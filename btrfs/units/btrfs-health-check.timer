@@ -1,0 +1,11 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Periodic btrfs RAID1 / NVMe health check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

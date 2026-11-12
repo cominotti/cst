@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+#
+# btrfs-health-check
+#
+# Hourly check installed by btrfs-setup.sh (CST); alerts through
+# /usr/local/sbin/btrfs-notify. Never changes the filesystem; the only
+# writes are btrfs-degraded-boot markers in /var/lib/btrfs-degraded-boot
+# (records complete_since=, deletes the marker once RAID1 is verified restored)
+# and the journal cursor and reclaim error counts in /var/lib/btrfs-health-check.
+# It also asks btrfs-notify to drop alerts kept for a login that are older than
+# 7 days (/var/lib/cst-alerts/pending), so they expire even when no new alert
+# comes, and to deliver stall-monitor alerts still waiting in its queue.
+# Exit 0 = healthy, 1 = at least one problem was alerted.
+
+set -Euo pipefail
+
+SCRUB_MAX_AGE_DAYS=10
+WEAR_ALERT_PCT=80
+UNALLOC_MIN_GIB=50       # early warning, per device
+UNALLOC_CRIT_GIB=5       # near ENOSPC: btrfs' own dynamic reclaim only starts here
+RECLAIM_CONF=/etc/tmpfiles.d/btrfs-automatic-reclaim.conf
+state_dir=/var/lib/btrfs-health-check
+mkdir -p "${state_dir}"
+problems=()
+
+problem() { problems+=("$*"); }
+
+# Housekeeping of the alerts kept for the next login (best effort). The
+# stall monitor's queue is normally empty: btrfs-stall-alert.service delivers
+# it at once. An alert written in the instant that service was finishing
+# would otherwise wait for the next stall alert; this picks it up.
+if [[ -x /usr/local/sbin/btrfs-notify ]]; then
+    /usr/local/sbin/btrfs-notify --prune || true
+    [[ -d /run/btrfs-stall-monitor ]] && { /usr/local/sbin/btrfs-notify --queue /run/btrfs-stall-monitor || true; }
+fi
+
+# One entry per btrfs filesystem; prefer / or /var over bind mounts like /etc.
+mapfile -t btrfs_mounts < <(findmnt -rn -t btrfs -o UUID,TARGET |
+    awk '!($1 in m) || $2 == "/" || $2 == "/var" { m[$1] = $2 } END { for (u in m) print m[u] }')
+
+member_disks=()
+member_dms=()
+
+for mnt in "${btrfs_mounts[@]}"; do
+    show="$(btrfs filesystem show "${mnt}" 2>&1)"
+    if grep -qi 'missing' <<<"${show}"; then
+        problem "btrfs ${mnt}: member device MISSING (running degraded)"
+    fi
+
+    # A transaction abort or a tree-checker rejection forces the fs read-only
+    # without touching the device error counters below.
+    opts="$(findmnt -rn -o OPTIONS -M "${mnt}" | head -n1)"
+    if [[ "${mnt}" != /sysroot && ",${opts}," == *,ro,* ]]; then
+        problem "btrfs ${mnt}: mounted READ-ONLY (forced after an error?) - check 'journalctl -k -g BTRFS'"
+    fi
+
+    usage="$(btrfs filesystem usage -b "${mnt}" 2>/dev/null)"
+    missing_bytes="$(awk -F: '/Device missing/ {gsub(/[[:space:]]/, "", $2); print $2}' <<<"${usage}")"
+    if [[ -n "${missing_bytes}" && "${missing_bytes}" != "0" ]]; then
+        problem "btrfs ${mnt}: ${missing_bytes} bytes on missing device"
+    fi
+    if grep -Eq 'Multiple profiles:[[:space:]]+yes' <<<"${usage}"; then
+        problem "btrfs ${mnt}: mixed chunk profiles (degraded writes?) - run balance -dconvert=raid1,soft -mconvert=raid1,soft"
+    fi
+
+    # Unallocated space is what metadata (and new chunks) grow into. When it
+    # runs out btrfs can fail with ENOSPC while data chunks still have room.
+    # Per device: every RAID1 chunk needs room on both members. (A missing
+    # member is listed as "missing" with its recorded size: skipped.)
+    min_unalloc=""
+    while read -r dev unalloc; do
+        [[ "${dev}" == missing || ! "${unalloc}" =~ ^[0-9]+$ ]] && continue
+        if [[ -z "${min_unalloc}" ]] || (( unalloc < min_unalloc )); then
+            min_unalloc="${unalloc}"
+        fi
+        if (( unalloc < UNALLOC_CRIT_GIB * 1024 ** 3 )); then
+            # One line (one alert line per problem). Order matters: a balance
+            # needs unallocated room to work in, so freeing space comes first;
+            # the ladder starts at -dusage=0 (empty chunks, no copying).
+            problem "btrfs ${mnt}: CRITICAL: only $(( unalloc / 1024 ** 2 )) MiB unallocated on ${dev}: ENOSPC is close. First free space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 ${mnt}', then -dusage=5, 15, 30; never a metadata or full balance. If a balance hangs the PC or the boot: boot once with ,skip_balance added to the rootflags= of the kernel command line, then 'btrfs balance cancel ${mnt}' (cst btrfs README, section 13)"
+        elif (( unalloc < UNALLOC_MIN_GIB * 1024 ** 3 )); then
+            problem "btrfs ${mnt}: only $(( unalloc / 1024 ** 3 )) GiB unallocated on ${dev} (warning below ${UNALLOC_MIN_GIB} GiB; metadata grows only from unallocated space). Free space, or compact half-empty data chunks: 'btrfs balance start -dusage=20 ${mnt}'"
+        fi
+    done < <(btrfs device usage -b "${mnt}" 2>/dev/null |
+        awk '/, ID:/ {dev = $1; sub(/,$/, "", dev)} /^[[:space:]]+Unallocated:/ {print dev, $2}')
+
+    uuid="$(findmnt -rn -o UUID -M "${mnt}" | head -n1)"
+    alloc="/sys/fs/btrfs/${uuid}/allocation"
+    if [[ -n "${uuid}" && -d "${alloc}" ]]; then
+        # Metadata ENOSPC proper: little room left in metadata chunks (less
+        # than twice the global reserve) and almost nothing to allocate more.
+        meta_free=$(( $(cat "${alloc}/metadata/total_bytes" 2>/dev/null || echo 0) - $(cat "${alloc}/metadata/bytes_used" 2>/dev/null || echo 0) ))
+        rsv="$(cat "${alloc}/global_rsv_size" 2>/dev/null || echo 0)"
+        if [[ -n "${min_unalloc}" ]] && (( meta_free < 2 * rsv && min_unalloc < 2 * 1024 ** 3 )); then
+            problem "btrfs ${mnt}: CRITICAL: metadata almost full ($(( meta_free / 1024 ** 2 )) MiB free in metadata chunks, $(( min_unalloc / 1024 ** 2 )) MiB unallocated): writes may fail with ENOSPC soon"
+        fi
+        # Automatic reclaim installed by btrfs-setup.sh, but not active (e.g.
+        # the knob was reset). Both knobs are needed.
+        for knob in dynamic_reclaim periodic_reclaim; do
+            if grep -qsF "/sys/fs/btrfs/${uuid}/allocation/data/${knob}" "${RECLAIM_CONF}" &&
+                [[ "$(cat "${alloc}/data/${knob}" 2>/dev/null)" != 1 ]]; then
+                problem "btrfs ${mnt}: automatic reclaim is configured but data/${knob} is off - run 'systemd-tmpfiles --create ${RECLAIM_CONF}'"
+            fi
+        done
+        # reclaim_errors counts since mount (it resets on reboot). The state
+        # file remembers boot id and count, so errors right after a reboot are
+        # still compared against 0, and a damaged file just restarts at 0.
+        boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+        for kind in data metadata; do
+            errs="$(cat "${alloc}/${kind}/reclaim_errors" 2>/dev/null || echo 0)"
+            [[ "${errs}" =~ ^[0-9]+$ ]] || continue
+            seen_file="${state_dir}/reclaim-errors-${uuid}-${kind}"
+            read -r seen_boot seen 2>/dev/null <"${seen_file}" || true
+            if [[ "${seen_boot:-}" != "${boot_id}" || ! "${seen:-}" =~ ^[0-9]+$ ]]; then
+                seen=0
+            fi
+            if (( errs > seen )); then
+                problem "btrfs ${mnt}: automatic ${kind} reclaim failed $(( errs - seen )) time(s) since the last check (reclaim_errors=${errs}) - see 'journalctl -k -g BTRFS'"
+            fi
+            printf '%s %s\n' "${boot_id}" "${errs}" >"${seen_file}.tmp" && mv -f "${seen_file}.tmp" "${seen_file}"
+            seen_boot="" seen=""
+        done
+    fi
+
+    if ! btrfs device stats --check "${mnt}" >/dev/null 2>&1; then
+        problem "btrfs ${mnt}: non-zero device error counters: $(btrfs device stats "${mnt}" | awk '$2 != 0' | tr '\n' ' ')"
+    fi
+
+    scrub="$(btrfs scrub status "${mnt}" 2>/dev/null)"
+    if grep -Eq 'Error summary:.*(csum|read|verify|super)=' <<<"${scrub}"; then
+        problem "btrfs ${mnt}: last scrub reported errors: $(grep 'Error summary' <<<"${scrub}")"
+    fi
+    started="$(awk -F': +' '/Scrub started/ {print $2}' <<<"${scrub}")"
+    scrub_state="$(awk '/^Status:/ {print $2}' <<<"${scrub}")"
+    if [[ -z "${started}" ]]; then
+        problem "btrfs ${mnt}: no scrub has ever completed"
+    elif [[ "${scrub_state}" == running ]]; then
+        :
+    elif [[ "${scrub_state}" != finished ]]; then
+        problem "btrfs ${mnt}: last scrub (started ${started}) did not finish: status ${scrub_state:-unknown}"
+    elif started_epoch="$(date -d "${started}" +%s 2>/dev/null)"; then
+        age_days=$(( ( $(date +%s) - started_epoch ) / 86400 ))
+        if (( age_days > SCRUB_MAX_AGE_DAYS )); then
+            problem "btrfs ${mnt}: last scrub is ${age_days} days old"
+        fi
+    fi
+
+    while read -r devpath; do
+        [[ -b "${devpath}" ]] || continue
+        member_dms+=("$(basename "$(readlink -f "${devpath}")")")
+        while read -r name type; do
+            [[ "${type}" == "disk" ]] && member_disks+=("${name}")
+        done < <(lsblk -lnso NAME,TYPE "${devpath}")
+    done < <(awk '/devid/ {print $NF}' <<<"${show}")
+done
+
+# btrfs-degraded-boot-setup.sh integration (only if it is installed).
+lr_rule=/etc/udev/rules.d/65-btrfs-last-resort.rules
+if [[ -r "${lr_rule}" ]]; then
+    rule_uuid="$(sed -n 's/^ENV{ID_FS_UUID}!="\([0-9a-f-]*\)".*/\1/p' "${lr_rule}")"
+    root_uuid="$(findmnt -rn -o UUID --target /sysroot | head -n1)"
+    [[ "${rule_uuid}" == "${root_uuid}" ]] ||
+        problem "btrfs-last-resort: ${lr_rule} is for ${rule_uuid:-?} but the root fs is ${root_uuid:-?}; re-run 'cst btrfs degraded-boot'"
+    # Upstream rule semantics the last resort builds on: booted and next boot.
+    next_root="$(rpm-ostree status --json 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin)["deployments"][0]; print("/ostree/deploy/%s/deploy/%s.%d" % (x["osname"], x["checksum"], x["serial"]))' 2>/dev/null)"
+    for up in /usr/lib/udev/rules.d/64-btrfs.rules ${next_root:+"${next_root}/usr/lib/udev/rules.d/64-btrfs.rules"}; do
+        grep -qF 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"' "${up}" 2>/dev/null ||
+            problem "udev: ${up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+    done
+fi
+for flag in /run/btrfs-allow-degraded/*; do
+    [[ -e "${flag}" ]] && problem "btrfs ${flag##*/}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)"
+done
+# Persistent marker of a degraded boot (since=, complete_since=). Alert until a
+# scrub that STARTED after the fs was seen complete again finished clean, with
+# no missing device and no mixed profiles; then clear it.
+for marker in /var/lib/btrfs-degraded-boot/degraded-*; do
+    [[ -e "${marker}" ]] || continue
+    uuid="${marker##*/degraded-}"
+    since="$(sed -n 's/^since=//p' "${marker}")"
+    since_h="$(sed -n 's/^since_human=//p' "${marker}")"
+    complete_since="$(sed -n 's/^complete_since=//p' "${marker}")"
+    mnt="$(findmnt -rn -t btrfs -o TARGET,UUID | awk -v u="${uuid}" '$2 == u {print $1; exit}')"
+    state="not mounted"
+    if [[ -n "${mnt}" && "${since}" =~ ^[0-9]+$ ]]; then
+        if grep -qi 'missing' <<<"$(btrfs filesystem show "${mnt}" 2>&1)"; then
+            state="still missing a device"
+            sed -i '/^complete_since=/d' "${marker}"
+        else
+            if ! [[ "${complete_since}" =~ ^[0-9]+$ ]]; then
+                complete_since="$(date +%s)"
+                echo "complete_since=${complete_since}" >>"${marker}"
+            fi
+            state="all devices present since $(date -d "@${complete_since}" '+%F %T'), waiting for a clean scrub started after that"
+            scrub="$(btrfs scrub status "${mnt}" 2>/dev/null)"
+            started="$(awk -F': +' '/Scrub started/ {print $2}' <<<"${scrub}")"
+            started_epoch="$(date -d "${started}" +%s 2>/dev/null || echo 0)"
+            if (( started_epoch > since && started_epoch > complete_since )) &&
+                grep -Eq 'Status:[[:space:]]+finished' <<<"${scrub}" &&
+                grep -q 'no errors found' <<<"${scrub}" &&
+                ! grep -Eq 'Multiple profiles:[[:space:]]+yes' <<<"$(btrfs filesystem usage -b "${mnt}" 2>/dev/null)"; then
+                rm -f "${marker}"
+                echo "<5>btrfs-health-check: btrfs ${uuid}: RAID1 restored (clean scrub started ${started} after the degraded boot), cleared ${marker}"
+                continue
+            fi
+        fi
+    fi
+    problem "btrfs ${uuid}: booted DEGRADED on ${since_h:-?} (${state}); restore RAID1 (replace the disk if needed), then 'btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft /var' and 'btrfs scrub start /var'. Clears after a clean scrub started once all devices are back."
+done
+
+# Kernel messages since the previous run (journal cursor): errors that forced
+# the fs read-only, csum failures (repaired from the other RAID1 copy, but a
+# sign of a failing device), hung tasks. Messages about other btrfs/devices
+# (test images, USB disks) are ignored.
+cursor="${state_dir}/kernel.cursor"
+# journalctl refuses --since together with --cursor-file, so the first run
+# (or a run after a bad cursor) looks back 65 min and then records a cursor.
+if [[ -s "${cursor}" ]] && klog="$(journalctl -k -q --no-pager -o short-iso --cursor-file="${cursor}" 2>&1)"; then
+    :
+else
+    rm -f "${cursor}"
+    klog="$(journalctl -k -q --no-pager -o short-iso --since -65min 2>&1)" ||
+        problem "kernel log scan failed: ${klog:0:200}"
+    journalctl -k -q -n 1 -o short-iso --cursor-file="${cursor}" >/dev/null 2>&1 || true
+fi
+ours=" ${member_dms[*]} ${member_disks[*]} "
+kbad=()
+while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    if [[ "${line}" =~ \(device\ ([A-Za-z0-9._-]+)\) || "${line}" =~ [[:space:]]dev\ ([A-Za-z0-9._-]+), ]]; then
+        dev="${BASH_REMATCH[1]}"
+        [[ "${ours}" == *" ${dev} "* || "${ours}" == *" ${dev%p[0-9]*} "* ]] || continue
+    fi
+    kbad+=("${line}")
+done < <(grep -Ei 'BTRFS (critical|error)|forced readonly|Transaction aborted|corrupt (leaf|node)|csum failed|blocked for more than [0-9]+ seconds|I/O error' <<<"${klog}")
+if (( ${#kbad[@]} > 0 )); then
+    problem "kernel: ${#kbad[@]} btrfs/IO error message(s) since last check, e.g.: $(printf '%s | ' "${kbad[@]:0:3}")"
+fi
+
+# Hourly /home snapshots ('cst btrfs snapshots setup'): still running?
+# The space guard, btrfs-snapshot-core's safety checks and the NAS backup alert
+# on their own; this catches a timer or a snapshot run that silently stopped
+# working.
+if systemctl is-enabled -q btrfs-snapshot.timer 2>/dev/null; then
+    snap_state=/var/lib/btrfs-snapshot
+    # (A pause by the space guard, old trees still being deleted after a
+    # conversion, or busy directories whose conversion (or busy items whose
+    # move into ~/Bulk) waits for the next boot - no snapshot until then - are
+    # announced by btrfs-snapshot itself.)
+    # Grace period after boot or resume from suspend: the timer catches up
+    # (Persistent=true, up to 5 min random delay) a little after this check.
+    last="$(cat "${snap_state}/last-ok" 2>/dev/null)"
+    awake_since="$(journalctl -q -o short-unix --no-pager -u systemd-suspend.service -u systemd-hibernate.service \
+        -u systemd-suspend-then-hibernate.service -n 1 2>/dev/null | awk '{print int($1)}')"
+    boot_since=$(( $(date +%s) - $(awk '{print int($1)}' /proc/uptime) ))
+    (( ${awake_since:-0} > boot_since )) || awake_since="${boot_since}"
+    if [[ ! -e "${snap_state}/paused" && ! -s "${snap_state}/drop-pending" && ! -e /etc/btrfs-setup/convert-at-boot &&
+          ! -e /etc/btrfs-setup/bulk-at-boot &&
+          "${last}" =~ ^[0-9]+$ ]] && (( $(date +%s) - last > 3 * 3600 )) &&
+        (( $(date +%s) - awake_since > 20 * 60 )); then
+        problem "snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'"
+    fi
+    NAS_ENABLED=0
+    # shellcheck source=/dev/null
+    [[ -r /etc/btrfs-setup/snapshots.conf ]] && . /etc/btrfs-setup/snapshots.conf
+    if [[ "${NAS_ENABLED}" == 1 ]]; then
+        # Last success, or when the backup was turned on if later (as btrfs-snapshot).
+        nas_last=0
+        for f in nas-last-ok nas-enabled-at; do
+            v="$(cat "${snap_state}/${f}" 2>/dev/null)"
+            [[ "${v}" =~ ^[0-9]+$ ]] && (( v > nas_last )) && nas_last="${v}"
+        done
+        # Journal only: btrfs-snapshot already notifies once a day about a stale NAS backup.
+        if (( nas_last > 0 && $(date +%s) - nas_last > 8 * 86400 )); then
+            echo "<4>btrfs-health-check: no successful NAS backup (restic) for over 8 days (journalctl -u btrfs-snapshot-nas)"
+        fi
+    fi
+fi
+
+if [[ -r /proc/mdstat ]] && grep -Eq '\[[U_]*_[U_]*\]' /proc/mdstat; then
+    problem "md RAID degraded: $(grep -B1 -E '\[[U_]*_[U_]*\]' /proc/mdstat | tr -s ' \n' ' ')"
+fi
+
+smart_field() { awk -F: -v key="$2" '$1 ~ "^"key"[[:space:]]*$" {gsub(/[^0-9]/, "", $2); print $2; exit}' <<<"$1"; }
+
+mapfile -t disks < <(printf '%s\n' "${member_disks[@]}" | sort -u | grep .)
+for disk in "${disks[@]}"; do
+    ctrl="/dev/${disk%n[0-9]*}"
+    log="$(nvme smart-log "${ctrl}" 2>/dev/null)" || continue
+    crit="$(smart_field "${log}" critical_warning)"
+    media="$(smart_field "${log}" media_errors)"
+    spare="$(smart_field "${log}" available_spare)"
+    spare_thr="$(smart_field "${log}" available_spare_threshold)"
+    used="$(smart_field "${log}" percentage_used)"
+    (( ${crit:-0} != 0 )) && problem "NVMe ${disk}: critical_warning=${crit}"
+    (( ${media:-0} > 0 )) && problem "NVMe ${disk}: media_errors=${media}"
+    (( ${spare:-100} < ${spare_thr:-0} )) && problem "NVMe ${disk}: available_spare ${spare}% below threshold ${spare_thr}%"
+    (( ${used:-0} >= WEAR_ALERT_PCT )) && problem "NVMe ${disk}: wear percentage_used=${used}%"
+done
+
+if (( ${#problems[@]} == 0 )); then
+    echo "<6>btrfs-health-check: OK (${btrfs_mounts[*]}; disks: ${disks[*]})"
+    exit 0
+fi
+
+for p in "${problems[@]}"; do
+    echo "<2>btrfs-health-check: ${p}" >&2
+done
+# A fixed title: an alert kept for the next login is replaced by its repeat
+# only when app and title match, so a count in the title would leave stale
+# copies ("1 problem" next to "2 problems"). The count opens the body.
+/usr/local/sbin/btrfs-notify -u critical -a btrfs-health-check "Disk health: problems detected" \
+    "$(printf '%s problem(s):\n' "${#problems[@]}"; printf '%s\n' "${problems[@]}")" || true
+exit 1

@@ -1,0 +1,11 @@
+# Managed by btrfs-setup.sh (CST). The btrfs top level (subvolid=5),
+# where the snapshots live outside the visible tree; mounted on demand.
+# Same options as /var: on btrfs, mount options are per filesystem.
+[Unit]
+Description=btrfs top level for snapshots
+
+[Mount]
+What=/dev/disk/by-uuid/@UUID@
+Where=/var/mnt/btrfs-top
+Type=btrfs
+Options=@OPTIONS@

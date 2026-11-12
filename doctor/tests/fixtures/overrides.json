@@ -1,0 +1,84 @@
+{
+ "deployments": [
+  {
+   "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "id": "fedora-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.0",
+   "version": "44.20261028.0",
+   "osname": "fedora",
+   "origin": "fedora:fedora/44/x86_64/silverblue",
+   "booted": true,
+   "staged": false,
+   "pinned": false,
+   "timestamp": 1793198594,
+   "requested-packages": [
+    "below",
+    "docker-cli",
+    "docker-compose-switch",
+    "gnome-boxes",
+    "moby-engine",
+    "samba",
+    "tini-static",
+    "vim"
+   ],
+   "packages": [
+    "below",
+    "docker-cli",
+    "docker-compose-switch",
+    "gnome-boxes",
+    "moby-engine",
+    "samba",
+    "tini-static",
+    "vim"
+   ],
+   "requested-local-packages": [],
+   "requested-local-fileoverride-packages": [],
+   "base-removals": [
+    [
+     "firefox-140.0-1.fc44.x86_64",
+     "firefox",
+     0,
+     "140.0",
+     "1.fc44",
+     "x86_64"
+    ],
+    [
+     "firefox-langpacks-140.0-1.fc44.x86_64",
+     "firefox-langpacks",
+     0,
+     "140.0",
+     "1.fc44",
+     "x86_64"
+    ]
+   ],
+   "requested-base-removals": [
+    "firefox",
+    "firefox-langpacks"
+   ],
+   "base-local-replacements": [
+    [
+     [
+      "mesa-dri-drivers-25.1.0-1.fc44.x86_64",
+      "mesa-dri-drivers",
+      0,
+      "25.1.0",
+      "1.fc44",
+      "x86_64"
+     ],
+     [
+      "mesa-dri-drivers-25.2.0-1.fc44.x86_64",
+      "mesa-dri-drivers",
+      0,
+      "25.2.0",
+      "1.fc44",
+      "x86_64"
+     ]
+    ]
+   ],
+   "requested-base-local-replacements": [],
+   "base-remote-replacements": {}
+  }
+ ],
+ "transaction": null,
+ "cached-update": null,
+ "update-driver": null
+}

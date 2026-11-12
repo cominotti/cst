@@ -1,0 +1,11 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Daily backup of /home snapshots to the NAS (restic)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

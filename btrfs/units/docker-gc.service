@@ -1,0 +1,13 @@
+# Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs docker-gc enable'.
+[Unit]
+Description=Remove stale Docker containers, images, anonymous volumes and build cache
+After=docker.service docker-gc-recorder.service
+
+[Service]
+Type=oneshot
+# Never start a socket-activated daemon just to clean it.
+ExecCondition=/usr/bin/systemctl -q is-active docker.service
+ExecStart=/usr/local/sbin/docker-gc run
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=1h

@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""swap-status: the live side of `cst swap status` and `cst swap plan`.
+
+Read-only. Reads /proc, /sys and the desired values in this folder
+(tmpfiles/zswap.conf, sysctl/99-swap-tuning.conf,
+units/machine.slice.d-50-memory-low.conf). Works inside a toolbox too: there
+/proc/sys, /sys/module and /sys/fs/cgroup are the host's. Only the zswap
+debug counters (/sys/kernel/debug/zswap) need root on the host.
+
+Usage: swap-status [--settings-only] [--hint TEXT]
+    --settings-only   only "live settings vs desired" (used by plan)
+    --hint TEXT       how to get root, shown where root is missing
+"""
+
+import argparse
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TMPFILES = os.path.join(HERE, "tmpfiles", "zswap.conf")
+SYSCTL = os.path.join(HERE, "sysctl", "99-swap-tuning.conf")
+DROPIN = os.path.join(HERE, "units", "machine.slice.d-50-memory-low.conf")
+
+PROC = "/proc"
+SYS = "/sys"
+CGROUP = "/sys/fs/cgroup"
+ZSWAP_PARAMS = "/sys/module/zswap/parameters"
+ZSWAP_DEBUG = "/sys/kernel/debug/zswap"
+# Records of the cpu module's runtime experiments (cpu-setup.sh). Inside a
+# toolbox /run is the container's own; the host's is under /run/host.
+CPU_RUN = "/run/host/run/cpu-setup" if os.path.exists("/run/.containerenv") else "/run/cpu-setup"
+# The experiment that sets one of our sysctls on purpose: while it is on,
+# that value is not a DIFF, and `apply` leaves it alone.
+WSF_EXPERIMENT = ("wsf-300", "vm.watermark_scale_factor")
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+# What each debugfs counter means, in short (unknown ones are still shown).
+DEBUG_HELP = {
+    "pool_total_size": "bytes the compressed pool takes in RAM",
+    "stored_pages": "pages in the pool now",
+    "stored_incompressible_pages": "pages stored raw (did not compress)",
+    "written_back_pages": "pages moved from the pool to disk swap",
+    "pool_limit_hit": "times the pool was full (max_pool_percent)",
+    "reject_reclaim_fail": "rejected: pool full and writeback failed",
+    "reject_compress_poor": "rejected: compressed to no gain",
+    "reject_compress_fail": "rejected: compression error",
+    "reject_alloc_fail": "rejected: no memory for the compressed copy",
+    "reject_kmemcache_fail": "rejected: no memory for the entry",
+    "decompress_fail": "decompression errors (should be 0)",
+    "duplicate_entry": "pages stored twice (should be 0)",
+    "same_filled_pages": "pages of one repeated value (stored without data)",
+}
+
+
+# ---- parsing (pure) ----------------------------------------------------------
+
+def parse_kv(text):
+    """'name value' lines (vmstat, memory.stat) -> {name: int}."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                out[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+    return out
+
+
+def parse_meminfo(text):
+    """/proc/meminfo -> {name: bytes}."""
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^(\S+):\s+(\d+)(?:\s+kB)?", line)
+        if m:
+            out[m.group(1)] = int(m.group(2)) * (1024 if line.rstrip().endswith("kB") else 1)
+    return out
+
+
+def parse_tmpfiles_params(text):
+    """zswap.conf -> [(param, value)] in file order."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"^w\s+/sys/module/zswap/parameters/(\S+)\s+(?:\S+\s+){4}(\S+)", line)
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def parse_sysctl(text):
+    """sysctl.d file -> [(key, value)]."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        key, sep, val = line.partition("=")
+        if sep:
+            out.append((key.strip(), val.strip()))
+    return out
+
+
+def parse_size(spec):
+    """systemd size ('48G', '512M', '1024') -> bytes (powers of 1024)."""
+    m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
+    if not m:
+        return None
+    return int(m.group(1)) * 1024 ** " KMGT".index(m.group(2) or " ")
+
+
+def parse_memory_low(text):
+    m = re.search(r"^MemoryLow=(\S+)", text, re.M)
+    return parse_size(m.group(1)) if m else None
+
+
+def same_param(live, desired):
+    """zswap shows booleans as Y/N; tmpfiles writes 1/0."""
+    norm = {"1": "Y", "0": "N", "y": "Y", "n": "N"}
+    return norm.get(live, live) == norm.get(desired, desired)
+
+
+# ---- maths (pure) ------------------------------------------------------------
+
+def share(num, den):
+    """num/den as a fraction, None when den is 0."""
+    return None if not den else num / den
+
+
+def pct(frac):
+    return "-" if frac is None else f"{frac * 100:.1f} %"
+
+
+def human(n):
+    if n is None:
+        return "-"
+    for unit, size in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if abs(n) >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
+
+
+def zswap_summary(meminfo, vmstat, params):
+    """The numbers status prints about the pool and the swap traffic.
+
+    meminfo in bytes, vmstat in pages, params as read from sysfs."""
+    total = meminfo.get("MemTotal", 0)
+    pool = meminfo.get("Zswap")          # compressed size in RAM
+    stored = meminfo.get("Zswapped")     # what it holds, uncompressed
+    try:
+        max_pct = int(params.get("max_pool_percent", ""))
+    except ValueError:
+        max_pct = None
+    try:
+        accept = int(params.get("accept_threshold_percent", ""))
+    except ValueError:
+        accept = None
+    limit = total * max_pct // 100 if max_pct is not None else None
+    zout, zin, zwb = (vmstat.get(k, 0) for k in ("zswpout", "zswpin", "zswpwb"))
+    pout, pin = vmstat.get("pswpout", 0), vmstat.get("pswpin", 0)
+    return {
+        "pool": pool,
+        "stored": stored,
+        "limit": limit,
+        "pool_of_limit": share(pool or 0, limit) if pool is not None else None,
+        "accept_below": limit * accept // 100 if limit is not None and accept is not None else None,
+        "ratio": (stored / pool) if pool and stored is not None else None,
+        "zswpout": zout, "zswpin": zin, "zswpwb": zwb, "pswpout": pout, "pswpin": pin,
+        # of the pages zswap took: loaded back from RAM / pushed on to disk
+        "loaded_back": share(zin, zout),
+        "written_back": share(zwb, zout),
+        # pages that went to disk without passing through the pool
+        # (rejected by zswap, or written while it was off)
+        "bypassed": max(pout - zwb, 0),
+        # of the pages written to disk, how many had to be read again;
+        # equals pswpin/zswpwb when nothing bypassed zswap
+        "read_back": share(pin, pout),
+    }
+
+
+def cgroup_row(stat, swap_current):
+    """memory.stat (+ memory.swap.current) of one cgroup -> derived values."""
+    zout, zwb = stat.get("zswpout", 0), stat.get("zswpwb", 0)
+    pout, pin = stat.get("pswpout", 0), stat.get("pswpin", 0)
+    return {
+        "swap": swap_current,
+        "zswap": stat.get("zswap"),
+        "zswapped": stat.get("zswapped"),
+        "zswpout": zout * PAGE,
+        "zswpwb": zwb * PAGE,
+        "pswpin": pin * PAGE,
+        "written_back": share(zwb, zout),
+        "read_back": share(pin, pout),
+    }
+
+
+# ---- reading -----------------------------------------------------------------
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def read1(path, default=None):
+    text = read(path)
+    return default if text is None else text.strip()
+
+
+def desired_text(path):
+    text = read(path)
+    if text is None:
+        sys.exit(f"swap-status: {path} is missing (incomplete copy of CST?)")
+    return text
+
+
+def zswap_params():
+    out = {}
+    try:
+        names = sorted(os.listdir(ZSWAP_PARAMS))
+    except OSError:
+        return out
+    for name in names:
+        out[name] = read1(os.path.join(ZSWAP_PARAMS, name), "?")
+    return out
+
+
+def psi_line(path, kind="some", key="avg60"):
+    for line in (read(path) or "").splitlines():
+        if line.startswith(kind + " "):
+            m = re.search(rf"{key}=(\S+)", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def cgroups():
+    """(label, path) of the cgroups status shows, if they exist."""
+    out = [("(whole system)", CGROUP)]
+    for name in ("system.slice", "machine.slice", "builds.slice"):
+        out.append((name, os.path.join(CGROUP, name)))
+    base = os.path.join(CGROUP, "user.slice")
+    try:
+        users = sorted(d for d in os.listdir(base) if re.fullmatch(r"user-\d+\.slice", d))
+    except OSError:
+        users = []
+    for u in users:
+        uid = u[5:-6]
+        mgr = os.path.join(base, u, f"user@{uid}.service")
+        out.append((f"apps (uid {uid}, app.slice)", os.path.join(mgr, "app.slice")))
+        out.append((f"toolboxes (uid {uid}, user.slice)", os.path.join(mgr, "user.slice")))
+    return [(label, p) for label, p in out if os.path.isdir(p)]
+
+
+# ---- printing ----------------------------------------------------------------
+
+def section(title):
+    print(f"\n== {title}")
+
+
+def show_settings(params):
+    section("live settings vs desired (from swap/ in CST)")
+    rows = []
+    if not params:
+        rows.append(("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", ""))
+    for name, want in parse_tmpfiles_params(desired_text(TMPFILES)):
+        live = params.get(name)
+        if live is not None:
+            rows.append(("ok" if same_param(live, want) else "DIFF", f"zswap {name}", live, want))
+    exp_name, exp_key = WSF_EXPERIMENT
+    exp_on = os.path.exists(os.path.join(CPU_RUN, "exp-" + exp_name))
+    for key, want in parse_sysctl(desired_text(SYSCTL)):
+        live = read1(os.path.join(PROC, "sys", key.replace(".", "/")), "?")
+        state = "ok" if live == want else "DIFF"
+        if state == "DIFF" and key == exp_key and exp_on:
+            state = "exp"
+        rows.append((state, key, live, want))
+    want = parse_memory_low(desired_text(DROPIN))
+    live = read1(os.path.join(CGROUP, "machine.slice", "memory.low"))
+    if live is None:
+        rows.append(("-", "machine.slice memory.low", "slice not active (no VM running)", human(want)))
+    else:
+        ok = live.isdigit() and int(live) == want
+        rows.append(("ok" if ok else "DIFF", "machine.slice memory.low",
+                     human(int(live)) if live.isdigit() else live, human(want)))
+    for state, label, live, want in rows:
+        extra = "" if state == "ok" or not want else f"   (desired {want})"
+        print(f"  {state:<5} {label:<28} {live}{extra}")
+    if any(r[0] == "exp" for r in rows):
+        print(f"  exp: the cpu experiment {exp_name} is on and sets {exp_key}; apply leaves it alone."
+              f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply")
+
+
+def show_pool(params, s):
+    section("zswap pool")
+    print("  parameters: " + ", ".join(f"{k}={v}" for k, v in params.items()) if params else "  zswap: not available")
+    if s["pool"] is None:
+        print("  no Zswap line in /proc/meminfo")
+        return
+    print(f"  pool in RAM: {human(s['pool'])} of a {human(s['limit'])} limit ({pct(s['pool_of_limit'])})")
+    if s["accept_below"] is not None:
+        print(f"  after the pool was full, zswap takes new pages again below {human(s['accept_below'])}"
+              f" (accept_threshold_percent of the limit)")
+    ratio = "-" if s["ratio"] is None else f"{s['ratio']:.2f} : 1"
+    print(f"  holds {human(s['stored'])} of memory compressed into {human(s['pool'])}: ratio {ratio}")
+
+
+def show_traffic(s):
+    section("swap traffic since boot (/proc/vmstat; pages of 4 KiB shown as sizes)")
+    p = lambda n: human(n * PAGE)  # noqa: E731
+    print(f"  into the pool    zswpout {p(s['zswpout']):>10}")
+    print(f"  back from pool   zswpin  {p(s['zswpin']):>10}   {pct(s['loaded_back'])} of what went in")
+    print(f"  pool -> disk     zswpwb  {p(s['zswpwb']):>10}   {pct(s['written_back'])} of what went in was written back")
+    if s["bypassed"]:
+        print(f"  written to disk  pswpout {p(s['pswpout']):>10}   {p(s['bypassed'])} of it bypassed zswap"
+              " (rejected, or written while zswap was off)")
+    else:
+        print(f"  written to disk  pswpout {p(s['pswpout']):>10}   = zswpwb: no page bypassed zswap")
+    print(f"  read from disk   pswpin  {p(s['pswpin']):>10}   {pct(s['read_back'])} of what was written to disk"
+          " was read back")
+    print("  How to read: a high 'written back' share is fine while 'read back' stays low (the disk")
+    print("  holds pages nobody needs). A growing 'read back' share means pages come back from the")
+    print("  NVMe instead of RAM: see swap/README.md, 'Reading the status'.")
+
+
+def show_debug(hint):
+    section(f"zswap debug counters ({ZSWAP_DEBUG})")
+    try:
+        names = sorted(os.listdir(ZSWAP_DEBUG))
+    except PermissionError:
+        print(f"  needs root{(': ' + hint) if hint else ''}")
+        return
+    except OSError:
+        print("  not available (debugfs not mounted, or zswap without debug counters)")
+        return
+    for name in names:
+        val = read1(os.path.join(ZSWAP_DEBUG, name), "?")
+        if name == "pool_total_size" and val.isdigit():
+            val = f"{val} ({human(int(val))})"
+        print(f"  {name:<28} {val:<24} {DEBUG_HELP.get(name, '')}".rstrip())
+
+
+def show_devices():
+    section("swap devices (/proc/swaps)")
+    lines = (read(os.path.join(PROC, "swaps")) or "").splitlines()[1:]
+    if not lines:
+        print("  none active")
+    for line in lines:
+        f = line.split()
+        if len(f) < 5:
+            continue
+        dev = f[0]
+        name = read1(os.path.join(SYS, "class", "block", os.path.basename(dev), "dm", "name"))
+        label = f"{dev} ({name})" if name else dev
+        size, used = int(f[2]) * 1024, int(f[3]) * 1024
+        print(f"  {label:<24} {f[1]:<10} used {human(used):>10} of {human(size):>10}  priority {f[4]}")
+
+
+def show_cgroups():
+    section("per cgroup (memory.stat; counters since the cgroup was created)")
+    head = (f"  {'cgroup':<32} {'swap':>9} {'zswapped':>9} {'zswap':>9} {'->pool':>9} {'->disk':>9}"
+            f" {'disk in':>9} {'wb%':>6} {'rb%':>6} {'zswap.wb':>8} {'low':>8} {'psi60':>6}")
+    print(head)
+    meminfo = parse_meminfo(read(os.path.join(PROC, "meminfo"), ""))
+    for label, path in cgroups():
+        stat = parse_kv(read(os.path.join(path, "memory.stat"), ""))
+        cur = read1(os.path.join(path, "memory.swap.current"))
+        if cur is None and path == CGROUP and "SwapTotal" in meminfo:
+            # the root cgroup has no memory.swap.current: all swap in use
+            cur = str(meminfo["SwapTotal"] - meminfo.get("SwapFree", 0))
+        r = cgroup_row(stat, int(cur) if cur and cur.isdigit() else None)
+        wb = read1(os.path.join(path, "memory.zswap.writeback"), "-")
+        low = read1(os.path.join(path, "memory.low"), "-")
+        low = human(int(low)) if low.isdigit() and int(low) else ("0" if low == "0" else low)
+        psi = psi_line(os.path.join(path, "memory.pressure")) or "-"
+        pc = lambda f: "-" if f is None else f"{f * 100:.0f}"  # noqa: E731
+        print(f"  {label:<32} {human(r['swap']):>9} {human(r['zswapped']):>9} {human(r['zswap']):>9}"
+              f" {human(r['zswpout']):>9} {human(r['zswpwb']):>9} {human(r['pswpin']):>9}"
+              f" {pc(r['written_back']):>6} {pc(r['read_back']):>6} {wb:>8} {low:>8} {psi:>6}")
+    print("  swap = memory.swap.current (pool + disk); zswapped/zswap = held in the pool, uncompressed/")
+    print("  compressed; ->pool = zswpout, ->disk = zswpwb, disk in = pswpin; wb% = zswpwb/zswpout;")
+    print("  rb% = pswpin/pswpout (read back from disk); zswap.wb = memory.zswap.writeback (1 = the")
+    print("  pool may write this cgroup's pages to disk); psi60 = memory pressure 'some', avg 60 s.")
+
+
+def show_psi():
+    section("memory pressure (/proc/pressure/memory: % of time tasks waited for memory)")
+    for line in (read(os.path.join(PROC, "pressure", "memory")) or "  not available\n").splitlines():
+        print(f"  {line}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="swap-status", description=__doc__.split("\n")[0])
+    ap.add_argument("--settings-only", action="store_true")
+    ap.add_argument("--hint", default="")
+    a = ap.parse_args(argv)
+    params = zswap_params()
+    show_settings(params)
+    if a.settings_only:
+        return 0
+    meminfo = parse_meminfo(read(os.path.join(PROC, "meminfo"), ""))
+    vmstat = parse_kv(read(os.path.join(PROC, "vmstat"), ""))
+    s = zswap_summary(meminfo, vmstat, params)
+    show_pool(params, s)
+    show_traffic(s)
+    show_debug(a.hint)
+    show_devices()
+    show_cgroups()
+    show_psi()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

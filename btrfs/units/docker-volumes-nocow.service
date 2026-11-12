@@ -1,0 +1,17 @@
+# Managed by btrfs-setup.sh (CST). Every boot, before Docker starts:
+# keeps the volumes dir NOCOW (+C) and, when 'install' found volumes with
+# copy-on-write data (flag file), rewrites them while no container can use them.
+[Unit]
+Description=Docker volumes without copy-on-write (btrfs NOCOW)
+RequiresMountsFor=/var/lib/docker
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-volumes-nocow migrate
+StandardOutput=journal+console
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

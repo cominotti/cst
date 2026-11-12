@@ -1,0 +1,995 @@
+#!/usr/bin/python3 -I
+"""cst-doctor: a read-only check-up of this workstation. It is the program
+behind `cst doctor` (and the last section of `cst status`). It never changes
+anything: it only reads files and runs query commands (rpm-ostree status,
+rpm-ostree db list, systemctl --failed, findmnt). Most problems it finds come with
+the command that fixes it; you decide whether to run it.
+
+Usage:
+  doctor [--brief]     all checks, grouped by area: one line each, ok / info /
+                       WARN / ERROR, then a summary line.
+                       --brief: only the summary and the WARN and ERROR lines
+                       (what `cst status` shows)
+  help
+
+Areas checked:
+  rpm-ostree   layered packages requested with a version (containerd-2.3.4-1.fc44
+               instead of containerd), in the booted deployment and the one of
+               the next boot (staged, or left by rpm-ostree rollback); local RPM
+               files layered; base packages replaced or removed; a deployment
+               waiting for a reboot
+  services     failed systemd units, of the system and of your user
+  alerts       CST desktop alerts kept for the next login (/var/lib/cst-alerts),
+               and the folder versions named f44-tools left behind
+  btrfs        how full the chunks are (data, metadata), automatic data reclaim
+               switched on, unallocated space per device (from sysfs; warning
+               and critical levels as btrfs-health-check)
+
+Levels: ok (fine), info (worth knowing, nothing to do), WARN (should be
+fixed), ERROR (fix soon). When there is a command for it, the line below a
+WARN or ERROR, "fix:", is that command alone, ready to paste. Inside a
+toolbox it reads "fix (on the host):": run it in a host terminal.
+Exit status: 0 everything ok or info, 1 at least one WARN or ERROR, 2 usage.
+
+Runs as your user (no sudo). Inside a toolbox it asks the host: commands go
+through flatpak-spawn --host, files are read under /run/host.
+Run as root (sudo), the checks of your user's units are skipped: `cst`
+starts it as the user who called sudo.
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+NAME = "cst-doctor"
+PROG = os.environ.get("CST_PROG") or NAME
+# The cst command, for hints: "cst" from "cst doctor".
+CST = PROG[:-len(" doctor")] if PROG.endswith(" doctor") else "cst"
+
+OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
+SEVERITY = {OK: 0, INFO: 1, WARN: 2, ERROR: 3}
+
+STAGED_OLD_DAYS = 7          # a staged deployment waiting longer gets a note
+ALERT_KEEP_DAYS = 7          # as btrfs-notify and cst-pending-alerts
+ALERT_MAX_FILE = 16384
+ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
+
+USAGE = f"usage: {PROG} [--brief] | help"
+
+
+class Usage(Exception):
+    pass
+
+
+class Result(tuple):
+    """(status, message, fix): fix is the command to run, or ""."""
+
+    def __new__(cls, status, message, fix=""):
+        return super().__new__(cls, (status, message, fix))
+
+    status = property(lambda self: self[0])
+    message = property(lambda self: self[1])
+    fix = property(lambda self: self[2])
+
+
+# ---- where the host is -------------------------------------------------------------------------
+class Host:
+    """How to reach the host: directly, or from a toolbox (flatpak-spawn
+    --host for commands, /run/host for files). Tests set CST_DOCTOR_CONTAINER
+    (1 or 0), CST_DOCTOR_ROOT (the host's / for files) and CST_DOCTOR_NOW."""
+
+    def __init__(self, env=None):
+        env = os.environ if env is None else env
+        forced = env.get("CST_DOCTOR_CONTAINER")
+        if forced in ("0", "1"):
+            self.container = forced == "1"
+        else:
+            self.container = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+        self.root = env.get("CST_DOCTOR_ROOT") or ("/run/host" if self.container else "/")
+        self.now = float(env.get("CST_DOCTOR_NOW") or time.time())
+        self.uid = os.getuid()
+        self.state_home = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+
+    def path(self, p):
+        """A host path, as this process can read it."""
+        return os.path.join(self.root, p.lstrip("/"))
+
+    def run(self, cmd, timeout=60):
+        """(rc, stdout, stderr) of a read-only query command on the host;
+        rc 127 when it cannot be started, 124 on a timeout."""
+        full = (["flatpak-spawn", "--host"] + cmd) if self.container else cmd
+        try:
+            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout,
+                               stdin=subprocess.DEVNULL)
+        except FileNotFoundError as e:
+            return 127, "", f"{full[0]}: not found ({e.strerror})"
+        except subprocess.TimeoutExpired:
+            return 124, "", f"{' '.join(cmd)}: no answer within {timeout} s"
+        except OSError as e:
+            return 126, "", f"{full[0]}: {e.strerror}"
+        return p.returncode, p.stdout, p.stderr
+
+
+def first_line(text):
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+# ---- the registry --------------------------------------------------------------------------------
+# A check is a function host -> iterable of Result. Areas are shown in the
+# order of their first check. A module that wants its own checks later adds
+# a function here with @check("area").
+CHECKS = []
+
+
+def check(area):
+    def register(fn):
+        CHECKS.append((area, fn))
+        return fn
+    return register
+
+
+# ---- rpm-ostree: package names and versions ----------------------------------------------------
+def parse_nevra(s):
+    """'name-[epoch:]version-release.arch' -> (name, epoch, version, release,
+    arch), or None. The arch is the part after the last dot; version and
+    release never contain a dash, so the name is everything before them."""
+    if "." not in s:
+        return None
+    nvr, arch = s.rsplit(".", 1)
+    parts = nvr.rsplit("-", 2)
+    if len(parts) != 3 or not all(parts):
+        return None
+    name, ev, rel = parts
+    epoch = ""
+    if ":" in ev:
+        epoch, ev = ev.split(":", 1)
+        if not epoch.isdigit():
+            return None
+    if not ev or not rel:
+        return None
+    return name, epoch, ev, rel, arch
+
+
+def spellings(pkg):
+    """Every way a request can name this exact package with a version:
+    {spelling: True if it names the architecture}."""
+    name, epoch, ver, rel, arch = pkg
+    out = {f"{name}-{ver}-{rel}": False, f"{name}-{ver}-{rel}.{arch}": True, f"{name}-{ver}": False}
+    if epoch:
+        out.update({f"{name}-{epoch}:{ver}-{rel}": False, f"{name}-{epoch}:{ver}-{rel}.{arch}": True,
+                    f"{name}-{epoch}:{ver}": False})
+    return out
+
+
+# The machine's own architecture: a bare name installs this one (or noarch).
+NATIVE_ARCH = os.uname().machine
+ARCHES = {"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64", "src"}
+
+# name-[epoch:]version-release with a distribution tag in the release
+# (.fc44, .el9, .eln140), and an optional .arch: only the form gives it away
+# when the deployment's package list cannot be read.
+NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d[^-]*\.(?:fc|el|eln)\d+[^-]*)$")
+
+
+def install_spec(name, arch, named, native):
+    """What to pass to --install= so that the same package comes back:
+    name.arch when the request named the architecture, or when the package
+    is of a foreign one (wine-core.i686 on x86_64); else the bare name."""
+    if arch and (named or arch not in (native, "noarch")):
+        return f"{name}.{arch}"
+    return name
+
+
+def classify_requests(requests, packages, native=None):
+    """Split requested-packages into by name and pinned to a version.
+    packages: the deployment's installed NEVRAs, or None if unknown.
+    Returns a list of (request, spec, how). how is:
+      "name"          fine; spec is the request itself;
+      "pinned"        the request is the name-version of an installed
+                      package; spec is what --install= needs to bring that
+                      same package back (name, or name.arch);
+      "pinned-form"   the package list is unknown, but the request looks
+                      like name-version-release.fcNN[.arch]; spec is read
+                      off the string;
+      "inactive"      looks like a pin, but no installed package matches
+                      (an inactive request, for example one the base image
+                      now provides): spec is "", nothing to install back."""
+    native = native or NATIVE_ARCH
+    names, versioned = set(), {}
+    for p in packages or ():
+        parsed = parse_nevra(p)
+        if not parsed:
+            continue
+        names.add(parsed[0])
+        for s, named in spellings(parsed).items():
+            versioned.setdefault(s, []).append((parsed[0], parsed[4], named))
+    out = []
+    for r in requests:
+        if r in names:
+            out.append((r, r, "name"))
+        elif r in versioned:
+            hits = versioned[r]
+            name, _, named = hits[0]
+            arches = [a for _, a, _ in hits]
+            # Without an arch in the request and several installed (multilib),
+            # the bare name is what installed the native one.
+            arch = "" if (not named and (native in arches or "noarch" in arches)) else arches[0]
+            out.append((r, install_spec(name, arch, named, native), "pinned"))
+        else:
+            m = NVR_FORM.match(r)
+            if not m:
+                out.append((r, r, "name"))   # a name, a provide (vim), a path...
+            elif packages is None:
+                last = m.group("rel").rsplit(".", 1)[-1]
+                arch = last if last in ARCHES else ""
+                out.append((r, install_spec(m.group("name"), arch, bool(arch), native), "pinned-form"))
+            else:
+                out.append((r, "", "inactive"))
+    return out
+
+
+def unpin_command(classified):
+    """One command that swaps every pinned request for its bare name (a name
+    already requested on its own is not requested twice). Inactive pins are
+    only dropped: nothing installed matches them, so nothing is asked back."""
+    pinned = [(r, n) for r, n, how in classified if how != "name"]
+    if not pinned:
+        return ""
+    by_name = {r for r, _, how in classified if how == "name"}
+    install = []
+    for _, n in pinned:
+        if n and n not in by_name and n not in install:
+            install.append(n)
+    words = ["sudo", "rpm-ostree", "uninstall"] + [r for r, _ in pinned]
+    words += [f"--install={n}" for n in install]
+    return " ".join(shlex.quote(w) for w in words)
+
+
+def pkg_names(obj):
+    """Package names in the JSON of replacements and removals. rpm-ostree
+    writes packages there as [nevra, name, epoch, version, release, arch]
+    or as plain NEVRA strings, inside lists (pairs new/old) or dicts."""
+    out = []
+
+    def add(n):
+        if n and n not in out:
+            out.append(n)
+
+    def walk(o):
+        if isinstance(o, str):
+            parsed = parse_nevra(o)
+            add(parsed[0] if parsed else o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            if len(o) >= 2 and isinstance(o[0], str) and isinstance(o[1], str) and \
+                    (o[0] == o[1] or o[0].startswith(o[1] + "-")):
+                add(o[1])
+            else:
+                for v in o:
+                    walk(v)
+    walk(obj)
+    return out
+
+
+def describe(d):
+    """'booted deployment 44.x', 'staged deployment 44.x', or 'pending
+    deployment 44.x (next boot)' for the next boot that was not staged (after
+    rpm-ostree rollback, or a deploy finished at once)."""
+    ver = d.get("version") or (d.get("checksum") or "?")[:10]
+    if d.get("booted"):
+        return f"booted deployment {ver}"
+    if d.get("staged"):
+        return f"staged deployment {ver}"
+    return f"pending deployment {ver} (next boot)"
+
+
+def ostree_deployments(host):
+    """(booted, pending, error). pending is the deployment of the next boot
+    when it is not the booted one: rpm-ostree lists it first (for the booted
+    system's osname), staged or not (rpm-ostree rollback leaves an unstaged
+    one there). It is the one rpm-ostree install/uninstall edit."""
+    if not os.path.exists(host.path("/run/ostree-booted")):
+        return None, None, "not an rpm-ostree system"
+    rc, out, err = host.run(["rpm-ostree", "status", "--json"])
+    if rc != 0:
+        return None, None, f"rpm-ostree status --json failed: {first_line(err) or f'exit {rc}'}"
+    try:
+        data = json.loads(out)
+        deps = [d for d in data["deployments"] if isinstance(d, dict)]
+    except (ValueError, KeyError, TypeError) as e:
+        return None, None, f"rpm-ostree status --json: unreadable output ({e})"
+    booted = next((d for d in deps if d.get("booted")), None)
+    osname = booted.get("osname") if booted else None
+    first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
+    pending = first if first is not None and first is not booted else None
+    return booted, pending, ""
+
+
+def installed_packages(host, d):
+    """The NEVRAs in a deployment (rpm-ostree db list CHECKSUM), or None."""
+    csum = d.get("checksum")
+    if not csum:
+        return None
+    rc, out, _ = host.run(["rpm-ostree", "db", "list", csum])
+    if rc != 0:
+        return None
+    pkgs = [ln.strip() for ln in out.splitlines() if ln.startswith(" ") and ln.strip()]
+    return pkgs or None
+
+
+def deployments(host):
+    """ostree_deployments, asked once per run (several checks use it)."""
+    if not hasattr(host, "_ostree"):
+        host._ostree = ostree_deployments(host)
+    return host._ostree
+
+
+@check("rpm-ostree")
+def check_pinned_layering(host):
+    booted, pending, err = deployments(host)
+    if err:
+        yield Result(INFO if err.startswith("not an") else WARN, f"layered packages: not checked ({err})")
+        return
+    found = {}
+    for d in (booted, pending):
+        if d is None:
+            continue
+        reqs = d.get("requested-packages") or []
+        cls = classify_requests(reqs, installed_packages(host, d))
+        found[id(d)] = (d, reqs, cls, [c for c in cls if c[2] != "name"])
+    if not found:
+        yield Result(WARN, "layered packages: no deployment in rpm-ostree status")
+        return
+    # rpm-ostree uninstall edits the next boot's deployment: the fix is built from it.
+    target = pending if pending is not None else booted
+    _, treqs, tcls, tpinned = found[id(target)]
+    for d, reqs, cls, pinned in found.values():
+        if not pinned:
+            continue
+        listed = ", ".join(r for r, _, how in pinned if how != "inactive")
+        inactive = [r for r, _, how in pinned if how == "inactive"]
+        msg = f"{describe(d)}: {len(pinned)} of {len(reqs)} layered packages are pinned to a version"
+        if listed:
+            msg += (" (they never update, and an upgrade fails once that version leaves the repositories): "
+                    + listed)
+        if any(how == "pinned-form" for _, _, how in pinned):
+            msg += " (recognised by their form only: the package list was not readable)"
+        if inactive:
+            msg += ("; pinned but matching no installed package (probably inactive requests: the base "
+                    "image may provide them now; the fix drops them without asking them back): "
+                    + ", ".join(inactive))
+        if d is target:
+            yield Result(WARN, msg, unpin_command(cls))
+        elif not tpinned:
+            # Booted pinned, but the next boot's deployment is clean.
+            yield Result(INFO, msg + f"; the {describe(pending)} has no version-pinned requests: "
+                         "reboot to use it")
+    if not tpinned:
+        yield Result(OK, f"{describe(target)}: {len(treqs)} layered packages, all requested by name")
+
+
+@check("rpm-ostree")
+def check_local_packages(host):
+    booted, pending, err = deployments(host)
+    if err:
+        return
+    target = pending or booted
+    if target is None:
+        return
+    local = list(target.get("requested-local-packages") or []) + \
+        list(target.get("requested-local-fileoverride-packages") or [])
+    if not local:
+        yield Result(OK, f"{describe(target)}: no local RPM files layered")
+        return
+    names = pkg_names(local)
+    words = ["sudo", "rpm-ostree", "uninstall"] + [str(x) for x in local] + [f"--install={n}" for n in names]
+    yield Result(WARN, f"{describe(target)}: {len(local)} local RPM file(s) layered: "
+                 f"{', '.join(map(str, local))}. rpm-ostree upgrade never updates them. "
+                 "Run the fix only if a repository has the package: it then comes from there",
+                 " ".join(shlex.quote(w) for w in words))
+
+
+@check("rpm-ostree")
+def check_overrides(host):
+    booted, pending, err = deployments(host)
+    if err:
+        return
+    target = pending or booted
+    if target is None:
+        return
+    replaced = pkg_names([target.get("base-remote-replacements") or {},
+                          target.get("base-local-replacements") or [],
+                          target.get("requested-base-local-replacements") or []])
+    removed = pkg_names([target.get("base-removals") or [], target.get("requested-base-removals") or []])
+    if replaced:
+        yield Result(WARN, f"{describe(target)}: base packages replaced by another version: "
+                     f"{', '.join(replaced)}. They stay at that version through every upgrade",
+                     " ".join(shlex.quote(w) for w in ["sudo", "rpm-ostree", "override", "reset"] + replaced))
+    if removed:
+        yield Result(INFO, f"{describe(target)}: base packages removed on purpose: {', '.join(removed)} "
+                     f"(to bring them back: sudo rpm-ostree override reset {' '.join(removed)})")
+    if not replaced and not removed:
+        yield Result(OK, f"{describe(target)}: no base package replaced or removed")
+
+
+@check("rpm-ostree")
+def check_staged(host):
+    booted, pending, err = deployments(host)
+    if err:
+        return
+    if pending is None:
+        yield Result(OK, "no pending deployment: the next boot is the booted one")
+        return
+    if not pending.get("staged"):
+        yield Result(INFO, f"{describe(pending)} is not the booted one (for example after "
+                     "rpm-ostree rollback): it becomes the system at the next boot")
+        return
+    ts = pending.get("timestamp")
+    age = ""
+    if isinstance(ts, (int, float)) and ts > 0:
+        days = (host.now - ts) / 86400
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+        age = f", built {when}"
+        if days >= STAGED_OLD_DAYS:
+            age += f", {int(days)} days ago"
+    yield Result(INFO, f"{describe(pending)} waits for a reboot{age} (it becomes the system at the next boot)")
+
+
+# ---- services ------------------------------------------------------------------------------------
+TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
+
+
+def failed_units(host, user):
+    cmd = ["systemctl"] + (["--user"] if user else []) + \
+        ["list-units", "--state=failed", "--no-legend", "--plain", "--full", "--no-pager"]
+    rc, out, err = host.run(cmd, timeout=30)
+    if rc != 0:
+        return None, first_line(err) or f"exit {rc}"
+    units = []
+    for line in out.splitlines():
+        f = line.split()
+        if f and f[0] not in units:
+            units.append(f[0].lstrip("●*"))
+    return [u for u in units if u], ""
+
+
+def unit_results(scope, units):
+    user = scope == "user"
+    sysctl = "systemctl --user" if user else "sudo systemctl"
+    journal = "journalctl --user" if user else "journalctl"
+    real = [u for u in units if not TRANSIENT.match(u)]
+    transient = [u for u in units if TRANSIENT.match(u)]
+    if real:
+        q = " ".join(shlex.quote(u) for u in real)
+        logs = " ".join(f"-u {shlex.quote(u)}" for u in real)
+        yield Result(WARN, f"{scope} units failed: {', '.join(real)}. Read why first: {journal} -b {logs} "
+                     "(the fix only clears the mark, not the cause)",
+                     f"{sysctl} reset-failed {q}")
+    if transient:
+        q = " ".join(shlex.quote(u) for u in transient)
+        yield Result(INFO, f"{scope}: {len(transient)} transient unit(s) failed (systemd-run, low priority): "
+                     f"{', '.join(transient)}; to clear: {sysctl} reset-failed {q}")
+    if not units:
+        yield Result(OK, f"no failed {scope} units")
+
+
+@check("services")
+def check_system_units(host):
+    units, err = failed_units(host, user=False)
+    if units is None:
+        yield Result(WARN, f"system units: not checked (systemctl: {err})")
+        return
+    yield from unit_results("system", units)
+
+
+@check("services")
+def check_user_units(host):
+    if host.uid == 0:
+        yield Result(INFO, "user units: skipped (running as root; run it as your user)")
+        return
+    units, err = failed_units(host, user=True)
+    if units is None:
+        yield Result(WARN, f"user units: not checked (systemctl --user: {err})")
+        return
+    yield from unit_results("user", units)
+
+
+# ---- alerts --------------------------------------------------------------------------------------
+def read_alert(path):
+    """(urgency, title, last) of a pending alert file, or None."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(ALERT_MAX_FILE).decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = data.split("\n")
+    if not lines or lines[0] not in ("cst-alert 1", "f44-alert 1"):
+        return None
+    head = {}
+    for line in lines[1:]:
+        if not line:
+            break
+        k, _, v = line.partition("=")
+        head[k] = v
+    if head.get("urgency") not in ("critical", "normal") or not head.get("title"):
+        return None
+    last = int(head["last"]) if head.get("last", "").isdigit() else 0
+    return head["urgency"], head["title"][:200], last
+
+
+def seen_record(host):
+    """name -> recorded mtime string, from cst-pending-alerts' record of what
+    this user saw (the f44-tools one while the new one does not exist)."""
+    new = os.path.join(host.state_home, "cst-alerts")
+    old = os.path.join(host.state_home, "f44-alerts")
+    d = old if not os.path.exists(new) and os.path.isdir(old) and not os.path.islink(old) else new
+    rec = {}
+    try:
+        with open(os.path.join(d, "delivered")) as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 2 and ALERT_NAME.match(p[0]):
+                    rec[p[0]] = p[1]
+    except OSError:
+        pass
+    return rec
+
+
+def mtime_matches(recorded, st):
+    """As cst-pending-alerts: full precision when the record has it."""
+    sec, ns = divmod(st.st_mtime_ns, 1_000_000_000)
+    whole, _, frac = recorded.partition(".")
+    if whole != str(sec):
+        return False
+    return not frac or frac[:9].ljust(9, "0") == f"{ns:09d}"
+
+
+@check("alerts")
+def check_pending_alerts(host):
+    pending = host.path("/var/lib/cst-alerts/pending")
+    if not os.path.isdir(pending):
+        yield Result(INFO, f"no alert folder /var/lib/cst-alerts/pending (installed by {CST} btrfs install)")
+        return
+    try:
+        names = sorted(n for n in os.listdir(pending) if ALERT_NAME.match(n))
+    except OSError as e:
+        yield Result(WARN, f"pending alerts: not readable ({e.strerror})")
+        return
+    seen = seen_record(host)
+    unseen, seen_n = [], 0
+    for n in names:
+        p = os.path.join(pending, n)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not os.path.isfile(p) or os.path.islink(p) or host.now - st.st_mtime > ALERT_KEEP_DAYS * 86400:
+            continue
+        a = read_alert(p)
+        if a is None:
+            continue
+        if n in seen and mtime_matches(seen[n], st):
+            seen_n += 1
+        else:
+            unseen.append(a)
+    for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
+        when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
+        yield Result(ERROR if urgency == "critical" else WARN,
+                     f"alert you have not seen yet ({urgency}, {when}): {title} (shown at your next login; "
+                     f"the fix shows it now, as does {CST} btrfs status)", "cst-pending-alerts --list")
+    if seen_n:
+        yield Result(INFO, f"{seen_n} alert(s) of the last {ALERT_KEEP_DAYS} days already shown to you "
+                     "(cst-pending-alerts --list)")
+    if not unseen and not seen_n:
+        yield Result(OK, "no pending alerts")
+
+
+@check("alerts")
+def check_legacy_alerts(host):
+    old = host.path("/var/lib/f44-alerts")
+    if os.path.islink(old):
+        yield Result(WARN, "/var/lib/f44-alerts: link left by the move from f44-tools to CST "
+                     "(the fix removes it)", f"{CST} btrfs install")
+    elif os.path.exists(old):
+        yield Result(WARN, "/var/lib/f44-alerts: folder of the versions named f44-tools still there "
+                     "(the fix moves its alerts to /var/lib/cst-alerts and removes it)", f"{CST} btrfs install")
+    else:
+        yield Result(OK, "no leftovers of f44-tools in /var/lib")
+
+
+# ---- btrfs: chunk allocation ---------------------------------------------------------------------
+# btrfs hands out disk space in chunks (block groups). "Unallocated" is the
+# space in no chunk yet: metadata can grow only from there. When it runs out,
+# writes fail with ENOSPC while df still shows free space inside data chunks.
+# Everything here comes from sysfs (readable without root); the hourly
+# btrfs-health-check (root) reads the exact per-device numbers.
+BTRFS_SYSFS = "/sys/fs/btrfs"
+RECLAIM_CONF = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+HEALTH_CHECK_REPO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "btrfs", "btrfs-health-check")
+HEALTH_CHECK_HOST = "/usr/local/sbin/btrfs-health-check"
+UNALLOC_DEFAULTS = (50, 5)        # GiB, as btrfs-health-check (read from it when possible)
+FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Copies of each chunk per profile: a device holds one copy of every chunk of
+# raid1 (2 devices), raid1c3 (3) or raid1c4 (4); single and dup only exist
+# per device on a one-device filesystem. Other layouts: no per-device number.
+MIRROR_COPIES = {"raid1": 2, "raid1c3": 3, "raid1c4": 4}
+ONE_DEVICE_FACTOR = {"single": 1, "dup": 2}
+GIB = 1024 ** 3
+# statfs rounds the size down to whole blocks, per device and per copy: a
+# difference up to this much between the btrfs devices and their block
+# devices is rounding, not a shrunk device.
+RESIZE_SLACK = 16 * 2 ** 20
+
+
+def unalloc_thresholds(host):
+    """(warn_gib, crit_gib) from btrfs-health-check (the repository copy, else
+    the installed one), so both always agree; the defaults if neither reads."""
+    for path in (HEALTH_CHECK_REPO, host.path(HEALTH_CHECK_HOST)):
+        try:
+            with open(path) as f:
+                text = f.read(65536)
+        except OSError:
+            continue
+        w = re.search(r"^UNALLOC_MIN_GIB=(\d+)\b", text, re.M)
+        c = re.search(r"^UNALLOC_CRIT_GIB=(\d+)\b", text, re.M)
+        if w and c:
+            return int(w.group(1)), int(c.group(1))
+    return UNALLOC_DEFAULTS
+
+
+def read_int(path):
+    try:
+        with open(path) as f:
+            v = f.read(64).strip()
+    except OSError:
+        return None
+    return int(v) if v.isdigit() else None
+
+
+def read_text(path, limit=256):
+    try:
+        with open(path) as f:
+            return f.read(limit).strip()
+    except OSError:
+        return ""
+
+
+def gib(n):
+    return f"{n / GIB:.1f} GiB" if abs(n) >= GIB else f"{n // 2 ** 20} MiB"
+
+
+def btrfs_mounts(host):
+    """{block device name (dm-1, nvme0n1p3): [mount points]}, from findmnt
+    on the host; {} when findmnt does not answer."""
+    rc, out, _ = host.run(["findmnt", "-rn", "-t", "btrfs", "-o", "SOURCE,TARGET"], timeout=15)
+    if rc != 0:
+        return {}
+    mounts = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) != 2:
+            continue
+        src = re.sub(r"\[.*\]$", "", f[0])
+        target = f[1].replace("\\x20", " ")
+        dev = os.path.basename(os.path.realpath(host.path(src))) if src.startswith("/dev/") else ""
+        if dev:
+            mounts.setdefault(dev, [])
+            if target not in mounts[dev]:
+                mounts[dev].append(target)
+    return mounts
+
+
+def pick_mount(targets):
+    """The mount point to name a filesystem by: / or /var first (as
+    btrfs-health-check), then /sysroot, then the shortest."""
+    for p in ("/", "/var", "/sysroot"):
+        if p in targets:
+            return p
+    return min(targets, key=len) if targets else ""
+
+
+def btrfs_profiles(alloc):
+    """{kind: {profile: logical chunk bytes}} for data, metadata, system."""
+    out = {}
+    for kind in ("data", "metadata", "system"):
+        d = os.path.join(alloc, kind)
+        prof = {}
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            names = []
+        for name in names:
+            total = read_int(os.path.join(d, name, "total_bytes"))
+            if total is not None and os.path.isdir(os.path.join(d, name)):
+                prof[name] = total
+        out[kind] = prof
+    return out
+
+
+def per_device_allocated(profiles, ndev):
+    """Bytes allocated on each device, the same on all of them, when the
+    layout makes that exact; else None."""
+    used = {p for prof in profiles.values() for p in prof}
+    if not used:
+        return None
+    if ndev == 1 and used <= set(ONE_DEVICE_FACTOR):
+        return sum(t * ONE_DEVICE_FACTOR[p] for prof in profiles.values() for p, t in prof.items())
+    if all(MIRROR_COPIES.get(p) == ndev for p in used):
+        return sum(t for prof in profiles.values() for t in prof.values())
+    return None
+
+
+def btrfs_device_bytes(host, mnt, profiles):
+    """Sum of the btrfs device sizes (what btrfs uses of each block device),
+    from statfs on the mount: btrfs reports f_blocks as that sum divided by
+    the copies of the data profile. None when it cannot be read or the data
+    profile is not one known value."""
+    data = list(profiles.get("data", {}))
+    factor = {**ONE_DEVICE_FACTOR, **MIRROR_COPIES}.get(data[0]) if len(data) == 1 else None
+    if not mnt or not factor:
+        return None
+    rc, out, _ = host.run(["stat", "-f", "-c", "%S %b", mnt], timeout=15)
+    f = out.split() if rc == 0 else []
+    if len(f) != 2 or not all(x.isdigit() for x in f):
+        return None
+    return int(f[0]) * int(f[1]) * factor
+
+
+def btrfs_devices(base):
+    """([(name, label, size bytes)], problem): the members, from
+    devices/ (block size in 512-byte sectors) and devinfo/ (missing flag)."""
+    try:
+        names = sorted(os.listdir(os.path.join(base, "devices")))
+        ids = sorted(os.listdir(os.path.join(base, "devinfo")))
+    except OSError:
+        return [], "no device list in sysfs"
+    if any(read_int(os.path.join(base, "devinfo", i, "missing")) == 1 for i in ids):
+        return [], "a member device is missing"
+    if len(names) != len(ids):
+        return [], f"{len(ids)} members but {len(names)} device(s) present"
+    devs = []
+    for n in names:
+        sectors = read_int(os.path.join(base, "devices", n, "size"))
+        if not sectors:
+            return [], f"no size for {n}"
+        dm = read_text(os.path.join(base, "devices", n, "dm", "name"))
+        devs.append((n, f"/dev/mapper/{dm}" if dm else f"/dev/{n}", sectors * 512))
+    return devs, ""
+
+
+@check("btrfs")
+def check_btrfs_allocation(host):
+    sysfs = host.path(BTRFS_SYSFS)
+    try:
+        uuids = sorted(n for n in os.listdir(sysfs) if FS_UUID.match(n)
+                       and os.path.isdir(os.path.join(sysfs, n, "allocation")))
+    except OSError:
+        uuids = []
+    if not uuids:
+        yield Result(INFO, f"allocation: no mounted btrfs filesystem ({BTRFS_SYSFS} has none)")
+        return
+    warn_gib, crit_gib = unalloc_thresholds(host)
+    mounts = btrfs_mounts(host)
+    conf = read_text(host.path(RECLAIM_CONF), 65536)
+    readme = "btrfs/README.md, section 13: 'No space left' but df shows free space"
+    for uuid in uuids:
+        base = os.path.join(sysfs, uuid)
+        alloc = os.path.join(base, "allocation")
+        devs, dev_problem = btrfs_devices(base)
+        targets = []
+        try:
+            for n in os.listdir(os.path.join(base, "devices")):
+                targets += [t for t in mounts.get(n, []) if t not in targets]
+        except OSError:
+            pass
+        mnt = pick_mount(targets)
+        name = f"btrfs {mnt}" if mnt else f"btrfs {uuid[:8]}"
+        where = mnt or "MOUNTPOINT"
+        system = bool({"/", "/var", "/sysroot"} & set(targets))
+
+        # How full the chunks are (logical bytes: one copy).
+        fill = {}
+        for kind in ("data", "metadata"):
+            total = read_int(os.path.join(alloc, kind, "total_bytes"))
+            used = read_int(os.path.join(alloc, kind, "bytes_used"))
+            fill[kind] = (used, total) if total and used is not None else None
+        profiles = btrfs_profiles(alloc)
+        layout = "/".join(sorted({p.upper() for prof in profiles.values() for p in prof})) or "?"
+        parts = []
+        for kind in ("data", "metadata"):
+            if fill[kind]:
+                u, t = fill[kind]
+                parts.append(f"{kind} chunks {gib(u)} used of {gib(t)} allocated ({100 * u // t}%)")
+        if fill["data"] and fill["metadata"] and fill["data"][0]:
+            parts.append(f"metadata is {100 * fill['metadata'][0] / fill['data'][0]:.1f}% of data")
+        if parts:
+            yield Result(OK, f"{name} ({layout}): " + ", ".join(parts))
+        else:
+            yield Result(INFO, f"{name}: chunk usage not readable in sysfs")
+
+        # Automatic reclaim of half-empty data chunks (Linux 6.11+, set by cst btrfs install).
+        dyn = read_int(os.path.join(alloc, "data", "dynamic_reclaim"))
+        per = read_int(os.path.join(alloc, "data", "periodic_reclaim"))
+        configured = f"/sys/fs/btrfs/{uuid}/allocation/data/" in conf
+        if dyn is None or per is None:
+            yield Result(INFO, f"{name}: this kernel has no automatic reclaim switches (Linux 6.11 or later)")
+        elif dyn == 1 and per == 1:
+            count = read_int(os.path.join(alloc, "data", "reclaim_count"))
+            errs = read_int(os.path.join(alloc, "data", "reclaim_errors"))
+            extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
+            if errs:
+                yield Result(INFO, f"{name}: automatic data reclaim on (dynamic, periodic){extra}, "
+                             f"{errs} failed (journalctl -k -g BTRFS)")
+            else:
+                yield Result(OK, f"{name}: automatic data reclaim on (dynamic, periodic){extra}")
+        else:
+            off = ", ".join(k for k, v in (("dynamic_reclaim", dyn), ("periodic_reclaim", per)) if v != 1)
+            if configured or system:
+                why = "configured by CST but switched off" if configured else "not set up"
+                yield Result(WARN, f"{name}: automatic data reclaim is {why} ({off} = 0): btrfs then never "
+                             "compacts half-empty data chunks by itself as unallocated space runs out",
+                             f"{CST} btrfs install")
+            else:
+                yield Result(INFO, f"{name}: automatic data reclaim off ({off}); CST sets it up only "
+                             "for the root filesystem")
+
+        # Unallocated space, per device.
+        limits = f"warning below {warn_gib} GiB, critical below {crit_gib} GiB"
+        needs_root = (f"per-device unallocated needs root: sudo btrfs filesystem usage -T {where} "
+                      "(the hourly btrfs-health-check watches it)")
+        if not devs:
+            yield Result(INFO, f"{name}: {needs_root}; not estimated: {dev_problem}")
+            continue
+        each = per_device_allocated(profiles, len(devs))
+        if each is not None and all(size >= each for _, _, size in devs):
+            # Block size minus one copy of every chunk. A btrfs device is never
+            # larger than its block device, so this is an upper bound; it is
+            # exact when the btrfs devices add up to the block devices (none
+            # was shrunk with btrfs filesystem resize). statfs tells.
+            fs_bytes = btrfs_device_bytes(host, mnt, profiles)
+            block_bytes = sum(size for _, _, size in devs)
+            exact = fs_bytes is not None and abs(block_bytes - fs_bytes) <= RESIZE_SLACK
+            if fs_bytes is None:
+                unknown = f"the filesystem size could not be read (stat -f {where})"
+            elif block_bytes > fs_bytes:
+                unknown = (f"the btrfs devices use {gib(block_bytes - fs_bytes)} less than their block "
+                           "devices (shrunk with btrfs filesystem resize?)")
+            else:
+                unknown = "the filesystem size from statfs does not match its block devices"
+            free = [(label, size - each) for _, label, size in devs]
+            low = min(b for _, b in free)
+            listed = ", ".join(f"{label} {gib(b)}" for label, b in free)
+            if not exact:
+                listed = "at most " + listed
+            meta_free = (fill["metadata"][1] - fill["metadata"][0]) if fill["metadata"] else None
+            rsv = read_int(os.path.join(alloc, "global_rsv_size")) or 0
+            if low < crit_gib * GIB:
+                yield Result(ERROR, f"{name}: CRITICAL: unallocated per device {listed} ({limits}): "
+                             f"ENOSPC is close. Free space first, then a filtered data balance; never a "
+                             f"metadata or full balance. Steps: {readme}")
+            elif low < warn_gib * GIB:
+                yield Result(WARN, f"{name}: little unallocated space per device: {listed} ({limits}; "
+                             f"metadata grows only from it). Free space; then, if it stays low, "
+                             f"see {readme}")
+            elif exact:
+                yield Result(OK, f"{name}: unallocated per device {listed} ({limits}; from sysfs, "
+                             "each btrfs device fills its block device)")
+            else:
+                yield Result(INFO, f"{name}: {needs_root}; not estimated: {unknown}")
+            if meta_free is not None and meta_free < 2 * rsv and low < 2 * GIB:
+                yield Result(ERROR, f"{name}: metadata almost full ({meta_free // 2 ** 20} MiB free in "
+                             f"metadata chunks, global reserve {rsv // 2 ** 20} MiB): writes may fail "
+                             f"with ENOSPC soon. Steps: {readme}")
+            continue
+        # Mixed or striped layout: only the sum over all devices is exact.
+        disk_total = 0
+        for kind in ("data", "metadata", "system"):
+            disk_total += read_int(os.path.join(alloc, kind, "disk_total")) or 0
+        total_free = sum(size for _, _, size in devs) - disk_total
+        if disk_total and total_free < warn_gib * GIB * len(devs):
+            # The average is below the warning, so at least one device is too.
+            yield Result(WARN, f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s), so at least "
+                         f"one device has less than {warn_gib} GiB ({limits}); {needs_root}. "
+                         f"Steps: {readme}")
+        elif disk_total:
+            yield Result(INFO, f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s) "
+                         f"(layout {layout}); {needs_root}")
+        else:
+            yield Result(INFO, f"{name}: {needs_root}")
+
+
+# ---- running and printing ------------------------------------------------------------------------
+def run_checks(host, checks=None):
+    """[(area, Result)] in registry order. A check that crashes is an ERROR
+    line, not a crash of the whole check-up."""
+    out = []
+    for area, fn in (CHECKS if checks is None else checks):
+        try:
+            for r in fn(host):
+                out.append((area, r))
+        except Exception as e:  # noqa: BLE001 - one broken check must not hide the others
+            out.append((area, Result(ERROR, f"{fn.__name__}: the check itself failed ({type(e).__name__}: {e})")))
+    return out
+
+
+def summary(results):
+    counts = {s: 0 for s in SEVERITY}
+    for _, r in results:
+        counts[r.status] += 1
+    worst = max((SEVERITY[r.status] for _, r in results), default=0)
+    verdict = "all good" if worst < SEVERITY[WARN] else "needs attention"
+    line = (f"doctor: {verdict}: {counts[ERROR]} ERROR, {counts[WARN]} WARN, "
+            f"{counts[INFO]} info, {counts[OK]} ok")
+    return line, (1 if worst >= SEVERITY[WARN] else 0)
+
+
+def render(results, brief, out, container=False):
+    """Print the results; container: running in a toolbox, where the fix
+    commands do not work (no rpm-ostree, no host journal): say "on the host"."""
+    line, rc = summary(results)
+    label = "fix (on the host):" if container else "fix:"
+    if brief:
+        print(line, file=out)
+    else:
+        print(f"{PROG}: read-only check-up (nothing is changed)", file=out)
+        if container:
+            print("Inside a toolbox: run every command shown here on the host (a host terminal, "
+                  "or put flatpak-spawn --host in front of a command without sudo).", file=out)
+    area_now = None
+    for area, r in results:
+        if brief and SEVERITY[r.status] < SEVERITY[WARN]:
+            continue
+        if not brief and area != area_now:
+            print(f"\n== {area}", file=out)
+            area_now = area
+        tag = f"[{area}] " if brief else ""
+        print(f"  {r.status:<5}  {tag}{r.message}", file=out)
+        if r.fix:
+            print(f"         {label} {r.fix}", file=out)
+    if not brief:
+        print(f"\n{line}", file=out)
+        if rc:
+            print("Each fix is a suggestion: read it before you run it. Details: doctor/README.md in CST.",
+                  file=out)
+    return rc
+
+
+def parse_args(argv):
+    if argv and argv[0] in ("help", "-h", "--help"):
+        if len(argv) > 1:
+            raise Usage("help takes no arguments")
+        return "help", False
+    brief = False
+    for a in argv:
+        if a == "--brief" and not brief:
+            brief = True
+        else:
+            raise Usage(f"unknown argument '{a}'")
+    return "run", brief
+
+
+def main(argv, out=sys.stdout):
+    try:
+        cmd, brief = parse_args(argv)
+    except Usage as e:
+        print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+    if cmd == "help":
+        print(__doc__.replace("doctor [--brief]", f"{PROG} [--brief]", 1), file=out)
+        return 0
+    host = Host()
+    return render(run_checks(host), brief, out, host.container)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

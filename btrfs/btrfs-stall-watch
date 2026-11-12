@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# btrfs-stall-watch  (run as: cst btrfs watch ...)
+#
+# Optional convenience wrapper. The recording itself is done all the time by
+# btrfs-stall-monitor.service (see btrfs-setup.sh), so wrapping a
+# command is NOT required: run it normally and query the window afterwards
+# with `btrfs-stall-report --since ...`.
+#
+# This wrapper only remembers the exact window and label of a run, keeps the
+# command output, and prints/saves the report for that window, which is handy
+# for A/B comparisons (kernel update, mount option or sysctl change).
+#
+# Usage:
+#   cst btrfs watch [-l LABEL] -- command [args...]
+#   cst btrfs watch [-l LABEL] --duration SECONDS
+#   cst btrfs watch --list            past runs (label, window, exit)
+#
+# Output: ${XDG_STATE_HOME:-~/.local/state}/btrfs-stall-watch/<timestamp>/
+#         {workload.log,report.txt,report.json} and runs.tsv (index).
+
+set -euo pipefail
+
+out_base="${XDG_STATE_HOME:-$HOME/.local/state}/btrfs-stall-watch"
+label=""
+duration=""
+declare -a workload=()
+
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -l|--label) label="${2:?missing value for $1}"; shift 2 ;;
+        -d|--duration) duration="${2:?missing value for $1}"; shift 2 ;;
+        --list)
+            [[ -s "${out_base}/runs.tsv" ]] && column -t -s $'\t' "${out_base}/runs.tsv" || echo "no runs yet"
+            exit 0
+            ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; workload=("$@"); break ;;
+        -*) echo "Unknown option: $1 (use -- before the command)" >&2; exit 2 ;;
+        *) workload=("$@"); break ;;
+    esac
+done
+
+if [[ ${#workload[@]} -eq 0 && -z "${duration}" ]]; then
+    usage >&2
+    exit 2
+fi
+if [[ -n "${duration}" && ! "${duration}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "Invalid duration: ${duration}" >&2
+    exit 2
+fi
+
+if ! command -v btrfs-stall-report >/dev/null 2>&1; then
+    echo "btrfs-stall-report not found: install with 'cst btrfs install' (on the host)" >&2
+    exit 1
+fi
+
+out_dir="${out_base}/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${out_dir}"
+start_epoch="$(date +%s)"
+[[ -n "${label}" ]] || label="${workload[*]:-sleep ${duration}}"
+
+exit_code=0
+set +e
+if [[ ${#workload[@]} -gt 0 ]]; then
+    "${workload[@]}" 2>&1 | tee "${out_dir}/workload.log"
+    exit_code="${PIPESTATUS[0]}"
+else
+    sleep "${duration}"
+fi
+set -e
+end_epoch="$(date +%s)"
+window=(--since "@${start_epoch}" --until "@$(( end_epoch + 1 ))")
+# The daemon hands data to disk about every 10 s (and an open stall episode
+# only when it ends): wait until the recording covers the end of the run.
+# The last poll's output is kept as report.json.
+for _ in $(seq 1 20); do
+    btrfs-stall-report "${window[@]}" --json --no-below >"${out_dir}/report.json" 2>/dev/null || true
+    last="$(python3 -I -c 'import json, sys; print(int(json.load(sys.stdin)["coverage"]["last_sample"] or 0))' \
+        <"${out_dir}/report.json" 2>/dev/null || echo 0)"
+    (( last >= end_epoch - 1 )) && break
+    sleep 3
+done
+
+btrfs-stall-report "${window[@]}" >"${out_dir}/report.txt" 2>&1 || true
+
+[[ -s "${out_base}/runs.tsv" ]] || printf 'start\tend\texit\tlabel\tdir\n' >"${out_base}/runs.tsv"
+printf '%s\t%s\t%s\t%s\t%s\n' "$(date -d "@${start_epoch}" '+%F %T')" "$(date -d "@${end_epoch}" '+%T')" \
+    "${exit_code}" "${label//$'\t'/ }" "${out_dir}" >>"${out_base}/runs.tsv"
+
+echo
+echo "=== btrfs-stall-report for '${label}' (${out_dir}) ==="
+cat "${out_dir}/report.txt"
+exit "${exit_code}"

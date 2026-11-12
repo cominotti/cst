@@ -1,0 +1,1244 @@
+#!/usr/bin/env bash
+#
+# btrfs-snapshot
+#
+# Installed by btrfs-setup.sh (CST) as /usr/local/sbin/btrfs-snapshot.
+# Runtime side of `cst btrfs snapshots ...`; runs as root from units:
+#
+#   btrfs-snapshot convert  (run live by `cst btrfs snapshots setup`) turns
+#                           the planned directories (~/Workspace, caches,
+#                           IDEs, emulator disks, Downloads, ...) into nested subvolumes;
+#                           busy ones are flagged for the next normal boot:
+#   btrfs-snapshot convert-boot  (btrfs-subvol-convert.service, before login).
+#   btrfs-snapshot hourly   (btrfs-snapshot.service) finishes pending conversions,
+#                           then space guard and btrfs-snapshot-core: a read-only
+#                           snapshot of /home and of ~/Workspace (once it is a
+#                           subvolume) if they changed, then deletes what the
+#                           retention no longer keeps. Local only: nothing here
+#                           waits for the NAS. No new snapshot while planned
+#                           conversions (or btrfs-bulk's moves into ~/Bulk) wait
+#                           for the next boot, a move into ~/Bulk is unfinished
+#                           (a journal in /var/lib/btrfs-bulk), or old trees are
+#                           still being deleted (they would be pinned for months).
+#   btrfs-snapshot nas      (btrfs-snapshot-nas.service) optional backup to the
+#                           NAS with restic over SFTP: pins the newest snapshots,
+#                           bind-mounts them read-only at fixed paths, `restic
+#                           backup`, then forget (+ prune weekly, check monthly).
+#                           Never creates or deletes local snapshots; a failure
+#                           is logged, alerted only once the copy is stale.
+#   btrfs-snapshot list [--json]  every snapshot with its keep/delete decision.
+#   btrfs-snapshot prune [--dry-run] [--allow-mass-delete]  deletions by the
+#                           normal retention only; --allow-mass-delete confirms
+#                           what the circuit breaker blocked (`cst btrfs
+#                           snapshots prune [--confirm]`).
+#   btrfs-snapshot purge    deletes every snapshot btrfs-snapshot-core owns
+#                           (`cst btrfs snapshots disable --purge`).
+#   btrfs-snapshot planned-left  planned paths not converted yet.
+#   btrfs-snapshot busy [--home DIR] PATH...  prints those of PATH... some
+#                           process uses (open file, cwd, root, binary, mapped
+#                           file, a container's bind mount of it, of something
+#                           below it, or with --home of a folder between DIR
+#                           and it); used by btrfs-bulk.
+#   btrfs-snapshot convert-one PATH  one directory into a nested subvolume
+#                           (btrfs-bulk: a plain ~/Bulk folder).
+#   btrfs-snapshot configure     no-op, kept for compatibility (it wrote the
+#                           btrbk configs of earlier versions).
+#
+# Settings: /etc/btrfs-setup/snapshots.conf. State: /var/lib/btrfs-snapshot.
+#
+# Locking: hourly, convert, convert-boot, prune and purge hold /run/btrfs-snapshot.lock
+# (flock, fd 9) for their whole run and call btrfs-snapshot-core with --no-lock
+# (its default lock is that same file: a second open file description from the
+# child would conflict with ours). nas holds it only while choosing and pinning
+# the snapshots it reads, so a long upload never delays the hourly run; pinned
+# snapshots are never deleted by the core.
+
+set -Euo pipefail
+
+CONF=/etc/btrfs-setup/snapshots.conf
+PLAN=/etc/btrfs-setup/convert-plan
+STATE=/var/lib/btrfs-snapshot
+CORE=/usr/local/sbin/btrfs-snapshot-core
+NOTIFY=/usr/local/sbin/btrfs-notify
+LOCK=/run/btrfs-snapshot.lock
+RUN_DIR=/run/btrfs-snapshot
+PIN_FILE="${RUN_DIR}/pinned"        # read by btrfs-snapshot-core: never deleted while listed
+NAS_MNT="${RUN_DIR}/nas"            # stable paths restic reads (same path = restic's parent match)
+NAS_LOCK=/run/btrfs-snapshot-nas.lock
+NAS_SSH_ALIAS=btrfs-setup-nas       # managed Host block in /root/.ssh/config (snapshots nas setup)
+RESTIC_PASSWORD=/etc/btrfs-setup/restic-password
+RESTIC_CACHE=/var/cache/btrfs-snapshot-restic
+GIB=$((1024 ** 3))
+
+# Defaults; snapshots.conf overrides.
+HOME_DIR="${HOME_DIR:-}"
+HOME_MOUNT=/var/home       # where the home subvolume is mounted
+HOME_SUBVOL=home           # its path below the btrfs top level
+TOP=/var/mnt/btrfs-top
+SNAP_DIR_NAME=snapshots    # below the top level: outside the visible tree
+# Retention (btrbk snapshot_preserve syntax): one snapshot per hour when the
+# subvolume changed; keep...
+HOME_PRESERVE="72h 7d 4w 3m"   # every hour 3 days, a day 1 week, a week 1 month, a month 3 months
+WS_PRESERVE="48h 7d"           # ~/Workspace: builds churn there, git has the long history
+EMERGENCY_PRESERVE="24h 3d"
+# Space guard on btrfs' "Free (estimated)": no new snapshot at or below 250
+# GiB (resume only above 270, hysteresis); emergency purge at or below 150.
+SKIP_AT_OR_BELOW_GIB=250
+RESUME_ABOVE_GIB=270
+EMERGENCY_AT_OR_BELOW_GIB=150
+BOOT_FLAG=/etc/btrfs-setup/convert-at-boot
+BULK_FLAG=/etc/btrfs-setup/bulk-at-boot   # btrfs-bulk: items still to move into ~/Bulk at boot
+BULK_STATE=/var/lib/btrfs-bulk            # btrfs-bulk: journal-<id>.json = a move not finished
+DROP_INLINE=1              # convert-boot defers deleting old trees to the hourly run
+NAS_ENABLED=0
+NAS_HOST=""
+NAS_PORT=2204
+NAS_USER=""
+NAS_PATH=""
+NAS_RESTIC_HOST=""         # restic --host; recorded by 'snapshots nas setup' (hostname -s)
+NAS_STALE_DAYS=7
+NAS_TIMEOUT=6h             # whole backup part of one run (timeout(1) syntax)
+NAS_KEEP_DAILY=14
+NAS_KEEP_WEEKLY=8
+NAS_KEEP_MONTHLY=12
+NAS_PRUNE_EVERY_DAYS=7
+NAS_CHECK_EVERY_DAYS=30
+NAS_CHECK_SUBSET=5%
+env_home="${HOME_DIR}"
+# shellcheck source=/dev/null
+[[ -r "${CONF}" ]] && . "${CONF}"
+[[ -n "${env_home}" ]] && HOME_DIR="${env_home}"   # explicit environment wins (dry runs)
+SNAPDIR="${TOP}/${SNAP_DIR_NAME}"
+[[ -n "${NAS_RESTIC_HOST}" ]] || NAS_RESTIC_HOST="$(hostname -s)"
+
+mkdir -p "${STATE}"
+log() { echo "<$1>btrfs-snapshot: $2"; }
+
+# alert KIND URGENCY TITLE BODY: desktop notification at most once a day per kind.
+# btrfs-notify shows it now or, with no graphical session yet (e.g. at boot),
+# keeps it and shows it at the next login: either way it is on its way to the
+# user, so the stamp starts the day. Only when btrfs-notify could do neither is
+# the stamp left alone, so a later run tries again.
+alert() {
+    local urgency="$2" title="$3" body="$4" stamp="${STATE}/alerted-$1"
+    log 4 "${title}: ${body}"
+    if [[ -e "${stamp}" ]] && (( $(date +%s) - $(stat -c %Y "${stamp}") < 86400 )); then
+        return 0
+    fi
+    if [[ -x "${NOTIFY}" ]] && "${NOTIFY}" -u "${urgency}" -a btrfs-snapshot "${title}" "${body}"; then
+        touch "${stamp}"
+    fi
+    return 0
+}
+clear_alert() { rm -f "${STATE}/alerted-$1"; }
+
+# Free space btrfs estimates for new data (already accounts for RAID1).
+free_bytes() {
+    btrfs filesystem usage -b /var 2>/dev/null | awk '/Free \(estimated\)/ {print $3; exit}'
+}
+
+is_subvol() { [[ -d "$1" && "$(stat -c %i "$1" 2>/dev/null)" == 256 ]]; }
+
+# ---- open files ---------------------------------------------------------------------
+# Every path any process has as cwd, root, binary or open fd, collected once
+# per batch; with "maps", also every mapped file (a program run from the tree,
+# or a model file read through mmap after its fd was closed).
+OPEN_PATHS=""
+collect_open_paths() {
+    # One find reads every link (no readlink fork per fd); -P does not follow
+    # the cwd/root/exe start points, -type l skips the fd directories themselves.
+    OPEN_PATHS="$( {
+        find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null |
+            sed -e 's/ (deleted)$//'
+        if [[ "${1:-}" == maps ]]; then
+            cat /proc/[0-9]*/maps 2>/dev/null | awk '$6 ~ /^\// {print $6}' | sed -e 's/ (deleted)$//'
+        fi
+        mount_sources
+    } | sed '/^$/d' | sort -u)"
+}
+# Sources of bind mounts of the home subvolume in every mount namespace, as
+# host paths: a container started with -v ~/Workspace/x:/src writes into the
+# tree through a mount that the host's mount table and the container
+# processes' /proc links (/src/...) never show under /var/home.
+mount_sources() {
+    local dev pid
+    dev="$(awk -v m="${HOME_MOUNT}" '$5 == m {print $3; exit}' /proc/self/mountinfo)"
+    [[ -n "${dev}" ]] || return 0
+    # One process per mount namespace.
+    find /proc/[0-9]*/ns/mnt -maxdepth 0 -printf '%l %h\n' 2>/dev/null | sort -u -k1,1 |
+        while read -r _ pid; do
+            pid="${pid#/proc/}"; pid="${pid%/ns}"
+            cat "/proc/${pid}/mountinfo" 2>/dev/null
+        done |
+        D="${dev}" S="/${HOME_SUBVOL}" M="${HOME_MOUNT}" awk '
+            BEGIN {d = ENVIRON["D"]; s = ENVIRON["S"]; m = ENVIRON["M"]}
+            $3 == d && (index($4, s "/") == 1) {r = $4; gsub(/\\040/, " ", r); print m substr(r, length(s) + 1)}' |
+        sort -u
+}
+in_use() {   # path: true if anything is open at or below it (batch snapshot)
+    P="$1" awk 'BEGIN {p = ENVIRON["P"]}
+        index($0, p) == 1 && (length($0) == length(p) || substr($0, length(p) + 1, 1) == "/") {found = 1; exit}
+        END {exit !found}' <<<"${OPEN_PATHS}"
+}
+# Fresh check of one path right before switching it (find reads the links
+# itself, no fork per fd; glob characters in the path are escaped), plus the
+# bind mounts of every mount namespace.
+in_use_now() {
+    local pat
+    pat="$(printf '%s' "$1" | sed 's/[][*?\\]/\\&/g')"
+    [[ -n "$(find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd -maxdepth 1 \
+        \( -lname "${pat}" -o -lname "${pat}/*" \) -print -quit 2>/dev/null)" ]] && return 0
+    OPEN_PATHS="$(mount_sources)" in_use "$1"
+}
+# A mount below PATH (e.g. a bind mount of the same subvolume) would be walked
+# by cp/find -xdev and emptied by rm --one-file-system: never touch such a path.
+has_mount_below() {
+    findmnt -rn -o TARGET | P="$1/" awk 'BEGIN {p = ENVIRON["P"]} index($0, p) == 1 {found = 1; exit} END {exit !found}'
+}
+
+# ---- conversion of one directory into a nested subvolume ----------------------------
+# Prepare DST so `cp --reflink=always` can clone everything: NOCOW (+C) is not
+# copied by cp, and cloning between NOCOW and COW files fails. So every
+# directory gets its source's +C, and every file whose +C differs from its new
+# directory is pre-created empty with the right flag. ioctl, no fork per file.
+prepare_nocow() {
+    python3 -I - "$1" "$2" <<'PY'
+import fcntl, os, stat, struct, sys
+GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
+src, dst = sys.argv[1], sys.argv[2]
+def flags(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
+    finally:
+        os.close(fd)
+def set_nocow(path, on):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        cur = struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
+        new = (cur | NOCOW) if on else (cur & ~NOCOW)
+        if new != cur:
+            fcntl.ioctl(fd, SET, struct.pack("l", new))
+    finally:
+        os.close(fd)
+dev = os.lstat(src).st_dev
+set_nocow(dst, bool(flags(src) & NOCOW))
+for root, dirs, files in os.walk(src):
+    rel = os.path.relpath(root, src)
+    droot = os.path.join(dst, rel) if rel != "." else dst
+    dflag = bool(flags(droot) & NOCOW)
+    keep = []
+    for d in dirs:
+        s = os.path.join(root, d)
+        st = os.lstat(s)
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != dev:
+            continue
+        keep.append(d)
+        t = os.path.join(droot, d)
+        os.mkdir(t)
+        set_nocow(t, bool(flags(s) & NOCOW))
+    dirs[:] = keep
+    for f in files:
+        s = os.path.join(root, f)
+        if not stat.S_ISREG(os.lstat(s).st_mode):
+            continue
+        want = bool(flags(s) & NOCOW)
+        if want != dflag:
+            t = os.path.join(droot, f)
+            os.close(os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            set_nocow(t, want)
+PY
+}
+
+clone_tree() {
+    local src="$1" dst="$2" err
+    prepare_nocow "${src}" "${dst}" || { log 3 "clone ${src}: preparing NOCOW flags failed"; return 1; }
+    # --reflink=always: a clone that is not possible fails loudly instead of
+    # silently writing a full copy. Any warning (an xattr or SELinux context
+    # that could not be preserved) counts as a failure too.
+    err="$(cp -a --reflink=always "${src}/." "${dst}/" 2>&1 >/dev/null)" && [[ -z "${err}" ]] ||
+        { log 3 "clone ${src}: ${err:0:300}"; return 1; }
+}
+
+# discard_new LEVEL MSG: convert_one's abort path once PATH.subvol-new exists
+# (uses its locals path/new): delete the new subvolume, log, fail.
+discard_new() {
+    btrfs subvolume delete "${new}" >/dev/null 2>&1
+    log "$1" "convert: ${path}: $2"; return 1
+}
+
+# convert_one PATH: clone PATH into a new subvolume and switch the names; the
+# old tree (same extents, nothing duplicated) is then deleted via drop-pending.
+# PATH absent but its parent there: create PATH as an empty subvolume, so the
+# app writes straight into it (idempotent; works on a freshly installed system).
+# Parent absent too: nothing yet (the hourly run looks again).
+convert_one() {
+    local path="$1" ts new old n_old n_new
+    ts="$(date +%Y%m%dT%H%M%S)"
+    new="${path}.subvol-new"
+    old="${path}.pre-subvol-${ts}"
+    # Recovery: a previous run died between the two renames.
+    if [[ ! -e "${path}" ]] && is_subvol "${new}"; then
+        if mv -T "${new}" "${path}"; then
+            log 4 "convert: ${path}: finished an interrupted conversion"; return 0
+        fi
+        log 3 "convert: ${path}: could not finish an interrupted conversion"; return 1
+    fi
+    forget_skip "${path}"
+    if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+        [[ -d "$(dirname "${path}")" ]] || return 0
+        btrfs subvolume create "${path}" >/dev/null || return 1
+        if ! chown --reference="$(dirname "${path}")" "${path}" || ! chmod 0755 "${path}"; then
+            btrfs subvolume delete "${path}" >/dev/null 2>&1
+            log 3 "convert: ${path}: cannot set owner/mode"; return 1
+        fi
+        restorecon "${path}" 2>/dev/null || true
+        log 5 "convert: ${path}: created as an empty subvolume"
+        return 0
+    fi
+    [[ -d "${path}" && ! -L "${path}" ]] || { skip "${path}" "not a directory (a symlink or file)"; return 0; }
+    is_subvol "${path}" && return 0
+    if mountpoint -q "${path}" || has_mount_below "${path}"; then
+        skip "${path}" "is or contains a mountpoint"; return 0
+    fi
+    if in_use "${path}"; then
+        log 5 "convert: ${path}: in use, left for later"; return 1
+    fi
+    if [[ -n "$(find "${path}" -mindepth 1 -inum 256 -print -quit 2>/dev/null)" ]]; then
+        skip "${path}" "contains a nested subvolume"; return 0
+    fi
+    [[ -e "${new}" ]] && btrfs subvolume delete "${new}" >/dev/null 2>&1
+    btrfs subvolume create "${new}" >/dev/null || { log 3 "convert: ${path}: cannot create subvolume"; return 1; }
+    if ! chown --reference="${path}" "${new}" || ! chmod --reference="${path}" "${new}"; then
+        discard_new 3 "cannot set owner/mode"; return 1
+    fi
+    chcon --reference="${path}" "${new}" 2>/dev/null || true
+    # Clock for "was anything written while we cloned?" (ctime: no program
+    # can set it back, unlike mtime; cloning only reads the source).
+    touch "${STATE}/clone-start"
+    if ! clone_tree "${path}" "${new}"; then
+        discard_new 3 "clone failed; left unchanged"; return 1
+    fi
+    n_old="$(find "${path}" -xdev | wc -l)"
+    n_new="$(find "${new}" -xdev | wc -l)"
+    if (( n_old != n_new )); then
+        discard_new 3 "entry count differs (${n_old} vs ${n_new}); left unchanged"; return 1
+    fi
+    # Race guard, last moment before the switch: a process still in there
+    # (in_use_now), or one that wrote during the clone and already exited
+    # (anything changed since clone-start), means the copy may be stale.
+    if in_use_now "${path}"; then
+        discard_new 4 "started being used, skipped"; return 1
+    fi
+    if [[ -n "$(find "${path}" -xdev -cnewer "${STATE}/clone-start" -print -quit 2>/dev/null)" ]]; then
+        discard_new 4 "written to during the clone, skipped (retried later)"; return 1
+    fi
+    # Record the old tree before anything can interrupt us.
+    printf '%s\n' "${old}" >>"${STATE}/drop-pending"
+    if ! mv -T "${path}" "${old}"; then
+        forget_pending "${old}"
+        discard_new 3 "rename failed; left unchanged"; return 1
+    fi
+    if ! mv -T "${new}" "${path}"; then
+        forget_pending "${old}"   # whatever happens next, never delete the original
+        if mv -T "${old}" "${path}"; then
+            log 3 "convert: ${path}: rename failed; rolled back"
+        else
+            alert convert critical "Subvolume conversion: manual check needed" \
+                "${path} is missing; the original tree is ${old}, the clone ${new}."
+        fi
+        return 1
+    fi
+    # Last check, after the switch: anything that wrote into the old tree in
+    # the instant between the checks and the renames (the renamed directory's
+    # own ctime changes with the rename, hence -mindepth 1) rolls it all back.
+    if [[ -n "$(find "${old}" -xdev -mindepth 1 -cnewer "${STATE}/clone-start" -print -quit 2>/dev/null)" ]] ||
+        in_use_now "${old}"; then
+        forget_pending "${old}"   # it has the late writes: never delete it
+        if mv -T "${path}" "${new}" && mv -T "${old}" "${path}"; then
+            discard_new 4 "written to during the switch; rolled back (retried later)"; return 1
+        fi
+        # The recovery at the top must not install the stale clone either.
+        [[ -e "${new}" ]] && mv -T "${new}" "${path}.stale-clone-$(date +%s)" 2>/dev/null
+        alert convert critical "Subvolume conversion: manual check needed" \
+            "Rolling back ${path} after a late write failed; the tree with the latest data is ${old}."
+        return 1
+    fi
+    if (( DROP_INLINE )); then
+        drop_pending
+        log 5 "convert: ${path}: now a subvolume, old tree removed"
+    else
+        log 5 "convert: ${path}: now a subvolume; the old tree is deleted by the hourly run"
+    fi
+    return 0
+}
+
+# Planned paths that cannot be converted as they are (symlink, mountpoint,
+# nested subvolume): "PATH<TAB>reason" in STATE/skipped, shown by status, not
+# retried at boot; re-checked by every run (the cause may go away).
+skip() {
+    forget_skip "$1"
+    printf '%s\t%s\n' "$1" "$2" >>"${STATE}/skipped"
+    log 4 "convert: $1: $2, skipped"
+}
+forget_skip() {
+    local tmp
+    [[ -s "${STATE}/skipped" ]] || return 0
+    tmp="$(mktemp)"
+    P="$1" awk -F '\t' '$1 != ENVIRON["P"]' "${STATE}/skipped" >"${tmp}" || true
+    mv -f "${tmp}" "${STATE}/skipped"
+}
+skipped() { [[ -s "${STATE}/skipped" ]] && cut -f1 "${STATE}/skipped" | grep -qxF -- "$1"; }
+
+forget_pending() {
+    local tmp
+    [[ -e "${STATE}/drop-pending" ]] || return 0
+    tmp="$(mktemp)"
+    grep -vxF -- "$1" "${STATE}/drop-pending" >"${tmp}" || true
+    mv -f "${tmp}" "${STATE}/drop-pending"
+}
+
+# Move PATH (a pure cache, e.g. ~/.cache/uv) out of its parent before the
+# parent is cloned, as $HOME/.<name>.pre-subvol-<ts>, deleted via drop-pending.
+put_aside() {
+    local path="$1" dst
+    [[ -d "${path}" && ! -L "${path}" ]] || return 0
+    # Only before the parent's conversion: once the parent is a subvolume the
+    # cache lives there legitimately (and mv would copy across subvolumes).
+    is_subvol "${path}" || is_subvol "$(dirname "${path}")" && return 0
+    in_use "${path}" && { log 5 "aside: ${path}: in use, left for later"; return 1; }
+    dst="${HOME_DIR}/.$(basename "${path}")-aside.pre-subvol-$(date +%Y%m%dT%H%M%S)"
+    printf '%s\n' "${dst}" >>"${STATE}/drop-pending"
+    mv -T "${path}" "${dst}" || { forget_pending "${dst}"; return 1; }
+    log 5 "aside: ${path}: moved out of the way, deleted in the background"
+}
+
+# Delete the old trees recorded in drop-pending (also retries trees left by an
+# interrupted run). Only paths that are still *.pre-subvol-* directories.
+drop_pending() {
+    local list p keep=""
+    [[ -s "${STATE}/drop-pending" ]] || return 0
+    list="$(cat "${STATE}/drop-pending")"
+    while IFS= read -r p; do
+        [[ -n "${p}" ]] || continue
+        if [[ -d "${p}" && "${p}" == *.pre-subvol-* ]] && ! has_mount_below "${p}"; then
+            # Bounded and at idle IO priority; what remains is retried next run.
+            timeout 900 ionice -c3 nice -n 19 rm -rf --one-file-system -- "${p}"
+        fi
+        [[ -e "${p}" ]] && keep+="${p}"$'\n'
+    done <<<"${list}"
+    printf '%s' "${keep}" >"${STATE}/drop-pending"
+}
+
+# ---- planned directories (snapshots setup) --------------------------------------------
+# PLAN lines: "<copy|aside> <absolute path>", in order (an "aside" entry, a pure
+# cache moved out of the way and deleted, precedes its parent's "copy").
+convert_planned() {
+    local strategy path n=0 left=0
+    [[ -r "${PLAN}" ]] || return 0
+    collect_open_paths
+    while read -r strategy path; do
+        [[ -z "${path}" || "${strategy}" == \#* ]] && continue
+        if [[ "${strategy}" == aside ]]; then
+            put_aside "${path}" || left=$((left + 1)); continue
+        fi
+        is_subvol "${path}" && continue
+        if convert_one "${path}"; then
+            is_subvol "${path}" && n=$((n + 1))
+        else
+            left=$((left + 1))
+        fi
+    done <"${PLAN}"
+    (( n + left == 0 )) || log 5 "planned dirs: ${n} done, ${left} left for later (in use or failed)"
+    return 0
+}
+
+# Planned paths still to do (busy or failed), one per line.
+planned_left() {
+    local strategy path
+    [[ -r "${PLAN}" ]] || return 0
+    while read -r strategy path; do
+        [[ -z "${path}" || "${strategy}" == \#* ]] && continue
+        if [[ "${strategy}" == aside ]]; then
+            [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+                printf '%s\n' "${path}"
+        elif [[ -e "${path}" || -d "$(dirname "${path}")" ]] && ! is_subvol "${path}" && ! skipped "${path}"; then
+            printf '%s\n' "${path}"
+        fi
+    done <"${PLAN}"
+    return 0
+}
+
+# Live conversion run by `snapshots setup`; what the session keeps busy is
+# flagged for the next normal boot (then hourly picks up the rest).
+convert() {
+    echo "Converting planned directories (busy ones wait for the next boot)..."
+    convert_planned
+    drop_pending
+    if [[ -n "$(planned_left)" ]]; then
+        touch "${BOOT_FLAG}"
+    else
+        rm -f "${BOOT_FLAG}"
+    fi
+    return 0
+}
+
+# At boot, before any login: nothing of the desktop session holds files open.
+# Never blocks login more than twice for the same leftovers.
+convert_boot() {
+    local attempts
+    [[ -e "${BOOT_FLAG}" ]] || return 0
+    attempts="$(cat "${STATE}/boot-attempts" 2>/dev/null || echo 0)"
+    if (( attempts >= 2 )); then
+        rm -f "${BOOT_FLAG}" "${STATE}/boot-attempts"
+        alert boot critical "Subvolume conversion at boot gave up" \
+            "Left: $(planned_left | tr '\n' ' ') - see 'journalctl -u btrfs-subvol-convert'."
+        return 0
+    fi
+    echo $((attempts + 1)) >"${STATE}/boot-attempts"
+    echo "btrfs-snapshot: converting the directories the desktop session kept busy..."
+    DROP_INLINE=0
+    convert_planned
+    configure
+    if [[ -z "$(planned_left)" ]]; then
+        rm -f "${BOOT_FLAG}" "${STATE}/boot-attempts"
+    fi
+    return 0
+}
+
+# ---- btrfs-snapshot-core ---------------------------------------------------------------
+# No-op kept for compatibility: earlier versions (re)wrote btrbk configs here;
+# btrfs-snapshot-core takes everything on its command line.
+configure() { return 0; }
+
+# core_sources HOME_POLICY WS_POLICY: sets SRC_NAMES/SRC_PATHS (snapshot name,
+# source subvolume below the top level) and CORE_SOURCES (their --source
+# arguments). ~/Workspace has snapshots of its own only once it is a subvolume;
+# until then it is simply part of /home's.
+core_sources() {
+    local i policy
+    SRC_NAMES=(home)
+    SRC_PATHS=("${TOP}/${HOME_SUBVOL}")
+    if is_subvol "${HOME_DIR}/Workspace"; then
+        SRC_NAMES+=(Workspace)
+        SRC_PATHS+=("${TOP}/${HOME_SUBVOL}${HOME_DIR#"${HOME_MOUNT}"}/Workspace")
+    fi
+    CORE_SOURCES=()
+    for i in "${!SRC_NAMES[@]}"; do
+        policy="$1"
+        [[ "${SRC_NAMES[i]}" == Workspace ]] && policy="$2"
+        CORE_SOURCES+=(--source "${SRC_NAMES[i]}=${SRC_PATHS[i]}:${policy}")
+    done
+}
+
+# What the core names in its messages to review or confirm deletions: our
+# commands (its own would need the --source arguments built here).
+CORE_HINTS=(--list-hint "cst btrfs snapshots list"
+            --confirm-hint "cst btrfs snapshots prune --confirm")
+
+# core_run CMD ARGS...: btrfs-snapshot-core snapshot|prune with the common
+# arguments; we already hold LOCK (fd 9), hence --no-lock. Its log lines
+# (journald prefixes) are passed through as they come; CORE_REASON is its
+# first warning or error, for the alert. Returns the core's exit code: 0 ok,
+# 1 error, 2 usage, 3 lock busy, 4 a safety check blocked a creation or deletion.
+core_run() {
+    local out rc fd line
+    # Each line is passed on as it comes, not only once the core is done: the
+    # line of each deletion reaches the journal when it happens, also if the
+    # run is stopped halfway (timeout, `snapshots disable --purge`). The copy
+    # in $(...) is only read for CORE_REASON. (Not tee: under systemd stdout
+    # is a socket, which /dev/fd/N cannot reopen.)
+    exec {fd}>&1
+    out="$("${CORE}" "$1" --snapdir "${SNAPDIR}" --no-lock --pin-file "${PIN_FILE}" \
+            --state-dir "${STATE}" "${CORE_HINTS[@]}" "${@:2}" |
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            printf '%s\n' "${line}" >&"${fd}"
+            printf '%s\n' "${line}"
+        done
+        exit "${PIPESTATUS[0]}")"; rc=$?
+    exec {fd}>&-
+    # The line naming the block if there is one (a note such as a future-dated
+    # snapshot can come first), else the first warning or error.
+    CORE_REASON="$(sed -n 's/^<[34]>btrfs-snapshot: //p' <<<"${out}" | grep -v ' summary: ' |
+        awk '/blocked|not creating a snapshot|not deleting|circuit breaker/ {print; found = 1; exit}
+             first == "" {first = $0} END {if (!found && first != "") print first}')" || true
+    return "${rc}"
+}
+
+# core_result WHAT RC: alerts for the core's exit code; true only for 0.
+core_result() {
+    local what="$1" rc="$2" title hint reason
+    case "${rc}" in
+        0) clear_alert blocked; return 0 ;;
+        3) log 5 "${what}: another run holds ${LOCK}; skipped" ;;
+        4)
+            title="Snapshots: safety check blocked deletions"
+            [[ "${CORE_REASON}" == *"not creating a snapshot"* ]] && title="Snapshots: safety check blocked a new snapshot"
+            hint="review: cst btrfs snapshots list"
+            # Only the circuit breaker can be overridden; a clock problem must be fixed.
+            [[ "${CORE_REASON}" == *"circuit breaker"* ]] &&
+                hint+="; if those deletions are right (e.g. a shorter retention in ${CONF}): cst btrfs snapshots prune --confirm"
+            # The core's own "check with ..." tail is replaced by the hint.
+            reason="${CORE_REASON%%; check with *}"
+            alert blocked normal "${title}" "${reason:0:300} - ${hint}; details: journalctl -u btrfs-snapshot." ;;
+        *) log 3 "${what}: btrfs-snapshot-core failed (rc=${rc})" ;;
+    esac
+    return 1
+}
+
+# Deletions by the normal retention only (no new snapshot this hour).
+prune_only() {
+    local rc
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    core_run prune "${CORE_SOURCES[@]}"; rc=$?
+    core_result prune "${rc}" || (( rc == 3 || rc == 4 )) ||
+        alert prune-failed critical "Snapshots: purge failed" \
+            "btrfs-snapshot-core rc=${rc}; see journalctl -u btrfs-snapshot."
+    return 0
+}
+
+# waiting KIND MSG TITLE BODY: no snapshot this hour (logged); after a day of
+# waiting, an alert (once a day). STATE/KIND-since holds the start.
+waiting() {
+    local since="${STATE}/$1-since"
+    [[ -e "${since}" ]] || touch "${since}"
+    log 5 "$2; no snapshot this hour"
+    if (( EPOCHSECONDS - $(stat -c %Y "${since}") > 86400 )); then
+        alert "$1" normal "$3" "$4"
+    fi
+}
+
+# ---- hourly --------------------------------------------------------------------------
+hourly() {
+    local free paused=0 rc left
+    [[ -n "${HOME_DIR}" ]] || { log 3 "not set up; run 'cst btrfs snapshots setup'"; return 1; }
+    [[ -x "${CORE}" ]] || { log 3 "${CORE} is missing; re-run 'cst btrfs snapshots setup'"; return 1; }
+    convert_planned
+    drop_pending
+    # The space guard comes first: its purges must run even while new
+    # snapshots wait (below) for old trees or planned conversions.
+    free="$(free_bytes)"
+    [[ "${free}" =~ ^[0-9]+$ ]] || { log 3 "cannot read free space"; return 1; }
+    [[ -e "${STATE}/paused" ]] && paused=1
+
+    if (( free <= EMERGENCY_AT_OR_BELOW_GIB * GIB )); then
+        touch "${STATE}/paused" "${STATE}/emergency"
+        alert emergency critical "Snapshots: emergency purge" \
+            "Only $(( free / GIB )) GiB free (limit ${EMERGENCY_AT_OR_BELOW_GIB}): keeping only the last day and 3 dailies. Free space on /home or /var."
+        # Mass deletion is the point here (no circuit breaker); pinned
+        # snapshots, the 3 newest and those of the last 24 h are still kept.
+        core_sources "${EMERGENCY_PRESERVE}" "${EMERGENCY_PRESERVE}"
+        core_run prune "${CORE_SOURCES[@]}" --allow-mass-delete; rc=$?
+        core_result "emergency purge" "${rc}" || (( rc == 3 || rc == 4 )) ||
+            alert prune-failed critical "Snapshots: emergency purge failed" \
+                "btrfs-snapshot-core rc=${rc}; see journalctl -u btrfs-snapshot."
+        # Deletions free space asynchronously: wait before the next decision.
+        btrfs subvolume sync /var >/dev/null 2>&1 || true
+        log 4 "emergency purge done (rc=${rc}); free now $(( $(free_bytes) / GIB )) GiB"
+        return 0
+    fi
+    rm -f "${STATE}/emergency"
+    if (( free <= SKIP_AT_OR_BELOW_GIB * GIB )) || (( paused && free <= RESUME_ABOVE_GIB * GIB )); then
+        touch "${STATE}/paused"
+        alert paused normal "Snapshots paused: low space" \
+            "$(( free / GIB )) GiB free; hourly snapshots resume above ${RESUME_ABOVE_GIB} GiB. Older snapshots still expire normally."
+        prune_only
+        return 0
+    fi
+    rm -f "${STATE}/paused"
+    clear_alert paused
+    clear_alert emergency
+
+    # No new snapshot yet while data that is about to leave /home is still
+    # in it: a snapshot taken now would keep it for months (the first of a
+    # month is kept 3 months). Older snapshots still expire normally.
+    # 1. Old trees of finished conversions, still being deleted.
+    if [[ -s "${STATE}/drop-pending" ]]; then
+        waiting pending "old trees still being deleted ($(grep -c . "${STATE}/drop-pending"))" \
+            "Snapshots: waiting for old trees to be deleted" \
+            "For over a day: $(head -n 3 "${STATE}/drop-pending" | tr '\n' ' ')"
+        prune_only
+        return 0
+    fi
+    rm -f "${STATE}/pending-since"
+    # 2. Directories `snapshots setup` found busy: converted at the next boot
+    # (convert-boot; it gives up after two boots and removes the flag). If
+    # convert_planned above managed them all already, snapshots start now.
+    if [[ -e "${BOOT_FLAG}" ]]; then
+        left="$(planned_left)"
+        if [[ -n "${left}" ]]; then
+            waiting boot-wait "$(grep -c . <<<"${left}") planned conversion(s) wait for the next boot" \
+                "Snapshots wait for a reboot" \
+                "Busy directories are converted at the next boot, before login; snapshots start after that. Left: $(head -n 3 <<<"${left}" | tr '\n' ' ')"
+            prune_only
+            return 0
+        fi
+        rm -f "${BOOT_FLAG}" "${STATE}/boot-attempts"
+        log 5 "all planned conversions done; snapshots start"
+    fi
+    rm -f "${STATE}/boot-wait-since"
+    clear_alert boot-wait
+    # 3. Items btrfs-bulk found busy, still in /home: moved into ~/Bulk at the
+    # next boot (btrfs-bulk-boot.service; it gives up after two boots and
+    # removes the flag).
+    # A journal: a move interrupted (or stopped for a look) halfway; the old
+    # tree, or a second copy, sits in /home until it is finished or undone.
+    # Not one marked "bulk_only": true (the in-place +C rewrite of the emulator
+    # disks in ~/Bulk/emulators: every path inside ~/Bulk, no data of it in /home).
+    # shellcheck disable=SC2143  # -L lists the files WITHOUT the marker; -q cannot say that
+    if compgen -G "${BULK_STATE}/journal-*.json" >/dev/null &&
+        [[ -n "$(grep -L -s -F '"bulk_only": true' "${BULK_STATE}"/journal-*.json)" ]]; then
+        waiting bulk-journal "an unfinished move into ~/Bulk (${BULK_STATE})" \
+            "Snapshots wait for ~/Bulk" \
+            "A move into ~/Bulk was interrupted or needs a look; snapshots start after that. Run: cst btrfs bulk status"
+        prune_only
+        return 0
+    fi
+    rm -f "${STATE}/bulk-journal-since"
+    clear_alert bulk-journal
+    if [[ -e "${BULK_FLAG}" ]]; then
+        waiting bulk-wait "items still to move into ~/Bulk at the next boot ($(tr '\n' ' ' <"${BULK_FLAG}"))" \
+            "Snapshots wait for a reboot" \
+            "Busy items are moved into ~/Bulk at the next boot, before login; snapshots start after that. Left: $(tr '\n' ' ' <"${BULK_FLAG}")"
+        prune_only
+        return 0
+    fi
+    rm -f "${STATE}/bulk-wait-since"
+    clear_alert bulk-wait
+
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    core_run snapshot "${CORE_SOURCES[@]}"; rc=$?
+    if core_result snapshot "${rc}"; then
+        date +%s >"${STATE}/last-ok"
+        clear_alert prune-failed
+    fi
+    # 3 (busy) and 4 (blocked, alerted) are not failures of this unit; without
+    # last-ok, a lasting problem also shows in the health check after 3 hours.
+    (( rc == 0 || rc == 3 || rc == 4 ))
+}
+
+# `cst btrfs snapshots prune [--confirm]`: the normal retention by hand.
+# --allow-mass-delete deletes what the circuit breaker held back (e.g. after
+# HOME_PRESERVE/WS_PRESERVE were shortened in snapshots.conf); pinned
+# snapshots, the 3 newest and those of the last 24 h are still kept.
+manual_prune() {
+    local a rc dry=0
+    local -a extra=()
+    [[ -n "${HOME_DIR}" ]] || { echo "not set up; run 'cst btrfs snapshots setup'" >&2; return 1; }
+    [[ -x "${CORE}" ]] || { echo "${CORE} is missing; re-run 'cst btrfs snapshots setup'" >&2; return 1; }
+    for a in "$@"; do
+        case "${a}" in
+            --dry-run) dry=1; extra+=("${a}") ;;
+            --allow-mass-delete) extra+=("${a}") ;;
+            *) echo "usage: btrfs-snapshot prune [--dry-run] [--allow-mass-delete]" >&2; return 2 ;;
+        esac
+    done
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    core_run prune "${CORE_SOURCES[@]}" "${extra[@]}"; rc=$?
+    (( rc == 0 && ! dry )) && clear_alert blocked
+    return "${rc}"
+}
+
+# ---- list / purge ----------------------------------------------------------------------
+# Every snapshot with btrfs-snapshot-core's keep/delete decision (no lock: read only).
+list_snapshots() {
+    [[ -n "${HOME_DIR}" ]] || { echo "not set up; run 'cst btrfs snapshots setup'" >&2; return 1; }
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    "${CORE}" list --snapdir "${SNAPDIR}" --pin-file "${PIN_FILE}" --state-dir "${STATE}" "${CORE_HINTS[@]}" \
+        "${CORE_SOURCES[@]}" "$@"
+}
+
+# Delete every snapshot the core owns (its naming and ownership rules: name,
+# real read-only subvolume, Parent UUID of the source); anything else in the
+# directory is left alone. Pinned ones (a NAS run) are skipped.
+purge() {
+    local out p n_left
+    local -a paths=() batch=()
+    [[ -n "${HOME_DIR}" && -d "${SNAPDIR}" ]] || { echo "No snapshot directory: nothing to delete."; return 0; }
+    # The policy does not matter here: only the ownership check of `list` is used.
+    core_sources 1h 1h
+    out="$("${CORE}" list --json --snapdir "${SNAPDIR}" --pin-file "${PIN_FILE}" --state-dir "${STATE}" \
+        "${CORE_SOURCES[@]}")" || { log 3 "purge: cannot list the snapshots; nothing deleted"; return 1; }
+    while IFS= read -r p; do
+        [[ -n "${p}" ]] || continue
+        if [[ -s "${PIN_FILE}" ]] && grep -qxF -- "${p}" "${PIN_FILE}"; then
+            log 4 "purge: ${p} is pinned (NAS backup running?); kept"
+            continue
+        fi
+        paths+=("${p}")
+    done < <(python3 -I -c 'import json, sys
+for src in json.load(sys.stdin)["sources"]:
+    for snap in src.get("snapshots", []):
+        print(snap["path"])' <<<"${out}")
+    echo "Deleting ${#paths[@]} snapshot(s) in batches of 10..."
+    # Batches + sync: a bulk delete is cleaner and discard work in the background.
+    for p in "${paths[@]}"; do
+        batch+=("${p}")
+        if (( ${#batch[@]} == 10 )); then
+            btrfs subvolume delete "${batch[@]}" >/dev/null || log 3 "purge: a deletion failed"
+            btrfs subvolume sync /var >/dev/null 2>&1 || true
+            batch=()
+        fi
+    done
+    if (( ${#batch[@]} )); then
+        btrfs subvolume delete "${batch[@]}" >/dev/null || log 3 "purge: a deletion failed"
+        btrfs subvolume sync /var >/dev/null 2>&1 || true
+    fi
+    n_left="$(find "${SNAPDIR}" -mindepth 1 -maxdepth 1 | wc -l)"
+    if (( n_left )); then
+        echo "${n_left} entr$( (( n_left == 1 )) && echo y || echo ies) left in ${SNAPDIR} (not owned by btrfs-snapshot-core, or pinned): not deleted."
+    else
+        rmdir "${SNAPDIR}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# ---- nas -----------------------------------------------------------------------------
+# restic over SFTP. Host, port, user, key, timeouts and keepalives come from
+# the managed Host block NAS_SSH_ALIAS in /root/.ssh/config (written by
+# `snapshots nas setup`); restic's own ssh picks it up. The restic snapshots
+# are read from the newest local snapshots, bind-mounted read-only at fixed
+# paths (NAS_MNT/home, NAS_MNT/Workspace): with the same path every day,
+# restic's parent snapshot matches and unchanged files are not read again.
+# The staleness clock: the last successful backup, or when the backup was
+# enabled if that is later (`nas enable` records it only when it turns the
+# backup on, so re-running setup does not move it). Started now if neither
+# is recorded (NAS_ENABLED=1 set by hand).
+nas_since() {
+    local f v best=0
+    for f in nas-last-ok nas-enabled-at; do
+        v="$(cat "${STATE}/${f}" 2>/dev/null)"
+        [[ "${v}" =~ ^[0-9]+$ ]] && (( v > best )) && best="${v}"
+    done
+    if (( best == 0 )); then
+        best="$(date +%s)"
+        echo "${best}" >"${STATE}/nas-enabled-at"
+    fi
+    echo "${best}"
+}
+
+nas_stale_alert() {
+    local last age_d
+    last="$(nas_since)"
+    age_d=$(( ($(date +%s) - last) / 86400 ))
+    if (( age_d >= NAS_STALE_DAYS )); then
+        alert nas normal "NAS backup is ${age_d} days old" "$1 Local snapshots are unaffected."
+    fi
+}
+
+# Seconds of a timeout(1) duration (N, Ns, Nm, Nh, Nd); 6 h if unreadable.
+duration_s() {
+    [[ "$1" =~ ^([0-9]+)([smhd]?)$ ]] || { echo 21600; return 0; }
+    case "${BASH_REMATCH[2]}" in
+        m) echo $(( BASH_REMATCH[1] * 60 )) ;;
+        h) echo $(( BASH_REMATCH[1] * 3600 )) ;;
+        d) echo $(( BASH_REMATCH[1] * 86400 )) ;;
+        *) echo "${BASH_REMATCH[1]}" ;;
+    esac
+}
+
+# due FILE DAYS: true if the epoch in FILE is missing or DAYS old.
+due() {
+    local last
+    last="$(cat "$1" 2>/dev/null)" || return 0
+    [[ "${last}" =~ ^[0-9]+$ ]] || return 0
+    (( $(date +%s) - last >= $2 * 86400 ))
+}
+
+# Seconds left of this run's NAS_TIMEOUT budget.
+time_left() { echo $(( NAS_DEADLINE - $(date +%s) )); }
+
+# restic_run SECONDS ARGS...: restic bounded by SECONDS, its output in the
+# journal format (errors and warnings at level 4), and appended to the file
+# RESTIC_CAPTURE if set. RESTIC_RUN_ENV (VAR=value words) is added to its
+# environment. Returns restic's exit code (124: time limit; restic: 3
+# incomplete, 10 no repository, 11 locked, 12 wrong password).
+restic_run() {
+    local limit="$1"
+    shift
+    timeout --kill-after=5m "${limit}" env "${RESTIC_RUN_ENV[@]}" restic "$@" 2>&1 |
+        sed -u -e 's/^\(Fatal\|[Ee]rror\|[Ww]arning\)/<4>btrfs-snapshot: restic: \1/; t' \
+            -e 's/^/<6>btrfs-snapshot: restic: /' |
+        tee -a "${RESTIC_CAPTURE:-/dev/null}"
+    return "${PIPESTATUS[0]}"
+}
+RESTIC_RUN_ENV=()
+NAS_REPO_ID=""             # set by nas_repo_ready (restic cat config)
+
+# Connection, key, host key and SFTP subsystem in one go (what restic uses).
+nas_reachable() {
+    timeout 60 sftp -q -b - "${NAS_SSH_ALIAS}" <<<"pwd" >/dev/null 2>&1
+}
+
+# The repository opens with our password. A missing one is created only if
+# `snapshots nas setup` asked for it (restic arrived after a reboot), never
+# on its own: a moved or deleted repository must be noticed, not replaced.
+# Sets NAS_REPO_ID.
+nas_repo_ready() {
+    local out rc
+    out="$(timeout 300 restic cat config 2>&1)"; rc=$?
+    if (( rc == 10 )) && [[ -e "${STATE}/nas-init-pending" ]]; then
+        log 5 "NAS: creating the restic repository ${RESTIC_REPOSITORY} (requested by 'snapshots nas setup')"
+        if ! restic_run 600 init; then
+            log 4 "NAS: restic init failed"
+            nas_stale_alert "Creating the repository on the NAS failed."
+            return 1
+        fi
+        rm -f "${STATE}/nas-init-pending"
+        # Setup could only call that password provisional: now it matters.
+        alert nas-created normal "NAS backup: repository created" \
+            "Encrypted with the password in ${RESTIC_PASSWORD}: store a copy in your password manager now (sudo cat ${RESTIC_PASSWORD}); without it the backups cannot be read."
+        out="$(timeout 300 restic cat config 2>&1)"; rc=$?
+    fi
+    case "${rc}" in
+        0)
+            rm -f "${STATE}/nas-init-pending"
+            NAS_REPO_ID="$(grep -oE '"id": *"[0-9a-f]{64}"' <<<"${out}" | grep -oE '[0-9a-f]{64}' | head -n1)"
+            nas_repo_records
+            return 0 ;;
+        10)
+            log 4 "NAS: no restic repository at ${RESTIC_REPOSITORY}; not creating one on its own (re-run 'cst btrfs snapshots nas setup')"
+            nas_stale_alert "No repository at ${NAS_PATH} on the NAS (moved or deleted?)."
+            return 1 ;;
+        12)
+            alert nas-password critical "NAS backup: wrong repository password" \
+                "${RESTIC_PASSWORD} does not open ${RESTIC_REPOSITORY}; put the saved password there."
+            return 1 ;;
+        *)
+            log 4 "NAS: cannot open the repository (restic rc=${rc}): ${out:0:300}"
+            nas_stale_alert "The repository on the NAS could not be opened (restic rc=${rc})."
+            return 1 ;;
+    esac
+}
+
+# What STATE records about the repository (which local snapshots it has,
+# last prune/check, summary) belongs to the repository it was recorded for:
+# a different one (another path, or created again) starts over, else a run
+# would skip snapshots as "already in the repository" that are not in it.
+nas_repo_records() {
+    local known
+    known="$(cat "${STATE}/nas-repo-id" 2>/dev/null)"
+    [[ -n "${NAS_REPO_ID}" && "${known}" == "${NAS_REPO_ID}" ]] && return 0
+    [[ -n "${known}" ]] && log 5 "NAS: another repository than last time (id ${known:0:8} -> ${NAS_REPO_ID:0:8}); its records start over"
+    rm -f "${STATE}"/nas-done-* "${STATE}/nas-summary" "${STATE}/nas-last-prune" "${STATE}/nas-last-check" \
+        "${STATE}/nas-check-failures" "${STATE}/nas-repo-id"
+    [[ -n "${NAS_REPO_ID}" ]] && printf '%s\n' "${NAS_REPO_ID}" >"${STATE}/nas-repo-id"
+    return 0
+}
+
+# Unmount NAS_MNT/* (a run killed at the wrong moment can leave mounts
+# stacked there: all of them). The pin file is removed only once nothing is
+# mounted; false if something stayed mounted (its snapshot stays pinned).
+nas_unmount() {
+    local m n ok=1
+    for m in "${NAS_MNT}"/*; do
+        [[ -d "${m}" ]] || continue
+        n=0
+        while mountpoint -q "${m}" && (( n++ < 5 )); do
+            umount "${m}" || break
+        done
+        if mountpoint -q "${m}"; then
+            ok=0
+            log 4 "NAS: cannot unmount ${m}; the pinned snapshots stay pinned, and no backup starts until it is unmounted"
+            continue
+        fi
+        rmdir "${m}" 2>/dev/null || true
+    done
+    (( ok )) && rm -f "${PIN_FILE}"
+    (( ok ))
+}
+
+# Under LOCK, so no hourly run deletes anything between choosing and pinning:
+# the newest owned snapshot of each source (by "Gen at creation", from the
+# core), written to the pin file. Sets NAS_NAMES/NAS_SNAPS; false if none.
+nas_pin() {
+    local i snap
+    NAS_NAMES=()
+    NAS_SNAPS=()
+    exec 9>"${LOCK}"
+    if ! flock -w 1800 9; then
+        exec 9>&-
+        log 5 "NAS: the hourly run held ${LOCK} for 30 minutes; skipped"
+        return 1
+    fi
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    for i in "${!SRC_NAMES[@]}"; do
+        if snap="$("${CORE}" latest --snapdir "${SNAPDIR}" --name "${SRC_NAMES[i]}" \
+            --source-path "${SRC_PATHS[i]}")" && [[ -n "${snap}" ]]; then
+            NAS_NAMES+=("${SRC_NAMES[i]}")
+            NAS_SNAPS+=("${snap}")
+        else
+            log 4 "NAS: no snapshot of ${SRC_NAMES[i]} to back up"
+        fi
+    done
+    install -d -m 0755 "${RUN_DIR}"
+    if ! { printf '%s\n' "${NAS_SNAPS[@]}" >"${PIN_FILE}.tmp" && mv -f "${PIN_FILE}.tmp" "${PIN_FILE}"; }; then
+        exec 9>&-
+        log 3 "NAS: cannot write ${PIN_FILE}"
+        return 1
+    fi
+    exec 9>&-
+    (( ${#NAS_SNAPS[@]} ))
+}
+
+# nas_backup NAME SNAPSHOT: one restic snapshot of SNAPSHOT, read at
+# NAS_MNT/NAME, dated with the local snapshot's time (from its name).
+nas_backup() {
+    local name="$1" snap="$2" entry ts when left rc mnt="${NAS_MNT}/$1"
+    entry="${snap##*/}"
+    # Recorded with the repository id: a record of another repository (or of
+    # one whose id could not be read) never counts.
+    if [[ -n "${NAS_REPO_ID}" && "$(cat "${STATE}/nas-done-${name}" 2>/dev/null)" == "${entry} ${NAS_REPO_ID}" ]]; then
+        log 6 "NAS: ${entry} is already in the repository"
+        return 0
+    fi
+    ts="${entry#"${name}".}"
+    ts="${ts%%_*}"
+    when="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}:00"
+    left="$(time_left)"
+    (( left > 60 )) || { log 4 "NAS: ${name}: no time left in this run (NAS_TIMEOUT=${NAS_TIMEOUT})"; return 1; }
+    install -d -m 0700 "${mnt}"
+    # Never stack a mount on a leftover one: that one's snapshot would no
+    # longer be in the pin file once it is rewritten.
+    if mountpoint -q "${mnt}"; then
+        log 4 "NAS: ${name}: ${mnt} is still mounted; skipped"
+        return 1
+    fi
+    mount --bind -o ro,nosuid,nodev "${snap}" "${mnt}" ||
+        { log 4 "NAS: ${name}: cannot bind-mount ${snap} at ${mnt}"; return 1; }
+    log 5 "NAS: backing up ${entry} (read at ${mnt})"
+    # device-id-for-hardlinks (alpha in restic 0.19; see nas()): without it every
+    # new btrfs snapshot has another device id, so every directory's metadata
+    # would be stored again. Content is deduplicated either way.
+    local -a RESTIC_RUN_ENV=("${NAS_FEATURES[@]}")
+    # --one-file-system: nested subvolumes (caches, ~/Workspace in /home's
+    # snapshot) are empty directories in a snapshot anyway; this also keeps
+    # out anything mounted below. --exclude-caches: CACHEDIR.TAG directories.
+    restic_run "${left}" backup --host "${NAS_RESTIC_HOST}" --tag "btrfs-setup,${name}" --time "${when}" \
+        --one-file-system --exclude-caches --skip-if-unchanged "${mnt}"; rc=$?
+    umount "${mnt}" 2>/dev/null || true   # nas_unmount retries and keeps the pin if it failed
+    case "${rc}" in
+        0) ;;
+        3) log 4 "NAS: ${name}: some files could not be read; the rest was backed up" ;;
+        124|137) log 4 "NAS: ${name}: stopped at the time limit (NAS_TIMEOUT=${NAS_TIMEOUT}); the uploaded data is reused next run"; return 1 ;;
+        *) log 4 "NAS: ${name}: restic backup failed (rc=${rc})"; return 1 ;;
+    esac
+    printf '%s %s\n' "${entry}" "${NAS_REPO_ID}" >"${STATE}/nas-done-${name}"
+}
+
+# forget every run, prune at most every NAS_PRUNE_EVERY_DAYS, check a random
+# NAS_CHECK_SUBSET of the data at most every NAS_CHECK_EVERY_DAYS.
+# Messages of `restic check` (0.19) that name damaged data, not a transport
+# problem.
+RESTIC_DAMAGE_RE='error for tree|not found in index|ciphertext verification failed|does not match|index is damaged|without subtree|decompression failed|invalid compression|contains [0-9]+ errors|no such file|does not exist'
+
+nas_maintain() {
+    local rc left prune=0 out fails
+    local -a args=(forget --host "${NAS_RESTIC_HOST}" --tag btrfs-setup --keep-daily "${NAS_KEEP_DAILY}"
+                   --keep-weekly "${NAS_KEEP_WEEKLY}" --keep-monthly "${NAS_KEEP_MONTHLY}")
+    left="$(time_left)"
+    (( left > 60 )) || { log 5 "NAS: no time left for forget/prune/check; next run"; return 0; }
+    if due "${STATE}/nas-last-prune" "${NAS_PRUNE_EVERY_DAYS}"; then
+        args+=(--prune)
+        prune=1
+    fi
+    restic_run "${left}" "${args[@]}"; rc=$?
+    if (( rc == 0 )); then
+        (( prune )) && date +%s >"${STATE}/nas-last-prune"
+    else
+        log 4 "NAS: restic ${args[*]:0:1}$( (( prune )) && echo ' --prune') failed (rc=${rc}); retried next run"
+    fi
+    due "${STATE}/nas-last-check" "${NAS_CHECK_EVERY_DAYS}" || return 0
+    left="$(time_left)"
+    (( left > 60 )) || return 0
+    out="$(mktemp)" || return 0
+    RESTIC_CAPTURE="${out}" restic_run "${left}" check --read-data-subset="${NAS_CHECK_SUBSET}"; rc=$?
+    case "${rc}" in
+        0) date +%s >"${STATE}/nas-last-check"; rm -f "${STATE}/nas-check-failures"; clear_alert nas-check ;;
+        11|124|130|137) log 4 "NAS: restic check did not complete (rc=${rc}); retried next run"; nas_check_stale ;;
+        *)
+            # restic exits 1 both for damaged data and for a NAS that went
+            # away mid-check (then also "The repository is damaged" / "Fatal:
+            # repository contains errors"): only messages naming damaged data,
+            # with the NAS still reachable, mean damage.
+            if grep -qiE "${RESTIC_DAMAGE_RE}" "${out}" && nas_reachable; then
+                alert nas-check critical "NAS backup: repository damaged" \
+                    "restic check found damaged data (rc=${rc}); see journalctl -u btrfs-snapshot-nas and restic's troubleshooting guide (restic repair)."
+            elif ! nas_reachable; then
+                # An outage: quiet, like a failed backup (nas_check_stale).
+                log 4 "NAS: restic check stopped, the NAS went away (rc=${rc}); retried next run"
+                nas_check_stale
+            else
+                fails=$(( $(cat "${STATE}/nas-check-failures" 2>/dev/null || echo 0) + 1 ))
+                echo "${fails}" >"${STATE}/nas-check-failures"
+                log 4 "NAS: restic check failed (rc=${rc}) without naming damaged data (connection lost?); retried next run"
+                if (( fails >= 3 )); then
+                    alert nas-check normal "NAS backup: repository check keeps failing" \
+                        "restic check failed ${fails} runs in a row (rc=${rc}) with the NAS reachable, without naming damaged data; see journalctl -u btrfs-snapshot-nas."
+                else
+                    nas_check_stale
+                fi
+            fi ;;
+    esac
+    rm -f "${out}"
+    return 0
+}
+
+# A check that keeps not completing (the NAS dropping out mid-check) is
+# alerted only once it is overdue by another full interval.
+nas_check_stale() {
+    local last age_d
+    last="$(cat "${STATE}/nas-last-check" 2>/dev/null || stat -c %Y "${STATE}/nas-repo-id" 2>/dev/null || date +%s)"
+    [[ "${last}" =~ ^[0-9]+$ ]] || last="$(date +%s)"
+    age_d=$(( ($(date +%s) - last) / 86400 ))
+    if (( age_d >= 2 * NAS_CHECK_EVERY_DAYS )); then
+        alert nas-check normal "NAS backup: repository not checked for ${age_d} days" \
+            "restic check did not complete at the last attempts; see journalctl -u btrfs-snapshot-nas."
+    fi
+}
+
+# One line per source about its latest restic snapshot, for `snapshots status`
+# (read from the repository here, while connected; status stays offline).
+nas_summary() {
+    local out
+    out="$(timeout 300 restic snapshots --json --latest 1 --host "${NAS_RESTIC_HOST}" --tag btrfs-setup 2>/dev/null)" ||
+        return 0
+    python3 -I -c 'import json, sys
+for snap in sorted(json.load(sys.stdin), key=lambda s: (s.get("paths") or [""])[0]):
+    summary = snap.get("summary") or {}
+    name = (snap.get("paths") or ["?"])[0].rsplit("/", 1)[-1]
+    when = snap.get("time", "")[:16].replace("T", " ")
+    size = summary.get("total_bytes_processed", 0) / 2**30
+    files = summary.get("total_files_processed", 0)
+    added = summary.get("data_added_packed", 0) / 2**20
+    print(f"{name}: {when}, {size:.1f} GiB in {files} files, {added:.0f} MiB new on the NAS")
+' <<<"${out}" >"${STATE}/nas-summary.tmp" 2>/dev/null &&
+        mv -f "${STATE}/nas-summary.tmp" "${STATE}/nas-summary"
+    rm -f "${STATE}/nas-summary.tmp"
+    return 0
+}
+
+nas() {
+    local i ok=0 failed=0 type
+    if [[ "${NAS_ENABLED}" != 1 ]]; then
+        log 6 "NAS backup not enabled"; return 0
+    fi
+    if ! command -v restic >/dev/null; then
+        log 5 "NAS: restic is not installed yet (rpm-ostree: active after the next reboot); skipped"; return 0
+    fi
+    if [[ -z "${NAS_PATH}" || ! -s "${RESTIC_PASSWORD}" ]]; then
+        log 4 "NAS: not configured completely (NAS_PATH, ${RESTIC_PASSWORD}); re-run 'cst btrfs snapshots nas setup'"
+        nas_stale_alert "The NAS backup is not configured completely."
+        return 0
+    fi
+    exec 8>"${NAS_LOCK}"
+    flock -n 8 || { log 5 "another NAS run is active; skipped"; return 0; }
+    # Always unmount and unpin, also when systemd stops the run (TERM) or Ctrl-C.
+    trap nas_unmount EXIT
+    trap 'exit 143' TERM INT HUP
+    # Leftovers of a run that was killed. If one cannot be unmounted, its
+    # snapshot stays pinned only as long as the pin file is not rewritten:
+    # no new run until it is gone.
+    if ! nas_unmount; then
+        trap - EXIT   # nothing of this run to unmount
+        nas_stale_alert "A snapshot of an earlier run is still mounted under ${NAS_MNT}."
+        return 0
+    fi
+    NAS_DEADLINE=$(( $(date +%s) + $(duration_s "${NAS_TIMEOUT}") ))
+    export RESTIC_REPOSITORY="sftp:${NAS_SSH_ALIAS}:${NAS_PATH}"
+    export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD}" RESTIC_CACHE_DIR="${RESTIC_CACHE}"
+    if ! nas_reachable; then
+        log 5 "NAS ${NAS_USER}@${NAS_HOST}:${NAS_PORT} unreachable (ssh ${NAS_SSH_ALIAS}); skipping this run"
+        nas_stale_alert "The NAS was unreachable at the last attempts."
+        return 0
+    fi
+    nas_repo_ready || return 0
+    # Only locks whose process is gone (a run killed at the time limit).
+    restic_run 300 unlock || true
+    if ! nas_pin; then
+        nas_stale_alert "There was no local snapshot to back up."
+        return 0
+    fi
+    # restic 0.19 still ships device-id-for-hardlinks as an alpha feature flag,
+    # and restic refuses unknown flags: set it only while this restic lists it
+    # as alpha or beta (once stable it is always on; once removed, unneeded).
+    NAS_FEATURES=()
+    type="$(restic features 2>/dev/null | awk '$1 == "device-id-for-hardlinks" {print $2; exit}')"
+    [[ "${type}" == alpha || "${type}" == beta ]] && NAS_FEATURES=(RESTIC_FEATURES=device-id-for-hardlinks)
+    for i in "${!NAS_NAMES[@]}"; do
+        if nas_backup "${NAS_NAMES[i]}" "${NAS_SNAPS[i]}"; then ok=$((ok + 1)); else failed=$((failed + 1)); fi
+    done
+    nas_unmount || true   # forget/prune/check don't need them: let them expire again
+    if (( failed )); then
+        log 4 "NAS backup failed for ${failed} of $((ok + failed)) source(s); will retry next run"
+        nas_stale_alert "Last attempt failed; see journalctl -u btrfs-snapshot-nas."
+        return 0
+    fi
+    date +%s >"${STATE}/nas-last-ok"
+    clear_alert nas
+    clear_alert nas-password
+    nas_maintain
+    nas_summary
+    log 5 "NAS backup ok: ${NAS_SNAPS[*]##*/}"
+    return 0
+}
+
+# hourly, convert, prune and purge all change /home trees or snapshots: never at the
+# same time (nas takes the same lock only to pin; see the top of this file).
+lock() {
+    exec 9>"${LOCK}"
+    flock "$1" 9 || { log 5 "another conversion/snapshot run is active; skipped"; exit 0; }
+}
+
+# `busy [--home DIR] PATH...`: the given paths some process uses, one per
+# line (no lock: read only). Mapped files count too: a program started from
+# the tree. With --home, also a container's bind mount of a folder between
+# DIR and PATH (-v ~/.m2:/root/.m2 writes into ~/.m2/repository); not DIR
+# itself or above (every toolbox mounts the whole home).
+busy() {
+    local p home="" src
+    local -a anc=()
+    if [[ "${1:-}" == --home ]]; then
+        home="${2%/}"
+        shift 2
+        mapfile -t anc < <(mount_sources)
+    fi
+    collect_open_paths maps
+    for p in "$@"; do
+        if in_use "${p}"; then
+            printf '%s\n' "${p}"
+            continue
+        fi
+        for src in "${anc[@]}"; do
+            if [[ "${src}" == "${home}"/* && "${p}" == "${src}"/* ]]; then
+                printf '%s\n' "${p}"
+                break
+            fi
+        done
+    done
+    return 0
+}
+
+# `convert-one PATH`: convert_one for a single directory outside the plan.
+convert_single() {
+    local path="${1:?}"
+    collect_open_paths
+    convert_one "${path}" || { drop_pending; return 1; }
+    drop_pending
+    is_subvol "${path}"
+}
+
+case "${1:-}" in
+    hourly) lock -n; hourly ;;
+    nas) nas ;;
+    convert) lock -x; convert ;;
+    convert-boot) lock -x; convert_boot ;;
+    list) shift; list_snapshots "$@" ;;
+    prune) shift; lock -x; manual_prune "$@" ;;
+    purge) lock -x; purge ;;
+    configure) configure ;;
+    planned-left) planned_left ;;
+    busy) shift; busy "$@" ;;
+    convert-one) lock -x; convert_single "${2:?usage: btrfs-snapshot convert-one PATH}" ;;
+    *) echo "usage: btrfs-snapshot hourly|nas|convert|convert-boot|list [--json]|prune [--dry-run] [--allow-mass-delete]|purge|planned-left|busy [--home DIR] PATH...|convert-one PATH" >&2; exit 2 ;;
+esac

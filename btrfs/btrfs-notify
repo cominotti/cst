@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+#
+# btrfs-notify
+#
+# Installed by btrfs-setup.sh (CST). Desktop notification for every
+# logged-in graphical user; shared by btrfs-health-check, btrfs-snapshot,
+# docker-volumes-nocow and btrfs-stall-monitord (through
+# btrfs-stall-alert.service). Runs as root.
+#
+#   btrfs-notify [-u critical|normal] [-a APP] TITLE BODY
+#   btrfs-notify --queue DIR    deliver and remove DIR/alert-*.txt until none
+#                               is left (line 1: urgency, line 2: title, rest:
+#                               body); the hourly health check also runs it
+#   btrfs-notify --prune        drop pending alerts older than 7 days (the
+#                               hourly health check calls it)
+#
+# When no graphical session takes the notification (at boot before the login,
+# nobody logged in, the desktop not answering), the alert is kept as a pending
+# file in ${ALERTS_DIR}/pending, and cst-pending-alerts (a user service started
+# at each graphical login) shows it then. One file per app + title: a repeat
+# replaces the older one and counts the occurrences, so a problem that comes
+# back every hour during the night is one notification in the morning. A later
+# live delivery of the same alert drops the pending one (the user has just seen
+# it). Root cannot know which users have seen a kept alert, so on a machine
+# with several desktop users, a kept alert is dropped as soon as anyone sees it
+# live (this is a single-user workstation). Written only by root (dir 0755,
+# files 0644): users read it, nobody else can plant alerts there.
+#
+# Exit status: 0 when a session showed it or it was kept for the next login,
+# 1 when neither worked (then only the journal has it).
+#
+# Paths can be overridden for tests: CST_ALERTS_DIR, CST_RUN_USER.
+
+set -uo pipefail
+
+ALERTS_DIR="${CST_ALERTS_DIR:-/var/lib/cst-alerts}"
+PENDING="${ALERTS_DIR}/pending"
+RUN_USER="${CST_RUN_USER:-/run/user}"
+KEEP_DAYS=7
+MAX_PENDING=50          # oldest dropped beyond this: the queue never grows unbounded
+MAX_TITLE=200           # characters
+MAX_BODY=4000           # characters
+
+log() { echo "<$1>btrfs-notify: $2" >&2; }
+
+# send URGENCY APP TITLE BODY: notify-send in every graphical session; 0 if at
+# least one of them accepted it. A session bus without a notification server
+# (an ssh login, a lingering user manager) makes notify-send fail: not shown.
+send() {
+    local urgency="$1" app="$2" title="$3" body="$4" bus uid user shown=1
+    for bus in "${RUN_USER}"/*/bus; do
+        [[ -S "${bus}" && ! -L "${bus}" ]] || continue
+        uid="$(stat -c %u "${bus}")"
+        # Only a socket owned by the uid its /run/user/<uid> directory is named after.
+        [[ "${bus}" == "${RUN_USER}/${uid}/bus" ]] && (( uid >= 1000 )) || continue
+        user="$(id -nu "${uid}" 2>/dev/null)" || continue
+        if timeout 15 runuser -u "${user}" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
+            notify-send -u "${urgency}" -a "${app}" -i drive-harddisk -- "${title}" "${body}" 2>/dev/null; then
+            shown=0
+        fi
+    done
+    return "${shown}"
+}
+
+# key_file APP TITLE: the pending file of this alert. A hash, so nothing of the
+# text ends up in a path.
+key_file() {
+    local sum
+    sum="$(printf '%s\n%s' "$1" "$2" | sha256sum)"
+    echo "${PENDING}/${sum:0:32}.alert"
+}
+
+# lock: serialize writers (two units alerting at the same moment).
+lock() {
+    install -d -m 0755 "${ALERTS_DIR}" "${PENDING}" || return 1
+    exec 9>"${ALERTS_DIR}/.lock" || return 1
+    flock -w 30 9
+}
+
+# prune: drop what is older than KEEP_DAYS (by the last occurrence = mtime),
+# then the oldest ones beyond MAX_PENDING, and leftovers of interrupted writes.
+prune() {
+    [[ -d "${PENDING}" && ! -L "${PENDING}" ]] || return 0
+    find "${PENDING}" -maxdepth 1 -type f -name '*.alert' -mmin +$((KEEP_DAYS * 1440)) -delete 2>/dev/null
+    find "${PENDING}" -maxdepth 1 -type f -name '.tmp.*' -mmin +60 -delete 2>/dev/null
+    find "${PENDING}" -maxdepth 1 -type f -name '*.alert' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | tail -n +$((MAX_PENDING + 1)) | cut -d' ' -f2- | xargs -r rm -f --
+}
+
+# keep URGENCY APP TITLE BODY: store it for the next login, merged with an
+# earlier occurrence of the same alert.
+keep() {
+    local urgency="$1" app="$2" title="$3" body="$4" file tmp now first count line
+    file="$(key_file "${app}" "${title}")"
+    now="$(date +%s)"
+    first="${now}"
+    count=1
+    if [[ -f "${file}" && ! -L "${file}" ]]; then
+        while IFS= read -r line && [[ -n "${line}" ]]; do
+            case "${line}" in
+                first=*) [[ "${line#first=}" =~ ^[0-9]{1,12}$ ]] && first="${line#first=}" ;;
+                count=*) [[ "${line#count=}" =~ ^[0-9]{1,9}$ ]] && count=$(( ${line#count=} + 1 )) ;;
+            esac
+        done <"${file}"
+    fi
+    tmp="$(mktemp "${PENDING}/.tmp.XXXXXX")" || return 1
+    {
+        echo "cst-alert 1"
+        echo "urgency=${urgency}"
+        echo "app=${app}"
+        echo "first=${first}"
+        echo "last=${now}"
+        echo "count=${count}"
+        echo "title=${title}"
+        echo
+        printf '%s\n' "${body}"
+    } >"${tmp}" && chmod 0644 "${tmp}" && mv -f "${tmp}" "${file}" || { rm -f "${tmp}"; return 1; }
+    log 5 "no desktop session showed it; kept for the next login (${file}, ${count} occurrence(s))"
+}
+
+# deliver URGENCY APP TITLE BODY: live if possible, otherwise kept for later.
+deliver() {
+    local urgency="$1" app="$2" title="$3" body="$4" rc=0
+    # Bounded and normalized once, so the live text and the kept text agree.
+    [[ "${urgency}" == critical ]] || urgency=normal
+    app="${app//[^A-Za-z0-9._-]/_}"
+    app="${app:0:40}"
+    [[ -n "${app}" ]] || app=btrfs
+    title="${title//[$'\n\r\t']/ }"
+    title="${title:0:${MAX_TITLE}}"
+    [[ -n "${title}" ]] || title="${app} alert"
+    body="${body:0:${MAX_BODY}}"
+    echo "<4>${app}: ${title}: ${body}" >&2
+    if send "${urgency}" "${app}" "${title}" "${body}"; then
+        # Seen now: an older copy waiting for the next login would only repeat it.
+        rm -f "$(key_file "${app}" "${title}")" 2>/dev/null
+        return 0
+    fi
+    if lock; then
+        keep "${urgency}" "${app}" "${title}" "${body}" || rc=1
+        prune
+        exec 9>&-
+    else
+        rc=1
+    fi
+    (( rc == 0 )) || log 3 "could not keep the alert for the next login (${PENDING}); it is only in this journal"
+    return "${rc}"
+}
+
+case "${1:-}" in
+    --queue)
+        dir="${2:?missing queue directory}"
+        # btrfs-stall-alert.service is a oneshot: a start request that comes
+        # while it is running is merged into the running start, so one look at
+        # the directory could leave an alert written meanwhile waiting until
+        # the next alert, or lose it at a reboot (/run). So: until a round
+        # finds nothing. Each file is claimed first by a rename, so two runs at
+        # once (the hourly health check also sweeps) never deliver one twice.
+        while :; do
+            n=0
+            for f in "${dir}"/alert-*.txt; do
+                [[ -f "${f}" && ! -L "${f}" ]] || continue
+                claimed="${f%.txt}.sending"
+                mv -- "${f}" "${claimed}" 2>/dev/null || continue
+                n=$((n + 1))
+                mapfile -t lines < <(head -c 65536 -- "${claimed}")
+                deliver "${lines[0]:-normal}" btrfs-stall-monitor "${lines[1]:-btrfs stall}" \
+                    "$(printf '%s\n' "${lines[@]:2}")"
+                # Removed whatever the result: a failure means it can be
+                # neither shown nor kept, and the journal already has it.
+                rm -f -- "${claimed}"
+            done
+            (( n )) || break
+        done
+        # Always 0: a failure is in the journal already, and a failed
+        # btrfs-stall-alert.service would add nothing to it.
+        exit 0
+        ;;
+    --prune)
+        [[ -d "${PENDING}" ]] || exit 0
+        lock || exit 1
+        prune
+        exit 0
+        ;;
+esac
+
+urgency=normal
+app=btrfs
+while [[ $# -gt 2 ]]; do
+    case "$1" in
+        -u) urgency="$2"; shift 2 ;;
+        -a) app="$2"; shift 2 ;;
+        *) break ;;
+    esac
+done
+[[ $# -eq 2 ]] || { echo "usage: btrfs-notify [-u critical|normal] [-a APP] TITLE BODY | --queue DIR | --prune" >&2; exit 2; }
+deliver "${urgency}" "${app}" "$1" "$2"

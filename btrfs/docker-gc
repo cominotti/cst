@@ -1,0 +1,563 @@
+#!/usr/bin/python3 -I
+"""docker-gc: conservative garbage collection for the Docker engine.
+
+Installed by `cst btrfs docker-gc enable` (CST) as
+/usr/local/sbin/docker-gc. Runs as root.
+
+  docker-gc record      (docker-gc-recorder.service) follows `docker events`
+                        and records when each image was last used (container
+                        created, started or stopped; image pulled, built,
+                        tagged, loaded). Docker itself keeps no "last used"
+                        time, and its `until` filters look at the build date.
+  docker-gc run [--dry-run]  (docker-gc.timer, weekly) removes:
+      * ephemeral containers stopped for KEEP_CONTAINER_DAYS: a name Docker
+        generated (its own word lists) or a Testcontainers label, and no
+        compose/k3d/kind/devcontainer label and no restart policy;
+      * anonymous volumes no container references (named volumes: never);
+      * images no remaining container references and not used for
+        KEEP_IMAGE_DAYS; never images of PROTECTED registries (corporate:
+        re-pulling needs the tunnel, and a build's FROM image leaves no
+        event), and none at all unless the recorder is running;
+      * build cache unused for KEEP_BUILD_CACHE_DAYS.
+  docker-gc cleanup-now  one-off, interactive: everything unused that was not
+                        seen in use in the window, listed in full; protected
+                        images only after a second, separate confirmation.
+  docker-gc status      what a run would remove now, and the tracking state.
+"""
+
+import fcntl
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")   # override: tests
+LAST_USED = os.path.join(STATE_DIR, "last-used.json")
+LAST_RUN = os.path.join(STATE_DIR, "last-run.json")
+LOCK = "/run/docker-gc.lock"
+DAY = 86400
+KEEP_CONTAINER_DAYS = int(os.environ.get("KEEP_CONTAINER_DAYS", 7))
+KEEP_IMAGE_DAYS = int(os.environ.get("KEEP_IMAGE_DAYS", 14))
+KEEP_BUILD_CACHE_DAYS = int(os.environ.get("KEEP_BUILD_CACHE_DAYS", 14))
+PROTECTED = tuple(r.strip() + "/" for r in
+                  os.environ.get("DOCKER_GC_PROTECT", "harbor-dev.matera.com").split(",") if r.strip())
+FLUSH_SECONDS = int(os.environ.get("DOCKER_GC_FLUSH", 30))
+HEARTBEAT_SECONDS = 300
+MIN_UPTIME = 600   # after boot, restart-policy containers are still coming up
+# Containers that belong to something the user manages as a unit.
+KEEP_LABEL_PREFIXES = ("com.docker.compose.", "k3d.", "io.x-k8s.kind.", "dev.containers.",
+                       "devcontainer.", "com.docker.desktop.")
+TESTCONTAINERS_LABEL = "org.testcontainers"
+
+# Docker's generated names (moby pkg/namesgenerator, v28.5.2): left_right, plus
+# one digit after a collision. A user's own "redis_cache" matches neither list.
+NAMES_LEFT = frozenset('''
+admiring adoring affectionate agitated amazing angry awesome beautiful blissful bold
+boring brave busy charming clever compassionate competent condescending confident cool
+cranky crazy dazzling determined distracted dreamy eager ecstatic elastic elated elegant
+eloquent epic exciting fervent festive flamboyant focused friendly frosty funny gallant
+gifted goofy gracious great happy hardcore heuristic hopeful hungry infallible inspiring
+intelligent interesting jolly jovial keen kind laughing loving lucid magical modest
+musing mystifying naughty nervous nice nifty nostalgic objective optimistic peaceful
+pedantic pensive practical priceless quirky quizzical recursing relaxed reverent
+romantic sad serene sharp silly sleepy stoic strange stupefied suspicious sweet tender
+thirsty trusting unruffled upbeat vibrant vigilant vigorous wizardly wonderful
+xenodochial youthful zealous zen
+'''.split())
+NAMES_RIGHT = frozenset('''
+agnesi albattani allen almeida antonelli archimedes ardinghelli aryabhata austin babbage
+banach banzai bardeen bartik bassi beaver bell benz bhabha bhaskara black blackburn
+blackwell bohr booth borg bose bouman boyd brahmagupta brattain brown buck burnell
+cannon carson cartwright carver cerf chandrasekhar chaplygin chatelet chatterjee chaum
+chebyshev clarke cohen colden cori cray curie curran darwin davinci dewdney dhawan
+diffie dijkstra dirac driscoll dubinsky easley edison einstein elbakyan elgamal elion
+ellis engelbart euclid euler faraday feistel fermat fermi feynman franklin gagarin
+galileo galois ganguly gates gauss germain goldberg goldstine goldwasser golick goodall
+gould greider grothendieck haibt hamilton haslett hawking heisenberg hellman hermann
+herschel hertz heyrovsky hodgkin hofstadter hoover hopper hugle hypatia ishizaka jackson
+jang jemison jennings jepsen johnson joliot jones kalam kapitsa kare keldysh keller
+kepler khayyam khorana kilby kirch knuth kowalevski lalande lamarr lamport leakey
+leavitt lederberg lehmann lewin lichterman liskov lovelace lumiere mahavira margulis
+matsumoto maxwell mayer mccarthy mcclintock mclaren mclean mcnulty meitner mendel
+mendeleev meninsky merkle mestorf mirzakhani montalcini moore morse moser murdock napier
+nash neumann newton nightingale nobel noether northcutt noyce panini pare pascal pasteur
+payne perlman pike poincare poitras proskuriakova ptolemy raman ramanujan rhodes ride
+ritchie robinson roentgen rosalind rubin saha sammet sanderson satoshi shamir shannon
+shaw shirley shockley shtern sinoussi snyder solomon spence stonebraker sutherland
+swanson swartz swirles taussig tesla tharp thompson torvalds tu turing varahamihira
+vaughan villani visvesvaraya volhard wescoff wilbur wiles williams williamson wilson
+wing wozniak wright wu yalow yonath zhukovsky
+'''.split())
+
+
+def auto_named(name):
+    m = re.fullmatch(r"([a-z]+)_([a-z]+)[0-9]?", name)
+    # The generator never returns boring_wozniak: that one was chosen by hand.
+    return bool(m and m.group(1) in NAMES_LEFT and m.group(2) in NAMES_RIGHT
+                and not name.startswith("boring_wozniak"))
+
+
+def log(prio, msg):
+    print(f"<{prio}>docker-gc: {msg}", flush=True)
+
+
+def docker(*args, timeout=600, check=True):
+    try:
+        r = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s")
+    if check and r.returncode != 0:
+        raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
+    return r
+
+
+def inspect_all(kind, list_args):
+    """Inspect every object listed. Objects that vanished in between are
+    dropped; any other gap aborts (a container missing from the result would
+    leave its image unprotected)."""
+    ids = sorted(set(docker(*list_args).stdout.split()))
+    out = []
+    for i in range(0, len(ids), 100):
+        r = docker(kind, "inspect", *ids[i:i + 100], check=False)
+        try:
+            out.extend(json.loads(r.stdout or "[]"))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"{kind} inspect: unreadable output ({e})")
+    got = {o.get("Id") or o.get("Name") for o in out}
+    missing = set(ids) - got
+    if missing and missing & set(docker(*list_args).stdout.split()):
+        raise RuntimeError(f"{kind} inspect failed for {len(missing)} object(s); nothing done")
+    return out
+
+
+def ts(value):
+    """RFC 3339 from Docker (nanoseconds, Z) -> epoch seconds; 0 if unset."""
+    if not value or not isinstance(value, str) or value.startswith("0001-"):
+        return 0
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$", value)
+    if not m:
+        return 0
+    base, frac, tz = m.groups()
+    tz = "+00:00" if tz == "Z" else tz
+    return datetime.fromisoformat(f"{base}.{(frac or '0')[:6].ljust(6, '0')}{tz}").timestamp()
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1000
+    return f"{n} B"
+
+
+def day(t):
+    return datetime.fromtimestamp(t).strftime("%F") if t else "never"
+
+
+# ---- last-used state ------------------------------------------------------------------
+def load_state():
+    try:
+        with open(LAST_USED) as f:
+            st = json.load(f)
+        if isinstance(st.get("images"), dict) and isinstance(st.get("since"), (int, float)):
+            return st
+    except (OSError, ValueError):
+        pass
+    return {"since": time.time(), "images": {}, "heartbeat": 0}
+
+
+def save_state(st):
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    tmp = LAST_USED + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, LAST_USED)
+
+
+def recorder_alive(st):
+    active = subprocess.run(["systemctl", "-q", "is-active", "docker-gc-recorder.service"]).returncode == 0
+    return active and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
+
+
+def container_use(c):
+    """Last moment a container was using its image."""
+    s = c.get("State") or {}
+    if s.get("Running"):
+        return time.time()
+    return max(ts(s.get("StartedAt")), ts(s.get("FinishedAt")), ts(c.get("Created")))
+
+
+def record():
+    st = load_state()
+    # Down for a while with Docker running (not just a reboot, when Docker was
+    # down too): `--rm` containers of that time left no trace, so the 14-day
+    # clock starts over.
+    with open("/proc/uptime") as f:
+        booted = time.time() - float(f.read().split()[0])
+    if st.get("heartbeat") and time.time() - max(st["heartbeat"], booted) > 3 * HEARTBEAT_SECONDS:
+        st["since"] = time.time()
+        log(5, "recorder was down for a while: image clock restarted")
+    lock = threading.Lock()
+    resolved = {}    # image reference -> (image id, resolved at)
+    dirty = [False]
+
+    def use(iid, t):
+        if iid and t > st["images"].get(iid, 0):
+            with lock:
+                st["images"][iid] = t
+                dirty[0] = True
+
+    # Whatever happened while no recorder ran: every container counts as a use.
+    for c in inspect_all("container", ("ps", "-aq", "--no-trunc")):
+        use(c.get("Image", ""), container_use(c))
+    with lock:
+        st["heartbeat"] = time.time()
+        save_state(st)   # also fixes "since" on the very first start
+        dirty[0] = False
+
+    def flusher():   # on a clock, not only when an event arrives
+        last_beat = time.time()
+        while True:
+            time.sleep(FLUSH_SECONDS)
+            with lock:
+                if dirty[0] or time.time() - last_beat >= HEARTBEAT_SECONDS:
+                    st["heartbeat"] = last_beat = time.time()
+                    try:
+                        save_state(st)
+                        dirty[0] = False
+                    except OSError as e:   # stale heartbeat = images held: safe
+                        log(3, f"cannot save state: {e}")
+    threading.Thread(target=flusher, daemon=True).start()
+
+    def image_id(ref):
+        if ref.startswith("sha256:") and len(ref) == 71:
+            return ref
+        hit = resolved.get(ref)
+        if hit and time.time() - hit[1] < 60:
+            return hit[0]
+        r = docker("image", "inspect", "--format", "{{.Id}}", ref, check=False, timeout=30)
+        iid = r.stdout.strip() if r.returncode == 0 else ""
+        if len(resolved) > 2000:
+            resolved.clear()
+        resolved[ref] = (iid, time.time())
+        return iid
+
+    proc = subprocess.Popen(["docker", "events", "--format", "{{json .}}",
+                             "--filter", "type=container", "--filter", "type=image"],
+                            stdout=subprocess.PIPE, text=True)
+    stopping = []
+
+    def stop(*_):   # systemctl stop: end the loop, flush below
+        stopping.append(True)
+        proc.terminate()
+    signal.signal(signal.SIGTERM, stop)
+    log(6, "recording image use from docker events")
+    for line in proc.stdout:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        kind, action = ev.get("Type"), ev.get("Action", "")
+        actor = ev.get("Actor") or {}
+        if kind == "container" and action in ("create", "start", "die", "stop"):
+            ref = (actor.get("Attributes") or {}).get("image", "")
+        elif kind == "image" and action in ("pull", "tag", "load", "import", "create", "push"):
+            ref = actor.get("ID", "")
+        else:
+            continue
+        use(image_id(ref) if ref else "", time.time())
+    with lock:
+        save_state(st)
+    rc = proc.wait()
+    if stopping or rc < 0:
+        sys.exit(0)
+    # docker events ended by itself (daemon restart): systemd restarts us.
+    sys.exit(rc or 1)
+
+
+# ---- collection -----------------------------------------------------------------------
+def is_protected(im):
+    refs = (im.get("RepoTags") or []) + (im.get("RepoDigests") or [])
+    return any(r.startswith(PROTECTED) for r in refs)
+
+
+def ephemeral(c):
+    name = c.get("Name", "").lstrip("/")
+    labels = (c.get("Config") or {}).get("Labels") or {}
+    restart = ((c.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") or "no"
+    return ((auto_named(name) or TESTCONTAINERS_LABEL in labels)
+            and not any(k.startswith(KEEP_LABEL_PREFIXES) for k in labels)
+            and restart == "no")
+
+
+def plan(now, timed=True):
+    """What to remove. timed=True: the weekly run (the recorder's start counts
+    as a use; protected registries never; no images without the recorder).
+    timed=False: cleanup-now."""
+    containers = inspect_all("container", ("ps", "-aq", "--no-trunc"))
+    st = load_state()
+    used_by = {}
+    drop_c, keep_images, kept_vols, freed_vols = [], set(), set(), set()
+    for c in containers:
+        iid = c.get("Image", "")
+        used_by[iid] = max(used_by.get(iid, 0), container_use(c))
+        state = c.get("State") or {}
+        ended = ts(state.get("FinishedAt")) or ts(c.get("Created"))
+        vols = {m.get("Name") for m in c.get("Mounts") or [] if m.get("Type") == "volume"}
+        if (state.get("Status") in ("exited", "created", "dead") and ephemeral(c)
+                and ended and now - ended >= KEEP_CONTAINER_DAYS * DAY):
+            drop_c.append({"id": c["Id"], "name": c.get("Name", "").lstrip("/"),
+                           "image": (c.get("Config") or {}).get("Image", "?"), "ended": ended})
+            freed_vols |= vols
+        else:
+            keep_images.add(iid)
+            kept_vols |= vols
+
+    # Anonymous volumes no remaining container uses: today's orphans plus
+    # those of the containers removed above. Named volumes never.
+    volumes = inspect_all("volume", ("volume", "ls", "-q"))
+    drop_v = sorted(v["Name"] for v in volumes
+                    if "com.docker.volume.anonymous" in (v.get("Labels") or {}) and v["Name"] not in kept_vols)
+
+    images = inspect_all("image", ("image", "ls", "-aq", "--no-trunc"))
+    recorder_ok = recorder_alive(st)
+    drop_i, held = [], 0
+    for im in images:
+        iid = im.get("Id", "")
+        if iid in keep_images:
+            continue
+        # Uses: recorded events, containers (also those removed now: until
+        # they stopped), and the local tag time (pull, build, tag).
+        used = max(st["images"].get(iid, 0), used_by.get(iid, 0),
+                   ts((im.get("Metadata") or {}).get("LastTagTime")))
+        if timed:
+            used = max(used, st["since"])
+        if now - used < KEEP_IMAGE_DAYS * DAY:
+            continue
+        prot = is_protected(im)
+        if timed and (prot or not recorder_ok):
+            held += 1
+            continue
+        drop_i.append({"id": iid, "tags": im.get("RepoTags") or [], "size": im.get("Size", 0) or 0,
+                       "used": used, "protected": prot})
+    return {"containers": drop_c, "volumes": drop_v, "images": drop_i, "held": held,
+            "recorder_ok": recorder_ok, "at": now}
+
+
+def show(p, full=False):
+    now = p["at"]
+    cs, vs, ims = p["containers"], p["volumes"], p["images"]
+    lc, lv, li = (None, None, None) if full else (10, 3, 15)
+    print(f"ephemeral containers stopped for {KEEP_CONTAINER_DAYS}+ days: {len(cs)}")
+    for c in cs[:lc]:
+        print(f"  {c['name']:32} {c['image'][:60]}  (stopped {int((now - c['ended']) // DAY)} days ago)")
+    print(f"orphaned anonymous volumes: {len(vs)}")
+    for v in vs[:lv]:
+        print(f"  {v}")
+    total = sum(i["size"] for i in ims)
+    # Per-image sizes overlap (shared base layers are counted for each image).
+    print(f"unused images: {len(ims)}, up to {human(total)} (shared layers counted per image)")
+    for i in sorted(ims, key=lambda x: -x["size"])[:li]:
+        name = i["tags"][0] if i["tags"] else "<untagged> " + i["id"][7:19]
+        mark = "  [corporate registry]" if i["protected"] else ""
+        print(f"  {human(i['size']):>9}  {name[:80]}  (last use {day(i['used'])}){mark}")
+    if not full and (len(cs) > lc or len(vs) > lv or len(ims) > li):
+        print("  (lists truncated; 'docker-gc cleanup-now' shows everything before asking)")
+    if p.get("held"):
+        why = "the recorder is not running" if not p["recorder_ok"] else "corporate registry: cleanup-now only"
+        print(f"held back: {p['held']} image(s) ({why})")
+
+
+def remove_image(img, plan_at):
+    """Re-checked right before removal: still unused (fresh container list and
+    recorder state), and each tag still pointing at this very image."""
+    iid = img["id"]
+    if iid in {c.get("Image") for c in inspect_all("container", ("ps", "-aq", "--no-trunc"))}:
+        return "now used by a container"
+    if load_state()["images"].get(iid, 0) > plan_at - 60:
+        return "used meanwhile"
+    for t in img["tags"]:
+        r = docker("image", "inspect", "--format", "{{.Id}}", t, check=False)
+        if r.returncode != 0 or r.stdout.strip() != iid:
+            continue   # re-pulled or retagged meanwhile: that tag is not ours
+        r = docker("image", "rm", t, check=False)
+        if r.returncode != 0:
+            return f"cannot remove {t}: {r.stderr.strip()[:100]}"
+    r = docker("image", "inspect", iid, check=False)
+    if r.returncode == 0:
+        try:
+            left = json.loads(r.stdout)[0].get("RepoTags") or []
+        except (ValueError, IndexError):
+            left = ["?"]
+        if left:
+            return "got new tags meanwhile"
+        r = docker("image", "rm", iid, check=False)
+        if r.returncode != 0 and "no such image" not in r.stderr.lower():
+            return r.stderr.strip()[:120]
+    return ""
+
+
+def apply(p):
+    failed = 0
+    for c in p["containers"]:
+        if docker("container", "rm", c["id"], check=False).returncode != 0:
+            failed += 1
+            log(4, f"could not remove container {c['name']}")
+    # Exactly the planned volumes; `rm` refuses one that got used meanwhile.
+    for v in p["volumes"]:
+        r = docker("volume", "rm", v, check=False)
+        if r.returncode != 0 and "no such volume" not in r.stderr.lower():
+            failed += 1
+            log(4, f"could not remove volume {v[:16]}: {r.stderr.strip()[:100]}")
+    for img in p["images"]:
+        why = remove_image(img, p["at"])
+        if why:
+            log(5, f"kept image {(img['tags'] or [img['id']])[0]}: {why}")
+    # --all: unused cache of any kind; until= is measured from its last use.
+    docker("builder", "prune", "-f", "--all", "--filter", f"until={KEEP_BUILD_CACHE_DAYS * 24}h", check=False)
+    return failed
+
+
+def df():
+    r = docker("system", "df", "--format", "{{json .}}", check=False)
+    out = {}
+    for line in r.stdout.splitlines():
+        try:
+            d = json.loads(line)
+            out[d.get("Type", "?")] = d.get("Size", "?")
+        except ValueError:
+            pass
+    return out
+
+
+def locked():
+    f = open(LOCK, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log(5, "another docker-gc run is active; skipped")
+        sys.exit(0)
+    return f
+
+
+def docker_up():
+    if docker("info", "--format", "{{.ID}}", check=False, timeout=60).returncode != 0:
+        print("docker is not running; nothing to do")
+        return False
+    return True
+
+
+def run(dry):
+    if not docker_up():
+        return 0
+    with open("/proc/uptime") as f:
+        if float(f.read().split()[0]) < MIN_UPTIME and not dry:
+            log(5, "booted less than 10 minutes ago; skipped this time")
+            return 0
+    _lock = locked()
+    p = plan(time.time())
+    show(p)
+    if dry:
+        print("(dry run: nothing removed)")
+        return 0
+    before = df()
+    failed = apply(p)
+    after = df()
+    summary = {"at": p["at"], "containers": len(p["containers"]), "volumes": len(p["volumes"]),
+               "images": len(p["images"]), "image_bytes": sum(i["size"] for i in p["images"]),
+               "failed": failed, "before": before, "after": after}
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    with open(LAST_RUN, "w") as f:
+        json.dump(summary, f)
+    log(5, f"removed {summary['containers']} container(s), {summary['volumes']} anonymous volume(s), "
+           f"{summary['images']} image(s) planned ({human(summary['image_bytes'])}), old build cache; "
+           f"failures {failed}; images {before.get('Images', '?')} -> {after.get('Images', '?')}")
+    return 0
+
+
+def ask(q):
+    try:
+        return input(q).strip()[:1] in ("y", "Y", "s", "S")
+    except EOFError:
+        return False
+
+
+def cleanup_now():
+    if not docker_up():
+        return 0
+    if not sys.stdin.isatty():
+        print("cleanup-now asks for confirmation: run it in a terminal.", file=sys.stderr)
+        return 1
+    _lock = locked()
+    p = plan(time.time(), timed=False)
+    show(p, full=True)
+    if not (p["containers"] or p["volumes"] or p["images"]):
+        print("Nothing to remove.")
+        return 0
+    prot = [i for i in p["images"] if i["protected"]]
+    p["images"] = [i for i in p["images"] if not i["protected"]]
+    if not ask(f"\nRemove the containers, volumes and {len(p['images'])} image(s) above"
+               f"{' (the [corporate registry] ones are asked next)' if prot else ''}? [y/N] "):
+        print("Nothing removed.")
+        return 0
+    if prot and ask(f"Also remove the {len(prot)} image(s) marked [corporate registry]? "
+                    f"Re-pulling them needs the corporate tunnel. [y/N] "):
+        p["images"] += prot
+    failed = apply(p)
+    print(f"Done; failures: {failed}. Now: {df()}")
+    return 0
+
+
+def status():
+    st = load_state() if os.path.exists(LAST_USED) else None
+    if st:
+        print(f"image use recorded since {datetime.fromtimestamp(st['since']).strftime('%F %T')}"
+              f" ({len(st['images'])} image(s) seen); timed image removal possible from "
+              f"{day(st['since'] + KEEP_IMAGE_DAYS * DAY)}; recorder "
+              f"{'ok' if recorder_alive(st) else 'NOT running (images are held back)'}")
+    else:
+        print("image use not recorded yet (recorder not started)")
+    try:
+        with open(LAST_RUN) as f:
+            lr = json.load(f)
+        print(f"last run {datetime.fromtimestamp(lr['at']).strftime('%F %T')}: {lr['containers']} container(s), "
+              f"{lr['volumes']} volume(s), {lr['images']} image(s) ({human(lr['image_bytes'])}), "
+              f"failures {lr['failed']}")
+    except (OSError, ValueError, KeyError):
+        print("last run: never")
+    if not docker_up():
+        return 0
+    print("a weekly run now would remove:")
+    show(plan(time.time()))
+    return 0
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    try:
+        if cmd == "record":
+            record()
+        elif cmd == "run":
+            return run("--dry-run" in sys.argv[2:])
+        elif cmd == "cleanup-now":
+            return cleanup_now()
+        elif cmd == "status":
+            return status()
+        else:
+            print("usage: docker-gc record|run [--dry-run]|cleanup-now|status", file=sys.stderr)
+            return 2
+    except RuntimeError as e:
+        log(3, str(e))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,26 @@
+# Managed by btrfs-setup.sh (CST). Runs at boot only while 'bulk apply'
+# (or 'snapshots setup') left items the session kept busy (flag file), or a
+# move was interrupted (a journal), before any user can log in, so nothing has
+# files open in them: moves them into ~/Bulk and leaves the symlinks, or
+# finishes/undoes the interrupted move. Gives up on busy items after two boots
+# (btrfs-bulk boot).
+[Unit]
+Description=Move busy items into ~/Bulk (re-downloadable data, no snapshots)
+# Either one ("|"): the flag, or a journal of an interrupted move.
+ConditionPathExists=|/etc/btrfs-setup/bulk-at-boot
+ConditionPathExistsGlob=|/var/lib/btrfs-bulk/journal-*.json
+RequiresMountsFor=/var/home
+After=local-fs.target
+Before=btrfs-subvol-convert.service systemd-user-sessions.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-bulk boot
+# 1/4/3 = something needs a look (4: only inside ~/Bulk) / is left for
+# later: logged (and retried at the next boot), not a failed boot unit.
+SuccessExitStatus=1 3 4
+StandardOutput=journal+console
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

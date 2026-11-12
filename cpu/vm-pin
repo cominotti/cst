@@ -1,0 +1,135 @@
+#!/usr/bin/python3 -I
+"""vm-pin: keep a libvirt VM off the P-cores and the game's E-cores.
+
+Installed as /usr/local/sbin/cpu-vm-pin; run by `cst cpu vm-pin plan|apply|status [VM]`.
+
+  plan    print the domain XML diff: <vcpu> VCPUS, every vCPU and the
+          emulator threads pinned to CPUS (default 12 vCPUs on 12-23); no change
+  apply   same diff, asks, then `virsh define`: takes effect at the VM's next
+          start (shutting it down/starting it is left to the user)
+  status  current vCPU count and pinning (live and persistent)
+"""
+
+import difflib
+import os
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+URI = "qemu:///system"
+CONF = "/etc/cpu-setup/cpu-setup.conf"
+
+
+def conf():
+    vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23"}
+    try:
+        with open(CONF) as f:
+            for line in f:
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.strip().split("=", 1)
+                    vals[k] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    return vals
+
+
+def virsh(*args, check=True):
+    r = subprocess.run(["virsh", "-c", URI, *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        sys.exit(f"virsh {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout
+
+
+def keep_prefixes(xml_text):
+    """Register the document's own namespace prefixes (libosinfo metadata etc.),
+    so serializing does not rename them to ns0."""
+    import io
+    for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
+        ET.register_namespace(prefix, uri)
+
+
+def pinned(xml_text, vcpus, cpus):
+    keep_prefixes(xml_text)
+    root = ET.fromstring(xml_text)
+    vcpu = root.find("vcpu")
+    vcpu.text = str(vcpus)
+    vcpu.attrib.pop("current", None)
+    vcpu.set("placement", "static")
+    # A topology must multiply up to the vCPU count.
+    topo = root.find("cpu/topology")
+    if topo is not None:
+        for k, v in (("sockets", "1"), ("dies", "1"), ("clusters", "1"), ("cores", str(vcpus)), ("threads", "1")):
+            if k in topo.attrib or k in ("sockets", "cores", "threads"):
+                topo.set(k, v)
+    tune = root.find("cputune")
+    if tune is None:
+        tune = ET.Element("cputune")
+        root.insert(list(root).index(vcpu) + 1, tune)
+    for el in list(tune):
+        if el.tag in ("vcpupin", "emulatorpin"):
+            tune.remove(el)
+    for i in range(vcpus):
+        ET.SubElement(tune, "vcpupin", {"vcpu": str(i), "cpuset": cpus})
+    ET.SubElement(tune, "emulatorpin", {"cpuset": cpus})
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n"
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    c = conf()
+    name = sys.argv[2] if len(sys.argv) > 2 else c["VM_NAME"]
+    vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
+    if action == "status":
+        state = virsh("domstate", name).strip()
+        print(f"{name}: {state}")
+        print(virsh("vcpucount", name, check=False).rstrip())
+        print(virsh("vcpupin", name, "--config", check=False).rstrip())
+        print("emulator (persistent):", virsh("emulatorpin", name, "--config", check=False).split()[-1:])
+        return 0
+    if action not in ("plan", "apply"):
+        print(__doc__)
+        return 2
+    cur = virsh("dumpxml", "--inactive", "--security-info", name)
+    keep_prefixes(cur)
+    croot = ET.fromstring(cur)
+    # Elements tied to the vCPU count that this tool does not rewrite.
+    for path in ("cputune/vcpusched", "cputune/cachetune", "cpu/numa", "vcpus"):
+        if croot.find(path) is not None:
+            sys.exit(f"{name} has <{path}>: adjust it by hand (virsh edit {name}); nothing changed")
+    ET.indent(cur_root := ET.fromstring(cur), space="  ")
+    before = ET.tostring(cur_root, encoding="unicode") + "\n"
+    after = pinned(cur, vcpus, cpus)
+    diff = list(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "current", "pinned"))
+    if not diff:
+        print(f"{name}: already {vcpus} vCPUs pinned to {cpus}.")
+        return 0
+    sys.stdout.writelines(diff)
+    if action == "plan":
+        print(f"\nPlan only. Apply with: cst cpu vm-pin apply   (effective at the VM's next start)")
+        return 0
+    if not sys.stdin.isatty():
+        sys.exit("apply asks for confirmation: run it in a terminal")
+    if input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus}? [y/N] ").strip()[:1] not in ("y", "Y", "s", "S"):
+        print("Nothing changed.")
+        return 0
+    backup = f"/etc/cpu-setup/{name}.xml.before-vm-pin"
+    os.makedirs("/etc/cpu-setup", exist_ok=True)
+    if not os.path.exists(backup):
+        # Holds --security-info secrets (graphics passwords): 0600 from the start.
+        with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(cur)
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
+        f.write(after)
+    try:
+        virsh("define", f.name)
+    finally:
+        os.unlink(f.name)
+    print(f"Defined. Effective at the next start of {name} (shut it down and start it when convenient).")
+    print(f"Previous definition saved in {backup} (restore: virsh -c {URI} define {backup}).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,21 @@
+# Managed by btrfs-setup.sh (CST). Global user unit (/etc/systemd/user),
+# enabled for every user with `systemctl --global enable`.
+# At each graphical login, shows the storage alerts that were raised while no
+# desktop session could show them (at boot, before the login, or while nobody
+# was logged in); btrfs-notify keeps them in /var/lib/cst-alerts/pending.
+[Unit]
+Description=Show storage alerts raised while nobody was logged in
+After=graphical-session.target
+# Not for system users: the login screen (gdm) has its own graphical session,
+# and the alerts must not appear there or be marked as seen by it.
+ConditionUser=!@system
+# Nothing kept (the usual case): nothing to start.
+ConditionDirectoryNotEmpty=/var/lib/cst-alerts/pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cst-pending-alerts
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=graphical-session.target

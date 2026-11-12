@@ -1,0 +1,12 @@
+// Managed by cpu-setup.sh (CST): GameMode's [custom] hooks, running as
+// @USER@ in the active local session, may start/stop only cpu-game.service.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "cpu-game.service" &&
+        subject.user == "@USER@" && subject.local && subject.active) {
+        var verb = action.lookup("verb");
+        if (verb == "start" || verb == "stop") {
+            return polkit.Result.YES;
+        }
+    }
+});

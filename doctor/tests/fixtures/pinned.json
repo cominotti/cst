@@ -1,0 +1,91 @@
+{
+ "deployments": [
+  {
+   "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "id": "fedora-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.0",
+   "version": "44.20261028.0",
+   "osname": "fedora",
+   "origin": "fedora:fedora/44/x86_64/silverblue",
+   "booted": true,
+   "staged": false,
+   "pinned": false,
+   "timestamp": 1793198594,
+   "requested-packages": [
+    "below",
+    "containerd-2.3.4-1.fc44",
+    "docker-cli-29.7.2-1.fc44",
+    "docker-compose-switch-1.0.5-10.fc44",
+    "gnome-boxes",
+    "moby-engine-29.7.2-1.fc44",
+    "pigz-2.8-8.fc44",
+    "samba",
+    "tini-static-0.19.0-12.fc44",
+    "vim"
+   ],
+   "packages": [
+    "below",
+    "containerd-2.3.4-1.fc44",
+    "docker-cli-29.7.2-1.fc44",
+    "docker-compose-switch-1.0.5-10.fc44",
+    "gnome-boxes",
+    "moby-engine-29.7.2-1.fc44",
+    "pigz-2.8-8.fc44",
+    "samba",
+    "tini-static-0.19.0-12.fc44",
+    "vim"
+   ],
+   "requested-local-packages": [],
+   "requested-local-fileoverride-packages": [],
+   "base-removals": [],
+   "requested-base-removals": [],
+   "base-local-replacements": [],
+   "requested-base-local-replacements": [],
+   "base-remote-replacements": {}
+  },
+  {
+   "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+   "id": "fedora-0000000000000000000000000000000000000000000000000000000000000000.0",
+   "version": "44.20261009.0",
+   "osname": "fedora",
+   "origin": "fedora:fedora/44/x86_64/silverblue",
+   "booted": false,
+   "staged": false,
+   "pinned": false,
+   "timestamp": 1793198594,
+   "requested-packages": [
+    "below",
+    "containerd-2.3.4-1.fc44",
+    "docker-cli-29.7.2-1.fc44",
+    "docker-compose-switch-1.0.5-10.fc44",
+    "gnome-boxes",
+    "moby-engine-29.7.2-1.fc44",
+    "pigz-2.8-8.fc44",
+    "samba",
+    "tini-static-0.19.0-12.fc44",
+    "vim"
+   ],
+   "packages": [
+    "below",
+    "containerd-2.3.4-1.fc44",
+    "docker-cli-29.7.2-1.fc44",
+    "docker-compose-switch-1.0.5-10.fc44",
+    "gnome-boxes",
+    "moby-engine-29.7.2-1.fc44",
+    "pigz-2.8-8.fc44",
+    "samba",
+    "tini-static-0.19.0-12.fc44",
+    "vim"
+   ],
+   "requested-local-packages": [],
+   "requested-local-fileoverride-packages": [],
+   "base-removals": [],
+   "requested-base-removals": [],
+   "base-local-replacements": [],
+   "requested-base-local-replacements": [],
+   "base-remote-replacements": {}
+  }
+ ],
+ "transaction": null,
+ "cached-update": null,
+ "update-driver": null
+}

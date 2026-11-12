@@ -1,0 +1,11 @@
+# Managed by cpu-setup.sh (CST). Started/stopped by GameMode's [custom]
+# hooks (polkit lets the desktop user manage only this unit) or by
+# `cst cpu game on|off`. Runtime-only settings: a reboot clears them too.
+[Unit]
+Description=CPU/memory game profile (builds and VM off the game's cores)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cpu-game-profile on
+ExecStop=/usr/local/sbin/cpu-game-profile off

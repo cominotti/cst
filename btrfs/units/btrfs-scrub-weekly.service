@@ -1,0 +1,14 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Weekly btrfs scrub of the root filesystem
+After=local-fs.target
+# Scrub errors (exit 3) or a failed scrub still end in an alert.
+OnFailure=btrfs-health-check.service
+
+[Service]
+Type=oneshot
+# -B: stay in foreground so systemd sees the result; scrub covers every device.
+ExecStart=/usr/sbin/btrfs scrub start -B /var
+ExecStartPost=-/usr/local/sbin/btrfs-health-check
+Nice=19
+IOSchedulingClass=idle

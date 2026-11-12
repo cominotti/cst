@@ -1,0 +1,10 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Check btrfs RAID1 / NVMe health and alert on problems
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-health-check
+Nice=10
+IOSchedulingClass=idle
