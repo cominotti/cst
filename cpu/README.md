@@ -228,7 +228,7 @@ Rules:
 | `~/.local/bin/cst` | Link to `~/Workspace/cst/cst`, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
-| `/etc/systemd/system/machine.slice.d/50-cpu-setup.conf` | VM baseline weight `CPUWeight=50`. |
+| `/etc/systemd/system/machine.slice.d/50-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
 | `/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf` | `Delegate=cpuset` for user managers (6.3). |
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
@@ -273,7 +273,7 @@ VM_VCPUS=12
 | `TARGET_USER` | Your user. Needed for everything in your session. | `cpu-setup.sh`, game profile |
 | `BUILD_CPUS` | Where the VM and Docker go during games; the VM always, after `vm-pin`. | game profile, `vm-pin` |
 | `P_CORES` | Cores that get EPP `performance` during games. | game profile |
-| `VM_WEIGHT` | VM weight during games. | game profile |
+| `VM_WEIGHT` | VM CPU (and I/O, when numeric `1..10000`) weight during games. | game profile |
 | `GAME_MEMORY_LOW` | Memory protection for the game (Dota 2 uses about 10 GB, plus Steam). | game profile |
 | `GAME_ZSWAP_WRITEBACK` | `no`: during games, swapped pages of desktop apps stay in zswap, never on the swap disk (7.1). `yes`: leave it alone. Missing (files written before this key existed) means `no`. | game profile |
 | `VM_NAME` | The libvirt VM name. | `vm-pin` |
@@ -292,11 +292,23 @@ You may edit the values. Rules:
 
 | Box | Setting | Why |
 |-----|---------|-----|
-| `machine.slice` (VM) | `CPUWeight=50` | The VM never gets the same share as the desktop (the default would be 100). |
+| `machine.slice` (VM) | `CPUWeight=50`, `IOWeight=50` | The VM never ties with the desktop for CPU (default 100). `IOWeight` prepares the cgroup for I/O arbitration, though it has no effect on this host yet (see below). |
 | toolboxes (inner `user.slice`) | `CPUWeight=30`, `AllowedCPUs=8-23` | GNOME gives its own background tasks (`background.slice`) weight 30 too, so toolboxes get the same low priority as other background work. Builds stay off the P-cores. |
 | `flatpak-session-helper.service` | `AllowedCPUs=8-23` | Commands that toolboxes start on the host with `flatpak-spawn --host` run here, outside the toolbox's box. Without this, they would escape to the P-cores. |
-| `builds.slice` (only after `docker-slice install`) | `CPUWeight=20`, `IOWeight=20`, `AllowedCPUs=8-23` | Docker builds and tests stay low and on the E-cores. |
+| `builds.slice` (only after `docker-slice install`) | `CPUWeight=20`, `IOWeight=20`, `AllowedCPUs=8-23` | Docker builds and tests stay low and on the E-cores (`IOWeight=20` is likewise dormant without `bfq` or `iocost`). |
 | CPU frequency (intel_pstate) | `hwp_dynamic_boost=1` | When a task wakes up after waiting for the disk (a build doing many fsyncs, a game loading files), the CPU raises its frequency at once instead of ramping up. Costs a little power during those moments. `install` sets it now and a tmpfiles.d file keeps it after reboots; `uninstall` removes the file and sets it back to `0`. Skipped (with a NOTE) on CPUs without intel_pstate in HWP mode. |
+
+**Note on `IOWeight` (`machine.slice` and `builds.slice`):** cgroup I/O weights
+(`io.weight`) are only enforced when the block device uses the **BFQ** I/O
+scheduler or when the kernel's **`iocost`** controller is enabled. On this host,
+the NVMe drives use `none` (`/sys/block/nvme*/queue/scheduler`) and `iocost` is
+off (`/sys/fs/cgroup/io.cost.qos` is empty), so the kernel stores `io.weight`
+but does not arbitrate disk I/O with it today. The setting has zero runtime
+cost and keeps the cgroup hierarchy ready; any decision to enable `iocost` (or
+switch schedulers) waits for measurements (`cst btrfs report` / `cst cpu watch`),
+bearing in mind that global btrfs kernel work (transaction commits, part of
+`fsync` log-tree and metadata writeback) still runs in kernel threads outside
+the VM or container cgroups.
 
 **Why the E-core limit helps builds too:** programs like Claude Code, shells,
 cargo, go, gradle and maven look at the CPUs they are *allowed* to use to
@@ -383,8 +395,8 @@ kernel 7.2.9-200.fc44.x86_64, scheduler EEVDF, preempt lazy
 
 == game profile
   game profile: off
-    machine.slice   cpus=         weight=50
-    builds.slice    cpus=8-23     weight=20
+    machine.slice   cpus=         weight=50   io=50
+    builds.slice    cpus=8-23     weight=20   io=20
     toolboxes       weight=30
     app.slice       zswap writeback=yes
     toolboxes       cpus effective=8-23
@@ -420,8 +432,8 @@ Lines to look at:
 
 ```
 game profile: ON (by hand)
-  machine.slice   cpus=12-23    weight=10
-  builds.slice    cpus=12-23    weight=idle
+  machine.slice   cpus=12-23    weight=10   io=10
+  builds.slice    cpus=12-23    weight=idle io=20
   toolboxes       weight=idle
   app.slice       zswap writeback=no
   toolboxes       cpus effective=12-23
@@ -447,7 +459,7 @@ are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
 
 | Fixes finding | Change | Value |
 |---|--------|-------|
-| 1, 2, 3 | VM: `machine.slice` | `AllowedCPUs=12-23`, `CPUWeight=10` |
+| 1, 2, 3 | VM: `machine.slice` | `AllowedCPUs=12-23`, `CPUWeight=10`, `IOWeight=10` (uses `VM_WEIGHT` when `1..10000`, otherwise `10`, because systemd's `IOWeight` does not accept `idle`; `IOWeight` only takes effect if `bfq` or `iocost` is enabled, see 6.3) |
 | 1, 2, 3 | Docker, if `builds.slice` is active | `AllowedCPUs=12-23`, `CPUWeight=idle` |
 | 1, 2 | Docker containers **outside** `builds.slice` (`docker-*.scope`) | `AllowedCPUs=12-23` (no weight change) |
 | 3 | Toolboxes (inner `user.slice`) | `CPUWeight=idle` |
@@ -684,12 +696,15 @@ does not read that file, so they work together with `docker-slice`.
 |----------|---------------|----------|--------------|
 | Toolboxes (podman, rootless) and everything inside | inner `user.slice` | weight 30, E-cores* | idle, 12-23* |
 | Host commands from toolboxes (`flatpak-spawn --host`) | `app.slice/flatpak-session-helper.service` | E-cores*, normal weight | 12-23*, normal weight |
-| Windows VM | `machine.slice` | weight 50 (+ 12-23 with `vm-pin`) | weight 10, 12-23 |
-| Docker with `docker-slice` | `builds.slice` | weight 20, E-cores | idle, 12-23 |
+| Windows VM | `machine.slice` | weight 50, io 50† (+ 12-23 with `vm-pin`) | weight 10, io 10†, 12-23 |
+| Docker with `docker-slice` | `builds.slice` | weight 20, io 20†, E-cores | idle, io 20†, 12-23 |
 | Docker without `docker-slice` | `system.slice/docker-*.scope` | not covered | 12-23 only |
 
 \* the CPU limits need the cpuset delegation (6.3), so they work only after
 the user manager restart.
+
+† `IOWeight` (`io`) only takes effect with `bfq` or `iocost`; on this host
+(`none`, `iocost` off) it is recorded on the cgroup as a no-op (see 6.3).
 
 Note on host commands from toolboxes: they live in `app.slice`, next to the
 game. Only their CPU list is limited, not their weight. Without delegation

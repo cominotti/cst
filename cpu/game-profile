@@ -151,10 +151,15 @@ on() {
     # Recorded before each change, straight into the state file: if 'on' dies
     # halfway, 'off' still undoes whatever was changed.
     : >"${STATE}"
-    local cpu f u
+    local cpu f u vm_io_weight
     # 1. VM and Docker: off the P-cores and off 8-11 (the game's E-core
     #    workers), low weight.
-    setp sys machine.slice AllowedCPUs="${BUILD_CPUS}" CPUWeight="${VM_WEIGHT}"
+    # systemd's IOWeight only accepts 1..10000 (not 'idle').
+    vm_io_weight="${VM_WEIGHT}"
+    if [[ ! "${vm_io_weight}" =~ ^[0-9]+$ ]] || (( 10#${vm_io_weight} < 1 || 10#${vm_io_weight} > 10000 )); then
+        vm_io_weight=10
+    fi
+    setp sys machine.slice AllowedCPUs="${BUILD_CPUS}" CPUWeight="${VM_WEIGHT}" IOWeight="${vm_io_weight}"
     if uses_builds_slice; then
         setp sys builds.slice AllowedCPUs="${BUILD_CPUS}" CPUWeight=idle
     fi
@@ -257,9 +262,11 @@ state() {
     else
         echo "game profile: off"
     fi
-    printf '  machine.slice   cpus=%-8s weight=%s\n' "$(prop sys machine.slice AllowedCPUs)" "$(prop sys machine.slice CPUWeight)"
+    printf '  machine.slice   cpus=%-8s weight=%-4s io=%s\n' \
+        "$(prop sys machine.slice AllowedCPUs)" "$(prop sys machine.slice CPUWeight)" "$(prop sys machine.slice IOWeight)"
     if uses_builds_slice; then
-        printf '  builds.slice    cpus=%-8s weight=%s\n' "$(prop sys builds.slice AllowedCPUs)" "$(prop sys builds.slice CPUWeight)"
+        printf '  builds.slice    cpus=%-8s weight=%-4s io=%s\n' \
+            "$(prop sys builds.slice AllowedCPUs)" "$(prop sys builds.slice CPUWeight)" "$(prop sys builds.slice IOWeight)"
     fi
     if [[ -n "${TARGET_USER}" ]]; then
         printf '  toolboxes       weight=%s\n' "$(prop usr user.slice CPUWeight)"
