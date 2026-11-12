@@ -1,0 +1,10 @@
+# Managed by btrfs-setup.sh (CST).
+# Started by btrfs-stall-monitor.service to deliver its queued alerts as
+# desktop notifications (needs runuser, so it lives outside that sandbox);
+# with no desktop session they are kept for the next login (btrfs-notify).
+[Unit]
+Description=Deliver btrfs-stall-monitor desktop alerts
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-notify --queue /run/btrfs-stall-monitor

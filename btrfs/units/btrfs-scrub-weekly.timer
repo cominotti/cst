@@ -1,0 +1,11 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Weekly btrfs scrub (Saturday-to-Sunday night, 02:00)
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00
+# Machine off at that time: run at next boot instead of waiting a week.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

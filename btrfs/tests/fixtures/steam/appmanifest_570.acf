@@ -1,0 +1,75 @@
+"AppState"
+{
+	"appid"		"570"
+	"universe"		"1"
+	"name"		"Dota 2"
+	"StateFlags"		"4"
+	"installdir"		"dota 2 beta"
+	"LastUpdated"		"1793139624"
+	"LastPlayed"		"1793157450"
+	"SizeOnDisk"		"77217690526"
+	"StagingSize"		"0"
+	"buildid"		"26253230"
+	"LastOwner"		"76561197960265728"
+	"DownloadType"		"3"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"903954768"
+	"BytesDownloaded"		"903954768"
+	"BytesToStage"		"3050179491"
+	"BytesStaged"		"3050179491"
+	"TargetBuildID"		"0"
+	"AutoUpdateBehavior"		"0"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"0"
+	"InstalledDepots"
+	{
+		"373301"
+		{
+			"manifest"		"6482835768921726536"
+			"size"		"5050605727"
+		}
+		"381451"
+		{
+			"manifest"		"5232075504352746697"
+			"size"		"2106956849"
+		}
+		"381452"
+		{
+			"manifest"		"528329675359452466"
+			"size"		"2125839697"
+		}
+		"381453"
+		{
+			"manifest"		"3720380494461558858"
+			"size"		"2097971847"
+		}
+		"381454"
+		{
+			"manifest"		"4468347514726866344"
+			"size"		"2194102918"
+		}
+		"381455"
+		{
+			"manifest"		"8640377578756196802"
+			"size"		"62891368988"
+		}
+		"373305"
+		{
+			"manifest"		"4435851250675935801"
+			"size"		"0"
+		}
+		"373306"
+		{
+			"manifest"		"3578309104779000319"
+			"size"		"750844500"
+		}
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+	}
+}

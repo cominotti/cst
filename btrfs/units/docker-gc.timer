@@ -1,0 +1,11 @@
+# Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs docker-gc enable'.
+[Unit]
+Description=Weekly Docker garbage collection (docker-gc)
+
+[Timer]
+OnCalendar=Mon *-*-* 11:00:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+#
+# game-profile
+#
+# Installed by cpu-setup.sh (CST) as /usr/local/sbin/cpu-game-profile.
+# Runs as root from cpu-game.service (started/stopped by GameMode's [custom]
+# hooks, or by `cst cpu game on|off`), and from cpu-game-watchdog.timer.
+#
+#   on     while a game runs: VM and Docker containers off the P-cores and the
+#          game's E-cores (CPUs 12-23) with a low weight, toolboxes idle-class,
+#          P-cores at EPP performance, the game's memory protected from reclaim
+#          along the whole cgroup chain, and desktop apps' swapped pages kept
+#          in zswap (no writeback to the NVMe swap).
+#   off    exact revert: runtime overrides this script created are deleted
+#          (then daemon-reload), so nothing masks /etc drop-ins afterwards;
+#          ones that existed before get their previous value back.
+#   tick   watchdog (every 30 s): 'off' if no GameMode client is left (unless
+#          switched on by hand); 'on' if a client runs and the profile is off
+#          (fallback if the GameMode hook could not start the unit), unless
+#          switched off by hand during that game; new containers get pinned
+#          and new Steam scopes (the game itself) get the memory protection.
+#   state  what is applied now.
+#
+# Everything is runtime-only: a reboot clears it too.
+# Settings: /etc/cpu-setup/cpu-setup.conf.
+
+set -Euo pipefail
+
+CONF=/etc/cpu-setup/cpu-setup.conf
+RUN=/run/cpu-setup
+STATE="${RUN}/game.state"
+MANUAL="${RUN}/manual"
+SUPPRESS="${RUN}/suppress"   # 'game off' by hand: no automatic 'on' until the game ends
+
+# Defaults; cpu-setup.conf overrides.
+TARGET_USER=""
+BUILD_CPUS="12-23"         # VM, Docker and nothing of the game while it runs
+P_CORES="0-7"
+VM_WEIGHT=10
+GAME_MEMORY_LOW="16G"      # Dota 2 ~10 GB resident + steamwebhelper
+GAME_ZSWAP_WRITEBACK="no"  # app.slice during games: "no" = swapped pages stay in zswap, "yes" = leave as is
+# shellcheck source=/dev/null
+[[ -r "${CONF}" ]] && . "${CONF}"
+
+log() { echo "<$1>game-profile: $2"; }
+
+expand_cpus() {   # "0-3,6" -> "0 1 2 3 6"
+    local part out=() parts
+    IFS=',' read -ra parts <<<"$1"
+    for part in "${parts[@]}"; do
+        if [[ "${part}" == *-* ]]; then
+            mapfile -t -O "${#out[@]}" out < <(seq "${part%-*}" "${part#*-}")
+        else
+            out+=("${part}")
+        fi
+    done
+    echo "${out[@]}"
+}
+
+uid() { id -u "${TARGET_USER}"; }
+# mgr: "sys" (system manager) or "usr" (the user's manager).
+ctl() {
+    local mgr="$1"
+    shift
+    if [[ "${mgr}" == usr ]]; then
+        systemctl --user -M "${TARGET_USER}@" "$@"
+    else
+        systemctl "$@"
+    fi
+}
+ctl_file() {   # mgr unit prop: where `set-property --runtime` writes
+    if [[ "$1" == usr ]]; then
+        echo "/run/user/$(uid)/systemd/user.control/$2.d/50-$3.conf"
+    else
+        echo "/run/systemd/system.control/$2.d/50-$3.conf"
+    fi
+}
+prop() { ctl "$1" show -P "$3" "$2" 2>/dev/null | sed 's/^\[not set\]$//'; }
+
+# setp MGR UNIT PROP=VALUE...: record, per property, whether a runtime
+# override already existed (and its value), then apply.
+setp() {
+    local mgr="$1" unit="$2" kv p
+    shift 2
+    for kv in "$@"; do
+        p="${kv%%=*}"
+        if [[ -e "$(ctl_file "${mgr}" "${unit}" "${p}")" ]]; then
+            printf 'prop %q %q %q existed %q\n' "${mgr}" "${unit}" "${p}" "$(prop "${mgr}" "${unit}" "${p}")" >>"${STATE}"
+        else
+            printf 'prop %q %q %q new -\n' "${mgr}" "${unit}" "${p}" >>"${STATE}"
+        fi
+    done
+    ctl "${mgr}" set-property --runtime "${unit}" "$@" || log 4 "${unit}: could not set $*"
+}
+
+# Every Steam scope: the client has one, and each game it starts gets its own
+# (started after 'on' ran, so tick() picks those up).
+steam_scopes() {
+    ctl usr list-units --type=scope --state=running --plain --no-legend 'app-flatpak-com.valvesoftware.Steam-*' 2>/dev/null |
+        awk '{print $1}'
+}
+# Docker containers outside builds.slice (no cgroup-parent yet, or started
+# before dockerd was restarted with it).
+loose_docker_scopes() {
+    local s
+    systemctl list-units --type=scope --state=running --plain --no-legend 'docker-*.scope' 2>/dev/null |
+        awk '{print $1}' | while read -r s; do
+            [[ "$(systemctl show -P Slice "${s}")" == builds.slice ]] || echo "${s}"
+        done
+}
+uses_builds_slice() { systemctl -q is-active builds.slice 2>/dev/null; }
+# A process with GameMode's client library loaded (gamemoderun /
+# libgamemodeauto). grep -q: no pipe, so no SIGPIPE under pipefail.
+gamemode_client() { grep -qsF libgamemode /proc/[0-9]*/maps; }
+
+protect_steam() {
+    local s
+    for s in $(steam_scopes); do
+        grep -qF " ${s} MemoryLow " "${STATE}" 2>/dev/null && continue
+        setp usr "${s}" MemoryLow="${GAME_MEMORY_LOW}"
+    done
+}
+
+# A user manager started before cpuset was delegated to it (cpu-setup install
+# needs a new login for that) accepts AllowedCPUs but never writes cpuset.cpus.
+# Then the cgroup file is written directly, and recorded for 'off'.
+cpus_fallback() {   # usr UNIT
+    local cg f old
+    cg="$(ctl usr show -P ControlGroup "$1" 2>/dev/null)"
+    f="/sys/fs/cgroup${cg}/cpuset.cpus"
+    [[ -n "${cg}" && -w "${f}" ]] || return 0
+    old="$(cat "${f}")"
+    [[ "${old}" == "${BUILD_CPUS}" ]] && return 0
+    printf 'cgw %q %q\n' "${f}" "${old}" >>"${STATE}"
+    echo "${BUILD_CPUS}" >"${f}" 2>/dev/null || log 4 "$1: could not write ${f}"
+}
+
+pin_docker() {
+    local s
+    for s in $(loose_docker_scopes); do
+        grep -qF " ${s} AllowedCPUs " "${STATE}" 2>/dev/null && continue
+        setp sys "${s}" AllowedCPUs="${BUILD_CPUS}"
+    done
+}
+
+on() {
+    if [[ -e "${STATE}" ]]; then
+        log 6 "already on"; return 0
+    fi
+    [[ -n "${TARGET_USER}" ]] || { log 3 "TARGET_USER not set in ${CONF}"; return 1; }
+    # Recorded before each change, straight into the state file: if 'on' dies
+    # halfway, 'off' still undoes whatever was changed.
+    : >"${STATE}"
+    local cpu f u
+    # 1. VM and Docker: off the P-cores and off 8-11 (the game's E-core
+    #    workers), low weight.
+    setp sys machine.slice AllowedCPUs="${BUILD_CPUS}" CPUWeight="${VM_WEIGHT}"
+    if uses_builds_slice; then
+        setp sys builds.slice AllowedCPUs="${BUILD_CPUS}" CPUWeight=idle
+    fi
+    pin_docker
+    # 2. Toolboxes (inner user.slice of the user manager, sibling of app.slice
+    #    where the game runs): idle class, so any game thread wins.
+    setp usr user.slice CPUWeight=idle
+    # With cpuset delegated (cpu-setup install, next login): toolboxes and
+    # their host commands also leave 8-11 to the game's E-core workers.
+    if grep -qw cpuset "/sys/fs/cgroup/user.slice/user-$(uid).slice/user@$(uid).service/cgroup.subtree_control" 2>/dev/null; then
+        setp usr user.slice AllowedCPUs="${BUILD_CPUS}"
+        setp usr flatpak-session-helper.service AllowedCPUs="${BUILD_CPUS}"
+        cpus_fallback user.slice
+        cpus_fallback flatpak-session-helper.service
+    fi
+    # 3. The game's memory: memory.low only counts up to every ancestor's
+    #    protection, so the whole chain gets it.
+    for u in user.slice "user-$(uid).slice" "user@$(uid).service"; do
+        setp sys "${u}" MemoryLow="${GAME_MEMORY_LOW}"
+    done
+    setp usr app.slice MemoryLow="${GAME_MEMORY_LOW}"
+    protect_steam
+    # 4. Desktop apps (game included): pages already reclaimed stay compressed
+    #    in zswap instead of being written to the NVMe swap, so bringing them
+    #    back costs microseconds, not disk reads. Costs RAM elsewhere; see
+    #    cpu/README.md 7.1.
+    if [[ "${GAME_ZSWAP_WRITEBACK}" == no ]] && [[ -n "$(prop usr app.slice MemoryZSwapWriteback)" ]]; then
+        setp usr app.slice MemoryZSwapWriteback=no
+    fi
+    # 5. P-cores ramp up at once (E-cores keep their EPP for the builds).
+    for cpu in $(expand_cpus "${P_CORES}"); do
+        f="/sys/devices/system/cpu/cpu${cpu}/cpufreq/energy_performance_preference"
+        [[ -w "${f}" ]] || continue
+        printf 'epp %q %q\n' "${cpu}" "$(cat "${f}")" >>"${STATE}"
+        echo performance >"${f}" 2>/dev/null || true
+    done
+    log 5 "on: VM/Docker on ${BUILD_CPUS}, toolboxes idle, game memory protected (${GAME_MEMORY_LOW}), app zswap writeback ${GAME_ZSWAP_WRITEBACK}, P-cores EPP performance"
+}
+
+off() {
+    [[ -e "${STATE}" ]] || { rm -f "${MANUAL}"; return 0; }
+    local line kind mgr unit p mode old cpu val f i reload_sys=0 reload_usr=0
+    local -a rec lines
+    mapfile -t lines <"${STATE}"
+    # Newest first, so a property touched twice ends at its oldest value.
+    for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
+        line="${lines[i]}"
+        [[ -n "${line}" ]] || continue
+        eval "rec=(${line})"   # fields were written with %q
+        kind="${rec[0]}"
+        if [[ "${kind}" == cgw ]]; then
+            echo "${rec[2]}" >"${rec[1]}" 2>/dev/null || true
+            continue
+        fi
+        if [[ "${kind}" == epp ]]; then
+            cpu="${rec[1]}"; val="${rec[2]}"
+            echo "${val}" >"/sys/devices/system/cpu/cpu${cpu}/cpufreq/energy_performance_preference" 2>/dev/null || true
+            continue
+        fi
+        mgr="${rec[1]}"; unit="${rec[2]}"; p="${rec[3]}"; mode="${rec[4]}"; old="${rec[5]}"
+        if [[ "${mode}" == new ]]; then
+            f="$(ctl_file "${mgr}" "${unit}" "${p}")"
+            rm -f "${f}"
+            rmdir "$(dirname "${f}")" 2>/dev/null || true
+            if [[ "${mgr}" == usr ]]; then reload_usr=1; else reload_sys=1; fi
+        else
+            ctl "${mgr}" set-property --runtime "${unit}" "${p}=${old}" 2>/dev/null || true
+        fi
+    done
+    # Re-reads the units without the deleted overrides and re-applies their
+    # cgroup settings (defaults, or the /etc drop-ins).
+    if (( reload_sys )); then systemctl daemon-reload; fi
+    if (( reload_usr )); then ctl usr daemon-reload; fi
+    rm -f "${STATE}" "${MANUAL}"
+    log 5 "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+}
+
+tick() {
+    if [[ ! -e "${STATE}" ]]; then
+        if ! gamemode_client; then
+            rm -f "${SUPPRESS}"
+        elif [[ ! -e "${SUPPRESS}" ]]; then
+            log 5 "GameMode client running but profile off: switching on"
+            systemctl start --no-block cpu-game.service
+        fi
+        return 0
+    fi
+    if [[ ! -e "${MANUAL}" ]] && ! gamemode_client; then
+        log 5 "no GameMode client left: switching off"
+        systemctl stop --no-block cpu-game.service
+        return 0
+    fi
+    pin_docker      # containers started meanwhile
+    protect_steam   # the game's own scope, started after 'on'
+}
+
+state() {
+    if [[ -e "${STATE}" ]]; then
+        echo "game profile: ON$([[ -e "${MANUAL}" ]] && echo ' (by hand)')"
+    else
+        echo "game profile: off"
+    fi
+    printf '  machine.slice   cpus=%-8s weight=%s\n' "$(prop sys machine.slice AllowedCPUs)" "$(prop sys machine.slice CPUWeight)"
+    if uses_builds_slice; then
+        printf '  builds.slice    cpus=%-8s weight=%s\n' "$(prop sys builds.slice AllowedCPUs)" "$(prop sys builds.slice CPUWeight)"
+    fi
+    if [[ -n "${TARGET_USER}" ]]; then
+        printf '  toolboxes       weight=%s\n' "$(prop usr user.slice CPUWeight)"
+        printf '  app.slice       zswap writeback=%s\n' "$(prop usr app.slice MemoryZSwapWriteback)"
+        printf '  toolboxes       cpus effective=%s\n' \
+            "$(cat "/sys/fs/cgroup$(ctl usr show -P ControlGroup user.slice 2>/dev/null)/cpuset.cpus.effective" 2>/dev/null)"
+    fi
+    printf '  EPP cpu0 %s, cpu%s %s\n' \
+        "$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)" \
+        "${BUILD_CPUS%%-*}" "$(cat "/sys/devices/system/cpu/cpu${BUILD_CPUS%%-*}/cpufreq/energy_performance_preference" 2>/dev/null)"
+}
+
+# on/off/tick never interleave (e.g. a tick re-pinning containers after 'off').
+locked() {
+    install -d -m 0755 "${RUN}"
+    exec 9>"${RUN}/lock"
+    flock -w 60 9 || { log 3 "lock busy"; exit 1; }
+    "$@"
+}
+
+case "${1:-}" in
+    on) locked on ;;
+    off) locked off ;;
+    tick) locked tick ;;
+    state) state ;;
+    *) echo "usage: game-profile on|off|tick|state" >&2; exit 2 ;;
+esac

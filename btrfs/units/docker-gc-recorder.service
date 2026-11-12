@@ -1,0 +1,16 @@
+# Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs docker-gc enable'.
+# Follows `docker events` and records when each image was last used: Docker
+# keeps no such time, and docker-gc must not delete what a test used yesterday.
+[Unit]
+Description=Record Docker image use for docker-gc
+After=docker.service
+BindsTo=docker.service
+
+[Service]
+ExecStart=/usr/local/sbin/docker-gc record
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=docker.service

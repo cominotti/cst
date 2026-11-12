@@ -1,0 +1,14 @@
+# Managed by btrfs-setup.sh (CST).
+# Automatic block-group reclaim ("auto-balance") for the root btrfs filesystem,
+# a last line of defence against ENOSPC rather than routine housekeeping:
+#   dynamic_reclaim:  the reclaim threshold stays 0 until unallocated space
+#                     (summed over devices) drops below ~10 data chunks
+#                     (~10 GiB here); from there it rises towards 100%, so
+#                     half-empty data block groups get compacted harder the
+#                     closer the fs is to full;
+#   periodic_reclaim: lets the cleaner thread run that check periodically.
+# btrfs-health-check warns much earlier (50 GiB unallocated per device).
+# Only data block groups: relocating metadata needs metadata space itself.
+# `w-` keeps this harmless on kernels/rescue boots without these sysfs knobs.
+w- /sys/fs/btrfs/@UUID@/allocation/data/dynamic_reclaim - - - - 1
+w- /sys/fs/btrfs/@UUID@/allocation/data/periodic_reclaim - - - - 1

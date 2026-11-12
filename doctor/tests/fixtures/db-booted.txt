@@ -1,0 +1,15 @@
+ostree commit: bbbbbbbb (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+ NetworkManager-1:1.56.1-2.fc44.x86_64
+ below-0.9.0-6.fc44.x86_64
+ containerd-2.3.4-1.fc44.x86_64
+ docker-cli-29.7.2-1.fc44.x86_64
+ docker-compose-switch-1.0.5-10.fc44.x86_64
+ gnome-boxes-50.0-1.fc44.x86_64
+ gtk4-4.20.1-1.fc44.x86_64
+ java-21-openjdk-21.0.9.0.10-1.fc44.x86_64
+ moby-engine-29.7.2-1.fc44.x86_64
+ pigz-2.8-8.fc44.x86_64
+ python3.13-3.13.9-1.fc44.x86_64
+ samba-2:4.23.2-1.fc44.x86_64
+ tini-static-0.19.0-12.fc44.x86_64
+ vim-enhanced-2:9.2.1202-1.fc44.x86_64

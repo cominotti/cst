@@ -1,0 +1,501 @@
+#!/usr/bin/python3 -I
+"""chrome-cache: keep Chrome's (Flatpak) HTTP cache out of /home snapshots.
+
+Run by `cst btrfs snapshots setup` (and `snapshots chrome-cache ...`,
+`snapshots status`) from this repository, always as the user (runuser): it
+never runs as root, so nothing in the home is written by root.
+
+btrfs cannot leave a plain folder out of a snapshot; only a nested subvolume
+is left out. Instead of making ~/.var/app/com.google.Chrome/cache one, Chrome
+is told to put its HTTP cache in the sandbox's /tmp, a tmpfs (RAM) that the
+Flatpak keeps in the user runtime dir (/run/user/UID/.flatpak/<app>/tmp) and
+that is emptied at reboot (and at logout only for a user that does not linger;
+this PC lingers, for podman). That tmpfs is shared with the session
+(sockets, portals, podman), so the cache gets a hard cap of 512 MiB.
+
+The Flatpak's launcher (cobalt) reads one flag per line from
+~/.var/app/com.google.Chrome/config/chrome-flags.conf ('#' lines are
+comments). This tool adds, once:
+
+    # btrfs-setup.sh (CST) chrome-cache: ...       (the marker)
+    --disk-cache-dir=/tmp/chrome-cache
+    --disk-cache-size=536870912
+
+Rules: only when Chrome's Flatpak is installed (user or system); the user's
+other lines are never removed or reordered; a --disk-cache-dir or
+--disk-cache-size the user set (any other value, or without the marker) is
+left alone and reported as theirs; a symlink or non-regular file (or a
+symlink on the way to it) is refused. Turning it off (`off`, or deleting the
+two flag lines under the marker by hand) leaves a comment that keeps setup
+from adding them again.
+
+  chrome-cache status --home DIR   flags, Chrome installed?, cache sizes
+  chrome-cache plan   --home DIR   one line: what apply would do
+  chrome-cache apply  --home DIR   add the flags if needed (idempotent)
+  chrome-cache off    --home DIR   remove our flag lines, keep "off" marker
+
+Exit status: 0 fine (also "nothing to do"), 1 refused or failed, 2 usage.
+"""
+
+import os
+import shlex
+import stat
+import sys
+
+APP = "com.google.Chrome"
+CACHE_DIR = "/tmp/chrome-cache"
+CACHE_SIZE = 512 * 1024 * 1024          # 536870912: mandatory cap (shared tmpfs)
+FLAG_DIR = f"--disk-cache-dir={CACHE_DIR}"
+FLAG_SIZE = f"--disk-cache-size={CACHE_SIZE}"
+APP_DIR = f".var/app/{APP}"
+FLAGS_REL = f"{APP_DIR}/config/chrome-flags.conf"
+OLD_CACHE_REL = f"{APP_DIR}/cache/google-chrome"
+CACHE_SUBVOL_REL = f"{APP_DIR}/cache"
+MARK = "# btrfs-setup.sh (CST) chrome-cache"
+# The marker as versions named f44-tools wrote it: recognised like the current
+# one (a file it is in is not rewritten for the new name), never written.
+MARKS = (MARK, "# btrfs-setup.sh (f44-tools) chrome-cache")
+# No quotes or apostrophes: cobalt parses lines as shell words.
+ON_LINE = (MARK + ": HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB."
+           " Undo: delete the 2 lines below and keep this one (so setup does not add them again).")
+OFF_LINE = (MARK + " off: setup adds no cache flags while this line is here"
+            " (delete it, then run cst btrfs snapshots chrome-cache apply, to turn them on).")
+# Where a system or user install of the app has its deployed files.
+SYSTEM_INSTALLS = ["/var/lib/flatpak", "/run/host/var/lib/flatpak"]
+USER_INSTALL_REL = ".local/share/flatpak"
+RUNTIME_DIR = f"/run/user/{os.getuid()}"
+
+
+class Refused(Exception):
+    pass
+
+
+# ---- reading the flags file ---------------------------------------------------------------
+def marked(s, rest):
+    """Whether the stripped line S starts with one of the MARKS followed by REST."""
+    return any(s.startswith(m + rest) for m in MARKS)
+
+
+def words(line):
+    """The shell words of one non-comment line (cobalt parses each line so)."""
+    try:
+        return shlex.split(line, comments=True)
+    except ValueError:
+        return line.split()
+
+
+def flag_value(tokens, name):
+    """Value of --name=VALUE (the last one wins, as in Chrome); "" for a bare
+    --name; None if absent."""
+    val = None
+    for t in tokens:
+        if t == name:
+            val = ""
+        elif t.startswith(name + "="):
+            val = t[len(name) + 1:]
+    return val
+
+
+def inspect(text):
+    lines = text.splitlines()
+    tokens, on, off = [], False, False
+    for ln in lines:
+        s = ln.strip()
+        if marked(s, " off"):
+            off = True
+        elif marked(s, ":"):
+            on = True
+        if not s or s.startswith("#"):
+            continue
+        tokens += words(s)
+    return {"dir": flag_value(tokens, "--disk-cache-dir"),
+            "size": flag_value(tokens, "--disk-cache-size"),
+            "on": on, "off": off}
+
+
+def decide(text):
+    """(state, new_text or None, message). new_text None: nothing to write."""
+    i = inspect(text)
+    d, s = i["dir"], i["size"]
+    ours_d, ours_s = d == CACHE_DIR, s == str(CACHE_SIZE)
+    if i["off"] or (i["on"] and d is None):
+        if d is None and s is None:
+            return "off", None, "off by your choice (marker without the flags): nothing added"
+        return "user", None, f"off by your choice; your own cache flags there: {fmt(d, s)}"
+    if d is None and s is None:
+        return "absent", add_block(text), "add the cache flags (sandbox /tmp, at most 512 MiB)"
+    if ours_d and ours_s:
+        if i["on"]:
+            return "managed", None, "flags present (managed by CST)"
+        return "user-same", None, "flags present (written by you, same values): left as they are"
+    if i["on"] and ours_d and s is None and has_line(text, FLAG_DIR):
+        return "cap-missing", add_after(text, FLAG_DIR, FLAG_SIZE), \
+            "the 512 MiB cap line is missing under the marker: add it back"
+    note = ""
+    if ours_d and s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
+        note = "; WARNING: that cache lives in RAM, keep it small"
+    elif ours_d and (s is None or s in ("", "0")):
+        note = "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
+    return "user", None, f"set by you ({fmt(d, s)}): left as it is{note}"
+
+
+def fmt(d, s):
+    parts = []
+    if d is not None:
+        parts.append(f"--disk-cache-dir={d}")
+    if s is not None:
+        parts.append(f"--disk-cache-size={s}")
+    return " ".join(parts) or "none"
+
+
+def nl_end(text):
+    return text if not text or text.endswith("\n") else text + "\n"
+
+
+def add_block(text):
+    return nl_end(text) + "\n".join([ON_LINE, FLAG_DIR, FLAG_SIZE]) + "\n"
+
+
+def has_line(text, line):
+    return any(ln.strip() == line for ln in text.splitlines())
+
+
+def add_after(text, anchor, new):
+    """Insert line NEW right after the last line equal to ANCHOR."""
+    lines = nl_end(text).splitlines(keepends=True)
+    idx = max(n for n, ln in enumerate(lines) if ln.strip() == anchor)
+    lines.insert(idx + 1, new + "\n")
+    return "".join(lines)
+
+
+def turn_off(text):
+    """Our flag lines out (only if our marker is there), marker -> OFF_LINE;
+    no marker at all: OFF_LINE appended. None if already off."""
+    i = inspect(text)
+    if i["off"]:
+        return None
+    lines = nl_end(text).splitlines(keepends=True)
+    if not i["on"]:
+        return nl_end(text) + OFF_LINE + "\n"
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if s in (FLAG_DIR, FLAG_SIZE):
+            continue
+        if marked(s, ":"):
+            out.append(OFF_LINE + "\n")
+            continue
+        out.append(ln)
+    return "".join(out)
+
+
+# ---- safe file access (as the user; no symlinks on the way) ------------------------------
+def open_dir_chain(home, rel_dir, create):
+    """fd of HOME/REL_DIR walked component by component with O_NOFOLLOW (a
+    symlink anywhere below HOME is refused). Missing folders are created when
+    CREATE, else None is returned."""
+    fd = os.open(os.path.realpath(home), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in rel_dir.split("/"):
+            try:
+                st = os.lstat(part, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                os.mkdir(part, 0o755, dir_fd=fd)
+                st = os.lstat(part, dir_fd=fd)
+            if stat.S_ISLNK(st.st_mode):
+                raise Refused(f"~/{rel_dir}: '{part}' is a symlink (refused; nothing changed)")
+            if not stat.S_ISDIR(st.st_mode):
+                raise Refused(f"~/{rel_dir}: '{part}' is not a folder (refused; nothing changed)")
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_flags(dfd, name):
+    """(text, stat) of the flags file in DFD; ("", None) if absent."""
+    try:
+        st = os.lstat(name, dir_fd=dfd)
+    except FileNotFoundError:
+        return "", None
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused(f"~/{FLAGS_REL} is a symlink (refused; nothing changed)")
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused(f"~/{FLAGS_REL} is not a regular file (refused; nothing changed)")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    with os.fdopen(fd, "rb") as f:
+        fst = os.fstat(f.fileno())
+        data = f.read()
+    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+        raise Refused(f"~/{FLAGS_REL} changed while it was read (nothing changed; run again)")
+    return data.decode("utf-8", "surrogateescape"), fst
+
+
+def write_flags(dfd, name, text, old_st):
+    """Atomic replace: a new file next to it, then rename. Refused if the file
+    changed since it was read."""
+    tmp = f".{name}.cst-new"
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except FileNotFoundError:
+        pass
+    mode = stat.S_IMODE(old_st.st_mode) if old_st else 0o644
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=dfd)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8", "surrogateescape"))
+            f.flush()
+            os.fchmod(f.fileno(), mode)
+            os.fsync(f.fileno())
+        try:
+            now = os.lstat(name, dir_fd=dfd)
+        except FileNotFoundError:
+            now = None
+        same = (now is None and old_st is None) or (
+            now is not None and old_st is not None and stat.S_ISREG(now.st_mode)
+            and (now.st_ino, now.st_size, now.st_mtime_ns) == (old_st.st_ino, old_st.st_size, old_st.st_mtime_ns))
+        if not same:
+            raise Refused(f"~/{FLAGS_REL} changed meanwhile (nothing changed; run again)")
+        os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+# ---- facts about the app -------------------------------------------------------------------
+def installed(home):
+    """"system", "user" or None."""
+    for base in SYSTEM_INSTALLS:
+        if os.path.isdir(os.path.join(base, "app", APP, "current", "active")):
+            return "system"
+    if os.path.isdir(os.path.join(home, USER_INSTALL_REL, "app", APP, "current", "active")):
+        return "user"
+    return None
+
+
+def tree_bytes(path):
+    """Disk usage (allocated blocks) of a tree; symlinks not followed."""
+    total = 0
+    try:
+        total += os.lstat(path).st_blocks * 512
+    except OSError:
+        return 0
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        for n in dirs + files:
+            try:
+                total += os.lstat(os.path.join(root, n)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def old_cache(home):
+    """(HTTP cache bytes, Code Cache bytes, profiles with an HTTP cache) in
+    ~/.var/app/com.google.Chrome/cache/google-chrome/<profile>/."""
+    top = os.path.join(home, OLD_CACHE_REL)
+    http = code = 0
+    profiles = 0
+    try:
+        names = sorted(os.listdir(top))
+    except OSError:
+        return 0, 0, 0
+    for p in names:
+        d = os.path.join(top, p)
+        if os.path.islink(d) or not os.path.isdir(d):
+            continue
+        c = os.path.join(d, "Cache")
+        if os.path.isdir(c) and not os.path.islink(c):
+            profiles += 1
+            http += tree_bytes(c)
+        cc = os.path.join(d, "Code Cache")
+        if os.path.isdir(cc) and not os.path.islink(cc):
+            code += tree_bytes(cc)
+    return http, code, profiles
+
+
+def is_subvol(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_ino == 256
+
+
+def size_text(n):
+    return f"{n / 1024 ** 3:.1f} GiB" if n >= 1024 ** 3 // 10 else f"{n >> 20} MiB"
+
+
+# ---- actions -------------------------------------------------------------------------------
+def current(home, create=False):
+    """(dir fd or None, text, stat)."""
+    dfd = open_dir_chain(home, os.path.dirname(FLAGS_REL), create)
+    if dfd is None:
+        return None, "", None
+    try:
+        text, st = read_flags(dfd, os.path.basename(FLAGS_REL))
+    except BaseException:
+        os.close(dfd)
+        raise
+    return dfd, text, st
+
+
+def apply(home):
+    """(state, message, changed)."""
+    if not installed(home):
+        return "no-app", "Chrome Flatpak not installed: nothing to do", False
+    dfd, text, st = current(home, create=False)
+    try:
+        state, new, msg = decide(text)
+        if new is None:
+            return state, msg, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            state, new, msg = decide(text)
+            if new is None:
+                return state, msg, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        return state, msg, True
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+def off_message(text, new):
+    """What turn_off changed (TEXT -> NEW), in words."""
+    i, left = inspect(text), inspect(new)
+    if left["dir"] is not None or left["size"] is not None:
+        what = "our flag lines removed" if i["on"] else "off marker added"
+        return (f"{what}, but cache flags not written by CST are still there"
+                f" ({fmt(left['dir'], left['size'])}): left as they are; to turn them off,"
+                " delete those lines by hand")
+    if not i["on"]:
+        return "off marker added (there were no cache flags); setup will not add them"
+    return "off: our flag lines removed (your other lines kept); setup will not add them again"
+
+
+def off(home):
+    """(message, changed, still_set): STILL_SET when cache flags remain."""
+    dfd, text, st = current(home, create=False)
+    try:
+        new = turn_off(text)
+        if new is None:
+            return "already off: nothing changed", False, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            new = turn_off(text)
+            if new is None:
+                return "already off: nothing changed", False, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        left = inspect(new)
+        return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+def plan_line(home):
+    if not installed(home):
+        return "not installed: nothing to do"
+    dfd, text, _ = current(home, create=False)
+    if dfd is not None:
+        os.close(dfd)
+    state, _, msg = decide(text)
+    return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
+
+
+def status(home):
+    print("Chrome (Flatpak): HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB")
+    inst = installed(home)
+    print(f"  Chrome Flatpak:        {('installed (' + inst + ')') if inst else 'not installed (nothing to do)'}")
+    rc = 0
+    try:
+        dfd, text, _ = current(home, create=False)
+        if dfd is not None:
+            os.close(dfd)
+        state, _, msg = decide(text)
+        if state == "absent":
+            msg = "absent" + ("; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" if inst else "")
+        elif state == "cap-missing":
+            msg = "the 512 MiB cap line is missing: 'snapshots chrome-cache apply' adds it back"
+        print(f"  ~/{FLAGS_REL}:")
+        print(f"                         {msg}")
+    except (Refused, OSError, ValueError) as e:
+        print(f"  ~/{FLAGS_REL}: NEEDS A LOOK: {e}")
+        state, rc = "?", 1
+    ram = os.path.join(RUNTIME_DIR, ".flatpak", APP, "tmp", "chrome-cache")
+    if os.path.isdir(ram):
+        print(f"  in RAM now:            {size_text(tree_bytes(ram))} ({ram})")
+    http, code, profiles = old_cache(home)
+    sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
+    where = "" if sub else ", in /home snapshots"
+    if state in ("managed", "user-same") and http >= 1024 ** 2:
+        print(f"  old on-disk HTTP cache: {size_text(http)} in {profiles} profile(s){where}. Quit Chrome")
+        print("                         (all windows), start it again, then delete it (never done automatically):")
+        print(f"                         rm -rf ~/{OLD_CACHE_REL}/*/Cache")
+    elif http:
+        print(f"  on-disk HTTP cache:    {size_text(http)} in {profiles} profile(s) (~/{OLD_CACHE_REL}/*/Cache)")
+    if code:
+        print(f"  Code Cache on disk:    {size_text(code)} (~/{OLD_CACHE_REL}/*/Code Cache; whether the flag")
+        print("                         moves it too is not verified: btrfs/SNAPSHOTS.md, section 3, Chrome)")
+    if sub:
+        print(f"  ~/{CACHE_SUBVOL_REL}: a nested subvolume from an earlier setup: harmless (left out")
+        print("                         of snapshots), no longer needed; to make it a plain folder again see")
+        print("                         btrfs/SNAPSHOTS.md, section 3, Chrome")
+    return rc
+
+
+def main(argv):
+    args = argv[1:]
+    cmd = args[0] if args else "status"
+    home = None
+    if "--home" in args:
+        i = args.index("--home")
+        home = args[i + 1] if i + 1 < len(args) else None
+    if cmd not in ("status", "plan", "apply", "off", "undo") or (("--home" in args) and not home):
+        print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)", file=sys.stderr)
+        return 2
+    home = os.path.realpath(home or os.path.expanduser("~"))
+    try:
+        if os.stat(home).st_uid != os.getuid():
+            print(f"chrome-cache: {home} is not yours", file=sys.stderr)
+            return 2
+    except OSError as e:
+        print(f"chrome-cache: {home}: {e}", file=sys.stderr)
+        return 2
+    try:
+        if cmd == "status":
+            return status(home)
+        if cmd == "plan":
+            print(plan_line(home))
+            return 0
+        if cmd == "apply":
+            state, msg, changed = apply(home)
+            print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}" if state != "no-app"
+                  else f"{'kept:':<10} {msg}")
+            if changed:
+                print("           Takes effect when Chrome starts again (quit all its windows first).")
+            return 0
+        msg, changed, still_set = off(home)
+        print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
+        if changed and not still_set:
+            print("           Takes effect when Chrome starts again.")
+        return 0
+    except (Refused, OSError, ValueError) as e:
+        print(f"NEEDS A LOOK: chrome-cache: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

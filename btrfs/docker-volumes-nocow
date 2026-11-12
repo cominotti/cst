@@ -1,0 +1,333 @@
+#!/usr/bin/python3 -I
+"""docker-volumes-nocow: Docker volumes without copy-on-write (btrfs NOCOW, +C).
+
+Installed by `cst btrfs install` (CST) as
+/usr/local/sbin/docker-volumes-nocow. Runs as root.
+
+Docker volumes here hold disposable test data (databases rewriting the same
+pages and calling fsync all the time). NOCOW writes those in place: no CoW
+fragmentation, no checksums, no compression. The cost is accepted for this
+data: no checksum means scrub cannot verify or repair it, so after a degraded
+RAID1 episode such volumes should be recreated, not trusted.
+
+  docker-volumes-nocow status    volumes dir flag, volumes still with CoW files
+  docker-volumes-nocow mark      set +C on the volumes dir (new volumes inherit
+                                 it at creation); exit 1 if existing volumes
+                                 still need migrating
+  docker-volumes-nocow migrate   (docker-volumes-nocow.service, every boot, before
+                                 docker.service) marks the dir; if flagged, rewrites each volume that has
+                                 CoW files into a NOCOW copy: +C only applies to
+                                 empty files, so the data has to be copied.
+                                 Refuses while Docker runs.
+  docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
+"""
+
+import fcntl
+import json
+import os
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
+FLAG = "/etc/btrfs-setup/docker-nocow-pending"
+ATTEMPTS = "/var/lib/docker-volumes-nocow/attempts"
+NOTIFY = "/usr/local/sbin/btrfs-notify"
+MARGIN = 20 * 1024 ** 3   # free space kept besides the copy itself
+
+
+def log(prio, msg):
+    print(f"<{prio}>docker-volumes-nocow: {msg}", flush=True)
+
+
+def docker_root():
+    try:
+        with open("/etc/docker/daemon.json") as f:
+            return os.path.join(json.load(f).get("data-root") or "/var/lib/docker", "volumes")
+    except (OSError, ValueError):
+        return "/var/lib/docker/volumes"
+
+
+VOLUMES = docker_root()
+
+
+def flags(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
+    finally:
+        os.close(fd)
+
+
+def set_nocow(path, on):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        cur = struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
+        new = (cur | NOCOW) if on else (cur & ~NOCOW)
+        if new != cur:
+            fcntl.ioctl(fd, SET, struct.pack("l", new))
+    finally:
+        os.close(fd)
+
+
+def real_dirs(root, names, dev):
+    """Subdirectories to descend into: real directories on the same filesystem
+    (os.walk lists symlinks to directories among them; those are entries,
+    and NOCOW flags are never read or set through a link)."""
+    out = []
+    for d in names:
+        st = os.lstat(os.path.join(root, d))
+        if stat.S_ISDIR(st.st_mode) and st.st_dev == dev:
+            out.append(d)
+    return out
+
+
+def cow_files(top, fix=False):
+    """(regular files with data and without NOCOW, their apparent bytes, all
+    entries, total apparent bytes) below top. fix=True also sets +C in place
+    where that works: on directories (affects what is created later) and on
+    empty files; only files holding data need a copy."""
+    n = size = entries = total = 0
+    dev = os.lstat(top).st_dev
+    if fix:
+        set_nocow(top, True)
+    for root, dirs, files in os.walk(top):
+        entries += len(dirs) + len(files)   # symlinks to directories included
+        dirs[:] = real_dirs(root, dirs, dev)
+        if fix:
+            for d in dirs:
+                set_nocow(os.path.join(root, d), True)
+        for f in files:
+            p = os.path.join(root, f)
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            total += st.st_size
+            if flags(p) & NOCOW:
+                continue
+            if st.st_size:
+                n += 1
+                size += st.st_size
+            elif fix:
+                set_nocow(p, True)
+    return n, size, entries, total
+
+
+def dirs_cow(top):
+    """True if top or a directory below it lacks +C (new files there: CoW)."""
+    if not flags(top) & NOCOW:
+        return True
+    dev = os.lstat(top).st_dev
+    for root, dirs, _ in os.walk(top):
+        dirs[:] = real_dirs(root, dirs, dev)
+        for d in dirs:
+            if not flags(os.path.join(root, d)) & NOCOW:
+                return True
+    return False
+
+
+def volumes():
+    """(name, path of _data) for every volume of the local driver."""
+    if not os.path.isdir(VOLUMES):
+        return []
+    out = []
+    for name in sorted(os.listdir(VOLUMES)):
+        data = os.path.join(VOLUMES, name, "_data")
+        if os.path.isdir(data) and not os.path.islink(data):
+            out.append((name, data))
+    return out
+
+
+def pending(fix=False):
+    """Volumes that still have CoW data: [(name, data, files, bytes)].
+    fix=True first sets +C in place on directories and empty files."""
+    out = []
+    for name, data in volumes():
+        n, size, _, _ = cow_files(data, fix)
+        if n:
+            out.append((name, data, n, size))
+    return out
+
+
+def not_fully_nocow():
+    """Volumes with CoW data or a CoW directory (status)."""
+    return [name for name, data in volumes() if cow_files(data)[0] or dirs_cow(data)]
+
+
+def recover():
+    """Leftovers of an interrupted migration (kill, timeout, power loss)."""
+    if not os.path.isdir(VOLUMES):
+        return
+    for name in os.listdir(VOLUMES):
+        d = os.path.join(VOLUMES, name)
+        if not os.path.isdir(d) or os.path.islink(d):
+            continue
+        data = os.path.join(d, "_data")
+        olds = sorted(x for x in os.listdir(d) if x.startswith("_data.cow-old-"))
+        if not os.path.lexists(data) and olds:
+            # Died between the two renames: the original goes back.
+            os.rename(os.path.join(d, olds[-1]), data)
+            olds = olds[:-1]
+            log(4, f"{name}: restored the original after an interrupted migration")
+        if os.path.isdir(data):
+            for x in olds + [x for x in os.listdir(d) if x == "_data.nocow-new"]:
+                shutil.rmtree(os.path.join(d, x), ignore_errors=True)
+
+
+def free_bytes():
+    r = subprocess.run(["btrfs", "filesystem", "usage", "-b", VOLUMES], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if "Free (estimated)" in line:
+            return int(line.split()[2])
+    return 0
+
+
+def docker_active():
+    r = subprocess.run(["systemctl", "show", "-P", "ActiveState", "docker.service"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() in ("active", "activating", "reloading", "deactivating")
+
+
+def migrate_one(name, data):
+    """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
+    new, old = data + ".nocow-new", data + f".cow-old-{int(time.time())}"
+    if os.path.lexists(new):
+        shutil.rmtree(new)
+    os.mkdir(new)
+    st = os.lstat(data)
+    os.chown(new, st.st_uid, st.st_gid)
+    os.chmod(new, stat.S_IMODE(st.st_mode))
+    subprocess.run(["chcon", "--reference", data, new], capture_output=True)
+    set_nocow(new, True)
+    # Real copy (NOCOW and CoW extents cannot share data); every file and
+    # directory created below `new` inherits +C before any data is written.
+    r = subprocess.run(["cp", "-a", "--reflink=never", "--sparse=auto", "--", data + "/.", new + "/"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(f"copy failed: {r.stderr.strip()[:200]}")
+    n_cow, _, entries_new, bytes_new = cow_files(new)
+    _, _, entries_old, bytes_old = cow_files(data)
+    if entries_new != entries_old or bytes_new != bytes_old or n_cow or dirs_cow(new):
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(f"copy check failed (entries {entries_old} vs {entries_new}, bytes "
+                           f"{bytes_old} vs {bytes_new}, CoW files {n_cow})")
+    os.sync()
+    os.rename(data, old)
+    try:
+        os.rename(new, data)
+    except OSError:
+        os.rename(old, data)
+        raise
+    shutil.rmtree(old)
+
+
+def migrate():
+    if not os.path.isdir(VOLUMES):
+        return 0
+    if docker_active():
+        log(4, "Docker is running: migration left for the next boot")
+        return 0
+    recover()
+    # Every boot: Docker may have been installed after btrfs-setup, creating
+    # the volumes dir without +C; the volumes made in between are migrated too.
+    if not flags(VOLUMES) & NOCOW:
+        set_nocow(VOLUMES, True)
+        if pending(fix=True):
+            open(FLAG, "a").close()
+    if not os.path.exists(FLAG):
+        return 0
+    os.makedirs(os.path.dirname(ATTEMPTS), exist_ok=True)
+    try:
+        attempts = int(open(ATTEMPTS).read())
+    except (OSError, ValueError):
+        attempts = 0
+    if attempts >= 2:
+        os.remove(FLAG)
+        os.remove(ATTEMPTS)   # a later 'install' starts afresh
+        msg = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
+        log(3, msg)
+        # At boot nobody is logged in yet: btrfs-notify keeps it and it is
+        # shown at the next graphical login.
+        subprocess.run([NOTIFY, "-u", "normal", "-a", "btrfs-setup",
+                        "Docker volumes: NOCOW migration gave up", msg], capture_output=True)
+        return 0
+    open(ATTEMPTS, "w").write(str(attempts + 1))
+    set_nocow(VOLUMES, True)
+    todo = pending(fix=True)
+    log(5, f"rewriting {len(todo)} volume(s) without copy-on-write before Docker starts")
+    failed = 0
+    for name, data, n, size in todo:
+        if free_bytes() < size + MARGIN:
+            log(4, f"{name}: not enough free space for a {size >> 20} MiB copy; skipped")
+            failed += 1
+            continue
+        t0 = time.time()
+        try:
+            migrate_one(name, data)
+            log(6, f"{name}: {n} file(s), {size >> 20} MiB in {time.time() - t0:.0f}s")
+        except Exception as e:   # one volume must not stop the others
+            log(3, f"{name}: {e}; left as it was")
+            failed += 1
+    if not failed:
+        os.remove(FLAG)
+        os.remove(ATTEMPTS)
+        log(5, "all Docker volumes are NOCOW now")
+    return 0
+
+
+def mark():
+    if not os.path.isdir(VOLUMES):
+        print(f"{VOLUMES}: absent (Docker not set up yet): nothing to mark")
+        return 0
+    set_nocow(VOLUMES, True)
+    todo = pending(fix=True)   # directories and empty files: in place, now
+    try:
+        os.remove(ATTEMPTS)    # a new request gets its two boots again
+    except OSError:
+        pass
+    if not todo:
+        return 0
+    print(f"{len(todo)} existing volume(s) hold copy-on-write data "
+          f"({sum(t[3] for t in todo) >> 20} MiB): rewritten at the next boot, before Docker starts")
+    return 1
+
+
+def unmark():
+    if os.path.isdir(VOLUMES):
+        set_nocow(VOLUMES, False)
+    return 0
+
+
+def status():
+    if not os.path.isdir(VOLUMES):
+        print(f"{VOLUMES}: absent")
+        return 0
+    on = bool(flags(VOLUMES) & NOCOW)
+    todo = pending()
+    print(f"{VOLUMES}: new volumes {'NOCOW' if on else 'copy-on-write'}; "
+          f"{len(volumes()) - len(not_fully_nocow())} of {len(volumes())} volume(s) fully NOCOW")
+    if todo:
+        state = "at the next boot" if os.path.exists(FLAG) else "not scheduled"
+        print(f"  {len(todo)} with copy-on-write data ({sum(t[3] for t in todo) >> 20} MiB), migration {state}")
+    return 0
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    fn = {"status": status, "mark": mark, "migrate": migrate, "unmark": unmark}.get(cmd)
+    if not fn:
+        print("usage: docker-volumes-nocow status|mark|migrate|unmark", file=sys.stderr)
+        return 2
+    try:
+        return fn()
+    except OSError as e:   # e.g. a data-root that is not on btrfs
+        log(3, f"{VOLUMES}: {e}")
+        return 0 if cmd in ("migrate", "unmark") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

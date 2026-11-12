@@ -1,0 +1,3020 @@
+#!/usr/bin/python3 -I
+"""cst-toolchains: the caches of the developer toolchains (cargo and uv,
+later go, npm, maven) and the toolchain settings CST writes. It is the program behind
+`cst toolchains` (toolchains-setup.sh), and the hourly user timer runs a copy
+of it (~/.local/lib/cst/cst-toolchains). Always as the user, never as root.
+
+Commands:
+  status [--brief]               per target: what and where, size, policy,
+                                 last prune; the timer; the installed rustup
+                                 toolchains (a report: which are pinned or named
+                                 in build files); the toolchain settings
+  prune plan  [TARGET...]        what prune apply would delete, and why
+  prune apply [TARGET...]        delete now (the timer runs this, no TARGET)
+  auto on [--unless-off]         install this program and the user timer
+                                 cst-toolchains-prune.timer (hourly) and start it
+                                 (--unless-off: not if `auto off` was run;
+                                 `cst btrfs snapshots setup` uses it)
+  auto off                       stop the timer, remove what `auto on` installed,
+                                 and remember the choice (~/.config/cst/toolchains-auto.off)
+  config plan | apply [--lean-debuginfo | --no-lean-debuginfo]
+                                 the toolchain settings in your home: cargo's
+                                 build-dir in ~/.cargo/config.toml, uv's
+                                 link-mode in ~/.config/uv/uv.toml, and the
+                                 opt-in lean debug info (RUST_LEAN_DEBUGINFO)
+  help
+Every command takes --home DIR (default: your home).
+
+TARGET is LANG:CACHE (rust:build) or LANG (all targets of that language).
+Without TARGET, prune runs every target enabled in the settings. A target
+named on the command line runs even when it is disabled (disabled = left out
+of the timer and of the default selection).
+
+Targets:
+  rust:build     cargo's intermediate build files, ~/.cache/cargo-build/XX/YYYYYYYYYYYYYY
+                 (one folder per workspace path; cargo never deletes them)
+  python:uv      `uv cache prune` on ~/.cache/uv (only entries uv no longer uses)
+  Planned, not implemented yet: rust:registry, go:build (both tools already
+  clean these by themselves), go:mod, node:npm, jvm:maven.
+
+Settings: KEY=value lines; the defaults are in toolchains.conf next to this
+program (toolchains/toolchains.conf in CST), yours in
+~/.config/cst/toolchains.conf win. Keys are <LANG>_<CACHE>_<SETTING>:
+  RUST_BUILD_ENABLED=yes     the timer and a bare `prune` run it (yes or no)
+  RUST_BUILD_MAX_IDLE=48h    delete a folder whose newest activity is older
+  RUST_BUILD_MAX_TOTAL=150G  then, while the total is above this, delete the
+                             least recently active folders first (0 or off: no cap)
+  RUST_BUILD_MIN_KEEP=2h     never delete a folder active more recently than
+                             this (also not for the cap, orphans, incremental);
+                             at least 15m
+  RUST_BUILD_ORPHANS=yes     delete a folder no workspace claims any more
+  RUST_BUILD_INCREMENTAL_IDLE=6h  in a folder idle longer than this, delete
+                             only <profile>/incremental (0 or off: never)
+  PYTHON_UV_ENABLED=yes      uv cache prune ...
+  PYTHON_UV_INTERVAL=1d      ... at most once per this (0: every run)
+  RUST_LEAN_DEBUGINFO=no     yes: `config apply` writes lean debug info for
+                             dev builds into ~/.cargo/config.toml
+Durations: a number with s, m, h, d or w. Sizes: a number with K, M, G or T
+(binary: G = GiB; "GiB", "GB" and "G" all mean 2^30 bytes); the unit is
+required (a bare 150 is an error, not 150 bytes). An unknown key or a bad
+value stops the run: nothing is deleted. Sizes are what `du` shows: the
+files' size before btrfs compression (zstd usually stores less, and RAID1
+stores that twice).
+
+rust:build in detail. `cst toolchains config apply` (also run by `cst btrfs
+snapshots setup`) writes into ~/.cargo/config.toml:
+
+    [build]
+    build-dir = "<home>/.cache/cargo-build/{workspace-path-hash}"
+
+so every cargo workspace path (every git worktree, every agent checkout) gets
+its own folder of intermediate build files, <root>/XX/YYYYYYYYYYYYYY (cargo's
+16-hex-digit hash of the manifest path, split 2 + 14). Cargo never deletes
+them (`cargo clean gc` does not cover build-dir).
+
+Activity of a folder = the newest modification time (mtime) of anything in
+it: every entry is visited anyway to measure the size, so the newest mtime
+costs nothing more. Each build that compiles something creates or rewrites
+files (rustc output in deps/, incremental session folders, fingerprints), so
+the newest mtime is the last build that did work. A no-op build changes
+nothing and does not count (deleting then only costs one rebuild). mtimes
+more than 5 minutes in the future are ignored (a wrong clock or a copied
+file); a folder with nothing else counts as active now.
+
+Safety: only folders <root>/XX/YYYYYYYYYYYYYY (lowercase hex) are touched;
+anything else in the root is reported and left alone; symlinks are refused
+and never followed; entries on another filesystem are not counted and not
+deleted (rm --one-file-system); a folder is skipped while a process of the
+user has its working directory, executable, an open file or a mapped file
+in it (/proc; toolbox containers share the host's process list), or while
+cargo's lock (<profile>/.cargo-build-lock, <triple>/<profile>/... and the
+older .cargo-lock) is held, or while a running cargo (cargo, cargo-nextest,
+...) uses it: cargo holds no lock while tests run, so each running cargo is
+asked which build folder it uses (`cargo metadata --no-deps --offline` in
+its folder, with its own cargo and settings); if that cannot be found out,
+nothing is deleted while it runs. A non-blocking flock is taken on each lock
+first and held while the users are checked, the folder is measured again
+(a build may have written there since the run started: if the rule that
+chose the action no longer holds, it is kept and planned again) and the
+folder is renamed away (atomic); then the renamed folder is deleted. A cargo that was waiting for
+the lock then rebuilds from scratch into a new folder at the same path. If
+build-dir in ~/.cargo/config.toml is not exactly the line CST writes,
+nothing is done.
+
+Orphans. Each folder is named after a workspace's Cargo.toml path. Every
+git repository under ~/Workspace (6 levels deep; not node_modules, target,
+hidden or CACHEDIR.TAG folders) is listed with `git worktree list
+--porcelain` (also linked worktrees elsewhere); each Cargo.toml in those
+worktrees (a workspace answers for its members) is asked `cargo metadata
+--offline --no-deps --format-version 1` (read only, idle priority, 60 s each,
+600 s in all; RUSTUP_AUTO_INSTALL=0). Its build_directory field names the
+folder the workspace claims. A folder idle longer than MIN_KEEP that nobody
+claims is deleted ("orphan: no workspace claims it"), with the same lock and
+in-use checks. If a git or cargo call fails or times out, or nothing is
+claimed at all, no folder counts as an orphan in that run (plan and the
+journal say why). A crate that cargo refuses to build where it is ("believes
+it's in a workspace when it's not") claims nothing and is not a failure.
+
+Incremental. In a folder idle longer than INCREMENTAL_IDLE, not in use and
+not locked, only the incremental folders (<profile>/incremental and
+<triple>/<profile>/incremental) are deleted: they are most of a folder's size
+and only speed up rebuilding the workspace's own crates. Their parent's
+mtime is put back, so the folder's last activity does not move.
+
+python:uv. `uv cache prune --cache-dir ~/.cache/uv` (never --force), with uv
+from PATH (refused when absent; `auto on` checks the user manager's PATH,
+which the timer uses). uv holds a shared lock on <cache>/.lock while any uv
+command runs; if it is held the run is skipped, and uv itself waits at most
+60 s (UV_LOCK_TIMEOUT) for a uv that starts meanwhile (only uv's timeout
+message counts as that; any other error is a failure).
+
+Time budget. One `prune apply` keeps to 25 minutes (the service is stopped
+at 30): targets with a fixed bound (python:uv) run first; rust:build starts
+no deletion with less than 2 minutes left and stops an rm at the end (the
+next run deletes the leftover).
+
+In a toolbox this program runs itself on the host (flatpak-spawn --host):
+only the host sees the processes of every container. Exit status: 0 fine
+(also "nothing to do"), 1 refused or failed, 2 usage.
+"""
+
+import fcntl
+import json
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+MARKER = "# managed-by: toolchains-setup.sh (CST)"
+NAME = "cst-toolchains"
+CONF_REL = ".config/cst/toolchains.conf"
+# Left by `auto off` (and removed by `auto on`): `snapshots setup` then does
+# not turn the timer back on (auto on --unless-off).
+OFF_REL = ".config/cst/toolchains-auto.off"
+LIB_REL = ".local/lib/cst"
+PROG_REL = f"{LIB_REL}/{NAME}"
+DEFAULTS_NAME = "toolchains.conf"
+DEFAULTS_REL = f"{LIB_REL}/{DEFAULTS_NAME}"
+UNIT_DIR_REL = ".config/systemd/user"
+STATE_DIR_REL = ".local/state/cst"
+SERVICE = "cst-toolchains-prune.service"
+TIMER = "cst-toolchains-prune.timer"
+# What the first version (`cst btrfs cargo-gc`, never deployed) installed:
+# auto on and auto off remove it when its marker shows it is CST's.
+OLD_MARKER = "# managed-by: btrfs-setup.sh (CST)"
+OLD_TIMER = "cst-cargo-build-gc.timer"
+OLD_UNITS = ("cst-cargo-build-gc.timer", "cst-cargo-build-gc.service")
+OLD_FILES = (".local/lib/cst/cargo-build-gc", ".config/cst/cargo-gc.disabled")
+OLD_DATA = (".local/state/cst/cargo-build-gc.json", ".local/state/cst/cargo-build-gc.lock")
+OLD_CONF_REL = ".config/cst/cargo-gc.conf"
+
+HASH_VAR = "{workspace-path-hash}"
+ROOT_REL = ".cache/cargo-build"
+MIN_KEEP_FLOOR = 15 * 60
+FUTURE_SLACK = 300
+HASH_TOP = re.compile(r"[0-9a-f]{2}\Z")
+HASH_LEAF = re.compile(r"[0-9a-f]{14}\Z")
+LOCK_NAMES = (".cargo-build-lock", ".cargo-lock")
+TRASH_PREFIX = ".cst-toolchains-trash-"
+# A whole folder: <prefix><16 hex>-<time>; its incremental dirs: <prefix><16 hex>-inc<n>-<time>.
+TRASH_NAME = re.compile(re.escape(TRASH_PREFIX) + r"[0-9a-f]{16}(?:-inc\d+)?-\d+\Z")
+INCREMENTAL = "incremental"
+GIB = 1 << 30
+PROC = "/proc"
+# How hints name the frontend ("cst toolchains" through cst).
+PROG = os.environ.get("CST_PROG") or "cst toolchains"
+# Processes whose state we must know (comm is readable even when the rest is not).
+RUST_TOOLS = re.compile(r"(cargo|rustc|rustdoc|clippy-driver|rust-analyzer|build-script|build_script).*")
+
+
+def journal_stdout():
+    """stdout is connected to the journal (systemd's documented check:
+    JOURNAL_STREAM is "dev:inode" of that very stream; a variable inherited
+    from elsewhere does not match)."""
+    try:
+        dev, ino = (int(x) for x in os.environ.get("JOURNAL_STREAM", "").split(":"))
+        st = os.fstat(sys.stdout.fileno())
+    except (ValueError, OSError):
+        return False
+    return (st.st_dev, st.st_ino) == (dev, ino)
+
+
+JOURNAL = journal_stdout()
+
+
+class Refused(Exception):
+    pass
+
+
+class ConfigError(Exception):
+    pass
+
+
+class Usage(Exception):
+    pass
+
+
+# ---- output -------------------------------------------------------------------------------
+def say(msg, prio=6, err=False):
+    """One line; with the journal priority prefix when run by systemd."""
+    line = f"<{prio}>{msg}" if JOURNAL else msg
+    print(line, file=sys.stderr if err and not JOURNAL else sys.stdout, flush=True)
+
+
+def gib(n):
+    return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / (1 << 20):.0f} MiB"
+
+
+def ago(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 4 * 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
+def span(seconds):
+    """A setting's duration, short: 48h, 2h, 90m, 14d."""
+    if seconds % 3600 == 0 and seconds < 7 * 86400:
+        return f"{seconds // 3600}h"
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def when(ts):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def tilde(path, home):
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+
+def where_text(path, home):
+    """PATH (with ~), and where it really is when a symlink on the way leads
+    elsewhere (the ~/Bulk links of `cst btrfs bulk`)."""
+    real = os.path.realpath(path)
+    shown = tilde(path, home)
+    if real != path:
+        shown += f" -> {tilde(real, home)}"
+    return shown
+
+
+# ---- settings -------------------------------------------------------------------------------
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+
+
+def parse_duration(text):
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*", text, re.I)
+    if not m:
+        raise ConfigError(f"'{text}' is not a duration (a number with s, m, h, d or w, e.g. 48h)")
+    return int(float(m.group(1)) * DURATION_UNITS[m.group(2).lower()])
+
+
+def parse_size(text):
+    """Bytes. The unit is required (only 0 may go without): MAX_TOTAL=150
+    meant as 150G would otherwise be 150 bytes, a cap that deletes
+    everything older than MIN_KEEP."""
+    t = text.strip().lower()
+    if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t):
+        return 0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t)
+    if not m:
+        raise ConfigError(f"'{text}' is not a size (a number with K, M, G or T, e.g. 150G; 0 or off for no cap)")
+    return int(float(m.group(1)) * SIZE_UNITS[m.group(2)])
+
+
+def parse_bool(text):
+    t = text.strip().lower()
+    if t in ("yes", "true", "on", "1"):
+        return True
+    if t in ("no", "false", "off", "0"):
+        return False
+    raise ConfigError(f"'{text}' is not yes or no")
+
+
+def parse_conf(text, known):
+    """{KEY: raw value} from KEY=value lines; '#' starts a comment (also after
+    a value, behind a blank); quotes around the value are dropped. Keys not in
+    KNOWN are an error (a typo must not silently fall back to a default)."""
+    out = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            raise ConfigError(f"line {n}: expected KEY=value, got '{s}'")
+        key, val = (p.strip() for p in s.split("=", 1))
+        val = re.sub(r"\s+#.*$", "", val).strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        if key not in known:
+            raise ConfigError(f"line {n}: unknown setting '{key}' (known: {', '.join(sorted(known))})")
+        out[key] = val
+    return out
+
+
+# Settings that belong to no prune target: {KEY: parser}.
+OPTIONS = {"RUST_LEAN_DEBUGINFO": parse_bool}
+
+
+def parse_off_or_duration(text):
+    """Seconds, or 0 for 0/off/no (the rule is off)."""
+    if text.strip().lower() in ("0", "off", "no", "none"):
+        return 0
+    return parse_duration(text)
+
+
+def known_keys():
+    keys = set(OPTIONS)
+    for cls in TARGETS.values():
+        keys.add(f"{cls.PREFIX}_ENABLED")
+        keys.update(f"{cls.PREFIX}_{k}" for k in cls.SETTINGS)
+    return keys
+
+
+def defaults_path():
+    """toolchains.conf next to this program: toolchains/toolchains.conf in
+    CST, ~/.local/lib/cst/toolchains.conf for the timer's copy."""
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), DEFAULTS_NAME)
+
+
+class Settings:
+    """The checked settings of every target: defaults, then the user's file.
+    Raises ConfigError on any bad line or value (nothing runs then)."""
+
+    def __init__(self, home):
+        known = known_keys()
+        path = defaults_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                defaults = parse_conf(f.read(), known)
+        except FileNotFoundError:
+            raise ConfigError(f"the defaults file {path} is missing") from None
+        except ConfigError as e:
+            raise ConfigError(f"{path}: {e}") from None
+        lacking = sorted(known - set(defaults))
+        if lacking:
+            raise ConfigError(f"{path} lacks {', '.join(lacking)}")
+        self.user_path = os.path.join(home, CONF_REL)
+        self.source = tilde(self.user_path, home)
+        try:
+            with open(self.user_path, encoding="utf-8") as f:
+                text = f.read()
+        except FileNotFoundError:
+            text = ""
+        try:
+            user = parse_conf(text, known)
+        except ConfigError as e:
+            raise ConfigError(f"{self.source}: {e}") from None
+        self.user_keys = set(user)
+        self.raw = {**defaults, **user}
+        self.enabled = {}
+        self.policy = {}
+        self.options = {}
+        for key, parse in OPTIONS.items():
+            try:
+                self.options[key] = parse(self.raw[key])
+            except ConfigError as e:
+                raise ConfigError(f"{self.where(key)}: {key}: {e}") from None
+        for tid, cls in TARGETS.items():
+            key = f"{cls.PREFIX}_ENABLED"
+            try:
+                self.enabled[tid] = parse_bool(self.raw[key])
+            except ConfigError as e:
+                raise ConfigError(f"{self.where(key)}: {key}: {e}") from None
+            vals = {k: self.raw[f"{cls.PREFIX}_{k}"] for k in cls.SETTINGS}
+            try:
+                self.policy[tid] = cls.make_policy(vals, cls.PREFIX)
+            except ConfigError as e:
+                raise ConfigError(f"{self.where(*(f'{cls.PREFIX}_{k}' for k in cls.SETTINGS))}: {e}") from None
+
+    def where(self, *keys):
+        return self.source if any(k in self.user_keys for k in keys) else "defaults"
+
+    def source_of(self, cls):
+        keys = [f"{cls.PREFIX}_{k}" for k in ("ENABLED", *cls.SETTINGS)]
+        return self.where(*keys)
+
+
+# ---- rust:build: the root ------------------------------------------------------------------
+def expected_template(home):
+    return f"{home}/{ROOT_REL}/{HASH_VAR}"
+
+
+def cargo_config_path(home):
+    ch = os.environ.get("CARGO_HOME", "")
+    base = ch if os.path.isabs(ch) else os.path.join(home, ".cargo")
+    return os.path.join(base, "config.toml")
+
+
+def resolve_root(home):
+    """The root folder, from build-dir in the user's cargo config. Raises
+    Refused when the setting is not the one CST writes, or the folder is odd.
+    Returns None when the folder does not exist yet (nothing to do)."""
+    cfg = cargo_config_path(home)
+    want = expected_template(home)
+    try:
+        with open(cfg, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        raise Refused(f"{tilde(cfg, home)} not found: build-dir is not set ({PROG} config apply sets it)") from None
+    except (tomllib.TOMLDecodeError, OSError) as e:
+        raise Refused(f"cannot read {tilde(cfg, home)}: {e}") from None
+    build = data.get("build")
+    value = build.get("build-dir") if isinstance(build, dict) else None
+    if value != want:
+        raise Refused(f"build-dir in {tilde(cfg, home)} is {value!r}, not the one CST writes "
+                      f"({want!r}): nothing is done")
+    root = want[: -len("/" + HASH_VAR)]
+    try:
+        st = os.lstat(root)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused(f"{root} is a symlink: refused")
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused(f"{root} is not a folder: refused")
+    if st.st_uid != os.getuid():
+        raise Refused(f"{root} belongs to uid {st.st_uid}, not to you: refused")
+    if os.path.realpath(root) != root:
+        raise Refused(f"{root} goes through a symlink ({os.path.realpath(root)}): refused")
+    return root
+
+
+# ---- scanning -------------------------------------------------------------------------------
+class Folder:
+    def __init__(self, root, top, leaf):
+        self.key = f"{top}/{leaf}"
+        self.path = os.path.join(root, top, leaf)
+        self.size = 0
+        self.activity = 0.0
+        self.entries = 0
+        self.problem = ""
+        self.future = 0
+        self.foreign = 0
+        # Cargo's incremental folders inside: [[path, size]], <profile>/incremental
+        # and <triple>/<profile>/incremental.
+        self.inc = []
+
+    @property
+    def inc_size(self):
+        return sum(n for _, n in self.inc)
+
+    def __repr__(self):
+        return f"Folder({self.key}, {self.size}, {self.activity})"
+
+
+def measure(folder, dev, now):
+    """Size (st_blocks, hardlinks once), newest mtime and entry count of a
+    folder; never follows symlinks, never leaves the filesystem. On btrfs,
+    st_blocks is the size before compression (what du shows), not the
+    compressed extents actually on disk. Also sizes the incremental
+    folders (folder.inc) on the way."""
+    seen = set()
+    newest = 0.0
+    try:
+        st = os.lstat(folder.path)
+    except OSError as e:
+        folder.problem = f"cannot read: {e.strerror}"
+        return folder
+    # (path, depth below the folder, index into folder.inc or -1)
+    stack = [(folder.path, 0, -1)]
+    if st.st_mtime <= now + FUTURE_SLACK:
+        newest = st.st_mtime
+    folder.size += st.st_blocks * 512
+    while stack:
+        d, depth, inc = stack.pop()
+        try:
+            it = os.scandir(d)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            folder.problem = f"cannot read {d}: {e.strerror}"
+            continue
+        with it:
+            for e in it:
+                try:
+                    s = e.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as err:
+                    folder.problem = f"cannot read {e.path}: {err.strerror}"
+                    continue
+                folder.entries += 1
+                if s.st_dev != dev:
+                    folder.foreign += 1
+                    continue
+                if s.st_mtime > now + FUTURE_SLACK:
+                    folder.future += 1
+                elif s.st_mtime > newest:
+                    newest = s.st_mtime
+                if s.st_nlink > 1 and not stat.S_ISDIR(s.st_mode):
+                    if s.st_ino in seen:
+                        continue
+                    seen.add(s.st_ino)
+                sub = inc
+                if sub < 0 and depth + 1 in (2, 3) and e.name == INCREMENTAL and stat.S_ISDIR(s.st_mode):
+                    folder.inc.append([e.path, 0])
+                    sub = len(folder.inc) - 1
+                folder.size += s.st_blocks * 512
+                if sub >= 0:
+                    folder.inc[sub][1] += s.st_blocks * 512
+                if stat.S_ISDIR(s.st_mode):
+                    stack.append((e.path, depth + 1, sub))
+    folder.activity = newest if newest else now
+    if folder.foreign:
+        folder.problem = folder.problem or f"{folder.foreign} entr(y/ies) on another filesystem"
+    return folder
+
+
+def scan(root, now):
+    """(folders, trash, others): the hash folders (measured), leftovers of an
+    interrupted run, and anything else in the root (name, why left alone)."""
+    folders, trash, others = [], [], []
+    rst = os.lstat(root)
+    dev = rst.st_dev
+    try:
+        with os.scandir(root) as it:
+            tops = sorted(it, key=lambda e: e.name)
+    except FileNotFoundError:
+        tops = []
+    for e in tops:
+        try:
+            s = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if TRASH_NAME.match(e.name):
+            if stat.S_ISDIR(s.st_mode) and s.st_dev == dev:
+                t = Folder(root, "", "")
+                t.key, t.path = e.name, e.path
+                trash.append(measure(t, dev, now))
+            else:
+                others.append((e.name, "not a folder on this filesystem"))
+            continue
+        why = classify(e.name, s, dev, HASH_TOP)
+        if why:
+            others.append((e.name, why))
+            continue
+        try:
+            with os.scandir(e.path) as it2:
+                leaves = sorted(it2, key=lambda x: x.name)
+        except FileNotFoundError:
+            continue        # removed meanwhile (apply removes an XX/ it emptied)
+        except OSError as err:
+            others.append((e.name, f"cannot read: {err.strerror}"))
+            continue
+        for l in leaves:
+            try:
+                ls = l.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            why = classify(l.name, ls, dev, HASH_LEAF)
+            if why:
+                others.append((f"{e.name}/{l.name}", why))
+                continue
+            folders.append(measure(Folder(root, e.name, l.name), dev, now))
+    return folders, trash, others
+
+
+def classify(name, st, dev, pattern):
+    """Why an entry is not a hash folder, or "" if it is one."""
+    if not pattern.match(name):
+        return "not a cargo hash name"
+    if stat.S_ISLNK(st.st_mode):
+        return "a symlink (refused)"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not a folder"
+    if st.st_dev != dev:
+        return "on another filesystem"
+    return ""
+
+
+# ---- in use ---------------------------------------------------------------------------------
+def prefixes(root):
+    """The root as a process may see it: /home is a symlink to /var/home on
+    Silverblue and in toolbox containers."""
+    out = {root}
+    if root.startswith("/var/home/"):
+        out.add(root[len("/var"):])
+    elif root.startswith("/home/"):
+        out.add("/var" + root)
+    return tuple(sorted(out))
+
+
+def proc_users(root, uid=None):
+    """({folder key: [(pid, comm), ...]}, unreadable): the processes of the
+    user that have their cwd, executable, an open file or a mapped file
+    under ROOT. Keys are 'XX/YYYY' or a trash name. Processes of other users
+    are not looked at; UNREADABLE counts the user's own that could not be
+    inspected (from inside a container: those in other containers' user
+    namespaces; the host sees them all) and that are Rust tools (cargo,
+    rustc, clippy-driver, rust-analyzer, build scripts: by their name)."""
+    uid = os.getuid() if uid is None else uid
+    pre = prefixes(root)
+    me = os.getpid()
+    found = {}
+    unreadable = 0
+
+    def note(pid, comm, path):
+        if path.endswith(" (deleted)"):
+            path = path[: -len(" (deleted)")]
+        for p in pre:
+            if path.startswith(p + "/"):
+                parts = path[len(p) + 1:].split("/")
+                key = parts[0] if parts[0].startswith(TRASH_PREFIX) else "/".join(parts[:2])
+                lst = found.setdefault(key, [])
+                if (pid, comm) not in lst:
+                    lst.append((pid, comm))
+                return
+
+    try:
+        pids = [p for p in os.listdir(PROC) if p.isdigit()]
+    except OSError:
+        return found, 0
+    for pid in pids:
+        if int(pid) == me:
+            continue
+        base = os.path.join(PROC, pid)
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            with open(os.path.join(base, "comm")) as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        try:
+            note(pid, comm, os.readlink(os.path.join(base, "cwd")))
+        except PermissionError:
+            if RUST_TOOLS.fullmatch(comm):
+                unreadable += 1
+            continue
+        except OSError:
+            pass
+        try:
+            note(pid, comm, os.readlink(os.path.join(base, "exe")))
+        except OSError:
+            pass
+        try:
+            fds = os.listdir(os.path.join(base, "fd"))
+        except OSError:
+            fds = []
+        for fd in fds:
+            try:
+                note(pid, comm, os.readlink(os.path.join(base, "fd", fd)))
+            except OSError:
+                pass
+        try:
+            with open(os.path.join(base, "maps")) as f:
+                for line in f:
+                    i = line.find("/")
+                    if i > 0:
+                        note(pid, comm, line[i:].rstrip("\n"))
+        except OSError:
+            pass
+    return found, unreadable
+
+
+def lock_files(path):
+    """Cargo's lock files in a build folder: <profile>/<lock> and
+    <triple>/<profile>/<lock> (regular files only)."""
+    out = []
+    try:
+        with os.scandir(path) as it:
+            level1 = [e for e in it if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return out
+    dirs = [e.path for e in level1]
+    for e in level1:
+        try:
+            with os.scandir(e.path) as it:
+                dirs += [x.path for x in it if x.is_dir(follow_symlinks=False)]
+        except OSError:
+            pass
+    for d in dirs:
+        for n in LOCK_NAMES:
+            p = os.path.join(d, n)
+            try:
+                if stat.S_ISREG(os.lstat(p).st_mode):
+                    out.append(p)
+            except OSError:
+                pass
+    return sorted(out)
+
+
+def take_locks(path):
+    """Exclusive non-blocking flocks on every cargo lock in PATH:
+    (fds, None) or ([], busy lock path) with nothing held."""
+    fds = []
+    for p in lock_files(path):
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            release(fds)
+            return [], p
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            release(fds)
+            return [], p
+        fds.append(fd)
+    return fds, None
+
+
+def release(fds):
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+# ---- cargo processes ------------------------------------------------------------------------
+# Cargo holds its build-dir lock only while it compiles. While `cargo test`,
+# `cargo bench` or `cargo nextest` run the test binaries, the lock is free and
+# cargo itself has nothing open in the build folder; between two test
+# binaries nothing points there at all. So every running cargo process is
+# asked about (`cargo metadata`, the same cargo, folder and settings): the
+# build folder it uses counts as in use while it runs.
+CARGO_COMM = re.compile(r"cargo(-.+)?")
+CARGO_ENV = ("CARGO_HOME", "CARGO_BUILD_BUILD_DIR", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
+
+
+def cargo_procs(uid=None):
+    """The user's processes named cargo or cargo-* (cargo-nextest,
+    cargo-clippy, ...): [{pid, comm, cwd, exe, args, env}]. cwd is None when
+    it cannot be read."""
+    uid = os.getuid() if uid is None else uid
+    me = os.getpid()
+    out = []
+    try:
+        pids = [p for p in os.listdir(PROC) if p.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        if int(pid) == me:
+            continue
+        base = os.path.join(PROC, pid)
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            with open(os.path.join(base, "comm")) as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        if not CARGO_COMM.fullmatch(comm):
+            continue
+        p = {"pid": pid, "comm": comm, "cwd": None, "exe": "", "args": [], "env": {}}
+        try:
+            p["cwd"] = os.readlink(os.path.join(base, "cwd"))
+        except OSError:
+            pass
+        try:
+            p["exe"] = os.readlink(os.path.join(base, "exe"))
+        except OSError:
+            pass
+        try:
+            with open(os.path.join(base, "cmdline"), "rb") as f:
+                p["args"] = [a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1]]
+            with open(os.path.join(base, "environ"), "rb") as f:
+                for item in f.read().split(b"\0"):
+                    k, sep, v = item.decode("utf-8", "replace").partition("=")
+                    if sep and k in CARGO_ENV:
+                        p["env"][k] = v
+        except OSError:
+            pass
+        if not os.path.exists(base):
+            continue        # ended meanwhile
+        out.append(p)
+    return out
+
+
+def manifest_arg(args, cwd):
+    """--manifest-path of a cargo command line (absolute), or ''."""
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        val = None
+        if a == "--manifest-path" and i + 1 < len(args):
+            val = args[i + 1]
+        elif a.startswith("--manifest-path="):
+            val = a.split("=", 1)[1]
+        if val:
+            return os.path.normpath(os.path.join(cwd, val))
+    return ""
+
+
+def cargo_binary(p, home):
+    """The cargo to ask: the process's own program when it is a cargo (the
+    same version computes the same folder name), else the user's."""
+    exe = p["exe"]
+    if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == "cargo" and os.access(exe, os.X_OK):
+        return exe
+    ch = p["env"].get("CARGO_HOME") or os.environ.get("CARGO_HOME", "")
+    for c in (os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
+              shutil.which("cargo")):
+        if c and os.access(c, os.X_OK):
+            return c
+    return ""
+
+
+def cargo_query(p, home):
+    """(cache key, command, env, cwd) of the `cargo metadata` that tells the
+    build folder of process P; or (None, why) when it cannot be asked."""
+    cwd = p["cwd"]
+    if not cwd or cwd.endswith(" (deleted)") or not os.path.isdir(cwd):
+        return None, f"its working folder {cwd or '(unreadable)'} is not reachable"
+    cargo = cargo_binary(p, home)
+    if not cargo:
+        return None, "no cargo program found to ask"
+    cmd = [cargo]
+    if len(p["args"]) > 1 and p["args"][1].startswith("+"):
+        cmd.append(p["args"][1])       # rustup's +toolchain (the process is rustup's proxy)
+    cmd += ["metadata", "--no-deps", "--offline", "--format-version", "1"]
+    manifest = manifest_arg(p["args"], cwd)
+    if manifest:
+        cmd += ["--manifest-path", manifest]
+    env = {k: v for k, v in os.environ.items() if k not in CARGO_ENV}
+    env.update(p["env"])
+    # Never download a toolchain or anything else; plain output.
+    env.update(RUSTUP_AUTO_INSTALL="0", CARGO_NET_OFFLINE="true", CARGO_TERM_COLOR="never")
+    key = (tuple(cmd), cwd, tuple(sorted(p["env"].items())))
+    return key, (cmd, env, cwd)
+
+
+def ask_cargo(cmd, env, cwd):
+    """(build folder or '', None) or (None, why). Read only: metadata
+    --no-deps writes nothing and does not wait for the build lock."""
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"cargo metadata: {e}"
+    if r.returncode != 0:
+        last = (r.stderr.strip().splitlines() or ["failed"])[-1]
+        return None, f"cargo metadata: {last}"
+    try:
+        bd = json.loads(r.stdout).get("build_directory")
+    except (ValueError, AttributeError):
+        return None, "cargo metadata: unexpected output"
+    # No build_directory: a cargo without build-dir support, so not this root.
+    return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
+
+
+def cargo_users(root, home, cache):
+    """({folder key: [(pid, comm)]}, [(pid, comm, cwd, why)]): the folders
+    running cargo processes build in, and the cargo processes whose folder
+    could not be found out. CACHE (a dict) keeps the answers for one run."""
+    pre = prefixes(root)
+    found, unknown = {}, []
+    for p in cargo_procs():
+        key, q = cargo_query(p, home)
+        if key is None:
+            unknown.append((p["pid"], p["comm"], p["cwd"], q))
+            continue
+        if key not in cache:
+            cache[key] = ask_cargo(*q)
+        bd, why = cache[key]
+        if why:
+            unknown.append((p["pid"], p["comm"], p["cwd"], why))
+            continue
+        for pr in pre:
+            if bd.startswith(pr + "/"):
+                k = "/".join(bd[len(pr) + 1:].split("/")[:2])
+                lst = found.setdefault(k, [])
+                if (p["pid"], p["comm"]) not in lst:
+                    lst.append((p["pid"], p["comm"]))
+                break
+    return found, unknown
+
+
+def unknown_text(unknown):
+    pid, comm, cwd, why = unknown[0]
+    more = f" (and {len(unknown) - 1} more)" if len(unknown) > 1 else ""
+    return f"{comm} (pid {pid}) in {cwd or '?'}: its build folder is unknown ({why}){more}"
+
+
+def merge_users(*maps):
+    out = {}
+    for m in maps:
+        for k, v in m.items():
+            lst = out.setdefault(k, [])
+            lst += [u for u in v if u not in lst]
+    return out
+
+
+# ---- workspaces: which build folders are still claimed ----------------------------------------
+# A build folder is named after the path of a workspace's Cargo.toml. When no
+# workspace on disk computes that name any more (its worktree was removed),
+# the folder is an orphan: nothing will ever build there again. The
+# workspaces are the git worktrees of every repository under ~/Workspace
+# (`git worktree list` also names linked worktrees elsewhere, e.g. inside a
+# target/ folder); each Cargo.toml in them is asked, read only, which build
+# folder it uses (`cargo metadata --offline --no-deps`, never a download, never
+# a dependency resolution). If any step fails, nothing is an orphan in that run.
+WORKSPACE_REL = "Workspace"
+# Folders never walked (neither for repositories nor for Cargo.toml files).
+# Hidden folders are skipped too; worktrees inside them (.claude/worktrees/...)
+# are still found, through `git worktree list`.
+SCAN_SKIP = frozenset({"node_modules", "target", "__pycache__", "venv"})
+REPO_DEPTH = 6          # levels below ~/Workspace searched for repositories
+CRATE_DEPTH = 6         # levels below a worktree searched for Cargo.toml
+ENUM_BUDGET = 600       # seconds for the whole search; longer: incomplete
+CMD_TIMEOUT = 60        # seconds for one git or cargo call
+PIN_NAMES = ("rust-toolchain.toml", "rust-toolchain")
+# Files that may name a toolchain without pinning it (`cargo +nightly fuzz`,
+# TOOLCHAIN ?= nightly-2026-06-01, a CI job): the toolchains report reads
+# them so that it never offers to uninstall a toolchain named there.
+TOOL_FILE_NAMES = frozenset({"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile",
+                             "Taskfile.yml", "Taskfile.yaml"})
+TOOL_FILE_SUFFIXES = (".mk", ".just", ".sh", ".bash")
+# Read too, from a worktree's top (walk_dirs skips hidden folders): CI jobs
+# and cargo aliases. {folder: suffixes}
+TOOL_FILE_DIRS = {".github/workflows": (".yml", ".yaml"), ".cargo": ("config", "config.toml"),
+                  ".circleci": (".yml", ".yaml"), ".buildkite": (".yml", ".yaml")}
+TOOL_FILE_TOP = (".gitlab-ci.yml",)
+TOOL_FILE_MAX = 1 << 20     # bytes read of one file
+TOOL_FILES_MAX = 100000     # files read in all; more: the report counts as incomplete
+# A folder with this file is a cache (cargo's target/ and registry, ...): not searched.
+CACHE_TAG = "CACHEDIR.TAG"
+NOT_A_MEMBER = "believes it's in a workspace when it's not"
+
+
+class Incomplete(Exception):
+    pass
+
+
+def lower_priority():
+    """In the child, before exec: the lowest CPU priority (the timer runs at
+    Nice=19 anyway; a manual run should not slow builds either)."""
+    try:
+        os.nice(19)
+    except OSError:
+        pass
+
+
+def run_idle(cmd, cwd, env, timeout):
+    """subprocess.run at idle CPU and IO priority (ionice -c 3 when present)."""
+    io = shutil.which("ionice")
+    full = ([io, "-c", "3"] if io else []) + list(cmd)
+    return subprocess.run(full, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, timeout=timeout, preexec_fn=lower_priority)
+
+
+def walk_dirs(top, depth_max, deadline, stop=None):
+    """Yield (dir, names) for TOP and the folders below it, at most DEPTH_MAX
+    levels down; never follows symlinks; skips SCAN_SKIP and hidden folders;
+    does not descend into a folder for which STOP(dir, names) is true (it is
+    still yielded). A folder with a CACHEDIR.TAG (a cache, e.g. a cargo home
+    or target/ folder) is neither yielded nor entered. Unreadable folders are skipped: a cargo or git of the
+    user could not read them either."""
+    stack = [(top, 0)]
+    while stack:
+        if time.monotonic() > deadline:
+            raise Incomplete(f"the search of workspaces took longer than {ENUM_BUDGET}s")
+        d, depth = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        names = {e.name for e in entries}
+        if CACHE_TAG in names and d != top:
+            continue
+        yield d, names
+        if depth >= depth_max or (stop and stop(d, names)):
+            continue
+        for e in sorted(entries, key=lambda x: x.name, reverse=True):
+            if e.name.startswith(".") or e.name in SCAN_SKIP:
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    stack.append((e.path, depth + 1))
+            except OSError:
+                pass
+
+
+def git_common_dir(wt):
+    """The repository a worktree belongs to (its common git folder), or None
+    when its .git is broken (a linked worktree whose repository is gone)."""
+    g = os.path.join(wt, ".git")
+    try:
+        st = os.lstat(g)
+    except OSError:
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return os.path.realpath(g)
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        with open(g, encoding="utf-8", errors="replace") as f:
+            m = re.match(r"gitdir:\s*(.+)", f.read().strip())
+    except OSError:
+        return None
+    if not m:
+        return None
+    gd = os.path.normpath(os.path.join(wt, m.group(1).strip()))
+    if not os.path.isdir(gd):
+        return None
+    try:
+        with open(os.path.join(gd, "commondir"), encoding="utf-8") as f:
+            return os.path.realpath(os.path.join(gd, f.read().strip()))
+    except FileNotFoundError:
+        return os.path.realpath(gd)     # a submodule: its own repository
+    except OSError:
+        return None
+
+
+def git_worktrees(wt, deadline):
+    """The worktree paths `git worktree list --porcelain` names for the
+    repository of WT. Raises Incomplete when git fails."""
+    git = shutil.which("git")
+    if not git:
+        raise Incomplete("git not found on PATH")
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+    try:
+        r = run_idle([git, "-C", wt, "worktree", "list", "--porcelain"], wt, env,
+                     max(1, min(CMD_TIMEOUT, deadline - time.monotonic())))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Incomplete(f"git worktree list in {wt}: {e}") from None
+    if r.returncode != 0:
+        last = (r.stderr.strip().splitlines() or ["failed"])[-1]
+        raise Incomplete(f"git worktree list in {wt}: {last}")
+    out, cur, bare = [], None, False
+    for line in r.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            cur, bare = line[len("worktree "):], False
+        elif line == "bare":
+            bare = True
+        elif line == "" and cur is not None:
+            if not bare:
+                out.append(os.path.normpath(cur))
+            cur = None
+    return out
+
+
+class Workspaces:
+    """What the search found. claimed: {folder key: [workspace root, ...]};
+    incomplete: why the orphan rule must not run ('' when complete)."""
+
+    def __init__(self):
+        self.repos = 0
+        self.worktrees = []
+        self.manifests = 0
+        self.asked = 0
+        self.claimed = {}
+        self.pins = []          # rust-toolchain(.toml) files
+        self.tool_files = []    # files that may name a toolchain (TOOL_FILE_NAMES, ...)
+        self.failures = []      # [(manifest, why)]
+        self.incomplete = ""
+        self.seconds = 0.0
+
+
+def find_worktrees(home, deadline, ws):
+    """Every git worktree of the repositories under ~/Workspace (and those
+    the repositories list elsewhere)."""
+    top = os.path.join(home, WORKSPACE_REL)
+    if not os.path.isdir(top):
+        raise Incomplete(f"~/{WORKSPACE_REL} not found")
+    found = []
+    for d, names in walk_dirs(top, REPO_DEPTH, deadline):
+        if ".git" in names:
+            found.append(d)
+    ws.repos = len(found)
+    roots, groups = set(), {}
+    for d in found:
+        common = git_common_dir(d)
+        roots.add(os.path.realpath(d))
+        if common:
+            groups.setdefault(common, d)
+    for common, d in sorted(groups.items()):
+        for wt in git_worktrees(d, deadline):
+            if os.path.isdir(wt):           # a "prunable" one is gone: nothing to claim
+                roots.add(os.path.realpath(wt))
+    return sorted(roots)
+
+
+def is_tool_file(name):
+    return name in TOOL_FILE_NAMES or name.endswith(TOOL_FILE_SUFFIXES)
+
+
+def find_manifests(wt, deadline):
+    """(Cargo.toml files, rust-toolchain files, files that may name a
+    toolchain) in worktree WT; folders that are themselves a worktree or
+    repository (they have .git) are left to their own walk."""
+    manifests, pins, tools = [], [], []
+
+    def other_repo(d, names):
+        return d != wt and ".git" in names
+
+    for d, names in walk_dirs(wt, CRATE_DEPTH, deadline, stop=other_repo):
+        if other_repo(d, names):
+            continue
+        if "Cargo.toml" in names:
+            manifests.append(os.path.join(d, "Cargo.toml"))
+        pins += [os.path.join(d, n) for n in PIN_NAMES if n in names]
+        tools += [os.path.join(d, n) for n in sorted(names) if is_tool_file(n)]
+    tools += [os.path.join(wt, n) for n in TOOL_FILE_TOP if os.path.isfile(os.path.join(wt, n))]
+    for rel, ends in TOOL_FILE_DIRS.items():
+        try:
+            with os.scandir(os.path.join(wt, rel)) as it:
+                tools += sorted(e.path for e in it if e.name.endswith(ends) and e.is_file(follow_symlinks=False))
+        except OSError:
+            pass
+    return manifests, pins, tools
+
+
+def metadata_env(home):
+    env = {k: v for k, v in os.environ.items() if k not in ("RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR")}
+    # Never download a toolchain or anything else; plain output; the home asked about.
+    env.update(HOME=home, RUSTUP_AUTO_INSTALL="0", CARGO_NET_OFFLINE="true", CARGO_TERM_COLOR="never")
+    return env
+
+
+def user_cargo(home):
+    ch = os.environ.get("CARGO_HOME", "")
+    for c in (os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
+              shutil.which("cargo")):
+        if c and os.access(c, os.X_OK):
+            return c
+    return ""
+
+
+def workspace_metadata(cargo, manifest, env, deadline):
+    """cargo metadata of one Cargo.toml: (data, None) or (None, why)."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Incomplete(f"the search of workspaces took longer than {ENUM_BUDGET}s")
+    try:
+        r = run_idle([cargo, "metadata", "--offline", "--no-deps", "--format-version", "1",
+                      "--manifest-path", manifest], os.path.dirname(manifest), env, min(CMD_TIMEOUT, left))
+    except subprocess.TimeoutExpired:
+        return None, f"cargo metadata took longer than {int(min(CMD_TIMEOUT, left))}s"
+    except OSError as e:
+        return None, f"cargo metadata: {e.strerror or e}"
+    if r.returncode != 0:
+        if NOT_A_MEMBER in r.stderr:
+            # cargo refuses to build this package where it is (a crate under a
+            # workspace that does not list it, e.g. a fuzz/ folder): it can
+            # have no build folder, so it claims none.
+            return {}, None
+        last = (r.stderr.strip().splitlines() or ["failed"])[-1]
+        return None, f"cargo metadata: {last}"
+    try:
+        data = json.loads(r.stdout)
+        if not isinstance(data, dict):
+            raise ValueError
+    except ValueError:
+        return None, "cargo metadata: unexpected output"
+    return data, None
+
+
+def claimed_folders(root, home, with_cargo=True):
+    """Workspaces: which folders of ROOT a workspace on disk still claims.
+    WITH_CARGO=False only lists worktrees and rust-toolchain files (status)."""
+    ws = Workspaces()
+    start = time.monotonic()
+    deadline = start + ENUM_BUDGET
+    pre = prefixes(root) if root else ()
+    try:
+        ws.worktrees = find_worktrees(home, deadline, ws)
+        cargo = user_cargo(home) if with_cargo else ""
+        if with_cargo and not cargo:
+            raise Incomplete("no cargo program found to ask")
+        env = metadata_env(home)
+        for wt in ws.worktrees:
+            manifests, pins, tools = find_manifests(wt, deadline)
+            ws.pins += pins
+            ws.tool_files += tools
+            ws.manifests += len(manifests)
+            if not with_cargo:
+                continue
+            covered = set()
+            # The shallowest first: a workspace's root answers for its members.
+            for m in sorted(manifests, key=lambda p: (p.count("/"), p)):
+                if m in covered:
+                    continue
+                data, why = workspace_metadata(cargo, m, env, deadline)
+                ws.asked += 1
+                if why:
+                    ws.failures.append((m, why))
+                    continue
+                covered.add(m)
+                for p in data.get("packages") or []:
+                    if isinstance(p, dict) and isinstance(p.get("manifest_path"), str):
+                        covered.add(os.path.normpath(p["manifest_path"]))
+                wr = data.get("workspace_root")
+                if isinstance(wr, str):
+                    covered.add(os.path.join(os.path.normpath(wr), "Cargo.toml"))
+                bd = data.get("build_directory")
+                if not isinstance(bd, str) or not bd:
+                    continue        # a cargo without build-dir support: not in this root
+                bd = os.path.normpath(bd)
+                for pr in pre:
+                    if bd.startswith(pr + "/"):
+                        key = "/".join(bd[len(pr) + 1:].split("/")[:2])
+                        lst = ws.claimed.setdefault(key, [])
+                        shown = wr if isinstance(wr, str) else os.path.dirname(m)
+                        if shown not in lst:
+                            lst.append(shown)
+                        break
+        if ws.failures:
+            m, why = ws.failures[0]
+            more = f" (and {len(ws.failures) - 1} more)" if len(ws.failures) > 1 else ""
+            raise Incomplete(f"{tilde(m, home)}: {why}{more}")
+    except Incomplete as e:
+        ws.incomplete = str(e)
+    ws.seconds = time.monotonic() - start
+    return ws
+
+
+# ---- the plan -------------------------------------------------------------------------------
+def decide(folders, pol, now, in_use, claimed=None):
+    """[(folder, action, reason)] sorted least recently active first.
+    action: 'delete', 'trim' (delete only its incremental folders) or
+    'keep'. CLAIMED: {folder key: ...} of a complete workspace search, or
+    None (no orphan rule). Pure: no file access."""
+    order = sorted(folders, key=lambda f: (f.activity, f.key))
+    act = {}
+    total = sum(f.size for f in folders)
+    inc_idle = pol.get("incremental_idle", 0)
+    for f in order:
+        idle = now - f.activity
+        if f.problem:
+            act[f.key] = ("keep", f"left alone: {f.problem}")
+        elif f.key in in_use:
+            act[f.key] = ("keep", "in use: " + users_text(in_use[f.key]))
+        elif idle < pol["min_keep"]:
+            act[f.key] = ("keep", f"active {ago(idle)} ago (within MIN_KEEP)")
+        elif idle > pol["max_idle"]:
+            act[f.key] = ("delete", f"idle {ago(idle)} > MAX_IDLE")
+            total -= f.size
+        elif claimed is not None and pol.get("orphans", True) and f.key not in claimed:
+            act[f.key] = ("delete", f"orphan: no workspace claims it (idle {ago(idle)})")
+            total -= f.size
+        elif inc_idle and idle > inc_idle and f.inc_size:
+            act[f.key] = ("trim", f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})")
+            total -= f.inc_size
+    if pol["max_total"] and total > pol["max_total"]:
+        for f in order:
+            if total <= pol["max_total"]:
+                break
+            a = act.get(f.key, ("", ""))[0]
+            if a in ("keep", "delete"):
+                continue
+            act[f.key] = ("delete", f"over MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}), least recently active")
+            total -= f.size - (f.inc_size if a == "trim" else 0)
+    out = []
+    for f in order:
+        a, why = act.get(f.key, ("keep", f"active {ago(now - f.activity)} ago"))
+        out.append((f, a, why))
+    return out
+
+
+def users_text(users):
+    shown = ", ".join(f"{comm} (pid {pid})" for pid, comm in users[:3])
+    return shown + (f" and {len(users) - 3} more" if len(users) > 3 else "")
+
+
+def after_total(plan):
+    return sum(f.size - (f.inc_size if a == "trim" else 0) for f, a, _ in plan if a != "delete")
+
+
+# ---- deleting -------------------------------------------------------------------------------
+def time_left(deadline):
+    """Seconds until DEADLINE (time.monotonic()), or None without one."""
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def remove_tree(path, timeout=None):
+    """rm -rf --one-file-system (never follows symlinks). TIMEOUT (seconds,
+    None: none): rm is stopped then; what is left of PATH (an already
+    renamed-away folder) is a leftover that the next run deletes."""
+    try:
+        r = subprocess.run(["rm", "-rf", "--one-file-system", "--", path],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           timeout=None if timeout is None else max(1, timeout))
+    except subprocess.TimeoutExpired:
+        return False, f"stopped after {int(max(1, timeout))}s (the run's time budget); the next run deletes the rest"
+    return r.returncode == 0, r.stdout.strip()
+
+
+def guarded(root, folder, home, cache, step, recheck=None):
+    """Run STEP() while holding every cargo lock of FOLDER, after checking
+    that no process uses it and, with RECHECK, that the rule that chose the
+    action still holds (RECHECK() measures the folder again and returns ''
+    or why not). STEP returns (result, detail). Returns that, or
+    ('busy', why), ('changed', why) from RECHECK, or ('stop', why): a cargo
+    process whose build folder is unknown runs; nothing more is deleted in
+    this run."""
+    fds, busy = take_locks(folder.path)
+    if busy:
+        return "busy", f"cargo lock held: {os.path.relpath(busy, folder.path)}"
+    # The users are checked while the locks are held: a cargo that starts
+    # after this check must first compile, and that waits for the lock.
+    try:
+        users = proc_users(root)[0].get(folder.key)
+        if users:
+            return "busy", "in use: " + users_text(users)
+        ties, unknown = cargo_users(root, home, cache)
+        if ties.get(folder.key):
+            return "busy", "cargo runs on it: " + users_text(ties[folder.key])
+        if unknown:
+            return "stop", unknown_text(unknown)
+        # The plan was made from the activity measured when the run started;
+        # a build may have written there since (and ended: no lock, no
+        # process). Measured again here, while the locks are held: a cargo
+        # that starts now waits for them.
+        why = recheck() if recheck else ""
+        if why:
+            return "changed", why
+        return step()
+    finally:
+        release(fds)
+
+
+def delete_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
+    """Lock, check for users (and RECHECK, see guarded), rename away,
+    unlock, delete. ('deleted'|'busy'|'changed'|'stop'|'failed', detail)."""
+    try:
+        st = os.lstat(folder.path)
+    except FileNotFoundError:
+        return "failed", "already gone"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return "failed", "no longer a folder (refused)"
+    top = os.path.dirname(folder.path)
+    trash = os.path.join(root, f"{TRASH_PREFIX}{folder.key.replace('/', '')}-{int(now)}")
+
+    def step():
+        try:
+            os.rename(folder.path, trash)
+        except OSError as e:
+            return "failed", f"rename: {e.strerror}"
+        return "moved", ""
+
+    result, detail = guarded(root, folder, home, cache, step, recheck)
+    if result != "moved":
+        return result, detail
+    try:
+        os.rmdir(top)       # the XX folder, when this was its last hash
+    except OSError:
+        pass
+    ok, msg = remove_tree(trash, time_left(rm_deadline))
+    if not ok:
+        return "failed", f"rm: {msg}"
+    # A cargo that was waiting for the lock during the rename builds again,
+    # from scratch, into a new folder at the same path (it does not fail).
+    if os.path.lexists(folder.path):
+        return "deleted", "a build started meanwhile and is filling a new folder at the same path"
+    return "deleted", ""
+
+
+def trim_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
+    """Delete only the incremental folders of FOLDER, with the same locks and
+    checks as delete_folder (RECHECK may update folder.inc). Each is renamed away while the locks are held;
+    the modification time of its parent is put back afterwards, so that the
+    folder's last activity (MAX_IDLE) does not move. ('trimmed'|'busy'|
+    'stop'|'failed', detail)."""
+    moved = []
+    base = folder.key.replace("/", "")
+
+    def step():
+        for i, (path, _size) in enumerate(folder.inc):
+            parent = os.path.dirname(path)
+            try:
+                pst = os.lstat(parent)
+                st = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(pst.st_mode):
+                continue
+            trash = os.path.join(root, f"{TRASH_PREFIX}{base}-inc{i}-{int(now)}")
+            try:
+                os.rename(path, trash)
+            except OSError as e:
+                return "failed", f"rename {os.path.relpath(path, folder.path)}: {e.strerror}"
+            moved.append(trash)
+            try:
+                os.utime(parent, ns=(pst.st_atime_ns, pst.st_mtime_ns), follow_symlinks=False)
+            except OSError:
+                pass
+        return "moved", ""
+
+    result, detail = guarded(root, folder, home, cache, step, recheck)
+    # What was renamed away is deleted also after a later failure (else the
+    # next run deletes it as a leftover).
+    errors = []
+    for t in moved:
+        ok, msg = remove_tree(t, time_left(rm_deadline))
+        if not ok:
+            errors.append(msg)
+    if result != "moved":
+        return result, detail
+    if errors:
+        return "failed", f"rm: {errors[0]}"
+    return "trimmed", ""
+
+
+# ---- targets --------------------------------------------------------------------------------
+def state_path(home, tid):
+    return os.path.join(home, STATE_DIR_REL, f"toolchains-{tid.replace(':', '-')}.json")
+
+
+def write_state(home, tid, data):
+    path = state_path(home, tid)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=f".{os.path.basename(path)}.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        say(f"{tid}: could not save the run summary: {e}", 4)
+
+
+def read_state(home, tid):
+    try:
+        with open(state_path(home, tid)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+class Target:
+    """One cache of one toolchain. A new target is a subclass with these
+    attributes and methods, added to TARGETS (and its keys to
+    toolchains/toolchains.conf):
+      ID        "lang:cache", as typed on the command line
+      PREFIX    the settings prefix, e.g. RUST_BUILD
+      WHAT      one line for status
+      SETTINGS  its own setting names (without PREFIX_; ENABLED is common)
+      make_policy(vals, prefix)  checked policy from {SETTING: raw value}
+      location()                 the folder it prunes (for status)
+      check()                    raise Refused when it would refuse to run
+      plan(), apply()            exit status; apply also calls write_state
+      status_lines()             [line] for status (size, oldest, ...)
+      last_run_text(state)       one line from the saved summary"""
+
+    ID = PREFIX = WHAT = ""
+    SETTINGS = ()
+    # time.monotonic() by which an apply must be done (None: no limit);
+    # cmd_prune sets it from RUN_BUDGET.
+    deadline = None
+    # PATH to look for programs in (None: this process's PATH).
+    path = None
+    # The most seconds one apply can take (None: no fixed bound, only the
+    # run's budget). prune apply runs the bounded targets first.
+    MAX_SECONDS = None
+    # check() looks for a program on PATH (auto on then checks the user
+    # manager's PATH, which the timer runs with).
+    USES_PATH = False
+
+    def __init__(self, home, now, policy):
+        self.home, self.now, self.policy = home, now, policy
+        self.started = time.monotonic()
+
+    def tsay(self, msg, prio=6):
+        say(f"{self.ID}: {msg}", prio)
+
+    def clock(self):
+        """Now, on the run's clock: NOW plus the time since the start."""
+        return self.now + (time.monotonic() - self.started)
+
+    def time_left(self):
+        """Seconds left of the run's time budget (None: no limit)."""
+        return time_left(self.deadline)
+
+
+class RustBuild(Target):
+    ID = "rust:build"
+    PREFIX = "RUST_BUILD"
+    WHAT = "cargo's intermediate build files (build-dir), one folder per workspace path"
+    SETTINGS = ("MAX_IDLE", "MAX_TOTAL", "MIN_KEEP", "ORPHANS", "INCREMENTAL_IDLE")
+
+    @staticmethod
+    def make_policy(vals, prefix):
+        pol = {
+            "max_idle": parse_duration(vals["MAX_IDLE"]),
+            "max_total": parse_size(vals["MAX_TOTAL"]),
+            "min_keep": parse_duration(vals["MIN_KEEP"]),
+            "orphans": parse_bool(vals["ORPHANS"]),
+            "incremental_idle": parse_off_or_duration(vals["INCREMENTAL_IDLE"]),
+        }
+        if pol["min_keep"] < MIN_KEEP_FLOOR:
+            raise ConfigError(f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} is below the floor of 15m")
+        if pol["max_idle"] < pol["min_keep"]:
+            raise ConfigError(f"{prefix}_MAX_IDLE={vals['MAX_IDLE']} is shorter than "
+                              f"{prefix}_MIN_KEEP={vals['MIN_KEEP']}")
+        if pol["incremental_idle"] and pol["incremental_idle"] < pol["min_keep"]:
+            raise ConfigError(f"{prefix}_INCREMENTAL_IDLE={vals['INCREMENTAL_IDLE']} is shorter than "
+                              f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} (0 or off turns it off)")
+        return pol
+
+    @staticmethod
+    def policy_text(pol):
+        cap = gib(pol["max_total"]) if pol["max_total"] else "off"
+        inc = span(pol["incremental_idle"]) if pol.get("incremental_idle") else "off"
+        orph = "on" if pol.get("orphans", True) else "off"
+        return (f"MAX_IDLE {span(pol['max_idle'])}, MAX_TOTAL {cap}, MIN_KEEP {span(pol['min_keep'])}, "
+                f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}")
+
+    def location(self):
+        return os.path.join(self.home, ROOT_REL)
+
+    def check(self):
+        resolve_root(self.home)
+
+    def gather(self):
+        root = resolve_root(self.home)
+        if root is None:
+            return None, [], [], []
+        folders, trash, others = scan(root, self.now)
+        return root, folders, trash, others
+
+    def workspaces(self, root):
+        """(claimed or None, Workspaces or None): the folders claimed by a
+        workspace; None when the orphan rule is off or the search is
+        incomplete (then nothing is an orphan)."""
+        if not self.policy.get("orphans", True):
+            return None, None
+        ws = claimed_folders(root, self.home)
+        if ws.incomplete:
+            return None, ws
+        if not ws.claimed:
+            ws.incomplete = "no workspace claims any folder (a search that finds nothing is not trusted)"
+            return None, ws
+        return ws.claimed, ws
+
+    def workspace_lines(self, ws, claimed, folders):
+        if ws is None:
+            return ["orphans: the rule is off (RUST_BUILD_ORPHANS=no)"]
+        out = [f"workspaces: {ws.repos} repositories under ~/{WORKSPACE_REL}, {len(ws.worktrees)} worktree(s), "
+               f"{ws.manifests} Cargo.toml, {ws.asked} asked (cargo metadata --offline --no-deps), "
+               f"{ws.seconds:.0f}s"]
+        if claimed is None:
+            out.append(f"orphans: NOT looked for in this run: {ws.incomplete}")
+        else:
+            unclaimed = [f for f in folders if f.key not in claimed]
+            out.append(f"orphans: {len(claimed)} folder(s) claimed by a workspace, {len(unclaimed)} not claimed "
+                       f"({gib(sum(f.size for f in unclaimed))})")
+        return out
+
+    def plan(self):
+        home, now, pol = self.home, self.now, self.policy
+        root, folders, trash, others = self.gather()
+        if root is None:
+            say(f"  ~/{ROOT_REL} does not exist yet: nothing to do")
+            return 0
+        say(f"  root: {tilde(root, home)}/XX/YYYYYYYYYYYYYY (cargo build-dir)")
+        say(f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+            "(sizes as du shows them: before btrfs compression; on disk usually less, twice with RAID1)")
+        claimed, ws = self.workspaces(root)
+        for line in self.workspace_lines(ws, claimed, folders):
+            say(f"  {line}")
+        users, unreadable = proc_users(root)
+        ties, unknown = cargo_users(root, home, {})
+        users = merge_users(users, ties)
+        plan = decide(folders, pol, now, users, claimed)
+        if plan:
+            say(f"  {'ACTION':<7} {'SIZE':>10}  {'LAST ACTIVE':<16}  FOLDER            WHY")
+        for f, a, why in plan:
+            say(f"  {a:<7} {gib(f.size):>10}  {when(f.activity):<16}  {f.key:<17} {why}")
+        print_others(others, trash)
+        gone = [f for f, a, _ in plan if a == "delete"]
+        trims = [f for f, a, _ in plan if a == "trim"]
+        say(f"  apply would delete {len(gone)} folder(s), {gib(sum(f.size for f in gone))}"
+            + (f", and the incremental folders of {len(trims)} more, {gib(sum(f.inc_size for f in trims))}"
+               if trims else "")
+            + f"; left: {gib(after_total(plan))} in {len(plan) - len(gone)} folder(s)")
+        if pol["max_total"] and after_total(plan) > pol["max_total"]:
+            say("  still above MAX_TOTAL afterwards: the rest is active within MIN_KEEP, in use or left alone")
+        if unreadable:
+            say(f"  note: {unreadable} Rust tool process(es) of yours could not be inspected (run on the host to "
+                "see all); cargo's own lock is still checked before each deletion")
+        if unknown and (gone or trims):
+            say(f"  note: {unknown_text(unknown)}; apply deletes nothing while it runs")
+        return 0
+
+    def apply(self):
+        home, now, pol = self.home, self.now, self.policy
+        root, folders, trash, others = self.gather()
+        if root is None:
+            self.tsay(f"~/{ROOT_REL} does not exist yet: nothing to do")
+            write_state(home, self.ID, {"time": now, "deleted": 0, "freed": 0, "total": 0, "folders": 0,
+                                        "busy": 0, "failed": 0, "trimmed": 0, "trim_freed": 0})
+            return 0
+        before = sum(f.size for f in folders)
+        self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {self.policy_text(pol)}")
+        for name, why in others:
+            self.tsay(f"left alone: {name} ({why})", 5)
+        claimed, ws = self.workspaces(root)
+        for line in self.workspace_lines(ws, claimed, folders):
+            self.tsay(line, 5 if claimed is None and ws is not None else 6)
+        rc = 0
+        cache = {}
+        users, unreadable = proc_users(root)
+        users = merge_users(users, cargo_users(root, home, cache)[0])
+        if unreadable:
+            self.tsay(f"{unreadable} Rust tool process(es) of yours could not be inspected; "
+                      "cargo's lock is still checked", 5)
+        for t in trash:
+            if users.get(t.key):
+                self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
+                continue
+            ok, msg = remove_tree(t.path, self.time_left())
+            self.tsay(f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
+                      6 if ok else 3)
+        deleted, trimmed = {}, {}
+        nbusy = failed = 0
+        left = list(folders)
+        # Said once: what the policy alone would delete but a process uses now.
+        for f, a, _ in decide(left, pol, now, {}, claimed):
+            if a in ("delete", "trim") and f.key in users:
+                nbusy += 1
+                self.tsay(f"skipped {f.key}: in use: {users_text(users[f.key])}", 5)
+        dev = os.lstat(root).st_dev
+        rechecked = {}
+        stopped_by_budget = False
+
+        def recheck(f, a):
+            """Measure F again (the locks are held) and plan again with it:
+            '' when the rule still gives action A (or a delete when A is a
+            trim), else why not. F takes the fresh measurement either way."""
+            def check():
+                cur = self.clock()
+                top, leaf = f.key.split("/")
+                fresh = measure(Folder(root, top, leaf), dev, cur)
+                got, gwhy = next((x, w) for g, x, w in decide([fresh if g is f else g for g in left], pol, cur,
+                                                            users, claimed) if g is fresh)
+                f.__dict__.update(fresh.__dict__)
+                if got == a or (a == "trim" and got == "delete" and f.inc):
+                    return ""
+                return f"measured again: {gwhy}" if got == "keep" else f"measured again: now {got}: {gwhy}"
+            return check
+
+        # One folder at a time, planned again after each: a folder found busy (or
+        # failing) stays counted and kept, so the cap picks the next one instead.
+        while True:
+            cur = self.clock()
+            plan = decide(left, pol, cur, users, claimed)
+            nxt = next(((f, a, why) for f, a, why in plan if a == "delete"), None)
+            nxt = nxt or next(((f, a, why) for f, a, why in plan if a == "trim"), None)
+            if nxt is None:
+                break
+            f, a, why = nxt
+            left_s = self.time_left()
+            if left_s is not None and left_s < RM_MARGIN:
+                stopped_by_budget = True
+                self.tsay(f"stopped before {f.key}: the run's time budget ({span(RUN_BUDGET)}) is nearly used up; "
+                          "the next run goes on", 5)
+                break
+            if a == "delete":
+                result, detail = delete_folder(root, f, now, home, cache, recheck(f, a), self.deadline)
+            else:
+                result, detail = trim_folder(root, f, now, home, cache, recheck(f, a), self.deadline)
+            if result == "changed":
+                # Planned again with the fresh measurement; a folder that keeps
+                # changing is left for the next run.
+                rechecked[f.key] = rechecked.get(f.key, 0) + 1
+                self.tsay(f"not {'deleted' if a == 'delete' else 'trimmed'}: {f.key}: {detail}", 5)
+                if rechecked[f.key] < 3:
+                    continue
+                result = "busy"
+            if result == "deleted":
+                left.remove(f)
+                deleted[f.key] = f
+                self.tsay(f"deleted {f.key} ({gib(f.size)}, last active {when(f.activity)}): {why}")
+                if detail:
+                    self.tsay(f"note: {f.key}: {detail}", 5)
+                continue
+            if result == "trimmed":
+                trimmed[f.key] = f.inc_size
+                self.tsay(f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active "
+                          f"{when(f.activity)}): {why}")
+                f.size -= f.inc_size        # planned again without them (the cap counts what is left)
+                f.inc = []
+                continue
+            if result == "stop":
+                nbusy += 1
+                self.tsay(f"stopped before {f.key}: {detail}; nothing more is deleted in this run", 5)
+                break
+            if result == "busy":
+                nbusy += 1
+                self.tsay(f"skipped {f.key}: {detail}", 5)
+            else:
+                failed += 1
+                rc = 1
+                self.tsay(f"could not delete {'the incremental folders of ' if a == 'trim' else ''}{f.key}: "
+                          f"{detail}", 3)
+            if a == "delete" and not os.path.lexists(f.path):
+                left.remove(f)       # renamed away; the next run deletes the leftover
+            users = dict(users)
+            users[f.key] = [("-", detail)]
+        freed = sum(f.size for f in deleted.values())
+        trim_freed = sum(trimmed.values())
+        total = before - freed - trim_freed
+        self.tsay(f"done: deleted {len(deleted)} folder(s), freed {gib(freed)}"
+                  + (f"; incremental of {len(trimmed)} folder(s), freed {gib(trim_freed)}" if trimmed else "")
+                  + f"; left {gib(total)} in {len(folders) - len(deleted)} folder(s)"
+                  + (f"; {nbusy} busy" if nbusy else "")
+                  + ("; stopped at the time budget" if stopped_by_budget else ""))
+        if pol["max_total"] and total > pol["max_total"] and not stopped_by_budget:
+            self.tsay(f"still above MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}): "
+                      "the rest is active within MIN_KEEP, in use or left alone", 4)
+        write_state(home, self.ID, {"time": now, "deleted": len(deleted), "freed": freed, "total": total,
+                                    "folders": len(folders) - len(deleted), "busy": nbusy, "failed": failed,
+                                    "trimmed": len(trimmed), "trim_freed": trim_freed})
+        return rc
+
+    @staticmethod
+    def last_run_text(s):
+        extra = f", {s['busy']} busy" if s.get("busy") else ""
+        extra += f", {s['failed']} failed" if s.get("failed") else ""
+        trim = (f", incremental of {s['trimmed']} folder(s) ({gib(s.get('trim_freed', 0))})"
+                if s.get("trimmed") else "")
+        return (f"{when(s['time'])}, deleted {s['deleted']} folder(s) ({gib(s['freed'])}){trim}{extra}; "
+                f"left {gib(s['total'])} in {s['folders']} folder(s)")
+
+    def status_lines(self):
+        """Size and age of the folders, or why they are not looked at."""
+        try:
+            root = resolve_root(self.home)
+        except Refused as e:
+            return [f"not pruned: {e}"]
+        if root is None:
+            return [f"size:     ~/{ROOT_REL} does not exist yet"]
+        folders, trash, others = scan(root, self.now)
+        out = [f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+               "(as du shows it: before btrfs compression)"]
+        if folders:
+            old = min(folders, key=lambda f: f.activity)
+            new = max(folders, key=lambda f: f.activity)
+            out.append(f"oldest:   {when(old.activity)} ({ago(self.now - old.activity)} ago, {old.key}, "
+                       f"{gib(old.size)})")
+            out.append(f"newest:   {when(new.activity)} ({ago(self.now - new.activity)} ago, {new.key}, "
+                       f"{gib(new.size)})")
+        out += [f"left alone: {name} ({why})" for name, why in others]
+        out += [f"leftover of an interrupted run: {t.key} ({gib(t.size)}): deleted by apply" for t in trash]
+        return out
+
+
+def print_others(others, trash):
+    for name, why in others:
+        say(f"  left alone: {name} ({why})")
+    for t in trash:
+        say(f"  leftover of an interrupted run: {t.key} ({gib(t.size)}): deleted by apply")
+
+
+# ---- python:uv ------------------------------------------------------------------------------
+UV_CACHE_REL = ".cache/uv"
+UV_TIMEOUT = 10 * 60        # seconds for one `uv cache prune` (also bounded by the run's budget)
+UV_LOCK_WAIT = 60           # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
+# What uv says when UV_LOCK_TIMEOUT ran out ("Timeout (60s) when waiting for
+# lock on `...` at `.../.lock`, is another uv process running?"). Any other
+# error, also one that names the lock file (permission denied, ...), is a
+# failure.
+UV_LOCK_TIMED_OUT = re.compile(r"Timeout \(\d+(?:\.\d+)?s\) when waiting for lock on ")
+UV_REMOVED = re.compile(r"Removed (\d+) files? \(([\d.]+)\s*([KMGT]?i?B)\)")
+UV_UNITS = {"b": 1, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40,
+            "kb": 1000, "mb": 10 ** 6, "gb": 10 ** 9, "tb": 10 ** 12}
+
+
+def tree_size(path):
+    """Size of a tree as du shows it (st_blocks, hardlinks once); symlinks
+    not followed, other filesystems not entered."""
+    try:
+        dev = os.lstat(path).st_dev
+    except OSError:
+        return 0
+    f = Folder("", "", "")
+    f.path = path
+    return measure(f, dev, time.time()).size
+
+
+def uv_env():
+    env = {k: v for k, v in os.environ.items() if k not in ("UV_CACHE_DIR", "UV_NO_CACHE", "UV_LOCK_TIMEOUT")}
+    env.update(UV_LOCK_TIMEOUT=str(UV_LOCK_WAIT), NO_COLOR="1")
+    return env
+
+
+def uv_lock_busy(cache):
+    """True while another uv holds its cache lock (<cache>/.lock: every uv
+    command holds it shared; `uv cache prune` needs it alone). The test lock
+    is let go at once."""
+    try:
+        fd = os.open(os.path.join(cache, ".lock"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+class PythonUv(Target):
+    ID = "python:uv"
+    PREFIX = "PYTHON_UV"
+    WHAT = "uv's package cache (uv cache prune: only entries uv no longer uses)"
+    SETTINGS = ("INTERVAL",)
+    named = False
+    MAX_SECONDS = UV_TIMEOUT
+    USES_PATH = True
+
+    @staticmethod
+    def make_policy(vals, prefix):
+        return {"interval": parse_off_or_duration(vals["INTERVAL"])}
+
+    @staticmethod
+    def policy_text(pol):
+        every = span(pol["interval"]) if pol["interval"] else "every run"
+        return f"uv cache prune, at most once per INTERVAL ({every})"
+
+    def location(self):
+        return os.path.join(self.home, UV_CACHE_REL)
+
+    def uv(self):
+        uv = shutil.which("uv", path=self.path)
+        if not uv:
+            raise Refused("uv not found on PATH: nothing is done (install uv, or PYTHON_UV_ENABLED=no)")
+        return uv
+
+    def check(self):
+        self.uv()
+
+    def run_uv(self, uv, args, timeout):
+        return run_idle([uv, *args], self.home, uv_env(), timeout)
+
+    def uv_facts(self, uv):
+        """(version text, has --dry-run): read only, from uv's own help."""
+        try:
+            v = self.run_uv(uv, ["--version"], 20).stdout.strip()
+            h = self.run_uv(uv, ["cache", "prune", "--help"], 20).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return "?", False
+        return v or "?", "--dry-run" in h
+
+    def cache(self):
+        """The cache folder, or None when it does not exist (nothing to do)."""
+        c = self.location()
+        try:
+            st = os.lstat(os.path.realpath(c))
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            raise Refused(f"{tilde(c, self.home)} is not a folder: refused")
+        return c
+
+    def due(self):
+        """'' when an automatic run is due, else why not."""
+        last = read_state(self.home, self.ID)
+        iv = self.policy["interval"]
+        if self.named or not iv or not last or not isinstance(last.get("time"), (int, float)):
+            return ""
+        if self.now - last["time"] < iv:
+            return f"last run {ago(self.now - last['time'])} ago (INTERVAL {span(iv)})"
+        return ""
+
+    def plan(self):
+        c = self.cache()
+        if c is None:
+            say(f"  ~/{UV_CACHE_REL} does not exist: nothing to do")
+            return 0
+        uv = self.uv()
+        version, dry = self.uv_facts(uv)
+        say(f"  uv: {uv} ({version}); cache {gib(tree_size(c))} (as du shows it)")
+        if uv_lock_busy(c):
+            say("  a uv command is using the cache now (its lock is held): apply would skip it this time")
+        wait = self.due()
+        if wait:
+            say(f"  the timer would skip it: {wait}; named on the command line it runs")
+        if dry:
+            try:
+                r = self.run_uv(uv, ["cache", "prune", "--dry-run", "--cache-dir", c, "--no-progress"], UV_TIMEOUT)
+                for line in (r.stdout + r.stderr).strip().splitlines():
+                    say(f"  uv: {line}")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                say(f"  uv cache prune --dry-run: {e}")
+        else:
+            say("  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
+                "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
+                "only known afterwards")
+        return 0
+
+    def apply(self):
+        c = self.cache()
+        if c is None:
+            self.tsay(f"~/{UV_CACHE_REL} does not exist: nothing to do")
+            return 0
+        wait = self.due()
+        if wait:
+            self.tsay(f"not due: {wait}")
+            return 0
+        uv = self.uv()
+        if uv_lock_busy(c):
+            self.tsay("skipped: a uv command is using the cache (its lock is held); the next run tries again", 5)
+            return 0
+        timeout = UV_TIMEOUT
+        left = self.time_left()
+        if left is not None:
+            if left < 2 * UV_LOCK_WAIT:
+                self.tsay(f"skipped: the run's time budget ({span(RUN_BUDGET)}) is used up; the next run tries again", 5)
+                return 0
+            timeout = min(timeout, left)
+        try:
+            r = self.run_uv(uv, ["cache", "prune", "--cache-dir", c, "--no-progress"], timeout)
+        except subprocess.TimeoutExpired:
+            self.tsay(f"uv cache prune took longer than {ago(timeout)}: stopped", 3)
+            return 1
+        except OSError as e:
+            self.tsay(f"could not run uv: {e.strerror or e}", 3)
+            return 1
+        text = (r.stdout + "\n" + r.stderr).strip()
+        if r.returncode != 0:
+            if UV_LOCK_TIMED_OUT.search(text) or uv_lock_busy(c):
+                self.tsay(f"skipped: uv waited {UV_LOCK_WAIT}s for its cache lock (another uv runs); "
+                          "the next run tries again", 5)
+                return 0
+            last = (text.splitlines() or ["failed"])[-1]
+            self.tsay(f"uv cache prune failed: {last}", 3)
+            return 1
+        removed, freed = 0, 0
+        m = UV_REMOVED.search(text)
+        if m:
+            removed = int(m.group(1))
+            freed = int(float(m.group(2)) * UV_UNITS.get(m.group(3).lower(), 1))
+        for line in text.splitlines():
+            if line.strip():
+                self.tsay(f"uv: {line.strip()}")
+        write_state(self.home, self.ID, {"time": self.now, "removed": removed, "freed": freed})
+        return 0
+
+    @staticmethod
+    def last_run_text(s):
+        return f"{when(s['time'])}, removed {s.get('removed', 0)} file(s) ({gib(s.get('freed', 0))})"
+
+    def status_lines(self):
+        c = self.location()
+        if not os.path.isdir(c):
+            return [f"size:     ~/{UV_CACHE_REL} does not exist"]
+        out = [f"size:     {gib(tree_size(c))} (as du shows it)"]
+        uv = shutil.which("uv")
+        out.append(f"uv:       {uv}" if uv else "uv:       not found on PATH (prune refuses)")
+        if uv_lock_busy(c):
+            out.append("in use:   a uv command holds the cache lock now")
+        return out
+
+
+# ---- rust toolchains: a report, nothing is deleted ----------------------------------------
+HOST_SUFFIX = re.compile(r"-(?:x86_64|aarch64|i686|armv7|riscv64gc|powerpc64le|s390x|loongarch64)-[\w.-]+\Z")
+
+
+def rustup_home(home):
+    rh = os.environ.get("RUSTUP_HOME", "")
+    return rh if os.path.isabs(rh) else os.path.join(home, ".rustup")
+
+
+def pinned_channel(path):
+    """The toolchain a rust-toolchain(.toml) file pins, or ''."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(65536)
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", "replace")
+    if path.endswith(".toml") or "[toolchain]" in text:
+        try:
+            tc = tomllib.loads(text).get("toolchain")
+        except tomllib.TOMLDecodeError:
+            return ""
+        ch = tc.get("channel") if isinstance(tc, dict) else None
+        return ch.strip() if isinstance(ch, str) else ""
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    return lines[0] if len(lines) == 1 else ""
+
+
+def rustup_default(home, rh):
+    """The default toolchain's name, or ''. settings.toml first; else asks
+    rustup (read only)."""
+    try:
+        with open(os.path.join(rh, "settings.toml"), "rb") as f:
+            d = tomllib.load(f).get("default_toolchain")
+        if isinstance(d, str) and d:
+            return d
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    rustup = shutil.which("rustup")
+    if not rustup:
+        return ""
+    env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
+    env.pop("RUSTUP_TOOLCHAIN", None)
+    try:
+        r = subprocess.run([rustup, "default"], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    words = r.stdout.split() if r.returncode == 0 else []
+    return words[0] if words else ""
+
+
+def short_toolchain(name):
+    return HOST_SUFFIX.sub("", name)
+
+
+def toolchain_pattern(name):
+    """A toolchain name as a word (bytes): `+nightly`, `?= nightly-2026-06-01`,
+    `toolchain: 1.98.0`; not `nightly` inside `nightly-2026-06-01`, not
+    `1.98.0` inside `1.98.0.1`."""
+    return re.compile(rb"(?<![\w.+-])\+?" + re.escape(name.encode()) + rb"(?![\w.]|-\d)")
+
+
+def named_in(files, names):
+    """({name: first file that names it}, complete) for NAMES, read from
+    FILES (TOOL_FILE_MAX bytes each; unreadable ones skipped). COMPLETE is
+    False when there were more than TOOL_FILES_MAX files to read."""
+    pats = {n: (n.encode(), toolchain_pattern(n)) for n in names}
+    found = {}
+    seen = set()
+    for path in files:
+        if len(found) == len(pats):
+            break
+        if path in seen:
+            continue
+        if len(seen) >= TOOL_FILES_MAX:
+            return found, False
+        seen.add(path)
+        try:
+            with open(path, "rb") as f:
+                data = f.read(TOOL_FILE_MAX)
+        except OSError:
+            continue
+        for n, (raw, pat) in pats.items():
+            # The plain substring test is fast; the word test only where it hits.
+            if n not in found and raw in data and pat.search(data):
+                found[n] = path
+    return found, True
+
+
+def toolchain_lines(home):
+    """The report of `status`: installed rustup toolchains, their size, and
+    which rust-toolchain files under ~/Workspace pin them."""
+    rh = rustup_home(home)
+    tdir = os.path.join(rh, "toolchains")
+    try:
+        names = sorted(e.name for e in os.scandir(tdir) if e.is_dir())
+    except OSError:
+        return [f"{where_text(tdir, home)}: none installed (or not readable)"]
+    ws = claimed_folders(None, home, with_cargo=False)
+    pins = {}
+    for p in ws.pins:
+        ch = pinned_channel(p)
+        if ch:
+            pins.setdefault(ch, []).append(p)
+    try:
+        with open(os.path.join(rh, "settings.toml"), "rb") as f:
+            overrides = tomllib.load(f).get("overrides") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        overrides = {}
+    for path, ch in overrides.items() if isinstance(overrides, dict) else ():
+        if isinstance(ch, str):
+            pins.setdefault(short_toolchain(ch), []).append(f"rustup override for {path}")
+    default = rustup_default(home, rh)
+    out = [f"where:    {where_text(tdir, home)}",
+           f"default:  {short_toolchain(default) if default else 'unknown'}"]
+    if ws.incomplete:
+        out.append(f"note:     the search for rust-toolchain files was incomplete ({ws.incomplete})")
+    rows, total, unused = [], 0, []
+    is_default = {n: bool(default) and short_toolchain(n) == short_toolchain(default) for n in names}
+    loose = [short_toolchain(n) for n in names
+             if not is_default[n] and not pins.get(short_toolchain(n)) and not pins.get(n)]
+    # Files in the home first (a linked worktree elsewhere, e.g. in /tmp, is shown only when it is the only one).
+    files = sorted(ws.tool_files, key=lambda p: not (p == home or p.startswith(home + "/")))
+    named, read_all = named_in(files, loose) if loose else ({}, True)
+    if not read_all:
+        ws.incomplete = ws.incomplete or f"more than {TOOL_FILES_MAX} build files to read"
+    for n in names:
+        short = short_toolchain(n)
+        path = os.path.join(tdir, n)
+        size = 0 if os.path.islink(path) else tree_size(path)
+        total += size
+        by = pins.get(short, []) + (pins.get(n, []) if n != short else [])
+        if by:
+            first = tilde(by[0], home)
+            pin = f"pinned by {len(by)} file(s), e.g. {first}" if len(by) > 1 else f"pinned by {first}"
+        elif is_default[n]:
+            pin = "the default"
+        elif short in named:
+            pin = f"named in {tilde(named[short], home)} (not offered for removal)"
+        else:
+            pin = "not pinned or named under ~/Workspace"
+            unused.append(short)
+        rows.append(f"  {gib(size):>10}  {short:<22} {pin}" + ("  (a link: rustup toolchain link)"
+                                                              if os.path.islink(path) else ""))
+    out.append(f"{len(names)} toolchain(s), {gib(total)} (as du shows it):")
+    out += rows
+    known = {short_toolchain(n) for n in names} | set(names)
+    missing = sorted(ch for ch in pins if ch not in known)
+    if missing:
+        out.append("pinned but not installed (the next build there downloads it): " + ", ".join(missing))
+    out.append(f"(read: rust-toolchain.toml and rust-toolchain files, Makefiles, justfiles, *.mk and *.sh "
+               f"files, CI workflows and .cargo/config.toml of the git worktrees under ~/{WORKSPACE_REL}, and "
+               "rustup overrides)")
+    if unused and ws.incomplete:
+        out.append(f"not pinned, not the default and not named in the files read: {', '.join(unused)}; no "
+                   "removal command, because the search was incomplete")
+    elif unused:
+        out.append("not pinned, not the default and not named in those files. NOT CHECKED: projects outside "
+                   f"~/{WORKSPACE_REL}, other scripts and programs, RUSTUP_TOOLCHAIN. If none of those needs "
+                   "them, you can remove them yourself (CST never does):")
+        out.append(f"  rustup toolchain uninstall {' '.join(unused)}")
+    return out
+
+
+# The registry. Adding a target: a Target subclass here, its keys in
+# toolchains/toolchains.conf, a line in toolchains/README.md.
+TARGETS = {cls.ID: cls for cls in (RustBuild, PythonUv)}
+# Planned, not implemented yet: (where, how).
+PLANNED = {
+    "rust:registry": ("~/.cargo/registry, ~/.cargo/git",
+                      "cargo already deletes downloads unused for months by itself; maybe cargo clean gc limits"),
+    "go:build": ("~/.cache/go-build", "Go already trims entries unused for 5 days by itself"),
+    "go:mod": ("~/go/pkg/mod", "by age"),
+    "node:npm": ("~/.npm/_cacache", "npm cache verify / by age"),
+    "jvm:maven": ("~/.m2/repository", "old -SNAPSHOT builds and superseded versions only, never by age"),
+}
+
+
+def select_targets(names, settings):
+    """[(Target class, named)]: the named targets (LANG:CACHE or LANG), or,
+    without names, every enabled one. Raises Usage for an unknown or a
+    planned target."""
+    if not names:
+        return [(cls, False) for tid, cls in TARGETS.items() if settings.enabled[tid]]
+    out = []
+    for name in names:
+        if ":" in name:
+            if name in TARGETS:
+                found = [TARGETS[name]]
+            elif name in PLANNED:
+                raise Usage(f"target {name} is not implemented yet (implemented: {', '.join(TARGETS)})")
+            else:
+                raise Usage(f"unknown target '{name}' (implemented: {', '.join(TARGETS)})")
+        else:
+            found = [cls for tid, cls in TARGETS.items() if tid.split(":")[0] == name]
+            if not found:
+                planned = [t for t in PLANNED if t.split(":")[0] == name]
+                if planned:
+                    raise Usage(f"no target of {name} is implemented yet (planned: {', '.join(planned)})")
+                raise Usage(f"unknown target '{name}' (implemented: {', '.join(TARGETS)})")
+        for cls in found:
+            if all(cls is not c for c, _ in out):
+                out.append((cls, True))
+    return out
+
+
+# ---- prune ----------------------------------------------------------------------------------
+# The time one `prune apply` may take in all. The service is stopped by
+# systemd after 30 minutes (TimeoutStartSec): the run stops its own work
+# before that. Targets with a fixed upper bound (MAX_SECONDS) run first, so a
+# long rust:build run never leaves python:uv without time; rust:build starts
+# no deletion with less than RM_MARGIN left and stops an rm at the end of the
+# budget (what is left is a leftover that the next run deletes).
+RUN_BUDGET = 25 * 60
+RM_MARGIN = 2 * 60
+
+
+def cmd_prune(home, now, action, names):
+    settings = Settings(home)
+    chosen = select_targets(names, settings)
+    if not chosen:
+        say(f"no target is enabled (settings: {settings.source}): nothing to do")
+        return 0
+    rc = 0
+    deadline = None
+    if action == "apply":
+        deadline = time.monotonic() + RUN_BUDGET
+        chosen = sorted(chosen, key=lambda c: c[0].MAX_SECONDS is None)     # stable: bounded ones first
+    for cls, named in chosen:
+        t = cls(home, now, settings.policy[cls.ID])
+        t.named = named
+        t.deadline = deadline
+        off = "" if settings.enabled[cls.ID] else " (disabled in the settings: runs only because it was named)"
+        if action == "plan":
+            say(f"== {cls.ID}: {where_text(t.location(), home)}{off}")
+            say(f"  policy: {cls.policy_text(t.policy)} ({settings.source_of(cls)})")
+        elif off:
+            t.tsay(off.strip(" ()"), 5)
+        try:
+            r = t.plan() if action == "plan" else t.apply()
+        except Refused as e:
+            if action == "plan":
+                say(f"  refused: {e}")
+            else:
+                t.tsay(f"refused: {e}", 3)
+            r = 1
+        rc = max(rc, r)
+    if action == "plan":
+        say("(plan: nothing deleted)")
+    return rc
+
+
+# ---- the timer ------------------------------------------------------------------------------
+def in_container():
+    return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+
+
+def systemctl_cmd(*args):
+    # Tests point this at a stub: no test may reach the real user manager.
+    stub = os.environ.get("CST_TOOLCHAINS_SYSTEMCTL")
+    if stub:
+        return [stub, "--user", *args]
+    cmd = ["systemctl", "--user", *args]
+    return (["flatpak-spawn", "--host"] + cmd) if in_container() else cmd
+
+
+def systemctl_env():
+    env = dict(os.environ)
+    # Run by root through runuser (snapshots setup): no session variables.
+    rt = f"/run/user/{os.getuid()}"
+    if not env.get("XDG_RUNTIME_DIR") and os.path.isdir(rt):
+        env["XDG_RUNTIME_DIR"] = rt
+    return env
+
+
+def systemctl(*args, check=False):
+    """Output (stripped) of systemctl --user; '' when it could not run."""
+    try:
+        r = subprocess.run(systemctl_cmd(*args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, env=systemctl_env(), timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if check:
+            raise Refused(f"systemctl --user {' '.join(args)}: {e}") from None
+        return ""
+    if check and r.returncode != 0:
+        raise Refused(f"systemctl --user {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout.strip()
+
+
+def manager_path():
+    """PATH of the user manager (what the service runs with), or None when
+    it cannot be read."""
+    for line in systemctl("show-environment").splitlines():
+        if line.startswith("PATH="):
+            val = line[len("PATH="):]
+            # systemd quotes a value with special characters ($'...'): not parsed here.
+            return None if val[:1] in ("$", "'", '"') else val
+    return None
+
+
+def render_service():
+    return f"""\
+{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.
+# Prunes the toolchain caches enabled in ~/.config/cst/toolchains.conf
+# (cargo's build folders in ~/.cache/cargo-build, ...). Why and how:
+# toolchains/README.md in CST.
+[Unit]
+Description=CST: prune old toolchain caches (cst toolchains)
+ConditionPathExists=%h/{PROG_REL}
+ConditionPathExists=%h/{DEFAULTS_REL}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I %h/{PROG_REL} prune apply
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+"""
+
+
+def render_timer():
+    return f"""\
+{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.
+[Unit]
+Description=CST: prune old toolchain caches, hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+UNITS = {SERVICE: render_service, TIMER: render_timer}
+
+
+def file_state(path, wanted, marker=MARKER):
+    """ok | change (ours, differs) | conflict (not ours, or a symlink) | missing."""
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            return "conflict"
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "conflict"
+    if wanted is not None and text == wanted:
+        return "ok"
+    return "change" if marker in text else "conflict"
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def copies():
+    """{installed path (relative to home): source text}: this program and
+    its defaults, as the timer runs them."""
+    return {PROG_REL: read_text(os.path.realpath(__file__)), DEFAULTS_REL: read_text(defaults_path())}
+
+
+def unit_states(home):
+    out = {rel: file_state(os.path.join(home, rel), text) for rel, text in copies().items()}
+    for name, render in UNITS.items():
+        out[name] = file_state(os.path.join(home, UNIT_DIR_REL, name), render())
+    return out
+
+
+def label(key):
+    return f"~/{key}" if "/" in key else f"~/{UNIT_DIR_REL}/{key}"
+
+
+def write_atomic(path, text, mode):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def turned_off(home):
+    return os.path.lexists(os.path.join(home, OFF_REL))
+
+
+def stale_files(home):
+    """[(path, ours)] of what `cst btrfs cargo-gc enable|disable` left
+    (the first version of this cleanup)."""
+    out = []
+    for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
+        path = os.path.join(home, rel)
+        st = file_state(path, None, OLD_MARKER)
+        if st != "missing":
+            out.append((path, st == "change"))
+    for rel in OLD_DATA:
+        path = os.path.join(home, rel)
+        if os.path.lexists(path):
+            out.append((path, not os.path.islink(path)))
+    return out
+
+
+def remove_stale(home):
+    found = stale_files(home)
+    if not found:
+        return
+    timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
+    if (timer, True) in found:
+        systemctl("disable", "--now", OLD_TIMER)
+    reload = False
+    for path, ours in found:
+        if not ours:
+            say(f"left alone: {tilde(path, home)} (not written by CST)", 4, err=True)
+            continue
+        os.unlink(path)
+        say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
+        reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
+    if reload:
+        systemctl("daemon-reload")
+
+
+def old_conf_note(home):
+    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
+        say(f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
+            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it", 4, err=True)
+
+
+def cmd_auto_on(home, now, unless_off=False):
+    remove_stale(home)
+    if unless_off and turned_off(home):
+        say(f"left off: you turned the automatic pruning off ({PROG} auto off left ~/{OFF_REL}); "
+            f"'{PROG} auto on' turns it on again")
+        return 0
+    settings = Settings(home)
+    enabled = [cls for tid, cls in TARGETS.items() if settings.enabled[tid]]
+    if not enabled:
+        raise Refused(f"no target is enabled in the settings ({settings.source}): the timer would do nothing")
+    # Checked as the timer will run: programs are looked for in the PATH of
+    # the user manager (the service's PATH), not in this command's (run by
+    # snapshots setup through runuser, it is root's). If no target would run,
+    # no timer.
+    mpath, asked = None, False
+    refused = []
+    for cls in enabled:
+        t = cls(home, now, settings.policy[cls.ID])
+        if cls.USES_PATH:
+            if not asked:
+                mpath, asked = manager_path(), True
+            t.path = mpath
+        try:
+            t.check()
+        except Refused as e:
+            refused.append(f"{cls.ID}: {e}")
+    if len(refused) == len(enabled):
+        raise Refused("; ".join(refused))
+    where = ("in the PATH of your user manager, which the timer uses" if mpath is not None else
+             "in the PATH of this command; the timer uses your user manager's PATH (systemctl --user "
+             "show-environment), which could not be read")
+    for r in refused:
+        say(f"note: {r} (looked for {where}): each timer run tries it and reports it as refused (an error) "
+            f"until it is fixed; or set its _ENABLED=no in ~/{CONF_REL}", 4, err=True)
+    st = unit_states(home)
+    conflicts = [k for k, v in st.items() if v == "conflict"]
+    if conflicts:
+        raise Refused("not written by CST (or a symlink), left alone: " + ", ".join(label(k) for k in conflicts))
+    changed = False
+    for rel, text in copies().items():
+        if st[rel] != "ok":
+            write_atomic(os.path.join(home, rel), text, 0o755 if rel == PROG_REL else 0o644)
+            say(f"written:   ~/{rel}")
+        else:
+            say(f"unchanged: ~/{rel}")
+    for name, render in UNITS.items():
+        if st[name] != "ok":
+            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), 0o644)
+            say(f"written:   {label(name)}")
+            changed = True
+        else:
+            say(f"unchanged: {label(name)}")
+    if changed:
+        systemctl("daemon-reload", check=True)
+    systemctl("enable", "--now", TIMER, check=True)
+    say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
+    if turned_off(home):
+        os.unlink(os.path.join(home, OFF_REL))
+        say(f"removed:   ~/{OFF_REL} (snapshots setup keeps it enabled again)")
+    old_conf_note(home)
+    return 0
+
+
+def cmd_auto_off(home, now):
+    remove_stale(home)
+    st = unit_states(home)
+    if st[TIMER] in ("ok", "change"):
+        systemctl("disable", "--now", TIMER)
+    removed = False
+    for name in UNITS:
+        if st[name] in ("ok", "change"):
+            os.unlink(os.path.join(home, UNIT_DIR_REL, name))
+            say(f"removed:   {label(name)}")
+            removed = True
+        elif st[name] == "conflict":
+            say(f"left alone: {label(name)} (not written by CST)", 4, err=True)
+    if removed:
+        systemctl("daemon-reload")
+    for rel in copies():
+        if st[rel] in ("ok", "change"):
+            os.unlink(os.path.join(home, rel))
+            say(f"removed:   ~/{rel}")
+        elif st[rel] == "conflict":
+            say(f"left alone: ~/{rel} (not written by CST)", 4, err=True)
+    try:
+        os.rmdir(os.path.join(home, LIB_REL))       # only when empty (bluetooth keeps its watcher there)
+    except OSError:
+        pass
+    for tid in TARGETS:
+        try:
+            os.unlink(state_path(home, tid))
+        except OSError:
+            pass
+    if not turned_off(home):
+        write_atomic(os.path.join(home, OFF_REL),
+                     f"{MARKER}: written by `cst toolchains auto off`.\n"
+                     "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
+                     "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n", 0o644)
+        say(f"written:   ~/{OFF_REL} (snapshots setup leaves the pruning off)")
+    say(f"toolchain caches are no longer pruned automatically (settings in ~/{CONF_REL} kept, if any)")
+    return 0
+
+
+def timer_text(home):
+    if file_state(os.path.join(home, UNIT_DIR_REL, TIMER), render_timer()) == "missing":
+        if turned_off(home):
+            return (f"timer {TIMER}: turned off by you ({PROG} auto off; "
+                    f"snapshots setup leaves it off; {PROG} auto on turns it on)")
+        return f"timer {TIMER}: not installed ({PROG} auto on)"
+    en = systemctl("is-enabled", TIMER)
+    ac = systemctl("is-active", TIMER)
+    txt = f"timer {TIMER}: {en or 'unknown'}, {ac or 'unknown'}"
+    if ac == "active":
+        nxt = systemctl("show", "-p", "NextElapseUSecRealtime", "--value", TIMER)
+        if nxt and nxt not in ("n/a", "0"):
+            txt += f", next {nxt}"
+    return txt
+
+
+# ---- config: the toolchain settings in your home ---------------------------------------------
+# Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
+# comments, same rules): a setting already there is never changed.
+CARGO_CFG_REL = ".cargo/config.toml"
+UV_CFG_REL = ".config/uv/uv.toml"
+_WS = r"[^\S\n]"      # a blank that is not a line break (grep's [[:space:]] within a line)
+CARGO_HAS_BUILD_DIR = re.compile(rf"^{_WS}*build-dir{_WS}*=|^{_WS}*build\.build-dir", re.M)
+CARGO_HAS_BUILD = re.compile(rf"^{_WS}*\[{_WS}*build{_WS}*\]|^{_WS}*build\.", re.M)
+UV_HAS_LINK_MODE = re.compile(rf"^{_WS}*link-mode{_WS}*=", re.M)
+UV_HAS_TABLE = re.compile(rf"^{_WS}*\[", re.M)
+
+
+def cargo_text(home):
+    return ("\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
+            "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
+            f"[build]\nbuild-dir = \"{home}/{ROOT_REL}/{HASH_VAR}\"\n")
+
+
+UV_TEXT = ("# Added by btrfs-setup.sh (CST): ~/.cache is its own subvolume and\n"
+           "# hardlinks cannot cross subvolumes; reflink clones can.\n"
+           "link-mode = \"clone\"\n")
+
+
+def read_cfg(path):
+    """Text of a config file; '' when missing; None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+
+
+def config_items(home):
+    """[(name, path, state, text to append)]; state: set | by-hand | write |
+    unreadable."""
+    out = []
+    path = os.path.join(home, CARGO_CFG_REL)
+    text = read_cfg(path)
+    if text is None:
+        st = "unreadable"
+    elif CARGO_HAS_BUILD_DIR.search(text):
+        st = "set"
+    elif CARGO_HAS_BUILD.search(text):
+        st = "by-hand"
+    else:
+        st = "write"
+    out.append(("cargo", path, st, cargo_text(home)))
+    path = os.path.join(home, UV_CFG_REL)
+    text = read_cfg(path)
+    if text is None:
+        st = "unreadable"
+    elif UV_HAS_LINK_MODE.search(text):
+        st = "set"
+    elif UV_HAS_TABLE.search(text):
+        st = "by-hand"
+    else:
+        st = "write"
+    out.append(("uv", path, st, UV_TEXT))
+    return out
+
+
+def cargo_build_dir_is_csts(home):
+    try:
+        with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
+            build = tomllib.load(f).get("build")
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return isinstance(build, dict) and build.get("build-dir") == expected_template(home)
+
+
+# The opt-in item: lean debug info for dev builds. Off unless
+# RUST_LEAN_DEBUGINFO=yes (or config apply --lean-debuginfo); `cst btrfs
+# snapshots setup` passes --no-lean-debuginfo, so it never turns it on.
+# Changing debug info changes every dev build's fingerprint: the first build of
+# each workspace afterwards compiles everything again.
+LEAN_HEAD = ("\n# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes: smaller dev builds.\n"
+             "# Your own crates keep line tables (backtraces show file:line); dependencies get no\n"
+             "# debug info. These lines take precedence over [profile.dev] in each project's Cargo.toml.\n")
+LEAN_KEYS = (
+    ("profile.dev", ("profile", "dev"), "line-tables-only", '[profile.dev]\ndebug = "line-tables-only"\n'),
+    ('profile.dev.package."*"', ("profile", "dev", "package", "*"), False,
+     '[profile.dev.package."*"]\ndebug = false\n'),
+)
+LEAN_REBUILD = ("turning it on makes the next dev build of every workspace compile everything once "
+                "(all at once if many worktrees build together): apply it while builds are quiet")
+
+
+def dig(data, path):
+    for k in path:
+        if not isinstance(data, dict) or k not in data:
+            return None
+        data = data[k]
+    return data
+
+
+def same_debug(value, want):
+    if want is False:
+        return value is False or value == "none" or (type(value) is int and value == 0)
+    return value == want
+
+
+def lean_state(home):
+    """{path, text, add: [(label, block)], have: [label], conflicts: [text],
+    append: text or '' (when appending is safe), error: ''}."""
+    path = os.path.join(home, CARGO_CFG_REL)
+    st = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
+    text = read_cfg(path)
+    if text is None:
+        st["error"] = "cannot be read"
+        return st
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        st["error"] = f"is not valid TOML ({e})"
+        return st
+    for label_, tpath, want, block in LEAN_KEYS:
+        table = dig(data, tpath)
+        if isinstance(table, dict) and "debug" in table:
+            if same_debug(table["debug"], want):
+                st["have"].append(label_)
+            else:
+                st["conflicts"].append(f"[{label_}] debug = {json.dumps(table['debug'])} is yours: left as it is")
+        else:
+            st["add"].append((label_, block))
+    if st["add"]:
+        extra = LEAN_HEAD + "\n".join(b for _, b in st["add"])
+        new = text + ("" if not text or text.endswith("\n") else "\n") + extra
+        # Appended tables must not clash with the file's (TOML forbids a
+        # table twice): parse the result and compare.
+        try:
+            nd = tomllib.loads(new)
+        except tomllib.TOMLDecodeError:
+            nd = None
+        expect = json.loads(json.dumps(data))
+        for label_, tpath, want, _ in LEAN_KEYS:
+            if any(label_ == a for a, _ in st["add"]):
+                d = expect
+                for k in tpath:
+                    d = d.setdefault(k, {})
+                d["debug"] = want
+        if nd is not None and json.loads(json.dumps(nd)) == expect:
+            st["append"] = extra
+    return st
+
+
+def lean_wanted(settings, lean):
+    if lean is not None:
+        return lean, ("--lean-debuginfo" if lean else "--no-lean-debuginfo")
+    if settings is None:
+        return False, "bad settings"
+    return settings.options["RUST_LEAN_DEBUGINFO"], "RUST_LEAN_DEBUGINFO=" + (
+        "yes" if settings.options["RUST_LEAN_DEBUGINFO"] else "no")
+
+
+def lean_lines(home, verb, settings, lean):
+    st = lean_state(home)
+    shown = tilde(st["path"], home)
+    want, why = lean_wanted(settings, lean)
+    if st["error"]:
+        return [("?", shown, f"lean debug info: the file {st['error']}")]
+    if not want:
+        if not st["add"] and not st["conflicts"]:
+            return [("on", shown, f"lean debug info is set ({why} does not remove it: delete the lines by hand)")]
+        return [("off", shown, "lean debug info: off (opt-in; RUST_LEAN_DEBUGINFO=yes in ~/" + CONF_REL
+                 + f", or config apply --lean-debuginfo); {LEAN_REBUILD}")]
+    out = [("keep", shown, c) for c in st["conflicts"]]
+    if not st["add"]:
+        if not st["conflicts"]:
+            out.append(("ok", shown, f"lean debug info set ({why})"))
+        return out
+    what = "; ".join(b.replace("\n", " ").strip() for _, b in st["add"])
+    if st["append"]:
+        out.append(("write", shown, f"lean debug info ({why}): {what}; {LEAN_REBUILD}"
+                    + ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+    else:
+        out.append(("BY HAND", shown, f"lean debug info ({why}): the file already has these tables: add "
+                                      f"yourself: {what}"))
+    return out
+
+
+def lean_apply(home, settings, lean):
+    want, why = lean_wanted(settings, lean)
+    if not want:
+        return 0
+    st = lean_state(home)
+    path = st["path"]
+    if st["error"]:
+        say(f"{NAME}: lean debug info: {path} {st['error']}: left as it is", 3, err=True)
+        return 1
+    for c in st["conflicts"]:
+        say(f"NOTE: lean debug info: {path}: {c}", 5, err=True)
+    if not st["add"]:
+        if not st["conflicts"]:
+            say(f"kept:      {path} (lean debug info already set)")
+        return 0
+    if not st["append"]:
+        say(f"NOTE: lean debug info: {path} already has these tables: add by hand:", 5, err=True)
+        for _, block in st["add"]:
+            for line in block.splitlines():
+                say(f"      {line}", 5, err=True)
+        return 0
+    err = append_text(path, st["append"])
+    if err:
+        say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        return 1
+    say(f"written:   {path} (lean debug info, {why}; the next dev build of each workspace compiles everything once)")
+    return 0
+
+
+def config_lines(home, verb, settings=None, lean=None):
+    """The plan or status lines of the settings (lean: the explicit flag)."""
+    out = []
+    for name, path, st, _ in config_items(home):
+        shown = tilde(path, home)
+        if name == "cargo":
+            if st == "set":
+                if cargo_build_dir_is_csts(home):
+                    out.append(("ok", shown, "build-dir = CST's line (rust:build prunes that folder)"))
+                else:
+                    out.append(("keep", shown, "build-dir set to your own value: left as it is "
+                                               "(rust:build then prunes nothing)"))
+            elif st == "by-hand":
+                out.append(("BY HAND", shown, f"has a [build] table: add build-dir = "
+                                              f"\"{home}/{ROOT_REL}/{HASH_VAR}\" there yourself"))
+            elif st == "write":
+                out.append(("write", shown, f"[build] build-dir = \"~/{ROOT_REL}/{HASH_VAR}\"" +
+                            ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+            else:
+                out.append(("?", shown, "cannot be read"))
+        else:
+            if st == "set":
+                out.append(("ok", shown, "link-mode already set"))
+            elif st == "by-hand":
+                out.append(("BY HAND", shown, "has tables: add link-mode = \"clone\" at its top yourself"))
+            elif st == "write":
+                out.append(("write", shown, "link-mode = \"clone\" (hardlinks cannot cross subvolumes)" +
+                            ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+            else:
+                out.append(("?", shown, "cannot be read"))
+    out += lean_lines(home, verb, settings, lean)
+    return out
+
+
+def append_text(path, text):
+    """Append TEXT to PATH (made if missing); a file not ending in a newline
+    gets one first. Returns '' or the error."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "ab") as f:
+            # A file not ending in a newline would glue the comment onto its last line.
+            if f.tell() > 0:
+                with open(path, "rb") as r:
+                    r.seek(-1, os.SEEK_END)
+                    if r.read(1) != b"\n":
+                        f.write(b"\n")
+            f.write(text.encode("utf-8"))
+    except OSError as e:
+        return str(e.strerror or e)
+    return ""
+
+
+def cmd_config(home, action, lean=None):
+    try:
+        settings = Settings(home)
+    except ConfigError as e:
+        settings = None
+        if lean is None:
+            say(f"note: BAD SETTINGS ({e}): lean debug info is treated as off", 4, err=True)
+    if action == "plan":
+        lines = config_lines(home, "plan", settings, lean)
+        for st, shown, note in lines:
+            say(f"  {st:<8} {shown:<24} {note}")
+        if any(st == "write" for st, _, _ in lines):
+            say(f"Apply with: {PROG} config apply" + (" --lean-debuginfo" if lean else ""))
+        return 0
+    rc = 0
+    for name, path, st, text in config_items(home):
+        if st == "unreadable":
+            say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
+            rc = 1
+        elif name == "cargo" and st == "set":
+            say(f"kept:      {path} (build-dir already set)")
+        elif name == "cargo" and st == "by-hand":
+            say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
+            say(f"      build-dir = \"{home}/{ROOT_REL}/{HASH_VAR}\"", 5, err=True)
+        elif name == "uv" and st == "set":
+            say(f"kept:      {path} (link-mode already set)")
+        elif name == "uv" and st == "by-hand":
+            say(f"NOTE: {path} has tables: add link-mode = \"clone\" at its top by hand", 5, err=True)
+        else:
+            err = append_text(path, text)
+            if err:
+                # For example a ~/.cargo owned by root after a `sudo cargo`:
+                # report it and go on with the other setting.
+                say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+                rc = 1
+                continue
+            say(f"written:   {path}")
+    return max(rc, lean_apply(home, settings, lean))
+
+
+# ---- status ---------------------------------------------------------------------------------
+def cmd_status(home, now, brief):
+    say(f"auto: {timer_text(home)}")
+    try:
+        settings = Settings(home)
+    except ConfigError as e:
+        settings = None
+        say(f"BAD SETTINGS: {e} (prune and the timer do nothing until it is fixed)")
+    for tid, cls in TARGETS.items():
+        s = read_state(home, tid)
+        last = cls.last_run_text(s) if s else "none recorded"
+        if brief:
+            say(f"{tid}: last prune: {last}")
+            continue
+        say(f"== {tid}: {cls.WHAT}")
+        t = cls(home, now, settings.policy[tid] if settings else None)
+        say(f"  where:    {where_text(t.location(), home)}")
+        if settings:
+            state = "enabled" if settings.enabled[tid] else "disabled (prune runs it only when named)"
+            say(f"  policy:   {state}; {cls.policy_text(settings.policy[tid])} ({settings.source_of(cls)})")
+        else:
+            say("  policy:   BAD SETTINGS (see above)")
+        say(f"  last prune: {last}")
+        for line in t.status_lines():
+            say(f"  {line}")
+    if brief:
+        return 0
+    say("== not implemented yet (nothing pruned there by CST):")
+    for tid, (where, how) in PLANNED.items():
+        shown = ", ".join(where_text(os.path.join(home, p.strip()[2:]), home) for p in where.split(","))
+        say(f"  {tid:<14} {shown} ({how})")
+    say("== rust toolchains (a report: CST never removes one)")
+    for line in toolchain_lines(home):
+        say(f"  {line}")
+    say(f"== toolchain settings ({PROG} config)")
+    for st, shown, note in config_lines(home, "status", settings):
+        say(f"  {st:<8} {shown:<24} {note}")
+    st = unit_states(home)
+    say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
+    for path, ours in stale_files(home):
+        say(f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"
+            + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)"))
+    old_conf_note(home)
+    return 0
+
+
+# ---- main -----------------------------------------------------------------------------------
+def run_locked(home, fn):
+    """One run at a time (the timer and a manual apply, auto on/off)."""
+    path = os.path.join(home, STATE_DIR_REL, "toolchains.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            say("another run is in progress: nothing done", 5)
+            return 0
+        return fn()
+    finally:
+        os.close(fd)
+
+
+USAGE = """\
+usage: cst-toolchains status [--brief]
+       cst-toolchains prune plan|apply [TARGET...]
+       cst-toolchains auto on [--unless-off] | auto off
+       cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo]
+       (each also takes --home DIR; help: cst-toolchains help)"""
+
+
+def parse_args(argv):
+    """{cmd, action, targets, brief, unless_off, home}; raises Usage."""
+    args, home = [], None
+    it = iter(argv)
+    for a in it:
+        if a == "--home":
+            home = next(it, None)
+            if not home:
+                raise Usage("--home needs a folder")
+        elif a.startswith("--home="):
+            home = a.split("=", 1)[1]
+            if not home:      # an empty value must never mean "your real home"
+                raise Usage("--home needs a folder")
+        else:
+            args.append(a)
+    out = {"cmd": "help", "action": None, "targets": [], "brief": False, "unless_off": False, "home": home,
+           "lean": None}
+    if not args or args[0] in ("help", "-h", "--help"):
+        return out
+    cmd, rest = args[0], args[1:]
+    out["cmd"] = cmd
+    if cmd == "status":
+        for a in rest:
+            if a != "--brief":
+                raise Usage(f"status: unknown argument '{a}' (only --brief)")
+            out["brief"] = True
+    elif cmd == "prune":
+        if not rest or rest[0] not in ("plan", "apply"):
+            raise Usage("prune: plan or apply, then the targets (none: every enabled one)")
+        out["action"] = rest[0]
+        for a in rest[1:]:
+            if a.startswith("-"):
+                raise Usage(f"prune: unknown option '{a}'")
+            out["targets"].append(a)
+    elif cmd == "auto":
+        if not rest or rest[0] not in ("on", "off"):
+            raise Usage("auto: on or off")
+        out["action"] = rest[0]
+        for a in rest[1:]:
+            if a == "--unless-off" and rest[0] == "on":
+                out["unless_off"] = True
+            else:
+                raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
+    elif cmd == "config":
+        if not rest or rest[0] not in ("plan", "apply"):
+            raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo]")
+        out["action"] = rest[0]
+        for a in rest[1:]:
+            if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
+                out["lean"] = a == "--lean-debuginfo"
+            else:
+                raise Usage(f"config {rest[0]}: unknown argument '{a}'")
+    else:
+        raise Usage(f"unknown command '{cmd}'")
+    return out
+
+
+def main(argv):
+    try:
+        a = parse_args(argv)
+    except Usage as e:
+        print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+    if a["cmd"] == "help":
+        print(__doc__)
+        return 0
+    if os.getuid() == 0:
+        print(f"{NAME}: run as your user, not as root", file=sys.stderr)
+        return 1
+    if in_container() and not os.environ.get("CST_TOOLCHAINS_HERE"):
+        # From a toolbox, the processes of other containers cannot be
+        # inspected: the same program runs on the host (same home path).
+        me = os.path.realpath(__file__)
+        try:
+            os.execvp("flatpak-spawn", ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}",
+                                        "/usr/bin/python3", "-I", me, *argv])
+        except OSError as e:
+            print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); "
+                  f"run it on the host", file=sys.stderr)
+            return 1
+    home = os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if a["home"] is None else a["home"])
+    now = float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time())   # override: tests
+    cmd, action = a["cmd"], a["action"]
+    try:
+        if cmd == "status":
+            return cmd_status(home, now, a["brief"])
+        if cmd == "config":
+            return cmd_config(home, action, a["lean"])
+        if cmd == "prune" and action == "plan":
+            return cmd_prune(home, now, "plan", a["targets"])
+        if cmd == "prune":
+            return run_locked(home, lambda: cmd_prune(home, now, "apply", a["targets"]))
+        if action == "on":
+            return run_locked(home, lambda: cmd_auto_on(home, now, a["unless_off"]))
+        return run_locked(home, lambda: cmd_auto_off(home, now))
+    except Usage as e:
+        print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+    except (Refused, ConfigError) as e:
+        say(f"{NAME}: {e}", 3, err=True)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

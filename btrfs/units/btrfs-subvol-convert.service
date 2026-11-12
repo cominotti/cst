@@ -1,0 +1,19 @@
+# Managed by btrfs-setup.sh (CST). Runs at boot only while
+# 'snapshots setup' left directories the session kept busy (flag file), before
+# any user can log in, so nothing has files open in them. Gives up after two
+# boots (btrfs-snapshot convert-boot); old trees are deleted later by the hourly run.
+[Unit]
+Description=Convert planned /home directories into nested btrfs subvolumes
+ConditionPathExists=/etc/btrfs-setup/convert-at-boot
+RequiresMountsFor=/var/home
+After=local-fs.target
+Before=systemd-user-sessions.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-snapshot convert-boot
+StandardOutput=journal+console
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

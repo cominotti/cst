@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# cst
+#
+# CST (Cominotti Setup Tools): one command for the setup tools of this
+# workstation. Each module is a script next to this one, and still works on
+# its own; through cst its help and hints say `cst MODULE ...`.
+#
+#   cst btrfs [ARGS...]    storage: disk health, stalls, snapshots, ~/Bulk,
+#                          Docker volumes and cleanup (btrfs-setup.sh)
+#   cst cpu [ARGS...]      CPU: game profile, VM/toolbox/Docker priority and
+#                          E-cores, measurements (cpu-setup.sh)
+#   cst swap [ARGS...]     swap and memory: zswap, encrypted NVMe swap, zram
+#                          off, swap sysctls, VM memory floor (swap-setup.sh)
+#   cst bluetooth [ARGS...]
+#                          Bluetooth audio: LE Audio (BAP/LC3) in BlueZ,
+#                          adaptive LDAC for the headset (bluetooth-setup.sh)
+#   cst toolchains [ARGS...]
+#                          toolchain caches and settings: hourly pruning of
+#                          cargo's build folders, uv cache prune, cargo
+#                          build-dir and uv link-mode (toolchains-setup.sh;
+#                          as your user)
+#   cst doctor [--brief]   read-only check-up across modules: ok/info/WARN/
+#                          ERROR lines, most WARNs with the command that fixes
+#                          it (layered packages pinned to a version, failed
+#                          units, unseen alerts, btrfs chunk allocation).
+#                          Exit 1 if any WARN/ERROR
+#                          (doctor/cst-doctor; as your user, also in a toolbox)
+#   cst status             the read-only status of every module; asks sudo
+#                          once when one of them needs root (inside a toolbox
+#                          those are skipped, with a note); ends with the
+#                          short form of cst doctor
+#   cst help               this overview; `cst MODULE help` lists the
+#                          commands of one module
+#
+# Root commands of a module call sudo by themselves: type `cst btrfs install`,
+# not `sudo cst ...` (sudo would not find cst in its PATH). cst may be called
+# through a symlink, e.g. ~/.local/bin/cst -> ~/Workspace/cst/cst.
+
+set -Eeuo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+DIR="$(dirname "${SELF}")"
+MODULES=(btrfs cpu swap bluetooth toolchains)
+declare -A SCRIPT=([btrfs]=btrfs-setup.sh [cpu]=cpu-setup.sh [swap]=swap-setup.sh [bluetooth]=bluetooth-setup.sh
+              [toolchains]=toolchains-setup.sh)
+declare -A ABOUT=(
+    [btrfs]="storage: disk health, stalls, snapshots, ~/Bulk, Docker volumes and cleanup"
+    [cpu]="CPU: game profile, VM/toolbox/Docker priority and E-cores, measurements"
+    [swap]="swap and memory: zswap, encrypted NVMe swap, zram off, swap sysctls, VM memory floor"
+    [bluetooth]="Bluetooth audio: LE Audio (BAP/LC3) in BlueZ, adaptive LDAC for the headset"
+    [toolchains]="toolchain caches and settings: pruning of cargo build folders and uv's cache, cargo/uv settings"
+)
+# Whether the module's `status` needs root (it then calls sudo by itself).
+# swap's works as a user and in a toolbox; as root it adds zswap's debug
+# counters. bluetooth's reads the user's session (run as root, it switches
+# back to the user who called sudo); so does toolchains' (and in a toolbox
+# its program runs itself on the host).
+declare -A STATUS_ROOT=([btrfs]=1 [cpu]=1 [swap]=0 [bluetooth]=0 [toolchains]=0)
+
+DOCTOR="${DIR}/doctor/cst-doctor"
+
+in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }
+
+# The name to show in hints: "cst" when that is this script in PATH (also
+# through a symlink), else the path it was started with. Kept across sudo.
+if [[ -z "${CST_NAME:-}" ]]; then
+    CST_NAME="$0"
+    if [[ "$(readlink -f "$(command -v cst 2>/dev/null || echo /nonexistent)")" == "${SELF}" ]]; then
+        CST_NAME=cst
+    fi
+fi
+
+module_file() { echo "${DIR}/${SCRIPT[$1]}"; }
+is_module() {
+    local m
+    for m in "${MODULES[@]}"; do [[ "$1" == "${m}" ]] && return 0; done
+    return 1
+}
+
+usage() {
+    local m state
+    sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'
+    echo "Modules here:"
+    for m in "${MODULES[@]}"; do
+        if [[ -f "$(module_file "${m}")" ]]; then state=""; else state=" (not in this copy)"; fi
+        printf '  %-10s %s%s\n' "${m}" "${ABOUT[${m}]}" "${state}"
+    done
+}
+
+# run_module MODULE ARGS...: the module script, telling it how it was called.
+run_module() {
+    local m="$1" f
+    shift
+    f="$(module_file "${m}")"
+    if [[ ! -f "${f}" ]]; then
+        echo "${CST_NAME}: the '${m}' module is not in this copy (${f} is missing)" >&2
+        exit 1
+    fi
+    CST_PROG="${CST_NAME} ${m}" exec bash "${f}" "$@"
+}
+
+# run_doctor ARGS...: doctor/cst-doctor as the user. Started as root (sudo,
+# or `cst status` after asking sudo once), it runs as the user who called
+# sudo: the user's units and alert record are what it checks.
+run_doctor() {
+    local user uid
+    if [[ ! -f "${DOCTOR}" ]]; then
+        echo "${CST_NAME}: doctor is not in this copy (${DOCTOR} is missing)" >&2
+        return 1
+    fi
+    user="${SUDO_USER:-}"
+    if [[ ${EUID} -eq 0 && -n "${user}" && "${user}" != root ]]; then
+        uid="$(id -u "${user}")"
+        runuser -u "${user}" -- env -u XDG_STATE_HOME -u SUDO_USER \
+            "HOME=$(getent passwd "${user}" | cut -d: -f6)" "USER=${user}" "LOGNAME=${user}" \
+            "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" \
+            "CST_PROG=${CST_NAME} doctor" python3 -I "${DOCTOR}" "$@"
+    else
+        CST_PROG="${CST_NAME} doctor" python3 -I "${DOCTOR}" "$@"
+    fi
+}
+
+status_all() {
+    local m f need=0 rc=0
+    for m in "${MODULES[@]}"; do
+        [[ -f "$(module_file "${m}")" && "${STATUS_ROOT[${m}]}" == 1 ]] && need=1
+    done
+    # One password for all modules, instead of one sudo per module.
+    if (( need && EUID != 0 )) && ! in_container; then
+        echo "(some modules need root for their status: asking sudo once)" >&2
+        exec sudo -- env "CST_NAME=${CST_NAME}" "${SELF}" status
+    fi
+    for m in "${MODULES[@]}"; do
+        f="$(module_file "${m}")"
+        printf '\n==== %s (%s %s status)\n' "${m}" "${CST_NAME}" "${m}"
+        if [[ ! -f "${f}" ]]; then
+            echo "skipped: not in this copy (${f} is missing)"
+        elif [[ "${STATUS_ROOT[${m}]}" == 1 && ${EUID} -ne 0 ]]; then
+            echo "skipped: its status needs root on the host (run '${CST_NAME} status' on the host, not in a toolbox)"
+        else
+            CST_PROG="${CST_NAME} ${m}" bash "${f}" status || rc=1
+        fi
+    done
+    printf '\n==== doctor (%s doctor: the full list)\n' "${CST_NAME}"
+    run_doctor --brief || rc=1
+    return "${rc}"
+}
+
+cmd="${1:-help}"
+[[ $# -gt 0 ]] && shift
+case "${cmd}" in
+    help|-h|--help) usage ;;
+    status)
+        [[ $# -eq 0 ]] || { echo "${CST_NAME} status: no arguments (a module's own: ${CST_NAME} MODULE status)" >&2; exit 2; }
+        status_all
+        ;;
+    doctor)
+        rc=0
+        run_doctor "$@" || rc=$?
+        exit "${rc}"
+        ;;
+    *)
+        if is_module "${cmd}"; then
+            run_module "${cmd}" "$@"
+        fi
+        echo "${CST_NAME}: unknown command or module '${cmd}'" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

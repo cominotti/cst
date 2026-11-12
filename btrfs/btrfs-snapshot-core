@@ -1,0 +1,1315 @@
+#!/usr/bin/python3 -I
+"""btrfs-snapshot-core: local read-only snapshots with btrbk-compatible retention.
+
+Installed by btrfs-setup.sh (CST) as /usr/local/sbin/btrfs-snapshot-core
+and called by /usr/local/sbin/btrfs-snapshot (hourly, emergency purge, NAS
+pinning). Replaces btrbk for LOCAL snapshots only. Stdlib only, runs as root.
+Everything comes from the command line; it reads no configuration file.
+
+  btrfs-snapshot-core snapshot --snapdir DIR --source NAME=PATH:POLICY [...]
+                      [--dry-run] [--force]
+      per source: creates SNAPDIR/NAME.YYYYMMDDTHHMM (read-only) if the source
+      changed since its newest snapshot (or that one is older than 24 h, or
+      --force), then deletes what POLICY no longer keeps.
+  btrfs-snapshot-core prune --snapdir DIR --source NAME=PATH:POLICY [...]
+                      [--dry-run] [--allow-mass-delete]
+      deletions only (the emergency purge passes POLICY '24h 3d' and
+      --allow-mass-delete).
+  btrfs-snapshot-core list --snapdir DIR --source NAME=PATH:POLICY [...] [--json]
+      every snapshot with the keep/delete decision and its reason.
+  btrfs-snapshot-core latest --snapdir DIR --name NAME [--source-path PATH]
+      prints the path of the newest snapshot of NAME (by "Gen at creation").
+
+POLICY: like btrbk's snapshot_preserve, '<N>h <N>d <N>w <N>m <N>y' separated by
+spaces or commas, '*' for "all"; e.g. '72h 7d 4w 3m'. The decisions are those of
+btrbk 0.32.7 schedule() with preserve_hour_of_day 0, preserve_day_of_week
+sunday and snapshot_preserve_min latest:
+  * hours/days/weeks are counted on the local wall clock, from the start of the
+    hour/day (00:00)/week (Sunday 00:00); a month or year starts on its first
+    Sunday; "<N>h" keeps buckets 0..N (inclusive), likewise for d/w/m/y;
+  * in every bucket the OLDEST snapshot is the one kept ("first of hour",
+    "first of day" among the first-of-hour ones, "first weekly" ...);
+  * the newest snapshot is always kept, and so is any dated in the future.
+One known deviation: in zones whose DST shift is not a whole hour (only
+Australia/Lord_Howe, 30 minutes) a name in the repeated half hour of the DST
+end is read as the earlier instant, which is what localtime() maps back to that
+name; btrbk's Time::Local returns an instant 30 minutes off there, so the two
+can keep a different snapshot of that hour/month. Whole-hour zones (this
+host's America/Sao_Paulo, Europe/*, America/*) match btrbk exactly.
+
+Change detection: a source changed iff its Generation is greater than the
+"Gen at creation" of its newest snapshot (newest by that generation, not by
+name). Never "!=": since kernel 7.1 an idle source's generation stays BELOW
+the generation its snapshot was created in (btrbk issue #656). A source's
+Generation moves when the transaction holding a write commits (every 30 s or
+at a sync), so a write in the last seconds before a run is picked up by the
+next run. An unchanged source still gets a snapshot once its newest one is
+older than 24 h (by the name), or when its newest one is dated in the future
+while the clock is NTP-synchronized (see below).
+
+Safeguards on top of the policy (a snapshot is deleted only if all agree):
+  * ownership: only directory entries named NAME.YYYYMMDDTHHMM[_N] that are a
+    real subvolume (inode 256, not a symlink), read-only, and whose Parent UUID
+    is the source's UUID are considered at all; anything else is never deleted;
+  * the 3 newest snapshots of a source and any younger than 24 h are kept, and
+    so is every path listed in the pin file (one per line; the NAS copy pins
+    what it is reading);
+  * clock guards for deletions: none while the clock is not NTP-synchronized,
+    or is behind the newest snapshot (by "Gen at creation") or the last
+    successful run (minus 5 minutes) - a name from the wrong time would put
+    the snapshot in the wrong retention bucket;
+  * circuit breaker: a normal run that would delete more than max(5, 10% of the
+    owned) snapshots of a source deletes none of them (exit 4) unless
+    --allow-mass-delete. Deletions the passing of time explains do not count:
+    a snapshot the policy still kept at the last successful run (state file)
+    and that has aged out since is expected, however long the machine was off.
+    What counts is everything else - a shrunken policy, snapshots with old
+    names that appeared since, or the wall clock having moved further than
+    the real time elapsed since a last run in the same boot (CLOCK_BOOTTIME,
+    which includes suspend). With no recorded run every deletion counts. When
+    it trips: check with `list`, then run `prune ... --allow-mass-delete`
+    (--list-hint/--confirm-hint name a caller's own commands in the message);
+  * the directory is listed again right before deleting and every candidate is
+    re-checked (same UUID, still owned, still due); deletions go one by one.
+
+Clock guards for creation (a snapshot's name is its time, and a wrong name
+outlives the clock error):
+  * no snapshot while the clock is behind the last successful run (minus 5
+    minutes) - the state file is removed by hand if the clock is right;
+  * not NTP-synchronized: no snapshot if the clock is behind the newest
+    snapshot, or moved further than the real time elapsed since a last run in
+    this boot, or - in the first 30 minutes after boot - is more than 24 h
+    ahead of both the newest snapshot and the last successful run (the catch-up
+    run of a Persistent timer can start before chrony has stepped a wrong RTC;
+    the next run catches up). Otherwise (an offline machine) the snapshot is
+    taken with the unverified time and a notice;
+  * NTP-synchronized but the newest snapshot is dated in the future (it was
+    named while the clock ran ahead): a new, correctly named snapshot is taken
+    and a warning names the old one. It becomes the newest by "Gen at
+    creation", so deletions resume; the future-dated one is kept ("preserve
+    forced") until its date passes, or deleted by hand with `btrfs subvolume
+    delete` after checking `list`.
+The state file (--state-dir/core-last-run: epoch, boot id, CLOCK_BOOTTIME) is
+written only by successful runs with an NTP-synchronized clock, and never
+moves backwards.
+
+Locking: snapshot and prune take an exclusive, non-blocking flock on --lock
+(default /run/btrfs-snapshot.lock, the same file btrfs-snapshot locks for its
+hourly run and the conversions, so manual runs exclude both) and exit 3 if it
+is busy. A caller that already holds that lock (btrfs-snapshot hourly) passes
+--no-lock: flock locks belong to an open file description, so a second open of
+the same file from the child would conflict with the parent's lock. list and
+latest take no lock.
+
+Exit codes: 0 ok, 1 error, 2 usage, 3 lock busy, 4 a safety check blocked a
+creation or deletion (the log says which and why).
+Log lines go to stdout with the journald '<N>btrfs-snapshot: ' prefix (stderr
+for `latest` and `list --json`, whose stdout is the result); one summary line
+per snapshot/prune run.
+"""
+
+import argparse
+import dataclasses
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+import zoneinfo
+
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUSY, EXIT_REFUSED = 0, 1, 2, 3, 4
+
+DEFAULT_LOCK = "/run/btrfs-snapshot.lock"
+DEFAULT_LIST_HINT = "btrfs-snapshot-core list --snapdir DIR --source NAME=PATH:POLICY ..."
+DEFAULT_CONFIRM_HINT = "btrfs-snapshot-core prune --snapdir DIR --source NAME=PATH:POLICY ... --allow-mass-delete"
+DEFAULT_PIN_FILE = "/run/btrfs-snapshot/pinned"
+DEFAULT_STATE_DIR = "/var/lib/btrfs-snapshot"
+STATE_FILE = "core-last-run"       # "EPOCH BOOT_ID BOOTTIME" of the last successful synchronized run
+BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
+
+TS_FORMAT = "%Y%m%dT%H%M"          # btrbk timestamp_format long, local time
+NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+KEEP_NEWEST = 3                    # never delete the 3 newest snapshots of a source
+MIN_AGE = 24 * 3600                # ... nor any younger than this
+SAFETY_NET = 24 * 3600             # snapshot an unchanged source at least this often
+CLOCK_SLACK = 5 * 60               # tolerated clock step backwards (NTP slews, RTC drift)
+NTP_GRACE = 30 * 60                # after boot: wait this long for NTP before trusting a far-ahead clock
+MASS_DELETE_MIN = 5                # circuit breaker: more than max(5, 10% of owned)
+MASS_DELETE_PERCENT = 10
+CMD_TIMEOUT = 600
+
+# Policy letters in btrbk's order; '*' is stored as "all".
+POLICY_UNITS = "hdwmy"
+POLICY_TOKEN = re.compile(r"(\*|[0-9]+)([hdwmy])", re.IGNORECASE)
+DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
+
+LOG_STREAM = sys.stdout
+
+
+def log(level, msg):
+    print(f"<{level}>btrfs-snapshot: {msg}", file=LOG_STREAM, flush=True)
+
+
+class UsageError(Exception):
+    pass
+
+
+class ParseError(Exception):
+    pass
+
+
+# ---- policy --------------------------------------------------------------------------
+def parse_policy(text):
+    """'72h 7d 4w 3m' -> {'h': 72, 'd': 7, 'w': 4, 'm': 3}; '*' -> 'all'.
+
+    Same tokens as btrbk's preserve matrix (case-insensitive unit, each unit at
+    most once); commas are accepted as separators too. An empty policy ("keep
+    only the latest") is refused: it is never what a caller of this tool means.
+    """
+    tokens = [t for t in re.split(r"[\s,]+", text.strip()) if t]
+    if not tokens:
+        raise ValueError("empty retention policy")
+    policy = {}
+    for tok in tokens:
+        m = POLICY_TOKEN.fullmatch(tok)
+        if not m:
+            raise ValueError(f"bad retention token {tok!r} (expected <N>h, <N>d, <N>w, <N>m or <N>y)")
+        unit = m.group(2).lower()
+        if unit in policy:
+            raise ValueError(f"retention unit {unit!r} given twice")
+        policy[unit] = "all" if m.group(1) == "*" else int(m.group(1))
+    return policy
+
+
+def format_policy(policy):
+    return " ".join(f"{'*' if policy[u] == 'all' else policy[u]}{u}" for u in POLICY_UNITS if u in policy)
+
+
+def policy_max_kept(policy):
+    """Upper bound of snapshots the policy keeps (excluding future-dated ones),
+    or None if a unit is '*'."""
+    total = 1   # the latest
+    for u in POLICY_UNITS:
+        n = policy.get(u)
+        if n == "all":
+            return None
+        if n:
+            total += n + 1   # buckets 0..N
+    return total
+
+
+# ---- time ----------------------------------------------------------------------------
+def local_tz(name=None):
+    """The zone used for names and retention: --tz, else $TZ, else /etc/localtime."""
+    if name:
+        return zoneinfo.ZoneInfo(name)
+    env = os.environ.get("TZ", "").lstrip(":")
+    if env:
+        try:
+            if env.startswith("/"):
+                with open(env, "rb") as f:
+                    return zoneinfo.ZoneInfo.from_file(f, key=env)
+            return zoneinfo.ZoneInfo(env)
+        except (OSError, ValueError, zoneinfo.ZoneInfoNotFoundError):
+            pass
+    try:
+        with open("/etc/localtime", "rb") as f:
+            return zoneinfo.ZoneInfo.from_file(f, key="localtime")
+    except (OSError, ValueError):
+        return dt.timezone.utc
+
+
+def wall_to_epoch(wall, tz):
+    """Local wall time -> epoch: an ambiguous time (DST end) maps to the EARLIER
+    instant, a non-existent one (DST start) to the instant one DST shift later
+    (zoneinfo fold=0). That is Perl's timelocal() (btrbk) for every zone with
+    whole-hour DST shifts. Not for Australia/Lord_Howe (30-minute shift): there
+    Time::Local 1.35 maps e.g. 01:38 on DST end to 14:08 UTC, an instant that
+    localtime() shows as 01:08, not 01:38; fold=0 gives 14:38 UTC, which does
+    show as 01:38, so we keep it and accept that plan() may pick a different
+    first-of-hour/first-weekly snapshot than btrbk in that half hour."""
+    return int(wall.replace(tzinfo=tz, fold=0).timestamp())
+
+
+def epoch_to_wall(epoch, tz):
+    return dt.datetime.fromtimestamp(epoch, tz).replace(tzinfo=None)
+
+
+def perl_int_div(a, b):
+    """Perl's int(a / b) for b > 0: truncates toward zero (matters for future dates)."""
+    q = abs(a) // b
+    return q if a >= 0 else -q
+
+
+def snapshot_name(name, wall, seq=0):
+    return f"{name}.{wall.strftime(TS_FORMAT)}" + (f"_{seq}" if seq else "")
+
+
+def name_regex(name):
+    return re.compile(re.escape(name) + r"\.([0-9]{8}T[0-9]{4})(?:_([0-9]+))?")
+
+
+def parse_snapshot_name(name, entry):
+    """'home.20261013T1400_1' -> (wall datetime, 1), or None if not ours / invalid date."""
+    m = name_regex(name).fullmatch(entry)
+    if not m:
+        return None
+    try:
+        wall = dt.datetime.strptime(m.group(1), TS_FORMAT)
+    except ValueError:
+        return None
+    return wall, int(m.group(2) or 0)
+
+
+# ---- retention (pure) ----------------------------------------------------------------
+@dataclasses.dataclass
+class Snap:
+    entry: str                 # directory entry, e.g. home.20261013T1400
+    wall: dt.datetime          # local wall time from the name (naive)
+    seq: int = 0               # collision suffix _N
+    path: str = ""
+    uuid: str = ""
+    cgen: int = 0              # Gen at creation
+    virtual: bool = False      # dry run: the snapshot this run would create
+
+
+@dataclasses.dataclass
+class Decision:
+    snap: Snap
+    action: str                # "keep" | "delete"
+    reason: str
+
+
+def plan(snaps, now, policy, tz, *, hod=0, dow=0):
+    """Retention of btrbk 0.32.7 schedule() (snapshot_preserve_min latest,
+    preserve_date_in_future as in its snapshot deletion). Identical decisions
+    and reasons in every zone with whole-hour DST shifts; in Australia/Lord_Howe
+    names in the repeated half hour of the DST end are read differently from
+    btrbk (see wall_to_epoch()).
+
+    snaps: iterable of Snap (only .wall, .seq used); now: epoch seconds or an
+    aware datetime; policy: from parse_policy(); tz: zone of the names.
+    Returns [Decision] sorted oldest first; the reason is btrbk's (the last
+    rule that matched wins, as in btrbk's output).
+    """
+    if isinstance(now, dt.datetime):
+        now = now.timestamp()
+    now_wall = epoch_to_wall(now, tz)
+    # btrbk: timegm() of the local hour fields, i.e. DST-blind wall-clock hours.
+    now_h = now_wall.replace(minute=0, second=0, microsecond=0)
+    dow_name = DAY_NAMES[dow]
+
+    items = []
+    for s in snaps:
+        epoch = wall_to_epoch(s.wall, tz)
+        tm = epoch_to_wall(epoch, tz)          # localtime(): normalizes non-existent times
+        wday = (tm.weekday() + 1) % 7          # Perl: Sunday = 0
+        hfh = tm.hour - hod                    # hours from start of day
+        dfe = wday - dow                       # days from start of week
+        if hfh < 0:
+            hfh += 24
+            dfe -= 1
+        if dfe < 0:
+            dfe += 7
+        month_corr, year_corr = tm.month - 1, tm.year
+        if tm.day <= dfe:
+            # The month (and year) starts on its first preserve_day_of_week.
+            month_corr -= 1
+            if month_corr < 0:
+                month_corr, year_corr = 11, year_corr - 1
+        dh = int((now_h - tm.replace(minute=0, second=0)).total_seconds()) // 3600
+        dd = perl_int_div(dh + hfh, 24)
+        dw = perl_int_div(dd + dfe, 7)
+        dy = now_wall.year - year_corr
+        dm = dy * 12 + (now_wall.month - 1 - month_corr)
+        items.append({"snap": s, "key": (epoch, s.seq), "dh": dh, "dd": dd, "dw": dw, "dm": dm, "dy": dy,
+                      "hfh": hfh, "dfe": dfe, "year": year_corr, "month": month_corr + 1, "reason": None})
+    items.sort(key=lambda i: i["key"])
+
+    def delta_text(i):
+        s = (f" {i['dfe']}d" if i["dfe"] else "") + (f" {i['hfh']}h" if i["hfh"] else "")
+        return (f"{s} after " if s else " at ") + f"{dow_name} {hod:02d}:00"
+
+    def within(unit, delta):
+        n = policy.get(unit)
+        return bool(n) and (n == "all" or delta <= n)
+
+    first_hours = {}
+    for i in items:
+        if i["dh"] < 0:
+            i["reason"] = f"preserve forced: {-i['dh']} hours in the future"
+        first_hours.setdefault(i["dh"], i)
+    if items:
+        items[-1]["reason"] = "preserve min: latest"
+
+    first_days = {}
+    for k in sorted(first_hours, reverse=True):
+        i = first_hours[k]
+        if within("h", i["dh"]):
+            i["reason"] = f"preserve hourly: first of hour, {i['dh']} hours ago"
+        first_days.setdefault(i["dd"], i)
+    first_weeks = {}
+    for k in sorted(first_days, reverse=True):
+        i = first_days[k]
+        if within("d", i["dd"]):
+            i["reason"] = (f"preserve daily: first of day, {i['dd']} days ago"
+                           + (f", {i['hfh']}h after " if i["hfh"] else ", at ") + f"{hod:02d}:00")
+        first_weeks.setdefault(i["dw"], i)
+    first_months = {}
+    for k in sorted(first_weeks, reverse=True):
+        i = first_weeks[k]
+        if within("w", i["dw"]):
+            i["reason"] = f"preserve weekly: {i['dw']} weeks ago," + delta_text(i)
+        first_months.setdefault(i["dm"], i)
+    first_years = {}
+    for k in sorted(first_months, reverse=True):
+        i = first_months[k]
+        if within("m", i["dm"]):
+            i["reason"] = (f"preserve monthly: first weekly of month {i['year']}-{i['month']:02d} "
+                           f"({i['dm']} months ago," + delta_text(i) + ")")
+        first_years.setdefault(i["dy"], i)
+    for k in sorted(first_years, reverse=True):
+        i = first_years[k]
+        if within("y", i["dy"]):
+            i["reason"] = (f"preserve yearly: first weekly of year {i['year']} "
+                           f"({i['dy']} years ago," + delta_text(i) + ")")
+
+    out = []
+    for i in items:
+        if i["reason"]:
+            out.append(Decision(i["snap"], "keep", i["reason"]))
+        else:
+            out.append(Decision(i["snap"], "delete", f"not kept by policy '{format_policy(policy)}'"))
+    return out
+
+
+def newest_of(snaps):
+    """Newest by Gen at creation (names can lie after a clock step), then by date."""
+    return max(snaps, key=lambda s: (s.cgen, s.wall, s.seq), default=None)
+
+
+def apply_safeguards(decisions, now, tz, pins):
+    """Turn policy deletions into keeps for the 3 newest (by generation and by
+    name), anything younger than 24 h, and pinned paths."""
+    snaps = [d.snap for d in decisions]
+    protected = set()
+    for key in (lambda s: (s.cgen, s.wall, s.seq), lambda s: (wall_to_epoch(s.wall, tz), s.seq)):
+        protected.update(id(s) for s in sorted(snaps, key=key, reverse=True)[:KEEP_NEWEST])
+    for d in decisions:
+        if d.action != "delete":
+            continue
+        s = d.snap
+        if id(s) in protected:
+            d.action, d.reason = "keep", f"safeguard: one of the {KEEP_NEWEST} newest ({d.reason})"
+        elif now - wall_to_epoch(s.wall, tz) < MIN_AGE:
+            d.action, d.reason = "keep", f"safeguard: younger than 24 h ({d.reason})"
+        elif is_pinned(s.path, pins):
+            d.action, d.reason = "keep", f"safeguard: pinned ({d.reason})"
+    return decisions
+
+
+def is_pinned(path, pins):
+    if not path or not pins:
+        return False
+    return os.path.normpath(path) in pins or os.path.realpath(path) in pins
+
+
+def mass_delete_limit(owned):
+    return max(MASS_DELETE_MIN, owned * MASS_DELETE_PERCENT // 100)
+
+
+def is_mass_delete(count, owned):
+    """More than max(5, 10% of owned)."""
+    return count > MASS_DELETE_MIN and count * 100 > owned * MASS_DELETE_PERCENT
+
+
+def unexplained_deletions(decisions, snaps, policy, tz, pins, since, ref=None):
+    """The deletions in DECISIONS (made now) that time passing does not explain.
+
+    A deletion is explained when the snapshot was kept at SINCE (the last
+    successful run: policy and safeguards replayed over the snapshots named up
+    to then) and is due at REF (the trusted current time; None = the time the
+    decisions were made). After the machine was off, whole days of hourly
+    snapshots age out at once and all of them are explained, so the circuit
+    breaker does not trip on them; a shrunken policy dooms snapshots that were
+    already due at SINCE, and a clock that jumped ahead of REF dooms snapshots
+    not yet due at REF - those stay unexplained. SINCE None: nothing is
+    explained (no successful run recorded)."""
+    doomed = [d for d in decisions if d.action == "delete" and not d.snap.virtual]
+    if since is None or not doomed:
+        return doomed
+    real = [s for s in snaps if not s.virtual]
+    before = [s for s in real if wall_to_epoch(s.wall, tz) <= since + CLOCK_SLACK]
+    kept_then = {id(d.snap) for d in apply_safeguards(plan(before, since, policy, tz), since, tz, pins)
+                 if d.action == "keep"}
+    if ref is None:
+        due_now = {id(d.snap) for d in doomed}
+    else:
+        due_now = {id(d.snap) for d in apply_safeguards(plan(real, ref, policy, tz), ref, tz, pins)
+                   if d.action == "delete"}
+    return [d for d in doomed if not (id(d.snap) in kept_then and id(d.snap) in due_now)]
+
+
+# ---- btrfs ---------------------------------------------------------------------------
+SHOW_LABELS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Generation": "generation",
+               "Gen at creation": "cgen"}
+
+
+def parse_subvolume_show(text):
+    """The four fields we use from `btrfs subvolume show`; ParseError on anything odd.
+
+    Label lines are indented; the list after "Snapshot(s):" holds paths that are
+    not ours to interpret, so parsing stops there.
+    """
+    found = {}
+    for line in text.splitlines():
+        if line.strip().startswith("Snapshot(s):"):
+            break
+        m = re.match(r"^\s+([^:\t]+?):\s*(.*?)\s*$", line)
+        if not m or m.group(1) not in SHOW_LABELS:
+            continue
+        key = SHOW_LABELS[m.group(1)]
+        if key in found:
+            raise ParseError(f"label {m.group(1)!r} appears twice")
+        found[key] = m.group(2)
+    missing = [label for label, key in SHOW_LABELS.items() if key not in found]
+    if missing:
+        raise ParseError("missing " + ", ".join(missing))
+    if not UUID_RE.fullmatch(found["uuid"]):
+        raise ParseError(f"bad UUID {found['uuid']!r}")
+    if found["parent_uuid"] != "-" and not UUID_RE.fullmatch(found["parent_uuid"]):
+        raise ParseError(f"bad Parent UUID {found['parent_uuid']!r}")
+    for key in ("generation", "cgen"):
+        if not found[key].isdigit():
+            raise ParseError(f"bad {key} {found[key]!r}")
+    return {"uuid": found["uuid"], "parent_uuid": None if found["parent_uuid"] == "-" else found["parent_uuid"],
+            "generation": int(found["generation"]), "cgen": int(found["cgen"])}
+
+
+class Host:
+    """Everything that touches the system; tests replace it."""
+
+    def run(self, argv):
+        env = dict(os.environ, LC_ALL="C")
+        try:
+            p = subprocess.run(argv, check=False, capture_output=True, text=True, env=env, timeout=CMD_TIMEOUT)
+        except FileNotFoundError:
+            return 127, "", f"{argv[0]}: not found"
+        except subprocess.TimeoutExpired:
+            return 124, "", f"timed out after {CMD_TIMEOUT}s"
+        return p.returncode, p.stdout, p.stderr
+
+    def time(self):
+        return time.time()
+
+    def boot(self):
+        """(boot id, seconds since boot including suspend), or (None, None) if unknown.
+
+        Real time elapsed between two runs of the same boot, whatever the wall
+        clock did meanwhile."""
+        try:
+            with open(BOOT_ID_FILE) as f:
+                boot_id = f.read().strip()
+            return boot_id, time.clock_gettime(time.CLOCK_BOOTTIME)
+        except (OSError, AttributeError):
+            return None, None
+
+    def listdir(self, path):
+        return sorted(os.listdir(path))
+
+    def kind(self, path):
+        """'subvol' (a real subvolume root), 'symlink', 'missing' or 'other'."""
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return "missing"
+        if stat.S_ISLNK(st.st_mode):
+            return "symlink"
+        if stat.S_ISDIR(st.st_mode) and st.st_ino == 256:
+            return "subvol"
+        return "other"
+
+    def mkdir(self, path, mode):
+        os.mkdir(path, mode)
+
+
+class Btrfs:
+    def __init__(self, host):
+        self.host = host
+
+    def show(self, path):
+        rc, out, err = self.host.run(["btrfs", "subvolume", "show", path])
+        if rc != 0:
+            raise ParseError(f"btrfs subvolume show failed (rc={rc}): {err.strip()}")
+        return parse_subvolume_show(out)
+
+    def readonly(self, path):
+        rc, out, err = self.host.run(["btrfs", "property", "get", "-ts", path, "ro"])
+        if rc != 0:
+            raise ParseError(f"btrfs property get failed (rc={rc}): {err.strip()}")
+        value = out.strip()
+        if value == "ro=true":
+            return True
+        if value == "ro=false":
+            return False
+        raise ParseError(f"unexpected property output {value!r}")
+
+    def snapshot(self, source, dest):
+        return self.host.run(["btrfs", "subvolume", "snapshot", "-r", source, dest])
+
+    def delete(self, path):
+        return self.host.run(["btrfs", "subvolume", "delete", path])
+
+
+@dataclasses.dataclass
+class Scan:
+    owned: list
+    ignored: list              # (path, reason): not ours, never touched
+    unverifiable: list         # (path, reason): could be ours, blocks deletions
+
+
+def scan_snapshots(host, btrfs, snapdir, name, source_uuid):
+    """Owned snapshots of one source. source_uuid None = skip the parent check (latest)."""
+    owned, ignored, unverifiable = [], [], []
+    try:
+        entries = host.listdir(snapdir)
+    except FileNotFoundError:
+        return Scan(owned, ignored, unverifiable)
+    except OSError as e:
+        raise ParseError(f"cannot list {snapdir}: {e.strerror}") from None
+    pattern = name_regex(name)
+    for entry in entries:
+        if not pattern.fullmatch(entry):
+            continue
+        path = os.path.join(snapdir, entry)
+        parsed = parse_snapshot_name(name, entry)
+        if parsed is None:
+            ignored.append((path, "invalid date in the name"))
+            continue
+        kind = host.kind(path)
+        if kind != "subvol":
+            ignored.append((path, "not a subvolume" if kind != "symlink" else "symlink"))
+            continue
+        try:
+            info = btrfs.show(path)
+            ro = btrfs.readonly(path)
+        except ParseError as e:
+            unverifiable.append((path, str(e)))
+            continue
+        if not ro:
+            ignored.append((path, "not read-only"))
+            continue
+        if source_uuid is not None and info["parent_uuid"] != source_uuid:
+            ignored.append((path, f"snapshot of another subvolume (Parent UUID {info['parent_uuid'] or '-'})"))
+            continue
+        owned.append(Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path,
+                          uuid=info["uuid"], cgen=info["cgen"]))
+    return Scan(owned, ignored, unverifiable)
+
+
+# ---- run context -----------------------------------------------------------------------
+@dataclasses.dataclass
+class Source:
+    name: str
+    path: str
+    policy: dict
+    policy_text: str
+
+
+def parse_source(text, need_policy=True):
+    if "=" not in text:
+        raise UsageError(f"--source {text!r}: expected NAME=PATH:POLICY")
+    name, rest = text.split("=", 1)
+    if not NAME_RE.fullmatch(name):
+        raise UsageError(f"--source {text!r}: NAME must match [A-Za-z0-9._-]+")
+    if ":" in rest:
+        path, policy_text = rest.rsplit(":", 1)
+    elif need_policy:
+        raise UsageError(f"--source {text!r}: missing :POLICY")
+    else:
+        path, policy_text = rest, ""
+    if not path.startswith("/"):
+        raise UsageError(f"--source {text!r}: PATH must be absolute")
+    policy = {}
+    if need_policy or policy_text.strip():
+        try:
+            policy = parse_policy(policy_text)
+        except ValueError as e:
+            raise UsageError(f"--source {text!r}: {e}") from None
+    return Source(name, os.path.normpath(path), policy, policy_text.strip())
+
+
+@dataclasses.dataclass
+class LastRun:
+    epoch: int
+    boot_id: str = None        # None: written without (or by an older format)
+    boottime: float = None
+
+
+def parse_state(text):
+    """'EPOCH [BOOT_ID BOOTTIME]' -> LastRun, or None if malformed."""
+    parts = text.split()
+    if not parts or not parts[0].isdigit():
+        return None
+    if len(parts) == 1:
+        return LastRun(int(parts[0]))
+    if len(parts) != 3 or not UUID_RE.fullmatch(parts[1]):
+        return None
+    try:
+        boottime = float(parts[2])
+    except ValueError:
+        return None
+    return LastRun(int(parts[0]), parts[1], boottime)
+
+
+class Run:
+    """State of one snapshot/prune/list invocation."""
+
+    def __init__(self, args, host):
+        self.args = args
+        self.host = host
+        self.btrfs = Btrfs(host)
+        self.tz = local_tz(args.tz)
+        self.now = host.time()
+        self.boot_id, self.boottime = host.boot()
+        self.snapdir = os.path.normpath(args.snapdir)
+        self._ntp = None
+        self._pins = None
+        self._last_run = None
+
+    # Clock guards -----------------------------------------------------------
+    def ntp_problem(self):
+        if self.args.assume_clock_ok:
+            return None
+        if self._ntp is None:
+            rc, out, _ = self.host.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+            self._ntp = (rc == 0 and out.strip() == "yes")
+        return None if self._ntp else "the system clock is not NTP-synchronized (timedatectl NTPSynchronized != yes)"
+
+    def state_path(self):
+        return os.path.join(self.args.state_dir, STATE_FILE)
+
+    def last_run(self):
+        """(LastRun or None, problem or None)."""
+        if self._last_run is None:
+            try:
+                with open(self.state_path()) as f:
+                    text = f.read().strip()
+                record = parse_state(text)
+                self._last_run = (record, None) if record else \
+                    (None, f"unreadable state {self.state_path()} ({text[:60]!r}); remove it if the clock is right")
+            except FileNotFoundError:
+                self._last_run = (None, None)
+            except (OSError, UnicodeDecodeError) as e:
+                self._last_run = (None, f"cannot read {self.state_path()}: {e}")
+        return self._last_run
+
+    def behind_last_run(self):
+        """Why the clock is not to be trusted against the state file (None = fine)."""
+        last, problem = self.last_run()
+        if problem:
+            return problem
+        if last is not None and self.now < last.epoch - CLOCK_SLACK:
+            return (f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the last successful run "
+                    f"({fmt_epoch(last.epoch, self.tz)}); if the clock is right, remove {self.state_path()}")
+        return None
+
+    def backwards_problem(self, newest):
+        """Deletions: the clock runs behind what this tool already recorded."""
+        problem = self.behind_last_run()
+        if problem:
+            return problem
+        if newest is not None:
+            newest_epoch = wall_to_epoch(newest.wall, self.tz)
+            if self.now < newest_epoch - CLOCK_SLACK:
+                return (f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the newest snapshot "
+                        f"{newest.entry}; if the clock is right, that name came from a clock that ran ahead: "
+                        f"check it with '{self.args.list_hint}' and delete it with "
+                        f"'btrfs subvolume delete {newest.path or newest.entry}'")
+        return None
+
+    def clock_jump(self):
+        """Seconds the wall clock advanced beyond the real time elapsed since the
+        last successful run, if that run was in this boot (else 0: unknown)."""
+        last, problem = self.last_run()
+        if problem or last is None or last.boot_id is None or self.boot_id is None or self.boottime is None:
+            return 0
+        if last.boot_id != self.boot_id or self.boottime < last.boottime:
+            return 0
+        return max(0, (self.now - last.epoch) - (self.boottime - last.boottime))
+
+    def creation_check(self, newest):
+        """(problem, notes) for naming a new snapshot after the clock: problem =
+        why not to create it now (a refusal), notes = (level, text) to log if it
+        is created."""
+        problem = self.behind_last_run()
+        if problem:
+            return problem, []
+        synced = self.ntp_problem() is None
+        last, _ = self.last_run()
+        newest_epoch = wall_to_epoch(newest.wall, self.tz) if newest is not None else None
+        notes = []
+        if newest_epoch is not None and self.now < newest_epoch - CLOCK_SLACK:
+            if not synced:
+                return (f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the newest snapshot "
+                        f"{newest.entry} and not NTP-synchronized; if the clock is right, that name came "
+                        f"from a clock that ran ahead: check it with '{self.args.list_hint}' and delete it "
+                        f"with 'btrfs subvolume delete {newest.path}'"), []
+            notes.append((4, f"the newest snapshot {newest.entry} is dated in the future (named while the clock "
+                         f"ran ahead?); it is kept until its date passes - if the name is wrong, delete it "
+                         f"with 'btrfs subvolume delete {newest.path}'"))
+        if not synced:
+            jump = self.clock_jump()
+            if jump > CLOCK_SLACK:
+                return (f"the clock is not NTP-synchronized and moved {fmt_span(jump)} further than the time "
+                        f"elapsed since the last successful run ({fmt_epoch(last.epoch, self.tz)}, same boot)"), []
+            refs = [e for e in (newest_epoch, last.epoch if last else None) if e is not None]
+            if (refs and self.now > max(refs) + SAFETY_NET
+                    and self.boottime is not None and self.boottime < NTP_GRACE):
+                return (f"the clock ({fmt_epoch(self.now, self.tz)}) is not NTP-synchronized yet, the system "
+                        f"booted {fmt_span(self.boottime)} ago, and the clock is more than 24 h ahead of the "
+                        f"newest snapshot and the last successful run; not freezing a possibly wrong clock "
+                        f"into a name - the next run catches up"), []
+            notes.append((5, "the clock is not NTP-synchronized; the name uses the unverified time"))
+        return None, notes
+
+    def pins(self):
+        """(set of pinned paths, problem or None)."""
+        if self._pins is None:
+            pins = set()
+            try:
+                with open(self.args.pin_file) as f:
+                    for raw in f:
+                        line = raw.strip()
+                        if line:
+                            pins.add(os.path.normpath(line))
+                            pins.add(os.path.realpath(line))
+                self._pins = (pins, None)
+            except FileNotFoundError:
+                self._pins = (pins, None)
+            except (OSError, UnicodeDecodeError) as e:
+                self._pins = (pins, f"cannot read the pin file {self.args.pin_file}: {e}")
+        return self._pins
+
+    def record_success(self):
+        """Store this run as the last successful one - only with a trusted clock,
+        and never moving the record backwards (it guards against a clock that
+        later runs behind)."""
+        if self.ntp_problem():
+            log(6, "the clock is not NTP-synchronized; this run is not recorded as the last successful one")
+            return
+        last, problem = self.last_run()
+        if problem:
+            log(4, f"not recording this run: {problem}")
+            return
+        if last is not None and self.now < last.epoch:
+            if self.now < last.epoch - CLOCK_SLACK:
+                log(4, f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the last successful run "
+                       f"({fmt_epoch(last.epoch, self.tz)}); keeping that record - if the clock is right, "
+                       f"remove {self.state_path()}")
+            return
+        line = str(int(self.now))
+        if self.boot_id and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
+            line += f" {self.boot_id} {self.boottime:.3f}"
+        os.makedirs(self.args.state_dir, mode=0o755, exist_ok=True)
+        path = self.state_path()
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        self._last_run = (parse_state(line), None)
+
+    # Per source ---------------------------------------------------------------
+    def source_info(self, src):
+        kind = self.host.kind(src.path)
+        if kind != "subvol":
+            raise ParseError(f"{src.path} is not a subvolume ({kind})")
+        return self.btrfs.show(src.path)
+
+    def decide(self, src, scan, extra=()):
+        """Decisions after policy and safeguards, the deletion candidates, and
+        why deleting is refused (None = allowed)."""
+        snaps = list(scan.owned) + list(extra)
+        pins, pin_problem = self.pins()
+        decisions = apply_safeguards(plan(snaps, self.now, src.policy, self.tz), self.now, self.tz, pins)
+        doomed = [d for d in decisions if d.action == "delete" and not d.snap.virtual]
+        refusal = None
+        if doomed:
+            # A dry run counts the snapshot it would create, like the real run will.
+            newest = newest_of(snaps)
+            if scan.unverifiable:
+                path, why = scan.unverifiable[0]
+                refusal = (f"{len(scan.unverifiable)} entr{'y' if len(scan.unverifiable) == 1 else 'ies'} "
+                           f"could not be verified ({path}: {why})")
+            elif pin_problem:
+                refusal = pin_problem
+            else:
+                refusal = self.backwards_problem(newest) or self.ntp_problem()
+            owned = len(snaps)
+            if refusal is None and not self.args.allow_mass_delete:
+                refusal = self.breaker(src, decisions, snaps, pins, doomed, owned)
+        return decisions, doomed, refusal
+
+    def breaker(self, src, decisions, snaps, pins, doomed, owned):
+        last, _ = self.last_run()
+        since = last.epoch if last is not None else None
+        jump = self.clock_jump()
+        ref = self.now - jump if jump > CLOCK_SLACK else None
+        unexplained = unexplained_deletions(decisions, snaps, src.policy, self.tz, pins, since, ref)
+        if not is_mass_delete(len(unexplained), owned):
+            return None
+        if since is None:
+            why = "no successful run is recorded, so none of them is explained by the time passed"
+        else:
+            why = (f"{len(unexplained)} of them not explained by the time passed since the last successful "
+                   f"run ({fmt_epoch(since, self.tz)})")
+            if ref is not None:
+                why += (f"; the clock moved {fmt_span(jump)} further than the time elapsed since then "
+                        f"(same boot)")
+            else:
+                why += "; was the policy shortened?"
+        return (f"circuit breaker: {len(doomed)} of {owned} snapshots would be deleted, {why} "
+                f"(limit {mass_delete_limit(owned)}); check with '{self.args.list_hint}', "
+                f"then delete them with '{self.args.confirm_hint}'")
+
+
+def fmt_span(seconds):
+    seconds = int(seconds)
+    if seconds >= 2 * 86400:
+        return f"{seconds // 86400} days"
+    if seconds >= 2 * 3600:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 60} min"
+
+
+def fmt_epoch(epoch, tz):
+    return dt.datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+@dataclasses.dataclass
+class Result:
+    name: str
+    status: int = EXIT_OK
+    created: str = ""
+    deleted: int = 0
+    kept: int = 0
+    note: str = ""
+
+    def worse(self, status):
+        # error beats refusal beats ok
+        rank = {EXIT_OK: 0, EXIT_REFUSED: 1, EXIT_ERROR: 2}
+        if rank[status] > rank[self.status]:
+            self.status = status
+
+
+def process_source(run, src, create):
+    args = run.args
+    res = Result(src.name)
+    dry = args.dry_run
+    would = "would " if dry else ""
+    try:
+        info = run.source_info(src)
+    except ParseError as e:
+        log(3, f"{src.name}: cannot read source {src.path}: {e}; nothing done")
+        res.worse(EXIT_ERROR)
+        res.note = "source unreadable"
+        return res
+    try:
+        scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
+    except ParseError as e:
+        log(3, f"{src.name}: {e}; nothing done")
+        res.worse(EXIT_ERROR)
+        return res
+    for path, why in scan.unverifiable:
+        log(4, f"{src.name}: cannot verify {path}: {why}")
+    newest = newest_of(scan.owned)
+    extra = []
+
+    if create:
+        reason = None
+        if args.force:
+            reason = "forced"
+        elif newest is None:
+            reason = "no snapshot yet"
+        elif info["generation"] > newest.cgen:
+            reason = f"changed (generation {info['generation']} > {newest.cgen} of {newest.entry})"
+        elif run.now - wall_to_epoch(newest.wall, run.tz) > SAFETY_NET:
+            reason = f"newest snapshot {newest.entry} is older than 24 h"
+        elif run.now < wall_to_epoch(newest.wall, run.tz) - CLOCK_SLACK and run.ntp_problem() is None:
+            # Named while the clock ran ahead. A correctly named snapshot becomes
+            # the newest by generation, which lets deletions resume.
+            reason = f"newest snapshot {newest.entry} is dated in the future"
+        if reason is None:
+            log(6, f"{src.name}: unchanged since {newest.entry}; no new snapshot")
+        else:
+            problem, notes = run.creation_check(newest)
+            if problem:
+                log(4, f"{src.name}: not creating a snapshot: {problem}")
+                res.worse(EXIT_REFUSED)
+                res.note = "clock"
+            else:
+                for level, note in notes:
+                    log(level, f"{src.name}: {note}")
+                wall = epoch_to_wall(run.now, run.tz).replace(second=0, microsecond=0)
+                entry = free_name(run.host, run.snapdir, src.name, wall)
+                dest = os.path.join(run.snapdir, entry)
+                if dry:
+                    log(5, f"{src.name}: would create {dest} ({reason})")
+                    # The real snapshot's "Gen at creation" is the running transaction:
+                    # above the source's generation and every existing snapshot's.
+                    cgen = max([info["generation"]] + [s.cgen for s in scan.owned]) + 1
+                    extra.append(Snap(entry=entry, wall=wall, seq=parse_snapshot_name(src.name, entry)[1],
+                                      path=dest, cgen=cgen, virtual=True))
+                    res.created = entry
+                elif create_snapshot(run, src, info, dest, entry, reason):
+                    res.created = entry
+                    try:
+                        scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
+                    except ParseError as e:
+                        log(3, f"{src.name}: {e}; no deletions")
+                        res.worse(EXIT_ERROR)
+                        return res
+                    if not any(s.entry == entry for s in scan.owned):
+                        log(3, f"{src.name}: created {dest} but it does not pass the ownership check")
+                        res.worse(EXIT_ERROR)
+                else:
+                    res.worse(EXIT_ERROR)
+
+    decisions, doomed, refusal = run.decide(src, scan, extra)
+    res.kept = sum(1 for d in decisions if d.action == "keep" and not d.snap.virtual)
+    if not doomed:
+        return res
+    if refusal:
+        log(4, f"{src.name}: {len(doomed)} deletion(s) blocked: {refusal}")
+        for d in doomed:
+            log(6, f"{src.name}: blocked: {d.snap.entry} ({d.reason})")
+        res.worse(EXIT_REFUSED)
+        res.kept += len(doomed)
+        return res
+    if dry:
+        for d in doomed:
+            log(5, f"{src.name}: {would}delete {d.snap.path} ({d.reason})")
+        res.deleted = len(doomed)
+        return res
+
+    # Right before deleting: list again, decide again, and keep only what both
+    # passes agree on (same UUID); then re-check each one just before its delete.
+    run._pins = None
+    try:
+        fresh = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
+    except ParseError as e:
+        log(3, f"{src.name}: {e}; no deletions")
+        res.worse(EXIT_ERROR)
+        return res
+    _, fresh_doomed, refusal = run.decide(src, fresh)
+    if refusal:
+        log(4, f"{src.name}: deletions blocked on re-check: {refusal}")
+        res.worse(EXIT_REFUSED)
+        res.kept += len(doomed)
+        return res
+    fresh_uuids = {d.snap.uuid for d in fresh_doomed}
+    for d in doomed:
+        s = d.snap
+        if s.uuid not in fresh_uuids:
+            log(5, f"{src.name}: {s.entry} is no longer due after re-listing; kept")
+            res.kept += 1
+            continue
+        # Pins are re-read before every deletion; a pin is protection, not a fault.
+        run._pins = None
+        if is_pinned(s.path, run.pins()[0]):
+            log(5, f"{src.name}: {s.entry} was pinned meanwhile; kept")
+            res.kept += 1
+            continue
+        problem = recheck(run, s, info["uuid"])
+        if problem:
+            log(4, f"{src.name}: not deleting {s.path}: {problem}")
+            res.worse(EXIT_REFUSED)
+            res.kept += 1
+            continue
+        rc, _, err = run.btrfs.delete(s.path)
+        if rc != 0:
+            log(3, f"{src.name}: deleting {s.path} failed (rc={rc}): {err.strip()}; stopping deletions")
+            res.worse(EXIT_ERROR)
+            break
+        log(5, f"{src.name}: deleted {s.path} ({d.reason})")
+        res.deleted += 1
+    return res
+
+
+def recheck(run, snap, source_uuid):
+    """Why SNAP must not be deleted after all (None = go ahead)."""
+    problem = run.pins()[1]
+    if problem:
+        return problem
+    if run.host.kind(snap.path) != "subvol":
+        return "no longer a subvolume"
+    try:
+        info = run.btrfs.show(snap.path)
+        ro = run.btrfs.readonly(snap.path)
+    except ParseError as e:
+        return str(e)
+    if info["uuid"] != snap.uuid:
+        return f"UUID changed ({snap.uuid} -> {info['uuid']})"
+    if info["parent_uuid"] != source_uuid:
+        return "Parent UUID changed"
+    if not ro:
+        return "no longer read-only"
+    return None
+
+
+def free_name(host, snapdir, name, wall):
+    """NAME.TS, or NAME.TS_N with N = highest present + 1 (btrbk)."""
+    base = snapshot_name(name, wall)
+    pattern = re.compile(re.escape(base) + r"(?:_([0-9]+))?")
+    try:
+        entries = host.listdir(snapdir)
+    except FileNotFoundError:
+        entries = []
+    taken = [int(m.group(1) or 0) for m in map(pattern.fullmatch, entries) if m]
+    return base if not taken else f"{base}_{max(taken) + 1}"
+
+
+def create_snapshot(run, src, info, dest, entry, reason):
+    if run.host.kind(run.snapdir) == "missing":
+        try:
+            run.host.mkdir(run.snapdir, 0o700)
+            log(5, f"created the snapshot directory {run.snapdir}")
+        except OSError as e:
+            log(3, f"cannot create {run.snapdir}: {e.strerror}")
+            return False
+    rc, _, err = run.btrfs.snapshot(src.path, dest)
+    if rc != 0:
+        log(3, f"{src.name}: creating {dest} failed (rc={rc}): {err.strip()}")
+        return False
+    log(5, f"{src.name}: created {entry} ({reason})")
+    return True
+
+
+# ---- commands ------------------------------------------------------------------------
+def take_lock(args):
+    """Returns the open fd (close it to unlock), -1 if no lock is wanted, or None if busy."""
+    if args.no_lock or args.dry_run:
+        return -1
+    fd = os.open(args.lock, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def check_snapdir(host, snapdir):
+    # A missing directory just holds no snapshots yet (snapshot creates it).
+    if host.kind(snapdir) == "symlink":
+        raise UsageError(f"--snapdir {snapdir} is a symlink")
+
+
+def cmd_snapshot_or_prune(args, host, create):
+    check_snapdir(host, args.snapdir)
+    fd = take_lock(args)
+    if fd is None:
+        log(5, f"another run holds {args.lock}; skipped")
+        return EXIT_BUSY
+    try:
+        return snapshot_or_prune(args, host, create)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def snapshot_or_prune(args, host, create):
+    run = Run(args, host)
+    results = [process_source(run, src, create) for src in args.sources]
+    status = EXIT_OK
+    for r in results:
+        if r.status == EXIT_ERROR or (r.status == EXIT_REFUSED and status == EXIT_OK):
+            status = r.status
+    parts = []
+    for r in results:
+        what = f"created {r.created}" if r.created else ("no new snapshot" if create else "")
+        bits = [b for b in (what, f"deleted {r.deleted}", f"kept {r.kept}", r.note) if b]
+        parts.append(f"{r.name}: " + ", ".join(bits))
+    word = {EXIT_OK: "ok", EXIT_REFUSED: "blocked by a safety check", EXIT_ERROR: "error"}[status]
+    log(5 if status == EXIT_OK else 4 if status == EXIT_REFUSED else 3,
+        f"{'dry run ' if args.dry_run else ''}{'snapshot' if create else 'prune'} summary: "
+        + "; ".join(parts) + f"; result: {word}")
+    if status == EXIT_OK and not args.dry_run:
+        try:
+            run.record_success()
+        except OSError as e:
+            log(4, f"cannot record the run in {args.state_dir}: {e.strerror}")
+    return status
+
+
+def cmd_list(args, host):
+    run = Run(args, host)
+    out = []
+    status = EXIT_OK
+    for src in args.sources:
+        entry = {"name": src.name, "source": src.path, "policy": format_policy(src.policy)}
+        try:
+            info = run.source_info(src)
+        except ParseError as e:
+            log(3, f"{src.name}: cannot read source {src.path}: {e}")
+            entry["error"] = str(e)
+            out.append(entry)
+            status = EXIT_ERROR
+            continue
+        try:
+            scan = scan_snapshots(host, run.btrfs, run.snapdir, src.name, info["uuid"])
+        except ParseError as e:
+            log(3, f"{src.name}: {e}")
+            entry["error"] = str(e)
+            out.append(entry)
+            status = EXIT_ERROR
+            continue
+        decisions, doomed, refusal = run.decide(src, scan)
+        newest = newest_of(scan.owned)
+        entry.update({
+            "uuid": info["uuid"], "generation": info["generation"],
+            "changed": newest is None or info["generation"] > newest.cgen,
+            "snapshots": [{"path": d.snap.path, "entry": d.snap.entry,
+                           "time": d.snap.wall.strftime("%Y-%m-%dT%H:%M"), "uuid": d.snap.uuid,
+                           "gen_at_creation": d.snap.cgen, "action": d.action, "reason": d.reason}
+                          for d in decisions],
+            "ignored": [{"path": p, "reason": r} for p, r in scan.ignored],
+            "unverifiable": [{"path": p, "reason": r} for p, r in scan.unverifiable],
+            "deletions_blocked": refusal,
+        })
+        out.append(entry)
+    if args.json:
+        json.dump({"snapdir": run.snapdir, "now": int(run.now), "sources": out}, sys.stdout, indent=2)
+        print()
+        return status
+    for e in out:
+        if "error" in e:
+            print(f"{e['name']}: {e['source']}: ERROR {e['error']}")
+            continue
+        print(f"{e['name']}: {e['source']} (generation {e['generation']}, "
+              f"{'changed' if e['changed'] else 'unchanged'} since the newest snapshot), policy '{e['policy']}'")
+        for s in e["snapshots"]:
+            print(f"  {s['action'].upper():7} {s['entry']:<32} {s['reason']}")
+        for s in e["ignored"]:
+            print(f"  {'IGNORED':7} {os.path.basename(s['path']):<32} {s['reason']}")
+        for s in e["unverifiable"]:
+            print(f"  {'UNKNOWN':7} {os.path.basename(s['path']):<32} {s['reason']}")
+        n_del = sum(1 for s in e["snapshots"] if s["action"] == "delete")
+        print(f"  {len(e['snapshots'])} snapshot(s), {n_del} due for deletion"
+              + (f"; deletions would be blocked: {e['deletions_blocked']}" if e["deletions_blocked"] else ""))
+    return status
+
+
+def cmd_latest(args, host):
+    check_snapdir(host, args.snapdir)
+    btrfs = Btrfs(host)
+    source_uuid = None
+    if args.source_path:
+        try:
+            source_uuid = btrfs.show(os.path.normpath(args.source_path))["uuid"]
+        except ParseError as e:
+            log(3, f"cannot read {args.source_path}: {e}")
+            return EXIT_ERROR
+    try:
+        scan = scan_snapshots(host, btrfs, os.path.normpath(args.snapdir), args.name, source_uuid)
+    except ParseError as e:
+        log(3, str(e))
+        return EXIT_ERROR
+    for path, why in scan.unverifiable:
+        log(4, f"cannot verify {path}: {why}")
+    newest = newest_of(scan.owned)
+    if newest is None:
+        log(4, f"no snapshot of {args.name} in {args.snapdir}")
+        return EXIT_ERROR
+    print(newest.path)
+    return EXIT_OK
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="btrfs-snapshot-core",
+                                description="Local btrfs snapshots with btrbk-compatible retention.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp, policy=True):
+        sp.add_argument("--snapdir", required=True, help="directory holding the snapshots")
+        sp.add_argument("--source", action="append", required=True, dest="sources", metavar="NAME=PATH:POLICY",
+                        help="snapshot name, source subvolume and retention, e.g. home=/mnt/top/home:'72h 7d'")
+        sp.add_argument("--tz", help="time zone of the names and the retention (default: local; for tests)")
+        sp.add_argument("--pin-file", default=DEFAULT_PIN_FILE, help=f"pinned paths (default {DEFAULT_PIN_FILE})")
+        sp.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help=f"default {DEFAULT_STATE_DIR}")
+        sp.add_argument("--assume-clock-ok", action="store_true",
+                        help="skip the NTP-synchronized check (tests); the other clock guards stay")
+        # A caller that builds the --source arguments itself (btrfs-snapshot)
+        # names its own runnable commands in the messages instead of ours.
+        sp.add_argument("--list-hint", default=DEFAULT_LIST_HINT, metavar="COMMAND",
+                        help="command named in messages to review the decisions")
+        sp.add_argument("--confirm-hint", default=DEFAULT_CONFIRM_HINT, metavar="COMMAND",
+                        help="command named in messages to confirm a mass deletion")
+
+    for name, helptext in (("snapshot", "create changed snapshots, then prune"), ("prune", "prune only")):
+        sp = sub.add_parser(name, help=helptext)
+        common(sp)
+        sp.add_argument("--dry-run", action="store_true", help="show what would be created/deleted")
+        sp.add_argument("--allow-mass-delete", action="store_true", help="disable the circuit breaker")
+        sp.add_argument("--lock", default=DEFAULT_LOCK, help=f"lock file (default {DEFAULT_LOCK})")
+        sp.add_argument("--no-lock", action="store_true", help="the caller already holds the lock")
+        if name == "snapshot":
+            sp.add_argument("--force", action="store_true", help="create even if unchanged")
+    sp = sub.add_parser("list", help="list snapshots with the retention decision")
+    common(sp)
+    sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("latest", help="print the newest snapshot of NAME")
+    sp.add_argument("--snapdir", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--source-path", help="also require the snapshot's Parent UUID to be this subvolume's UUID")
+    return p
+
+
+def main(argv=None, host=None):
+    global LOG_STREAM
+    host = host or Host()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    LOG_STREAM = sys.stderr if args.cmd == "latest" or getattr(args, "json", False) else sys.stdout
+    for attr in ("force", "allow_mass_delete", "dry_run", "no_lock"):
+        if not hasattr(args, attr):
+            setattr(args, attr, False)
+    for attr, default in (("list_hint", DEFAULT_LIST_HINT), ("confirm_hint", DEFAULT_CONFIRM_HINT)):
+        if not hasattr(args, attr):
+            setattr(args, attr, default)
+    try:
+        if not args.snapdir.startswith("/"):
+            raise UsageError("--snapdir must be absolute")
+        if args.cmd == "latest":
+            if not NAME_RE.fullmatch(args.name):
+                raise UsageError("--name must match [A-Za-z0-9._-]+")
+            return cmd_latest(args, host)
+        if args.tz:
+            try:
+                zoneinfo.ZoneInfo(args.tz)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+                raise UsageError(f"unknown --tz {args.tz!r}") from None
+        args.sources = [parse_source(s) for s in args.sources]
+        names = [s.name for s in args.sources]
+        paths = [s.path for s in args.sources]
+        if len(set(names)) != len(names) or len(set(paths)) != len(paths):
+            raise UsageError("each --source needs its own NAME and PATH")
+        if args.cmd == "list":
+            return cmd_list(args, host)
+        return cmd_snapshot_or_prune(args, host, create=(args.cmd == "snapshot"))
+    except UsageError as e:
+        parser.print_usage(sys.stderr)
+        print(f"btrfs-snapshot-core: {e}", file=sys.stderr)
+        return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

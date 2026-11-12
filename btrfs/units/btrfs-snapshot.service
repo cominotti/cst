@@ -1,0 +1,12 @@
+# Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs snapshots setup'.
+[Unit]
+Description=Hourly btrfs snapshot of /home (space guard + btrfs-snapshot-core, local only)
+RequiresMountsFor=/var/home /var/mnt/btrfs-top
+After=local-fs.target time-set.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-snapshot hourly
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30min

@@ -1,0 +1,17 @@
+# Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs snapshots nas setup'.
+# Optional backup to the NAS; any failure is logged and retried next day, never blocking anything.
+[Unit]
+Description=Back up the newest /home snapshots to the NAS (restic over SFTP)
+RequiresMountsFor=/var/home /var/mnt/btrfs-top
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/btrfs-snapshot nas
+Nice=19
+IOSchedulingClass=idle
+# The script bounds restic itself (NAS_TIMEOUT for the backups, then forget,
+# prune and check with what is left); this is a backstop. On stop, the script
+# unmounts and unpins the snapshots it was reading.
+TimeoutStartSec=7h

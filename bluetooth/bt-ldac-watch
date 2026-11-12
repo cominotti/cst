@@ -1,0 +1,537 @@
+#!/usr/bin/python3 -I
+# managed-by: bluetooth-setup.sh (CST): `cst bluetooth apply` installs this copy; edit the one in CST.
+"""bt-ldac-watch: keeps the headset's LDAC stream at 48000 Hz (CST, the
+`bluetooth` module; see bluetooth/README.md, "LDAC sample rate").
+
+Who configures the A2DP stream picks its sample rate. When the PC does it,
+PipeWire prefers 48000 Hz; when the headset reconnects by itself, it often
+picks 96000 Hz. This program waits for that case and then switches the
+headset's card to its SBC profile and straight back to LDAC: the PC then
+configures the stream, at 48000 Hz. The Bluetooth link stays up; the sound
+stops for about a second.
+
+  bt-ldac-watch --device MAC [--rate 48000] [--dry-run]
+      run: listen to `pactl subscribe`, act when needed. Logs to standard
+      output (the journal, under systemd). --dry-run logs what it would do
+      and never switches a profile
+  bt-ldac-watch --device MAC --snapshot
+      stdin: pw-dump; prints what this program sees of the headset
+
+Rules: one attempt per connection (a new connection, or an output node
+that went away by itself, allows another one, but never more than
+MAX_TRIES per connection); never two attempts within the cooldown; after a
+failed attempt, or when the headset goes back to the wrong rate soon after
+a fix (RELAPSE), it gives up until the headset connects again; nothing is
+done while the headset's microphone is in use or when the card is not on
+its LDAC profile. A stop signal during a profile switch waits until the
+switch back to LDAC is done.
+"""
+
+import argparse
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import time
+
+# Seconds. SETTLE: how long the wrong rate must last before acting (the
+# headset and WirePlumber are often still busy just after a connection).
+SETTLE = 5.0
+COOLDOWN = 600.0
+DEBOUNCE = 1.0          # events come in bursts: one look after the burst
+FALLBACK = 120.0        # a look now and then, should an event be missed
+BACKOFF_MAX = 60.0      # pactl subscribe restarted after 1, 2, 4 ... 60 s
+SBC_WAIT = 6.0          # how long the SBC profile may take to come up
+SBC_HOLD = 2.0          # then kept this long, so the stream really closes
+LDAC_WAIT = 10.0        # how long LDAC may take to come back with a rate
+RELAPSE = 300.0         # wrong rate again this soon after a fix: the fix did not hold
+MAX_TRIES = 2           # attempts per connection, whatever happens
+
+
+def log(msg, level=6):
+    """One journal line; LEVEL as a syslog priority prefix (4 warning, 3 error)."""
+    print(f"<{level}>{msg}", flush=True)
+
+
+def device_id(mac):
+    return mac.upper().replace(":", "_")
+
+
+# ---- what pw-dump shows -----------------------------------------------------------------
+def node_rate(info):
+    """The sample rate of a node: its negotiated Format, else the rate its
+    EnumFormat offers (a Bluetooth node offers exactly the transport's rate;
+    a suspended node has an empty Format). None when neither has one."""
+    params = info.get("params") or {}
+    for key in ("Format", "EnumFormat"):
+        for fmt in params.get(key) or []:
+            rate = fmt.get("rate") if isinstance(fmt, dict) else None
+            if isinstance(rate, int):
+                return rate
+    return None
+
+
+def serial(props):
+    s = props.get("object.serial")
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot(dev, objs):
+    """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
+    dict: card (object serial, None = not in PipeWire), profile (active card
+    profile), out (output node serial), codec, rate, mic (the headset's input
+    node is running). Missing parts are None."""
+    mac = dev.replace("_", ":")
+    snap = {"card": None, "profile": None, "out": None, "codec": None, "rate": None,
+            "inputs": [], "mic": False}
+    for o in objs:
+        if not isinstance(o, dict):
+            continue
+        info = o.get("info") or {}
+        p = info.get("props") or {}
+        kind = o.get("type", "")
+        if kind.endswith("Device") and p.get("device.name") == "bluez_card." + dev:
+            snap["card"] = serial(p)
+            prof = (info.get("params") or {}).get("Profile") or []
+            if prof and isinstance(prof[0], dict):
+                snap["profile"] = prof[0].get("name")
+        if not kind.endswith("Node"):
+            continue
+        name = str(p.get("node.name", ""))
+        if name.startswith("bluez_output." + dev) and p.get("api.bluez5.codec"):
+            snap["out"] = serial(p)
+            snap["codec"] = p["api.bluez5.codec"]
+            snap["rate"] = node_rate(info)
+        elif name.startswith(("bluez_input." + dev, "bluez_input." + mac)):
+            snap["inputs"].append(serial(p))
+            if info.get("state") == "running":
+                snap["mic"] = True
+    return snap
+
+
+def decide(snap, rate):
+    """(what, why) for one snapshot: what is "none" (nothing wrong),
+    "skip" (wrong rate, but not now) or "act" (wrong rate, may be fixed)."""
+    if snap is None or snap["card"] is None:
+        return "none", "headset not in PipeWire"
+    if snap["codec"] != "ldac":
+        return "none", f"codec {snap['codec'] or 'none'}"
+    if snap["rate"] is None:
+        return "none", "LDAC, rate unknown"
+    if snap["rate"] == rate:
+        return "none", f"LDAC at {rate} Hz"
+    if not str(snap["profile"] or "").startswith("a2dp-sink"):
+        return "skip", f"LDAC at {snap['rate']} Hz, but the card profile is {snap['profile']}"
+    if snap["mic"]:
+        return "skip", f"LDAC at {snap['rate']} Hz, but the headset's microphone is in use"
+    return "act", f"LDAC at {snap['rate']} Hz (want {rate})"
+
+
+class Tracker:
+    """The one-attempt-per-connection rule (at most MAX_TRIES, and none
+    after a failure or a fix that did not hold), the settle time and the
+    cooldown. observe() takes a snapshot and the time and says what to do:
+      ("none"|"skip", why)   nothing to do now
+      ("wait", seconds)      wrong rate: look again after SECONDS
+      ("act", why)           do the bounce now (then call attempted/result)
+      ("done", why)          wrong rate, but this connection had its attempt(s)
+      ("cooldown", seconds)  wrong rate, the last attempt was too recent"""
+
+    def __init__(self, rate, settle=SETTLE, cooldown=COOLDOWN, relapse=RELAPSE, max_tries=MAX_TRIES):
+        self.rate, self.settle, self.cooldown = rate, settle, cooldown
+        self.relapse, self.max_tries = relapse, max_tries
+        self.card = self.out = None
+        self.tried = False
+        self.failed = None          # why this connection gets no more attempts
+        self.tries = 0              # attempts on this connection
+        self.fixed = None           # time of the last attempt that worked, this connection
+        self.last = None            # time of the last attempt (any connection)
+        self.since = None           # wrong rate seen first at
+
+    def _new_connection(self):
+        self.tried = False
+        self.failed = None
+        self.tries = 0
+        self.fixed = None
+        self.since = None
+
+    def observe(self, snap, now):
+        card = snap["card"] if snap else None
+        out = snap["out"] if snap else None
+        if card != self.card:
+            # Gone, or connected again (a new card object): a new connection.
+            self._new_connection()
+        elif out != self.out and self.out is not None:
+            # The output node went away or was replaced, not by us (own
+            # bounces are recorded with own_node): one more attempt, unless
+            # the last one failed or the connection had all its attempts.
+            self.tried = False
+            self.since = None
+        self.card, self.out = card, out
+        what, why = decide(snap, self.rate)
+        if what != "act":
+            self.since = None
+            return what, why
+        if not self.failed and self.fixed is not None and now - self.fixed < self.relapse:
+            # The wrong rate is back soon after a fix, on the same connection:
+            # the headset set the stream up again by itself. Another bounce
+            # would not hold either and would only repeat the dropout.
+            self.failed = (f"the headset went back to {snap['rate']} Hz by itself "
+                           f"{now - self.fixed:.0f} s after the fix")
+        if self.failed:
+            return "done", f"{self.failed}: given up until it connects again"
+        if self.tries >= self.max_tries:
+            return "done", f"{self.tries} attempts on this connection already: given up until it connects again"
+        if self.tried:
+            return "done", "already tried once on this connection"
+        if self.last is not None and now - self.last < self.cooldown:
+            return "cooldown", self.cooldown - (now - self.last)
+        if self.since is None:
+            self.since = now
+        if now - self.since < self.settle:
+            return "wait", self.settle - (now - self.since)
+        return "act", why
+
+    def attempted(self, now):
+        self.tried = True
+        self.tries += 1
+        self.last = now
+        self.since = None
+
+    def own_node(self, snap):
+        """After our own bounce: its new output node is not a reason to try again."""
+        if snap and snap["card"] == self.card:
+            self.out = snap["out"]
+
+    def result(self, ok):
+        if ok:
+            self.fixed = self.last
+        else:
+            self.failed = "an attempt failed on this connection"
+
+
+# ---- pactl ------------------------------------------------------------------------------
+EVENT = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
+
+
+def relevant(line, known):
+    """Whether a `pactl subscribe` line can matter: a card or sink that comes
+    or goes, or a change of one of the headset's objects (KNOWN: their
+    indexes, which are the PipeWire object serials)."""
+    m = EVENT.match(line.strip())
+    if not m:
+        return False
+    event, kind, idx = m.group(1), m.group(2), int(m.group(3))
+    if event in ("new", "remove") and kind in ("card", "sink"):
+        return True
+    return idx in known
+
+
+A2DP_DESC = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
+
+
+def profiles(dev, cards):
+    """(card's active profile, LDAC profile, profile to bounce through) from
+    `pactl -f json list cards`. Found by the codec in each profile's
+    description, else by PipeWire's usual names. The bounce profile is SBC,
+    else another available A2DP codec (SBC-XQ, AAC, ...); None when the card
+    or a profile is missing."""
+    card = next((c for c in cards if c.get("name") == "bluez_card." + dev), None)
+    if card is None:
+        return None, None, None
+    by_codec = {}
+    for name, p in (card.get("profiles") or {}).items():
+        if not p.get("available", False):
+            continue
+        m = A2DP_DESC.search(str(p.get("description", "")))
+        if m:
+            by_codec[m.group(1).strip().upper()] = name
+    have = {n for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
+    ldac = by_codec.get("LDAC") or ("a2dp-sink" if "a2dp-sink" in have else None)
+    alt = by_codec.get("SBC") or ("a2dp-sink-sbc" if "a2dp-sink-sbc" in have else None)
+    if alt is None:
+        others = sorted(n for c, n in by_codec.items() if c != "LDAC" and n != ldac)
+        alt = others[0] if others else None
+    return card.get("active_profile"), ldac, alt
+
+
+def run(cmd, timeout=15):
+    """(exit status, stdout) of CMD; 127 when it cannot be started, 124 on timeout."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+
+
+class Live:
+    """The real system: pw-dump and pactl."""
+
+    def __init__(self, dev):
+        self.dev = dev
+
+    def snap(self):
+        rc, out = run(["pw-dump"], timeout=10)
+        if rc != 0:
+            return None
+        try:
+            return snapshot(self.dev, json.loads(out))
+        except ValueError:
+            return None
+
+    def cards(self):
+        rc, out = run(["pactl", "-f", "json", "list", "cards"])
+        if rc != 0:
+            return None
+        try:
+            return json.loads(out)
+        except ValueError:
+            return None
+
+    def set_profile(self, prof):
+        return run(["pactl", "set-card-profile", "bluez_card." + self.dev, prof])[0] == 0
+
+
+def wait_until(test, seconds, step=0.5):
+    """Calls TEST until it returns something true, at most SECONDS; returns that or None."""
+    end = time.monotonic() + seconds
+    while True:
+        got = test()
+        if got:
+            return got
+        if time.monotonic() >= end:
+            return None
+        time.sleep(step)
+
+
+def bounce(live, ldac, alt, rate):
+    """LDAC -> ALT -> LDAC. (ok, message, last snapshot)."""
+    if not live.set_profile(alt):
+        return False, f"pactl could not switch to {alt}", live.snap()
+
+    def on_alt():
+        c = live.cards()
+        return c is not None and profiles(live.dev, c)[0] == alt
+    if not wait_until(on_alt, SBC_WAIT):
+        log(f"{alt} did not become active within {SBC_WAIT:.0f} s", 4)
+    time.sleep(SBC_HOLD)
+    # Look again before forcing LDAC back: in the meantime WirePlumber (its
+    # switch to HFP when an app opens the headset's microphone) or the user
+    # may have chosen another profile. That choice wins.
+    snap = live.snap()
+    c = live.cards()
+    now = profiles(live.dev, c)[0] if c is not None else None
+    hint = f"back to LDAC by hand: pactl set-card-profile bluez_card.{live.dev} {ldac}"
+    if c is not None and now is None:
+        return False, "the headset went away during the switch", snap
+    if snap is not None and snap["mic"]:
+        return False, f"the headset's microphone came into use during the switch: left on {now or alt} " \
+                      f"({hint})", snap
+    if now is not None and now not in (alt, ldac):
+        return False, f"the card went to {now} during the switch (WirePlumber or the user): left there " \
+                      f"({hint})", snap
+    if not live.set_profile(ldac):
+        time.sleep(1)
+        if not live.set_profile(ldac):
+            return False, f"pactl could not switch back to {ldac}: the headset stays on {alt} " \
+                          f"(pactl set-card-profile bluez_card.{live.dev} {ldac})", live.snap()
+
+    def ldac_back():
+        s = live.snap()
+        return s if s and s["codec"] == "ldac" and s["rate"] else None
+    snap = wait_until(ldac_back, LDAC_WAIT, step=1.0)
+    if snap is None:
+        return False, f"LDAC did not come back within {LDAC_WAIT:.0f} s", live.snap()
+    if snap["rate"] != rate:
+        return False, f"LDAC came back at {snap['rate']} Hz again", snap
+    return True, f"LDAC now at {snap['rate']} Hz", snap
+
+
+# ---- stopping ---------------------------------------------------------------------------
+class Stop:
+    """SIGTERM/SIGINT: exit at once, except during a bounce. Between the two
+    profile switches the card is on SBC, and WirePlumber keeps that as the
+    headset's chosen profile; so the bounce first finishes (at most about
+    20 s; systemd waits 90 s) and the program exits right after it."""
+
+    busy = False
+    asked = False
+
+    @classmethod
+    def handler(cls, signum, frame):
+        if cls.busy:
+            cls.asked = True        # the sleeps and pactl calls carry on (PEP 475)
+            return
+        raise SystemExit(0)
+
+    @classmethod
+    def check(cls):
+        if cls.asked:
+            log("stop asked during the profile switch: done switching, stopping now")
+            raise SystemExit(0)
+
+
+# ---- the loop -----------------------------------------------------------------------------
+class Watcher:
+    def __init__(self, dev, rate, dry_run=False):
+        self.dev, self.rate, self.dry = dev, rate, dry_run
+        self.live = Live(dev)
+        self.tracker = Tracker(rate)
+        self.known = set()
+        self.said = None
+
+    def say(self, what, why, level=6):
+        """Logs a verdict only when it differs from the last one (no line
+        every fallback look)."""
+        key = (what, why if what not in ("wait", "cooldown") else None)
+        if key != self.said:
+            self.said = key
+            text = why if isinstance(why, str) else f"{why:.0f} s"
+            log(f"{what}: {text}", level)
+
+    def remember(self, snap):
+        self.known = set()
+        if snap:
+            self.known = {x for x in [snap["card"], snap["out"], *snap["inputs"]] if x is not None}
+
+    def look(self):
+        """One evaluation; returns seconds until the next forced look, or None."""
+        snap = self.live.snap()
+        if snap is None:
+            # pw-dump failed (PipeWire restarting): not a disconnection.
+            self.say("none", "pw-dump gave no answer")
+            return None
+        self.remember(snap)
+        what, why = self.tracker.observe(snap, time.monotonic())
+        if what in ("wait", "cooldown"):
+            self.say(what, why)
+            return why
+        if what != "act":
+            self.say(what, why, 4 if what == "done" else 6)
+            return None
+        cards = self.live.cards()
+        active, ldac, alt = profiles(self.dev, cards or [])
+        if cards is None or ldac is None or active != ldac:
+            self.say("skip", f"{why}, but the LDAC profile is not the active one "
+                             f"(active {active}, LDAC {ldac})")
+            return None
+        if alt is None:
+            self.tracker.attempted(time.monotonic())
+            self.tracker.result(False)
+            self.say("give up", f"{why}, but the card offers no SBC (or other A2DP) profile to switch through", 4)
+            return None
+        if self.dry:
+            self.tracker.attempted(time.monotonic())
+            self.say("dry run", f"{why}: would switch {ldac} -> {alt} -> {ldac}")
+            return None
+        log(f"act: {why}: switching {ldac} -> {alt} -> {ldac} (about a second of silence)")
+        self.tracker.attempted(time.monotonic())
+        Stop.busy = True
+        try:
+            ok, msg, after = bounce(self.live, ldac, alt, self.rate)
+        finally:
+            Stop.busy = False
+        self.tracker.own_node(after)
+        self.tracker.result(ok)
+        self.remember(after)
+        if ok:
+            log(f"fixed: {msg}")
+        else:
+            log(f"failed: {msg}; no further attempt until the headset connects again", 3)
+        self.said = None
+        Stop.check()
+        return None
+
+    def run(self):
+        log(f"watching bluez_card.{self.dev}: LDAC wanted at {self.rate} Hz"
+            f"{' (dry run)' if self.dry else ''}")
+        backoff = 1.0
+        while True:
+            try:
+                proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, bufsize=0)
+            except OSError as e:
+                log(f"cannot start pactl subscribe ({e}); again in {backoff:.0f} s", 4)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, BACKOFF_MAX)
+                continue
+            started = time.monotonic()
+            self.listen(proc)
+            proc.kill()
+            proc.wait()
+            if time.monotonic() - started > BACKOFF_MAX:
+                backoff = 1.0
+            log(f"pactl subscribe ended (PipeWire restarted?); again in {backoff:.0f} s", 4)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, BACKOFF_MAX)
+
+    def listen(self, proc):
+        """Reads events until pactl ends. A look right away (also after a
+        reconnection), DEBOUNCE after a relevant event, and every FALLBACK."""
+        now = time.monotonic()
+        due = now                       # next look
+        fallback = now + FALLBACK
+        fd = proc.stdout.fileno()
+        buf = b""                       # read by hand: select() cannot see Python's buffer
+        while True:
+            now = time.monotonic()
+            if due is not None and now >= due:
+                due = None
+                nxt = self.look()
+                now = time.monotonic()
+                fallback = now + FALLBACK
+                if nxt is not None:
+                    due = now + max(nxt, 0.5)
+            if now >= fallback:
+                due = now
+                continue
+            timeout = min(x for x in (due, fallback) if x is not None) - now
+            r, _, _ = select.select([fd], [], [], max(timeout, 0))
+            if not r:
+                continue
+            data = os.read(fd, 65536)
+            if not data:
+                return
+            *lines, buf = (buf + data).split(b"\n")
+            if due is None and any(relevant(x.decode("utf-8", "replace"), self.known) for x in lines):
+                due = time.monotonic() + DEBOUNCE
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--device", required=True)
+    ap.add_argument("--rate", type=int, default=48000)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--snapshot", action="store_true")
+    a = ap.parse_args(argv)
+    if not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", a.device):
+        ap.error(f"--device must be a MAC address like AA:BB:CC:DD:EE:FF (got {a.device!r})")
+    dev = device_id(a.device)
+    if a.snapshot:
+        try:
+            snap = snapshot(dev, json.load(sys.stdin))
+        except ValueError:
+            return 3
+        print(json.dumps(snap, sort_keys=True))
+        print("%s: %s" % decide(snap, a.rate))
+        return 0
+    signal.signal(signal.SIGTERM, Stop.handler)
+    signal.signal(signal.SIGINT, Stop.handler)
+    os.environ.setdefault("LC_ALL", "C")     # pactl's event lines in English
+    try:
+        Watcher(dev, a.rate, a.dry_run).run()
+    except (KeyboardInterrupt, SystemExit):
+        log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,10 @@
+# Managed by cpu-setup.sh (CST). Root-level slice for Docker containers
+# (daemon.json "cgroup-parent": "builds.slice"): a sibling of user.slice, so
+# its weight really competes with the desktop and the game.
+[Unit]
+Description=Builds and test containers (low priority)
+Before=slices.target
+
+[Slice]
+CPUWeight=20
+IOWeight=20

@@ -1,0 +1,9 @@
+# Managed by cpu-setup.sh (CST). Switches the game profile off when no
+# GameMode client is left (crash, kill), so the VM and builds are never left
+# throttled; re-applies the CPU set to new Docker containers.
+[Unit]
+Description=Watchdog for the CPU game profile
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cpu-game-profile tick

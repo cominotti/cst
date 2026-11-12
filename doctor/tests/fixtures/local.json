@@ -1,0 +1,47 @@
+{
+ "deployments": [
+  {
+   "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "id": "fedora-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.0",
+   "version": "44.20261028.0",
+   "osname": "fedora",
+   "origin": "fedora:fedora/44/x86_64/silverblue",
+   "booted": true,
+   "staged": false,
+   "pinned": false,
+   "timestamp": 1793198594,
+   "requested-packages": [
+    "below",
+    "docker-cli",
+    "docker-compose-switch",
+    "gnome-boxes",
+    "moby-engine",
+    "samba",
+    "tini-static",
+    "vim"
+   ],
+   "packages": [
+    "below",
+    "docker-cli",
+    "docker-compose-switch",
+    "gnome-boxes",
+    "moby-engine",
+    "samba",
+    "tini-static",
+    "vim"
+   ],
+   "requested-local-packages": [
+    "mytool-1.2-3.fc44.x86_64"
+   ],
+   "requested-local-fileoverride-packages": [],
+   "base-removals": [],
+   "requested-base-removals": [],
+   "base-local-replacements": [],
+   "requested-base-local-replacements": [],
+   "base-remote-replacements": {}
+  }
+ ],
+ "transaction": null,
+ "cached-update": null,
+ "update-driver": null
+}

@@ -1,0 +1,10 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=btrfs top level for snapshots (on demand)
+
+[Automount]
+Where=/var/mnt/btrfs-top
+TimeoutIdleSec=10min
+
+[Install]
+WantedBy=local-fs.target

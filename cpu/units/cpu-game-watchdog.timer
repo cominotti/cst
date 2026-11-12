@@ -1,0 +1,11 @@
+# Managed by cpu-setup.sh (CST).
+[Unit]
+Description=Watchdog for the CPU game profile (every 30 s)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,50 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Record btrfs / IO stall telemetry (read-only)
+Documentation=file:///usr/local/sbin/btrfs-stall-monitord
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/btrfs-stall-monitord
+Restart=on-failure
+RestartSec=10
+# Data holds kernel messages and process names: readable by wheel only.
+Group=wheel
+LogsDirectory=btrfs-stall-monitor
+LogsDirectoryMode=0750
+RuntimeDirectory=btrfs-stall-monitor
+RuntimeDirectoryMode=0700
+UMask=0027
+# Must keep sampling while everything else is stalled.
+Nice=-5
+MemoryMax=192M
+CPUQuota=25%
+TasksMax=8
+# Only what reading other tasks' kernel stacks (/proc/PID/stack: SYS_ADMIN +
+# SYS_PTRACE), /proc/PID/io and /dev/kmsg (SYSLOG) needs. No writes outside
+# the logs/runtime directories.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_SYSLOG
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+DevicePolicy=closed
+DeviceAllow=/dev/kmsg r
+
+[Install]
+WantedBy=multi-user.target

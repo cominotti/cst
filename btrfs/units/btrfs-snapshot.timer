@@ -1,0 +1,13 @@
+# Managed by btrfs-setup.sh (CST).
+[Unit]
+Description=Hourly btrfs snapshot of /home
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+AccuracySec=1min
+# After suspend/shutdown: take the missed snapshot at the next opportunity.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

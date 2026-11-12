@@ -1,0 +1,282 @@
+#!/usr/bin/python3 -I
+"""cpu-watch: frame-pacing telemetry for A/B comparisons (user level, read-only).
+
+Installed by cpu-setup.sh (CST) as /usr/local/bin/cpu-watch; also run
+as `cst cpu watch|report`.
+
+  cpu-watch watch -l LABEL [--game NAME] [--seconds N] [--mangohud DIR] [-- CMD...]
+      Samples once per second until CMD exits, N seconds pass or Ctrl-C:
+      CPU and memory pressure of the game's cgroup (the Steam app scope, so
+      the Steam client counts too) (time its threads were
+      runnable but waiting, or stalled on memory), the game's involuntary
+      context switches, system CPU pressure, mean P-core and E-core MHz, CPU
+      used by the VM (machine.slice) and builds (builds.slice / docker
+      scopes) and whether the game profile is on. With --mangohud, the newest
+      MangoHud CSV written in the window is copied into the run, for frame
+      times (avg FPS, 1% and 0.1% lows).
+      Runs: ~/.local/state/cpu-setup/runs/<time>-<label>/
+  cpu-watch report [RUN...]   one line per run (default: the last 10), to
+      compare labels such as "baseline-build" vs "profile-build".
+"""
+
+import csv
+import glob
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
+CG = "/sys/fs/cgroup"
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def cpus_of(kind):
+    """CPU numbers of core type kind ('cpu_core' or 'cpu_atom')."""
+    out = []
+    for part in read(f"/sys/devices/{kind}/cpus").strip().split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out += range(int(a), int(b) + 1)
+        elif part:
+            out.append(int(part))
+    return out
+
+
+P_CPUS, E_CPUS = cpus_of("cpu_core"), cpus_of("cpu_atom")
+
+
+def mean_mhz(cpus):
+    vals = [int(read(f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq", "0") or 0) for c in cpus]
+    vals = [v for v in vals if v]
+    return round(sum(vals) / len(vals) / 1000) if vals else 0
+
+
+def pressure_total(path, kind):
+    """Cumulative stall microseconds ('some' or 'full') of a pressure file."""
+    m = re.search(rf"^{kind} .*total=(\d+)", read(path), re.M)
+    return int(m.group(1)) if m else None
+
+
+def usage_usec(cg):
+    m = re.search(r"^usage_usec (\d+)", read(os.path.join(CG, cg, "cpu.stat")), re.M)
+    return int(m.group(1)) if m else 0
+
+
+def find_game(name):
+    """PID of the game: NAME if given, else a process with GameMode's client
+    library loaded."""
+    if name:
+        r = subprocess.run(["pgrep", "-xo", name], capture_output=True, text=True)
+        return int(r.stdout.split()[0]) if r.stdout.split() else None
+    # Several processes of the launch chain (reaper, pressure-vessel) map it:
+    # the game is the one with the most threads.
+    best, nthreads = None, 0
+    for maps in glob.glob("/proc/[0-9]*/maps"):
+        if "libgamemode" in read(maps):
+            pid = int(maps.split("/")[2])
+            n = len(glob.glob(f"/proc/{pid}/task/*"))
+            if n > nthreads:
+                best, nthreads = pid, n
+    return best
+
+
+def game_cgroup(pid):
+    line = read(f"/proc/{pid}/cgroup").strip()
+    return line.split("::", 1)[1].lstrip("/") if "::" in line else ""
+
+
+def invol(pid):
+    total = 0
+    for st in glob.glob(f"/proc/{pid}/task/*/status"):
+        m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read(st), re.M)
+        total += int(m.group(1)) if m else 0
+    return total
+
+
+def build_cgroups():
+    out = ["builds.slice"] if os.path.isdir(os.path.join(CG, "builds.slice")) else []
+    out += [os.path.relpath(p, CG) for p in glob.glob(os.path.join(CG, "system.slice", "docker-*.scope"))]
+    return out
+
+
+def watch(argv):
+    label, game, seconds, mangohud, cmd = "run", None, None, None, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            cmd = argv[i + 1:]
+            break
+        if a in ("-l", "--label"):
+            label = argv[i + 1]; i += 2
+        elif a == "--game":
+            game = argv[i + 1]; i += 2
+        elif a == "--seconds":
+            seconds = int(argv[i + 1]); i += 2
+        elif a == "--mangohud":
+            mangohud = os.path.expanduser(argv[i + 1]); i += 2
+        else:
+            print(f"unknown argument {a}", file=sys.stderr)
+            return 2
+    label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+    start = time.time()
+    run_dir = os.path.join(RUNS, datetime.fromtimestamp(start).strftime("%Y%m%dT%H%M%S") + "-" + label)
+    os.makedirs(run_dir)
+    proc = subprocess.Popen(cmd) if cmd else None
+    stop = []
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+    print(f"recording into {run_dir} (Ctrl-C to stop)", file=sys.stderr)
+
+    prev = {}
+    rows = []
+    pid, cg = None, ""
+    fields = ["t", "profile_on", "game_pid", "game_cpu_wait_ms", "game_mem_stall_ms", "game_invol_switches",
+              "sys_cpu_some_ms", "p_mhz", "e_mhz", "vm_cpus_used", "builds_cpus_used"]
+    with open(os.path.join(run_dir, "samples.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(fields)
+        while not stop:
+            if proc and proc.poll() is not None:
+                break
+            if seconds and time.time() - start >= seconds:
+                break
+            if not pid or not os.path.exists(f"/proc/{pid}"):
+                pid = find_game(game)
+                cg = game_cgroup(pid) if pid else ""
+                prev.pop("game", None)
+            now = time.time()
+            cur = {
+                "t": now,
+                "sys": pressure_total("/proc/pressure/cpu", "some") or 0,
+                "vm": usage_usec("machine.slice"),
+                "builds": sum(usage_usec(c) for c in build_cgroups()),
+            }
+            if pid and cg:
+                cur["game"] = (pressure_total(os.path.join(CG, cg, "cpu.pressure"), "some") or 0,
+                               pressure_total(os.path.join(CG, cg, "memory.pressure"), "full") or 0,
+                               invol(pid))
+            if prev:
+                dt = now - prev["t"]
+                g = cur.get("game"), prev.get("game")
+                row = [round(now - start, 1), int(os.path.exists("/run/cpu-setup/game.state")), pid or "",
+                       # per second of wall time (samples drift a little past 1 s)
+                       round((g[0][0] - g[1][0]) / 1000 / dt, 1) if all(g) else "",
+                       round((g[0][1] - g[1][1]) / 1000 / dt, 1) if all(g) else "",
+                       round((g[0][2] - g[1][2]) / dt) if all(g) else "",
+                       round((cur["sys"] - prev["sys"]) / 1000 / dt, 1),
+                       mean_mhz(P_CPUS), mean_mhz(E_CPUS),
+                       round((cur["vm"] - prev["vm"]) / 1e6 / dt, 2),
+                       round(max(0, cur["builds"] - prev["builds"]) / 1e6 / dt, 2)]
+                w.writerow(row)
+                f.flush()
+                rows.append(row)
+            prev = cur
+            time.sleep(1)
+    end = time.time()
+    if proc and proc.poll() is None:
+        proc.terminate()
+    meta = {"label": label, "start": start, "end": end, "cmd": cmd, "game": game,
+            "rc": proc.returncode if proc else None}
+    if mangohud:
+        logs = [p for p in glob.glob(os.path.join(mangohud, "*.csv")) if start - 5 <= os.path.getmtime(p) <= end + 30]
+        if logs:
+            newest = max(logs, key=os.path.getmtime)
+            shutil.copy2(newest, os.path.join(run_dir, "mangohud.csv"))
+            meta["mangohud"] = newest
+    with open(os.path.join(run_dir, "meta.json"), "w") as f:
+        json.dump(meta, f)
+    print(summarize(run_dir))
+    return proc.returncode if proc and proc.returncode else 0
+
+
+def frametimes(path):
+    """Frame times (ms) from a MangoHud CSV (header row with 'frametime')."""
+    out = []
+    with open(path, newline="") as f:
+        rd = csv.reader(f)
+        col = None
+        for row in rd:
+            if col is None:
+                low = [c.strip().lower() for c in row]
+                if "frametime" in low:
+                    col = low.index("frametime")
+                continue
+            try:
+                out.append(float(row[col]))
+            except (ValueError, IndexError):
+                pass
+    return out
+
+
+def lows(ft):
+    """avg fps, 1% low and 0.1% low (fps of the mean of the worst frames)."""
+    if not ft:
+        return None
+    s = sorted(ft, reverse=True)
+
+    def low(frac):
+        worst = s[:max(1, int(len(s) * frac))]
+        return 1000 / (sum(worst) / len(worst))
+    return 1000 / (sum(ft) / len(ft)), low(0.01), low(0.001)
+
+
+def summarize(run_dir):
+    meta = json.loads(read(os.path.join(run_dir, "meta.json"), "{}") or "{}")
+    with open(os.path.join(run_dir, "samples.csv"), newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    def col(name):
+        return [float(r[name]) for r in rows if r.get(name) not in ("", None)]
+
+    def avg(v):
+        return sum(v) / len(v) if v else float("nan")
+    wait, mem, inv = col("game_cpu_wait_ms"), col("game_mem_stall_ms"), col("game_invol_switches")
+    game = (f"game wait {avg(wait) / 10:5.1f}% (max {max(wait) / 10:5.1f}%)  mem stall {sum(mem):7.0f} ms"
+            f"  invol/s {avg(inv):7.0f}") if wait else f"{'no game found (--game NAME?)':62}"
+    out = (f"{os.path.basename(run_dir):40} {len(rows):5d}s  {game}"
+           f"  P {avg(col('p_mhz')):5.0f} MHz  E {avg(col('e_mhz')):5.0f} MHz"
+           f"  VM {avg(col('vm_cpus_used')):4.1f} cpu  builds {avg(col('builds_cpus_used')):4.1f} cpu"
+           f"  profile {'on' if avg(col('profile_on')) > 0.5 else 'off'}")
+    mh = os.path.join(run_dir, "mangohud.csv")
+    if os.path.exists(mh):
+        r = lows(frametimes(mh))
+        if r:
+            out += f"\n{'':40} frames: avg {r[0]:.0f} fps, 1% low {r[1]:.0f}, 0.1% low {r[2]:.0f}"
+    return out
+
+
+def report(argv):
+    runs = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in argv] or \
+        sorted(glob.glob(os.path.join(RUNS, "*")))[-10:]
+    if not runs:
+        print(f"no runs in {RUNS}; record one with: cst cpu watch -l <label> [-- <cmd>]")
+        return 0
+    print("game wait = share of time the game's threads were runnable but waiting for a CPU")
+    for r in runs:
+        print(summarize(r))
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("watch", "report"):
+        print(__doc__)
+        return 2
+    return watch(sys.argv[2:]) if sys.argv[1] == "watch" else report(sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())
