@@ -33,7 +33,7 @@ jobs:
       e2e_images: ${{ steps.filter.outputs.e2e_images }}
     steps:
       - name: Checkout repository
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -45,10 +45,36 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
           FORCE_E2E: ${{ inputs.force_e2e || false }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" != "pull_request" || "${FORCE_E2E}" == "true" ]]; then
+          if [[ "${FORCE_E2E}" == "true" ]]; then
+            echo "code=true" >> "${GITHUB_OUTPUT}"
+            echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          e2e_images="false"
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            code="true"
+            if [[ -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              mapfile -t changed < <(git diff --name-only "${BEFORE_SHA}..${AFTER_SHA}")
+              for path in "${changed[@]}"; do
+                case "${path}" in
+                  tests/e2e/images/*|tests/e2e/scripts/*) e2e_images="true" ;;
+                esac
+              done
+            else
+              e2e_images="true"
+            fi
+            echo "code=${code}" >> "${GITHUB_OUTPUT}"
+            echo "e2e_images=${e2e_images}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
             echo "code=true" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
             exit 0
@@ -62,11 +88,10 @@ jobs:
           fi
 
           code="false"
-          e2e_images="false"
           for path in "${changed[@]}"; do
-            if [[ "${path}" == tests/e2e/images/* ]]; then
-              e2e_images="true"
-            fi
+            case "${path}" in
+              tests/e2e/images/*|tests/e2e/scripts/*) e2e_images="true" ;;
+            esac
             case "${path}" in
               *.md|LICENSE|.gitignore) ;;
               *) code="true" ;;

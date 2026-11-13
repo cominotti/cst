@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'tests/e2e/images/**'
+      - 'tests/e2e/scripts/**'
       - '.github/workflows/e2e-images.yml'
   schedule:
     - cron: '30 3 * * 0'

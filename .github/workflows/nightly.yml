@@ -42,7 +42,10 @@ jobs:
         run: |
           set -euo pipefail
           invowk validate cst.invowkmod
-          invowk audit --format json --severity low cst.invowkmod > audit-report.json
+          rc=0
+          invowk audit --format json --severity low cst.invowkmod > audit-report.json || rc=$?
+          python3 .github/scripts/audit_summary.py audit-report.json "${rc}"
+          exit "${rc}"
 
       - name: Run full clean suite (test all --rebuild --keep_logs)
         run: invowk cmd test all --rebuild --keep_logs
