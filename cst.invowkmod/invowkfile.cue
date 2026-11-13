@@ -160,6 +160,27 @@ cmds: [
 		}]
 	},
 	{
+		name:        "ci pin-invowk"
+		category:    "ci"
+		description: "Print the archive and binary SHA256 pins for .github/actions/setup-invowk (downloads to a temp dir; verifies cosign)"
+		args: [
+			{name: "version", description: "Exact invowk release tag, e.g. v0.16.0", required: true},
+		]
+		flags: [
+			{name: "skip_cosign", type: "bool", default_value: "false", description: "Skip the cosign check of checksums.txt when cosign is not installed (prints a warning; do not commit pins made this way unchecked)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=("${INVOWK_ARG_VERSION}")
+				[[ "${INVOWK_FLAG_SKIP_COSIGN:-false}" == "true" ]] && args+=(--skip-cosign)
+				exec python3 -I -B .github/scripts/pin_invowk.py "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "cst doctor"
 		category:    "cst"
 		description: "Run cst read-only workstation doctor"
