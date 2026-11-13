@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -902,6 +903,97 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertFalse(os.path.exists(os.path.join(self.home, ".config/cst")))
         r = self.sh("le_audio_cmd\n", le="on")
         self.assertIn("Turn it off: cst-test le-audio off", r.stdout)
+
+    def test_install_main_conf_respects_selinux_state(self):
+        orig = os.path.join(self.home, "main.conf")
+        new = os.path.join(self.home, "main.conf.newsrc")
+        with open(orig, "w") as f:
+            f.write("[General]\n")
+        with open(new, "w") as f:
+            f.write("[General]\nExperimental = true\n")
+        log = os.path.join(self.home, "calls.log")
+        script = (
+            f'MAIN_CONF={shlex.quote(orig)}\n'
+            'sudo() { "$@"; }\n'
+            f'cp() {{ printf "cp %s\\n" "$*" >>{shlex.quote(log)}; '
+            'local args=(); for a in "$@"; do [[ "$a" == --preserve=context ]] || args+=("$a"); done; '
+            'command cp "${args[@]}"; }\n'
+            f'install() {{ printf "install %s\\n" "$*" >>{shlex.quote(log)}; '
+            'local args=("$@"); local dst="${args[-1]}"; local src="${args[-2]}"; '
+            'command cp "$src" "$dst"; }\n'
+            'mv() { command mv -f "$2" "$3"; }\n'
+            'selinuxenabled() { return 1; }\n'
+            f'install_main_conf {shlex.quote(new)}\n'
+            'selinuxenabled() { return 0; }\n'
+            f'install_main_conf {shlex.quote(new)}\n'
+        )
+        r = self.sh(shell_functions("install_main_conf") + script)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(log) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertNotIn("--preserve=context", lines[0])
+        self.assertNotIn(" -Z ", lines[1])
+        self.assertIn("--preserve=context", lines[2])
+        self.assertIn(" -Z ", lines[3])
+
+    def test_bt_info_uses_timeout_and_null_stdin(self):
+        with open(SETUP) as f:
+            src = f.read()
+        bt_info_fn = re.search(r"^bt_info\(\) .*$", src, re.M).group(0)
+        script = (
+            bt_info_fn + "\n"
+            'hostcmd() { "$@"; }\n'
+            'timeout() { printf "stdin_target=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*"; }\n'
+            'bt_info\n'
+        )
+        r = self.sh(script)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"stdin_target=/dev/null args=5 bluetoothctl info {MAC}", r.stdout)
+
+    def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
+        with open(SETUP) as f:
+            src = f.read()
+        apply_fn = re.search(r"^apply\(\) \{\n.*?^\}\n", src, re.M | re.S).group(0)
+        stub_plan = (
+            'compute_plan() { MC_CHANGED=0; WP_STATE=ok; LE_STATE=ok; LE_CHANGE=0; LEGACY=0; '
+            'BT_RESTART=0; WP_RESTART=0; LW_CHANGE=0; LW_WANT=0; BEARER_STATE=set; BEARER=bredr; }\n'
+            'lw_plan() { :; }; apply_watcher() { :; }; do_restarts() { return 0; }; bt_info() { printf "\\tPreferredBearer: bredr\\n"; }\n'
+            'verify() { :; }\n'
+        )
+        # 1. With bluetoothctl stubbed as a shell function (as in test_ldac_watch), it runs directly
+        fn_log = os.path.join(self.home, "fn.log")
+        script_fn = (
+            stub_plan
+            + f'bluetoothctl() {{ printf "fn stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(fn_log)}; }}\n'
+            + apply_fn + "\napply\n"
+        )
+        r1 = self.sh(script_fn)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        with open(fn_log) as f:
+            self.assertIn(f"fn stdin=/dev/null args=bearer {MAC} bredr", f.read())
+        # 2. Without a shell function, bluetoothctl runs under timeout 5 with stdin=/dev/null
+        fake_bin = os.path.join(self.home, "bin")
+        os.makedirs(fake_bin, exist_ok=True)
+        bin_log = os.path.join(self.home, "bin.log")
+        fake_bt = os.path.join(fake_bin, "bluetoothctl")
+        with open(fake_bt, "w") as f:
+            f.write("#!/usr/bin/env bash\nexit 0\n")
+        os.chmod(fake_bt, 0o755)
+        fake_to = os.path.join(fake_bin, "timeout")
+        with open(fake_to, "w") as f:
+            f.write(f'#!/usr/bin/env bash\nprintf "bin_to stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(bin_log)}\n')
+        os.chmod(fake_to, 0o755)
+        script_bin = (
+            f'PATH={shlex.quote(fake_bin)}:"$PATH"\n'
+            + stub_plan
+            + apply_fn + "\napply\n"
+        )
+        r2 = self.sh(script_bin)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        with open(bin_log) as f:
+            self.assertIn(f"bin_to stdin=/dev/null args=5 bluetoothctl bearer {MAC} bredr", f.read())
+
 
 
 class OptionsTest(unittest.TestCase):

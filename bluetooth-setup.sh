@@ -329,7 +329,7 @@ card_state() {
     printf '[%s,%s,%s]' "${cards}" "${srcs}" "${outs}" | helper card-state "${DEVICE_ID}"
 }
 
-bt_info() { hostcmd bluetoothctl info "${DEVICE_MAC}" 2>/dev/null || true; }
+bt_info() { hostcmd timeout 5 bluetoothctl info "${DEVICE_MAC}" </dev/null 2>/dev/null || true; }
 
 # ---- what apply would do ----------------------------------------------------------------
 # compute_plan: sets MC_CHANGED (main.conf, new text in TMP), WP_STATE,
@@ -837,11 +837,17 @@ preconditions() {
 # BACKUP is set only once the copy exists (the ERR message names it).
 install_main_conf() {
     local bak
+    local -a z_opt=()
     bak="${MAIN_CONF}.bak-$(date +%Y%m%d-%H%M%S)"
-    sudo cp -p --preserve=context "${MAIN_CONF}" "${bak}"
+    if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+        sudo cp -p --preserve=context "${MAIN_CONF}" "${bak}"
+        z_opt=(-Z)
+    else
+        sudo cp -p "${MAIN_CONF}" "${bak}"
+    fi
     BACKUP="${bak}"
     echo "backup:    ${BACKUP}"
-    sudo install -m 0644 -o root -g root -Z "$1" "${MAIN_CONF}.new"
+    sudo install -m 0644 -o root -g root "${z_opt[@]}" "$1" "${MAIN_CONF}.new"
     sudo mv -f "${MAIN_CONF}.new" "${MAIN_CONF}"
     echo "written:   ${MAIN_CONF}"
 }
@@ -1015,7 +1021,11 @@ apply() {
 
     if [[ "${BEARER_STATE}" == set ]]; then
         echo "== preferred bearer"
-        out="$(bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" 2>&1 || true)"
+        if declare -F bluetoothctl >/dev/null 2>&1; then
+            out="$(bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
+        else
+            out="$(timeout 5 bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
+        fi
         info="$(bt_info)"
         if grep -Eq "^[[:space:]]*PreferredBearer: ${BEARER}[[:space:]]*$" <<<"${info}"; then
             echo "set:       PreferredBearer = ${BEARER} (for connections the PC starts; disconnect and reconnect)"
