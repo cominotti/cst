@@ -380,6 +380,14 @@ everything with `plan`, `status` or `doctor` before changing anything:
   module, the `swap` module, the `bluetooth` module, the `toolchains` module and
   `cst doctor`. The unit tests need no root and no btrfs:
   `python3 -I -B -m unittest`, run from this folder, runs all of them.
+- `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).
+  Tier 2 runs a `--privileged` container that sees the host's disks, so it
+  refuses to start unless you opt in with `CST_E2E_ALLOW_PRIVILEGED=1` (or
+  `--allow_privileged`). CI sets that opt-in; don't use it on your workstation.
+- `.github/`: the CI workflows. `.github/actions/setup-invowk` installs the
+  pinned invowk release only if its SHA256 matches the hash pinned in that file
+  and the release's `checksums.txt` carries a valid cosign signature from
+  invowk's own release workflow. A new invowk version needs its hashes added there.
 
 ## Glossary
 

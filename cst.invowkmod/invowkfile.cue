@@ -81,7 +81,7 @@ cmds: [
 	{
 		name:        "test e2e tier2"
 		category:    "test"
-		description: "Run Docker Layer 2 E2E suite (--privileged loopback btrfs RAID1, DinD, cgroups v2, Polkit)"
+		description: "Run Docker Layer 2 E2E suite (--privileged loopback btrfs RAID1, DinD, cgroups v2, Polkit; needs --allow_privileged or CST_E2E_ALLOW_PRIVILEGED=1)"
 		depends_on: {
 			tools: [{alternatives: ["docker"]}]
 			capabilities: [{alternatives: ["containers"]}]
@@ -90,6 +90,7 @@ cmds: [
 		flags: [
 			{name: "keep_logs", type: "bool", default_value: "false", description: "Preserve collected journald/systemd artifacts even on success"},
 			{name: "rebuild", type: "bool", default_value: "false", description: "Force rebuild of E2E Docker images"},
+			{name: "allow_privileged", type: "bool", default_value: "false", description: "Opt in to tier 2's --privileged container, which sees this machine's block devices (same as CST_E2E_ALLOW_PRIVILEGED=1; meant for disposable CI runners and VMs)"},
 		]
 		implementations: [{
 			platforms: [{name: "linux"}]
@@ -100,6 +101,7 @@ cmds: [
 				args=(--tier 2)
 				[[ "${INVOWK_FLAG_KEEP_LOGS:-false}" == "true" ]] && args+=(--keep-logs)
 				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && args+=(--rebuild)
+				[[ "${INVOWK_FLAG_ALLOW_PRIVILEGED:-false}" == "true" ]] && args+=(--allow-privileged)
 				python3 -I -B tests/e2e/run.py "${args[@]}"
 				"""}
 		}]
@@ -107,7 +109,7 @@ cmds: [
 	{
 		name:        "test all"
 		category:    "test"
-		description: "Run unit tests, shell lint, Docker Layer 1 and Docker Layer 2 E2E suites"
+		description: "Run unit tests, shell lint, Docker Layer 1 and Docker Layer 2 E2E suites (Layer 2 needs --allow_privileged or CST_E2E_ALLOW_PRIVILEGED=1)"
 		depends_on: {
 			tools: [
 				{alternatives: ["docker"]},
@@ -119,6 +121,7 @@ cmds: [
 		flags: [
 			{name: "keep_logs", type: "bool", default_value: "false", description: "Preserve collected journald/systemd artifacts even on success"},
 			{name: "rebuild", type: "bool", default_value: "false", description: "Force rebuild of E2E Docker images"},
+			{name: "allow_privileged", type: "bool", default_value: "false", description: "Opt in to tier 2's --privileged container, which sees this machine's block devices (same as CST_E2E_ALLOW_PRIVILEGED=1; meant for disposable CI runners and VMs)"},
 		]
 		implementations: [{
 			platforms: [{name: "linux"}]
@@ -127,6 +130,10 @@ cmds: [
 			script: {content: """
 				set -euo pipefail
 				shopt -s nullglob
+				e2e_args=(--tier 1 --tier 2)
+				[[ "${INVOWK_FLAG_ALLOW_PRIVILEGED:-false}" == "true" ]] && e2e_args+=(--allow-privileged)
+				# Stop before the long unit and lint runs if tier 2 is not allowed here.
+				python3 -I -B tests/e2e/run.py "${e2e_args[@]}" --check-only
 				python3 -I -B -m unittest discover -s . -v
 				scripts=(
 					cst
@@ -146,7 +153,6 @@ cmds: [
 				else
 					toolbox run -c devbox shellcheck -S warning -x "${scripts[@]}"
 				fi
-				e2e_args=(--tier 1 --tier 2)
 				[[ "${INVOWK_FLAG_KEEP_LOGS:-false}" == "true" ]] && e2e_args+=(--keep-logs)
 				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && e2e_args+=(--rebuild)
 				python3 -I -B tests/e2e/run.py "${e2e_args[@]}"

@@ -41,14 +41,36 @@ runs:
       run: |
         set -euo pipefail
         krel="$(uname -r)"
+        pkg="linux-modules-extra-${krel}"
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends "linux-modules-extra-${krel}" btrfs-progs || \
-          sudo apt-get install -y --no-install-recommends linux-modules-extra-azure btrfs-progs
-        sudo modprobe btrfs
+        # The btrfs module must match the running kernel exactly. A generic
+        # package (such as linux-modules-extra-azure) can install modules for a
+        # different kernel, so a missing package is an error, not a fallback.
+        if ! apt-cache show "${pkg}" >/dev/null 2>&1; then
+          echo "::error::${pkg} is not available from apt for the running kernel ${krel}; the runner image and the Ubuntu archive are out of step. Re-run later or pin a runner image whose kernel has a matching modules-extra package." >&2
+          exit 1
+        fi
+        if ! sudo apt-get install -y --no-install-recommends "${pkg}" btrfs-progs; then
+          echo "::error::Installing ${pkg} and btrfs-progs failed" >&2
+          exit 1
+        fi
+        if ! sudo modprobe btrfs; then
+          echo "::error::modprobe btrfs failed on kernel ${krel} even after installing ${pkg}" >&2
+          exit 1
+        fi
         sudo modprobe loop || true
-        grep -qw btrfs /proc/filesystems
-        test -e /dev/loop-control
-        test -r /proc/pressure/io
+        if ! grep -qw btrfs /proc/filesystems; then
+          echo "::error::btrfs is not listed in /proc/filesystems after modprobe" >&2
+          exit 1
+        fi
+        if [[ ! -e /dev/loop-control ]]; then
+          echo "::error::/dev/loop-control is missing; tier 2 needs loop devices" >&2
+          exit 1
+        fi
+        if [[ ! -r /proc/pressure/io ]]; then
+          echo "::error::/proc/pressure/io is not readable; tier 2 needs PSI" >&2
+          exit 1
+        fi
 
     - name: Hydrate E2E Docker image cache from GHCR
       id: hydrate

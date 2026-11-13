@@ -1,11 +1,20 @@
 name: Setup invowk
-description: Download, verify (SHA256), cache, and expose the invowk CLI on PATH.
+description: >-
+  Download invowk, check it against a SHA256 pinned in this action, verify the
+  release's cosign keyless signature on checksums.txt, cache it, and put it on PATH.
+  Needs bash, curl, tar, gzip, sha256sum and envsubst (the cosign installer uses it).
 
 inputs:
   version:
     description: Exact invowk release tag to install
     required: false
     default: 'v0.16.0'
+  sha256:
+    description: >-
+      Expected SHA256 of invowk_<version>_linux_<arch>.tar.gz. Only needed for a
+      version that has no hash pinned below; when both exist they must agree.
+    required: false
+    default: ''
 
 outputs:
   version:
@@ -15,11 +24,12 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Resolve target architecture and staging directory
+    - name: Resolve target architecture, pinned hash and staging directory
       id: meta
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        INPUT_SHA256: ${{ inputs.sha256 }}
       run: |
         set -euo pipefail
         case "${RUNNER_ARCH}" in
@@ -30,36 +40,72 @@ runs:
             exit 1
             ;;
         esac
+
+        # SHA256 of each release archive we accept, copied from that release's
+        # checksums.txt (whose cosign signature is checked again below).
+        # To move to a new version: add its two lines here, taken from
+        # https://github.com/invowk/invowk/releases/download/<tag>/checksums.txt
+        # after verifying that file with cosign, then change the default above.
+        case "${INPUT_VERSION}/${arch}" in
+          v0.16.0/amd64) pinned="5518d93d2c4b13a821c5966ffe3e30a1f2a0085c1cf35b0f979781c1505500d6" ;;
+          v0.16.0/arm64) pinned="b802a2b06655c034e97ef7dfcef3aef483d50bbb086484d9a9b315a48b166645" ;;
+          *) pinned="" ;;
+        esac
+
+        given="$(printf '%s' "${INPUT_SHA256}" | tr '[:upper:]' '[:lower:]')"
+        if [[ -n "${given}" && ! "${given}" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::The sha256 input must be 64 hex characters" >&2
+          exit 1
+        fi
+        if [[ -n "${pinned}" && -n "${given}" && "${pinned}" != "${given}" ]]; then
+          echo "::error::The sha256 input (${given}) differs from the hash pinned for invowk ${INPUT_VERSION} ${arch} (${pinned})" >&2
+          exit 1
+        fi
+        expected="${pinned:-${given}}"
+        if [[ -z "${expected}" ]]; then
+          echo "::error::No SHA256 is pinned for invowk ${INPUT_VERSION} (linux ${arch}). Add it to .github/actions/setup-invowk/action.yml, or pass the 'sha256' input." >&2
+          exit 1
+        fi
+
         env_kind="host"
         if [[ -f /.dockerenv || -f /run/.containerenv ]]; then
           env_kind="container"
         fi
         install_dir="${RUNNER_TEMP}/invowk-bin-${INPUT_VERSION}"
-        echo "arch=${arch}" >> "${GITHUB_OUTPUT}"
-        echo "env_kind=${env_kind}" >> "${GITHUB_OUTPUT}"
-        echo "ver_no_v=${INPUT_VERSION#v}" >> "${GITHUB_OUTPUT}"
-        echo "install_dir=${install_dir}" >> "${GITHUB_OUTPUT}"
+        {
+          echo "arch=${arch}"
+          echo "env_kind=${env_kind}"
+          echo "ver_no_v=${INPUT_VERSION#v}"
+          echo "install_dir=${install_dir}"
+          echo "expected_sha256=${expected}"
+        } >> "${GITHUB_OUTPUT}"
 
     - name: Cache invowk binary
       id: cache-invowk
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.meta.outputs.install_dir }}
-        key: invowk-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.env_kind }}-${{ inputs.version }}-v1
+        # The expected hash is part of the key, so changing a pin never reuses
+        # a binary that was checked against the old one.
+        key: invowk-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.env_kind }}-${{ inputs.version }}-${{ steps.meta.outputs.expected_sha256 }}-v2
+
+    # cosign checks the Sigstore bundle of checksums.txt. Only needed when the
+    # binary is downloaded; a cached binary passed both checks when it was saved.
+    - name: Install cosign
+      if: steps.cache-invowk.outputs.cache-hit != 'true'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2 (installs cosign v3.0.6)
 
     - name: Download and verify invowk release archive
+      if: steps.cache-invowk.outputs.cache-hit != 'true'
       shell: bash
       env:
         INVOWK_TAG: ${{ inputs.version }}
         INVOWK_VER: ${{ steps.meta.outputs.ver_no_v }}
         INVOWK_ARCH: ${{ steps.meta.outputs.arch }}
         INSTALL_DIR: ${{ steps.meta.outputs.install_dir }}
-        CACHE_HIT: ${{ steps.cache-invowk.outputs.cache-hit }}
+        EXPECTED_SHA256: ${{ steps.meta.outputs.expected_sha256 }}
       run: |
         set -euo pipefail
-        if [[ "${CACHE_HIT}" == "true" && -x "${INSTALL_DIR}/invowk" ]]; then
-          exit 0
-        fi
         asset="invowk_${INVOWK_VER}_linux_${INVOWK_ARCH}.tar.gz"
         base_url="https://github.com/invowk/invowk/releases/download/${INVOWK_TAG}"
         workdir="$(mktemp -d)"
@@ -67,13 +113,30 @@ runs:
 
         curl -fsSL --retry 3 --retry-all-errors "${base_url}/${asset}" -o "${workdir}/${asset}"
         curl -fsSL --retry 3 --retry-all-errors "${base_url}/checksums.txt" -o "${workdir}/checksums.txt"
+        curl -fsSL --retry 3 --retry-all-errors "${base_url}/checksums.txt.sigstore.json" -o "${workdir}/checksums.txt.sigstore.json"
 
-        expected_sha="$(awk -v a="${asset}" '$2 == a { print $1; exit }' "${workdir}/checksums.txt")"
-        if [[ -z "${expected_sha}" ]]; then
-          echo "::error::Checksum entry for ${asset} not found in checksums.txt" >&2
+        # 1. checksums.txt was signed by invowk's own release workflow, run for
+        #    this exact tag (goreleaser signs it keyless with GitHub's OIDC token).
+        cosign verify-blob \
+          --bundle "${workdir}/checksums.txt.sigstore.json" \
+          --certificate-identity "https://github.com/invowk/invowk/.github/workflows/release.yml@refs/tags/${INVOWK_TAG}" \
+          --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+          "${workdir}/checksums.txt"
+
+        # 2. The signed checksums.txt lists the hash we pinned for this archive.
+        listed_sha="$(awk -v a="${asset}" '$2 == a { print $1; exit }' "${workdir}/checksums.txt")"
+        if [[ "${listed_sha}" != "${EXPECTED_SHA256}" ]]; then
+          echo "::error::checksums.txt lists '${listed_sha:-nothing}' for ${asset}, but the pinned SHA256 is ${EXPECTED_SHA256}" >&2
           exit 1
         fi
-        printf '%s  %s\n' "${expected_sha}" "${workdir}/${asset}" | sha256sum -c -
+
+        # 3. The downloaded archive has the pinned hash.
+        actual_sha="$(sha256sum "${workdir}/${asset}" | awk '{ print $1 }')"
+        if [[ "${actual_sha}" != "${EXPECTED_SHA256}" ]]; then
+          echo "::error::${asset} has SHA256 ${actual_sha}, expected the pinned ${EXPECTED_SHA256}" >&2
+          exit 1
+        fi
+        echo "${asset}: SHA256 ${actual_sha} matches the pin and the signed checksums.txt"
 
         tar -xzf "${workdir}/${asset}" -C "${workdir}"
         bin_path="$(find "${workdir}" -maxdepth 3 -type f -name invowk | head -n 1)"
@@ -91,6 +154,10 @@ runs:
         INSTALL_DIR: ${{ steps.meta.outputs.install_dir }}
       run: |
         set -euo pipefail
+        if [[ ! -x "${INSTALL_DIR}/invowk" ]]; then
+          echo "::error::${INSTALL_DIR}/invowk is missing (empty cache entry?)" >&2
+          exit 1
+        fi
         echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
         ver="$("${INSTALL_DIR}/invowk" --version | head -n 1)"
         echo "${ver}"
