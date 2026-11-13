@@ -143,9 +143,9 @@ runs:
         workdir="$(mktemp -d)"
         trap 'rm -rf "${workdir}"' EXIT
 
-        curl -fsSL --retry 3 --retry-all-errors "${base_url}/${asset}" -o "${workdir}/${asset}"
-        curl -fsSL --retry 3 --retry-all-errors "${base_url}/checksums.txt" -o "${workdir}/checksums.txt"
-        curl -fsSL --retry 3 --retry-all-errors "${base_url}/checksums.txt.sigstore.json" -o "${workdir}/checksums.txt.sigstore.json"
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors "${base_url}/${asset}" -o "${workdir}/${asset}"
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors "${base_url}/checksums.txt" -o "${workdir}/checksums.txt"
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --retry-all-errors "${base_url}/checksums.txt.sigstore.json" -o "${workdir}/checksums.txt.sigstore.json"
 
         # 1. checksums.txt was signed by invowk's own release workflow, run for
         #    this exact tag (goreleaser signs it keyless with GitHub's OIDC token).

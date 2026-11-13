@@ -29,13 +29,17 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 
 REPO = "invowk/invowk"
 ARCHES = ("amd64", "arm64")
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
-TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
+CHECKSUMS = "checksums.txt"
+BUNDLE = CHECKSUMS + ".sigstore.json"
+# re.ASCII: \d must mean 0-9 only (without it, Python accepts any Unicode digit).
+TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", re.ASCII)
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 # setup-invowk finds the binary with `find <dir> -maxdepth 3`, and the archive
 # is extracted one level below <dir>, so a member path has at most 3 parts.
@@ -60,14 +64,20 @@ def download(url: str, dest: Path, attempts: int = 3) -> None:
     for attempt in range(1, attempts + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "cst-pin-invowk"})
-            with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out:
-                shutil.copyfileobj(resp, out)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                # urllib follows redirects to any scheme: refuse anything that
+                # did not end on HTTPS (same rule as curl --proto-redir =https).
+                final = urllib.parse.urlsplit(resp.geturl())
+                if final.scheme != "https":
+                    raise PinError(f"{url}: redirected to a non-HTTPS URL ({final.scheme}://{final.netloc})")
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(resp, out)
             return
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise PinError(f"{url}: not found (is the tag right?)") from exc
             err = exc
-        except (urllib.error.URLError, OSError) as exc:
+        except OSError as exc:  # also covers urllib.error.URLError
             err = exc
         if attempt < attempts:
             time.sleep(2 * attempt)
@@ -120,10 +130,10 @@ def binary_sha256(archive: Path) -> str:
 def verify_cosign(cosign: str, workdir: Path, tag: str) -> None:
     cmd = [
         cosign, "verify-blob",
-        "--bundle", str(workdir / "checksums.txt.sigstore.json"),
+        "--bundle", str(workdir / BUNDLE),
         "--certificate-identity", certificate_identity(tag),
         "--certificate-oidc-issuer", OIDC_ISSUER,
-        str(workdir / "checksums.txt"),
+        str(workdir / CHECKSUMS),
     ]
     if subprocess.run(cmd, check=False).returncode != 0:
         raise PinError("cosign could not verify checksums.txt; do not pin this release")
@@ -156,7 +166,7 @@ def run(tag: str, skip_cosign: bool) -> list:
     base = f"https://github.com/{REPO}/releases/download/{tag}"
     with tempfile.TemporaryDirectory(prefix="pin-invowk-") as tmp:
         workdir = Path(tmp)
-        for name in ("checksums.txt", "checksums.txt.sigstore.json"):
+        for name in (CHECKSUMS, BUNDLE):
             download(f"{base}/{name}", workdir / name)
         if skip_cosign:
             warn_skip_cosign(tag)
@@ -164,7 +174,7 @@ def run(tag: str, skip_cosign: bool) -> list:
             verify_cosign(cosign, workdir, tag)
             print(f"cosign: checksums.txt for {tag} is signed by {certificate_identity(tag)}", file=sys.stderr)
 
-        listed = parse_checksums((workdir / "checksums.txt").read_text(encoding="utf-8"))
+        listed = parse_checksums((workdir / CHECKSUMS).read_text(encoding="utf-8"))
         lines = []
         for arch in ARCHES:
             asset = asset_name(tag, arch)
