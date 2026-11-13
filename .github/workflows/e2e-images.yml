@@ -1,0 +1,60 @@
+name: E2E Images Cache
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tests/e2e/images/**'
+      - '.github/workflows/e2e-images.yml'
+  schedule:
+    - cron: '30 3 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Fedora 45 E2E Images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Reclaim runner disk space and verify Docker
+        uses: ./.github/actions/prep-e2e-runner
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push E2E cache images in dependency order
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          source_label="org.opencontainers.image.source=https://github.com/${REPO_FULL}"
+
+          systemd_cache="ghcr.io/${owner}/cst-e2e-systemd:cache"
+          nas_cache="ghcr.io/${owner}/cst-e2e-nas:cache"
+          priv_cache="ghcr.io/${owner}/cst-e2e-priv:cache"
+
+          docker build --pull --label "${source_label}" -t cst-e2e-systemd:local -t "${systemd_cache}" -f tests/e2e/images/systemd.Dockerfile .
+          docker build --pull --label "${source_label}" -t cst-e2e-nas:local -t "${nas_cache}" -f tests/e2e/images/nas.Dockerfile .
+          docker build --label "${source_label}" -t cst-e2e-priv:local -t "${priv_cache}" -f tests/e2e/images/priv.Dockerfile .
+
+          docker push "${systemd_cache}"
+          docker push "${nas_cache}"
+          docker push "${priv_cache}"

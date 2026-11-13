@@ -1,0 +1,93 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '20 4 * * 1,4'
+  workflow_dispatch:
+    inputs:
+      run_llm_audit:
+        description: Run optional invowk audit --llm scan (requires configured provider secret)
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  clean-e2e-rebuild:
+    name: Clean Fedora 45 E2E Rebuild
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Prepare E2E runner with host btrfs kernel support
+        uses: ./.github/actions/prep-e2e-runner
+        with:
+          needs_btrfs: 'true'
+
+      - name: Validate and audit invowk module
+        run: |
+          set -euo pipefail
+          invowk validate cst.invowkmod
+          invowk audit --format json --severity low cst.invowkmod > audit-report.json
+
+      - name: Run full clean suite (test all --rebuild --keep_logs)
+        run: invowk cmd test all --rebuild --keep_logs
+
+      - name: Upload nightly E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-e2e-artifacts
+          path: |
+            audit-report.json
+            tests/e2e/.artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  llm-audit:
+    name: Optional LLM Security Audit
+    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_audit == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      - name: Run invowk audit --llm when API key is configured
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.INVOWK_LLM_URL || 'https://api.openai.com/v1' }}
+          INVOWK_LLM_MODEL: ${{ vars.INVOWK_LLM_MODEL || 'gpt-4o-mini' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPENAI_API_KEY}" ]]; then
+            echo "::notice::OPENAI_API_KEY secret is not configured; skipping LLM audit."
+            exit 0
+          fi
+          invowk audit --llm --llm-url "${OPENAI_BASE_URL}" --llm-model "${INVOWK_LLM_MODEL}" --llm-api-key "${OPENAI_API_KEY}" --format json --severity low cst.invowkmod > llm-audit.json
+
+      - name: Upload LLM audit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: invowk-llm-audit
+          path: llm-audit.json
+          if-no-files-found: ignore
+          retention-days: 14

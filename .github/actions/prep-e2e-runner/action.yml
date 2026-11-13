@@ -1,0 +1,85 @@
+name: Prepare E2E runner
+description: Reclaim disk space on ubuntu-24.04, provision host btrfs kernel support when needed, and hydrate GHCR image cache.
+
+inputs:
+  needs_btrfs:
+    description: Install linux-modules-extra + btrfs-progs and load btrfs/loop kernel modules
+    required: false
+    default: 'false'
+  hydrate_images:
+    description: Space-separated list of E2E image suffixes to pull from GHCR (e.g. "systemd nas" or "systemd nas priv")
+    required: false
+    default: ''
+  tag_local:
+    description: Tag pulled GHCR cache images as cst-e2e-<name>:local so run.py skips rebuilding
+    required: false
+    default: 'true'
+  ghcr_token:
+    description: Optional token for authenticated read pulls from GHCR
+    required: false
+    default: ''
+
+outputs:
+  cache_from:
+    description: Comma-separated list of pulled GHCR image references for --cache-from
+    value: ${{ steps.hydrate.outputs.cache_from }}
+
+runs:
+  using: composite
+  steps:
+    - name: Reclaim runner disk space and verify Docker
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+        df -h /
+        docker info >/dev/null
+
+    - name: Provision host btrfs kernel module and PSI preflight
+      if: inputs.needs_btrfs == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        krel="$(uname -r)"
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends "linux-modules-extra-${krel}" btrfs-progs || \
+          sudo apt-get install -y --no-install-recommends linux-modules-extra-azure btrfs-progs
+        sudo modprobe btrfs
+        sudo modprobe loop || true
+        grep -qw btrfs /proc/filesystems
+        test -e /dev/loop-control
+        test -r /proc/pressure/io
+
+    - name: Hydrate E2E Docker image cache from GHCR
+      id: hydrate
+      shell: bash
+      env:
+        REPO_OWNER: ${{ github.repository_owner }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        IMAGES: ${{ inputs.hydrate_images }}
+        TAG_LOCAL: ${{ inputs.tag_local }}
+        GHCR_TOKEN: ${{ inputs.ghcr_token }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${IMAGES}" ]]; then
+          echo "cache_from=" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        if [[ -n "${GHCR_TOKEN}" ]]; then
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin >/dev/null 2>&1 || true
+        fi
+        owner="$(printf '%s' "${REPO_OWNER}" | tr '[:upper:]' '[:lower:]')"
+        pulled=()
+        for name in ${IMAGES}; do
+          ref="ghcr.io/${owner}/cst-e2e-${name}:cache"
+          if docker pull "${ref}"; then
+            pulled+=("${ref}")
+            if [[ "${TAG_LOCAL}" == "true" ]]; then
+              docker tag "${ref}" "cst-e2e-${name}:local"
+            fi
+          else
+            echo "::notice::GHCR cache miss for ${ref}; will build locally"
+          fi
+        done
+        IFS=,
+        echo "cache_from=${pulled[*]:-}" >> "${GITHUB_OUTPUT}"

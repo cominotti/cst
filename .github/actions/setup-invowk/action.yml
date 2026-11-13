@@ -1,0 +1,97 @@
+name: Setup invowk
+description: Download, verify (SHA256), cache, and expose the invowk CLI on PATH.
+
+inputs:
+  version:
+    description: Exact invowk release tag to install
+    required: false
+    default: 'v0.16.0'
+
+outputs:
+  version:
+    description: Installed invowk version output
+    value: ${{ steps.verify.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve target architecture and staging directory
+      id: meta
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_ARCH}" in
+          X64)   arch="amd64" ;;
+          ARM64) arch="arm64" ;;
+          *)
+            echo "::error::Unsupported RUNNER_ARCH=${RUNNER_ARCH}" >&2
+            exit 1
+            ;;
+        esac
+        env_kind="host"
+        if [[ -f /.dockerenv || -f /run/.containerenv ]]; then
+          env_kind="container"
+        fi
+        install_dir="${RUNNER_TEMP}/invowk-bin-${INPUT_VERSION}"
+        echo "arch=${arch}" >> "${GITHUB_OUTPUT}"
+        echo "env_kind=${env_kind}" >> "${GITHUB_OUTPUT}"
+        echo "ver_no_v=${INPUT_VERSION#v}" >> "${GITHUB_OUTPUT}"
+        echo "install_dir=${install_dir}" >> "${GITHUB_OUTPUT}"
+
+    - name: Cache invowk binary
+      id: cache-invowk
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.meta.outputs.install_dir }}
+        key: invowk-${{ runner.os }}-${{ runner.arch }}-${{ steps.meta.outputs.env_kind }}-${{ inputs.version }}-v1
+
+    - name: Download and verify invowk release archive
+      shell: bash
+      env:
+        INVOWK_TAG: ${{ inputs.version }}
+        INVOWK_VER: ${{ steps.meta.outputs.ver_no_v }}
+        INVOWK_ARCH: ${{ steps.meta.outputs.arch }}
+        INSTALL_DIR: ${{ steps.meta.outputs.install_dir }}
+        CACHE_HIT: ${{ steps.cache-invowk.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        if [[ "${CACHE_HIT}" == "true" && -x "${INSTALL_DIR}/invowk" ]]; then
+          exit 0
+        fi
+        asset="invowk_${INVOWK_VER}_linux_${INVOWK_ARCH}.tar.gz"
+        base_url="https://github.com/invowk/invowk/releases/download/${INVOWK_TAG}"
+        workdir="$(mktemp -d)"
+        trap 'rm -rf "${workdir}"' EXIT
+
+        curl -fsSL --retry 3 --retry-all-errors "${base_url}/${asset}" -o "${workdir}/${asset}"
+        curl -fsSL --retry 3 --retry-all-errors "${base_url}/checksums.txt" -o "${workdir}/checksums.txt"
+
+        expected_sha="$(awk -v a="${asset}" '$2 == a { print $1; exit }' "${workdir}/checksums.txt")"
+        if [[ -z "${expected_sha}" ]]; then
+          echo "::error::Checksum entry for ${asset} not found in checksums.txt" >&2
+          exit 1
+        fi
+        printf '%s  %s\n' "${expected_sha}" "${workdir}/${asset}" | sha256sum -c -
+
+        tar -xzf "${workdir}/${asset}" -C "${workdir}"
+        bin_path="$(find "${workdir}" -maxdepth 3 -type f -name invowk | head -n 1)"
+        if [[ -z "${bin_path}" ]]; then
+          echo "::error::invowk binary missing from ${asset}" >&2
+          exit 1
+        fi
+        mkdir -p "${INSTALL_DIR}"
+        install -m 0755 "${bin_path}" "${INSTALL_DIR}/invowk"
+
+    - name: Expose invowk on PATH and verify
+      id: verify
+      shell: bash
+      env:
+        INSTALL_DIR: ${{ steps.meta.outputs.install_dir }}
+      run: |
+        set -euo pipefail
+        echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+        ver="$("${INSTALL_DIR}/invowk" --version)"
+        echo "${ver}"
+        echo "version=${ver}" >> "${GITHUB_OUTPUT}"

@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Release Candidate
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_e2e: true
+
+  package-and-attest:
+    name: Package, Smoke-Test & Publish Release
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare E2E systemd image for clean install smoke test
+        uses: ./.github/actions/prep-e2e-runner
+        with:
+          hydrate_images: 'systemd'
+          tag_local: 'true'
+          ghcr_token: ${{ github.token }}
+
+      - name: Build release tarball and SHA256SUMS
+        id: pkg
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "${IS_TAG}" != "true" ]]; then
+            tag="snapshot-$(git rev-parse --short HEAD)"
+          fi
+          mkdir -p dist
+          tarball="cst-${tag}.tar.gz"
+          git archive --format=tar.gz --prefix="cst-${tag}/" -o "dist/${tarball}" HEAD
+          (
+            cd dist
+            sha256sum "${tarball}" > SHA256SUMS
+          )
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "tarball=${tarball}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clean tarball install smoke test in Fedora 45 systemd container
+        env:
+          TARBALL: ${{ steps.pkg.outputs.tarball }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! docker image inspect cst-e2e-systemd:local >/dev/null 2>&1; then
+            docker build -t cst-e2e-systemd:local -f tests/e2e/images/systemd.Dockerfile .
+          fi
+
+          cname="cst-rel-smoke-${GITHUB_RUN_ID}"
+          docker rm -f "${cname}" >/dev/null 2>&1 || true
+          trap 'docker rm -f "${cname}" >/dev/null 2>&1 || true' EXIT
+
+          sec_opts=()
+          [[ -f /sys/fs/selinux/enforce ]] && sec_opts+=(--security-opt label=disable)
+          if [[ -r /sys/module/apparmor/parameters/enabled ]] && [[ "$(cat /sys/module/apparmor/parameters/enabled)" == "Y" ]]; then
+            sec_opts+=(--security-opt apparmor=unconfined)
+          fi
+
+          docker run -d --name "${cname}" \
+            --cap-add SYS_ADMIN \
+            "${sec_opts[@]}" \
+            --cgroupns=private \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
+            -v "${PWD}/dist:/dist:ro" \
+            cst-e2e-systemd:local
+
+          for _ in $(seq 1 90); do
+            state="$(docker exec "${cname}" systemctl is-system-running 2>/dev/null || true)"
+            if [[ "${state}" == "running" || "${state}" == "degraded" ]]; then
+              break
+            fi
+            sleep 0.5
+          done
+          docker exec "${cname}" systemctl start user@1000.service
+          for _ in $(seq 1 60); do
+            ust="$(docker exec "${cname}" runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user is-system-running 2>/dev/null || true)"
+            [[ "${ust}" == "running" ]] && break
+            sleep 0.3
+          done
+          sys_state="$(docker exec "${cname}" systemctl is-system-running 2>/dev/null || true)"
+          if [[ "${sys_state}" != "running" ]]; then
+            docker exec "${cname}" systemctl --failed --no-pager || true
+          fi
+
+          docker exec -e TARBALL="${TARBALL}" "${cname}" bash -c '
+            set -euo pipefail
+            mkdir -p /opt/cst-release
+            (cd /dist && sha256sum -c SHA256SUMS)
+            tar -xzf "/dist/${TARBALL}" --strip-components=1 -C /opt/cst-release
+            chown -R tester:tester /opt/cst-release
+            source /opt/cst-release/cst-link.bash
+            link_cst_command tester
+          '
+          docker exec "${cname}" runuser -u tester -- env \
+            HOME=/home/tester \
+            USER=tester \
+            LOGNAME=tester \
+            XDG_RUNTIME_DIR=/run/user/1000 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+            bash -c '
+              set -euo pipefail
+              "${HOME}/.local/bin/cst" help >/dev/null
+              "${HOME}/.local/bin/cst" doctor --brief
+              out="$("${HOME}/.local/bin/cst" status || true)"
+              grep -q "==== doctor" <<<"${out}"
+            '
+
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          files: |
+            dist/${{ steps.pkg.outputs.tarball }}
+            dist/SHA256SUMS
+          generate_release_notes: true
