@@ -43,20 +43,30 @@ runs:
         krel="$(uname -r)"
         pkg="linux-modules-extra-${krel}"
         sudo apt-get update
-        # The btrfs module must match the running kernel exactly. A generic
-        # package (such as linux-modules-extra-azure) can install modules for a
-        # different kernel, so a missing package is an error, not a fallback.
-        if ! apt-cache show "${pkg}" >/dev/null 2>&1; then
-          echo "::error::${pkg} is not available from apt for the running kernel ${krel}; the runner image and the Ubuntu archive are out of step. Re-run later or pin a runner image whose kernel has a matching modules-extra package." >&2
+        if ! sudo apt-get install -y --no-install-recommends btrfs-progs; then
+          echo "::error::Installing btrfs-progs failed" >&2
           exit 1
         fi
-        if ! sudo apt-get install -y --no-install-recommends "${pkg}" btrfs-progs; then
-          echo "::error::Installing ${pkg} and btrfs-progs failed" >&2
-          exit 1
-        fi
-        if ! sudo modprobe btrfs; then
-          echo "::error::modprobe btrfs failed on kernel ${krel} even after installing ${pkg}" >&2
-          exit 1
+        # The runner kernel usually ships btrfs already (built in, or in its base
+        # linux-modules package): try it first. Only if that fails, install the
+        # modules-extra package of the RUNNING kernel. A generic package such as
+        # linux-modules-extra-azure installs modules for the newest kernel in the
+        # archive, which is often not the running one, so it is never used.
+        if sudo modprobe btrfs 2>/dev/null; then
+          echo "btrfs: available on kernel ${krel} without extra packages"
+        else
+          if ! apt-cache show "${pkg}" >/dev/null 2>&1; then
+            echo "::error::btrfs is not loadable on kernel ${krel} and ${pkg} is not available from apt; the runner image and the Ubuntu archive are out of step. Re-run later or pin a runner image whose kernel has a matching modules-extra package." >&2
+            exit 1
+          fi
+          if ! sudo apt-get install -y --no-install-recommends "${pkg}"; then
+            echo "::error::Installing ${pkg} failed" >&2
+            exit 1
+          fi
+          if ! sudo modprobe btrfs; then
+            echo "::error::modprobe btrfs failed on kernel ${krel} even after installing ${pkg}" >&2
+            exit 1
+          fi
         fi
         sudo modprobe loop || true
         if ! grep -qw btrfs /proc/filesystems; then
