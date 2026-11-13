@@ -92,6 +92,6 @@ runs:
       run: |
         set -euo pipefail
         echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
-        ver="$("${INSTALL_DIR}/invowk" --version)"
+        ver="$("${INSTALL_DIR}/invowk" --version | head -n 1)"
         echo "${ver}"
         echo "version=${ver}" >> "${GITHUB_OUTPUT}"
