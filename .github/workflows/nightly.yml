@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: '20 4 * * 1,4'
   workflow_dispatch:
-    inputs:
-      run_llm_audit:
-        description: Run optional invowk audit --llm scan (requires configured provider secret)
-        type: boolean
-        required: false
-        default: false
 
 concurrency:
   group: nightly-${{ github.ref }}
@@ -19,6 +13,55 @@ permissions:
   contents: read
 
 jobs:
+  static-gates:
+    name: Validate, Audit, Lint & Unit (Fedora 45)
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 15
+    steps:
+      - name: Install Fedora 45 tools and create non-root CI user
+        run: |
+          set -euo pipefail
+          # gettext-envsubst provides envsubst, needed by sigstore/cosign-installer inside setup-invowk.
+          dnf -y install --setopt=install_weak_deps=False git-core python3 ShellCheck curl tar gzip findutils util-linux diffutils gettext-envsubst
+          id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      - name: Validate invowk module
+        run: runuser -u ci -- env "PATH=${PATH}" invowk validate cst.invowkmod
+
+      - name: Audit invowk module security
+        run: |
+          set -euo pipefail
+          rc=0
+          runuser -u ci -- env "PATH=${PATH}" invowk audit --format json --severity low cst.invowkmod > audit-report.json || rc=$?
+          python3 .github/scripts/audit_summary.py audit-report.json "${rc}"
+          exit "${rc}"
+
+      - name: Upload invowk audit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-invowk-audit-report
+          path: audit-report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Run shell syntax and ShellCheck gate
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test lint
+
+      - name: Run unit tests
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test unit
+
+  # The E2E tiers need Docker, loop devices and the btrfs kernel module, so
+  # they run on the Ubuntu host runner. Only the tiers run here; the static
+  # gates above run in Fedora 45, like CI's fast-gates.
   clean-e2e-rebuild:
     name: Clean Fedora 45 E2E Rebuild
     runs-on: ubuntu-24.04
@@ -30,67 +73,34 @@ jobs:
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk
 
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-
       - name: Prepare E2E runner with host btrfs kernel support
+        id: prep
         uses: ./.github/actions/prep-e2e-runner
         with:
           needs_btrfs: 'true'
 
-      - name: Validate and audit invowk module
-        run: |
-          set -euo pipefail
-          invowk validate cst.invowkmod
-          rc=0
-          invowk audit --format json --severity low cst.invowkmod > audit-report.json || rc=$?
-          python3 .github/scripts/audit_summary.py audit-report.json "${rc}"
-          exit "${rc}"
+      - name: Run E2E Tier 1 from a clean image build
+        run: invowk cmd test e2e tier1 --rebuild --keep_logs
 
-      - name: Run full clean suite (test all --rebuild --keep_logs)
-        run: invowk cmd test all --rebuild --keep_logs
+      - name: Run E2E Tier 2 from a clean image build
+        # This runner starts with no E2E images and no build cache. Tier 1 just
+        # built the systemd and NAS images with --rebuild, and the priv image
+        # does not exist yet, so without --rebuild every tier 2 image is still
+        # built from scratch in this job, and the shared ones are not built twice.
+        # Tier 2 runs a --privileged container, so it needs the explicit opt-in.
+        # It still runs when only tier 1 failed, but not when setup or the
+        # runner preparation failed (prep runs after setup, so its outcome
+        # covers both): there would be no invowk or no btrfs support.
+        if: ${{ !cancelled() && steps.prep.outcome == 'success' }}
+        env:
+          CST_E2E_ALLOW_PRIVILEGED: '1'
+        run: invowk cmd test e2e tier2 --keep_logs
 
       - name: Upload nightly E2E artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-e2e-artifacts
-          path: |
-            audit-report.json
-            tests/e2e/.artifacts/
-          if-no-files-found: ignore
-          retention-days: 14
-
-  llm-audit:
-    name: Optional LLM Security Audit
-    if: github.event_name == 'workflow_dispatch' && inputs.run_llm_audit == true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup invowk
-        uses: ./.github/actions/setup-invowk
-
-      - name: Run invowk audit --llm when API key is configured
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ vars.INVOWK_LLM_URL || 'https://api.openai.com/v1' }}
-          INVOWK_LLM_MODEL: ${{ vars.INVOWK_LLM_MODEL || 'gpt-4o-mini' }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${OPENAI_API_KEY}" ]]; then
-            echo "::notice::OPENAI_API_KEY secret is not configured; skipping LLM audit."
-            exit 0
-          fi
-          invowk audit --llm --llm-url "${OPENAI_BASE_URL}" --llm-model "${INVOWK_LLM_MODEL}" --llm-api-key "${OPENAI_API_KEY}" --format json --severity low cst.invowkmod > llm-audit.json
-
-      - name: Upload LLM audit report
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: invowk-llm-audit
-          path: llm-audit.json
+          path: tests/e2e/.artifacts/
           if-no-files-found: ignore
           retention-days: 14

@@ -380,6 +380,23 @@ everything with `plan`, `status` or `doctor` before changing anything:
   module, the `swap` module, the `bluetooth` module, the `toolchains` module and
   `cst doctor`. The unit tests need no root and no btrfs:
   `python3 -I -B -m unittest`, run from this folder, runs all of them.
+- `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).
+  Tier 2 runs a `--privileged` container that sees the host's disks, so it
+  refuses to start unless you opt in with `CST_E2E_ALLOW_PRIVILEGED=1` (or
+  `--allow_privileged`). CI sets that opt-in; don't use it on your workstation.
+- `.github/`: the CI workflows. `.github/actions/setup-invowk` installs the
+  pinned invowk release only if the archive's SHA256 matches the hash pinned in
+  that file and the release's `checksums.txt` carries a valid cosign signature
+  from invowk's own release workflow. The binary inside also has its own pinned
+  SHA256, checked after extraction and again whenever CI restores it from the
+  cache (where the cosign check is skipped), before it goes on `PATH`.
+  To move CI to a new invowk version, run `invowk cmd ci pin-invowk <tag>` from
+  this folder. It needs `cosign` on `PATH` (`--skip_cosign` exists for a quick
+  look, prints a warning, and is not enough to commit pins). It downloads the
+  linux amd64 and arm64 archives, `checksums.txt` and its signature bundle into
+  a temporary directory, verifies the bundle, checks each archive against
+  `checksums.txt`, hashes the binary inside, and prints the lines to paste into
+  the action's pin table. Then change the action's default `version`.
 
 ## Glossary
 
