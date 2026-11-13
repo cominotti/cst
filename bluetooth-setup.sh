@@ -202,6 +202,16 @@ hostcmd() {
     if in_container; then flatpak-spawn --host "$@"; else "$@"; fi
 }
 
+# Seconds that each short bluetoothctl call (bt_info and the bearer change)
+# may take before it is stopped, so a stuck bluetoothd cannot hang the
+# script. 0 calls bluetoothctl directly, without timeout: the tests use it to
+# reach their bluetoothctl shell function (timeout only runs programs).
+# The value is read as base 10, so a leading zero ("08") means 8 seconds:
+# without that, bash would read it as octal inside (( )) and fail.
+BT_TIMEOUT="${BT_TIMEOUT:-5}"
+[[ "${BT_TIMEOUT}" =~ ^[0-9]{1,9}$ ]] || { echo "BT_TIMEOUT must be a whole number of seconds (got '${BT_TIMEOUT}')" >&2; exit 2; }
+BT_TIMEOUT=$((10#${BT_TIMEOUT}))
+
 # ---- settings ----------------------------------------------------------------------
 USER_SETTINGS="${XDG_CONFIG_HOME:-${HOME}/.config}/cst/bluetooth.conf"
 S_DEVICE="" S_LDAC_QUALITY="" S_BEARER="" S_LDAC_RATE="" S_LE_AUDIO=""
@@ -329,7 +339,13 @@ card_state() {
     printf '[%s,%s,%s]' "${cards}" "${srcs}" "${outs}" | helper card-state "${DEVICE_ID}"
 }
 
-bt_info() { hostcmd timeout 5 bluetoothctl info "${DEVICE_MAC}" </dev/null 2>/dev/null || true; }
+bt_info() {
+    if (( BT_TIMEOUT > 0 )); then
+        hostcmd timeout "${BT_TIMEOUT}" bluetoothctl info "${DEVICE_MAC}" </dev/null 2>/dev/null || true
+    else
+        hostcmd bluetoothctl info "${DEVICE_MAC}" </dev/null 2>/dev/null || true
+    fi
+}
 
 # ---- what apply would do ----------------------------------------------------------------
 # compute_plan: sets MC_CHANGED (main.conf, new text in TMP), WP_STATE,
@@ -1021,10 +1037,10 @@ apply() {
 
     if [[ "${BEARER_STATE}" == set ]]; then
         echo "== preferred bearer"
-        if declare -F bluetoothctl >/dev/null 2>&1; then
-            out="$(bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
+        if (( BT_TIMEOUT > 0 )); then
+            out="$(timeout "${BT_TIMEOUT}" bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
         else
-            out="$(timeout 5 bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
+            out="$(bluetoothctl bearer "${DEVICE_MAC}" "${BEARER}" </dev/null 2>&1 || true)"
         fi
         info="$(bt_info)"
         if grep -Eq "^[[:space:]]*PreferredBearer: ${BEARER}[[:space:]]*$" <<<"${info}"; then

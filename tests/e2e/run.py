@@ -20,6 +20,34 @@ IMG_SYSTEMD = "cst-e2e-systemd:local"
 IMG_NAS = "cst-e2e-nas:local"
 IMG_PRIV = "cst-e2e-priv:local"
 
+# Tier 2 starts a --privileged container. Such a container sees the host's
+# block devices and loop devices and can load kernel modules, so a mistake in
+# a test or in cst could touch the real disks of the machine that runs it.
+# It is meant for disposable CI runners: on any other machine it only runs
+# after an explicit opt-in.
+PRIVILEGED_OPT_IN_ENV = "CST_E2E_ALLOW_PRIVILEGED"
+
+PRIVILEGED_REFUSAL = f"""\
+[e2e] Refusing to run tier 2 without an explicit opt-in.
+
+Tier 2 runs a --privileged Docker container. It sees this machine's block
+devices (/dev/sd*, /dev/nvme*, /dev/loop*), creates loop devices and btrfs
+filesystems, and could change the host's real disks if something goes wrong.
+CI runs it on throwaway runners. Do not run it on a workstation you care about.
+
+To run it anyway (for example in a disposable VM), opt in with either:
+  {PRIVILEGED_OPT_IN_ENV}=1 python3 -I -B tests/e2e/run.py --tier 2
+  python3 -I -B tests/e2e/run.py --tier 2 --allow-privileged
+  invowk cmd test e2e tier2 --allow_privileged
+Tier 1 (unprivileged) needs no opt-in.
+"""
+
+
+def privileged_allowed(flag, environ=None):
+    """True when tier 2 may run: --allow-privileged, or CST_E2E_ALLOW_PRIVILEGED=1."""
+    environ = os.environ if environ is None else environ
+    return bool(flag) or environ.get(PRIVILEGED_OPT_IN_ENV, "").strip() == "1"
+
 
 def run(cmd, *, check=True, env=None, capture=False):
     return subprocess.run(
@@ -228,12 +256,28 @@ def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
             raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="CST Docker E2E test runner")
     parser.add_argument("--tier", action="append", type=int, choices=(1, 2), required=True)
     parser.add_argument("--keep-logs", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--allow-privileged",
+        action="store_true",
+        help=f"allow tier 2 (a --privileged container) to run; same as {PRIVILEGED_OPT_IN_ENV}=1",
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="only check that the requested tiers may run (opt-in for tier 2), then exit",
+    )
+    args = parser.parse_args(argv)
+
+    if 2 in args.tier and not privileged_allowed(args.allow_privileged):
+        print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
+        return 2
+    if args.check_only:
+        return 0
 
     run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     artifact_dir = ARTIFACTS_BASE / run_id

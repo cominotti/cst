@@ -111,7 +111,8 @@ jobs:
       - name: Install Fedora 45 fast-gate tools and create non-root CI user
         run: |
           set -euo pipefail
-          dnf -y install --setopt=install_weak_deps=False git-core python3 ShellCheck curl tar gzip findutils util-linux diffutils
+          # gettext-envsubst provides envsubst, needed by sigstore/cosign-installer inside setup-invowk.
+          dnf -y install --setopt=install_weak_deps=False git-core python3 ShellCheck curl tar gzip findutils util-linux diffutils gettext-envsubst
           id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
 
       - name: Checkout repository
@@ -219,6 +220,9 @@ jobs:
 
       - name: Run E2E Tier 2
         env:
+          # Tier 2 runs a --privileged container; run.py refuses it without this
+          # opt-in, which only this disposable runner sets.
+          CST_E2E_ALLOW_PRIVILEGED: '1'
           REBUILD_IMAGES: ${{ needs.changes.outputs.e2e_images }}
           CST_E2E_BUILD_CACHE_FROM: ${{ steps.prep.outputs.cache_from }}
         run: |
@@ -244,19 +248,27 @@ jobs:
 
   ci-status:
     name: CI Status
-    needs: [fast-gates, e2e-tier1, e2e-tier2]
+    needs: [changes, fast-gates, e2e-tier1, e2e-tier2]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Verify all required CI gates succeeded or skipped cleanly
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
           FAST_RESULT: ${{ needs.fast-gates.result }}
           TIER1_RESULT: ${{ needs.e2e-tier1.result }}
           TIER2_RESULT: ${{ needs.e2e-tier2.result }}
         run: |
           set -euo pipefail
-          echo "fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT}"
+          echo "changes=${CHANGES_RESULT} (code=${CODE_CHANGED:-<unset>}) fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT}"
+          # The E2E tiers are skipped when 'changes' did not run cleanly, so a
+          # failed or cancelled classification must never pass as "nothing to test".
+          if [[ "${CHANGES_RESULT}" != "success" ]]; then
+            echo "::error::changes (Classify Changes) did not succeed (${CHANGES_RESULT})" >&2
+            exit 1
+          fi
           if [[ "${FAST_RESULT}" != "success" ]]; then
             echo "::error::fast-gates did not succeed (${FAST_RESULT})" >&2
             exit 1
@@ -264,8 +276,15 @@ jobs:
           for name_res in "e2e-tier1:${TIER1_RESULT}" "e2e-tier2:${TIER2_RESULT}"; do
             job="${name_res%%:*}"
             res="${name_res##*:}"
-            if [[ "${res}" != "success" && "${res}" != "skipped" ]]; then
-              echo "::error::${job} ended with non-passing result (${res})" >&2
-              exit 1
+            if [[ "${res}" == "success" ]]; then
+              continue
             fi
+            # A skipped tier is only fine when the classification said there
+            # was no code to test (for example a docs-only pull request).
+            if [[ "${res}" == "skipped" && "${CODE_CHANGED}" == "false" ]]; then
+              echo "${job} skipped: no code changes"
+              continue
+            fi
+            echo "::error::${job} ended with non-passing result (${res}; code=${CODE_CHANGED:-<unset>})" >&2
+            exit 1
           done
