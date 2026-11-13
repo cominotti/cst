@@ -332,6 +332,18 @@ off
         )
         self.assertEqual(bad.returncode, 2)
 
+    def test_e_cores_missing_returns_empty_cleanly(self):
+        # On uniform CPUs without /sys/devices/cpu_atom/cpus, e_cores() must exit 0 under set -e.
+        with open(SETUP) as f:
+            src = f.read()
+        line = next(l for l in src.splitlines() if l.startswith("e_cores()"))
+        fn = line.replace("/sys/devices/cpu_atom/cpus", "/nonexistent/cpu_atom/cpus")
+        r = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", f"{fn}\necores=\"$(e_cores)\"\nprintf '<%s>' \"$ecores\""],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(r.stdout, "<>")
+
 
 if __name__ == "__main__":
     unittest.main()

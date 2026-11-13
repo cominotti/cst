@@ -159,7 +159,7 @@ check_syntax() {
 section() { printf '\n== %s\n' "$1"; }
 toolbox_dropin() { echo "$(user_home)/.config/systemd/user/user.slice.d/50-cpu-setup.conf"; }
 helper_dropin() { echo "$(user_home)/.config/systemd/user/flatpak-session-helper.service.d/50-cpu-setup.conf"; }
-e_cores() { cat /sys/devices/cpu_atom/cpus 2>/dev/null; }
+e_cores() { cat /sys/devices/cpu_atom/cpus 2>/dev/null || true; }
 # cpuset in use by the user manager (not just offered to it): it shows in
 # the manager's own subtree_control only once a manager started with the
 # delegation enabled it (next login after install).
