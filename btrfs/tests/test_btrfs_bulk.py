@@ -138,6 +138,19 @@ class BulkBase(unittest.TestCase):
         with open(self.H(rel)) as f:
             return f.read()
 
+    def purge_tree(self, path):
+        # Clear fake inode sets before deleting so recycled inodes on ext4/tmpfs do not look +C.
+        if os.path.exists(path):
+            st = os.lstat(path)
+            self.nocow.discard((st.st_dev, st.st_ino))
+            self.subvols.discard((st.st_dev, st.st_ino))
+            for root, dirs, files in os.walk(path):
+                for n in dirs + files:
+                    st = os.lstat(os.path.join(root, n))
+                    self.nocow.discard((st.st_dev, st.st_ino))
+                    self.subvols.discard((st.st_dev, st.st_ino))
+            shutil.rmtree(path)
+
     def apply(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -560,7 +573,7 @@ class BulkTest(BulkBase):
         # ~/Bulk/emulators is a symlink: NEEDS A LOOK, and no +C reading of
         # the folders it points to (outside ~/Bulk).
         self.apply()
-        shutil.rmtree(self.B("emulators"))
+        self.purge_tree(self.B("emulators"))
         os.makedirs(self.H("elsewhere/android/avd"))
         os.symlink(self.H("elsewhere"), self.B("emulators"))
         state, detail = self.m.classify(self.ctx, self.m.BY_ID["avd"], {"apps"})
@@ -582,7 +595,7 @@ class BulkTest(BulkBase):
         # A ~/Bulk/emulators made by hand before (copy-on-write, with other
         # data): it gets +C (only files created later are affected), nothing moves.
         self.apply()
-        shutil.rmtree(self.B("emulators"))
+        self.purge_tree(self.B("emulators"))
         self.write("Bulk/emulators/other/x.img", "x")
         self.assertEqual(self.apply(), ([], []), self.out)
         self.assertTrue(self.m.is_nocow(self.B("emulators")))
