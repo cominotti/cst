@@ -647,6 +647,7 @@ step() {{ echo "STEP $*" >>"$LOG"; }}
 preconditions() {{ :; }}; compute_plan() {{ :; }}; die() {{ echo "DIE $*"; exit 1; }}
 do_restarts() {{ step do_restarts; return {restart_rc}; }}
 lw_install() {{ step lw_install; }}; lw_remove() {{ step lw_remove; }}; apply_le() {{ step apply_le; }}
+BT_TIMEOUT=0  # call the bluetoothctl stub below directly, not through timeout
 bluetoothctl() {{ step bluetoothctl "$@"; }}; bt_info() {{ :; }}
 verify() {{ step verify; }}
 le_plan() {{ :; }}; lw_plan() {{ :; }}

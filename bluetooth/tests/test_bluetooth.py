@@ -938,33 +938,76 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn(" -Z ", lines[3])
 
     def test_bt_info_uses_timeout_and_null_stdin(self):
-        with open(SETUP) as f:
-            src = f.read()
-        bt_info_fn = re.search(r"^bt_info\(\) .*$", src, re.M).group(0)
+        # BT_TIMEOUT > 0: bluetoothctl runs under timeout BT_TIMEOUT with stdin=/dev/null
         script = (
-            bt_info_fn + "\n"
-            'hostcmd() { "$@"; }\n'
+            shell_functions("bt_info")
+            + 'hostcmd() { "$@"; }\n'
             'timeout() { printf "stdin_target=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*"; }\n'
-            'bt_info\n'
+            'bluetoothctl() { echo "direct call"; }\n'
+            'BT_TIMEOUT=7; bt_info\n'
         )
         r = self.sh(script)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"stdin_target=/dev/null args=5 bluetoothctl info {MAC}", r.stdout)
+        self.assertIn(f"stdin_target=/dev/null args=7 bluetoothctl info {MAC}", r.stdout)
+        self.assertNotIn("direct call", r.stdout)
 
-    def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
+    def test_bt_info_without_timeout_calls_bluetoothctl_directly(self):
+        # BT_TIMEOUT=0 is the test seam: no timeout, so a shell function stub is reached
+        script = (
+            shell_functions("bt_info")
+            + 'hostcmd() { "$@"; }\n'
+            'timeout() { echo "timeout used"; }\n'
+            'bluetoothctl() { printf "fn stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*"; }\n'
+            'BT_TIMEOUT=0; bt_info\n'
+        )
+        r = self.sh(script)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"fn stdin=/dev/null args=info {MAC}", r.stdout)
+        self.assertNotIn("timeout used", r.stdout)
+
+    def test_bt_timeout_default_and_validation(self):
         with open(SETUP) as f:
             src = f.read()
-        apply_fn = re.search(r"^apply\(\) \{\n.*?^\}\n", src, re.M | re.S).group(0)
+        self.assertIn('BT_TIMEOUT="${BT_TIMEOUT:-5}"', src)
+        self.assertNotIn("declare -F bluetoothctl", src)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home, "BT_TIMEOUT": "soon"}
+        r = subprocess.run(["bash", SETUP, "plan"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BT_TIMEOUT must be a whole number", r.stderr)
+
+    def test_bt_timeout_leading_zero_is_decimal(self):
+        # "08" and "09" are not valid octal, so without base-10 normalisation
+        # (( BT_TIMEOUT > 0 )) would fail and bluetoothctl would run with no timeout.
+        with open(SETUP) as f:
+            src = f.read()
+        start = src.index('BT_TIMEOUT="${BT_TIMEOUT:-5}"')
+        block = src[start:src.index("\n\n", start)]
+        for raw, want in (("08", "8"), ("09", "9"), ("007", "7"), ("0", "0"), ("5", "5")):
+            r = subprocess.run(
+                ["bash", "-c", 'set -euo pipefail\n' + block + '\n(( BT_TIMEOUT > 0 )) && echo "pos=$BT_TIMEOUT" || echo "zero=$BT_TIMEOUT"\n'],
+                capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": raw},
+            )
+            self.assertEqual(r.returncode, 0, raw + ": " + r.stderr)
+            self.assertEqual(r.stderr, "", raw)
+            self.assertIn(("pos=" if want != "0" else "zero=") + want, r.stdout, raw)
+        for bad in ("1234567890", "-1", " 5"):
+            r = subprocess.run(["bash", "-c", block], capture_output=True, text=True,
+                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad})
+            self.assertEqual(r.returncode, 2, bad)
+
+    def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
+        apply_fn = shell_functions("apply")
         stub_plan = (
             'compute_plan() { MC_CHANGED=0; WP_STATE=ok; LE_STATE=ok; LE_CHANGE=0; LEGACY=0; '
             'BT_RESTART=0; WP_RESTART=0; LW_CHANGE=0; LW_WANT=0; BEARER_STATE=set; BEARER=bredr; }\n'
             'lw_plan() { :; }; apply_watcher() { :; }; do_restarts() { return 0; }; bt_info() { printf "\\tPreferredBearer: bredr\\n"; }\n'
             'verify() { :; }\n'
         )
-        # 1. With bluetoothctl stubbed as a shell function (as in test_ldac_watch), it runs directly
+        # 1. BT_TIMEOUT=0 (the test seam): the bluetoothctl shell function is called directly
         fn_log = os.path.join(self.home, "fn.log")
         script_fn = (
             stub_plan
+            + 'BT_TIMEOUT=0\n'
             + f'bluetoothctl() {{ printf "fn stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(fn_log)}; }}\n'
             + apply_fn + "\napply\n"
         )
@@ -972,7 +1015,8 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertEqual(r1.returncode, 0, r1.stderr)
         with open(fn_log) as f:
             self.assertIn(f"fn stdin=/dev/null args=bearer {MAC} bredr", f.read())
-        # 2. Without a shell function, bluetoothctl runs under timeout 5 with stdin=/dev/null
+        # 2. BT_TIMEOUT > 0: bluetoothctl runs under timeout BT_TIMEOUT with stdin=/dev/null,
+        #    even when a bluetoothctl shell function exists (no test-awareness left)
         fake_bin = os.path.join(self.home, "bin")
         os.makedirs(fake_bin, exist_ok=True)
         bin_log = os.path.join(self.home, "bin.log")
@@ -987,13 +1031,15 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         script_bin = (
             f'PATH={shlex.quote(fake_bin)}:"$PATH"\n'
             + stub_plan
+            + 'BT_TIMEOUT=5\n'
+            + f'bluetoothctl() {{ echo fn >>{shlex.quote(fn_log + ".2")}; }}\n'
             + apply_fn + "\napply\n"
         )
         r2 = self.sh(script_bin)
         self.assertEqual(r2.returncode, 0, r2.stderr)
         with open(bin_log) as f:
             self.assertIn(f"bin_to stdin=/dev/null args=5 bluetoothctl bearer {MAC} bredr", f.read())
-
+        self.assertFalse(os.path.exists(fn_log + ".2"))
 
 
 class OptionsTest(unittest.TestCase):
