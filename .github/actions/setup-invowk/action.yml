@@ -206,6 +206,10 @@ runs:
         # hold (extra executables next to invowk) never reaches PATH, and
         # nothing has executed the binary before the check.
         path_dir="$(mktemp -d "${RUNNER_TEMP}/invowk-path.XXXXXX")"
+        # mktemp -d creates the directory 0700; jobs that run invowk as a
+        # non-root user (runuser -u ci inside the Fedora container) need to
+        # traverse it. Read and execute for others, writable only by the owner.
+        chmod 0755 "${path_dir}"
         install -m 0755 "${INSTALL_DIR}/invowk" "${path_dir}/invowk"
         bin_sha="$(sha256sum "${path_dir}/invowk" | awk '{ print $1 }')"
         if [[ "${bin_sha}" != "${EXPECTED_BIN_SHA256}" ]]; then
