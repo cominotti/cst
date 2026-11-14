@@ -47,7 +47,9 @@ cst doctor help
 | `btrfs` | How full the chunks are: data and metadata, used of allocated, and metadata as a share of data (see [section 6](#6-the-btrfs-check-chunks-and-unallocated-space)) | `ok` (numbers only) |
 | `btrfs` | Automatic data reclaim (`dynamic_reclaim`, `periodic_reclaim`) on | `WARN` when off on the root filesystem, fix: `cst btrfs install`; `info` on other btrfs filesystems or on kernels without these switches |
 | `vm` | A libvirt VM with `<cpu mode='host-passthrough'>` that does not disable CET and nested MBEC (`cet-ss`, `cet-ibt`, `vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`) while this QEMU offers them (see [section 7](#7-the-vm-checks)) | `WARN`, fix: `cst cpu vm-pin plan`; `ok` when QEMU does not offer them; `info` when that could not be read |
-| `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no `cst vm backup` was made since the booted deployment was built (fix: `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
+| `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no VM backup, local or on the NAS, was made since the booted deployment was built (fix: `cst vm backup --nas` when the NAS backup is set up, else `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
+| `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
+| `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
 | `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
@@ -167,10 +169,15 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `fix (on the host):`. Run them in a host terminal; a command without
   `sudo` also works with `flatpak-spawn --host` in front of it.
 - The `vm` checks ask libvirt's system connection (`virsh -r -c
-  qemu:///system list --all --name` and `dumpxml --inactive`, never with
-  `--security-info`; `virsh -c qemu:///system domcapabilities`, which libvirt
+  qemu:///system list --all --name`, `dumpxml --inactive` and
+  `domblklist VM --details`, never with `--security-info`, and `domstate VM` only when a
+  disk points to a backup overlay; `virsh -c qemu:///system domcapabilities`, which libvirt
   does not answer on a read-only connection) and read the world-readable
-  index `/var/lib/cst/vm-backups.json` written by `cst vm backup`. Your user
+  index `/var/lib/cst/vm-backups.json` written by `cst vm backup`, the
+  world-readable `/etc/btrfs-setup/snapshots.conf` (is the NAS backup set
+  up?), the lock file `/run/cst-vm/nas-VM.lock` with `/proc/<pid>` (is a NAS
+  backup running?) and `/etc/systemd/system/timers.target.wants` (is the
+  weekly timer on?). Your user
   needs libvirt's permission for the system connection: membership of the
   `libvirt` group, or an equivalent polkit rule. `domcapabilities` is asked
   only when a VM lacks one of the disables. No `virsh`, no permission,
@@ -269,9 +276,51 @@ When they differ and libvirt has at least one VM, it wants two things:
   `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp. The
   fix is `cst vm backup` (with the VM shut off).
 
-With both in place the line is `info`. Best practice: before every Fedora
-major upgrade, shut the VM down and run `cst vm backup`; after it, keep the
+With both in place the line is `info`. A NAS backup (`mode` `nas` in the
+index) counts like a local one. When the NAS backup of `/home` is set up
+(`NAS_ENABLED=1` and `NAS_PATH` in `/etc/btrfs-setup/snapshots.conf`, a
+world-readable file), the fix is `cst vm backup --nas`, which works with the
+VM running; else `cst vm backup` with the VM shut off. Best practice: before
+every Fedora major upgrade, back the VM up (`cst vm backup --nas --keep-tag
+NAME`, and/or a local `cst vm backup` with it shut off); after it, keep the
 old deployment pinned until the VM boots on the new one.
+
+**A disk left on a backup overlay.** `cst vm backup --nas` puts a
+short-lived overlay file (`<image>.cst-overlay-<UTC time>`) in front of each
+disk of a running VM and merges it back at the end
+([vm/README.md, section 10.2](../vm/README.md#102-how-a-running-vm-is-backed-up)).
+When a disk still points to such a file, in the running VM
+(`virsh -r domblklist VM --details`) or in its definition, the merge did not
+finish: `WARN`. The fix depends on the case, which the doctor works out from
+`virsh -r domstate` and the two listings:
+
+- **Running (or paused) on the overlay:** the `virsh blockcommit` command.
+  The text also covers a commit left "ready" at 100 %: `virsh blockjob VM
+  DISK --pivot`.
+- **Running on the image, but the definition names the overlay:** the overlay
+  is stale. The fix is `virsh edit VM` to point the definition back, and the
+  text says not to `qemu-img commit` it, which would overwrite newer data.
+- **Shut off:** the doctor compares the times of the image and the overlay.
+  If the overlay is newer, it holds the last writes and the fix is
+  `qemu-img commit`. If the image is newer, the doctor cannot tell. A merge
+  cut short also writes the image while the overlay is still needed, so
+  the fix only looks (the `ls` command that shows the times), and the text
+  says to check the backup's own message first. The same applies when the
+  times cannot be read.
+- **The state or the live listing cannot be read:** the fix only looks
+  (`virsh domblklist`); nothing is called stale.
+
+After the fix, check that both `domblklist` listings show the image again,
+and only then remove the overlay file
+([vm/README.md, section 10.8](../vm/README.md#108-if-a-backup-left-an-overlay)).
+While the backup still runs, the line is `info` instead. "Still runs" means
+its lock file `/run/cst-vm/nas-VM.lock` names a live process whose command
+line is `cst-vm`, so a reused pid does not count.
+
+**Weekly NAS backup timer.** One `info` line per VM: whether
+`cst-vm-backup@VM.timer` is enabled (a link in
+`/etc/systemd/system/timers.target.wants`). `cst vm backup-timer on VM`
+turns it on.
 
 **Hardware differs from `cst vm tune`.** For each VM, the definition
 (the same `dumpxml --inactive` as above, asked once) goes through the

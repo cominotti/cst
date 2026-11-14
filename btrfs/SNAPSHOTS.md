@@ -1243,6 +1243,29 @@ Settings in `/etc/btrfs-setup/snapshots.conf`: `NAS_HOST`, `NAS_PORT`,
 `NAS_TIMEOUT=6h`, `NAS_KEEP_DAILY=14`, `NAS_KEEP_WEEKLY=8`,
 `NAS_KEEP_MONTHLY=12`.
 
+### The VM backups share this repository
+
+`cst vm backup --nas` (and its weekly timer) stores the libvirt VM in the
+**same repository**, with the same password, SSH settings and host name, but
+with its own tags: `cst-vm` and `vm:<name>` (plus `cst-keep` and a name for
+the ones kept by hand). They never mix with the `/home` snapshots:
+
+- this job's `restic forget` looks only at snapshots tagged `btrfs-setup`,
+  and the VM backup's `forget` only at `cst-vm,vm:<name>`. Anything else in
+  the repository (for example a snapshot you made by hand) is left alone by
+  both;
+- the VM backup never runs `prune`: the space of forgotten VM snapshots is
+  freed by this job's weekly `--prune`, which works on the whole repository;
+- both take restic's lock; the VM backup waits up to 30 minutes for it
+  (`--retry-lock`; its first check, `restic cat config --no-lock`, takes
+  no lock), and runs on Saturday morning, away from this job's start
+  (00:00 to 01:00).
+
+The VM backup needs this NAS backup set up and enabled (`NAS_ENABLED=1`):
+after `cst btrfs snapshots nas disable` it refuses, and nothing would prune
+the repository. Details:
+[vm/README.md, section 10](../vm/README.md#10-the-nas-backup-the-default).
+
 ---
 
 ## 8. All commands

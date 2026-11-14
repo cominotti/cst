@@ -3,7 +3,7 @@
 behind `cst doctor` (and the last section of `cst status`). It never changes
 anything: it only reads files and runs query commands (rpm-ostree status,
 rpm-ostree db list, systemctl --failed, findmnt, virsh list/dumpxml/
-domcapabilities). Most problems it finds come with
+domblklist/domstate/domcapabilities). Most problems it finds come with
 the command that fixes it; you decide whether to run it.
 
 Usage:
@@ -30,7 +30,10 @@ Areas checked:
                bootloops); the virtualization packages (QEMU, libvirt, UEFI
                firmware, TPM emulator) changed between the rollback and the
                booted deployment while the rollback is not pinned or no VM
-               backup was taken since the booted deployment was built
+               backup (local or on the NAS) was taken since the booted
+               deployment was built; a disk left on the overlay of a NAS
+               backup (`cst vm backup --nas` could not merge it back); whether
+               the weekly NAS backup timer of each VM is on
 
 Levels: ok (fine), info (worth knowing, nothing to do), WARN (should be
 fixed), ERROR (fix soon). When there is a command for it, the line below a
@@ -931,6 +934,11 @@ CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX = "/var/lib/cst/vm-backups.json"
 VM_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vm", "cst-vm")
 VM_CONF = "/etc/cst/vm.conf"
+VM_OVERLAY_MARK = ".cst-overlay-"           # as OVERLAY_MARK in vm/cst-vm
+VM_LIVE_STATES = ("running", "paused", "pmsuspended")   # QEMU alive: a block job works
+VM_RUN_DIR = "/run/cst-vm"                  # nas-<vm>.lock: the pid of a NAS backup in progress
+VM_TIMER_WANTS = "/etc/systemd/system/timers.target.wants"
+NAS_CONF = "/etc/btrfs-setup/snapshots.conf"
 # Packages that make up the guest's virtual hardware: name prefixes.
 VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 # The ones named in the message (the others are only counted).
@@ -1158,8 +1166,162 @@ def check_virt_stack_change(host):
     if not fresh:
         when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
         last = time.strftime("%Y-%m-%d", time.localtime(backup)) if backup else "never"
-        yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
-                     f"backup: {last}). Shut the VM down first", f"{CST} vm backup")
+        if nas_configured(host):
+            yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
+                         f"backup: {last}). The NAS backup works with the VM running", f"{CST} vm backup --nas")
+        else:
+            yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
+                         f"backup: {last}). Shut the VM down first", f"{CST} vm backup")
+
+
+def nas_configured(host):
+    """The /home NAS backup is set up (snapshots.conf is world-readable)."""
+    vals = {}
+    try:
+        with open(host.path(NAS_CONF)) as f:
+            for line in f:
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.strip().split("=", 1)
+                    vals[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        return False
+    return vals.get("NAS_ENABLED") == "1" and bool(vals.get("NAS_PATH"))
+
+
+def nas_backup_running(host, vm):
+    """The pid of a `cst vm backup --nas` of vm in progress, or 0. The pid
+    must still be cst-vm: a lock file a killed run left keeps its pid, and
+    the kernel reuses pids."""
+    try:
+        with open(host.path(os.path.join(VM_RUN_DIR, f"nas-{vm}.lock"))) as f:
+            pid = f.read().strip()
+    except OSError:
+        return 0
+    if not pid.isdigit():
+        return 0
+    try:
+        with open(host.path(f"/proc/{pid}/cmdline"), "rb") as f:
+            cmdline = f.read()
+    except OSError:
+        return 0
+    return int(pid) if b"cst-vm" in cmdline else 0
+
+
+def file_newer(host, a, b):
+    """True when file a was written after file b, None when unknown."""
+    try:
+        return os.stat(host.path(a)).st_mtime_ns > os.stat(host.path(b)).st_mtime_ns
+    except OSError:
+        return None
+
+
+@check("vm")
+def check_vm_overlays(host):
+    """WARN for a disk whose definition names an overlay of a NAS backup
+    (<image>.cst-overlay-<UTC>): the blockcommit at its end did not finish.
+    The fix depends on the case: the VM still runs on the overlay (merge it),
+    only its definition names a stale overlay (point it back, never commit
+    it), or it is shut off on the overlay (merge it offline). INFO while the
+    backup runs."""
+    import xml.etree.ElementTree as ET
+    names, _ = libvirt_domains(host)
+    for vm in names or []:
+        live, defined = {}, {}     # target -> overlay path: what QEMU uses, what the definition names
+        sources = None             # target -> source of the live listing; None: not readable
+        rc, out, _ = virsh(host, "domblklist", vm, "--details")
+        if rc == 0:
+            sources = {}
+            for ln in out.splitlines():
+                parts = ln.split(None, 3)
+                if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
+                    sources[parts[2]] = parts[3].strip()
+                    if VM_OVERLAY_MARK in parts[3]:
+                        live.setdefault(parts[2], parts[3].strip())
+        rc, out, _ = domain_xml(host, vm)
+        try:
+            disks = ET.fromstring(out).findall("devices/disk") if rc == 0 else []
+        except ET.ParseError:
+            disks = []
+        for disk in disks:
+            src, tgt = disk.find("source"), disk.find("target")
+            path = src.get("file") if src is not None else None
+            if path and VM_OVERLAY_MARK in path:
+                defined.setdefault(tgt.get("dev") if tgt is not None else "?", path)
+        if not live and not defined:
+            continue
+        rc, out, _ = virsh(host, "domstate", vm)
+        state = first_line(out) if rc == 0 else None
+        pid = nas_backup_running(host, vm)
+        q, v = shlex.quote, f"sudo virsh -c {VIRSH_URI}"
+        left = f"an overlay left by `{CST} vm backup --nas` (it could not merge it back)"
+        guide = "(vm/README.md, \"If a backup left an overlay\")"
+        for dev in sorted(set(live) | set(defined)):
+            path = live.get(dev) or defined[dev]
+            base = path.split(VM_OVERLAY_MARK, 1)[0]
+            if pid:
+                yield Result(INFO, f"VM {vm}: disk {dev} on {path}: a NAS backup is in progress (pid {pid}); "
+                             "it merges the overlay back when restic is done")
+                continue
+            # "definition" only when the live listing was read and shows the image; "offline"
+            # only when the overlay is newer (an image written later may be a merge cut short).
+            if state in VM_LIVE_STATES:
+                kind = ("live" if dev in live else
+                        "definition" if sources is not None and sources.get(dev) == base else "unknown")
+            elif state in ("shut off", "crashed"):
+                kind = "offline" if file_newer(host, path, base) else "unknown"
+            else:
+                kind = "unknown"
+            if kind == "live":
+                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
+                             f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
+                             f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
+                             f"command below. Then check that `virsh domblklist {vm} --details` (also with "
+                             f"--inactive) shows {base}, and remove the overlay file {guide}",
+                             f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose")
+            elif kind == "definition":
+                yield Result(WARN, f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
+                             f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
+                             f"the image). Point the disk back with the command below (<source file='{base}'/>, "
+                             f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
+                             f"then remove the overlay file {guide}",
+                             f"{v} edit {q(vm)}")
+            elif kind == "offline":
+                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
+                             f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
+                             f"command below, then point the disk back with `virsh edit {vm}` (<source "
+                             f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
+                             f"--inactive`, and remove the overlay file {guide}",
+                             f"sudo qemu-img commit -p {q(path)}")
+            elif state in ("shut off", "crashed"):
+                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
+                             f"cannot tell whether that overlay still holds the guest's last writes: the image is "
+                             f"newer, or the times are unreadable. The image is newer both after a merge cut short "
+                             f"(the overlay is still needed) and after a merge that left the definition behind "
+                             f"(stale). Do not remove or commit anything yet: look at the times with the command "
+                             f"below and at the backup's own message or alert {guide}",
+                             f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}")
+            else:
+                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
+                             f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
+                             f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
+                             f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
+                             f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details")
+
+
+@check("vm")
+def check_vm_backup_timer(host):
+    """INFO: whether the weekly NAS backup timer of each VM is on."""
+    names, _ = libvirt_domains(host)
+    if not names:
+        return
+    try:
+        links = set(os.listdir(host.path(VM_TIMER_WANTS)))
+    except OSError:
+        links = set()
+    for vm in names:
+        on = f"cst-vm-backup@{vm}.timer" in links
+        yield Result(INFO, f"VM {vm}: weekly NAS backup timer: {'on' if on else 'off'}"
+                     + ("" if on else f" ({CST} vm backup-timer on {vm} turns it on)"))
 
 
 # ---- running and printing ------------------------------------------------------------------------

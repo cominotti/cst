@@ -85,6 +85,12 @@ case " $* " in
   *" list --all --name "*) exec cat "$FIX_VIRSH/list.txt" ;;
   *" domcapabilities "*) [ -f "$FIX_VIRSH/caps.xml" ] && exec cat "$FIX_VIRSH/caps.xml" ;;
   *" dumpxml --inactive "*) [ -f "$FIX_VIRSH/$last.xml" ] && exec cat "$FIX_VIRSH/$last.xml" ;;
+  *" domstate "*) [ -f "$FIX_VIRSH/$last.state" ] && exec cat "$FIX_VIRSH/$last.state"
+                  echo running; exit 0 ;;
+  *" domblklist "*) for a in "$@"; do case "$a" in -*|domblklist|qemu:///system) ;; *) vm="$a" ;; esac; done
+                    [ -f "$FIX_VIRSH/$vm.blkfail" ] && { echo "error: failed" >&2; exit 1; }
+                    [ -f "$FIX_VIRSH/$vm.blk" ] && exec cat "$FIX_VIRSH/$vm.blk"
+                    printf ' Type   Device   Target   Source\n---\n' ; exit 0 ;;
 esac
 echo "error: unsupported in the stub" >&2
 exit 1
@@ -166,7 +172,8 @@ class Scratch(unittest.TestCase):
                    "systemctl --user list-units --state=failed", "flatpak-spawn --host ",
                    "findmnt -rn -t btrfs -o SOURCE,TARGET", "stat -f -c %S %b ",
                    "virsh -r -c qemu:///system list --all --name", "virsh -r -c qemu:///system dumpxml --inactive ",
-                   "virsh -c qemu:///system domcapabilities")
+                   "virsh -c qemu:///system domcapabilities", "virsh -r -c qemu:///system domblklist ",
+                   "virsh -r -c qemu:///system domstate ")
         for c in self.calls():
             self.assertTrue(c.startswith(allowed), f"unexpected call: {c}")
             self.assertNotIn("sudo", c)
@@ -891,6 +898,134 @@ class VmTest(Scratch):
                          "1 -> none, libvirt-daemon-driver-2 1 -> none, and 2 more virtualization package(s)")
         self.assertEqual(D.virt_versions(["qemu-kvm-2:11.1.3-1.fc45.x86_64", "vim-9-1.fc45.x86_64"]),
                          {"qemu-kvm": "2:11.1.3-1.fc45"})
+
+
+class VmNasBackupTest(VmTest):
+    """`cst vm backup --nas`: an overlay left behind, the timer, NAS backups in the freshness check."""
+
+    OVERLAY = "/var/lib/libvirt/images/win.qcow2.cst-overlay-20261114T033000Z"
+
+    def on_overlay(self, live=True, persistent=False):
+        src = self.OVERLAY if persistent else "/var/lib/libvirt/images/win.qcow2"
+        xml = (f"<domain type='kvm'><name>win</name><devices><disk type='file' device='disk'>"
+               f"<source file='{src}'/><target dev='sda' bus='scsi'/></disk></devices></domain>\n")
+        self.libvirt(["win"], {"win": xml}, CAPS_QEMU11)
+        with open(os.path.join(self.virsh, "win.blk"), "w") as f:
+            f.write(" Type   Device   Target   Source\n------\n"
+                    f" file   disk     sda      {self.OVERLAY if live else '/var/lib/libvirt/images/win.qcow2'}\n")
+
+    BASE = "/var/lib/libvirt/images/win.qcow2"
+
+    def test_overlay_left_behind_warns(self):
+        # Running: QEMU on the overlay -> merge it; only the definition -> point it back, never commit.
+        for live, persistent in ((True, False), (True, True)):
+            self.on_overlay(live, persistent)
+            r = self.run_tool()
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertEqual(r.stdout.count("an overlay left by `cst vm backup --nas`"), 1, r.stdout)
+            self.assertIn(f"WARN   VM win: disk sda is on {self.OVERLAY}", r.stdout)
+            self.assertIn("fix: sudo virsh -c qemu:///system blockcommit win sda --active --pivot --wait --verbose",
+                          r.stdout)
+            self.assertIn("virsh blockjob win sda --pivot", r.stdout)
+            self.assertIn(f"shows {self.BASE}", r.stdout)
+            self.assert_read_only()
+        self.on_overlay(False, True)
+        r = self.run_tool()
+        self.assertEqual(r.stdout.count("an overlay left by `cst vm backup --nas`"), 1, r.stdout)
+        self.assertIn(f"WARN   VM win: disk sda: the definition names {self.OVERLAY}", r.stdout)
+        self.assertIn(f"the VM runs on {self.BASE} again: the overlay is stale. Do NOT qemu-img commit it", r.stdout)
+        self.assertIn("fix: sudo virsh -c qemu:///system edit win", r.stdout)
+        self.assertNotIn("blockcommit", r.stdout)
+        self.assert_read_only()
+        # The live listing is not readable: never "back on the image", only commands that look.
+        open(os.path.join(self.virsh, "win.blkfail"), "w").close()
+        r = self.run_tool()
+        self.assertIn(f"WARN   VM win: disk sda is on {self.OVERLAY}", r.stdout)
+        self.assertIn("Do not remove or commit anything yet", r.stdout)
+        self.assertIn("fix: sudo virsh -c qemu:///system domblklist win --details", r.stdout)
+        self.assertNotIn("fix: sudo virsh -c qemu:///system edit", r.stdout)
+        self.assert_read_only()
+
+    def test_overlay_of_a_shut_off_vm(self):
+        self.on_overlay(True, True)
+        with open(os.path.join(self.virsh, "win.state"), "w") as f:
+            f.write("shut off\n")
+        r = self.run_tool()
+        # The files' times are unreadable: only commands that look.
+        self.assertIn("cannot tell whether that overlay still holds the guest's last writes", r.stdout)
+        self.assertIn(f"fix: sudo ls -l --time-style=full-iso {self.BASE} {self.OVERLAY}", r.stdout)
+        images = os.path.join(self.root, "var", "lib", "libvirt", "images")
+        os.makedirs(images)
+        base, overlay = os.path.join(images, "win.qcow2"), self.root + self.OVERLAY
+        for p in (base, overlay):
+            open(p, "w").close()
+        # Shut off on the overlay, which is newer: merge it offline.
+        os.utime(base, ns=(10**18, 10**18))
+        os.utime(overlay, ns=(2 * 10**18, 2 * 10**18))
+        r = self.run_tool()
+        self.assertIn(f"fix: sudo qemu-img commit -p {self.OVERLAY}", r.stdout)
+        self.assertIn("it holds the guest's last writes", r.stdout)
+        # The image is newer: a merge cut short or a stale overlay; only commands that look.
+        os.utime(base, ns=(3 * 10**18, 3 * 10**18))
+        r = self.run_tool()
+        self.assertIn("cannot tell whether that overlay still holds the guest's last writes", r.stdout)
+        self.assertIn(f"fix: sudo ls -l --time-style=full-iso {self.BASE} {self.OVERLAY}", r.stdout)
+        self.assertNotIn("fix: sudo qemu-img", r.stdout)
+        self.assertNotIn("fix: sudo virsh -c qemu:///system edit", r.stdout)
+        self.assert_read_only()
+
+    def test_overlay_during_a_backup_is_info(self):
+        self.on_overlay()
+        run = os.path.join(self.root, "run", "cst-vm")
+        os.makedirs(run)
+        os.makedirs(os.path.join(self.root, "proc", "4242"))
+        with open(os.path.join(self.root, "proc", "4242", "cmdline"), "wb") as f:
+            f.write(b"/usr/bin/python3\0-I\0/usr/local/sbin/cst-vm\0backup\0win\0--nas\0")
+        with open(os.path.join(run, "nas-win.lock"), "w") as f:
+            f.write("4242\n")
+        r = self.run_tool()
+        self.assertIn("info   VM win: disk sda on " + self.OVERLAY + ": a NAS backup is in progress (pid 4242)",
+                      r.stdout)
+        self.assertNotIn("WARN   VM win: disk", r.stdout)
+        # The pid was reused by another program (a killed run left its lock file): left behind.
+        with open(os.path.join(self.root, "proc", "4242", "cmdline"), "wb") as f:
+            f.write(b"/usr/bin/bash\0")
+        r = self.run_tool()
+        self.assertIn("WARN   VM win: disk sda is on", r.stdout)
+        # A pid that is gone: left behind again.
+        shutil.rmtree(os.path.join(self.root, "proc", "4242"))
+        r = self.run_tool()
+        self.assertIn("WARN   VM win: disk sda is on", r.stdout)
+
+    def test_no_overlay_is_silent(self):
+        r = self.run_tool()
+        self.assertNotIn("overlay", r.stdout)
+
+    def test_timer_state_is_info(self):
+        r = self.run_tool()
+        self.assertIn("info   VM win: weekly NAS backup timer: off (cst vm backup-timer on win turns it on)", r.stdout)
+        wants = os.path.join(self.root, "etc", "systemd", "system", "timers.target.wants")
+        os.makedirs(wants)
+        open(os.path.join(wants, "cst-vm-backup@win.timer"), "w").close()
+        r = self.run_tool()
+        self.assertIn("info   VM win: weekly NAS backup timer: on", r.stdout)
+
+    def test_nas_backup_counts_and_fix_names_it(self):
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/restic\n")
+        r = self.run_tool()
+        self.assertIn("The NAS backup works with the VM running", r.stdout)
+        self.assertIn("  fix: cst vm backup --nas", r.stdout)
+        d = os.path.join(self.root, "var", "lib", "cst")
+        os.makedirs(d)
+        with open(os.path.join(d, "vm-backups.json"), "w") as f:
+            json.dump({"version": 1, "backups": [{"vm": "win", "epoch": NOW - 86400, "mode": "nas",
+                                                  "snapshot": "abc", "timestamp": "t"}]}, f)
+        r = self.run_tool()
+        self.assertIn("rollback pinned and VM backup present", r.stdout)
+        self.assertNotIn("No VM backup since", r.stdout)
 
 
 class VmHardwareTest(VmTest):

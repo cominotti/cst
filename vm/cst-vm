@@ -4,6 +4,24 @@ before a risky change, such as a Fedora major upgrade. It is the program
 behind `cst vm` (vm-setup.sh).
 
 Usage:
+  backup [VM] --nas [--keep-tag NAME] [--no-quiesce]
+                         (root) the default backup: to the NAS, with restic,
+                         into the repository of the /home NAS backup (set up
+                         by `cst btrfs snapshots nas setup`). A running VM
+                         keeps running: a short-lived external snapshot (an
+                         overlay file next to each disk) holds the guest's
+                         writes while restic reads the disks, then
+                         `virsh blockcommit` merges it back. With the QEMU
+                         guest agent answering, the guest's file systems are
+                         frozen for that instant (--quiesce); else, or with
+                         --no-quiesce, the copy is crash-consistent (as after
+                         a power cut). A shut-off VM is read directly.
+                         Backs up the disks, the UEFI variables, the TPM
+                         state, the definition and a manifest; then keeps
+                         VM_NAS_KEEP_WEEKLY (4) weekly and VM_NAS_KEEP_MONTHLY
+                         (3) monthly restic snapshots of the VM (restic
+                         forget; the /home NAS job prunes). --keep-tag NAME:
+                         tags it cst-keep and NAME, kept until you forget it
   backup [VM] [--full]   (root) copy the VM while it is shut off (not
                          saved; checked again after the copy):
                          every file disk, the UEFI variables (NVRAM), the
@@ -17,6 +35,12 @@ Usage:
                          filesystem). --full: real copies (needs free space
                          for the allocated size). Prints how to restore;
                          never restores by itself
+  backup-timer on|off|status [VM]
+                         the weekly `backup VM --nas` (Saturday 04:30):
+                         on/off (root) install or remove
+                         cst-vm-backup@.service/.timer and the program copy
+                         /usr/local/sbin/cst-vm; status: whether it is on,
+                         up to date, and when it runs next
   list [VM]              the backups, from /var/lib/cst/vm-backups.json
                          (readable by every user)
   status [VM]            the VM's state, its CPU mode and whether the CET/MBEC
@@ -47,8 +71,9 @@ Usage:
   help
 
 VM defaults to VM_NAME in /etc/cpu-setup/cpu-setup.conf (win11-devbox).
-Settings (all optional, default yes): /etc/cst/vm.conf with
-VM_NOCOW, VM_TUNE_DISK_BUS, VM_TUNE_DISK_DRIVER, VM_TUNE_NIC (yes or no).
+Settings (all optional): /etc/cst/vm.conf with VM_NOCOW, VM_TUNE_DISK_BUS,
+VM_TUNE_DISK_DRIVER, VM_TUNE_NIC (yes or no, default yes), and for the NAS
+backup VM_NAS_KEEP_WEEKLY (4), VM_NAS_KEEP_MONTHLY (3), VM_NAS_TIMEOUT_HOURS (6).
 Exit status: 0 fine, 1 refused or failed, 2 usage.
 """
 
@@ -63,10 +88,13 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -97,7 +125,8 @@ GIB = 1024 ** 3
 FULL_MARGIN = (GIB, 0.05)     # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
 FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, FS_NOCOW_FL = 0x80086601, 0x40086602, 0x00800000
 
-USAGE = (f"usage: {PROG} backup [VM] [--full] | list [VM] | status [VM] | "
+USAGE = (f"usage: {PROG} backup [VM] [--full] | backup [VM] --nas [--keep-tag NAME] [--no-quiesce] | "
+         f"backup-timer on|off|status [VM] | list [VM] | status [VM] | "
          f"tune plan|apply [VM] [--guest-has-virtio] | nocow plan [--root] | nocow apply | help")
 
 # Settings of this module (optional file; every knob defaults to yes).
@@ -111,6 +140,42 @@ USER_IMAGES = ((".local/share/libvirt/images", "libvirt qemu:///session: virt-ma
                (".var/app/org.gnome.Boxes/data/gnome-boxes/images", "GNOME Boxes (Flatpak)"))
 BTRFS_MAGIC = 0x9123683E
 
+# The NAS backup reuses the restic repository, password and cache of the
+# /home NAS backup (btrfs/btrfs-snapshot: NAS_SSH_ALIAS, RESTIC_PASSWORD,
+# RESTIC_CACHE; a test checks they stay the same). The password never leaves
+# its root-only file: restic reads it through RESTIC_PASSWORD_FILE.
+NAS_CONF = os.environ.get("CST_VM_NAS_CONF") or "/etc/btrfs-setup/snapshots.conf"   # override: tests
+NAS_SSH_ALIAS = "btrfs-setup-nas"
+RESTIC_PASSWORD = os.environ.get("CST_VM_RESTIC_PASSWORD") or "/etc/btrfs-setup/restic-password"
+RESTIC_CACHE = os.environ.get("CST_VM_RESTIC_CACHE") or "/var/cache/btrfs-snapshot-restic"
+# The definition and the manifest, written here for restic to read: a fixed
+# path per VM, so restic's parent snapshot and forget's groups stay the same.
+NAS_STAGE = os.environ.get("CST_VM_NAS_STAGE") or "/var/lib/cst/vm-nas"
+RUN_DIR = os.environ.get("CST_VM_RUN_DIR") or "/run/cst-vm"        # per-VM lock (holds the pid)
+NOTIFY = os.environ.get("CST_VM_NOTIFY") or "/usr/local/sbin/btrfs-notify"
+OVERLAY_MARK = ".cst-overlay-"     # in the name of the snapshot overlay: <image>.cst-overlay-<UTC>
+TAG = "cst-vm"                     # every VM backup; plus vm:<name>
+KEEP_TAG = "cst-keep"              # --keep-tag: never forgotten by the retention
+RETRY_LOCK = "30m"                 # the /home NAS job may hold the repository's lock
+NAS_DEFAULTS = {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3, "VM_NAS_TIMEOUT_HOURS": 6}
+# The merge back (every blockcommit of a run together; it copies the guest's
+# writes of the backup's duration). The timer's TimeoutStopSec leaves room
+# for it after a stop.
+COMMIT_TIMEOUT = int(os.environ.get("CST_VM_COMMIT_TIMEOUT") or 4 * 3600)
+# virsh snapshot-create-as; after a timeout the run waits up to
+# SNAPSHOT_SETTLE seconds for libvirt to finish (or not) on its own.
+SNAPSHOT_TIMEOUT = int(os.environ.get("CST_VM_SNAPSHOT_TIMEOUT") or 600)
+SNAPSHOT_SETTLE = int(os.environ.get("CST_VM_SNAPSHOT_SETTLE") or 600)
+LIVE_STATES = ("running", "paused", "pmsuspended")     # QEMU is alive: a block job works
+
+# The weekly timer (backup-timer).
+UNIT_DIR = os.environ.get("CST_VM_UNIT_DIR") or "/etc/systemd/system"   # override: tests
+SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or "/usr/local/sbin/cst-vm"
+SERVICE = "cst-vm-backup@.service"
+TIMER = "cst-vm-backup@.timer"
+UNIT_MARKER = "# Managed by cst vm (CST)"
+ON_CALENDAR = "Sat *-*-* 04:30:00"
+
 
 class Usage(Exception):
     pass
@@ -121,13 +186,19 @@ class Refused(Exception):
 
 
 # ---- small helpers ---------------------------------------------------------------------------
-def run(cmd, timeout=120):
+# True during the merge back of a NAS backup: every child then runs in its own
+# session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
+# `blockcommit --wait` on SIGINT).
+DETACH = {"on": False}
+
+
+def run(cmd, timeout=120, extra_env=None, detach=None):
     """(rc, stdout, stderr); rc 127 when the command does not exist."""
     # LC_ALL=C: virsh translates its answers ("shut off" is "desligado" in pt_BR).
-    env = {**os.environ, "LC_ALL": "C"}
+    env = {**os.environ, "LC_ALL": "C", **(extra_env or {})}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
-                           env=env)
+                           env=env, start_new_session=DETACH["on"] if detach is None else detach)
     except FileNotFoundError:
         return 127, "", f"{cmd[0]}: not found"
     except subprocess.TimeoutExpired:
@@ -135,8 +206,8 @@ def run(cmd, timeout=120):
     return p.returncode, p.stdout, p.stderr
 
 
-def virsh(*args, timeout=60):
-    return run(["virsh", "-c", URI, *args], timeout=timeout)
+def virsh(*args, timeout=60, detach=None):
+    return run(["virsh", "-c", URI, *args], timeout=timeout, detach=detach)
 
 
 def first_line(text):
@@ -306,7 +377,8 @@ def read_index(path=None):
     except (OSError, ValueError):
         return []
     entries = data.get("backups") if isinstance(data, dict) else None
-    return [e for e in entries or [] if isinstance(e, dict) and e.get("vm") and e.get("path")]
+    return [e for e in entries or [] if isinstance(e, dict) and e.get("vm")
+            and (e.get("path") or e.get("mode") == "nas" and e.get("snapshot"))]
 
 
 def write_index(entries, path=None):
@@ -539,7 +611,8 @@ def cmd_backup(vm, full):
         print(f"  incomplete backup removed: {dest_dir}", file=sys.stderr)
         raise
     # Entries whose folder was removed by hand leave the index here.
-    entries = [e for e in read_index() if os.path.isdir(e["path"]) and e["path"] != dest_dir]
+    entries = [e for e in read_index() if e.get("mode") == "nas"
+               or os.path.isdir(e["path"]) and e["path"] != dest_dir]
     entries.append(index_entry(manifest, dest_dir))
     entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
     write_index(entries)
@@ -558,11 +631,922 @@ def cmd_backup(vm, full):
     return 0
 
 
+# ---- backup to the NAS (restic) ---------------------------------------------------------------
+class Stop(Exception):
+    """SIGTERM/SIGHUP/SIGINT (systemd stopping the unit, a closed terminal,
+    Ctrl-C): raised so the overlays are always committed back before the
+    program ends."""
+
+
+class Uncertain(Refused):
+    """virsh snapshot-create-as did not answer in time and libvirt's result
+    stayed unclear: the overlay files are kept, an alert is sent."""
+
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+def on_signal(signum, _frame):
+    # A second signal must not cut the cleanup short: ignored from here on.
+    for s in STOP_SIGNALS:
+        signal.signal(s, signal.SIG_IGN)
+    raise Stop(f"stopped by signal {signal.Signals(signum).name}")
+
+
+class signals_held:
+    """SIGTERM, SIGHUP and SIGINT wait (blocked) until the block ends, so a
+    stop never kills `virsh snapshot-create-as` while libvirt goes on making
+    the snapshot: the run then always knows what the VM runs on."""
+
+    def __enter__(self):
+        self.old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        return self
+
+    def __exit__(self, *_):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
+
+
+class SafeStream:
+    """stdout/stderr of a NAS backup: a closed terminal (EIO) or a reader
+    that went away (EPIPE: `| head`) must never cut the merge back or the
+    alert short. On the first failed write both fds go to /dev/null."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def write(self, text):
+        try:
+            return self.inner.write(text)
+        except (OSError, ValueError):
+            mute()
+            return len(text)
+
+    def flush(self):
+        try:
+            self.inner.flush()
+        except (OSError, ValueError):
+            mute()
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def mute():
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    for n in (1, 2):
+        try:
+            os.dup2(fd, n)
+        except OSError:
+            pass
+    os.close(fd)
+
+
+def safe_output():
+    if not isinstance(sys.stdout, SafeStream):
+        sys.stdout, sys.stderr = SafeStream(sys.stdout), SafeStream(sys.stderr)
+
+
+def conf_number(key, path=None):
+    """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
+    v = read_conf(path or VM_CONF).get(key, "")
+    return int(v) if v.isdigit() else NAS_DEFAULTS[key]
+
+
+def nas_settings():
+    """{host, env, repo} for restic, from the /home NAS backup's settings.
+    Refused when that backup is not set up: its setup creates the
+    repository, the SSH key and the password file this one reuses."""
+    conf = read_conf(NAS_CONF)
+    setup = f"{CST} btrfs snapshots nas setup"
+    if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
+        raise Refused(f"the NAS backup is not set up ({NAS_CONF}: NAS_ENABLED=1 and NAS_PATH are needed). "
+                      f"Set it up first: {setup} (the VM backup shares its restic repository)")
+    try:
+        if os.path.getsize(RESTIC_PASSWORD) == 0:
+            raise OSError
+    except OSError:
+        raise Refused(f"{RESTIC_PASSWORD} is missing or empty: run {setup} again "
+                      "(or put the saved repository password there)") from None
+    host = conf.get("NAS_RESTIC_HOST") or socket.gethostname().split(".")[0]
+    repo = f"sftp:{NAS_SSH_ALIAS}:{conf['NAS_PATH']}"
+    return {"host": host, "repo": repo,
+            "env": {"RESTIC_REPOSITORY": repo, "RESTIC_PASSWORD_FILE": RESTIC_PASSWORD,
+                    "RESTIC_CACHE_DIR": RESTIC_CACHE}}
+
+
+def restic(nas, *args, timeout=1800):
+    return run(["restic", *args], timeout=timeout, extra_env=nas["env"])
+
+
+def restic_ready(nas):
+    """Refused unless the repository opens (NAS reachable, password right):
+    checked before any snapshot, so an unreachable NAS never leaves the VM
+    on an overlay."""
+    # --no-lock: it only proves the repository opens, also while the /home
+    # NAS job holds the lock (its prune), which the backup waits for.
+    rc, _, err = restic(nas, "cat", "config", "--no-lock", timeout=300)
+    if rc == 0:
+        return
+    why = {127: "restic is not installed (it comes with the NAS setup; after rpm-ostree, active at the next reboot)",
+           124: "the NAS did not answer within 5 minutes",
+           10: f"no restic repository at {nas['repo']}",
+           11: "the repository is locked (try again later)",
+           12: f"{RESTIC_PASSWORD} does not open the repository"}.get(rc, first_line(err) or f"restic exit {rc}")
+    raise Refused(f"NAS repository not usable: {why}. Nothing was changed (no snapshot taken)")
+
+
+def restic_backup(nas, args, timeout):
+    """restic backup --json: stderr goes through, the status lines become a
+    progress line every minute, the summary is kept. (rc, summary or {})."""
+    env = {**os.environ, "LC_ALL": "C", **nas["env"]}
+    try:
+        p = subprocess.Popen(["restic", *args], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+                             env=env)
+    except FileNotFoundError:
+        return 127, {}
+    timer = threading.Timer(timeout, p.kill)
+    timer.start()
+    summary, shown = {}, 0.0
+    try:
+        for line in p.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                print(f"  restic: {line.rstrip()}", flush=True)
+                continue
+            if not isinstance(msg, dict):
+                continue
+            kind = msg.get("message_type")
+            if kind == "summary":
+                summary = msg
+            elif kind == "status" and time.monotonic() - shown >= 60:
+                shown = time.monotonic()
+                done, total = msg.get("bytes_done") or 0, msg.get("total_bytes") or 0
+                print(f"  restic: {100 * float(msg.get('percent_done') or 0):.0f} % ({human(done)} of "
+                      f"{human(total)} read)", flush=True)
+            elif kind == "error":
+                err = msg.get("error") or {}
+                print(f"  restic error: {msg.get('item') or ''} {err.get('message') or err}", file=sys.stderr)
+        rc = p.wait()
+    except BaseException:
+        p.terminate()
+        try:
+            p.wait(60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        raise
+    finally:
+        timer.cancel()
+    if rc == -signal.SIGKILL:
+        rc = 124
+    return rc, summary
+
+
+def live_disks(xml_text):
+    """[{target, device, type, source, backing}] of a definition's disks;
+    backing: the live definition shows a backing chain (an overlay)."""
+    out = []
+    for disk in ET.fromstring(xml_text).findall("devices/disk"):
+        t, s, bs = disk.find("target"), disk.find("source"), disk.find("backingStore")
+        src = ""
+        if s is not None:
+            src = s.get("file") or s.get("dev") or s.get("name") or s.get("volume") or ""
+        out.append({"target": t.get("dev") if t is not None else "", "device": disk.get("device", "disk"),
+                    "type": disk.get("type", "file"), "source": src,
+                    "backing": bs is not None and bs.find("source") is not None})
+    return out
+
+
+def agent_state(xml_text):
+    """"connected", "disconnected" or "none": the guest agent channel
+    (org.qemu.guest_agent.0) of the live definition."""
+    for ch in ET.fromstring(xml_text).findall("devices/channel"):
+        t = ch.find("target")
+        if t is not None and t.get("name") == "org.qemu.guest_agent.0":
+            return "connected" if t.get("state") == "connected" else "disconnected"
+    return "none"
+
+
+def blklist(vm, inactive=False):
+    """({target: source}, problem) from virsh domblklist --details."""
+    rc, so, err = virsh("domblklist", vm, "--details", *(["--inactive"] if inactive else []))
+    if rc != 0:
+        return None, first_line(err) or f"exit {rc}"
+    out = {}
+    for ln in so.splitlines():
+        parts = ln.split(None, 3)
+        if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
+            out[parts[2]] = parts[3].strip()
+    return out, ""
+
+
+def overlay_kind(state, live_src, base):
+    """How a disk left on an overlay is put back by hand:
+    live: QEMU still runs on the overlay (running, paused, pmsuspended);
+    definition: the running VM is back on the image, only its persistent
+    definition names the overlay, which is now stale: never commit it;
+    offline: shut off before any merge (this run knows none happened), so
+    the overlay holds the guest's last writes;
+    unknown: the state could not be read."""
+    if state in LIVE_STATES:
+        return "definition" if live_src == base else "live"
+    if state in ("shut off", "crashed"):
+        return "offline"
+    return "unknown"
+
+
+def overlay_recovery(vm, items, how):
+    """The commands that put a disk back on its image by hand."""
+    q = shlex.quote
+    v = f"sudo virsh -c {URI}"
+    lines = []
+    for t, (base, overlay) in items:
+        kind = how.get(t, "unknown")
+        if kind == "live":
+            lines += [f"# {t}: the VM still runs on {overlay}",
+                      f"{v} blockjob {q(vm)} {t} --info     # a commit still running? let it finish",
+                      f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
+                      "and nothing waits on it",
+                      f"{v} blockcommit {q(vm)} {t} --active --pivot --wait --verbose     # only if no block job "
+                      "is listed",
+                      f"{v} domblklist {q(vm)} --details     # {t} must show {base}",
+                      f"{v} domblklist {q(vm)} --details --inactive     # here too",
+                      f"sudo rm {q(overlay)}     # only once both show {base}"]
+        elif kind == "definition":
+            lines += [f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
+                      "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)",
+                      f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> "
+                      "element",
+                      f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                      f"sudo rm {q(overlay)}     # only once it shows {base}"]
+        elif kind == "offline":
+            lines += [f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
+                      "offline, then point the definition back",
+                      f"sudo qemu-img commit -p {q(overlay)}     # writes its changes into {base}",
+                      f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> "
+                      "element",
+                      f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                      f"sudo rm {q(overlay)}"]
+        else:
+            lines += [f"# {t}: the VM's state or the files could not be read: look first, then follow "
+                      "vm/README.md in CST, \"If a backup left an overlay\"",
+                      f"{v} domstate {q(vm)}",
+                      f"{v} domblklist {q(vm)} --details",
+                      f"{v} domblklist {q(vm)} --details --inactive",
+                      f"sudo ls -l --time-style=full-iso {q(base)} {q(overlay)}"]
+    return lines
+
+
+def notify(urgency, title, body):
+    """A CST desktop alert (btrfs-notify keeps it for the next login when no
+    session shows it). Sent first, then printed (best effort)."""
+    if os.access(NOTIFY, os.X_OK):
+        run([NOTIFY, "-u", urgency, "-a", NAME, title, body], timeout=60, detach=True)
+    print(f"{title}: {body}", file=sys.stderr)
+
+
+def commit_back(vm, overlaid):
+    """virsh blockcommit --active --pivot for each overlay (also on a paused
+    VM), then a check of the live and the persistent definition, then the
+    overlay file removed. Returns (problems, {target: how to recover}); no
+    problems: every disk is back on its image."""
+    problems, how = [], {}
+    state = domain_state_or_none(vm)
+    if state not in LIVE_STATES:
+        problems.append(f"{vm} stopped during the backup: its disks still point to the overlay files"
+                        if state in ("shut off", "crashed") else
+                        f"the state of {vm} could not be read ({state or 'virsh domstate failed'}): nothing merged")
+        for t, (base, overlay) in overlaid.items():
+            how[t] = overlay_kind(state, None, base)
+        return problems, how
+    if state != "running":
+        print(f"  {vm} is {state}: merging back anyway (a block job works on it)", flush=True)
+    deadline = time.monotonic() + COMMIT_TIMEOUT
+    for t, (base, overlay) in overlaid.items():
+        left = max(60, int(deadline - time.monotonic()))
+        print(f"  merging the overlay of {t} back into {base} (virsh blockcommit --active --pivot)", flush=True)
+        # --timeout: virsh aborts the job itself (the disk stays on the overlay, no job
+        # left half done) before the timer's TimeoutStopSec could kill it.
+        rc, so, err = virsh("blockcommit", vm, t, "--active", "--pivot", "--wait", "--verbose",
+                            "--timeout", str(left), timeout=left + 300)
+        if rc != 0:
+            problems.append(f"{t}: virsh blockcommit: {first_line(err) or first_line(so) or f'exit {rc}'}")
+    live, lerr = blklist(vm)
+    persistent, perr = blklist(vm, inactive=True)
+    for t, (base, overlay) in overlaid.items():
+        live_src = live.get(t) if live is not None else None
+        if live is None:
+            problems.append(f"{t}: virsh domblklist: {lerr}")
+        elif live_src != base:
+            problems.append(f"{t}: the running VM still uses {live_src or '?'} (expected {base})")
+        elif persistent is not None and persistent.get(t) != base:
+            problems.append(f"{t}: the definition still names {persistent.get(t) or '?'} (expected {base}): "
+                            "the VM would start on that stale overlay")
+        elif persistent is None:
+            problems.append(f"{t}: the persistent definition was not readable ({perr}): the overlay is kept "
+                            "until both listings show the image")
+        else:
+            try:
+                os.unlink(overlay)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"  note: {overlay}: not removed ({e.strerror}); {t} is back on {base}: remove it by hand")
+            continue
+        how[t] = overlay_kind(state, live_src, base)
+    return problems, how
+
+
+def find_overlays(vm, specs):
+    """{target: (image, overlay)} of this run's overlays that the running VM
+    or its definition names, or whose file exists when neither is readable."""
+    live, _ = blklist(vm)
+    persistent, _ = blklist(vm, inactive=True)
+    out = {}
+    for t, (base, overlay) in specs.items():
+        named = [m.get(t) == overlay for m in (live, persistent) if m is not None]
+        if any(named) or not named and os.path.exists(overlay):
+            out[t] = (base, overlay)
+    return out
+
+
+def domain_state_or_none(vm):
+    rc, so, _ = virsh("domstate", vm)
+    return first_line(so) if rc == 0 else None
+
+
+class VmLock:
+    """One NAS backup per VM at a time (the timer and a manual run). The
+    lock file holds the pid: cst doctor reads it to tell a backup in
+    progress from an overlay left behind."""
+
+    def __init__(self, vm):
+        self.path = os.path.join(RUN_DIR, f"nas-{vm}.lock")
+        self.fd = None
+
+    def __enter__(self):
+        os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(self.fd)
+            raise Refused(f"another NAS backup of this VM is running ({self.path})") from None
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, f"{os.getpid()}\n".encode())
+        return self
+
+    def __exit__(self, *_):
+        os.ftruncate(self.fd, 0)
+        os.close(self.fd)
+
+
+def stage_files(vm, xml_text, manifest):
+    """domain.xml (with --security-info: graphics passwords; restic stores it
+    encrypted) and manifest.json, 0600 in a 0700 folder. Returns the folder."""
+    d = os.path.join(NAS_STAGE, vm)
+    for x in (NAS_STAGE, d):
+        os.makedirs(x, mode=0o700, exist_ok=True)
+        os.chmod(x, 0o700)
+    for name, text in (("domain.xml", xml_text), ("manifest.json", json.dumps(manifest, indent=2, sort_keys=True)
+                                                    + "\n")):
+        path = os.path.join(d, name)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(text)
+    return d
+
+
+def unstage(d):
+    for name in ("domain.xml", "manifest.json"):
+        try:
+            os.unlink(os.path.join(d, name))
+        except OSError:
+            pass
+
+
+def nas_sources(vm, parts, notes):
+    """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder."""
+    out = []
+    for p in parts["disks"]:
+        if not os.path.isfile(p):
+            raise Refused(f"{vm}: disk {p} not found")
+        if OVERLAY_MARK in p:
+            raise Refused(f"{vm}: disk {p} is an overlay a NAS backup left behind (its blockcommit did not "
+                          f"finish). Put the disk back first; `{CST} doctor` shows the commands")
+        r = os.path.realpath(p)
+        if r != p:
+            notes.append(f"disk {p} is a symbolic link: read through it: {r}")
+        if qcow2_backing_file(r):
+            raise Refused(f"{vm}: {r} is a qcow2 overlay with a backing file: back up the chain by hand "
+                          "(qemu-img info --backing-chain)")
+        out.append((r, "disk"))
+    if parts["nvram"]:
+        if os.path.isfile(parts["nvram"]):
+            out.append((os.path.realpath(parts["nvram"]), "nvram"))
+        else:
+            notes.append(f"UEFI variables {parts['nvram']} not there yet: not backed up")
+    if parts["tpm"]:
+        tpm_dir = os.path.join(SWTPM_DIR, parts["uuid"])
+        if parts["uuid"] and os.path.isdir(tpm_dir):
+            out.append((os.path.realpath(tpm_dir), "tpm"))
+        else:
+            notes.append(f"TPM state {tpm_dir} not found: not backed up (BitLocker may then ask for its "
+                         "recovery key after a restore)")
+    return out
+
+
+def valid_keep(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name or "")) and \
+        not name.startswith(("cst-", "vm:")) and name not in ("btrfs-setup", "home", "Workspace")
+
+
+def cmd_backup_nas(vm, keep, quiesce):
+    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused("backup --nas needs root: run it as `cst vm backup --nas` (it calls sudo by itself)")
+    if "," in vm or not vm.strip():
+        raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
+    nas = nas_settings()
+    state = domain_state(vm)
+    if state not in ("running", "shut off"):
+        raise Refused(f"{vm} is {state or 'in an unknown state'}: the NAS backup reads a running VM (through a "
+                      f"snapshot) or a shut-off one. Resume it or shut it down first")
+    if state == "shut off":
+        check_shut_off(vm)
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, on_signal)
+    with VmLock(vm):
+        return nas_run(vm, keep, quiesce, nas, state == "running")
+
+
+def nas_run(vm, keep, quiesce, nas, live):
+    rc, xml_text, err = virsh("dumpxml", "--inactive", "--security-info", vm)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+    parts = domain_parts(xml_text)
+    if parts["problems"]:
+        raise Refused(f"{vm}: nothing backed up:\n  " + "\n  ".join(parts["problems"]))
+    if not parts["disks"]:
+        raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
+    notes = list(parts["skipped"])
+    sources = nas_sources(vm, parts, notes)
+    epoch, stamp = utc_now()
+    specs, others = {}, []         # target -> (image, overlay); targets left out of the snapshot
+    if live:
+        rc, live_xml, err = virsh("dumpxml", vm)
+        if rc != 0:
+            raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+        disks = live_disks(live_xml)
+        for d in disks:
+            if d["device"] != "disk" or d["type"] != "file":
+                others.append(d["target"])
+                continue
+            if OVERLAY_MARK in d["source"] or d["backing"]:
+                raise Refused(f"{vm}: disk {d['target']} runs on {d['source']} with a backing chain (an overlay "
+                              f"left by an earlier backup?). Put it back first; `{CST} doctor` shows the commands")
+            base = os.path.realpath(d["source"])
+            specs[d["target"]] = (base, os.path.join(os.path.dirname(base),
+                                                    f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"))
+        if sorted(b for b, _ in specs.values()) != sorted(p for p, k in sources if k == "disk"):
+            raise Refused(f"{vm}: the running VM's disks differ from its definition (changed since it started): "
+                          "restart it, then back up")
+        for t, (_, overlay) in specs.items():
+            if os.path.lexists(overlay):
+                raise Refused(f"{overlay} already exists: wait a second and run it again")
+        agent = agent_state(live_xml)
+    versions, deployment = package_versions(), booted_deployment()
+    restic_ready(nas)
+    print(f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True)
+    overlaid, consistency, failure = {}, "shut-off", None
+    before = {}
+    try:
+        if live:
+            # The UEFI variables and the TPM state have no snapshot: read live, checked after.
+            before = {p: fingerprint(p) for p, k in sources if k != "disk"}
+            consistency = take_snapshot(vm, stamp, specs, others, quiesce, agent, overlaid, notes)
+        else:
+            before = {p: fingerprint(p) for p, _ in sources}
+        tags = [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep else [])
+        manifest = {"vm": vm, "uuid": parts["uuid"], "timestamp": stamp, "epoch": int(epoch), "mode": "nas",
+                    "consistency": consistency, "keep": keep, "tags": tags,
+                    "files": [{"source": p, "kind": k, "allocated": tree_sizes(p)[0], "apparent": tree_sizes(p)[1]}
+                              for p, k in sources],
+                    "versions": versions, "deployment": deployment, "notes": notes}
+        stage = stage_files(vm, xml_text, manifest)
+        paths = [p for p, _ in sources] + [stage]
+        timeout = conf_number("VM_NAS_TIMEOUT_HOURS") * 3600 or 6 * 3600
+        for p, k in sources:
+            a, s = tree_sizes(p)
+            print(f"  reading {p} ({k}, {human(a)} allocated, {human(s)} apparent)")
+        try:
+            rc, summary = restic_backup(nas, ["backup", "--json", "--host", nas["host"], "--tag", ",".join(tags),
+                                              "--retry-lock", RETRY_LOCK, *paths], timeout)
+        finally:
+            unstage(stage)
+        snap = summary.get("snapshot_id") or ""
+        if rc != 0 or not snap:
+            if snap:
+                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)    # incomplete (rc 3): not a backup
+            why = {3: "some files could not be read", 124: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
+                   127: "restic not found", 11: "the repository stayed locked"}.get(rc, f"restic exit {rc}")
+            raise Refused(f"restic backup failed: {why}; no backup recorded")
+        if live:
+            for p in before:
+                try:
+                    same = fingerprint(p) == before[p]
+                except OSError:
+                    same = False
+                if not same:
+                    notes.append(f"{p} changed while restic read it (the VM wrote it): that copy may be torn; "
+                                 "the next backup reads it again")
+        if not live:
+            try:
+                check_shut_off(vm)
+            except Refused as e:
+                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)
+                raise Refused(f"the VM's state changed during the backup, the copy is not consistent "
+                              f"(restic snapshot {snap[:8]} forgotten): {e}") from None
+
+            def now_fp(p):
+                try:
+                    return fingerprint(p)
+                except OSError:
+                    return None
+            changed = [p for p, _ in sources if now_fp(p) != before[p]]
+            if changed:
+                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)
+                raise Refused("changed during the backup (the VM was started?), the copy is not consistent "
+                              f"(restic snapshot {snap[:8]} forgotten): {', '.join(changed)}")
+    except BaseException as e:      # noqa: BLE001 - the overlays are merged back first, then it is raised again
+        failure = e
+    # From here on no signal may cut the cleanup short, and no child may get one.
+    old = {s: signal.signal(s, signal.SIG_IGN) for s in STOP_SIGNALS}
+    DETACH["on"] = True
+    problems, how = [], {}
+    try:
+        if live:
+            # What the VM really runs on, not only what take_snapshot saw.
+            try:
+                overlaid.update(find_overlays(vm, specs))
+            except Exception as e:      # noqa: BLE001 - the merge back still runs for what is known
+                problems.append(f"the disks could not be listed: {e!r}")
+        if overlaid:
+            try:
+                more, how = commit_back(vm, overlaid)
+                problems += more
+            except Exception as e:      # noqa: BLE001 - reported loudly below
+                problems.append(f"the merge back failed: {e!r}")
+    finally:
+        DETACH["on"] = False
+        for s, h in old.items():
+            signal.signal(s, h)
+    if isinstance(failure, Uncertain) and not problems:
+        problems.append(str(failure))
+        overlaid.update({t: spec for t, spec in specs.items() if os.path.lexists(spec[1])})
+    if problems:
+        body = (f"{vm}: a disk was not merged back after the NAS backup, or may not be: " + "; ".join(problems) +
+                f". Check what the VM runs on; see `{CST} doctor`.")
+        notify("critical", "VM backup: disk left on a snapshot overlay", body)
+        if not overlaid:            # nothing known: the files this run could have made
+            overlaid.update({t: spec for t, spec in specs.items() if os.path.lexists(spec[1])})
+        lines = overlay_recovery(vm, overlaid.items(), how)
+        msg = ("DISK NOT MERGED BACK:\n  " + "\n  ".join(problems) +
+               "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  " +
+               "\n  ".join(lines))
+        if failure is not None and not isinstance(failure, Uncertain):
+            msg += f"\n(the backup itself: {failure})"
+        raise Refused(msg)
+    if failure is not None:
+        raise failure
+    print(f"  restic snapshot {snap[:8]}: {human(summary.get('total_bytes_processed') or 0)} read, "
+          f"{human(summary.get('data_added') or 0)} new on the NAS ({consistency})")
+    retention(vm, nas)
+    entries = [e for e in read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
+    entries.append({"vm": vm, "timestamp": stamp, "epoch": int(epoch), "mode": "nas", "snapshot": snap,
+                    "repository": nas["repo"], "host": nas["host"], "consistency": consistency, "keep": keep,
+                    "versions": versions, "deployment": deployment})
+    alive = nas_snapshot_ids(vm, nas)
+    if alive is not None:
+        alive.add(snap)
+        entries = [e for e in entries if not (e["vm"] == vm and e.get("mode") == "nas" and
+                                              e.get("repository") == nas["repo"] and
+                                              not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a)
+                                                      for a in alive))]
+    entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+    write_index(entries)
+    for n in notes:
+        print(f"  note: {n}")
+    print(f"Done: restic snapshot {snap[:8]} of {vm} ({consistency}"
+          f"{f'; kept until removed by hand: tags {KEEP_TAG},{keep}' if keep else ''}).")
+    print("Restore: vm/README.md in CST, section \"Restore from the NAS\" (restic restore "
+          f"{snap[:8]} --sparse --target <a NOCOW folder>).")
+    return 0
+
+
+def take_snapshot(vm, stamp, specs, others, quiesce, agent, overlaid, notes):
+    """The external disk-only snapshot; fills overlaid {target: (image,
+    overlay)} from what domblklist shows, also after a failure. Returns the
+    consistency: quiesced or crash-consistent. Raises Uncertain when virsh
+    did not answer and libvirt's result stayed unclear."""
+    def attempt(with_quiesce):
+        args = ["snapshot-create-as", vm, "--name", f"cst-nas-{stamp}", "--disk-only", "--atomic", "--no-metadata"]
+        if with_quiesce:
+            args.append("--quiesce")
+        for t, (_, overlay) in specs.items():
+            args += ["--diskspec", f"{t},snapshot=external,file={overlay.replace(',', ',,')}"]
+        for t in others:
+            args += ["--diskspec", f"{t},snapshot=no"]
+        # Signals wait until the outcome is known (virsh is never killed by a stop);
+        # its own session keeps a Ctrl-C or a closed terminal away from it.
+        with signals_held():
+            rc, so, err = virsh(*args, timeout=SNAPSHOT_TIMEOUT, detach=True)
+            settled = rc != 124 and rc >= 0       # not a timeout, and virsh not killed by a signal
+            deadline = time.monotonic() + (0 if settled else SNAPSHOT_SETTLE)
+            while True:
+                # The truth is what the VM runs on, also when virsh failed or timed out.
+                cur, _ = blklist(vm)
+                for t, (base, overlay) in specs.items():
+                    if (cur.get(t) == overlay) if cur is not None else os.path.exists(overlay):
+                        overlaid[t] = (base, overlay)
+                if settled or len(overlaid) == len(specs) or time.monotonic() >= deadline:
+                    break
+                time.sleep(5)
+        if not settled and len(overlaid) != len(specs):
+            if with_quiesce:
+                virsh("domfsthaw", vm)        # best effort: never leave the guest frozen
+            kept = ", ".join(o for t, (_, o) in specs.items() if t not in overlaid and os.path.lexists(o))
+            raise Uncertain(f"virsh snapshot-create-as {vm} did not answer within {SNAPSHOT_TIMEOUT} s and, "
+                            f"{SNAPSHOT_SETTLE} s later, the VM's disks still do not all show the overlay: libvirt "
+                            f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}")
+        if not settled and with_quiesce:
+            virsh("domfsthaw", vm)
+            notes.append("virsh did not answer in time; the snapshot is in place, but whether the guest was "
+                         "frozen is unknown")
+            return 0, "", True
+        return rc, first_line(err) or first_line(so) or f"exit {rc}", False
+
+    def drop_strays():
+        # Only after a definite error from libvirt: those files are not in use.
+        for t, (_, overlay) in specs.items():
+            if t not in overlaid:
+                try:
+                    os.unlink(overlay)
+                except OSError:
+                    pass
+
+    why = ("--no-quiesce" if not quiesce else
+           "no guest agent channel (org.qemu.guest_agent.0) in the definition" if agent == "none" else
+           "the guest agent is not connected" if agent != "connected" else "")
+    if not why:
+        rc, err, unsure = attempt(True)
+        if overlaid:
+            if rc != 0 or unsure:
+                if rc != 0:
+                    notes.append(f"virsh reported an error but the snapshot is in place: {err}")
+                    virsh("domfsthaw", vm)        # best effort: never leave the guest frozen
+                return "crash-consistent"
+            print("  snapshot taken with the guest's file systems frozen (quiesced, QEMU guest agent)")
+            return "quiesced"
+        drop_strays()
+        why = f"quiesce failed: {err}"
+    print(f"  crash-consistent snapshot ({why})", flush=True)
+    rc, err, _ = attempt(False)
+    if not overlaid:
+        drop_strays()
+        raise Refused(f"virsh snapshot-create-as {vm}: {err} (nothing changed)")
+    if rc != 0:
+        notes.append(f"virsh reported an error but the snapshot is in place: {err}")
+    notes.append(f"crash-consistent: {why}")
+    return "crash-consistent"
+
+
+def nas_snapshot_ids(vm, nas):
+    """The ids of the VM's restic snapshots, or None when not readable."""
+    rc, so, _ = restic(nas, "snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}",
+                       timeout=300)
+    try:
+        return {s["id"] for s in json.loads(so) if isinstance(s, dict) and s.get("id")} if rc == 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def forget_args(vm, host, weekly, monthly):
+    """restic forget for this VM only: --host and both tags, so the /home
+    backup's snapshots (tag btrfs-setup) and hand-made ones (without the
+    cst-vm tag) are never considered; --group-by host: one group per VM even
+    when its disks change. Never --prune (the /home NAS job prunes)."""
+    return ["forget", "--host", host, "--tag", f"{TAG},vm:{vm}", "--group-by", "host",
+            "--keep-weekly", str(weekly), "--keep-monthly", str(monthly), "--keep-tag", KEEP_TAG,
+            "--retry-lock", RETRY_LOCK]
+
+
+def retention(vm, nas):
+    weekly, monthly = conf_number("VM_NAS_KEEP_WEEKLY"), conf_number("VM_NAS_KEEP_MONTHLY")
+    if weekly + monthly == 0:
+        print(f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {VM_CONF}: nothing forgotten")
+        return
+    rc, so, err = restic(nas, *forget_args(vm, nas["host"], weekly, monthly))
+    if rc != 0:
+        print(f"  note: restic forget failed ({first_line(err) or f'exit {rc}'}): the backup is fine, the "
+              "retention runs again next time")
+        return
+    gone = len(re.findall(r"^remove \d+ snapshots?:", so, re.M))
+    print(f"  retention: {weekly} weekly + {monthly} monthly kept, and those tagged {KEEP_TAG}"
+          f"{'; older ones forgotten' if gone else ''} (space is freed by the /home NAS job's weekly prune)")
+
+
+# ---- the weekly timer ------------------------------------------------------------------------------
+def render_service():
+    return f"""{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.
+# The weekly backup of the libvirt VM %i to the NAS (restic): a live
+# snapshot while restic reads the disks, then merged back. Why and how:
+# vm/README.md in CST.
+[Unit]
+Description=CST: backup of the VM %i to the NAS (cst vm backup --nas)
+Wants=network-online.target
+After=network-online.target virtqemud.service libvirtd.service
+ConditionPathExists={SBIN_COPY}
+
+[Service]
+Type=oneshot
+Environment="CST_PROG=cst vm"
+ExecStart=/usr/bin/python3 -I {SBIN_COPY} backup %i --nas
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
+# On stop, SIGTERM reaches the program only: it stops restic and merges the
+# snapshot back before it ends (KillMode=mixed). TimeoutStopSec covers a held
+# snapshot call plus the merge's own limit (virsh blockcommit --timeout) plus
+# a margin, so systemd never kills a merge half done. No start limit: every step has its own (restic:
+# VM_NAS_TIMEOUT_HOURS in /etc/cst/vm.conf).
+KillMode=mixed
+TimeoutStartSec=infinity
+TimeoutStopSec={stop_timeout()}
+"""
+
+
+def stop_timeout():
+    """A stop may arrive while the snapshot call is held (SNAPSHOT_TIMEOUT +
+    SNAPSHOT_SETTLE), then the merge runs (COMMIT_TIMEOUT, plus virsh's own
+    300 s), then the checks and the alert: 30 minutes of margin."""
+    return f"{(SNAPSHOT_TIMEOUT + SNAPSHOT_SETTLE + COMMIT_TIMEOUT + 300 + 1800 + 59) // 60}min"
+
+
+def render_timer():
+    return f"""{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.
+# Saturday morning: the /home NAS job starts between 00:00 and 01:00 every
+# day, the btrfs scrub runs on Sunday at 02:00.
+[Unit]
+Description=CST: weekly backup of the VM %i to the NAS
+
+[Timer]
+OnCalendar={ON_CALENDAR}
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def program_text():
+    with open(os.path.realpath(__file__)) as f:
+        return f.read()
+
+
+def timer_files():
+    """{path: (wanted text, mode)}."""
+    return {SBIN_COPY: (program_text(), 0o755), os.path.join(UNIT_DIR, SERVICE): (render_service(), 0o644),
+            os.path.join(UNIT_DIR, TIMER): (render_timer(), 0o644)}
+
+
+def file_state(path, wanted):
+    """ok | stale (ours, differs) | foreign (not ours, or a link) | missing."""
+    try:
+        if os.path.islink(path):
+            return "foreign"
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "foreign"
+    if text == wanted:
+        return "ok"
+    ours = UNIT_MARKER in text or path == SBIN_COPY and text.startswith("#!/usr/bin/python3 -I\n\"\"\"cst-vm:")
+    return "stale" if ours else "foreign"
+
+
+def instance(vm):
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", vm) or vm.startswith("-"):
+        raise Refused(f"VM name {vm!r}: the timer takes names of letters, digits and _ . : - only")
+    return f"cst-vm-backup@{vm}.timer"
+
+
+def wants_links():
+    d = os.path.join(UNIT_DIR, "timers.target.wants")
+    try:
+        return sorted(n for n in os.listdir(d) if n.startswith("cst-vm-backup@") and n.endswith(".timer"))
+    except OSError:
+        return []
+
+
+def systemctl(*args):
+    rc, so, err = run(["systemctl", *args], timeout=120)
+    return rc, so.strip(), first_line(err)
+
+
+def write_file(path, text, mode):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_timer(sub, vm):
+    unit = instance(vm)
+    if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
+    files = timer_files()
+    states = {p: file_state(p, t) for p, (t, _) in files.items()}
+    if sub == "status":
+        on = unit in wants_links()
+        print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
+        words = {"ok": "installed, up to date", "missing": "not installed", "foreign": "not CST's file",
+                 "stale": f"installed, OLDER than this copy of CST: {PROG} backup-timer on {vm} updates it"}
+        for p, st in states.items():
+            print(f"  {p}: {words[st]}")
+        if on:
+            rc, nxt, _ = systemctl("show", "-p", "NextElapseUSecRealtime", "--value", unit)
+            rc2, last, _ = systemctl("show", "-p", "Result", "--value", unit.replace(".timer", ".service"))
+            if rc == 0 and nxt:
+                print(f"  next run: {nxt}")
+            if rc2 == 0 and last:
+                print(f"  last run of the service: {last}")
+        nas = [e for e in read_index() if e["vm"] == vm and e.get("mode") == "nas"]
+        print(f"  last NAS backup: {describe_entry(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
+        conf = read_conf(NAS_CONF)
+        if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
+            print(f"  the NAS backup is not set up: {CST} btrfs snapshots nas setup")
+        return 0
+    foreign = [p for p, st in states.items() if st == "foreign"]
+    if foreign:
+        raise Refused("not CST's files, left as they are: " + ", ".join(foreign))
+    if sub == "on":
+        nas_settings()
+        for p, (text, mode) in files.items():
+            if states[p] != "ok":
+                write_file(p, text, mode)
+                print(f"  {'updated' if states[p] == 'stale' else 'installed'}: {p}")
+        for args in (("daemon-reload",), ("enable", "--now", unit)):
+            rc, _, err = systemctl(*args)
+            if rc != 0:
+                raise Refused(f"systemctl {' '.join(args)}: {err or f'exit {rc}'}")
+        print(f"On: {unit} ({ON_CALENDAR}, then {CST} vm backup {vm} --nas). Run one now with: "
+              f"sudo systemctl start {unit.replace('.timer', '.service')}")
+        return 0
+    rc, _, err = systemctl("disable", "--now", unit)
+    if rc != 0 and unit in wants_links():
+        raise Refused(f"systemctl disable --now {unit}: {err or f'exit {rc}'}")
+    print(f"Off: {unit}")
+    if not wants_links():
+        for p, st in states.items():
+            if st != "missing":
+                os.unlink(p)
+                print(f"  removed: {p}")
+        systemctl("daemon-reload")
+    else:
+        print(f"  kept the units and {SBIN_COPY}: still used by {', '.join(wants_links())}")
+    print(f"The backups on the NAS stay (list: {CST} vm list).")
+    return 0
+
+
 # ---- list and status ---------------------------------------------------------------------------
 def describe_entry(e):
     dep = e.get("deployment") or {}
     qemu = next((v for k, v in (e.get("versions") or {}).items()
                  if k.startswith(("qemu-kvm", "qemu-system-x86")) and v != NOT_INSTALLED), "?")
+    if e.get("mode") == "nas":
+        keep = f", kept: {e['keep']}" if e.get("keep") else ""
+        return (f"{e['vm']:<16} {e['timestamp']}  nas      deployment {dep.get('version') or '?'}"
+                f"  {qemu}  restic {str(e.get('snapshot'))[:8]} ({e.get('consistency') or '?'}{keep})")
     gone = ""
     try:
         os.stat(e["path"])
@@ -627,7 +1611,8 @@ def cmd_status(vm):
             print(f"  {tune_line(xml_text)}")
     entries = sorted((e for e in read_index() if e["vm"] == vm), key=lambda e: e.get("epoch") or 0)
     if not entries:
-        print(f"  last backup: none (make one with the VM shut off: {CST} vm backup)")
+        print(f"  last backup: none (to the NAS, also while it runs: {CST} vm backup --nas; "
+              f"a local copy with the VM shut off: {CST} vm backup)")
     else:
         last = entries[-1]
         print(f"  last backup: {describe_entry(last)}")
@@ -638,6 +1623,14 @@ def cmd_status(vm):
                 print(f"    {c}")
         else:
             print("  virtualization packages: unchanged since the last backup")
+    nas = [e for e in entries if e.get("mode") == "nas"]
+    if nas and nas[-1] is not entries[-1]:
+        print(f"  last NAS backup: {describe_entry(nas[-1])}")
+    try:
+        print(f"  weekly NAS backup timer: {'on' if instance(vm) in wants_links() else 'off'}"
+              f" ({CST} vm backup-timer status {vm})")
+    except Refused:
+        pass
     if knobs()["VM_NOCOW"]:
         print("VM image folders (NOCOW):")
         for d in image_dirs():
@@ -1273,29 +2266,45 @@ def tune_line(xml_text):
 
 # ---- command line --------------------------------------------------------------------------------
 def parse_args(argv):
-    """{cmd, sub, vm, full, guest_virtio, root}."""
-    a = {"cmd": "help", "sub": None, "vm": None, "full": False, "guest_virtio": False, "root": False}
+    """{cmd, sub, vm, full, guest_virtio, root, nas, keep, no_quiesce}."""
+    a = {"cmd": "help", "sub": None, "vm": None, "full": False, "guest_virtio": False, "root": False,
+         "nas": False, "keep": None, "no_quiesce": False}
     if not argv or argv[0] in ("help", "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
         return a
     a["cmd"], rest = argv[0], argv[1:]
-    if a["cmd"] not in ("backup", "list", "status", "tune", "nocow"):
+    if a["cmd"] not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
         raise Usage(f"unknown command '{a['cmd']}'")
-    if a["cmd"] in ("tune", "nocow"):
-        if not rest or rest[0] not in ("plan", "apply"):
-            raise Usage(f"{a['cmd']}: plan or apply")
+    subs = {"tune": ("plan", "apply"), "nocow": ("plan", "apply"), "backup-timer": ("on", "off", "status")}
+    if a["cmd"] in subs:
+        if not rest or rest[0] not in subs[a["cmd"]]:
+            raise Usage(f"{a['cmd']}: {' or '.join(subs[a['cmd']])}")
         a["sub"], rest = rest[0], rest[1:]
-    flags = {"backup": {"--full": "full"}, "tune": {"--guest-has-virtio": "guest_virtio"},
+    flags = {"backup": {"--full": "full", "--nas": "nas", "--no-quiesce": "no_quiesce"},
+             "tune": {"--guest-has-virtio": "guest_virtio"},
              "nocow": {"--root": "root"} if a["sub"] == "plan" else {}}.get(a["cmd"], {})
     takes_vm = a["cmd"] != "nocow"
-    for x in rest:
-        if x in flags and not a[flags[x]]:
+    where = " ".join(filter(None, (a["cmd"], a["sub"])))
+    rest = list(rest)
+    while rest:
+        x = rest.pop(0)
+        if a["cmd"] == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and a["keep"] is None:
+            value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
+            if not valid_keep(value):
+                raise Usage(f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
+                            "starting with cst- or vm:), e.g. pre-f46")
+            a["keep"] = value
+        elif x in flags and not a[flags[x]]:
             a[flags[x]] = True
         elif takes_vm and not x.startswith("-") and a["vm"] is None:
             a["vm"] = x
         else:
-            raise Usage(f"{' '.join(filter(None, (a['cmd'], a['sub'])))}: unexpected argument '{x}'")
+            raise Usage(f"{where}: unexpected argument '{x}'")
+    if a["full"] and a["nas"]:
+        raise Usage("backup: --full is for the local copy, --nas for the NAS: one of them")
+    if (a["keep"] is not None or a["no_quiesce"]) and not a["nas"]:
+        raise Usage("backup: --keep-tag and --no-quiesce go with --nas")
     return a
 
 
@@ -1319,9 +2328,18 @@ def main(argv):
             return cmd_status(vm)
         if cmd == "tune":
             return cmd_tune(vm, a["sub"] == "apply", a["guest_virtio"])
+        if cmd == "backup-timer":
+            return cmd_timer(a["sub"], vm)
+        if a["nas"]:
+            safe_output()
+            return cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
         return cmd_backup(vm, a["full"])
-    except Refused as e:
+    except (Refused, Stop) as e:
         print(f"{PROG}: {e}", file=sys.stderr)
+        if cmd == "backup" and a["nas"] and os.environ.get("INVOCATION_ID") and "DISK NOT MERGED" not in str(e):
+            # Started by systemd (the weekly timer): nobody reads the terminal.
+            notify("normal", f"Weekly VM backup of {vm} to the NAS failed",
+                   f"{first_line(str(e))[:300]} See: journalctl -u cst-vm-backup@{vm}.service")
         return 1
 
 

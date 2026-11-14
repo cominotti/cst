@@ -8,6 +8,22 @@
 # restore, are in vm/README.md.
 #
 # Commands:
+#   backup [VM] --nas [--keep-tag NAME] [--no-quiesce]
+#                          (root) the default backup: to the NAS with restic,
+#                          into the repository of the /home NAS backup
+#                          (`cst btrfs snapshots nas setup` first). A running
+#                          VM keeps running: a short-lived external snapshot
+#                          holds its writes while restic reads the disks,
+#                          then virsh blockcommit merges it back. Quiesced
+#                          through the QEMU guest agent when it answers, else
+#                          crash-consistent (the output and the index say
+#                          which). Keeps 4 weekly + 3 monthly restic snapshots
+#                          of the VM (VM_NAS_KEEP_WEEKLY, VM_NAS_KEEP_MONTHLY);
+#                          --keep-tag NAME: kept until you forget it by hand
+#   backup-timer on|off|status [VM]
+#                          on/off (root): the weekly backup --nas (Saturday
+#                          04:30, systemd timer cst-vm-backup@VM.timer);
+#                          status (user): on or off, up to date, next run
 #   backup [VM] [--full]   (root) the VM must be shut off. Copies every file
 #                          disk, the UEFI variables, the TPM state, the
 #                          definition (XML, 0600: it holds secrets) and a
@@ -51,10 +67,11 @@
 #
 # VM defaults to VM_NAME of /etc/cpu-setup/cpu-setup.conf (win11-devbox).
 # Settings: /etc/cst/vm.conf (optional): VM_NOCOW, VM_TUNE_DISK_BUS,
-# VM_TUNE_DISK_DRIVER, VM_TUNE_NIC, each yes (default) or no.
-# backup, tune apply and nocow apply run on the host only; list, status,
-# tune plan and nocow plan also work in a toolbox (they run on the host
-# through flatpak-spawn). Old backups are removed by hand (sudo rm -r the
+# VM_TUNE_DISK_DRIVER, VM_TUNE_NIC, each yes (default) or no;
+# VM_NAS_KEEP_WEEKLY (4), VM_NAS_KEEP_MONTHLY (3), VM_NAS_TIMEOUT_HOURS (6).
+# backup, backup-timer on|off, tune apply and nocow apply run on the host
+# only; list, status, backup-timer status, tune plan and nocow plan also work
+# in a toolbox (they run on the host through flatpak-spawn). Old backups are removed by hand (sudo rm -r the
 # folder); the next backup drops them from the list.
 
 set -Eeuo pipefail
@@ -99,6 +116,12 @@ case "${cmd}" in
             plan) mode="read"; for a in "$@"; do [[ "${a}" == --root ]] && mode="root"; done ;;
             apply) mode="user" ;;
             *) echo "Usage: ${PROG} nocow plan [--root] | nocow apply" >&2; exit 2 ;;
+        esac ;;
+    backup-timer)
+        case "${sub}" in
+            status) mode="read" ;;
+            on|off) ;;
+            *) echo "Usage: ${PROG} backup-timer on|off|status [VM]" >&2; exit 2 ;;
         esac ;;
     backup) ;;
     *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
