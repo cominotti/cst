@@ -15,6 +15,7 @@ Installed as /usr/local/sbin/cpu-vm-pin; run by `cst cpu vm-pin plan|apply|statu
 
 import difflib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,10 +59,13 @@ def virsh(*args, check=True):
 
 def keep_prefixes(xml_text):
     """Register the document's own namespace prefixes (libosinfo metadata etc.),
-    so serializing does not rename them to ns0."""
+    so serializing does not rename them to ns0. A default namespace
+    (xmlns='...' on a <metadata> child) is not registered: as "" ElementTree
+    would write it on <domain>, moving every libvirt element into it."""
     import io
     for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
-        ET.register_namespace(prefix, uri)
+        if prefix and not re.fullmatch(r"ns\d+", prefix):    # ns0...: ElementTree's own, it refuses them
+            ET.register_namespace(prefix, uri)
 
 
 def disable_features(root, names):

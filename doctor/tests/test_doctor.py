@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -890,6 +891,100 @@ class VmTest(Scratch):
                          "1 -> none, libvirt-daemon-driver-2 1 -> none, and 2 more virtualization package(s)")
         self.assertEqual(D.virt_versions(["qemu-kvm-2:11.1.3-1.fc45.x86_64", "vim-9-1.fc45.x86_64"]),
                          {"qemu-kvm": "2:11.1.3-1.fc45"})
+
+
+class VmHardwareTest(VmTest):
+    """`cst vm tune` differences and the NOCOW of the VM image folders: info, never WARN."""
+
+    OLD_HW = ("<domain type='kvm'><name>win</name><vcpu>12</vcpu><features><hyperv mode='custom'/></features>"
+              "<devices><disk type='file' device='disk'><driver name='qemu' type='qcow2'/>"
+              "<source file='/v/win.qcow2'/><target dev='sda' bus='sata'/></disk>"
+              "<interface type='network'><mac address='52:54:00:00:00:01'/><model type='e1000e'/></interface>"
+              "<memballoon model='virtio'/></devices></domain>\n")
+    NEW_HW = ("<domain type='kvm'><name>lin</name><vcpu>2</vcpu><devices>"
+              "<disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none' io='native' "
+              "discard='unmap' detect_zeroes='unmap'/><source file='/v/l.qcow2'/><target dev='vda' bus='virtio'/>"
+              "</disk><interface type='network'><mac address='52:54:00:00:00:02'/><model type='virtio'/>"
+              "</interface><memballoon model='virtio'/></devices></domain>\n")
+
+    def test_hardware_differences_are_info(self):
+        self.libvirt(["win", "lin"], {"win": self.OLD_HW, "lin": self.NEW_HW}, CAPS_QEMU11)
+        r = self.run_tool()
+        self.assertNotIn("WARN   VM", r.stdout)
+        self.assertIn("info   VM win: hardware differs from what cst vm tune recommends: disk sda: cache "
+                      "(default) -> none; disk sda: io (default) -> native; disk sda: discard (default) -> unmap; "
+                      "and 4 more. Windows: the virtio drivers go in first (the plan shows how). "
+                      "See: cst vm tune plan win", r.stdout)
+        self.assertIn("ok     VM lin: disks and network card as cst vm tune recommends", r.stdout)
+        # One dumpxml per VM for both vm checks.
+        self.assertEqual(self.calls().count("virsh -r -c qemu:///system dumpxml --inactive win"), 1)
+        self.assert_read_only()
+
+    def test_knobs_come_from_the_host(self):
+        os.makedirs(os.path.join(self.root, "etc", "cst"))
+        with open(os.path.join(self.root, "etc", "cst", "vm.conf"), "w") as f:
+            f.write("VM_TUNE_DISK_BUS=no\nVM_TUNE_DISK_DRIVER=no\nVM_TUNE_NIC=no\n")
+        self.libvirt(["win"], {"win": self.OLD_HW}, CAPS_QEMU11)
+        r = self.run_tool()
+        self.assertIn("ok     VM win: disks and network card as cst vm tune recommends", r.stdout)
+
+    def folders(self, flags, btrfs=True, scandir_denied=()):
+        """The image folder check in-process, with fake inode flags."""
+        mod = D.vm_module()
+        real_scandir = os.scandir
+
+        def scandir(p):
+            if p in scandir_denied:
+                raise PermissionError(13, "Permission denied")
+            return real_scandir(p)
+        with mock.patch.dict(os.environ, {"HOME": self.tmp}), \
+                mock.patch.object(mod, "is_btrfs", lambda p: btrfs), \
+                mock.patch.object(mod, "inode_flags", lambda p: flags.get(p, 0)), \
+                mock.patch.object(mod.os, "scandir", scandir):
+            return list(D.check_vm_image_dirs(D.Host(self.env)))
+
+    def test_image_folders(self):
+        mod = D.vm_module()
+        system = os.path.join(self.root, "var", "lib", "libvirt", "images")
+        boxes = os.path.join(self.tmp, ".local", "share", "gnome-boxes", "images")
+        for d in (system, boxes):
+            os.makedirs(d)
+        with open(os.path.join(boxes, "fedora"), "wb") as f:
+            f.write(b"x" * 8192)
+        # Root's folder, not readable: one info line that says so, no finding.
+        res = self.folders({system: None}, scandir_denied=(system,))
+        self.assertEqual(res[0].status, D.INFO)
+        self.assertIn("/var/lib/libvirt/images: NOCOW mark not readable as your user", res[0].message)
+        self.assertIn("cst vm nocow plan --root", res[0].message)
+        self.assertEqual([r.message.split(":")[0] for r in res[1:]],
+                         [f"VM image folder {boxes}", f"VM image folder {boxes}"])
+        self.assertIn("no NOCOW mark (+C)", res[1].message)
+        self.assertIn("still copy-on-write: fedora", res[2].message)
+        self.assertTrue(all(r.status in (D.OK, D.INFO) for r in res))
+        # All marked: ok lines only.
+        nocow = mod.FS_NOCOW_FL
+        res = self.folders({system: nocow, boxes: nocow, os.path.join(boxes, "fedora"): nocow})
+        self.assertEqual([r.status for r in res], [D.OK, D.OK])
+        # Not btrfs, or no folders at all (CI): silent.
+        self.assertEqual(self.folders({}, btrfs=False), [])
+        shutil.rmtree(os.path.join(self.root, "var"))
+        shutil.rmtree(os.path.join(self.tmp, ".local"))
+        self.assertEqual(self.folders({}), [])
+
+    def test_image_folders_knob_off(self):
+        os.makedirs(os.path.join(self.root, "etc", "cst"))
+        with open(os.path.join(self.root, "etc", "cst", "vm.conf"), "w") as f:
+            f.write("VM_NOCOW=no\n")
+        res = self.folders({})
+        self.assertEqual([(r.status, r.message) for r in res],
+                         [(D.INFO, "VM image folders: NOCOW not managed (VM_NOCOW=no in /etc/cst/vm.conf)")])
+
+    def test_unloadable_vm_tool_is_info(self):
+        with mock.patch.object(D, "vm_module", lambda: None), \
+                mock.patch.object(D, "libvirt_domains", lambda host: (["win"], "")):
+            res = list(D.check_vm_hardware(D.Host(self.env)))
+            self.assertEqual(res[0].status, D.INFO)
+            self.assertEqual(list(D.check_vm_image_dirs(D.Host(self.env))), [])
 
 
 class CommandLineTest(Scratch):
