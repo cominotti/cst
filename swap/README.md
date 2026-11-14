@@ -1,8 +1,8 @@
 # `cst swap`: zswap, encrypted swap and memory protection
 
 This folder holds the parts of `swap-setup.sh`, the `swap` module of CST
-(Cominotti Setup Tools). The script lives one level up:
-`~/Workspace/cst/swap-setup.sh`. You run it as `cst swap <command>` (how to
+(Cominotti Setup Tools). The script lives one level up, at the top of
+the CST folder. You run it as `cst swap <command>` (how to
 set up `cst`: [../README.md](../README.md#the-cst-command));
 `bash swap-setup.sh <command>` from the repository folder does the same. It is
 written for one machine, the workstation **sophia**: 93 GiB of RAM, a Windows

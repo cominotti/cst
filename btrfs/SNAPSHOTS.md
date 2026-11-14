@@ -107,9 +107,9 @@ NAS backup ([section 7](#7-optional-backup-on-the-nas-restic)).
 - Run them through the `cst` command of this repository (CST, Cominotti
   Setup Tools): `cst btrfs ...` runs the script `btrfs-setup.sh`. How to make
   `cst` available (a symlink in `~/.local/bin` or an alias) is in
-  [../README.md](../README.md#the-cst-command). Without that, type the full
-  path, `~/Workspace/cst/cst btrfs ...`, or run `bash btrfs-setup.sh ...` from
-  `~/Workspace/cst`: all three are the same script.
+  [../README.md](../README.md#the-cst-command). Without that, run `./cst btrfs ...`
+  or `bash btrfs-setup.sh ...` from the CST folder (the folder you cloned
+  CST into): all three are the same script.
 - Run them **as your normal user**, without `sudo`. The script asks for your
   password (through `sudo`) by itself when it needs root (administrator
   rights). Do not type `sudo cst ...`: `sudo` does not find `cst`.
@@ -126,7 +126,6 @@ really need the `sudo`.
 ### The two commands
 
 ```
-cd ~/Workspace/cst
 cst btrfs snapshots setup        # once; shows a plan and asks once
 cst btrfs snapshots status       # at any time
 ```

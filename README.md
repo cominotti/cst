@@ -10,7 +10,7 @@ for swap and memory, `cst bluetooth ...` for Bluetooth audio,
 backups of the Windows VM, and `cst doctor`
 for a read-only check-up of the whole system (see
 [The `cst` command](#the-cst-command)). Older versions of this repository were
-called `f44-tools` and lived in `~/Workspace/f44-tools`; `cst btrfs install`
+called `f44-tools`; `cst btrfs install`
 moves what they left on the system to the new names (see
 [btrfs/README.md, section 4.9](btrfs/README.md#49-desktop-alerts-btrfs-notify)).
 
@@ -41,7 +41,8 @@ has GNOME, Steam (as a Flatpak), Docker, podman toolboxes, the Windows VM
 
 ## The `cst` command
 
-`cst` is a small script at the top of this folder (`~/Workspace/cst/cst`). It
+`cst` is a small script at the top of this folder (the folder you cloned
+CST into; this document calls it the CST folder). It
 does nothing by itself: it passes your command to one **module**.
 
 | Command | Module script | Folder | What it is for | Detailed documents |
@@ -76,14 +77,14 @@ group of parts; the parts live in the folder next to it. Each module also
 works on its own (`bash btrfs-setup.sh status` is the same as
 `cst btrfs status`), but its messages then show its own name.
 
-**How to call it.** The first time, type the full path:
+**How to call it.** The first time, run it from the CST folder:
 
 ```
-~/Workspace/cst/cst btrfs install      # or: ~/Workspace/cst/cst cpu install
+./cst btrfs install      # or: ./cst cpu install
 ```
 
 `cst btrfs install` and `cst cpu install` then create the link
-`~/.local/bin/cst` -> `~/Workspace/cst/cst` for your user (the shared helper
+`~/.local/bin/cst` -> the `cst` of the CST folder for your user (the shared helper
 `cst-link.bash` does it), and from then on `cst` works as a command. Fedora
 puts `~/.local/bin` in the `PATH` of your user. The link matters: the programs
 these modules install (desktop alerts, snapshot logs, `btrfs-stall-watch`,
@@ -92,13 +93,13 @@ as typed. If something of your own is already at `~/.local/bin/cst`, the
 install leaves it alone and says so. A link that points nowhere anymore (the
 folder was moved) is replaced. Uninstalling a module keeps the link (the
 other modules still use it); `rm ~/.local/bin/cst` removes it. Before any
-install, or without the link, make it by hand:
+install, or without the link, make it by hand, from the CST folder:
 
 ```
-mkdir -p ~/.local/bin && ln -s ~/Workspace/cst/cst ~/.local/bin/cst
+mkdir -p ~/.local/bin && ln -s "$PWD/cst" ~/.local/bin/cst
 ```
 
-An `alias cst=~/Workspace/cst/cst` in `~/.bashrc` also works for typing, but
+An alias in `~/.bashrc` to the `cst` of the CST folder also works for typing, but
 not for the hints, which assume a real command. This document and the module
 documents write `cst ...`. Nothing is installed into a system folder for it.
 

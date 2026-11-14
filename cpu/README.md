@@ -1,8 +1,8 @@
 # `cst cpu`: smooth games while builds, Docker and the VM run
 
 This folder holds the parts of `cpu-setup.sh`, the `cpu` module of CST
-(Cominotti Setup Tools). The script lives one level up:
-`~/Workspace/cst/cpu-setup.sh`. You run it as `cst cpu <command>` (how to set
+(Cominotti Setup Tools). The script lives one level up, at the top of
+the CST folder. You run it as `cst cpu <command>` (how to set
 up `cst`: [../README.md](../README.md#the-cst-command));
 `bash cpu-setup.sh <command>` from the repository folder does the same. It is
 written for one machine, the workstation **sophia**:
@@ -225,7 +225,7 @@ Rules:
 | `/usr/local/sbin/cpu-game-profile` | The game profile (from `cpu/game-profile`). |
 | `/usr/local/sbin/cpu-vm-pin` | VM pinning and CPU-feature tool (from `cpu/vm-pin`). |
 | `/usr/local/bin/cpu-watch` | Measurement tool (from `cpu/cpu-watch`). |
-| `~/.local/bin/cst` | Link to `~/Workspace/cst/cst`, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
+| `~/.local/bin/cst` | Link to the `cst` of the CST folder, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
 | `/etc/systemd/system/machine.slice.d/50-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |

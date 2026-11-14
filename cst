@@ -41,7 +41,7 @@
 #
 # Root commands of a module call sudo by themselves: type `cst btrfs install`,
 # not `sudo cst ...` (sudo would not find cst in its PATH). cst may be called
-# through a symlink, e.g. ~/.local/bin/cst -> ~/Workspace/cst/cst.
+# through a symlink, e.g. ~/.local/bin/cst -> the cst of this folder.
 
 set -Eeuo pipefail
 

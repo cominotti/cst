@@ -185,7 +185,7 @@ Unit files go to `/etc/systemd/system/`.
 | Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
 | Stall monitor (4.7) | `/usr/local/sbin/btrfs-stall-monitord`, `btrfs-stall-monitor.service` | always |
 | Stall report (section 7) | `/usr/local/bin/btrfs-stall-report`, and a small launcher `~/.local/bin/btrfs-stall-report` | when you run it |
-| The `cst` command | the link `~/.local/bin/cst` -> `~/Workspace/cst/cst`, only if nothing else is there, so the hints of alerts and logs (`cst btrfs ...`) work as typed ([README.md, The `cst` command](../README.md#the-cst-command)) | when you run it |
+| The `cst` command | the link `~/.local/bin/cst` -> the `cst` of the CST folder, only if nothing else is there, so the hints of alerts and logs (`cst btrfs ...`) work as typed ([README.md, The `cst` command](../README.md#the-cst-command)) | when you run it |
 | below (4.8) | the `below` package (added with `rpm-ostree`, see 4.8), the drop-in `/etc/systemd/system/below.service.d/10-cst.conf` | always |
 | Desktop alerts (4.9) | `/usr/local/sbin/btrfs-notify`, `btrfs-stall-alert.service`; for alerts kept until the next login: `/usr/local/bin/cst-pending-alerts`, the user unit `/etc/systemd/user/cst-pending-alerts.service` (enabled for every user) and the folder `/var/lib/cst-alerts/` | when a part has an alert; the user unit at each desktop login |
 | Docker volumes NOCOW (4.10) | `/usr/local/sbin/docker-volumes-nocow`, `docker-volumes-nocow.service` | at every boot, before Docker |

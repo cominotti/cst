@@ -19,6 +19,12 @@ consistent.
   existing tests use.
 - **Never walk `/`** (`find /`, `fd . /`, ...). Inside a toolbox `/run/host`
   is the whole host, including network shares.
+- **No fixed checkout path.** CST works from wherever it is cloned: the
+  scripts find their own folder at run time, and installed programs are
+  copies. Never write where the checkout lives (a path from a home folder
+  into the CST folder). Name files relative to the CST folder (`./cst`, "at the
+  top of the CST folder", `"$PWD/cst"`) or use the `cst` command, which the
+  installs link into `~/.local/bin`. `tests/test_repo_paths.py` enforces it.
 - **CI is the gate.** Work on a branch and open a pull request; `main` accepts
   squash merges with a green `CI Status` (fast gates, both E2E tiers) and a
   green SonarCloud check. Never weaken a check to make it pass.

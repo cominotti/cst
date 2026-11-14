@@ -1,8 +1,8 @@
 # `cst bluetooth`: LE Audio and adaptive LDAC for the headset
 
 This folder holds the parts of `bluetooth-setup.sh`, the `bluetooth` module of
-CST (Cominotti Setup Tools). The script lives one level up:
-`~/Workspace/cst/bluetooth-setup.sh`. You run it as `cst bluetooth <command>`
+CST (Cominotti Setup Tools). The script lives one level up, at the top
+of the CST folder. You run it as `cst bluetooth <command>`
 (how to set up `cst`: [../README.md](../README.md#the-cst-command));
 `bash bluetooth-setup.sh <command>` from the repository folder does the same.
 It is written for one machine, the workstation **sophia**, and one headset,
@@ -381,7 +381,7 @@ Why a copy, and not the file in this folder: the service then does not
 depend on this working copy. Moving or renaming the folder, editing the
 script, or restoring a snapshot of `~/Workspace` cannot break or silently
 change a running service, and it does not matter whether you call CST as
-`~/Workspace/cst/cst` or through the `~/.local/bin/cst` link. The other
+`./cst` from the CST folder or through the `~/.local/bin/cst` link. The other
 modules do the same (their programs are copied to `/usr/local`). `plan`
 compares the copy with the one in CST; after a change here, `apply` copies
 it again and restarts the service.

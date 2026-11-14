@@ -805,7 +805,7 @@ def main():
         sys.exit("--since must be before --until")
     if not os.path.isdir(args.log_dir):
         sys.exit(f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "
-                 f"Installer: ~/Workspace/cst/cst btrfs install (run on the host, not in toolbox)")
+                 f"Installer: cst btrfs install (run on the host, not in toolbox)")
     res, meta = analyse(load(args.log_dir, since, until), since, until, not args.no_below, args.verbose)
     if args.json:
         out = {"verdict": verdict(res, meta), "coverage": res.pop("coverage"), "units": UNITS}

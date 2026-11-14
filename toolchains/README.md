@@ -1,8 +1,8 @@
 # `cst toolchains`: toolchain caches and settings
 
 This folder holds the parts of `toolchains-setup.sh`, the `toolchains` module
-of CST (Cominotti Setup Tools). The script lives one level up:
-`~/Workspace/cst/toolchains-setup.sh`. You run it as `cst toolchains <command>`
+of CST (Cominotti Setup Tools). The script lives one level up, at the top
+of the CST folder. You run it as `cst toolchains <command>`
 (how to set up `cst`: [../README.md](../README.md#the-cst-command));
 `bash toolchains-setup.sh <command>` from the repository folder does the same.
 
