@@ -400,7 +400,10 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `python3 -I -B tests/run_unit.py`, run from this folder, runs all of them with a
   socket as stdin (the way CI runs them; see [AGENTS.md](AGENTS.md), "Test gotchas").
 - `AGENTS.md`: rules for changing this repository (for people and coding agents),
-  and the test gotchas with the gates that enforce them.
+  an index of the module documents, the test and lint commands, how the code
+  fits together, and the test gotchas with the gates that enforce them. Coding
+  agents such as Claude Code and Codex read it by themselves; there is no
+  separate `CLAUDE.md`.
 - `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).
   Tier 2 runs a `--privileged` container that sees the host's disks, so it
   refuses to start unless you opt in with `CST_E2E_ALLOW_PRIVILEGED=1` (or
