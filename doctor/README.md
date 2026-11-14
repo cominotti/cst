@@ -46,6 +46,8 @@ cst doctor help
 | `alerts` | `/var/lib/f44-alerts` (a link or folder left by the versions named f44-tools) | `WARN`, fix: `cst btrfs install` |
 | `btrfs` | How full the chunks are: data and metadata, used of allocated, and metadata as a share of data (see [section 6](#6-the-btrfs-check-chunks-and-unallocated-space)) | `ok` (numbers only) |
 | `btrfs` | Automatic data reclaim (`dynamic_reclaim`, `periodic_reclaim`) on | `WARN` when off on the root filesystem, fix: `cst btrfs install`; `info` on other btrfs filesystems or on kernels without these switches |
+| `vm` | A libvirt VM with `<cpu mode='host-passthrough'>` that does not disable CET and nested MBEC (`cet-ss`, `cet-ibt`, `vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`) while this QEMU offers them (see [section 7](#7-the-vm-checks)) | `WARN`, fix: `cst cpu vm-pin plan`; `ok` when QEMU does not offer them; `info` when that could not be read |
+| `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no `cst vm backup` was made since the booted deployment was built (fix: `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
@@ -162,6 +164,15 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   So in a toolbox the output starts with a note, and each fix line reads
   `fix (on the host):`. Run them in a host terminal; a command without
   `sudo` also works with `flatpak-spawn --host` in front of it.
+- The `vm` checks ask libvirt's system connection (`virsh -r -c
+  qemu:///system list --all --name` and `dumpxml --inactive`, never with
+  `--security-info`; `virsh -c qemu:///system domcapabilities`, which libvirt
+  does not answer on a read-only connection) and read the world-readable
+  index `/var/lib/cst/vm-backups.json` written by `cst vm backup`. Your user
+  needs libvirt's permission for the system connection: membership of the
+  `libvirt` group, or an equivalent polkit rule. `domcapabilities` is asked
+  only when a VM lacks one of the disables. No `virsh`, no permission,
+  libvirt not running, no VM: `info` or `ok`, never `WARN`.
 - The `btrfs` check reads `/sys/fs/btrfs` (under `/run/host` in a toolbox),
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
@@ -214,7 +225,50 @@ recover: [btrfs/README.md, "When btrfs says 'No space left' but df shows free sp
 - There is no `fix:` for low unallocated space: the way out is several steps
   (free space first, then a careful balance), not one command.
 
-## 7. Adding a check
+## 7. The vm checks
+
+**CET/MBEC on host-passthrough.** QEMU 11 (Fedora 45) passes Intel CET and
+nested MBEC to a guest with `<cpu mode='host-passthrough'>`, and Windows 11
+with Hyper-V/VBS/WSL2 then loops in Automatic Repair
+([QEMU issue 3215](https://gitlab.com/qemu-project/qemu/-/issues/3215);
+the full story: [vm/README.md](../vm/README.md)). `cst cpu vm-pin` adds the
+`<feature policy='disable' .../>` lines.
+
+"This QEMU offers them" is read from `virsh domcapabilities`: the
+`<feature>` names of its `host-model` CPU. libvirt builds that list from what
+the installed QEMU and KVM can give a guest on this CPU, so it is one query
+that already accounts for the QEMU version, the kernel and the processor
+(a QEMU version number alone would not know whether the CPU has CET). Only
+the names that are both offered and in the list of `cst cpu vm-pin` count.
+The list is `VM_CPU_DISABLE` in `/etc/cpu-setup/cpu-setup.conf` when that
+line exists (empty switches the check off, on purpose), else
+`CPU_DISABLE_DEFAULT` in `cpu/vm-pin`.
+
+**Virtualization packages changed.** A Fedora upgrade brings a new QEMU,
+libvirt, UEFI firmware and TPM emulator at once, and the guest sees new
+virtual hardware. The way back is the **rollback** deployment (the one that
+`ostree admin status` marks `(rollback)`: the next one after the booted
+deployment). The check compares the package lists of the two
+(`rpm-ostree db list`), for names starting with `qemu-kvm`,
+`qemu-system-x86`, `libvirt-daemon`, `edk2-ovmf`, `swtpm` and `libtpms`.
+When they differ and libvirt has at least one VM, it wants two things:
+
+- the rollback deployment **pinned**, so that the next upgrades do not
+  remove it. The fix is `sudo ostree admin pin N`, where N is the
+  deployment's position in the list of `rpm-ostree status` (counting from 0,
+  a staged deployment included), which is the index `ostree admin pin` takes:
+  `ostree admin status` lists the same deployments in the same order.
+  Unpin it later with `sudo ostree admin pin --unpin N`, once the VMs work on
+  the new deployment;
+- a **VM backup** made after the booted deployment was built: an entry in
+  `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp. The
+  fix is `cst vm backup` (with the VM shut off).
+
+With both in place the line is `info`. Best practice: before every Fedora
+major upgrade, shut the VM down and run `cst vm backup`; after it, keep the
+old deployment pinned until the VM boots on the new one.
+
+## 8. Adding a check
 
 Each check is a small function in `cst-doctor`, registered with
 `@check("area")`. It gets the `Host` (how to run a query and where host
@@ -224,7 +278,7 @@ one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 
-## 8. Tests
+## 9. Tests
 
 ```
 python3 -I -B -m unittest discover -s doctor/tests -t . -v
@@ -232,8 +286,8 @@ python3 -I -B -m unittest discover -s doctor/tests -t . -v
 
 The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
-built per test, and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat` and
-`flatpak-spawn` programs that log every call. They check the tricky
+built per test, and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
+`virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the
 toolbox path, the `cst status` section, and that only read-only queries were
 made.

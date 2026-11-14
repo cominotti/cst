@@ -1,0 +1,643 @@
+#!/usr/bin/python3 -I
+"""cst-vm: copies of a libvirt VM (disks, UEFI variables, TPM state) taken
+before a risky change, such as a Fedora major upgrade. It is the program
+behind `cst vm` (vm-setup.sh).
+
+Usage:
+  backup [VM] [--full]   (root) copy the VM while it is shut off (not
+                         saved; checked again after the copy):
+                         every file disk, the UEFI variables (NVRAM), the
+                         software TPM state, the definition (XML) and a
+                         manifest, to
+                         /var/lib/libvirt/cst-backups/VM/YYYYmmddTHHMMSSZ/.
+                         Default: reflink copies (instant on btrfs; they
+                         share blocks with the originals, so they protect
+                         against a repair tool or an upgrade writing to the
+                         image, NOT against losing the disks or the
+                         filesystem). --full: real copies (needs free space
+                         for the allocated size). Prints how to restore;
+                         never restores by itself
+  list [VM]              the backups, from /var/lib/cst/vm-backups.json
+                         (readable by every user)
+  status [VM]            the VM's state, its CPU mode and whether the CET/MBEC
+                         features are disabled, the last backup, and whether
+                         the virtualization packages changed since then
+  help
+
+VM defaults to VM_NAME in /etc/cpu-setup/cpu-setup.conf (win11-devbox).
+Exit status: 0 fine, 1 refused or failed, 2 usage.
+"""
+
+import datetime
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+
+NAME = "cst-vm"
+PROG = os.environ.get("CST_PROG") or NAME
+CST = PROG[:-len(" vm")] if PROG.endswith(" vm") else "cst"
+URI = "qemu:///system"
+CPU_CONF = os.environ.get("CST_VM_CPU_CONF") or "/etc/cpu-setup/cpu-setup.conf"   # override: tests
+DEFAULT_VM = "win11-devbox"
+
+# Overridable for the tests only (scratch folders instead of the host's).
+BACKUP_DIR = os.environ.get("CST_VM_BACKUP_DIR") or "/var/lib/libvirt/cst-backups"
+INDEX = os.environ.get("CST_VM_INDEX") or "/var/lib/cst/vm-backups.json"
+SWTPM_DIR = os.environ.get("CST_VM_SWTPM_DIR") or "/var/lib/libvirt/swtpm"
+
+# Packages whose version decides how the guest sees its virtual hardware.
+# Fedora names QEMU's x86 emulator qemu-system-x86-core (qemu-kvm-core on
+# some releases): every name is queried, the missing ones are recorded as such.
+VIRT_PACKAGES = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon",
+                 "edk2-ovmf", "swtpm", "libtpms")
+NOT_INSTALLED = "not installed"
+
+# Same list as cpu/vm-pin (read from there when this copy has it).
+VM_PIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cpu", "vm-pin")
+CPU_DISABLE_FALLBACK = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
+
+GIB = 1024 ** 3
+FULL_MARGIN = (GIB, 0.05)     # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
+FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, FS_NOCOW_FL = 0x80086601, 0x40086602, 0x00800000
+
+USAGE = f"usage: {PROG} backup [VM] [--full] | list [VM] | status [VM] | help"
+
+
+class Usage(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+# ---- small helpers ---------------------------------------------------------------------------
+def run(cmd, timeout=120):
+    """(rc, stdout, stderr); rc 127 when the command does not exist."""
+    # LC_ALL=C: virsh translates its answers ("shut off" is "desligado" in pt_BR).
+    env = {**os.environ, "LC_ALL": "C"}
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                           env=env)
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"{cmd[0]}: no answer within {timeout} s"
+    return p.returncode, p.stdout, p.stderr
+
+
+def virsh(*args, timeout=60):
+    return run(["virsh", "-c", URI, *args], timeout=timeout)
+
+
+def first_line(text):
+    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+
+
+def read_conf(path):
+    vals = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.strip().split("=", 1)
+                    vals[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    return vals
+
+
+def default_vm():
+    return read_conf(CPU_CONF).get("VM_NAME") or DEFAULT_VM
+
+
+def cpu_disable_list(conf_path=None, vm_pin=VM_PIN):
+    """The features vm-pin keeps disabled: VM_CPU_DISABLE from cpu-setup.conf
+    when set there (also empty), else cpu/vm-pin's default."""
+    conf = read_conf(conf_path or CPU_CONF)
+    if "VM_CPU_DISABLE" in conf:
+        return conf["VM_CPU_DISABLE"].split()
+    try:
+        with open(vm_pin) as f:
+            m = re.search(r'^CPU_DISABLE_DEFAULT = "([^"]*)"', f.read(65536), re.M)
+            if m:
+                return m.group(1).split()
+    except OSError:
+        pass
+    return CPU_DISABLE_FALLBACK.split()
+
+
+def human(n):
+    return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / 2 ** 20:.1f} MiB"
+
+
+def utc_now():
+    now = float(os.environ.get("CST_VM_NOW") or time.time())
+    return now, datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+# ---- what the domain is made of -----------------------------------------------------------------
+def domain_parts(xml_text):
+    """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
+    problems}. problems are disks a file copy cannot back up (block, network,
+    pool volumes): the backup refuses then, rather than leaving one out."""
+    root = ET.fromstring(xml_text)
+    out = {"uuid": (root.findtext("uuid") or "").strip(), "disks": [], "nvram": "", "tpm": False,
+           "skipped": [], "problems": []}
+    for disk in root.findall("devices/disk"):
+        device = disk.get("device", "disk")
+        kind = disk.get("type", "file")
+        target = disk.find("target")
+        dev = target.get("dev") if target is not None else "?"
+        src = disk.find("source")
+        if device in ("cdrom", "floppy"):
+            out["skipped"].append(f"{dev} ({device}, not copied)")
+            continue
+        if kind != "file":
+            where = ""
+            if src is not None:
+                where = src.get("dev") or src.get("name") or src.get("volume") or src.get("dir") or ""
+            out["problems"].append(f"{dev}: a {kind} disk{f' ({where})' if where else ''}: only file disks "
+                                   "can be copied; back it up by hand")
+            continue
+        path = src.get("file") if src is not None else None
+        if not path:
+            out["skipped"].append(f"{dev} (no source file)")
+            continue
+        if path not in out["disks"]:
+            out["disks"].append(path)
+    nv = root.find("os/nvram")
+    if nv is not None:
+        path = (nv.text or "").strip()
+        s = nv.find("source")
+        if not path and s is not None:
+            path = s.get("file") or ""
+        out["nvram"] = path
+    out["tpm"] = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
+    return out
+
+
+def qcow2_backing_file(path):
+    """True when path is a qcow2 image with a backing file (an overlay: the
+    copy would be useless without the base), False otherwise."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    return len(head) == 16 and head[:4] == b"QFI\xfb" and struct.unpack(">Q", head[8:16])[0] != 0
+
+
+def fingerprint(path):
+    """What changes when something writes to a file or a folder tree, or when
+    libvirt relabels it on start (ctime): compared before and after the copy."""
+    def one(p):
+        st = os.lstat(p)
+        return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    if os.path.isdir(path) and not os.path.islink(path):
+        out = [("", one(path))]
+        for d, dirs, files in os.walk(path):
+            dirs.sort()
+            for n in sorted(dirs + files):
+                q = os.path.join(d, n)
+                try:
+                    out.append((os.path.relpath(q, path), one(q)))
+                except OSError:
+                    out.append((os.path.relpath(q, path), None))
+        return tuple(out)
+    return one(path)
+
+
+def tree_sizes(path):
+    """(allocated, apparent) bytes of a file or a folder tree."""
+    alloc = apparent = 0
+    if os.path.isdir(path) and not os.path.islink(path):
+        for d, _, files in os.walk(path):
+            for n in files:
+                try:
+                    st = os.lstat(os.path.join(d, n))
+                except OSError:
+                    continue
+                alloc += st.st_blocks * 512
+                apparent += st.st_size
+        return alloc, apparent
+    st = os.stat(path)
+    return st.st_blocks * 512, st.st_size
+
+
+def package_versions():
+    """{package: name-version-release.arch or "not installed"}, one rpm -q each
+    (its exit code tells whether it is installed)."""
+    out = {}
+    for p in VIRT_PACKAGES:
+        rc, so, _ = run(["rpm", "-q", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n", p], timeout=30)
+        out[p] = first_line(so) if rc == 0 and first_line(so) else NOT_INSTALLED
+    return out
+
+
+def booted_deployment():
+    """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None."""
+    rc, so, _ = run(["rpm-ostree", "status", "--json"], timeout=60)
+    if rc != 0:
+        return None
+    try:
+        deps = json.loads(so).get("deployments") or []
+        d = next(x for x in deps if isinstance(x, dict) and x.get("booted"))
+    except (ValueError, StopIteration, AttributeError):
+        return None
+    return {"version": d.get("version"), "checksum": d.get("checksum"), "timestamp": d.get("timestamp")}
+
+
+# ---- the index (world-readable, no secrets) ------------------------------------------------------
+def read_index(path=None):
+    path = path or INDEX
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    entries = data.get("backups") if isinstance(data, dict) else None
+    return [e for e in entries or [] if isinstance(e, dict) and e.get("vm") and e.get("path")]
+
+
+def write_index(entries, path=None):
+    """Atomically (temporary file + rename), mode 0644, folder 0755."""
+    path = path or INDEX
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o755)
+    fd, tmp = tempfile.mkstemp(prefix=".vm-backups.", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"version": 1, "backups": entries}, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def index_entry(manifest, path):
+    return {"vm": manifest["vm"], "timestamp": manifest["timestamp"], "epoch": manifest["epoch"],
+            "path": path, "mode": manifest["mode"], "versions": manifest["versions"],
+            "deployment": manifest["deployment"]}
+
+
+# ---- backup ----------------------------------------------------------------------------------
+def nocow(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        buf = fcntl.ioctl(fd, FS_IOC_GETFLAGS, struct.pack("l", 0))
+        return bool(struct.unpack("l", buf)[0] & FS_NOCOW_FL)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def precreate_nocow(dest):
+    """btrfs clones only between files with the same NOCOW flag: an empty
+    destination with the flag set, which cp then fills. Best effort."""
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        buf = fcntl.ioctl(fd, FS_IOC_GETFLAGS, struct.pack("l", 0))
+        flags = struct.unpack("l", buf)[0] | FS_NOCOW_FL
+        fcntl.ioctl(fd, FS_IOC_SETFLAGS, struct.pack("l", flags))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def copy(src, dest, mode, big):
+    """Copy src (a file or a folder) to dest with cp -a. Disks (big) follow
+    the mode; the small parts (UEFI variables, TPM state) are plain copies."""
+    os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+    if not big:
+        flags = ["--reflink=never"] if mode == "full" else []
+    elif mode == "reflink":
+        flags = ["--reflink=always"]       # cp allows --reflink only with --sparse=auto
+        if os.path.isfile(src) and nocow(src):
+            precreate_nocow(dest)
+    else:
+        flags = ["--reflink=never", "--sparse=always"]
+    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * 3600)
+    if rc != 0:
+        raise Refused(f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}" +
+                      (f"\nReflink copies need the backup folder on the same btrfs filesystem as the "
+                       f"disks. Use real copies instead: {PROG} backup VM --full" if big and mode == "reflink"
+                       else ""))
+
+
+def stored(dest_dir, src):
+    """Where a source path is kept inside the backup: its absolute path
+    under files/, so names never collide and restoring is one cp each."""
+    return os.path.join(dest_dir, "files", src.lstrip("/"))
+
+
+def restore_lines(vm, dest_dir, copied, tpm_dir):
+    q = shlex.quote
+    lines = [f"# 1. the VM must be shut off: virsh -c {URI} domstate {q(vm)}",
+             "# 2. the files back (each line replaces the current file):"]
+    for src, _ in copied:
+        if src == tpm_dir:
+            lines.append(f"sudo rm -rf {q(src)} && sudo cp -a {q(stored(dest_dir, src))} {q(os.path.dirname(src))}/")
+        else:
+            lines.append(f"sudo cp --reflink=auto -a {q(stored(dest_dir, src))} {q(src)}")
+    lines += ["# 3. the definition (CPU, pinning, devices) as it was:",
+              f"sudo virsh -c {URI} define {q(os.path.join(dest_dir, 'domain.xml'))}"]
+    return lines
+
+
+def check_shut_off(vm):
+    """Refused unless the VM is shut off AND has no managed-save image: after
+    `virsh managedsave` (virt-manager's Save) domstate also says "shut off",
+    but the guest's disks are only consistent with the saved RAM."""
+    rc, so, err = virsh("domstate", vm)
+    if rc != 0:
+        raise Refused(f"virsh domstate {vm}: {first_line(err) or f'exit {rc}'}")
+    state = first_line(so)
+    if state != "shut off":
+        raise Refused(f"{vm} is {state or 'in an unknown state'}: shut it down first (a copy of a running "
+                      f"VM is not consistent). From Windows, or: virsh -c {URI} shutdown {vm}")
+    rc, so, err = virsh("list", "--all", "--with-managed-save", "--name")
+    if rc != 0:
+        raise Refused(f"virsh list --with-managed-save: {first_line(err) or f'exit {rc}'}")
+    if vm in (ln.strip() for ln in so.splitlines()):
+        raise Refused(f"{vm} was saved (managed save), not shut down: its disks are only consistent with "
+                      f"the saved memory. Start it and shut Windows down, then run the backup again "
+                      f"(or drop the saved memory: virsh -c {URI} managedsave-remove {vm})")
+
+
+def cmd_backup(vm, full):
+    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused("backup needs root: run it as `cst vm backup` (it calls sudo by itself)")
+    check_shut_off(vm)
+    rc, xml_text, err = virsh("dumpxml", "--inactive", "--security-info", vm)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+    parts = domain_parts(xml_text)
+    if parts["problems"]:
+        raise Refused(f"{vm}: nothing copied:\n  " + "\n  ".join(parts["problems"]))
+    if not parts["disks"]:
+        raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
+    notes = list(parts["skipped"])
+
+    def real(path, what):
+        # cp -a copies a symbolic link as a link (no data): the file it points
+        # to is what gets copied, and restored, instead.
+        r = os.path.realpath(path)
+        if r != path:
+            notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
+        return r
+    sources = []
+    for p in parts["disks"]:
+        if not os.path.isfile(p):
+            raise Refused(f"{vm}: disk {p} not found")
+        p = real(p, "disk")
+        if qcow2_backing_file(p):
+            raise Refused(f"{vm}: {p} is a qcow2 overlay with a backing file: back up the chain by hand "
+                          "(qemu-img info --backing-chain)")
+        if (p, True) not in sources:
+            sources.append((p, True))
+    if parts["nvram"]:
+        if os.path.isfile(parts["nvram"]):
+            sources.append((real(parts["nvram"], "UEFI variables"), False))
+        else:
+            notes.append(f"UEFI variables {parts['nvram']} not there yet (the VM never started?): not copied")
+    tpm_dir = ""
+    if parts["tpm"]:
+        tpm_dir = os.path.join(SWTPM_DIR, parts["uuid"])
+        if parts["uuid"] and os.path.isdir(tpm_dir):
+            tpm_dir = real(tpm_dir, "TPM state")
+            sources.append((tpm_dir, False))
+        else:
+            notes.append(f"TPM state {tpm_dir} not found: not copied (BitLocker may then ask for its "
+                         "recovery key after a restore)")
+    mode = "full" if full else "reflink"
+    epoch, stamp = utc_now()
+    vm_dir = os.path.join(BACKUP_DIR, vm)
+    dest_dir = os.path.join(vm_dir, stamp)
+    if os.path.exists(dest_dir):
+        raise Refused(f"{dest_dir} already exists: wait a second and run it again")
+    sizes = {p: tree_sizes(p) for p, _ in sources}
+    if full:
+        need = sum(a for a, _ in sizes.values())
+        margin = max(FULL_MARGIN[0], int(need * FULL_MARGIN[1]))
+        probe = BACKUP_DIR
+        while not os.path.exists(probe):
+            probe = os.path.dirname(probe)
+        st = os.statvfs(probe)
+        free = st.f_bavail * st.f_frsize
+        if free < need + margin:
+            raise Refused(f"--full needs {human(need)} (allocated size) + {human(margin)} margin, but "
+                          f"{probe} has {human(free)} free: free space first, or use the default reflink copy")
+    for d in (BACKUP_DIR, vm_dir):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+    os.mkdir(dest_dir, 0o700)
+    print(f"{vm}: {mode} backup to {dest_dir}")
+    copied = []
+    try:
+        before = {p: fingerprint(p) for p, _ in sources}
+        for src, big in sources:
+            a, s = sizes[src]
+            print(f"  copying {src} ({human(a)} allocated, {human(s)} apparent)", flush=True)
+            copy(src, stored(dest_dir, src), mode, big)
+            copied.append((src, big))
+        # Nothing stops the VM from starting during a long copy: check again,
+        # and that no source changed while it was read.
+        try:
+            check_shut_off(vm)
+        except Refused as e:
+            raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}")
+        def now_fp(p):
+            try:
+                return fingerprint(p)
+            except OSError:
+                return None          # removed during the copy: changed as well
+        changed = [p for p, _ in sources if now_fp(p) != before[p]]
+        if changed:
+            raise Refused("changed during the copy (the VM was started?), the copy is not consistent: "
+                          + ", ".join(changed) + ". Shut the VM off and run the backup again")
+        # The definition holds --security-info secrets (graphics passwords): 0600 from the start.
+        with os.fdopen(os.open(os.path.join(dest_dir, "domain.xml"),
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(xml_text)
+        manifest = {
+            "vm": vm, "uuid": parts["uuid"], "timestamp": stamp, "epoch": int(epoch), "mode": mode,
+            "files": [{"source": src, "stored": os.path.relpath(stored(dest_dir, src), dest_dir),
+                       "kind": "disk" if big else ("tpm" if src == tpm_dir else "nvram"),
+                       "allocated": sizes[src][0], "apparent": sizes[src][1]} for src, big in copied],
+            "versions": package_versions(),
+            "deployment": booted_deployment(),
+            "notes": notes,
+        }
+        with os.fdopen(os.open(os.path.join(dest_dir, "manifest.json"),
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+    except BaseException:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        print(f"  incomplete backup removed: {dest_dir}", file=sys.stderr)
+        raise
+    # Entries whose folder was removed by hand leave the index here.
+    entries = [e for e in read_index() if os.path.isdir(e["path"]) and e["path"] != dest_dir]
+    entries.append(index_entry(manifest, dest_dir))
+    entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+    write_index(entries)
+    for n in notes:
+        print(f"  note: {n}")
+    print(f"Done: {len(copied)} item(s), definition and manifest in {dest_dir}")
+    if mode == "reflink":
+        print("Reflink copies share disk blocks with the VM: they protect against changes to the image "
+              "(a repair tool, an upgrade), not against losing the disks. For that: --full, or a copy "
+              "on another machine.")
+    print("\nTo restore (never done automatically; read each line first):")
+    for line in restore_lines(vm, dest_dir, copied, tpm_dir):
+        print(f"  {line}")
+    print(f"\nRemove an old backup by hand: sudo rm -r {shlex.quote(vm_dir)}/TIMESTAMP "
+          f"(the next backup drops it from {CST} vm list)")
+    return 0
+
+
+# ---- list and status ---------------------------------------------------------------------------
+def describe_entry(e):
+    dep = e.get("deployment") or {}
+    qemu = next((v for k, v in (e.get("versions") or {}).items()
+                 if k.startswith(("qemu-kvm", "qemu-system-x86")) and v != NOT_INSTALLED), "?")
+    gone = ""
+    try:
+        os.stat(e["path"])
+    except FileNotFoundError:
+        gone = "  (folder gone)"
+    except OSError:
+        pass                     # not visible to this user (the folders are root's, 0700)
+    return (f"{e['vm']:<16} {e['timestamp']}  {e.get('mode', '?'):<7}  deployment {dep.get('version') or '?'}"
+            f"  {qemu}  {e['path']}{gone}")
+
+
+def cmd_list(vm):
+    entries = [e for e in read_index() if vm is None or e["vm"] == vm]
+    if not entries:
+        print(f"no VM backups{f' of {vm}' if vm else ''} in {INDEX} (make one: {CST} vm backup)")
+        return 0
+    for e in sorted(entries, key=lambda e: (e["vm"], e.get("epoch") or 0)):
+        print(describe_entry(e))
+    return 0
+
+
+def version_changes(old, new):
+    """['pkg: old -> new'] for every virtualization package that differs."""
+    out = []
+    for p in VIRT_PACKAGES:
+        a, b = (old or {}).get(p), (new or {}).get(p)
+        if a is not None and b is not None and a != b:
+            out.append(f"{p}: {a} -> {b}")
+    return out
+
+
+def cmd_status(vm):
+    rc, so, err = virsh("domstate", vm)
+    if rc == 127:
+        print(f"{vm}: virsh not found (libvirt not installed here)")
+    elif rc != 0:
+        print(f"{vm}: state not readable ({first_line(err) or f'exit {rc}'})")
+    else:
+        print(f"{vm}: {first_line(so)}")
+        rc, xml_text, err = virsh("dumpxml", "--inactive", vm)
+        try:
+            cpu = ET.fromstring(xml_text).find("cpu") if rc == 0 else None
+        except ET.ParseError:
+            cpu = None
+        names = cpu_disable_list()
+        if cpu is None:
+            print("  cpu: no <cpu> element (or not readable)")
+        else:
+            mode = cpu.get("mode", "custom")
+            off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
+            missing = [n for n in names if n not in off]
+            if mode != "host-passthrough":
+                print(f"  cpu mode {mode}: the CET/MBEC disables are only for host-passthrough")
+            elif not names:
+                print(f"  cpu mode {mode}: CPU features not managed (VM_CPU_DISABLE is empty)")
+            elif missing:
+                print(f"  cpu mode {mode}: NOT disabled: {' '.join(missing)} (Windows may bootloop under "
+                      f"QEMU 11; fix: {CST} cpu vm-pin plan)")
+            else:
+                print(f"  cpu mode {mode}: disabled {' '.join(names)}")
+    entries = sorted((e for e in read_index() if e["vm"] == vm), key=lambda e: e.get("epoch") or 0)
+    if not entries:
+        print(f"  last backup: none (make one with the VM shut off: {CST} vm backup)")
+        return 0
+    last = entries[-1]
+    print(f"  last backup: {describe_entry(last)}")
+    changes = version_changes(last.get("versions"), package_versions())
+    if changes:
+        print("  virtualization packages changed since then (back up again once the VM works on them):")
+        for c in changes:
+            print(f"    {c}")
+    else:
+        print("  virtualization packages: unchanged since the last backup")
+    return 0
+
+
+# ---- command line --------------------------------------------------------------------------------
+def parse_args(argv):
+    if not argv or argv[0] in ("help", "-h", "--help"):
+        if len(argv) > 1:
+            raise Usage("help takes no arguments")
+        return "help", None, False
+    cmd, rest = argv[0], argv[1:]
+    if cmd not in ("backup", "list", "status"):
+        raise Usage(f"unknown command '{cmd}'")
+    vm, full = None, False
+    for a in rest:
+        if a == "--full" and cmd == "backup" and not full:
+            full = True
+        elif not a.startswith("-") and vm is None:
+            vm = a
+        else:
+            raise Usage(f"{cmd}: unexpected argument '{a}'")
+    return cmd, vm, full
+
+
+def main(argv):
+    try:
+        cmd, vm, full = parse_args(argv)
+    except Usage as e:
+        print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+    if cmd == "help":
+        print(__doc__)
+        return 0
+    try:
+        if cmd == "list":
+            return cmd_list(vm)
+        vm = vm or default_vm()
+        if cmd == "status":
+            return cmd_status(vm)
+        return cmd_backup(vm, full)
+    except Refused as e:
+        print(f"{PROG}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -193,7 +193,7 @@ cst cpu help
 | `status` | needs sudo | The whole picture (sample in 6.5). |
 | `uninstall` | needs sudo | Removes what `install` added. |
 | `game on\|off\|state` | needs sudo | Switch the game profile by hand, or show it. |
-| `vm-pin plan\|apply\|status` | needs sudo | Pin the VM to CPUs 12-23 permanently. |
+| `vm-pin plan\|apply\|status` | needs sudo | Pin the VM to CPUs 12-23 permanently, and keep CET/MBEC off for a host-passthrough VM (8.1). |
 | `docker-slice install\|status\|uninstall` | needs sudo | Put Docker containers in `builds.slice`. |
 | `experiment list\|on NAME\|off NAME` | needs sudo | Runtime-only memory settings for A/B tests. |
 | `watch -l LABEL [...]` | your user | Record game wait, memory stalls, frequencies. |
@@ -223,7 +223,7 @@ Rules:
 |------|---------|
 | `/etc/cpu-setup/cpu-setup.conf` | Settings (6.2). Written only if missing. |
 | `/usr/local/sbin/cpu-game-profile` | The game profile (from `cpu/game-profile`). |
-| `/usr/local/sbin/cpu-vm-pin` | VM pinning tool (from `cpu/vm-pin`). |
+| `/usr/local/sbin/cpu-vm-pin` | VM pinning and CPU-feature tool (from `cpu/vm-pin`). |
 | `/usr/local/bin/cpu-watch` | Measurement tool (from `cpu/cpu-watch`). |
 | `~/.local/bin/cst` | Link to `~/Workspace/cst/cst`, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
@@ -266,7 +266,11 @@ GAME_MEMORY_LOW='16G'
 GAME_ZSWAP_WRITEBACK='no'
 VM_NAME='win11-devbox'
 VM_VCPUS=12
+VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'
 ```
+
+(Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
+uses the same five names as its default.)
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
@@ -278,6 +282,7 @@ VM_VCPUS=12
 | `GAME_ZSWAP_WRITEBACK` | `no`: during games, swapped pages of desktop apps stay in zswap, never on the swap disk (7.1). `yes`: leave it alone. Missing (files written before this key existed) means `no`. | game profile |
 | `VM_NAME` | The libvirt VM name. | `vm-pin` |
 | `VM_VCPUS` | Number of virtual CPUs `vm-pin` gives the VM. | `vm-pin` |
+| `VM_CPU_DISABLE` | CPU features `vm-pin` keeps switched off for a VM with `<cpu mode='host-passthrough'>` (section 8.1). Empty (`VM_CPU_DISABLE=''`): `vm-pin` leaves the CPU features alone. Missing: the default list. | `vm-pin`, `cst doctor`, `cst vm status` |
 
 You may edit the values. Rules:
 
@@ -584,6 +589,10 @@ Then it logs `off: previous CPU, weight, memory, zswap writeback and EPP setting
 an XML text file (the "definition"). `virsh` is libvirt's command-line tool,
 and `virsh define` saves a new version of the definition.
 
+`vm-pin` owns two parts of the definition: the CPU pinning (below) and, for
+a VM with `<cpu mode='host-passthrough'>`, the CPU features that must stay
+off for Windows to boot under QEMU 11 (section 8.1).
+
 **Why:** during games the VM is limited to 12-23 anyway. `vm-pin` makes this
 permanent. It gives the VM 12 virtual CPUs (vCPUs), as many as the 12 host
 CPUs it may use. Each vCPU may run on any of CPUs 12-23 (not one fixed CPU
@@ -592,7 +601,7 @@ must wait, and Windows can slow down in strange ways. With `vm-pin` that
 cannot happen.
 
 ```bash
-cst cpu vm-pin status   # vCPU count (live and saved) and the saved pinning
+cst cpu vm-pin status   # state, CPU mode and features, vCPU count (live and saved), the saved pinning
 cst cpu vm-pin plan     # show the XML diff, change nothing
 cst cpu vm-pin apply    # same diff, asks [y/N], then virsh define
 ```
@@ -607,7 +616,16 @@ What `apply` changes in the VM definition:
   = 1 if present);
 - `<cputune>`: one `<vcpupin cpuset="12-23">` per vCPU and
   `<emulatorpin cpuset="12-23">` (old pins are replaced). The *emulator
-  threads* are QEMU's helper threads for the VM.
+  threads* are QEMU's helper threads for the VM;
+- with `<cpu mode='host-passthrough'>` only: one
+  `<feature policy='disable' name='...'/>` for each name in `VM_CPU_DISABLE`
+  (section 8.1). A feature already listed keeps its place and only gets
+  `policy='disable'`; the others are added at the end. `<topology>`, other
+  `<feature>` lines and the attributes of `<cpu>` stay as they are. Other CPU
+  modes (`host-model`, `custom`) are left alone.
+
+When nothing would change, `plan` says so in one line, for example
+`win11-devbox: already 12 vCPUs pinned to 12-23; CPU features disabled: cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet.`
 
 Safety:
 
@@ -629,7 +647,37 @@ sudo virsh -c qemu:///system define /etc/cpu-setup/<VM>.xml.before-vm-pin
 sudo virsh -c qemu:///system define /etc/cpu-setup/win11-devbox.xml.before-vm-pin
 ```
 
-The old settings return at the next start of the VM.
+The old settings return at the next start of the VM. Careful: that file is
+the definition from *before the first* `apply`, so it may also bring back
+the CET/MBEC features (8.1). A newer copy of the definition is in each
+`cst vm backup` (`domain.xml`, see [vm/README.md](../vm/README.md)).
+
+### 8.1 CET and nested MBEC: why `vm-pin` switches them off
+
+With `<cpu mode='host-passthrough'>` the guest sees the host CPU's features,
+as far as QEMU and KVM pass them on. QEMU 11 (Fedora 45) started to pass
+Intel **CET** (`cet-ss` shadow stacks, `cet-ibt` indirect branch tracking)
+and nested **MBEC** (`vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`)
+to the guest. Windows 11 with Hyper-V, VBS (Memory Integrity) or WSL2 then
+no longer boots: it loops in Automatic Repair (WinRE). This happened to
+`win11-devbox` right after the upgrade from Fedora 44 to 45 (QEMU 10.2.2 ->
+11.1.3); [vm/README.md](../vm/README.md) tells the whole story. Upstream
+reports:
+[QEMU issue 3215](https://gitlab.com/qemu-project/qemu/-/issues/3215) and the
+[Proxmox forum thread](https://forum.proxmox.com/threads/windows-11-bootloop-with-kernel-7-0-works-with-kernel-6-17.185608/).
+
+The guest loses only what it never had under QEMU 10. `cst doctor` warns when
+a host-passthrough VM lacks one of these disables while this QEMU offers the
+feature (see [doctor/README.md](../doctor/README.md)).
+
+The list is `CPU_DISABLE_DEFAULT` in `cpu/vm-pin` (`VM_CPU_DISABLE` in
+`cpu-setup.conf` overrides it). Retire it once QEMU, KVM or Windows fix the
+problem upstream. **How to undo** (give the features back to the guest):
+set `VM_CPU_DISABLE=''` in `/etc/cpu-setup/cpu-setup.conf`, then remove the
+five `<feature policy='disable' .../>` lines with `sudo virsh -c
+qemu:///system edit win11-devbox` (with an empty list `vm-pin` no longer
+touches them, in either direction), or define the `domain.xml` of a
+`cst vm backup` made before the change.
 
 ---
 

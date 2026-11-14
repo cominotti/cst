@@ -36,7 +36,11 @@
 #   uninstall              (root) removes what install added
 #   game on|off|state      (root) switch the game profile by hand
 #   vm-pin plan|apply|status   (root) the VM permanently on 12 vCPUs pinned to
-#                          12-23 (diff first; apply asks; effective at the VM's
+#                          12-23, and with <cpu mode='host-passthrough'> the
+#                          CPU features of VM_CPU_DISABLE in cpu-setup.conf
+#                          kept off (default: CET and nested MBEC, which make
+#                          Windows bootloop under QEMU 11; '' = leave them)
+#                          (diff first; apply asks; effective at the VM's
 #                          next start, which is left to you)
 #   docker-slice install|status|uninstall   (root) Docker containers born in
 #                          builds.slice (weight 20, E-cores only; idle + 12-23
@@ -180,7 +184,8 @@ install_all() {
     if [[ ! -e "${CONF}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST); values may be edited." \
             "TARGET_USER='${target_user}'" "BUILD_CPUS='12-23'" "P_CORES='0-7'" "VM_WEIGHT=10" \
-            "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='no'" "VM_NAME='win11-devbox'" "VM_VCPUS=12" | install_text "${CONF}" 0644
+            "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='no'" "VM_NAME='win11-devbox'" "VM_VCPUS=12" \
+            "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'" | install_text "${CONF}" 0644
     fi
     for f in "${!BINARIES[@]}"; do
         install_file "${SRC}/${f}" "${BINARIES[${f}]}" 0755
@@ -407,7 +412,7 @@ status() (
             "$(cat "/sys/fs/cgroup/user.slice/user-$(id -u "${target_user}").slice/user@$(id -u "${target_user}").service/user.slice/cpuset.cpus.effective" 2>/dev/null)"
     fi
     section "VM"
-    python3 -I "${SRC}/vm-pin" status 2>&1 | sed -n '1,3p;$p' | sed 's/^/  /'
+    python3 -I "${SRC}/vm-pin" status 2>&1 | sed -n '1,4p;$p' | sed 's/^/  /'
     section "Docker"
     docker_slice status | sed 's/^/  /'
     section "memory experiments"

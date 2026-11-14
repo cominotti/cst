@@ -130,6 +130,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertIn("==== toolchains", status_res.stdout)
         self.assertIn("==== bluetooth", status_res.stdout)
+        self.assertIn("==== vm", status_res.stdout)
         self.assertIn("==== doctor", status_res.stdout)
         # Reset any hardwareless bluetooth.service D-Bus activation failure inside the container
         exec_bash(self.SYSTEMD_CONTAINER, "systemctl reset-failed bluetooth.service 2>/dev/null || true")

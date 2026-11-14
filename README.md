@@ -6,7 +6,8 @@ and keep games smooth while heavy work runs in the background.
 **CST** stands for **Cominotti Setup Tools**. One command, `cst`, runs all of
 them: `cst btrfs ...` for the disks, `cst cpu ...` for the CPU, `cst swap ...`
 for swap and memory, `cst bluetooth ...` for Bluetooth audio,
-`cst toolchains ...` for the caches of developer tools, and `cst doctor`
+`cst toolchains ...` for the caches of developer tools, `cst vm ...` for
+backups of the Windows VM, and `cst doctor`
 for a read-only check-up of the whole system (see
 [The `cst` command](#the-cst-command)). Older versions of this repository were
 called `f44-tools` and lived in `~/Workspace/f44-tools`; `cst btrfs install`
@@ -50,7 +51,8 @@ does nothing by itself: it passes your command to one **module**.
 | `cst swap ...` | `swap-setup.sh` | `swap/` | Swap and memory: zswap, encrypted NVMe swap, zram off, swap settings, memory floor for the VM, swap status per cgroup | [swap/README.md](swap/README.md) |
 | `cst bluetooth ...` | `bluetooth-setup.sh` | `bluetooth/` | Bluetooth audio: LE Audio (BAP/LC3) ready in BlueZ but off in PipeWire by default, adaptive LDAC quality for the headset, checks of both | [bluetooth/README.md](bluetooth/README.md) |
 | `cst toolchains ...` | `toolchains-setup.sh` | `toolchains/` | Toolchain caches and settings: hourly pruning of cargo's build folders (old, orphaned, and the incremental part of idle ones) and a daily `uv cache prune`; cargo's `build-dir`, uv's `link-mode` and an opt-in lean debug info for Rust dev builds; a report of installed Rust toolchains (later also Go, npm and Maven caches). Runs as your user | [toolchains/README.md](toolchains/README.md) |
-| `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk); most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
+| `cst vm ...` | `vm-setup.sh` | `vm/` | The libvirt VM `win11-devbox`: a backup of its disks, UEFI variables and TPM state (instant reflink copies on btrfs, or `--full` real copies) before a risky upgrade, a list of the backups, and a status that shows the CPU mode, the CET/MBEC fix and whether QEMU/libvirt changed since the last backup. `backup` needs root (it calls sudo); `list` and `status` run as your user, also in a toolbox | [vm/README.md](vm/README.md) |
+| `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk), a host-passthrough VM still given CET/MBEC by QEMU 11, and QEMU/libvirt changed since the rollback deployment without a pinned rollback or a VM backup; most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
 
 Three more commands belong to `cst` itself:
 
@@ -58,7 +60,7 @@ Three more commands belong to `cst` itself:
 - `cst status`: the status of every module, one after the other. `btrfs`
   and `cpu` need root for it, so it asks for your `sudo` password once.
   Inside a toolbox it skips those two and says so; the `swap`,
-  `bluetooth` and `toolchains` status also work there (`swap` without
+  `bluetooth`, `toolchains` and `vm` status also work there (`swap` without
   zswap's debug counters). Its last section is the short form of
   `cst doctor`: the summary line and the problems only.
 - `cst doctor`: a read-only check-up across the modules, with one line per
@@ -111,6 +113,7 @@ cst cpu help
 cst swap help
 cst bluetooth help
 cst toolchains help
+cst vm help
 ```
 
 Without a command, a module only prints the help and changes nothing.
@@ -131,7 +134,8 @@ for `toolchains`: `config apply` and `auto on`) yourself.
 - Inside a toolbox, the root commands stop with
   `'<command>' must run on the host, not inside a toolbox/container ...`.
   Only `report` and `watch` (of `btrfs` and `cpu`), `cst toolchains`
-  (it runs itself on the host), `cst swap plan` / `cst swap status` and
+  (it runs itself on the host), `cst vm list` / `cst vm status`,
+  `cst swap plan` / `cst swap status` and
   `cst bluetooth plan` / `status` / `revert --check` also work inside a
   toolbox.
 - `cst bluetooth apply` and `revert` are the exception to "root commands
@@ -328,6 +332,11 @@ swap and memory, with counters since boot.
   [btrfs/SNAPSHOTS.md, section 6](btrfs/SNAPSHOTS.md#6-how-to-restore-a-file-or-a-folder).
 - **The game profile does not switch on, or stays on**:
   [cpu/README.md, section 14](cpu/README.md#14-troubleshooting).
+- **The Windows VM loops in "Automatic Repair" after a Fedora upgrade**:
+  [vm/README.md, section 2](vm/README.md#2-the-incident-that-started-it-fedora-45).
+  Before every Fedora major upgrade: shut the VM down, `cst vm backup`, and
+  keep the old deployment pinned (`sudo ostree admin pin N`) until the VM
+  boots on the new one.
 
 ## How to undo
 
@@ -341,6 +350,7 @@ swap and memory, with counters since boot.
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |
 | Docker cleanup | `cst btrfs docker-gc disable` | [btrfs/README.md, section 11.3](btrfs/README.md#113-what-changes-on-my-system-and-how-to-undo) |
 | Pruning of old cargo build folders | `cst toolchains auto off` (the cargo and uv settings: by hand) | [toolchains/README.md, section 11](toolchains/README.md#11-how-to-undo) |
+| VM backups | Nothing runs by itself; delete old backups by hand (`sudo rm -r /var/lib/libvirt/cst-backups/VM/TIMESTAMP`) | [vm/README.md, section 6](vm/README.md#6-removing-old-backups) |
 | CPU tools | `cst cpu uninstall` (and `docker-slice uninstall`, `experiment off NAME`) | [cpu/README.md, section 13](cpu/README.md#13-how-to-undo-everything) |
 | Swap and memory | No command: a few steps by hand (switching swap off needs free RAM) | [swap/README.md, section 8](swap/README.md#8-how-to-undo) |
 | Bluetooth audio | `cst bluetooth revert` (`--check` first shows what it would do) | [bluetooth/README.md, section 8](bluetooth/README.md#8-how-to-undo) |
@@ -357,6 +367,7 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | Module | Works as is on another PC? | What to adjust for your hardware |
 |---|---|---|
 | `cst doctor` | Yes (any Fedora `rpm-ostree` / `btrfs` / `systemd` desktop) | Nothing — it is 100% read-only and discovers deployments, units and btrfs mounts dynamically. |
+| `cst vm` | Yes, for any libvirt VM with file disks | `cst vm backup NAME` (default: `VM_NAME` in `/etc/cpu-setup/cpu-setup.conf`). Reflink copies need the backup folder `/var/lib/libvirt/cst-backups` on the same btrfs filesystem as the disks; otherwise use `--full`. |
 | `cst toolchains` | Yes | Override retention or size limits in `~/.config/cst/toolchains.conf` (defaults in [`toolchains/toolchains.conf`](toolchains/toolchains.conf)). |
 | `cst bluetooth` | Yes, once you set your headset's MAC | Put `DEVICE=AA:BB:CC:DD:EE:FF` (and optional `LDAC_QUALITY`, `LE_AUDIO`, `BEARER`) in `~/.config/cst/bluetooth.conf` (defaults in [`bluetooth/bluetooth.conf`](bluetooth/bluetooth.conf)), or pass `--device`. |
 | `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (or in [`cpu-setup.sh`](cpu-setup.sh) / [`cpu/game-profile`](cpu/game-profile)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. |
@@ -375,10 +386,10 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `sudo ./fix-anaconda-webui-btrfs-compress.sh --help` for its own help.
   *(Not verified: whether the current installation was made with it.
   `cst btrfs status` does not check `commit=10`.)*
-- `btrfs/tests/`, `cpu/tests/`, `swap/tests/`, `bluetooth/tests/`, `toolchains/tests/`, `doctor/tests/`: tests for
+- `btrfs/tests/`, `cpu/tests/`, `swap/tests/`, `bluetooth/tests/`, `toolchains/tests/`, `vm/tests/`, `doctor/tests/`: tests for
   `btrfs-snapshot-core`, `btrfs-bulk`, `chrome-cache`, `cst-link.bash`, the `cpu`
-  module, the `swap` module, the `bluetooth` module, the `toolchains` module and
-  `cst doctor`. The unit tests need no root and no btrfs:
+  module, the `swap` module, the `bluetooth` module, the `toolchains` module, the
+  `vm` module and `cst doctor`. The unit tests need no root and no btrfs:
   `python3 -I -B -m unittest`, run from this folder, runs all of them.
 - `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).
   Tier 2 runs a `--privileged` container that sees the host's disks, so it
@@ -409,7 +420,7 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | deployment | On Silverblue, one bootable version of the system. The **booted** one runs now; a **staged** one, prepared by an update, becomes the system at the next boot. |
 | dm-crypt / LUKS | Linux disk encryption. You type a passphrase per disk at boot. |
 | E-core / P-core | Efficient cores (smaller, slower, many: CPUs 8-23) and Performance cores (fast: CPUs 0-7). |
-| frontend, module | One script that installs, shows and removes a group of parts (`btrfs-setup.sh`, `cpu-setup.sh`, `swap-setup.sh`, `bluetooth-setup.sh`, `toolchains-setup.sh`); `cst MODULE` runs it. |
+| frontend, module | One script that installs, shows and removes a group of parts (`btrfs-setup.sh`, `cpu-setup.sh`, `swap-setup.sh`, `bluetooth-setup.sh`, `toolchains-setup.sh`, `vm-setup.sh`); `cst MODULE` runs it. |
 | GameMode | A small service that runs actions when a game starts and ends. |
 | host | The real Fedora system of the PC, outside any toolbox. |
 | layered package | A package added on top of the Silverblue system image with `rpm-ostree install NAME`; request it by name, never with a version (see [doctor/README.md, section 3](doctor/README.md#3-why-pinned-layered-packages-are-a-problem)). |

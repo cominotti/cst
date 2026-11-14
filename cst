@@ -20,6 +20,9 @@
 #                          cargo's build folders, uv cache prune, cargo
 #                          build-dir and uv link-mode (toolchains-setup.sh;
 #                          as your user)
+#   cst vm [ARGS...]       the libvirt VM: backups of its disks, UEFI
+#                          variables and TPM state before risky upgrades,
+#                          and its status (vm-setup.sh; backup as root)
 #   cst doctor [--brief]   read-only check-up across modules: ok/info/WARN/
 #                          ERROR lines, most WARNs with the command that fixes
 #                          it (layered packages pinned to a version, failed
@@ -41,22 +44,24 @@ set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 DIR="$(dirname "${SELF}")"
-MODULES=(btrfs cpu swap bluetooth toolchains)
+MODULES=(btrfs cpu swap bluetooth toolchains vm)
 declare -A SCRIPT=([btrfs]=btrfs-setup.sh [cpu]=cpu-setup.sh [swap]=swap-setup.sh [bluetooth]=bluetooth-setup.sh
-              [toolchains]=toolchains-setup.sh)
+              [toolchains]=toolchains-setup.sh [vm]=vm-setup.sh)
 declare -A ABOUT=(
     [btrfs]="storage: disk health, stalls, snapshots, ~/Bulk, Docker volumes and cleanup"
     [cpu]="CPU: game profile, VM/toolbox/Docker priority and E-cores, measurements"
     [swap]="swap and memory: zswap, encrypted NVMe swap, zram off, swap sysctls, VM memory floor"
     [bluetooth]="Bluetooth audio: LE Audio (BAP/LC3) in BlueZ, adaptive LDAC for the headset"
     [toolchains]="toolchain caches and settings: pruning of cargo build folders and uv's cache, cargo/uv settings"
+    [vm]="the libvirt VM: backups (disks, UEFI variables, TPM) before upgrades, and its status"
 )
 # Whether the module's `status` needs root (it then calls sudo by itself).
 # swap's works as a user and in a toolbox; as root it adds zswap's debug
 # counters. bluetooth's reads the user's session (run as root, it switches
 # back to the user who called sudo); so does toolchains' (and in a toolbox
-# its program runs itself on the host).
-declare -A STATUS_ROOT=([btrfs]=1 [cpu]=1 [swap]=0 [bluetooth]=0 [toolchains]=0)
+# its program runs itself on the host). vm's reads libvirt's system
+# connection (as the user: libvirt group or a polkit rule) and a world-readable index.
+declare -A STATUS_ROOT=([btrfs]=1 [cpu]=1 [swap]=0 [bluetooth]=0 [toolchains]=0 [vm]=0)
 
 DOCTOR="${DIR}/doctor/cst-doctor"
 
