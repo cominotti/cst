@@ -48,6 +48,8 @@ cst doctor help
 | `btrfs` | Automatic data reclaim (`dynamic_reclaim`, `periodic_reclaim`) on | `WARN` when off on the root filesystem, fix: `cst btrfs install`; `info` on other btrfs filesystems or on kernels without these switches |
 | `vm` | A libvirt VM with `<cpu mode='host-passthrough'>` that does not disable CET and nested MBEC (`cet-ss`, `cet-ibt`, `vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`) while this QEMU offers them (see [section 7](#7-the-vm-checks)) | `WARN`, fix: `cst cpu vm-pin plan`; `ok` when QEMU does not offer them; `info` when that could not be read |
 | `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no `cst vm backup` was made since the booted deployment was built (fix: `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
+| `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
+| `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
@@ -172,7 +174,10 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   needs libvirt's permission for the system connection: membership of the
   `libvirt` group, or an equivalent polkit rule. `domcapabilities` is asked
   only when a VM lacks one of the disables. No `virsh`, no permission,
-  libvirt not running, no VM: `info` or `ok`, never `WARN`.
+  libvirt not running, no VM: `info` or `ok`, never `WARN`. The hardware
+  and image folder checks load `vm/cst-vm` of the same CST copy (no second
+  copy of its rules) and read the folders' inode flags with an ioctl; they
+  run no extra command.
 - The `btrfs` check reads `/sys/fs/btrfs` (under `/run/host` in a toolbox),
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
@@ -267,6 +272,25 @@ When they differ and libvirt has at least one VM, it wants two things:
 With both in place the line is `info`. Best practice: before every Fedora
 major upgrade, shut the VM down and run `cst vm backup`; after it, keep the
 old deployment pinned until the VM boots on the new one.
+
+**Hardware differs from `cst vm tune`.** For each VM, the definition
+(the same `dumpxml --inactive` as above, asked once) goes through the
+transform of `cst vm tune` as if the guest had its virtio drivers. Any
+change it would make is listed in one `info` line, with
+`cst vm tune plan VM`. For Windows the line adds that the drivers go in
+first (the plan prints the steps). The knobs of `/etc/cst/vm.conf`
+(`VM_TUNE_DISK_BUS`, `VM_TUNE_DISK_DRIVER`, `VM_TUNE_NIC`) are honoured.
+Details: [vm/README.md, section 8](../vm/README.md#8-cst-vm-tune-the-recommended-virtual-hardware).
+
+**VM image folders without NOCOW.** For each VM image folder that exists
+on btrfs: no `+C` mark, or images in it without `+C`, is an `info` line.
+The system folder `/var/lib/libvirt/images` is root's (mode 0711), so as
+your user its flags cannot be read: the line then says so and points to
+`cst vm nocow plan --root`; it never claims the folder is copy-on-write.
+A folder that is a symbolic link is not checked. With `VM_NOCOW=no` in
+`/etc/cst/vm.conf` the check only prints one `info` line saying the
+folders are not managed. Details:
+[vm/README.md, section 9](../vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write).
 
 ## 8. Adding a check
 

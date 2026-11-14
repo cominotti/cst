@@ -22,7 +22,9 @@
 #                          as your user)
 #   cst vm [ARGS...]       the libvirt VM: backups of its disks, UEFI
 #                          variables and TPM state before risky upgrades,
-#                          and its status (vm-setup.sh; backup as root)
+#                          the recommended virtual hardware (tune), NOCOW
+#                          for the VM image folders (nocow), and its status
+#                          (vm-setup.sh; backup and tune apply as root)
 #   cst doctor [--brief]   read-only check-up across modules: ok/info/WARN/
 #                          ERROR lines, most WARNs with the command that fixes
 #                          it (layered packages pinned to a version, failed
@@ -53,7 +55,7 @@ declare -A ABOUT=(
     [swap]="swap and memory: zswap, encrypted NVMe swap, zram off, swap sysctls, VM memory floor"
     [bluetooth]="Bluetooth audio: LE Audio (BAP/LC3) in BlueZ, adaptive LDAC for the headset"
     [toolchains]="toolchain caches and settings: pruning of cargo build folders and uv's cache, cargo/uv settings"
-    [vm]="the libvirt VM: backups (disks, UEFI variables, TPM) before upgrades, and its status"
+    [vm]="the libvirt VM: backups (disks, UEFI variables, TPM) before upgrades, virtio hardware (tune), NOCOW image folders, status"
 )
 # Whether the module's `status` needs root (it then calls sudo by itself).
 # swap's works as a user and in a toolbox; as root it adds zswap's debug

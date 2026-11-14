@@ -929,6 +929,8 @@ VM_PIN_HOST = "/usr/local/sbin/cpu-vm-pin"
 CPU_DISABLE_FALLBACK = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX = "/var/lib/cst/vm-backups.json"
+VM_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vm", "cst-vm")
+VM_CONF = "/etc/cst/vm.conf"
 # Packages that make up the guest's virtual hardware: name prefixes.
 VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 # The ones named in the message (the others are only counted).
@@ -955,6 +957,31 @@ def libvirt_domains(host):
         else:
             host._domains = ([n.strip() for n in out.splitlines() if n.strip()], "")
     return host._domains
+
+
+def domain_xml(host, vm):
+    """(rc, xml, err) of `dumpxml --inactive` (no secrets), asked once per VM and run."""
+    cache = host.__dict__.setdefault("_dumpxml", {})
+    if vm not in cache:
+        cache[vm] = virsh(host, "dumpxml", "--inactive", vm)
+    return cache[vm]
+
+
+def vm_module():
+    """vm/cst-vm of this copy, loaded as a module (its tune and NOCOW logic,
+    so the doctor does not keep a second copy), or None."""
+    if not hasattr(vm_module, "mod"):
+        import importlib.machinery
+        import importlib.util
+        try:
+            loader = importlib.machinery.SourceFileLoader("cst_vm", VM_TOOL)
+            spec = importlib.util.spec_from_loader("cst_vm", loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+        except Exception:  # noqa: BLE001 - a missing or broken copy is an info line, not an ERROR
+            mod = None
+        vm_module.mod = mod
+    return vm_module.mod
 
 
 def cpu_disable_names(host):
@@ -1018,7 +1045,7 @@ def check_vm_cpu_features(host):
         return
     offered = oproblem = None     # asked only when a VM lacks a disable: domcapabilities needs a
     for vm in names:              # read-write connection (libvirt group or an equivalent polkit rule)
-        rc, out, err = virsh(host, "dumpxml", "--inactive", vm)
+        rc, out, err = domain_xml(host, vm)
         try:
             cpu = ET.fromstring(out).find("cpu") if rc == 0 else None
         except ET.ParseError:
@@ -1136,6 +1163,69 @@ def check_virt_stack_change(host):
 
 
 # ---- running and printing ------------------------------------------------------------------------
+@check("vm")
+def check_vm_hardware(host):
+    """INFO for VMs whose disks or network card differ from `cst vm tune`."""
+    names, _ = libvirt_domains(host)
+    if not names:
+        return                    # no libvirt or no VM: the CPU check already said so
+    mod = vm_module()
+    if mod is None:
+        yield Result(INFO, f"VM hardware: not checked ({VM_TOOL} not loadable)")
+        return
+    kn = mod.knobs(host.path(VM_CONF))
+    for vm in names:
+        rc, out, err = domain_xml(host, vm)
+        if rc != 0:
+            continue              # already reported by the CPU check
+        try:
+            _, changes, _, _ = mod.tune_domain(out, kn, True)
+            kind, _ = mod.guest_kind(mod.ET.fromstring(out))
+        except Exception as e:  # noqa: BLE001 - an odd definition is an info line
+            yield Result(INFO, f"VM {vm}: hardware not checked ({type(e).__name__}: {e})")
+            continue
+        if not changes:
+            yield Result(OK, f"VM {vm}: disks and network card as {CST} vm tune recommends")
+            continue
+        first = "; ".join(changes[:3]) + (f"; and {len(changes) - 3} more" if len(changes) > 3 else "")
+        extra = " Windows: the virtio drivers go in first (the plan shows how)." if kind != "linux" else ""
+        yield Result(INFO, f"VM {vm}: hardware differs from what {CST} vm tune recommends: {first}.{extra} "
+                     f"See: {CST} vm tune plan {vm}")
+
+
+@check("vm")
+def check_vm_image_dirs(host):
+    """INFO for a VM image folder on btrfs without +C, or with images that
+    are still copy-on-write. Unreadable (root's folder) is an info line
+    that says so, never a finding; folders that are not there are silent."""
+    mod = vm_module()
+    if mod is None:
+        return
+    if not mod.knobs(host.path(VM_CONF))["VM_NOCOW"]:
+        yield Result(INFO, f"VM image folders: NOCOW not managed (VM_NOCOW=no in {VM_CONF})")
+        return
+    system = mod.SYSTEM_IMAGES
+    for d in mod.image_dirs():
+        p = mod.probe_dir(d, host.path if d["path"] == system else (lambda x: x))
+        if not p["present"] or p["btrfs"] is False:
+            continue
+        path = p["path"]
+        if p["nocow"] is None and not p["listed"]:
+            yield Result(INFO, f"VM image folder {path}: NOCOW mark not readable as your user (root's "
+                         f"folder); {CST} vm nocow plan --root shows it")
+            continue
+        cow = [i for i in p["images"] if i["nocow"] is False]
+        if p["nocow"] is False:
+            yield Result(INFO, f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
+                         f"copy-on-write; {CST} vm nocow apply sets it")
+        if cow:
+            listed = ", ".join(f"{i['name']} ({mod.human(i['alloc'])})" for i in cow)
+            yield Result(INFO, f"VM image folder {path}: still copy-on-write: {listed}; "
+                         f"{CST} vm nocow plan prints how to convert (never done automatically)")
+        if p["nocow"] and not cow:
+            yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
+
+
 def run_checks(host, checks=None):
     """[(area, Result)] in registry order. A check that crashes is an ERROR
     line, not a crash of the whole check-up."""

@@ -80,6 +80,15 @@ class VmPinTest(unittest.TestCase):
         self.assertEqual(len(emupin), 1)
         self.assertEqual(emupin[0].get("cpuset"), "12-23")
 
+    def test_a_default_namespace_in_metadata_does_not_move_domain(self):
+        xml = SAMPLE_DOMAIN_XML.replace("<metadata>", "<metadata><app xmlns='http://example.com/app/1'/>", 1)
+        self.assertIn("example.com/app/1", xml)
+        root = ET.fromstring(self.m.pinned(xml, 12, "12-23"))
+        self.assertEqual(root.tag, "domain")
+        self.assertIsNotNone(root.find("metadata/{http://example.com/app/1}app"))
+        again = self.m.pinned(self.m.pinned(xml, 12, "12-23"), 12, "12-23")     # ns0: on the way back
+        self.assertEqual(ET.fromstring(again).tag, "domain")
+
     def test_inserts_cputune_when_absent_and_is_idempotent(self):
         minimal = "<domain><name>vm</name><vcpu>8</vcpu></domain>\n"
         first = self.m.pinned(minimal, 4, "8-11")
