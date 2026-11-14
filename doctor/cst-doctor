@@ -2,7 +2,8 @@
 """cst-doctor: a read-only check-up of this workstation. It is the program
 behind `cst doctor` (and the last section of `cst status`). It never changes
 anything: it only reads files and runs query commands (rpm-ostree status,
-rpm-ostree db list, systemctl --failed, findmnt). Most problems it finds come with
+rpm-ostree db list, systemctl --failed, findmnt, virsh list/dumpxml/
+domcapabilities). Most problems it finds come with
 the command that fixes it; you decide whether to run it.
 
 Usage:
@@ -24,6 +25,12 @@ Areas checked:
   btrfs        how full the chunks are (data, metadata), automatic data reclaim
                switched on, unallocated space per device (from sysfs; warning
                and critical levels as btrfs-health-check)
+  vm           libvirt VMs with <cpu mode='host-passthrough'> that still pass
+               CET/MBEC to the guest while this QEMU offers them (Windows then
+               bootloops); the virtualization packages (QEMU, libvirt, UEFI
+               firmware, TPM emulator) changed between the rollback and the
+               booted deployment while the rollback is not pinned or no VM
+               backup was taken since the booted deployment was built
 
 Levels: ok (fine), info (worth knowing, nothing to do), WARN (should be
 fixed), ERROR (fix soon). When there is a command for it, the line below a
@@ -307,6 +314,7 @@ def ostree_deployments(host):
         deps = [d for d in data["deployments"] if isinstance(d, dict)]
     except (ValueError, KeyError, TypeError) as e:
         return None, None, f"rpm-ostree status --json: unreadable output ({e})"
+    host._ostree_list = deps     # every deployment, in the order ostree admin status numbers them
     booted = next((d for d in deps if d.get("booted")), None)
     osname = booted.get("osname") if booted else None
     first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
@@ -906,6 +914,225 @@ def check_btrfs_allocation(host):
                          f"(layout {layout}); {needs_root}")
         else:
             yield Result(INFO, f"{name}: {needs_root}")
+
+
+# ---- vm: libvirt guests --------------------------------------------------------------------------
+# Everything here is a query of libvirt's system connection (list, dumpxml
+# --inactive without secrets, domcapabilities), which the user may make when
+# libvirt allows it (the libvirt group, or a polkit rule). No virsh, no
+# permission, libvirt not running: info, never WARN.
+VIRSH_URI = "qemu:///system"
+CPU_CONF = "/etc/cpu-setup/cpu-setup.conf"
+VM_PIN_REPO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cpu", "vm-pin")
+VM_PIN_HOST = "/usr/local/sbin/cpu-vm-pin"
+# As CPU_DISABLE_DEFAULT in cpu/vm-pin (read from there when possible).
+CPU_DISABLE_FALLBACK = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
+CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
+VM_INDEX = "/var/lib/cst/vm-backups.json"
+# Packages that make up the guest's virtual hardware: name prefixes.
+VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
+# The ones named in the message (the others are only counted).
+VIRT_MAIN = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
+
+
+def virsh(host, *args, ro=True):
+    """virsh on the system connection; -r (read-only) where libvirt allows it."""
+    return host.run(["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args), timeout=20)
+
+
+def virsh_problem(rc, err):
+    if rc == 127:
+        return "no virsh: libvirt is not installed"
+    return first_line(err) or f"virsh exit {rc}"
+
+
+def libvirt_domains(host):
+    """(names, problem), asked once per run."""
+    if not hasattr(host, "_domains"):
+        rc, out, err = virsh(host, "list", "--all", "--name")
+        if rc != 0:
+            host._domains = (None, virsh_problem(rc, err))
+        else:
+            host._domains = ([n.strip() for n in out.splitlines() if n.strip()], "")
+    return host._domains
+
+
+def cpu_disable_names(host):
+    """VM_CPU_DISABLE of cpu-setup.conf when set there (also empty), else the
+    default of cpu/vm-pin (this copy, else the installed one)."""
+    value = None                  # the last assignment wins, as in vm-pin's conf() and the shell
+    try:
+        with open(host.path(CPU_CONF)) as f:
+            for line in f:
+                if line.strip().startswith("VM_CPU_DISABLE="):
+                    value = line.strip().split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    if value is not None:
+        return value.split()
+    for path in (VM_PIN_REPO, host.path(VM_PIN_HOST)):
+        try:
+            with open(path) as f:
+                m = re.search(r'^CPU_DISABLE_DEFAULT = "([^"]*)"', f.read(65536), re.M)
+        except OSError:
+            continue
+        if m:
+            return m.group(1).split()
+    return list(CPU_DISABLE_FALLBACK)
+
+
+def offered_features(host):
+    """(names, problem): the CPU features QEMU and KVM can give a guest on
+    this host: the <feature> names of the host-model CPU in virsh
+    domcapabilities (libvirt computes it from what this QEMU and KVM offer
+    on this CPU). Not allowed on a read-only (-r) connection."""
+    import xml.etree.ElementTree as ET
+    rc, out, err = virsh(host, "domcapabilities", ro=False)
+    if rc != 0:
+        return None, virsh_problem(rc, err)
+    try:
+        root = ET.fromstring(out)
+    except ET.ParseError as e:
+        return None, f"domcapabilities: unreadable ({e})"
+    names = set()
+    for mode in root.findall("cpu/mode"):
+        if mode.get("name") == "host-model":
+            names |= {f.get("name") for f in mode.findall("feature") if f.get("policy") != "disable"}
+    return names, ""
+
+
+@check("vm")
+def check_vm_cpu_features(host):
+    import xml.etree.ElementTree as ET
+    names, problem = libvirt_domains(host)
+    if names is None:
+        yield Result(INFO, f"libvirt VMs: not checked ({problem})")
+        return
+    if not names:
+        yield Result(OK, "libvirt: no VM defined")
+        return
+    wanted = cpu_disable_names(host)
+    if not wanted:
+        yield Result(INFO, "VM CPU features: not checked (VM_CPU_DISABLE is empty in "
+                     f"{CPU_CONF}: switched off on purpose)")
+        return
+    offered = oproblem = None     # asked only when a VM lacks a disable: domcapabilities needs a
+    for vm in names:              # read-write connection (libvirt group or an equivalent polkit rule)
+        rc, out, err = virsh(host, "dumpxml", "--inactive", vm)
+        try:
+            cpu = ET.fromstring(out).find("cpu") if rc == 0 else None
+        except ET.ParseError:
+            rc, err = 1, "definition unreadable"
+        if rc != 0:
+            yield Result(INFO, f"VM {vm}: definition not readable ({virsh_problem(rc, err)})")
+            continue
+        mode = cpu.get("mode", "custom") if cpu is not None else "not set"
+        if mode != "host-passthrough":
+            yield Result(OK, f"VM {vm}: cpu mode {mode} (the CET/MBEC bootloop concerns host-passthrough only)")
+            continue
+        off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
+        missing = [n for n in wanted if n not in off]
+        if missing and oproblem is None:
+            offered, oproblem = offered_features(host)
+        if not missing:
+            yield Result(OK, f"VM {vm}: host-passthrough with {', '.join(wanted)} disabled")
+        elif offered is None:
+            yield Result(INFO, f"VM {vm}: host-passthrough without disabling {', '.join(missing)}; whether "
+                         f"this QEMU passes them was not checked ({oproblem}). If Windows loops in "
+                         f"Automatic Repair: {CST} cpu vm-pin plan ({CET_ISSUE})")
+        elif not [n for n in missing if n in offered]:
+            yield Result(OK, f"VM {vm}: host-passthrough; this QEMU does not offer "
+                         f"{', '.join(missing)} (nothing to disable yet)")
+        else:
+            bad = [n for n in missing if n in offered]
+            yield Result(WARN, f"VM {vm}: host-passthrough passes {', '.join(bad)} to the guest (QEMU 11 and "
+                         "later offer them); Windows with Hyper-V/VBS/WSL2 then loops in Automatic Repair. "
+                         f"The fix shows the change to the definition; then {CST} cpu vm-pin apply. "
+                         f"Upstream: {CET_ISSUE}", f"{CST} cpu vm-pin plan")
+
+
+def virt_versions(pkgs):
+    """{name: version-release} of the virtualization packages in a NEVRA list."""
+    out = {}
+    for p in pkgs:
+        parsed = parse_nevra(p)
+        if parsed and parsed[0].startswith(VIRT_PREFIXES):
+            name, epoch, ver, rel, _ = parsed
+            out[name] = f"{epoch + ':' if epoch else ''}{ver}-{rel}"
+    return out
+
+
+def virt_changes(old, new):
+    """'qemu-kvm 10.2.2-1.fc44 -> 11.1.3-1.fc45, ...' (the main packages
+    named, the rest counted), or "" when nothing changed."""
+    changed = sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+    if not changed:
+        return ""
+    main = [n for n in changed if n in VIRT_MAIN] or changed[:3]
+    parts = [f"{n} {old.get(n, 'none')} -> {new.get(n, 'none')}" for n in main]
+    rest = len(changed) - len(main)
+    if rest:
+        parts.append(f"and {rest} more virtualization package(s)")
+    return ", ".join(parts)
+
+
+def newest_vm_backup(host):
+    """Epoch of the newest backup in cst vm's index, 0 when none or unreadable."""
+    try:
+        with open(host.path(VM_INDEX)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    entries = data.get("backups") if isinstance(data, dict) else None
+    return max((e["epoch"] for e in entries or [] if isinstance(e, dict)
+                and isinstance(e.get("epoch"), (int, float))), default=0)
+
+
+@check("vm")
+def check_virt_stack_change(host):
+    booted, _, err = deployments(host)
+    if err or booted is None:
+        yield Result(INFO, f"virtualization packages: not compared ({err or 'no booted deployment'})")
+        return
+    deps = getattr(host, "_ostree_list", [])
+    i = next(n for n, d in enumerate(deps) if d is booted)
+    # The rollback: the next deployment of the same OS after the booted one.
+    # Its position in rpm-ostree's list is the index ostree admin pin takes.
+    rb = next(((n, d) for n, d in enumerate(deps) if n > i and d.get("osname") == booted.get("osname")), None)
+    if rb is None:
+        yield Result(OK, "virtualization packages: no rollback deployment to compare with")
+        return
+    index, rollback = rb
+    old, new = installed_packages(host, rollback), installed_packages(host, booted)
+    if old is None or new is None:
+        yield Result(INFO, "virtualization packages: not compared (rpm-ostree db list did not answer)")
+        return
+    change = virt_changes(virt_versions(old), virt_versions(new))
+    if not change:
+        yield Result(OK, "virtualization packages: the same in the booted and the rollback deployment")
+        return
+    names, problem = libvirt_domains(host)
+    rb_ver = rollback.get("version") or (rollback.get("checksum") or "?")[:10]
+    what = f"virtualization packages changed from the rollback deployment {rb_ver} to the booted one: {change}"
+    if not names:
+        yield Result(INFO, f"{what}; no libvirt VM {'defined' if names is not None else f'seen ({problem})'}")
+        return
+    pinned = bool(rollback.get("pinned"))
+    built = booted.get("timestamp") if isinstance(booted.get("timestamp"), (int, float)) else 0
+    backup = newest_vm_backup(host)
+    fresh = backup > built > 0
+    if pinned and fresh:
+        yield Result(INFO, f"{what}; rollback pinned and VM backup present")
+        return
+    if not pinned:
+        yield Result(WARN, f"{what}. The rollback deployment (index {index}) is not pinned: the next upgrade "
+                     "can remove it, and with it the way back if a VM stops booting. Keep it pinned until "
+                     f"the VMs ({', '.join(names)}) work on the new one", f"sudo ostree admin pin {index}")
+    if not fresh:
+        when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
+        last = time.strftime("%Y-%m-%d", time.localtime(backup)) if backup else "never"
+        yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
+                     f"backup: {last}). Shut the VM down first", f"{CST} vm backup")
 
 
 # ---- running and printing ------------------------------------------------------------------------

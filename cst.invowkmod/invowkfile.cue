@@ -40,6 +40,7 @@ cmds: [
 					swap-setup.sh
 					bluetooth-setup.sh
 					toolchains-setup.sh
+					vm-setup.sh
 					fix-anaconda-webui-btrfs-compress.sh
 					cpu/game-profile
 					tests/e2e/scripts/*.sh
@@ -143,6 +144,7 @@ cmds: [
 					swap-setup.sh
 					bluetooth-setup.sh
 					toolchains-setup.sh
+					vm-setup.sh
 					fix-anaconda-webui-btrfs-compress.sh
 					cpu/game-profile
 					tests/e2e/scripts/*.sh

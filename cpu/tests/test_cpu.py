@@ -90,6 +90,86 @@ class VmPinTest(unittest.TestCase):
         )
 
 
+class VmPinCpuFeaturesTest(unittest.TestCase):
+    """The CET/MBEC features vm-pin keeps disabled on host-passthrough."""
+
+    def setUp(self):
+        self.m = load_module("vm_pin", VM_PIN)
+        self.names = self.m.CPU_DISABLE_DEFAULT.split()
+
+    def features(self, out):
+        return [(f.get("name"), f.get("policy")) for f in ET.fromstring(out).findall("cpu/feature")]
+
+    def test_default_list(self):
+        self.assertEqual(self.names, ["cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet"])
+
+    def test_self_closing_cpu(self):
+        xml = "<domain><name>vm</name><vcpu>4</vcpu><cpu mode='host-passthrough' check='none'/></domain>\n"
+        out = self.m.pinned(xml, 4, "8-11", self.names)
+        self.assertEqual(self.features(out), [(n, "disable") for n in self.names])
+        cpu = ET.fromstring(out).find("cpu")
+        self.assertEqual(cpu.get("check"), "none")
+        self.assertEqual(cpu.get("mode"), "host-passthrough")
+
+    def test_topology_and_other_features_kept(self):
+        out = self.m.pinned(SAMPLE_DOMAIN_XML.replace(
+            '<topology sockets="1" dies="1" clusters="1" cores="24" threads="1"/>',
+            '<topology sockets="1" dies="1" clusters="1" cores="24" threads="1"/>\n'
+            '    <feature policy="require" name="invtsc"/>'), 12, "12-23", self.names)
+        cpu = ET.fromstring(out).find("cpu")
+        self.assertEqual(cpu[0].tag, "topology")
+        self.assertEqual(cpu[0].get("cores"), "12")
+        self.assertEqual(self.features(out), [("invtsc", "require")] + [(n, "disable") for n in self.names])
+
+    def test_existing_feature_switched_in_place(self):
+        xml = ("<domain><name>vm</name><vcpu>4</vcpu><cpu mode='host-passthrough'>"
+               "<feature policy='require' name='vmx-mbec'/><feature policy='disable' name='cet-ss'/>"
+               "</cpu></domain>\n")
+        out = self.m.pinned(xml, 4, "8-11", self.names)
+        got = self.features(out)
+        self.assertEqual(got[:2], [("vmx-mbec", "disable"), ("cet-ss", "disable")])
+        self.assertEqual(sorted(n for n, _ in got), sorted(self.names))
+        self.assertTrue(all(p == "disable" for _, p in got))
+
+    def test_idempotent(self):
+        once = self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names)
+        self.assertEqual(self.m.pinned(once, 12, "12-23", self.names), once)
+
+    def test_other_modes_untouched(self):
+        for cpu in ("<cpu mode='host-model' check='partial'/>",
+                    "<cpu mode='custom'><model>Skylake</model><feature policy='require' name='cet-ss'/></cpu>", ""):
+            xml = f"<domain><name>vm</name><vcpu>4</vcpu>{cpu}</domain>\n"
+            base = self.m.pinned(xml, 4, "8-11")
+            self.assertEqual(self.m.pinned(xml, 4, "8-11", self.names), base, cpu)
+
+    def test_empty_knob_untouched(self):
+        self.assertEqual(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", []),
+                         self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23"))
+        self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", "".split())), [])
+
+    def test_conf_knob_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "w") as f:
+                f.write("VM_NAME='x'\nVM_CPU_DISABLE=''\n")
+            self.m.CONF = p
+            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), [])
+            with open(p, "w") as f:
+                f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
+            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
+            self.m.CONF = os.path.join(tmp, "absent")
+            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), self.names)
+
+    def test_messages(self):
+        root = ET.fromstring(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names))
+        self.assertIn("CPU features disabled: cet-ss", self.m.features_note(root, self.names))
+        self.assertIn("not managed", self.m.features_note(root, []))
+        other = ET.fromstring("<domain><cpu mode='host-model'/></domain>")
+        self.assertIn("left alone", self.m.features_note(other, self.names))
+        self.assertIn("NOT disabled yet: cet-ss", self.m.cpu_line(SAMPLE_DOMAIN_XML, self.names))
+        self.assertIn("; disabled: cet-ss", self.m.cpu_line(ET.tostring(root, encoding="unicode"), self.names))
+
+
 class CpuWatchTest(unittest.TestCase):
     def setUp(self):
         self.m = load_module("cpu_watch", CPU_WATCH)
