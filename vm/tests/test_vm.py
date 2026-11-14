@@ -279,7 +279,7 @@ class BackupTest(Scratch):
         r = self.run_tool("backup", "win", "--full")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         cps = [c for c in self.calls() if c.startswith("cp ")]
-        self.assertTrue(cps[0].startswith("cp --reflink=never --sparse=always -a -- "), cps)
+        self.assertTrue(cps[0].startswith("cp --reflink=never --sparse=auto -a -- "), cps)
         self.assertTrue(cps[1].startswith(f"cp --reflink=never -a -- {self.nvram} "), cps)
         self.assertTrue(cps[2].startswith("cp --reflink=never -a -- "), cps)
         self.assertEqual(json.load(open(os.path.join(self.dest(), "manifest.json")))["mode"], "full")
@@ -848,7 +848,7 @@ class NocowTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("still copy-on-write: win.qcow2", out)
         self.assertIn(f"sudo mv {win} {win}.cow-old", out)
-        self.assertIn(f"sudo cp -a --reflink=never --sparse=always {win}.cow-old {win}", out)
+        self.assertIn(f"sudo cp -a --reflink=never --sparse=auto {win}.cow-old {win}", out)
         self.assertIn("leftover of a conversion: old.qcow2.cow-old", out)
         self.assertIn(f"{self.boxes}  [GNOME Boxes (RPM)]\n  NOCOW mark (+C): no", out)
         self.assertIn("NOCOW images: fedora", out)

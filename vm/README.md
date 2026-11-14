@@ -140,8 +140,11 @@ other. Shut it down from Windows, or with
 Reflink copies use `cp --reflink=always -a`; if the filesystem cannot
 clone (not btrfs, or another filesystem), the backup stops, removes the
 incomplete folder and tells you to use `--full`. Full copies use
-`cp --reflink=never --sparse=always -a`, so empty parts of the image stay
-empty. A disk marked NOCOW (`chattr +C`) gets a NOCOW copy, because btrfs
+`cp --reflink=never --sparse=auto -a`: the holes of the image stay holes, and
+the data is written in long pieces. (`--sparse=always` would also turn every
+run of zero blocks inside the data into a hole. On a real 92 GiB image that
+gave 1.05 million extents instead of 0.6 million, and a guest writing into
+those holes allocates new extents, even on a NOCOW file.) A disk marked NOCOW (`chattr +C`) gets a NOCOW copy, because btrfs
 clones only between files with the same flag (section 9.1).
 
 ## 5. Restore
@@ -408,7 +411,7 @@ F=/var/lib/libvirt/images/win11-devbox.qcow2
 sudo mv $F $F.cow-old
 sudo install -m 0600 /dev/null $F      # new empty file, private until cp -a sets owner and mode
 sudo chattr +C $F                      # only works while the file is empty
-sudo cp -a --reflink=never --sparse=always $F.cow-old $F
+sudo cp -a --reflink=never --sparse=auto $F.cow-old $F   # not --sparse=always: see section 4
 sudo cmp $F.cow-old $F && echo same
 # start the VM; after a good boot:
 sudo rm $F.cow-old
