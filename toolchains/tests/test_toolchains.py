@@ -64,6 +64,8 @@ class Scratch(unittest.TestCase):
             "CST_TOOLCHAINS_NOW": str(NOW),
             "CST_TOOLCHAINS_SYSTEMCTL": self.stub,
             "SYSTEMCTL_LOG": self.log,
+            # status must never reach a real sccache server (their sockets live here).
+            "XDG_RUNTIME_DIR": os.path.join(self.tmp, "no-runtime-dir"),
         }
         saved = {k: os.environ.get(k) for k in self.env if k not in ("PATH", "HOME")}
         os.environ.update({k: v for k, v in self.env.items() if k not in ("PATH", "HOME")})
@@ -186,7 +188,8 @@ class DefaultsTest(Scratch):
                                "RUST_BUILD_MAX_TOTAL": "150G", "RUST_BUILD_MIN_KEEP": "2h",
                                "RUST_BUILD_ORPHANS": "yes", "RUST_BUILD_INCREMENTAL_IDLE": "6h",
                                "PYTHON_UV_ENABLED": "yes", "PYTHON_UV_INTERVAL": "1d",
-                               "RUST_LEAN_DEBUGINFO": "no"})
+                               "RUST_LEAN_DEBUGINFO": "no", "RUST_SCCACHE": "no",
+                               "RUST_SCCACHE_CACHE_SIZE": "25G"})
 
     def test_every_target_is_documented(self):
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:
@@ -280,7 +283,7 @@ class SnapshotsSetupTest(Scratch):
                   'snap_chrome() { echo "chrome $1"; }\n'
                   'snap_user_configs "$H"\n')
         return subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, prog],
-                              capture_output=True, text=True, env=self.env)
+                              capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
 
     def test_setup_writes_the_same_lines_and_turns_the_timer_on(self):
         r = self.run_setup()
@@ -318,7 +321,7 @@ class SnapshotsSetupTest(Scratch):
                   'snap_home() { echo "$H"; }\n'
                   'snap_toolchains_config_preview\n')
         r = subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=self.env)
+                           capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("    write", r.stdout)
         self.assertIn(".cargo/config.toml", r.stdout)
@@ -328,13 +331,13 @@ class SnapshotsSetupTest(Scratch):
         self.csts_cargo_config()
         self.write(".config/uv/uv.toml", OLD_UV)
         r = subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=self.env)
+                           capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("    ok", r.stdout)
 
     def test_hint_name_without_cst(self):
         r = subprocess.run(["bash", "-c", 'SRC="$1"; PROG="$2"; . "${SRC}/setup-snapshots.bash"; snap_toolchains_prog',
-                            "_", BTRFS, "./btrfs-setup.sh"], capture_output=True, text=True)
+                            "_", BTRFS, "./btrfs-setup.sh"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.stdout.strip(), os.path.join(REPO, "toolchains-setup.sh"))
 
 
@@ -471,7 +474,7 @@ class StatusTest(Scratch):
 class FrontendTest(Scratch):
     def sh(self, *args, script=SETUP):
         env = dict(self.env, CST_PROG="cst toolchains")
-        return subprocess.run(["bash", script, *args], capture_output=True, text=True, env=env)
+        return subprocess.run(["bash", script, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
 
     def test_help_and_usage(self):
         r = self.sh("help")

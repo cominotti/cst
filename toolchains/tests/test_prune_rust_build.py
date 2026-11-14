@@ -51,12 +51,14 @@ class Base(unittest.TestCase):
         os.makedirs(self.root)
         self.write_cargo_config(f'[build]\nbuild-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n')
         self.env = {k: os.environ.get(k) for k in ("CST_TOOLCHAINS_NOW", "CST_TOOLCHAINS_HERE", "CARGO_HOME",
-                                                  "CST_TOOLCHAINS_SYSTEMCTL")}
+                                                  "CST_TOOLCHAINS_SYSTEMCTL", "XDG_RUNTIME_DIR")}
         os.environ["CST_TOOLCHAINS_NOW"] = str(NOW)
         os.environ["CST_TOOLCHAINS_HERE"] = "1"
         # Never the real user manager, also if a test misses the fake below.
         os.environ["CST_TOOLCHAINS_SYSTEMCTL"] = "/nonexistent/systemctl"
         os.environ.pop("CARGO_HOME", None)
+        # status must never reach a real sccache server (their sockets live there).
+        os.environ["XDG_RUNTIME_DIR"] = os.path.join(self.tmp, "no-runtime-dir")
         self.calls = []
         self.manager_env = ""
         self.m.systemctl = self.fake_systemctl

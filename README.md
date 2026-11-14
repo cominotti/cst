@@ -288,6 +288,9 @@ cst toolchains status        # sizes, policy, last prune, the timer, rustup tool
 cst toolchains config apply  # cargo build-dir + uv link-mode (step 3 runs it)
 # opt-in, once, while no builds run (every workspace rebuilds once afterwards):
 # cst toolchains config apply --lean-debuginfo
+# opt-in: rustc through sccache (install sccache first), so worktrees share compiled dependencies;
+# --no-sccache removes it again:
+# cst toolchains config apply --sccache
 cst toolchains prune plan    # what would be deleted now; deletes nothing
 cst toolchains auto on       # the hourly pruning (step 3 runs it, unless you turned it off)
 ```

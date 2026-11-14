@@ -41,6 +41,7 @@ cmds: [
 					bluetooth-setup.sh
 					toolchains-setup.sh
 					vm-setup.sh
+					toolchains/rustc-wrapper
 					fix-anaconda-webui-btrfs-compress.sh
 					cpu/game-profile
 					tests/e2e/scripts/*.sh
@@ -145,6 +146,7 @@ cmds: [
 					bluetooth-setup.sh
 					toolchains-setup.sh
 					vm-setup.sh
+					toolchains/rustc-wrapper
 					fix-anaconda-webui-btrfs-compress.sh
 					cpu/game-profile
 					tests/e2e/scripts/*.sh
