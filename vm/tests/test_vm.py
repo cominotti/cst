@@ -433,7 +433,7 @@ class ListStatusTest(Scratch):
 class SetupScriptTest(unittest.TestCase):
     def run_setup(self, *args):
         return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, timeout=30,
-                              env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm"})
+                              env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm"}, stdin=subprocess.DEVNULL)
 
     def test_help_and_unknown(self):
         r = self.run_setup("help")
@@ -453,14 +453,16 @@ class SetupScriptTest(unittest.TestCase):
         r = subprocess.run(["bash", SETUP, "status", "win"], capture_output=True, text=True, timeout=30,
                            env={"PATH": tmp, "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1",
                                 "CST_VM_INDEX": os.path.join(tmp, "none.json"),
-                                "CST_VM_CPU_CONF": os.path.join(tmp, "none.conf")})
+                                "CST_VM_CPU_CONF": os.path.join(tmp, "none.conf")},
+                           stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("cannot reach the host from this container", r.stdout)
         self.assertIn("win: virsh not found", r.stdout)
         self.assertNotIn("not found", r.stderr)
 
     def test_registered_in_cst(self):
-        r = subprocess.run(["bash", os.path.join(REPO, "cst"), "help"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["bash", os.path.join(REPO, "cst"), "help"], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
         self.assertIn("vm         the libvirt VM", r.stdout)
         with open(os.path.join(REPO, "cst")) as f:
             text = f.read()

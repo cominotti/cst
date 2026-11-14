@@ -606,7 +606,7 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
                   f'NO_RESTART={no_restart}; rc=0; do_restarts {bt} {wp} || rc=$?; echo "rc=$rc"\n')
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log,
                "SUDO_RC": str(sudo_rc), "WP_RC": str(wp_rc), "LE_OFF": str(le_off)}
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         calls = []
         if os.path.exists(log):
             with open(log) as f:
@@ -697,7 +697,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
                                   "files_report", "apply_le", "header", "plan",
                                   "bearer_check", "revert", "le_off_active") + body)
         e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "REPO": REPO, **env}
-        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
 
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="bt-test-")
@@ -971,7 +971,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn('BT_TIMEOUT="${BT_TIMEOUT:-5}"', src)
         self.assertNotIn("declare -F bluetoothctl", src)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home, "BT_TIMEOUT": "soon"}
-        r = subprocess.run(["bash", SETUP, "plan"], capture_output=True, text=True, env=env)
+        r = subprocess.run(["bash", SETUP, "plan"], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BT_TIMEOUT must be a whole number", r.stderr)
 
@@ -986,13 +986,13 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             r = subprocess.run(
                 ["bash", "-c", 'set -euo pipefail\n' + block + '\n(( BT_TIMEOUT > 0 )) && echo "pos=$BT_TIMEOUT" || echo "zero=$BT_TIMEOUT"\n'],
                 capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": raw},
-            )
+                stdin=subprocess.DEVNULL)
             self.assertEqual(r.returncode, 0, raw + ": " + r.stderr)
             self.assertEqual(r.stderr, "", raw)
             self.assertIn(("pos=" if want != "0" else "zero=") + want, r.stdout, raw)
         for bad in ("1234567890", "-1", " 5"):
             r = subprocess.run(["bash", "-c", block], capture_output=True, text=True,
-                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad})
+                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad}, stdin=subprocess.DEVNULL)
             self.assertEqual(r.returncode, 2, bad)
 
     def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
@@ -1047,7 +1047,7 @@ class OptionsTest(unittest.TestCase):
 
     def run_setup(self, *args, home=None):
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home or tempfile.gettempdir()}
-        return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, env=env)
+        return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
 
     def test_bad_options(self):
         for args in (("plan", "--ldac-quality", "best"), ("plan", "--bearer=usb"), ("plan", "--bogus"),
