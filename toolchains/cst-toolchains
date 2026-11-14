@@ -17,11 +17,13 @@ Commands:
                                  `cst btrfs snapshots setup` uses it)
   auto off                       stop the timer, remove what `auto on` installed,
                                  and remember the choice (~/.config/cst/toolchains-auto.off)
-  config plan | apply [--lean-debuginfo | --no-lean-debuginfo]
+  config plan | apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
                                  the toolchain settings in your home: cargo's
                                  build-dir in ~/.cargo/config.toml, uv's
-                                 link-mode in ~/.config/uv/uv.toml, and the
+                                 link-mode in ~/.config/uv/uv.toml, the
                                  opt-in lean debug info (RUST_LEAN_DEBUGINFO)
+                                 and the opt-in sccache (RUST_SCCACHE; only
+                                 --no-sccache removes it again)
   help
 Every command takes --home DIR (default: your home).
 
@@ -54,6 +56,10 @@ program (toolchains/toolchains.conf in CST), yours in
   PYTHON_UV_INTERVAL=1d      ... at most once per this (0: every run)
   RUST_LEAN_DEBUGINFO=no     yes: `config apply` writes lean debug info for
                              dev builds into ~/.cargo/config.toml
+  RUST_SCCACHE=no            yes: `config apply` installs
+                             ~/.local/libexec/cst/rustc-wrapper and names it
+                             as [build] rustc-wrapper (rustc through sccache)
+  RUST_SCCACHE_CACHE_SIZE=25G  sccache's size cap for ~/.cache/sccache
 Durations: a number with s, m, h, d or w. Sizes: a number with K, M, G or T
 (binary: G = GiB; "GiB", "GB" and "G" all mean 2^30 bytes); the unit is
 required (a bare 150 is an error, not 150 bytes). An unknown key or a bad
@@ -144,6 +150,7 @@ import os
 import pwd
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -324,8 +331,22 @@ def parse_conf(text, known):
     return out
 
 
+def parse_sccache_size(text):
+    """A size for SCCACHE_CACHE_SIZE, in sccache's own spelling: a whole
+    number with K, M, G or T (sccache counts them in 1024s and knows no
+    fractions); 0 is refused (sccache needs a cap)."""
+    n = parse_size(text)
+    if n <= 0:
+        raise ConfigError(f"'{text}' is no cache size (sccache needs one, e.g. 25G)")
+    for unit in "TGM":
+        if n % SIZE_UNITS[unit.lower()] == 0:
+            return f"{n // SIZE_UNITS[unit.lower()]}{unit}"
+    return f"{-(-n // SIZE_UNITS['k'])}K"
+
+
 # Settings that belong to no prune target: {KEY: parser}.
-OPTIONS = {"RUST_LEAN_DEBUGINFO": parse_bool}
+OPTIONS = {"RUST_LEAN_DEBUGINFO": parse_bool, "RUST_SCCACHE": parse_bool,
+           "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size}
 
 
 def parse_off_or_duration(text):
@@ -2750,8 +2771,370 @@ def lean_apply(home, settings, lean):
     return 0
 
 
-def config_lines(home, verb, settings=None, lean=None):
-    """The plan or status lines of the settings (lean: the explicit flag)."""
+# The opt-in sccache item. Off unless RUST_SCCACHE=yes (or config apply
+# --sccache): a small wrapper (toolchains/rustc-wrapper, copied to
+# ~/.local/libexec/cst/) named as rustc-wrapper in [build] of
+# ~/.cargo/config.toml hands rustc to sccache. Unlike lean debug info,
+# --no-sccache removes CST's line again: a wrapper left behind is riskier
+# than a debug setting. RUST_SCCACHE=no alone never removes it.
+WRAPPER_NAME = "rustc-wrapper"
+WRAPPER_REL = ".local/libexec/cst/rustc-wrapper"
+SCCACHE_DIR_REL = ".cache/sccache"
+SCCACHE_DEFAULT_SIZE = "25G"
+SCCACHE_HEAD = ("# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through "
+                "sccache (~/.cache/sccache).")
+SCCACHE_SIZE_LINE = re.compile(r"(?m)^cache_size=\S*(?= # cst: RUST_SCCACHE_CACHE_SIZE)")
+SCCACHE_REBUILD = ("turning it on rebuilds nothing: the cache fills as crates are compiled anew "
+                   "(a new worktree, cargo update, a new toolchain)")
+BUILD_HEADER = re.compile(rf"^{_WS}*\[{_WS}*build{_WS}*\]{_WS}*(?:#.*)?$", re.M)
+KEY_LINE = re.compile(rf"^{_WS}*[A-Za-z0-9_.\"'-]+{_WS}*=", re.M)
+ANY_HEADER = re.compile(rf"^{_WS}*\[", re.M)
+SCCACHE_STATS = re.compile(r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S.*?)\s*$",
+                           re.M)
+
+
+def wrapper_path(home):
+    return os.path.join(home, WRAPPER_REL)
+
+
+def wrapper_text(size):
+    """The wrapper as installed (the cache size written in), or None when its
+    source is not next to this program (the timer's copy has none)."""
+    try:
+        text = read_text(os.path.join(os.path.dirname(os.path.realpath(__file__)), WRAPPER_NAME))
+    except OSError:
+        return None
+    new, n = SCCACHE_SIZE_LINE.subn(f"cache_size={size}", text, count=1)
+    return new if n == 1 else None
+
+
+def wrapper_state(home, text):
+    """ok | change | missing | conflict (not CST's, or a symlink)."""
+    path = wrapper_path(home)
+    st = file_state(path, text)
+    if st == "ok":
+        try:
+            if stat.S_IMODE(os.stat(path).st_mode) != 0o755:
+                st = "change"
+        except OSError:
+            st = "change"
+    return st
+
+
+def sccache_size(settings):
+    return settings.options["RUST_SCCACHE_CACHE_SIZE"] if settings else SCCACHE_DEFAULT_SIZE
+
+
+def plain(data):
+    return json.loads(json.dumps(data))
+
+
+def parses_as(text, expect):
+    try:
+        return plain(tomllib.loads(text)) == expect
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+def sccache_state(home):
+    """{path, error, value (build.rustc-wrapper now, or None), ours, add,
+    remove}: add / remove are the whole new file text, '' when CST cannot
+    make that change safely (each candidate is parsed again and must equal
+    the file with only that one key added or removed)."""
+    path = os.path.join(home, CARGO_CFG_REL)
+    st = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
+    text = read_cfg(path)
+    if text is None:
+        st["error"] = "cannot be read"
+        return st
+    try:
+        data = plain(tomllib.loads(text))
+    except tomllib.TOMLDecodeError as e:
+        st["error"] = f"is not valid TOML ({e})"
+        return st
+    want = wrapper_path(home)
+    build = data.get("build")
+    if build is not None and not isinstance(build, dict):
+        return st                                   # build = 1: no add, no remove
+    value = (build or {}).get("rustc-wrapper")
+    st["value"], st["ours"] = value, value == want
+    keyline = f"rustc-wrapper = {json.dumps(want)}"
+    if value is None:
+        expect = plain(data)
+        expect.setdefault("build", {})["rustc-wrapper"] = want
+        headers = list(BUILD_HEADER.finditer(text))
+        cands = []
+        if len(headers) == 1:
+            h = headers[0]
+            nxt = ANY_HEADER.search(text, h.end())
+            section_end = nxt.start() if nxt else len(text)
+            keys = list(KEY_LINE.finditer(text, h.end(), section_end))
+            # After the table's last key (the build-dir line CST writes),
+            # else right after the header.
+            spots = ([text.find("\n", keys[-1].start())] if keys else []) + [h.end()]
+            for pos in spots:
+                if pos < 0:
+                    pos = len(text)
+                rest = text[pos:]
+                cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest if rest else "\n"))
+        elif not headers:
+            sep = "" if not text or text.endswith("\n") else "\n"
+            cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
+        st["add"] = next((c for c in cands if parses_as(c, expect)), "")
+    elif st["ours"]:
+        lines = text.splitlines(keepends=True)
+        pat = re.compile(rf"{_WS}*rustc-wrapper{_WS}*={_WS}*{re.escape(json.dumps(want))}{_WS}*(?:#.*)?\n?\Z")
+        idx = [i for i, ln in enumerate(lines) if pat.match(ln)]
+        if len(idx) == 1:
+            i = idx[0]
+            drop = {i}
+            if i > 0 and lines[i - 1].startswith(SCCACHE_HEAD[:48]):
+                drop.add(i - 1)
+            # CST's own appended block (a [build] header whose own section
+            # holds only this key; [build.x] subtables may follow): all of it.
+            after = []
+            for ln in lines[i + 1:]:
+                if ANY_HEADER.match(ln):
+                    break
+                after.append(ln)
+            if (i > 1 and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n")) and lines[i - 2].startswith(SCCACHE_HEAD[:48])
+                    and not any(KEY_LINE.match(ln) for ln in after)):
+                drop |= {i - 1, i - 2}
+                if i > 2 and not lines[i - 3].strip():
+                    drop.add(i - 3)
+            new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
+            expect = plain(data)
+            del expect["build"]["rustc-wrapper"]
+            alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
+            if parses_as(new, expect) or parses_as(new, alt):
+                st["remove"] = new
+    return st
+
+
+def sccache_wanted(settings, flag):
+    if flag is not None:
+        return flag, ("--sccache" if flag else "--no-sccache")
+    if settings is None:
+        return False, "bad settings"
+    return settings.options["RUST_SCCACHE"], "RUST_SCCACHE=" + ("yes" if settings.options["RUST_SCCACHE"] else "no")
+
+
+def wrapper_lines(home, verb, text, size):
+    shown = tilde(wrapper_path(home), home)
+    if text is None:
+        return [("?", shown, f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
+                             f"run {PROG} config apply from CST")]
+    st = wrapper_state(home, text)
+    if st == "ok":
+        return [("ok", shown, f"sccache wrapper up to date (cache size {size})")]
+    if st == "conflict":
+        return [("keep", shown, "not CST's file (or a symlink): left alone, so CST writes no rustc-wrapper line")]
+    return [("write", shown, f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; cache size {size})"
+             + ("" if verb == "plan" else f" (fix: {PROG} config apply)"))]
+
+
+def sccache_lines(home, verb, settings, flag):
+    st = sccache_state(home)
+    shown = tilde(st["path"], home)
+    want, why = sccache_wanted(settings, flag)
+    size = sccache_size(settings)
+    off = (f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); "
+           f"{SCCACHE_REBUILD}")
+    if st["error"]:
+        return [("?", shown, f"sccache: the file {st['error']}")]
+    foreign = st["value"] is not None and not st["ours"]
+    yours = f"rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is"
+    if flag is False:
+        if st["ours"]:
+            if st["remove"]:
+                return [("remove", shown, f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
+                                          f"~/{WRAPPER_REL} stays (unused, harmless)")]
+            return [("BY HAND", shown, f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: "
+                                       f"delete it yourself")]
+        return [("keep", shown, f"sccache ({why}): {yours}")] if foreign else [("off", shown, "sccache: off")]
+    text = wrapper_text(size)
+    if not want:
+        if st["ours"]:
+            out = [("on", shown, f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
+                                 f"{PROG} config apply --no-sccache does)")]
+            return out + [ln for ln in wrapper_lines(home, verb, text, size) if ln[0] != "ok"]
+        return [("off", shown, off + (f"; {yours}" if foreign else ""))]
+    if foreign:
+        return [("keep", shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
+    out = wrapper_lines(home, verb, text, size)
+    if st["ours"]:
+        out.append(("ok", shown, f"sccache: rustc-wrapper set ({why})"))
+    elif st["add"]:
+        out.append(("write", shown, f"sccache ({why}): [build] rustc-wrapper = \"~/{WRAPPER_REL}\"; {SCCACHE_REBUILD}"
+                    + ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+    else:
+        out.append(("BY HAND", shown, f"sccache ({why}): CST cannot add the key safely here: put "
+                                      f"rustc-wrapper = \"{wrapper_path(home)}\" into [build] yourself"))
+    return out
+
+
+def write_cfg(path, text):
+    """Replace a config file's text (atomic, same mode). '' or the error."""
+    real = os.path.realpath(path)
+    try:
+        mode = stat.S_IMODE(os.stat(real).st_mode)
+    except OSError:
+        mode = 0o644
+    try:
+        write_atomic(real, text, mode)
+    except OSError as e:
+        return str(e.strerror or e)
+    return ""
+
+
+def install_wrapper(home, size):
+    """0 when the wrapper is in place (written or unchanged), else 1."""
+    text = wrapper_text(size)
+    path = wrapper_path(home)
+    if text is None:
+        say(f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {PROG} config apply from CST",
+            3, err=True)
+        return 1
+    st = wrapper_state(home, text)
+    if st == "conflict":
+        say(f"{NAME}: sccache: {path} is not CST's file (or a symlink): left alone", 3, err=True)
+        return 1
+    if st == "ok":
+        say(f"kept:      {path} (sccache wrapper)")
+        return 0
+    try:
+        write_atomic(path, text, 0o755)
+    except OSError as e:
+        say(f"{NAME}: cannot write {path}: {e.strerror or e}", 3, err=True)
+        return 1
+    say(f"written:   {path} (sccache wrapper, cache size {size})")
+    return 0
+
+
+def sccache_apply(home, settings, flag):
+    want, why = sccache_wanted(settings, flag)
+    st = sccache_state(home)
+    path = st["path"]
+    if st["error"]:
+        if want or flag is False or st["ours"]:
+            say(f"{NAME}: sccache: {path} {st['error']}: left as it is", 3, err=True)
+            return 1
+        return 0
+    if flag is False:
+        if not st["ours"]:
+            return 0
+        if not st["remove"]:
+            say(f"NOTE: sccache: {path}: CST cannot remove its rustc-wrapper line safely: delete it yourself",
+                5, err=True)
+            return 0
+        err = write_cfg(path, st["remove"])
+        if err:
+            say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+            return 1
+        say(f"removed:   {path} (CST's rustc-wrapper line, {why}; ~/{WRAPPER_REL} stays, unused)")
+        return 0
+    if not want:
+        # The line is there (set earlier): keep its wrapper current, so cargo
+        # never names a missing program.
+        return install_wrapper(home, sccache_size(settings)) if st["ours"] else 0
+    if st["value"] is not None and not st["ours"]:
+        say(f"NOTE: sccache: {path}: rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is "
+            f"(sccache not set up)", 5, err=True)
+        return 0
+    # The wrapper first: the line must never name a missing program.
+    if install_wrapper(home, sccache_size(settings)):
+        return 1
+    if st["ours"]:
+        say(f"kept:      {path} (rustc-wrapper already set)")
+        return 0
+    if not st["add"]:
+        say(f"NOTE: sccache: {path}: CST cannot add the key safely: put this into [build] by hand:", 5, err=True)
+        say(f"      rustc-wrapper = {json.dumps(wrapper_path(home))}", 5, err=True)
+        return 0
+    err = write_cfg(path, st["add"])
+    if err:
+        say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        return 1
+    say(f"written:   {path} (rustc-wrapper, {why}: rustc goes through sccache where it is on PATH)")
+    return 0
+
+
+def sccache_sockets(home):
+    """The per-environment server sockets the wrapper names (all
+    environments share $XDG_RUNTIME_DIR, or the fallback folder)."""
+    dirs = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "")
+    if xdg and os.path.isdir(xdg):
+        dirs.append(xdg)
+    dirs.append(os.path.join(home, SCCACHE_DIR_REL, "run"))
+    out = []
+    for d in dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        out += [os.path.join(d, n) for n in names if n.startswith("cst-sccache-") and n.endswith(".sock")]
+    return out
+
+
+def socket_answers(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def sccache_status_lines(home):
+    """The cache's size and, with sccache on this PATH, one line of stats
+    per running server (status runs on the host: its PATH)."""
+    cache = os.path.join(home, SCCACHE_DIR_REL)
+    out = []
+    if os.path.isdir(cache):
+        out.append(f"sccache cache: {where_text(cache, home)} {gib(tree_size(cache))} (sccache keeps it under "
+                   f"its size cap itself, least recently used first; ~/.cache is not in /home snapshots)")
+    else:
+        out.append(f"sccache cache: ~/{SCCACHE_DIR_REL} not there yet")
+    exe = shutil.which("sccache") or ""
+    if not exe:
+        # `cargo install sccache` lands in ~/.cargo/bin, which a PATH may lack.
+        ch = os.environ.get("CARGO_HOME", "")
+        c = os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "sccache")
+        exe = c if os.access(c, os.X_OK) else ""
+    socks = [p for p in sccache_sockets(home) if socket_answers(p)]
+    if not exe:
+        if socks:
+            out.append(f"sccache servers running: {len(socks)} (no sccache on the host's PATH to ask them)")
+        return out
+    if not socks:
+        out.append("sccache: no server running (each environment starts its own on its first build)")
+    for sock in socks:
+        env_id = os.path.basename(sock)[len("cst-sccache-"):-len(".sock")]
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SCCACHE_")}
+        env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1")
+        try:
+            r = subprocess.run([exe, "--show-stats"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, timeout=5)
+            stats = dict(SCCACHE_STATS.findall(r.stdout)) if r.returncode == 0 else {}
+        except (OSError, subprocess.TimeoutExpired):
+            stats = {}
+        if not stats:
+            out.append(f"sccache server {env_id}: no answer")
+            continue
+        shown = ", ".join(f"{k.lower()} {stats[k]}" for k in
+                          ("Compile requests", "Cache hits", "Cache misses", "Cache size", "Max cache size")
+                          if k in stats)
+        out.append(f"sccache server {env_id}: {shown}")
+    return out
+
+
+def config_lines(home, verb, settings=None, lean=None, sccache=None):
+    """The plan or status lines of the settings (lean, sccache: the explicit
+    flags)."""
     out = []
     for name, path, st, _ in config_items(home):
         shown = tilde(path, home)
@@ -2781,6 +3164,7 @@ def config_lines(home, verb, settings=None, lean=None):
             else:
                 out.append(("?", shown, "cannot be read"))
     out += lean_lines(home, verb, settings, lean)
+    out += sccache_lines(home, verb, settings, sccache)
     return out
 
 
@@ -2802,19 +3186,22 @@ def append_text(path, text):
     return ""
 
 
-def cmd_config(home, action, lean=None):
+def cmd_config(home, action, lean=None, sccache=None):
     try:
         settings = Settings(home)
     except ConfigError as e:
         settings = None
-        if lean is None:
-            say(f"note: BAD SETTINGS ({e}): lean debug info is treated as off", 4, err=True)
+        off = [w for w, flag in (("lean debug info", lean), ("sccache", sccache)) if flag is None]
+        if off:
+            say(f"note: BAD SETTINGS ({e}): {' and '.join(off)} treated as off", 4, err=True)
     if action == "plan":
-        lines = config_lines(home, "plan", settings, lean)
+        lines = config_lines(home, "plan", settings, lean, sccache)
         for st, shown, note in lines:
             say(f"  {st:<8} {shown:<24} {note}")
-        if any(st == "write" for st, _, _ in lines):
-            say(f"Apply with: {PROG} config apply" + (" --lean-debuginfo" if lean else ""))
+        if any(st in ("write", "remove") for st, _, _ in lines):
+            flags = {True: " --lean-debuginfo", False: " --no-lean-debuginfo"}.get(lean, "")
+            flags += {True: " --sccache", False: " --no-sccache"}.get(sccache, "")
+            say(f"Apply with: {PROG} config apply" + flags)
         return 0
     rc = 0
     for name, path, st, text in config_items(home):
@@ -2839,7 +3226,8 @@ def cmd_config(home, action, lean=None):
                 rc = 1
                 continue
             say(f"written:   {path}")
-    return max(rc, lean_apply(home, settings, lean))
+    rc = max(rc, lean_apply(home, settings, lean))
+    return max(rc, sccache_apply(home, settings, sccache))
 
 
 # ---- status ---------------------------------------------------------------------------------
@@ -2879,6 +3267,8 @@ def cmd_status(home, now, brief):
     say(f"== toolchain settings ({PROG} config)")
     for st, shown, note in config_lines(home, "status", settings):
         say(f"  {st:<8} {shown:<24} {note}")
+    for line in sccache_status_lines(home):
+        say(f"  {line}")
     st = unit_states(home)
     say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
     for path, ours in stale_files(home):
@@ -2909,7 +3299,7 @@ USAGE = """\
 usage: cst-toolchains status [--brief]
        cst-toolchains prune plan|apply [TARGET...]
        cst-toolchains auto on [--unless-off] | auto off
-       cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo]
+       cst-toolchains config plan|apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
        (each also takes --home DIR; help: cst-toolchains help)"""
 
 
@@ -2929,7 +3319,7 @@ def parse_args(argv):
         else:
             args.append(a)
     out = {"cmd": "help", "action": None, "targets": [], "brief": False, "unless_off": False, "home": home,
-           "lean": None}
+           "lean": None, "sccache": None}
     if not args or args[0] in ("help", "-h", "--help"):
         return out
     cmd, rest = args[0], args[1:]
@@ -2958,11 +3348,13 @@ def parse_args(argv):
                 raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
     elif cmd == "config":
         if not rest or rest[0] not in ("plan", "apply"):
-            raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo]")
+            raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
         out["action"] = rest[0]
         for a in rest[1:]:
             if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
                 out["lean"] = a == "--lean-debuginfo"
+            elif a in ("--sccache", "--no-sccache") and out["sccache"] is None:
+                out["sccache"] = a == "--sccache"
             else:
                 raise Usage(f"config {rest[0]}: unknown argument '{a}'")
     else:
@@ -3000,7 +3392,7 @@ def main(argv):
         if cmd == "status":
             return cmd_status(home, now, a["brief"])
         if cmd == "config":
-            return cmd_config(home, action, a["lean"])
+            return cmd_config(home, action, a["lean"], a["sccache"])
         if cmd == "prune" and action == "plan":
             return cmd_prune(home, now, "plan", a["targets"])
         if cmd == "prune":

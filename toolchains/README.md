@@ -26,8 +26,10 @@ The entry point of the whole repository is [../README.md](../README.md).
 >   than 150 GiB; in folders unused for 6 hours it deletes only their
 >   incremental part. Never a folder used in the last 2 hours or in use
 >   right now. Once a day it also runs `uv cache prune`.
-> - **One opt-in setting**, lean debug info for Rust dev builds: only when you
->   ask for it (`RUST_LEAN_DEBUGINFO=yes`), never by `snapshots setup`.
+> - **Two opt-in settings**: lean debug info for Rust dev builds, only when
+>   you ask for it (`RUST_LEAN_DEBUGINFO=yes`), never by `snapshots setup`;
+>   and sccache for rustc (`RUST_SCCACHE=yes`), so that many git worktrees
+>   reuse the dependencies another one already compiled.
 > - **A report of your Rust toolchains** in `status`, with the ones no project
 >   pins or names. CST never removes a toolchain.
 > - **Everything runs as your user.** Nothing in `/etc`, no `sudo`.
@@ -77,7 +79,7 @@ because only the host can see the processes of every toolbox.
 | `prune apply [TARGET...]` | Deletes now, the same as the hourly run. |
 | `auto on` | Copies the program to `~/.local/lib/cst/`, writes the timer, and starts it. `--unless-off`: not if you ran `auto off` (that is what `snapshots setup` uses). |
 | `auto off` | Stops the timer, removes what `auto on` installed, and remembers that you turned it off. |
-| `config plan` / `config apply` | The toolchain settings ([section 6](#6-the-toolchain-settings-config)). `--lean-debuginfo` / `--no-lean-debuginfo` turn the opt-in lean debug info on or off for this one run, whatever the settings say. |
+| `config plan` / `config apply` | The toolchain settings ([section 6](#6-the-toolchain-settings-config)). `--lean-debuginfo` / `--no-lean-debuginfo` turn the opt-in lean debug info on or off for this one run, whatever the settings say. `--sccache` sets up the opt-in sccache; `--no-sccache` removes CST's `rustc-wrapper` line again ([section 6](#sccache-opt-in)). |
 
 **TARGET** is `LANG:CACHE` (`rust:build`) or just `LANG` (`rust` = every
 target of Rust). Without a TARGET, `prune` runs every target that is enabled
@@ -143,6 +145,8 @@ RUST_BUILD_MAX_TOTAL=200G
 | `PYTHON_UV_ENABLED` | `yes` | `no`: the timer and a bare `prune` leave `python:uv` out. |
 | `PYTHON_UV_INTERVAL` | `1d` | The timer runs `uv cache prune` at most once per this. Named on the command line (`prune apply python:uv`) it always runs. `0`: every hourly run. |
 | `RUST_LEAN_DEBUGINFO` | `no` | `yes`: `config apply` writes lean debug info for dev builds ([section 6](#lean-debug-info-opt-in)). Not a prune setting. |
+| `RUST_SCCACHE` | `no` | `yes`: `config apply` sets up sccache for rustc ([section 6](#sccache-opt-in)). `no` does not remove it; `config apply --no-sccache` does. Not a prune setting. |
+| `RUST_SCCACHE_CACHE_SIZE` | `25G` | The size cap of `~/.cache/sccache`. sccache itself deletes the least recently used entries above it. A whole number with `K`, `M`, `G` or `T`; `0` is an error. |
 
 Every key is `<LANG>_<CACHE>_<SETTING>`. Durations take `s`, `m`, `h`, `d` or
 `w`. Sizes take `K`, `M`, `G` or `T` (`G`, `GB` and `GiB` all mean GiB), and
@@ -226,6 +230,139 @@ line); dependencies get no debug information. Things to know first:
 - To undo, delete the lines under the `# Added by toolchains-setup.sh (CST)
   for RUST_LEAN_DEBUGINFO=yes` comment (and set the setting back to `no`);
   the next build compiles everything once more.
+
+### sccache (opt-in)
+
+Every git worktree has its own cargo build folder, so ten worktrees of one
+project compile the same registry dependencies (tokio, syn, memchr, ...)
+ten times. [sccache](https://github.com/mozilla/sccache) keeps a cache of
+compiled crates in `~/.cache/sccache`: a crate compiled once with the same
+compiler, the same flags and the same sources is copied from there instead
+of being compiled again. Install sccache yourself (for example `cargo
+install sccache --locked`, which lands in `~/.cargo/bin` and so is on the
+PATH of the host and every toolbox), then turn it on with `RUST_SCCACHE=yes`
+in `~/.config/cst/toolchains.conf` or with `cst toolchains config apply
+--sccache` once. `config apply` then:
+
+1. copies `toolchains/rustc-wrapper` to `~/.local/libexec/cst/rustc-wrapper`
+   (mode 0755, the cache size written in; rewritten when it differs, so do
+   not edit the copy), and only then
+2. adds one key to the `[build]` table of `~/.cargo/config.toml`, after
+   CST's `build-dir` line:
+
+```
+[build]
+build-dir = "<home>/.cache/cargo-build/{workspace-path-hash}"
+# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through sccache (~/.cache/sccache).
+rustc-wrapper = "<home>/.local/libexec/cst/rustc-wrapper"
+```
+
+If the file has no `[build]` table, one is appended. The new file is parsed
+again and must equal the old one plus this one key; otherwise (for example
+`build.jobs = 4` written as a dotted key) `config` prints the line to add by
+hand. If `rustc-wrapper` is already set to something else, it is yours:
+`config` says so and changes nothing (not even with `--no-sccache`).
+
+What the wrapper does for each compiler call (`rustc-wrapper <compiler>
+<arguments>`, as cargo runs it):
+
+- **Only `rustc` goes through sccache.** Any other compiler runs directly:
+  Kani's `kani-compiler`, `clippy-driver` (which `cargo clippy` runs for
+  your workspace members), anything else.
+- **No sccache on the PATH: rustc runs directly.** A toolbox without sccache
+  builds as before; the wrapper never fails a build by itself.
+- **`CST_SCCACHE=0` skips sccache for one build**: `CST_SCCACHE=0 cargo
+  build`.
+- **One sccache server per environment.** The host and every toolbox share
+  `$HOME` and the network, and sccache's client finds its server on
+  `127.0.0.1:4226` by default: a server started in one toolbox would compile
+  for the others, with the wrong toolbox's files and programs. The wrapper
+  gives each environment its own unix socket instead,
+  `$XDG_RUNTIME_DIR/cst-sccache-<toolbox name>.sock` (`...-host.sock` on the
+  host; the name comes from `/run/.containerenv`; without
+  `$XDG_RUNTIME_DIR`, `~/.cache/sccache/run/`). sccache documents
+  `SCCACHE_SERVER_UDS` for this; a socket file left by a dead server is
+  replaced when the next one starts. All servers share the one cache folder.
+- **Defaults it sets, only when you have not set them:**
+  `SCCACHE_DIR=~/.cache/sccache`, `SCCACHE_CACHE_SIZE` (from
+  `RUST_SCCACHE_CACHE_SIZE`), `SCCACHE_IGNORE_SERVER_IO_ERROR=1` (a server
+  that breaks off: compile locally) and `SCCACHE_SERVER_UDS`.
+  `SCCACHE_SERVER_UDS` is not set if you set it or `SCCACHE_SERVER_PORT`.
+
+What is cached and what is not (sccache's own limits):
+
+- **The win is registry dependencies.** Cargo compiles them without
+  incremental compilation, so they can be cached and shared by every
+  worktree that uses the same versions and flags.
+- **Except crates with generated code, and everything built on them.** A
+  crate whose build script writes code that the crate pulls in
+  (`include!(concat!(env!("OUT_DIR"), ...))`, as serde, serde_core and
+  serde_json do) records the path of its `OUT_DIR`, and sccache puts that
+  path into the cache key. CST's `build-dir` is a different folder for each
+  worktree, so such a crate is cached only within one worktree. sccache also
+  keys a crate on the exact files of the crates it depends on, so every
+  crate above such a crate misses in a new worktree as well. Leaf crates
+  and crates without generated code (memchr, itoa, syn, quote, ...) are
+  shared. Expect a lower hit rate across worktrees in projects that lean on
+  serde.
+- **Incremental crates are never cached.** In dev builds cargo compiles your
+  workspace members and path dependencies incrementally; the wrapper hands
+  those straight to rustc. `CARGO_INCREMENTAL=0` (for example for agent
+  builds that start from an empty build folder) makes them cacheable too and
+  raises the hit rate.
+- **`CARGO_INCREMENTAL=1` would stop sccache** (releases up to 0.19 refuse
+  to run with it; later ones accept `SCCACHE_ALLOW_INCREMENTAL=1`). The
+  wrapper sets `SCCACHE_ALLOW_INCREMENTAL=1` and removes
+  `CARGO_INCREMENTAL` / `CARGO_BUILD_INCREMENTAL` for sccache only; rustc
+  never reads them (cargo turns them into `-C incremental`, which the
+  wrapper sees).
+- **Crates that are linked are never cached**: `bin`, `proc-macro`,
+  `dylib` and `cdylib` crates.
+- **`cargo check` and `cargo clippy` are cached too, separately.** They
+  emit only metadata (`.rmeta`), which sccache caches as well, but under
+  other entries than `cargo build`: a check does not fill the cache for a
+  build, or the other way round. Under `cargo clippy`, cargo runs
+  `clippy-driver` only for your workspace members (those pass straight
+  through the wrapper); registry dependencies are still compiled by `rustc`
+  and go through sccache.
+
+Things to know:
+
+- **Turning it on rebuilds nothing.** In a test with cargo 1.96 (dev and
+  release builds, the wrapper set through `--config build.rustc-wrapper=...`
+  and through `RUSTC_WRAPPER`), adding or removing it left every crate
+  fresh. The cache fills as crates are
+  compiled anew: a new worktree, `cargo update`, a new toolchain, a pruned
+  build folder.
+- **Pruning is sccache's own.** sccache keeps `~/.cache/sccache` under
+  `RUST_SCCACHE_CACHE_SIZE`, deleting the least recently used entries
+  first; there is no CST prune target for it. Each server checks the cap on
+  its own, so with servers in several environments at once the folder can
+  briefly grow past it. `~/.cache` is its own subvolume and not part of the
+  `/home` snapshots (see [btrfs/SNAPSHOTS.md](../btrfs/SNAPSHOTS.md)), so
+  the cache costs no snapshot space.
+- **A new `RUST_SCCACHE_CACHE_SIZE`** reaches the wrapper with the next
+  `config apply`, and a server reads it when it starts: a running server
+  keeps the old cap until it stops (after 10 minutes without work, or
+  `sccache --stop-server` with that environment's `SCCACHE_SERVER_UDS`).
+- **`status`** shows the item (`off`, `on`, `ok`, `write`), the size of
+  `~/.cache/sccache` and, when sccache is on the host's PATH (`status` runs
+  on the host), one line of statistics per running server: compile
+  requests, hits, misses, cache size.
+- **`RUST_SCCACHE=no` does not remove it**; `config` shows it as `on`. To
+  turn it off: `cst toolchains config apply --no-sccache`. That removes only
+  CST's own line (and its comment, and a `[build]` table CST added only for
+  it); `~/.local/libexec/cst/rustc-wrapper` stays, unused and harmless. Set
+  `RUST_SCCACHE=no` too, or the next `config apply` adds the line again.
+  While the line is there, every `config apply` keeps the wrapper file in
+  place, so cargo never names a missing program.
+- **`snapshots setup` follows your setting**: it runs `config apply` without
+  a flag, so it sets sccache up only if `RUST_SCCACHE=yes`, and never
+  removes it.
+- **Update the timer copy before setting the keys.** The hourly timer runs a
+  copy of the program in `~/.local/lib/cst/`. A copy older than this version
+  does not know `RUST_SCCACHE` and stops at the unknown key (nothing is
+  pruned) until `cst toolchains auto on` copies the new version.
 
 ## 7. `rust:build`: old cargo build folders
 
@@ -509,6 +646,10 @@ builds into each project's `target/` again (inside the `/home` and
 the opt-in lean debug info: delete the lines under `# Added by
 toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes` and set
 `RUST_LEAN_DEBUGINFO=no` (the next dev builds compile everything once).
+The opt-in sccache is the exception: `cst toolchains config apply
+--no-sccache` removes CST's `rustc-wrapper` line (set `RUST_SCCACHE=no`
+too); delete `~/.local/libexec/cst/rustc-wrapper` and `~/.cache/sccache` by
+hand if you want them gone.
 
 ## 12. Files in this folder
 
@@ -516,6 +657,7 @@ toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes` and set
 |---|---|
 | `cst-toolchains` | The program (Python): `status`, `prune`, `auto`, `config`, the targets and the toolchains report. Its `help` explains the details. |
 | `toolchains.conf` | The default settings. |
+| `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
 | `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v`, or all of CST with `python3 -I -B -m unittest` from the repository folder. |
 
 ## 13. Glossary

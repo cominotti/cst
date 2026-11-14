@@ -373,7 +373,7 @@ class SnapExcludeTest(unittest.TestCase):
 
     def entries(self):
         r = subprocess.run(["bash", "-c", 'SRC="$1"; . "$1/setup-snapshots.bash"; printf "%s\\n" "${SNAP_EXCLUDE[@]}"',
-                            "_", BTRFS], capture_output=True, text=True, check=True)
+                            "_", BTRFS], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
         return r.stdout.splitlines()
 
     def test_chrome_cache_no_longer_a_subvolume(self):
@@ -388,7 +388,7 @@ class SnapExcludeTest(unittest.TestCase):
                 f.write("".join(line + "\n" for line in plan_lines))
             r = subprocess.run(["bash", "-c", 'SRC="$1"; . "$1/setup-snapshots.bash"; SNAP_PLAN="$2"; '
                                 'snap_plan_stale /home/u', "_", BTRFS, plan],
-                               capture_output=True, text=True, check=True)
+                               capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
             return r.stdout
 
     def test_old_plan_with_chrome_is_pointed_out(self):

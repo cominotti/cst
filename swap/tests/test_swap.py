@@ -180,7 +180,7 @@ class MarkerTest(unittest.TestCase):
 
     def bash(self, script, *args):
         r = subprocess.run(["bash", "-c", f'set -euo pipefail; source "$0"; {self.defs}\n{script}',
-                            LIB, *args], capture_output=True, text=True, check=True)
+                            LIB, *args], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
         return r.stdout.strip()
 
     def path(self, name, text=None):

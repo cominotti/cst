@@ -235,7 +235,7 @@ class GameProfileAndCliTest(unittest.TestCase):
             r = subprocess.run(
                 ["bash", "-c", cmd, "bash", GAME_PROFILE, fn_file],
                 capture_output=True, text=True, check=True,
-            )
+                stdin=subprocess.DEVNULL)
             self.assertEqual(r.stdout.strip(), "0 1 2 3 6 12 13 14")
 
     def test_off_reverts_in_reverse_order_and_cleans_state(self):
@@ -273,7 +273,7 @@ systemctl() {{ echo "systemctl $*" >> {log_file!r}; }}
 eval "$(sed -n '/^off()/,/^}}/p' {GAME_PROFILE!r})"
 off
 """
-            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
             self.assertEqual(r.stderr, "")
             self.assertFalse(os.path.exists(state_file))
             self.assertFalse(os.path.exists(manual_file))
@@ -366,7 +366,7 @@ on
 cat {state_file!r} > {tmp!r}/state.after_on
 off
 """
-            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
             self.assertEqual(r.stderr, "")
             with open(os.path.join(tmp, "state.after_on")) as f:
                 state_after_on = f.read()
@@ -403,13 +403,13 @@ off
             ["bash", SETUP, "help"],
             env={**os.environ, "CST_PROG": "cst cpu"},
             capture_output=True, text=True, check=True,
-        )
+            stdin=subprocess.DEVNULL)
         self.assertIn("Usage: cst cpu <command> [args]", r.stdout)
 
         bad = subprocess.run(
             ["bash", SETUP, "not-a-command"],
             capture_output=True, text=True,
-        )
+            stdin=subprocess.DEVNULL)
         self.assertEqual(bad.returncode, 2)
 
     def test_e_cores_missing_returns_empty_cleanly(self):
@@ -421,7 +421,7 @@ off
         r = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", f"{fn}\necores=\"$(e_cores)\"\nprintf '<%s>' \"$ecores\""],
             capture_output=True, text=True, check=True,
-        )
+            stdin=subprocess.DEVNULL)
         self.assertEqual(r.stdout, "<>")
 
 

@@ -8,18 +8,27 @@ folder is touched):
 - rust:build incremental pruning: only <profile>/incremental of idle folders;
 - python:uv: `uv cache prune` through a fake uv;
 - the rust toolchains report of `status` (nothing is removed);
-- the opt-in lean debug info of `config`.
+- the opt-in lean debug info of `config`;
+- the opt-in sccache item of `config` and `status` (the rustc-wrapper key in
+  [build], the wrapper file, the per-server statistics) and the wrapper
+  script itself (toolchains/rustc-wrapper) with a fake sccache and fake
+  compilers.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s toolchains/tests -t . -v
 """
 
+import contextlib
 import fcntl
 import hashlib
+import io
 import os
 import shutil
+import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import unittest
@@ -794,12 +803,425 @@ class LeanDebugInfoTest(RulesBase):
         env = dict(os.environ, CST_TOOLCHAINS_SYSTEMCTL=os.path.join(self.bin, "systemctl"))
         self.exe(env["CST_TOOLCHAINS_SYSTEMCTL"], "#!/bin/sh\nexit 0\n")
         r = subprocess.run(["bash", "-c", script, "_", os.path.join(repo, "btrfs"), self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=env)
+                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("lean debug info: off", r.stdout)
         self.assertNotIn("profile", self.cfg())
+        self.assertIn("sccache: off", r.stdout)                    # nor sccache (RUST_SCCACHE=no)
+        self.assertNotIn("rustc-wrapper", self.cfg())
         self.assertIn("build-dir", self.cfg())
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SccacheConfigTest(RulesBase):
+    """The opt-in sccache item of `config`: the rustc-wrapper key in [build]
+    and the wrapper file."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg_path = os.path.join(self.home, ".cargo/config.toml")
+        self.wrapper = os.path.join(self.home, ".local/libexec/cst/rustc-wrapper")
+
+    def cfg(self):
+        with open(self.cfg_path) as f:
+            return f.read()
+
+    def data(self):
+        return tomllib.loads(self.cfg())
+
+    def wrapper_value(self):
+        return (self.data().get("build") or {}).get("rustc-wrapper")
+
+    def test_off_by_default_and_plain_apply_changes_nothing(self):
+        before = self.cfg()
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache: off (opt-in", out)
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.cfg(), before)
+        self.assertFalse(os.path.lexists(self.wrapper))
+
+    def test_flag_inserts_into_the_existing_build_table(self):
+        self.write_cargo_config('# mine\n[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n\n'
+                                '[profile.dev]\ndebug = 1\n' % self.home)
+        before = tomllib.loads(self.cfg())
+        rc, out = self.run_main("config", "plan", "--sccache")
+        self.assertIn('[build] rustc-wrapper = "~/.local/libexec/cst/rustc-wrapper"', out)
+        self.assertIn("Apply with: cst toolchains config apply --sccache", out)
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        text = self.cfg()
+        self.assertEqual(text.count("[build]"), 1)
+        self.assertIn("# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes", text)
+        data = tomllib.loads(text)
+        self.assertEqual(data["build"]["rustc-wrapper"], self.wrapper)
+        del data["build"]["rustc-wrapper"]
+        self.assertEqual(data, before)
+        # Right after build-dir, inside [build].
+        lines = text.splitlines()
+        self.assertTrue(lines[lines.index("[build]") + 3].startswith("rustc-wrapper = "), text)
+        self.assertEqual(self.m.resolve_root(self.home), self.root)
+        st = os.stat(self.wrapper)
+        self.assertEqual(stat_mode(st), 0o755)
+        with open(self.wrapper) as f:
+            self.assertIn("cache_size=25G # cst:", f.read())
+        # Idempotent.
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertIn("rustc-wrapper already set", out)
+        self.assertIn("(sccache wrapper)", out)
+        self.assertEqual(self.cfg(), text)
+        rc, out = self.run_main("config", "plan", "--sccache")
+        self.assertIn("sccache: rustc-wrapper set (--sccache)", out)
+        self.assertNotIn("Apply with", out)
+
+    def test_header_with_a_comment_and_no_keys(self):
+        self.write_cargo_config("[build] # empty for now\n\n[net]\noffline = true\n")
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        data = self.data()
+        self.assertEqual(data["build"], {"rustc-wrapper": self.wrapper})
+        self.assertIs(data["net"]["offline"], True)
+
+    def test_no_build_table_and_no_file(self):
+        self.write_cargo_config('[net]\noffline = true')          # no final newline
+        rc, out = self.run_main("config", "apply", "--sccache", "--lean-debuginfo")
+        self.assertEqual(rc, 0, out)
+        data = self.data()
+        self.assertEqual(data["build"]["rustc-wrapper"], self.wrapper)
+        self.assertIs(data["net"]["offline"], True)
+        os.unlink(self.cfg_path)
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        data = self.data()
+        self.assertEqual(data["build"]["rustc-wrapper"], self.wrapper)
+        self.assertIn("build-dir", data["build"])                  # CST's build-dir came first
+
+    def test_dotted_keys_need_a_hand(self):
+        self.write_cargo_config("build.jobs = 4\n")
+        before = self.cfg()
+        rc, out = self.run_main("config", "plan", "--sccache")
+        self.assertIn("BY HAND", out)
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("put this into [build] by hand", out)
+        self.assertEqual(self.cfg(), before)
+
+    def test_foreign_wrapper_is_refused(self):
+        self.write_cargo_config('[build]\nrustc-wrapper = "/usr/bin/sccache"\n')
+        before = self.cfg()
+        rc, out = self.run_main("config", "plan", "--sccache")
+        self.assertIn('rustc-wrapper = "/usr/bin/sccache" is yours', out)
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("is yours: left as it is", out)
+        self.assertEqual(self.cfg(), before)
+        self.assertFalse(os.path.lexists(self.wrapper))
+        rc, out = self.run_main("config", "apply", "--no-sccache")
+        self.assertEqual(self.cfg(), before)                       # never removed either
+
+    def test_setting_turns_it_on_no_keeps_it_flag_removes_it(self):
+        before = self.cfg()
+        self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_CACHE_SIZE=40GiB\n")
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.wrapper_value(), self.wrapper)
+        with open(self.wrapper) as f:
+            self.assertIn("cache_size=40G # cst:", f.read())
+        # Back to no: the line stays, status says "on", the wrapper is kept current.
+        self.write_conf_raw("RUST_SCCACHE=no\nRUST_SCCACHE_CACHE_SIZE=10G\n")
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache is on", out)
+        self.assertIn("config apply --no-sccache does", out)
+        self.assertIn("outdated", out)
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(self.wrapper_value(), self.wrapper)
+        with open(self.wrapper) as f:
+            self.assertIn("cache_size=10G # cst:", f.read())
+        os.unlink(self.wrapper)                                    # a missing wrapper is put back
+        rc, out = self.run_main("config", "apply")
+        self.assertTrue(os.path.isfile(self.wrapper))
+        rc, out = self.run_main("status")
+        self.assertIn("sccache is on", out)
+        # Removed only with the flag; the wrapper file stays (harmless).
+        rc, out = self.run_main("config", "plan", "--no-sccache")
+        self.assertIn("remove", out)
+        self.assertIn("Apply with: cst toolchains config apply --no-sccache", out)
+        rc, out = self.run_main("config", "apply", "--no-sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("removed:", out)
+        self.assertEqual(self.cfg(), before)
+        self.assertTrue(os.path.isfile(self.wrapper))
+        rc, out = self.run_main("config", "apply", "--no-sccache")
+        self.assertEqual(self.cfg(), before)
+
+    def test_removal_of_csts_own_build_table(self):
+        # Only the sccache step (config apply would add build-dir's [build] first).
+        self.write_cargo_config("[net]\noffline = true\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+        self.assertIn("\n\n# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes", self.cfg())
+        self.assertEqual(self.data()["build"], {"rustc-wrapper": self.wrapper})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+        self.assertEqual(self.cfg(), "[net]\noffline = true\n")
+
+    def test_removal_of_csts_own_build_table_beside_a_subtable(self):
+        # Only a [build.x] subtable: CST appends its own [build]; removal
+        # takes the whole block back, the subtable stays.
+        original = '[build.foo]\nbar = 1\n'
+        self.write_cargo_config(original)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+        self.assertEqual(self.data()["build"], {"foo": {"bar": 1}, "rustc-wrapper": self.wrapper})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+        self.assertEqual(self.cfg(), original)
+        self.assertNotIn("Added by", self.cfg())
+
+    def test_removal_keeps_a_build_table_with_other_keys(self):
+        self.write_cargo_config('[build]\njobs = 2\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+        self.assertEqual(self.cfg(), '[build]\njobs = 2\n')
+
+    def test_removal_leaves_a_changed_line_alone(self):
+        # Our value, but not CST's line (the user wrote it as a dotted key).
+        self.write_cargo_config(f'build.build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n'
+                                f'build.rustc-wrapper = "{self.wrapper}"\n')
+        before = self.cfg()
+        rc, out = self.run_main("config", "plan", "--no-sccache")
+        self.assertIn("BY HAND", out)
+        rc, out = self.run_main("config", "apply", "--no-sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("delete it yourself", out)
+        self.assertEqual(self.cfg(), before)
+
+    def test_foreign_wrapper_file_blocks_the_line(self):
+        os.makedirs(os.path.dirname(self.wrapper))
+        with open(self.wrapper, "w") as f:
+            f.write("#!/bin/sh\nexec \"$@\"\n")
+        before = self.cfg()
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not CST's file", out)
+        self.assertEqual(self.cfg(), before)
+
+    def test_missing_wrapper_source_blocks_the_line(self):
+        self.m.wrapper_text = lambda size: None
+        before = self.cfg()
+        rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.cfg(), before)
+
+    def test_sizes(self):
+        p = self.m.parse_sccache_size
+        self.assertEqual(p("25G"), "25G")
+        self.assertEqual(p("25GiB"), "25G")
+        self.assertEqual(p("1.5G"), "1536M")
+        self.assertEqual(p("2T"), "2T")
+        self.assertEqual(p("100K"), "100K")
+        for bad in ("0", "off", "25"):
+            with self.assertRaises(self.m.ConfigError, msg=bad):
+                p(bad)
+        self.write_conf_raw("RUST_SCCACHE_CACHE_SIZE=0\n")
+        rc, out = self.run_main("config", "plan", "--sccache")
+        self.assertIn("BAD SETTINGS", self.run_main("status")[1])
+
+    def test_parse_args(self):
+        p = self.m.parse_args
+        self.assertIs(p(["config", "apply", "--sccache"])["sccache"], True)
+        self.assertIs(p(["config", "plan", "--no-sccache", "--lean-debuginfo"])["sccache"], False)
+        self.assertIsNone(p(["config", "plan"])["sccache"])
+        for bad in (["config", "apply", "--sccache", "--no-sccache"], ["config", "apply", "--sccache=yes"]):
+            with self.assertRaises(self.m.Usage, msg=bad):
+                p(bad)
+
+    def test_status_lines(self):
+        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"     # no real sccache
+        rc, out = self.run_main("status")
+        self.assertIn("sccache: off (opt-in", out)
+        self.assertIn("sccache cache: ~/.cache/sccache not there yet", out)
+        os.makedirs(os.path.join(self.home, ".cache/sccache/a"))
+        with open(os.path.join(self.home, ".cache/sccache/a/x"), "wb") as f:
+            f.write(b"x" * (3 << 20))
+        rc, out = self.run_main("status")
+        self.assertIn("sccache cache: ~/.cache/sccache 3 MiB", out)
+        self.assertNotIn("sccache server", out)                    # no sccache on PATH, no socket
+        self.assertNotIn("no server running", out)
+
+    def test_status_finds_sccache_in_cargo_bin(self):
+        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"
+        self.exe(os.path.join(self.home, ".cargo/bin/sccache"), "#!/bin/sh\nexit 0\n")
+        rc, out = self.run_main("status")
+        self.assertIn("sccache: no server running", out)
+
+    def test_status_asks_each_running_server(self):
+        run = tempfile.mkdtemp(prefix="cs")
+        self.addCleanup(shutil.rmtree, run)
+        sock_path = os.path.join(run, "cst-sccache-devbox.sock")
+        if len(sock_path) > 100:
+            self.skipTest("temporary folder too long for a unix socket")
+        os.environ["XDG_RUNTIME_DIR"] = run
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(4)
+        self.addCleanup(srv.close)
+        # A stale socket of another environment: nobody listens, not asked.
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(os.path.join(run, "cst-sccache-host.sock"))
+        stale.close()
+        log = os.path.join(self.tmp, "sccache.log")
+        self.exe(os.path.join(self.bin, "sccache"),
+                 '#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"%s"\n'
+                 'printf "Compile requests                    12\\nCache hits                           7\\n'
+                 'Cache hits (Rust)                    7\\nCache misses                         5\\n'
+                 'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n' % log)
+        rc, out = self.run_main("status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("sccache server devbox: compile requests 12, cache hits 7, cache misses 5, "
+                      "cache size 1 GiB, max cache size 25 GiB", out)
+        self.assertNotIn("server host", out)
+        with open(log) as f:
+            self.assertEqual(f.read(), f"{sock_path} --show-stats\n")
+
+
+def stat_mode(st):
+    return stat.S_IMODE(st.st_mode)
+
+
+WRAPPER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rustc-wrapper")
+
+
+class RustcWrapperTest(unittest.TestCase):
+    """toolchains/rustc-wrapper with a fake sccache and fake compilers on a
+    clean environment (no SCCACHE_*, CARGO_INCREMENTAL or XDG_RUNTIME_DIR
+    inherited)."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-wrapper-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = os.path.join(self.tmp, "bin")
+        self.tools = os.path.join(self.tmp, "tools")
+        self.home = os.path.join(self.tmp, "home")
+        self.run_dir = os.path.join(self.tmp, "run")
+        for d in (self.bin, self.tools, self.home, self.run_dir):
+            os.makedirs(d)
+        self.log = os.path.join(self.tmp, "log")
+        # Each fake prints who ran and the variables that matter.
+        report = ('printf "%s|uds=%s|dir=%s|size=%s|io=%s|inc=%s|binc=%s|allow=%s|args=%s\\n" "{who}" '
+                  '"${{SCCACHE_SERVER_UDS-}}" "${{SCCACHE_DIR-}}" "${{SCCACHE_CACHE_SIZE-}}" '
+                  '"${{SCCACHE_IGNORE_SERVER_IO_ERROR-}}" "${{CARGO_INCREMENTAL-unset}}" '
+                  '"${{CARGO_BUILD_INCREMENTAL-unset}}" "${{SCCACHE_ALLOW_INCREMENTAL-unset}}" "$*" >>"{log}"\n')
+        for name in ("rustc", "kani-compiler", "clippy-driver"):
+            self.fake(os.path.join(self.tools, name), report.format(who=name, log=self.log))
+        self.sccache = os.path.join(self.bin, "sccache")
+        self.fake(self.sccache, report.format(who="sccache", log=self.log) + 'exec "$@"\n')
+        self.containerenv = os.path.join(self.tmp, "containerenv")
+        # Only test-owned programs on PATH (a real sccache must never be found):
+        # the two the wrapper runs itself are linked in.
+        self.sys = os.path.join(self.tmp, "sys")
+        os.makedirs(self.sys)
+        for tool in ("mkdir", "chmod"):
+            os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
+        self.sh = shutil.which("sh")
+
+    @staticmethod
+    def fake(path, body):
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(path, 0o755)
+
+    def run_wrapper(self, *args, **env):
+        base = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.home, "XDG_RUNTIME_DIR": self.run_dir,
+                "CST_SCCACHE_CONTAINERENV": self.containerenv}
+        base.update(env)
+        base = {k: v for k, v in base.items() if v is not None}
+        open(self.log, "w").close()
+        r = subprocess.run([self.sh, WRAPPER, *args], env=base, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.log) as f:
+            return [dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
+                    for ln in f.read().splitlines()]
+
+    def rustc(self):
+        return os.path.join(self.tools, "rustc")
+
+    def test_rustc_goes_through_sccache_with_defaults(self):
+        calls = self.run_wrapper(self.rustc(), "--crate-name", "x", "src/lib.rs")
+        self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
+        c = calls[0]
+        self.assertEqual(c["args"], f"{self.rustc()} --crate-name x src/lib.rs")
+        self.assertEqual(c["uds"], os.path.join(self.run_dir, "cst-sccache-host.sock"))
+        self.assertEqual(c["dir"], os.path.join(self.home, ".cache/sccache"))
+        self.assertEqual(c["size"], "25G")
+        self.assertEqual(c["io"], "1")
+        self.assertEqual(c["allow"], "unset")
+
+    def test_bare_rustc_name_counts(self):
+        calls = self.run_wrapper("rustc", "-vV", PATH=f"{self.bin}:{self.tools}:{self.sys}")
+        self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
+
+    def test_other_compilers_pass_straight_through(self):
+        for name in ("kani-compiler", "clippy-driver"):
+            calls = self.run_wrapper(os.path.join(self.tools, name), self.rustc(), "--crate-name", "x")
+            self.assertEqual([c["who"] for c in calls], [name], name)
+            self.assertEqual(calls[0]["uds"], "", name)        # nothing set for them
+
+    def test_escape_hatch_and_missing_sccache(self):
+        calls = self.run_wrapper(self.rustc(), "a", CST_SCCACHE="0")
+        self.assertEqual([c["who"] for c in calls], ["rustc"])
+        os.unlink(self.sccache)
+        calls = self.run_wrapper(self.rustc(), "a")
+        self.assertEqual([c["who"] for c in calls], ["rustc"])
+        self.assertEqual(calls[0]["uds"], "")
+
+    def test_incremental(self):
+        # An incremental compile: sccache cannot cache it, straight to rustc.
+        for args in (["-C", "incremental=/t/inc"], ["-Cincremental=/t/inc"]):
+            calls = self.run_wrapper(self.rustc(), *args)
+            self.assertEqual([c["who"] for c in calls], ["rustc"], args)
+        # CARGO_INCREMENTAL=1: allowed, and dropped for sccache (up to 0.19 it refuses otherwise).
+        for var in ("CARGO_INCREMENTAL", "CARGO_BUILD_INCREMENTAL"):
+            calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", **{var: "1"})
+            self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], var)
+            self.assertEqual(calls[0]["allow"], "1")
+            self.assertEqual(calls[0]["inc"], "unset")
+            self.assertEqual(calls[0]["binc"], "unset")
+        calls = self.run_wrapper(self.rustc(), "x", CARGO_INCREMENTAL="0")
+        self.assertEqual(calls[0]["allow"], "unset")
+        self.assertEqual(calls[0]["inc"], "0")
+
+    def test_server_per_environment(self):
+        with open(self.containerenv, "w") as f:
+            f.write('engine="podman-6.1.3"\nname="hypatia-f45"\nid="abc"\n')
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual(calls[0]["uds"], os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock"))
+        with open(self.containerenv, "w") as f:
+            f.write('name="we ird/../x"\n')
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual(calls[0]["uds"], os.path.join(self.run_dir, "cst-sccache-container.sock"))
+        # Yours win: an address already set is kept (a port too).
+        calls = self.run_wrapper(self.rustc(), "x", SCCACHE_SERVER_UDS="/x.sock", SCCACHE_DIR="/c",
+                                 SCCACHE_CACHE_SIZE="1G", SCCACHE_IGNORE_SERVER_IO_ERROR="0")
+        self.assertEqual((calls[0]["uds"], calls[0]["dir"], calls[0]["size"], calls[0]["io"]),
+                         ("/x.sock", "/c", "1G", "0"))
+        calls = self.run_wrapper(self.rustc(), "x", SCCACHE_SERVER_PORT="4300")
+        self.assertEqual(calls[0]["uds"], "")
+
+    def test_no_runtime_dir_falls_back_under_the_cache(self):
+        calls = self.run_wrapper(self.rustc(), "x", XDG_RUNTIME_DIR=None)
+        run = os.path.join(self.home, ".cache/sccache/run")
+        self.assertEqual(calls[0]["uds"], os.path.join(run, "cst-sccache-host.sock"))
+        self.assertEqual(stat_mode(os.stat(run)), 0o700)
+
+    def test_shell_lint(self):
+        r = subprocess.run(["sh", "-n", WRAPPER], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if shutil.which("shellcheck"):
+            r = subprocess.run(["shellcheck", "-S", "warning", WRAPPER], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout)

@@ -33,7 +33,7 @@
 #   auto off               stops and removes it, and remembers that:
 #                          `cst btrfs snapshots setup` then leaves it off
 #                          (until `auto on`)
-#   config plan | apply [--lean-debuginfo | --no-lean-debuginfo]
+#   config plan | apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
 #                          cargo's build-dir line in ~/.cargo/config.toml and
 #                          uv's link-mode = "clone" in ~/.config/uv/uv.toml.
 #                          A setting already there is never changed. Also run
@@ -41,12 +41,16 @@
 #                          RUST_LEAN_DEBUGINFO=yes or --lean-debuginfo; never
 #                          by snapshots setup): lean debug info for dev builds,
 #                          which makes every workspace rebuild once
+#                          Opt-in (RUST_SCCACHE=yes or --sccache): rustc through
+#                          sccache via ~/.local/libexec/cst/rustc-wrapper as
+#                          [build] rustc-wrapper; --no-sccache removes CST's line
 #   help
 #
 # Settings: toolchains/toolchains.conf in CST (the defaults), then
 # ~/.config/cst/toolchains.conf (yours, wins), e.g. RUST_BUILD_MAX_IDLE=48h,
 # RUST_BUILD_MAX_TOTAL=150G, RUST_BUILD_MIN_KEEP=2h, RUST_BUILD_ORPHANS=yes,
-# RUST_BUILD_INCREMENTAL_IDLE=6h, PYTHON_UV_ENABLED=yes, RUST_LEAN_DEBUGINFO=no.
+# RUST_BUILD_INCREMENTAL_IDLE=6h, PYTHON_UV_ENABLED=yes, RUST_LEAN_DEBUGINFO=no,
+# RUST_SCCACHE=no, RUST_SCCACHE_CACHE_SIZE=25G.
 # Started as root through sudo (also by `cst status`), it runs again as the
 # user who called sudo. Inside a toolbox the program runs itself on the host.
 

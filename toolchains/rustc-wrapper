@@ -1,0 +1,87 @@
+#!/bin/sh
+# managed-by: toolchains-setup.sh (CST): cargo's rustc-wrapper for RUST_SCCACHE=yes.
+#
+# `cst toolchains config apply --sccache` copies this file to
+# ~/.local/libexec/cst/rustc-wrapper and names it in ~/.cargo/config.toml
+# ([build] rustc-wrapper). Cargo then runs every compiler call as
+#     rustc-wrapper <compiler> <arguments...>
+# It hands rustc to sccache, so crates already compiled in another worktree
+# (mostly registry dependencies) come from ~/.cache/sccache instead of being
+# compiled again. Edits here are overwritten by the next config apply.
+#
+# Straight to the compiler (no sccache), always:
+#   - sccache is not on PATH (this toolbox lacks it): never a failed build;
+#   - the compiler is not named rustc (kani-compiler, clippy-driver as
+#     RUSTC_WORKSPACE_WRAPPER, anything else);
+#   - CST_SCCACHE=0 (for one build: CST_SCCACHE=0 cargo build);
+#   - an incremental compile (-C incremental=...): sccache cannot cache it.
+#
+# Set only when unset (yours win): SCCACHE_DIR=~/.cache/sccache,
+# SCCACHE_CACHE_SIZE (RUST_SCCACHE_CACHE_SIZE, written in below),
+# SCCACHE_IGNORE_SERVER_IO_ERROR=1 (a broken server: compile locally), and
+# the server's address. The host and every toolbox share $HOME and the
+# network: one sccache server on 127.0.0.1:4226 would run the compilers of
+# another environment. So each environment gets its own unix socket,
+# $XDG_RUNTIME_DIR/cst-sccache-<toolbox name or host>.sock.
+
+cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
+
+case "${1##*/}" in
+    rustc) ;;
+    *) exec "$@" ;;
+esac
+[ "${CST_SCCACHE:-}" = 0 ] && exec "$@"
+command -v sccache >/dev/null 2>&1 || exec "$@"
+for a in "$@"; do
+    case "$a" in
+        incremental=* | -Cincremental=*) exec "$@" ;;
+    esac
+done
+
+[ -n "${HOME:-}" ] || exec "$@"
+export SCCACHE_DIR="${SCCACHE_DIR:-${HOME}/.cache/sccache}"
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-${cache_size}}"
+export SCCACHE_IGNORE_SERVER_IO_ERROR="${SCCACHE_IGNORE_SERVER_IO_ERROR:-1}"
+
+# sccache up to 0.19 stops with an error when CARGO_INCREMENTAL=1 (or
+# CARGO_BUILD_INCREMENTAL=1) is set, even for crates cargo compiles without
+# incremental; later releases accept SCCACHE_ALLOW_INCREMENTAL=1. rustc
+# itself never reads these variables (cargo turns them into -C incremental,
+# handled above), so they are dropped for sccache.
+if [ "${CARGO_INCREMENTAL:-}" = 1 ] || [ "${CARGO_BUILD_INCREMENTAL:-}" = 1 ]; then
+    export SCCACHE_ALLOW_INCREMENTAL=1
+    unset CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL
+fi
+
+if [ -z "${SCCACHE_SERVER_UDS:-}" ] && [ -z "${SCCACHE_SERVER_PORT:-}" ]; then
+    env_id=host
+    containerenv="${CST_SCCACHE_CONTAINERENV:-/run/.containerenv}"
+    if [ -f "$containerenv" ]; then
+        env_id=container
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                name=*)
+                    line="${line#name=}"
+                    line="${line#\"}"
+                    line="${line%\"}"
+                    [ -n "$line" ] && env_id="$line"
+                    break
+                    ;;
+            esac
+        done <"$containerenv"
+        # Only letters, digits, dot, dash and underscore in a file name.
+        case "$env_id" in
+            *[!A-Za-z0-9._-]*) env_id=container ;;
+        esac
+    fi
+    run_dir="${XDG_RUNTIME_DIR:-}"
+    if [ -z "$run_dir" ] || [ ! -d "$run_dir" ] || [ ! -w "$run_dir" ]; then
+        run_dir="${SCCACHE_DIR}/run"
+        if [ ! -d "$run_dir" ]; then
+            { mkdir -p "$run_dir" && chmod 700 "$run_dir"; } 2>/dev/null || exec "$@"
+        fi
+    fi
+    export SCCACHE_SERVER_UDS="${run_dir}/cst-sccache-${env_id}.sock"
+fi
+
+exec sccache "$@"

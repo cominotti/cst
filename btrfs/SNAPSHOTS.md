@@ -832,6 +832,10 @@ built in during the last **2 hours** or in use (also by a running
 (`RUST_LEAN_DEBUGINFO`, see the toolchains README): it passes
 `--no-lean-debuginfo`, because turning it on makes every workspace rebuild
 once.
+The opt-in sccache item (`RUST_SCCACHE`) gets no flag: `setup` sets it up
+only if you set `RUST_SCCACHE=yes` yourself, and never removes it. Its cache,
+`~/.cache/sccache`, is in the `~/.cache` subvolume, so it is not in the
+`/home` snapshots.
 
 If `build-dir` is not exactly the line above (you set your own), `setup`
 prints why. The timer is then installed only for `uv cache prune` (if uv is

@@ -548,7 +548,7 @@ systemctl() {
                                   "lw_report", "lw_install", "lw_remove", "lw_last_failure") + body)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "LOG": log,
                "REPO": os.path.dirname(os.path.dirname(WATCH)), **(extra_env or {})}
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         calls = []
         if os.path.exists(log):
             with open(log) as f:
@@ -657,7 +657,7 @@ le_plan() {{ :; }}; lw_plan() {{ :; }}
         self.addCleanup(shutil.rmtree, tmp)
         log = os.path.join(tmp, "log")
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log})
+                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log}, stdin=subprocess.DEVNULL)
         r.steps = []
         if os.path.exists(log):
             with open(log) as f:
