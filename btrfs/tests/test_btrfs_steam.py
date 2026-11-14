@@ -1147,7 +1147,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
                  'systemctl() { echo "systemctl $*" >&3; }; bulk_run() { echo "bulk_run $*"; return 5; }; ')
         r = subprocess.run(["bash", "-c", 'SRC="$1"; shift; . "${SRC}/setup-snapshots.bash"; target_user=u; '
                             + stubs + 'bulk_cmd "$@"; echo "rc $?"', "_", os.path.dirname(TOOL), *args],
-                           capture_output=True, text=True, check=True)
+                           capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
         return r.stdout.splitlines()
 
     def test_steam_apply_installs_the_boot_runtime_first(self):

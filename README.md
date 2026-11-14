@@ -393,7 +393,10 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `btrfs-snapshot-core`, `btrfs-bulk`, `chrome-cache`, `cst-link.bash`, the `cpu`
   module, the `swap` module, the `bluetooth` module, the `toolchains` module, the
   `vm` module and `cst doctor`. The unit tests need no root and no btrfs:
-  `python3 -I -B -m unittest`, run from this folder, runs all of them.
+  `python3 -I -B tests/run_unit.py`, run from this folder, runs all of them with a
+  socket as stdin (the way CI runs them; see [AGENTS.md](AGENTS.md), "Test gotchas").
+- `AGENTS.md`: rules for changing this repository (for people and coding agents),
+  and the test gotchas with the gates that enforce them.
 - `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).
   Tier 2 runs a `--privileged` container that sees the host's disks, so it
   refuses to start unless you opt in with `CST_E2E_ALLOW_PRIVILEGED=1` (or

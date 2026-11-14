@@ -941,7 +941,7 @@ class CommandLineTest(Scratch):
         for fx in fixes:
             self.assertNotIn("(", fx)
             self.assertNotIn("   ", fx)
-            r2 = subprocess.run(["bash", "-n", "-c", fx], capture_output=True)
+            r2 = subprocess.run(["bash", "-n", "-c", fx], capture_output=True, stdin=subprocess.DEVNULL)
             self.assertEqual(r2.returncode, 0, fx)
 
     def test_registry_order(self):

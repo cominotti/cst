@@ -36,7 +36,7 @@ class CstLinkTest(unittest.TestCase):
             'runuser() { shift 3; "$@"; }\n'
             f'link_cst_command {user}\n')
         return subprocess.run(["bash", "-c", script, LIB, self.home],
-                              capture_output=True, text=True, check=True)
+                              capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
 
     def test_creates_link_once(self):
         r = self.run_link()

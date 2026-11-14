@@ -12,11 +12,11 @@ cmds: [
 	{
 		name:        "test unit"
 		category:    "test"
-		description: "Run all unit tests cleanly without generating __pycache__"
+		description: "Run all unit tests (with a socket as stdin, see tests/run_unit.py) without generating __pycache__"
 		implementations: [{
 			platforms: [{name: "linux"}]
 			runtimes: [{name: "native"}]
-			script: {content: "python3 -I -B -m unittest discover -s . -v"}
+			script: {content: "python3 -I -B tests/run_unit.py -v"}
 		}]
 	},
 	{
@@ -136,7 +136,7 @@ cmds: [
 				[[ "${INVOWK_FLAG_ALLOW_PRIVILEGED:-false}" == "true" ]] && e2e_args+=(--allow-privileged)
 				# Stop before the long unit and lint runs if tier 2 is not allowed here.
 				python3 -I -B tests/e2e/run.py "${e2e_args[@]}" --check-only
-				python3 -I -B -m unittest discover -s . -v
+				python3 -I -B tests/run_unit.py -v
 				scripts=(
 					cst
 					cst-link.bash
