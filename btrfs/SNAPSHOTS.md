@@ -412,6 +412,10 @@ damaged, you wipe the emulator and start it again. The Android SDK, next to
 them in spirit, is written once and read many times, so it stays
 copy-on-write in `toolchains/android/sdk`.
 
+Outside `~/Bulk`, the folders of libvirt and GNOME Boxes VM images can get
+`+C` too, with the same trade-off: `cst vm nocow`
+([../vm/README.md, section 9](../vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write)).
+
 The script also puts `+C` on `~/Bulk/emulators` and `~/Bulk/emulators/android`
 themselves. A folder's `+C` is passed on to what is created in it later, so a
 folder you add there for another emulator (for example

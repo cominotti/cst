@@ -23,14 +23,39 @@
 #                          never restores by itself
 #   list [VM]              (user) the backups, oldest first
 #   status [VM]            (user) the VM's state, CPU mode and CET/MBEC
-#                          disables, the last backup, and the virtualization
-#                          packages that changed since it
+#                          disables, whether its hardware matches `tune`, the
+#                          last backup, the virtualization packages that
+#                          changed since it, and the NOCOW state of the VM
+#                          image folders
+#   tune plan [VM] [--guest-has-virtio]
+#                          (user) the definition changes that give the VM the
+#                          recommended hardware: disks on virtio-scsi with
+#                          cache='none' io='native' discard='unmap'
+#                          detect_zeroes='unmap', network card virtio (same
+#                          MAC). Windows (or a guest not known to be Linux):
+#                          bus and network card only with --guest-has-virtio,
+#                          after the virtio drivers are in the guest (the plan
+#                          prints how). Changes nothing
+#   tune apply [VM] [--guest-has-virtio]
+#                          (root) the same, asks, saves the old definition
+#                          (0600) and runs virsh define: effective at the next
+#                          start
+#   nocow plan [--root]    (user) the VM image folders (libvirt system and
+#                          session, GNOME Boxes RPM and Flatpak): NOCOW mark
+#                          (+C) and the images still copy-on-write, with the
+#                          commands to convert each. --root: through sudo,
+#                          to read the root-only /var/lib/libvirt/images
+#   nocow apply            (user, sudo for the system folder) sets +C on the
+#                          folders; never converts an existing image
 #   help
 #
 # VM defaults to VM_NAME of /etc/cpu-setup/cpu-setup.conf (win11-devbox).
-# backup runs on the host only; list and status also work in a toolbox
-# (they run on the host through flatpak-spawn). Old backups are removed by
-# hand (sudo rm -r the folder); the next backup drops them from the list.
+# Settings: /etc/cst/vm.conf (optional): VM_NOCOW, VM_TUNE_DISK_BUS,
+# VM_TUNE_DISK_DRIVER, VM_TUNE_NIC, each yes (default) or no.
+# backup, tune apply and nocow apply run on the host only; list, status,
+# tune plan and nocow plan also work in a toolbox (they run on the host
+# through flatpak-spawn). Old backups are removed by hand (sudo rm -r the
+# folder); the next backup drops them from the list.
 
 set -Eeuo pipefail
 
@@ -55,9 +80,32 @@ cmd="${1:-help}"
 [[ $# -gt 0 ]] && shift
 orig_args=("${cmd}" "$@")
 
+# Read-only commands run as the user; "user" commands change only the
+# user's files and call sudo themselves for the rest; "root" ones re-run
+# through sudo.
+sub="${1:-}"
+mode="root"
 case "${cmd}" in
     help|-h|--help) usage; exit 0 ;;
-    list|status)
+    list|status) mode="read" ;;
+    tune)
+        case "${sub}" in
+            plan) mode="read" ;;
+            apply) ;;
+            *) echo "Usage: ${PROG} tune plan|apply [VM] [--guest-has-virtio]" >&2; exit 2 ;;
+        esac ;;
+    nocow)
+        case "${sub}" in
+            plan) mode="read"; for a in "$@"; do [[ "${a}" == --root ]] && mode="root"; done ;;
+            apply) mode="user" ;;
+            *) echo "Usage: ${PROG} nocow plan [--root] | nocow apply" >&2; exit 2 ;;
+        esac ;;
+    backup) ;;
+    *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
+esac
+
+case "${mode}" in
+    read)
         # Read-only, as any user: the index is world-readable and libvirt's
         # system connection answers the user's queries (libvirt group or polkit rule).
         if in_container; then
@@ -70,15 +118,16 @@ case "${cmd}" in
         fi
         CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
         ;;
-    backup) ;;
-    *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
 esac
 
-# ---- root commands -------------------------------------------------------------
+# ---- commands that change the host ------------------------------------------------
 if in_container; then
     echo "'${PROG} ${orig_args[*]}' must run on the host, not inside a toolbox/container." >&2
     echo "In a host terminal: ${PROG} ${orig_args[*]}" >&2
     exit 1
+fi
+if [[ "${mode}" == user ]]; then
+    CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
 fi
 if [[ ${EUID} -ne 0 ]]; then
     # sudo resets the environment: CST_PROG is handed over explicitly.

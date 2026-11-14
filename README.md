@@ -51,7 +51,7 @@ does nothing by itself: it passes your command to one **module**.
 | `cst swap ...` | `swap-setup.sh` | `swap/` | Swap and memory: zswap, encrypted NVMe swap, zram off, swap settings, memory floor for the VM, swap status per cgroup | [swap/README.md](swap/README.md) |
 | `cst bluetooth ...` | `bluetooth-setup.sh` | `bluetooth/` | Bluetooth audio: LE Audio (BAP/LC3) ready in BlueZ but off in PipeWire by default, adaptive LDAC quality for the headset, checks of both | [bluetooth/README.md](bluetooth/README.md) |
 | `cst toolchains ...` | `toolchains-setup.sh` | `toolchains/` | Toolchain caches and settings: hourly pruning of cargo's build folders (old, orphaned, and the incremental part of idle ones) and a daily `uv cache prune`; cargo's `build-dir`, uv's `link-mode` and an opt-in lean debug info for Rust dev builds; a report of installed Rust toolchains (later also Go, npm and Maven caches). Runs as your user | [toolchains/README.md](toolchains/README.md) |
-| `cst vm ...` | `vm-setup.sh` | `vm/` | The libvirt VM `win11-devbox`: a backup of its disks, UEFI variables and TPM state (instant reflink copies on btrfs, or `--full` real copies) before a risky upgrade, a list of the backups, and a status that shows the CPU mode, the CET/MBEC fix and whether QEMU/libvirt changed since the last backup. `backup` needs root (it calls sudo); `list` and `status` run as your user, also in a toolbox | [vm/README.md](vm/README.md) |
+| `cst vm ...` | `vm-setup.sh` | `vm/` | The libvirt VM `win11-devbox`: a backup of its disks, UEFI variables and TPM state (instant reflink copies on btrfs, or `--full` real copies) before a risky upgrade, a list of the backups, and a status that shows the CPU mode, the CET/MBEC fix and whether QEMU/libvirt changed since the last backup. `tune plan`/`apply`: the recommended virtual hardware (disks on virtio-scsi with `cache='none'`, virtio network card, same MAC; Windows only after its virtio drivers are installed). `nocow plan`/`apply`: the VM image folders without copy-on-write (existing images are never converted). `backup` and `tune apply` need root (they call sudo); `nocow apply` calls sudo only for `/var/lib/libvirt/images`; `list`, `status`, `tune plan` and `nocow plan` run as your user, also in a toolbox | [vm/README.md](vm/README.md) |
 | `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk), a host-passthrough VM still given CET/MBEC by QEMU 11, and QEMU/libvirt changed since the rollback deployment without a pinned rollback or a VM backup; most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
 
 Three more commands belong to `cst` itself:
@@ -134,7 +134,8 @@ for `toolchains`: `config apply` and `auto on`) yourself.
 - Inside a toolbox, the root commands stop with
   `'<command>' must run on the host, not inside a toolbox/container ...`.
   Only `report` and `watch` (of `btrfs` and `cpu`), `cst toolchains`
-  (it runs itself on the host), `cst vm list` / `cst vm status`,
+  (it runs itself on the host), `cst vm list` / `status` / `tune plan` /
+  `nocow plan`,
   `cst swap plan` / `cst swap status` and
   `cst bluetooth plan` / `status` / `revert --check` also work inside a
   toolbox.
@@ -353,6 +354,8 @@ swap and memory, with counters since boot.
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |
 | Docker cleanup | `cst btrfs docker-gc disable` | [btrfs/README.md, section 11.3](btrfs/README.md#113-what-changes-on-my-system-and-how-to-undo) |
 | Pruning of old cargo build folders | `cst toolchains auto off` (the cargo and uv settings: by hand) | [toolchains/README.md, section 11](toolchains/README.md#11-how-to-undo) |
+| VM hardware (`cst vm tune apply`) | `sudo virsh -c qemu:///system define` the saved `/var/lib/libvirt/cst-backups/VM/definitions/*.before-tune.xml` (for Windows, before uninstalling the virtio drivers) | [vm/README.md, section 8](vm/README.md#8-cst-vm-tune-the-recommended-virtual-hardware) |
+| NOCOW image folders (`cst vm nocow apply`) | `chattr -C FOLDER` (`sudo` for `/var/lib/libvirt/images`); affects only files created later, like `+C` | [vm/README.md, section 9](vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write) |
 | VM backups | Nothing runs by itself; delete old backups by hand (`sudo rm -r /var/lib/libvirt/cst-backups/VM/TIMESTAMP`) | [vm/README.md, section 6](vm/README.md#6-removing-old-backups) |
 | CPU tools | `cst cpu uninstall` (and `docker-slice uninstall`, `experiment off NAME`) | [cpu/README.md, section 13](cpu/README.md#13-how-to-undo-everything) |
 | Swap and memory | No command: a few steps by hand (switching swap off needs free RAM) | [swap/README.md, section 8](swap/README.md#8-how-to-undo) |
@@ -370,7 +373,7 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | Module | Works as is on another PC? | What to adjust for your hardware |
 |---|---|---|
 | `cst doctor` | Yes (any Fedora `rpm-ostree` / `btrfs` / `systemd` desktop) | Nothing — it is 100% read-only and discovers deployments, units and btrfs mounts dynamically. |
-| `cst vm` | Yes, for any libvirt VM with file disks | `cst vm backup NAME` (default: `VM_NAME` in `/etc/cpu-setup/cpu-setup.conf`). Reflink copies need the backup folder `/var/lib/libvirt/cst-backups` on the same btrfs filesystem as the disks; otherwise use `--full`. |
+| `cst vm` | Yes, for any libvirt VM with file disks | `cst vm backup NAME` (default: `VM_NAME` in `/etc/cpu-setup/cpu-setup.conf`). Reflink copies need the backup folder `/var/lib/libvirt/cst-backups` on the same btrfs filesystem as the disks; otherwise use `--full`. `cst vm tune plan NAME` works for any guest (Windows needs the virtio drivers first); `/etc/cst/vm.conf` switches each part off. |
 | `cst toolchains` | Yes | Override retention or size limits in `~/.config/cst/toolchains.conf` (defaults in [`toolchains/toolchains.conf`](toolchains/toolchains.conf)). |
 | `cst bluetooth` | Yes, once you set your headset's MAC | Put `DEVICE=AA:BB:CC:DD:EE:FF` (and optional `LDAC_QUALITY`, `LE_AUDIO`, `BEARER`) in `~/.config/cst/bluetooth.conf` (defaults in [`bluetooth/bluetooth.conf`](bluetooth/bluetooth.conf)), or pass `--device`. |
 | `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (or in [`cpu-setup.sh`](cpu-setup.sh) / [`cpu/game-profile`](cpu/game-profile)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. |

@@ -20,18 +20,46 @@ Usage:
   list [VM]              the backups, from /var/lib/cst/vm-backups.json
                          (readable by every user)
   status [VM]            the VM's state, its CPU mode and whether the CET/MBEC
-                         features are disabled, the last backup, and whether
-                         the virtualization packages changed since then
+                         features are disabled, whether its disks and network
+                         card match `tune`, the last backup, whether the
+                         virtualization packages changed since then, and the
+                         NOCOW state of the VM image folders
+  tune plan [VM] [--guest-has-virtio]
+                         the changes to the definition that give the VM the
+                         recommended virtual hardware: disks on virtio-scsi,
+                         cache='none' io='native' discard='unmap'
+                         detect_zeroes='unmap', network card virtio (same
+                         MAC). For a Windows guest (or one not known to be
+                         Linux), the bus and network card changes need
+                         --guest-has-virtio: the virtio drivers must be in
+                         the guest first. Changes nothing
+  tune apply [VM] [--guest-has-virtio]
+                         (root) the same, asks, saves the old definition and
+                         runs `virsh define`: effective at the VM's next start
+  nocow plan [--root]    the VM image folders (libvirt system and session,
+                         GNOME Boxes RPM and Flatpak): btrfs, NOCOW mark (+C),
+                         and the images in them still copy-on-write, with the
+                         commands to convert each. --root: through sudo, to
+                         read the root-only system folder. Changes nothing
+  nocow apply            sets +C on those folders (sudo for the system one;
+                         creates /var/lib/libvirt/images when libvirt is
+                         installed). Never converts an existing image
   help
 
 VM defaults to VM_NAME in /etc/cpu-setup/cpu-setup.conf (win11-devbox).
+Settings (all optional, default yes): /etc/cst/vm.conf with
+VM_NOCOW, VM_TUNE_DISK_BUS, VM_TUNE_DISK_DRIVER, VM_TUNE_NIC (yes or no).
 Exit status: 0 fine, 1 refused or failed, 2 usage.
 """
 
+import ctypes
 import datetime
+import difflib
 import fcntl
+import io
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -69,7 +97,19 @@ GIB = 1024 ** 3
 FULL_MARGIN = (GIB, 0.05)     # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
 FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, FS_NOCOW_FL = 0x80086601, 0x40086602, 0x00800000
 
-USAGE = f"usage: {PROG} backup [VM] [--full] | list [VM] | status [VM] | help"
+USAGE = (f"usage: {PROG} backup [VM] [--full] | list [VM] | status [VM] | "
+         f"tune plan|apply [VM] [--guest-has-virtio] | nocow plan [--root] | nocow apply | help")
+
+# Settings of this module (optional file; every knob defaults to yes).
+VM_CONF = os.environ.get("CST_VM_CONF") or "/etc/cst/vm.conf"     # override: tests
+KNOBS = ("VM_NOCOW", "VM_TUNE_DISK_BUS", "VM_TUNE_DISK_DRIVER", "VM_TUNE_NIC")
+
+# VM image folders. The system one is libvirt's default storage pool.
+SYSTEM_IMAGES = os.environ.get("CST_VM_SYSTEM_IMAGES") or "/var/lib/libvirt/images"   # override: tests
+USER_IMAGES = ((".local/share/libvirt/images", "libvirt qemu:///session: virt-manager, virsh as your user"),
+               (".local/share/gnome-boxes/images", "GNOME Boxes (RPM)"),
+               (".var/app/org.gnome.Boxes/data/gnome-boxes/images", "GNOME Boxes (Flatpak)"))
+BTRFS_MAGIC = 0x9123683E
 
 
 class Usage(Exception):
@@ -376,10 +416,7 @@ def check_shut_off(vm):
     if state != "shut off":
         raise Refused(f"{vm} is {state or 'in an unknown state'}: shut it down first (a copy of a running "
                       f"VM is not consistent). From Windows, or: virsh -c {URI} shutdown {vm}")
-    rc, so, err = virsh("list", "--all", "--with-managed-save", "--name")
-    if rc != 0:
-        raise Refused(f"virsh list --with-managed-save: {first_line(err) or f'exit {rc}'}")
-    if vm in (ln.strip() for ln in so.splitlines()):
+    if has_managed_save(vm):
         raise Refused(f"{vm} was saved (managed save), not shut down: its disks are only consistent with "
                       f"the saved memory. Start it and shut Windows down, then run the backup again "
                       f"(or drop the saved memory: virsh -c {URI} managedsave-remove {vm})")
@@ -582,58 +619,703 @@ def cmd_status(vm):
                       f"QEMU 11; fix: {CST} cpu vm-pin plan)")
             else:
                 print(f"  cpu mode {mode}: disabled {' '.join(names)}")
+        if rc == 0:
+            print(f"  {tune_line(xml_text)}")
     entries = sorted((e for e in read_index() if e["vm"] == vm), key=lambda e: e.get("epoch") or 0)
     if not entries:
         print(f"  last backup: none (make one with the VM shut off: {CST} vm backup)")
-        return 0
-    last = entries[-1]
-    print(f"  last backup: {describe_entry(last)}")
-    changes = version_changes(last.get("versions"), package_versions())
-    if changes:
-        print("  virtualization packages changed since then (back up again once the VM works on them):")
-        for c in changes:
-            print(f"    {c}")
     else:
-        print("  virtualization packages: unchanged since the last backup")
+        last = entries[-1]
+        print(f"  last backup: {describe_entry(last)}")
+        changes = version_changes(last.get("versions"), package_versions())
+        if changes:
+            print("  virtualization packages changed since then (back up again once the VM works on them):")
+            for c in changes:
+                print(f"    {c}")
+        else:
+            print("  virtualization packages: unchanged since the last backup")
+    if knobs()["VM_NOCOW"]:
+        print("VM image folders (NOCOW):")
+        for d in image_dirs():
+            for ln in nocow_lines(probe_dir(d), verbose=False):
+                print(f"  {ln}")
     return 0
+
+
+# ---- settings ------------------------------------------------------------------------------------
+def knobs(path=None):
+    """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
+    conf = read_conf(path or VM_CONF)
+    return {k: conf.get(k, "yes").strip().lower() not in ("no", "0", "false", "off") for k in KNOBS}
+
+
+def user_home():
+    """The home of the user who runs CST: under sudo, SUDO_USER's (sudo may
+    set HOME to /root), else HOME."""
+    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+        try:
+            return pwd.getpwnam(os.environ["SUDO_USER"]).pw_dir
+        except KeyError:
+            pass
+    return os.path.expanduser("~")
+
+
+# ---- NOCOW of the VM image folders -----------------------------------------------------------------
+def is_btrfs(path):
+    """True/False, or None when statfs fails (statfs needs only search
+    permission, so a root folder of mode 0711 still answers)."""
+    buf = ctypes.create_string_buffer(256)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.statfs(os.fsencode(path), buf) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    return struct.unpack_from("l", buf.raw, 0)[0] == BTRFS_MAGIC
+
+
+def inode_flags(path):
+    """The inode flags (FS_IOC_GETFLAGS), or None when this user may not read
+    them: the system folder is root's (0711) and the images are qemu's (0600).
+    Unreadable is not "copy-on-write": callers say "not readable"."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        buf = fcntl.ioctl(fd, FS_IOC_GETFLAGS, struct.pack("l", 0))
+        return struct.unpack("l", buf)[0]
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def set_nocow(path):
+    """Set +C on a folder this user owns (files created in it later inherit
+    it). Raises OSError."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        buf = fcntl.ioctl(fd, FS_IOC_GETFLAGS, struct.pack("l", 0))
+        flags = struct.unpack("l", buf)[0] | FS_NOCOW_FL
+        fcntl.ioctl(fd, FS_IOC_SETFLAGS, struct.pack("l", flags))
+    finally:
+        os.close(fd)
+
+
+def image_dirs(home=None):
+    """[{scope, path, what}] of every known VM image folder."""
+    home = home or user_home()
+    out = [{"scope": "system", "path": SYSTEM_IMAGES, "what": "libvirt qemu:///system: virt-manager, virsh"}]
+    out += [{"scope": "user", "path": os.path.join(home, rel), "what": what} for rel, what in USER_IMAGES]
+    return out
+
+
+def flag_state(flags):
+    return None if flags is None else bool(flags & FS_NOCOW_FL)
+
+
+def probe_dir(d, readable=lambda p: p):
+    """What a VM image folder looks like. readable maps a path to where this
+    process reads it (the doctor in a toolbox: under /run/host). Adds:
+    present, link (the target when the path is a symbolic link: never
+    created, marked or listed; present is then False), btrfs (None: unknown), nocow (True/False/None: not readable),
+    listed (False: the folder cannot be listed by this user), images
+    [{name, path, alloc, size, nocow}] (regular files, not .iso, not the
+    *.cow-old leftovers of a conversion) and leftovers [names]."""
+    d = dict(d)
+    rp = readable(d["path"])
+    link = os.readlink(rp) if os.path.islink(rp) else None
+    d.update(present=link is None and os.path.isdir(rp), link=link, btrfs=None, nocow=None, listed=False,
+             images=[], leftovers=[])
+    if not d["present"]:
+        return d
+    d["btrfs"] = is_btrfs(rp)
+    if d["btrfs"] is False:
+        return d
+    d["nocow"] = flag_state(inode_flags(rp))
+    try:
+        entries = sorted(os.scandir(rp), key=lambda e: e.name)
+    except OSError:
+        return d
+    d["listed"] = True
+    for e in entries:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            st = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if e.name.endswith(".cow-old"):
+            d["leftovers"].append(e.name)
+            continue
+        if e.name.lower().endswith(".iso"):
+            continue             # read-only installers: nothing to gain
+        d["images"].append({"name": e.name, "path": os.path.join(d["path"], e.name),
+                            "alloc": st.st_blocks * 512, "size": st.st_size,
+                            "nocow": flag_state(inode_flags(os.path.join(rp, e.name)))})
+    return d
+
+
+def convert_lines(img, system):
+    """The commands that make an existing image NOCOW (never run by CST)."""
+    q = shlex.quote
+    s = "sudo " if system else ""
+    f, old = q(img["path"]), q(img["path"] + ".cow-old")
+    return [f"{s}mv {f} {old}",
+            f"{s}install -m 0600 /dev/null {f}      # new empty file, private until cp -a sets the mode",
+            f"{s}chattr +C {f}",
+            f"{s}cp -a --reflink=never --sparse=always {old} {f}",
+            f"{s}cmp {old} {f} && echo same",
+            f"# start the VM; after a good boot: {s}rm {old}"]
+
+
+def nocow_lines(d, verbose=True):
+    """Lines describing one probed folder (plan and status)."""
+    head = f"{d['path']}  [{d['what']}]"
+    if d.get("link") is not None:
+        return [f"{head}: a symbolic link to {d['link']}: not managed by CST (set the mark on the real "
+                f"folder by hand if it is on btrfs: chattr +C <folder>)"]
+    if not d["present"]:
+        return [f"{head}: not present"]
+    if d["btrfs"] is False:
+        return [f"{head}: not on btrfs (NOCOW does not apply)"]
+    out = [head]
+    root_hint = f"{PROG} nocow plan --root"
+    if d["nocow"] is None:
+        out.append(f"  NOCOW mark (+C): not readable as your user (root-only folder): {root_hint}")
+    else:
+        out.append("  NOCOW mark (+C): " + ("yes" if d["nocow"] else
+                                           f"no: {PROG} nocow apply sets it (only files created later get it)"))
+    if not d["listed"]:
+        if d["nocow"] is not None or d["scope"] != "system":
+            out.append("  images: folder not listable as your user")
+        return out
+    cow = [i for i in d["images"] if i["nocow"] is False]
+    unknown = [i for i in d["images"] if i["nocow"] is None]
+    ok = [i for i in d["images"] if i["nocow"]]
+    if not d["images"]:
+        out.append("  images: none")
+    if ok:
+        out.append(f"  NOCOW images: {', '.join(i['name'] for i in ok)}")
+    if unknown:
+        out.append(f"  images whose mark is not readable as your user: {', '.join(i['name'] for i in unknown)}"
+                   f" ({root_hint})")
+    for i in cow:
+        out.append(f"  still copy-on-write: {i['name']}  {human(i['alloc'])} allocated, {human(i['size'])} apparent")
+        if verbose:
+            out.append(f"    to convert (every VM using it shut off; needs about {human(i['alloc'])} free):")
+            out += [f"      {ln}" for ln in convert_lines(i, d["scope"] == "system")]
+    for n in d["leftovers"]:
+        out.append(f"  leftover of a conversion: {n} (remove it once the VM booted well from the new file)")
+    return out
+
+
+def cmd_nocow_plan(as_root=False):
+    if as_root and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused(f"--root reads the system folder as root: run it as `{PROG} nocow plan --root` "
+                      "(it calls sudo by itself)")
+    if not knobs()["VM_NOCOW"]:
+        print(f"VM_NOCOW=no in {VM_CONF}: the VM image folders are not managed.")
+        return 0
+    dirs = [probe_dir(d) for d in image_dirs()]
+    for d in dirs:
+        for ln in nocow_lines(d):
+            print(ln)
+    todo = [d for d in dirs if needs_mark(d)]
+    print()
+    if todo:
+        print(f"Set the mark with: {PROG} nocow apply   (folders: "
+              + ", ".join(d["path"] + (" (not created yet)" if not d["present"] else
+                                       " (mark not readable here: set again, harmless)" if d["nocow"] is None else "")
+                          for d in todo) + ")")
+    else:
+        print("No folder to mark.")
+    print("Existing images are never converted by CST: the commands above are for you to run.")
+    return 0
+
+
+def needs_mark(d):
+    """True when nocow apply would act on the folder (also: unknown state of
+    the system folder, or the system folder missing while libvirt is there).
+    A symbolic link is never acted on (install -d and chattr would follow it)."""
+    if d.get("link") is not None or os.path.lexists(d["path"]) and not d["present"]:
+        return False
+    if d["scope"] == "system" and not d["present"]:
+        return os.path.isdir(os.path.dirname(d["path"]))
+    return d["present"] and d["btrfs"] is not False and d["nocow"] is not True
+
+
+def confirm(question):
+    if not sys.stdin.isatty():
+        raise Refused("apply asks for confirmation: run it in a terminal")
+    return input(f"{question} [y/N] ").strip()[:1] in ("y", "Y", "s", "S")
+
+
+def mark_system_dir(d):
+    """Create (root:root 0711, as libvirt does) and mark the system folder:
+    directly as root, else with sudo. Returns an error text or ""."""
+    path, q = d["path"], shlex.quote(d["path"])
+    if os.path.islink(path) or not d["present"] and os.path.lexists(path):
+        return f"{path}: appeared or is a symbolic link: not touched"
+    if os.geteuid() == 0:
+        try:
+            if not d["present"]:
+                os.mkdir(path, 0o711)
+                os.chmod(path, 0o711)
+                run(["restorecon", path])
+            set_nocow(path)
+        except OSError as e:
+            return f"{path}: {e.strerror}"
+        return "" if flag_state(inode_flags(path)) else f"{path}: the mark did not stick"
+    steps = []
+    if not d["present"]:
+        steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
+    steps.append(["chattr", "+C", path])
+    for cmd in steps:
+        print(f"  sudo {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
+        p = subprocess.run(["sudo", "--", *cmd], env={**os.environ, "LC_ALL": "C"})
+        if p.returncode != 0:
+            return f"sudo {cmd[0]} {q}: exit {p.returncode}"
+    rc, so, _ = run(["sudo", "--", "lsattr", "-d", path])
+    attrs = so.split()[0] if rc == 0 and so.split() else ""
+    return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"
+
+
+def cmd_nocow_apply():
+    if not knobs()["VM_NOCOW"]:
+        print(f"VM_NOCOW=no in {VM_CONF}: nothing to do.")
+        return 0
+    dirs = [probe_dir(d) for d in image_dirs()]
+    todo = [d for d in dirs if needs_mark(d)]
+    if not todo:
+        print("Every VM image folder present on btrfs already has the NOCOW mark (+C)"
+              + (" (symbolic links are not managed)." if any(d.get("link") for d in dirs) else "."))
+        return 0
+    for d in todo:
+        what = "create (root:root 0711) and mark" if not d["present"] else "mark"
+        unknown = " (its mark is not readable as your user: set again, harmless)" if d["nocow"] is None else ""
+        print(f"  {what} +C: {d['path']}{' (sudo)' if d['scope'] == 'system' and os.geteuid() else ''}{unknown}")
+    print("Only files created there later get the mark; existing images stay as they are "
+          f"({PROG} nocow plan shows how to convert them).")
+    if not confirm("Set the NOCOW mark on these folders?"):
+        print("Nothing changed.")
+        return 0
+    errors = []
+    for d in todo:
+        if d["scope"] == "system":
+            err = mark_system_dir(d)
+        else:
+            try:
+                set_nocow(d["path"])
+                err = "" if flag_state(inode_flags(d["path"])) else f"{d['path']}: the mark did not stick"
+            except OSError as e:
+                err = f"{d['path']}: {e.strerror}"
+        if err:
+            errors.append(err)
+        else:
+            print(f"  done: {d['path']}")
+    if errors:
+        raise Refused("not done:\n  " + "\n  ".join(errors))
+    return 0
+
+
+# ---- tune: the recommended virtual hardware --------------------------------------------------------
+DRIVER_WANTED = (("cache", "none"), ("io", "native"), ("discard", "unmap"), ("detect_zeroes", "unmap"))
+OLD_NICS = ("e1000", "e1000e", "rtl8139")
+# Interface types with an emulated card (a <model>); hostdev, vhostuser and vdpa are not.
+NIC_TYPES = ("network", "bridge", "direct", "user", "ethernet", "mcast", "server", "client", "udp", "null",
+             "vds")
+LINUX_OS = ("fedoraproject.org", "redhat.com", "centos.org", "almalinux.org", "rockylinux.org", "debian.org",
+            "ubuntu.com", "archlinux.org", "opensuse.org", "suse.com", "alpinelinux.org", "gentoo.org",
+            "nixos.org", "linuxmint.com", "manjaro.org", "kali.org", "endlessos.com", "silverblue",
+            "popos", "elementary.io")
+
+
+def keep_prefixes(xml_text):
+    """Register the document's own namespace prefixes (libosinfo metadata),
+    so serializing does not rename them to ns0 (as cpu/vm-pin). A default
+    namespace (xmlns='...' on a <metadata> child) is not registered: as ""
+    ElementTree would write it on <domain> itself, moving every libvirt
+    element into it; left alone it is written as ns0:, which is the same XML."""
+    for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
+        if prefix and not re.fullmatch(r"ns\d+", prefix):    # ns0...: ElementTree's own, it refuses them
+            ET.register_namespace(prefix, uri)
+
+
+def guest_kind(root):
+    """("windows" | "linux" | "unknown", why). From the libosinfo id that
+    virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
+    enlightenments (only Windows guests use them)."""
+    for el in root.iter():
+        if el.tag.endswith("}os") and el.get("id"):
+            osid = el.get("id")
+            if "microsoft.com/win" in osid:
+                return "windows", f"libosinfo {osid}"
+            if any(k in osid for k in LINUX_OS):
+                return "linux", f"libosinfo {osid}"
+            return "unknown", f"libosinfo {osid}"
+    if root.find("features/hyperv") is not None:
+        return "windows", "Hyper-V enlightenments in <features>"
+    return "unknown", "no libosinfo id in the definition"
+
+
+def disk_index(name):
+    """sda -> 0, sdz -> 25, sdaa -> 26 (libvirt's numbering); None if not sdX/hdX/vdX."""
+    m = re.fullmatch(r"[shv]d([a-z]+)", name or "")
+    if not m:
+        return None
+    n = 0
+    for ch in m.group(1):
+        n = n * 26 + (ord(ch) - ord("a") + 1)
+    return n - 1
+
+
+def disk_name(idx):
+    s = ""
+    idx += 1
+    while idx:
+        idx, r = divmod(idx - 1, 26)
+        s = chr(ord("a") + r) + s
+    return "sd" + s
+
+
+def tune_domain(xml_text, kn=None, allow_bus=True):
+    """(after_xml, changes, held, notes) for a definition: changes are what
+    the new definition differs in, held the bus and network card changes
+    left out because allow_bus is False (a guest without virtio drivers),
+    notes things reported but not changed. Only elements that differ from
+    the desired state are touched."""
+    kn = kn or knobs()
+    keep_prefixes(xml_text)
+    root = ET.fromstring(xml_text)
+    changes, held, notes = [], [], []
+    devices = root.find("devices")
+    if devices is None:
+        return None, changes, held, ["no <devices> in the definition"]
+    disks = devices.findall("disk")
+    names = {(d.find("target").get("dev") if d.find("target") is not None else None) for d in disks}
+    ctrl = {"idx": None}
+
+    def virtio_scsi_index():
+        if ctrl["idx"] is not None:
+            return ctrl["idx"]
+        scsi = [c for c in devices.findall("controller") if c.get("type") == "scsi"]
+        found = next((c for c in scsi if c.get("model") == "virtio-scsi"), None)
+        if found is not None:
+            ctrl["idx"] = int(found.get("index", "0"))
+            return ctrl["idx"]
+        idx = max((int(c.get("index", "0")) for c in scsi), default=-1) + 1
+        el = ET.Element("controller", {"type": "scsi", "index": str(idx), "model": "virtio-scsi"})
+        kids = list(devices)
+        last = max((i for i, c in enumerate(kids) if c.tag == "controller"), default=None)
+        if last is None:
+            last = max((i for i, c in enumerate(kids) if c.tag == "disk"), default=len(kids) - 1)
+        devices.insert(last + 1, el)
+        changes.append(f"add a virtio-scsi controller (index {idx})")
+        ctrl["idx"] = idx
+        return idx
+
+    def used_units(idx):
+        """Units taken on controller idx (bus 0, target 0): SCSI disks and
+        CD-ROMs, and SCSI host devices (<hostdev type='scsi'>)."""
+        out = set()
+        on_scsi = [d for d in disks if d.find("target") is not None and d.find("target").get("bus") == "scsi"]
+        on_scsi += [h for h in devices.findall("hostdev") if h.get("type") == "scsi"]
+        for d in on_scsi:
+            a = d.find("address")
+            if a is not None and a.get("type") == "drive" and a.get("controller", "0") == str(idx) \
+                    and a.get("bus", "0") == "0" and a.get("target", "0") == "0":
+                out.add(int(a.get("unit", "0")))
+        return out
+
+    for disk in disks:
+        if disk.get("device", "disk") != "disk":
+            continue                      # cdrom, floppy, lun: left as they are
+        target = disk.find("target")
+        dev = target.get("dev") if target is not None else "?"
+        kind = disk.get("type", "file")
+        if kind not in ("file", "block"):
+            notes.append(f"disk {dev}: a {kind} disk: left as it is (only file and block disks are tuned)")
+            continue
+        if kn["VM_TUNE_DISK_DRIVER"]:
+            drv = disk.find("driver")
+            if drv is None:
+                drv = ET.Element("driver", {"name": "qemu"})
+                disk.insert(0, drv)
+            if drv.get("name", "qemu") != "qemu":
+                notes.append(f"disk {dev}: driver {drv.get('name')}: left as it is")
+            else:
+                for k, v in DRIVER_WANTED:
+                    if drv.get(k) != v:
+                        changes.append(f"disk {dev}: {k} {drv.get(k) or '(default)'} -> {v}")
+                        drv.set(k, v)
+        bus = target.get("bus") if target is not None else None
+        if not kn["VM_TUNE_DISK_BUS"] or bus not in ("sata", "ide"):
+            continue
+        if not allow_bus:
+            held.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi)")
+            continue
+        idx = virtio_scsi_index()
+        new = dev
+        if not dev.startswith("sd"):
+            n = 0
+            while disk_name(n) in names:
+                n += 1
+            new = disk_name(n)
+            names.add(new)
+            target.set("dev", new)
+        target.set("bus", "scsi")
+        addr = disk.find("address")
+        if addr is not None and addr.get("type") == "drive":
+            disk.remove(addr)
+        taken = used_units(idx)
+        want = disk_index(new)
+        unit = want if want is not None and want not in taken else min(set(range(len(taken) + 1)) - taken)
+        ET.SubElement(disk, "address", {"type": "drive", "controller": str(idx), "bus": "0", "target": "0",
+                                        "unit": str(unit)})
+        changes.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi controller {idx}, unit {unit})"
+                       + (f", renamed {dev} -> {new}" if new != dev else ""))
+    for nic in devices.findall("interface"):
+        mac = nic.find("mac")
+        label = f"network card {mac.get('address') if mac is not None else '(no MAC)'}"
+        if nic.get("type") not in NIC_TYPES:
+            continue                      # hostdev, vhostuser, vdpa: not an emulated card
+        model = nic.find("model")
+        m = model.get("type") if model is not None else None
+        if m is None:
+            notes.append(f"{label}: no <model> (QEMU's default card): add <model type='virtio'/> by hand if wanted")
+            continue
+        if not kn["VM_TUNE_NIC"] or m not in OLD_NICS:
+            continue
+        if not allow_bus:
+            held.append(f"{label}: {m} -> virtio")
+            continue
+        model.set("type", "virtio")
+        changes.append(f"{label}: {m} -> virtio (same MAC)")
+    bal = devices.find("memballoon")
+    if bal is None:
+        notes.append("no <memballoon>: not added (libvirt adds one by default; it was removed on purpose?)")
+    elif bal.get("model") == "none":
+        notes.append("memballoon model='none': left as it is")
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n", changes, held, notes
+
+
+def normalized(xml_text):
+    keep_prefixes(xml_text)
+    root = ET.fromstring(xml_text)
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n"
+
+
+def cpu_owner_line(root):
+    """How cst cpu vm-pin's part of the definition stands (reported, never changed here)."""
+    cpu = root.find("cpu")
+    mode = cpu.get("mode", "custom") if cpu is not None else "not set"
+    names = cpu_disable_list()
+    off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"} if cpu is not None else set()
+    missing = [n for n in names if n not in off]
+    pins = {p.get("cpuset") for p in root.findall("cputune/vcpupin")}
+    pin = f"vCPUs pinned to {', '.join(sorted(pins))}" if pins else "vCPUs not pinned"
+    feat = (f"NOT disabled: {' '.join(missing)}" if mode == "host-passthrough" and missing
+            else "CET/MBEC disabled" if mode == "host-passthrough" and names else f"cpu mode {mode}")
+    return f"CPU (owned by {CST} cpu vm-pin, not by tune): {feat}; {pin}; check: {CST} cpu vm-pin plan"
+
+
+WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves to virtio-scsi
+(else: INACCESSIBLE_BOOT_DEVICE). With the guest running:
+  1. attach the virtio-win ISO (fedorapeople.org virtio-win, check its sha256) as a CD-ROM;
+  2. in an admin PowerShell (D: = the ISO; the .msi is unsigned, the .inf files are WHQL-signed):
+       Get-AuthenticodeSignature D:\\vioscsi\\w11\\amd64\\vioscsi.cat
+       pnputil /add-driver D:\\vioscsi\\w11\\amd64\\vioscsi.inf /install
+       pnputil /add-driver D:\\NetKVM\\w11\\amd64\\netkvm.inf /install
+       pnputil /add-driver D:\\Balloon\\w11\\amd64\\balloon.inf /install
+  3. hot-add a virtio-scsi controller so Windows binds vioscsi as a boot driver:
+       virsh -c qemu:///system attach-device {vm} ctrl.xml --live
+     (ctrl.xml: <controller type='scsi' model='virtio-scsi'/>; it needs a free PCIe root port); then in Windows
+       sc qc vioscsi        -> START_TYPE must be 0 (BOOT_START)
+  4. shut Windows down fully (Fast Startup makes the Start menu's Shut down a hibernation, and
+     resuming it on a changed boot controller can fail): in an admin prompt `shutdown /s /t 0`,
+     or Shift + Shut down; then: {cst} vm tune apply {vm} --guest-has-virtio
+Details: vm/README.md in CST, section "Windows guests"."""
+
+
+def domain_state(vm):
+    rc, so, err = virsh("domstate", vm)
+    if rc != 0:
+        raise Refused(f"virsh domstate {vm}: {first_line(err) or f'exit {rc}'}")
+    return first_line(so)
+
+
+def has_managed_save(vm):
+    rc, so, err = virsh("list", "--all", "--with-managed-save", "--name")
+    if rc != 0:
+        raise Refused(f"virsh list --with-managed-save: {first_line(err) or f'exit {rc}'}")
+    return vm in (ln.strip() for ln in so.splitlines())
+
+
+def cmd_tune(vm, apply, guest_virtio):
+    if apply and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused(f"tune apply needs root: run it as `{PROG} tune apply` (it calls sudo by itself)")
+    state = domain_state(vm)
+    # Without --security-info: what is printed holds no graphics passwords.
+    rc, plain, err = virsh("dumpxml", "--inactive", vm)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+    keep_prefixes(plain)
+    root = ET.fromstring(plain)
+    kind, why = guest_kind(root)
+    allow_bus = kind == "linux" or guest_virtio
+    kn = knobs()
+    after, changes, held, notes = tune_domain(plain, kn, allow_bus)
+    if after is None:
+        raise Refused(f"{vm}: {notes[0]}")
+    label = {"windows": "Windows", "linux": "Linux", "unknown": "not known"}[kind]
+    print(f"{vm}: {state}; guest: {label} ({why})")
+    off = [k for k in KNOBS[1:] if not kn[k]]
+    if off:
+        print(f"  skipped by {VM_CONF}: {', '.join(k + '=no' for k in off)}")
+    for c in changes:
+        print(f"  change: {c}")
+    for h in held:
+        print(f"  held back: {h}")
+    for n in notes:
+        print(f"  note: {n}")
+    print(f"  {cpu_owner_line(root)}")
+    if kind == "linux" and changes and any("bus" in c or "network card" in c for c in changes):
+        print("  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
+              "drivers (hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first.")
+    if held:
+        print(f"\nHeld back: the guest is {label}, and its virtio drivers are not known to be installed.")
+        print(WINDOWS_STEPS.format(cst=CST, vm=vm))
+    diff = list(difflib.unified_diff(normalized(plain).splitlines(True), after.splitlines(True),
+                                     "current", "tuned"))
+    if not diff:
+        print(f"\n{vm}: disks and network card already as {CST} vm tune recommends"
+              + (" (except what is held back above)." if held else "."))
+        return 0
+    print()
+    sys.stdout.writelines(diff)
+    flag = " --guest-has-virtio" if guest_virtio else ""
+    bus_change = any(" bus " in c or "network card" in c for c in changes)
+    msaved = kind != "linux" and bus_change and state == "shut off" and has_managed_save(vm)
+    if kind != "linux" and bus_change and (state != "shut off" or msaved):
+        msg = (f"{vm} is {state}: for a guest that is not known to be Linux, the bus and network card "
+               f"changes are applied only with the VM shut off (shut Windows down first)")
+        if msaved:
+            msg = (f"{vm} was saved (managed save), not shut down: start it and shut Windows down fully "
+                   f"(`shutdown /s /t 0`), then apply; or drop the saved memory: "
+                   f"virsh -c {URI} managedsave-remove {vm}")
+        if not apply:
+            print(f"\nPlan only. {msg}; then: {CST} vm tune apply {vm}{flag}")
+            return 0
+        raise Refused(msg)
+    if not apply:
+        print(f"\nPlan only. Apply with: {CST} vm tune apply {vm}{flag}   (effective at the VM's next start)")
+        return 0
+    # Define from the definition WITH its secrets (else graphics passwords are lost).
+    rc, secret, err = virsh("dumpxml", "--inactive", "--security-info", vm)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml --security-info {vm}: {first_line(err) or f'exit {rc}'}")
+    s_after, s_changes, _, _ = tune_domain(secret, kn, allow_bus)
+    if s_changes != changes:
+        raise Refused(f"{vm}: the definition changed while planning: run it again")
+    if not confirm(f"\nDefine {vm} with these changes (effective at its next start)?"):
+        print("Nothing changed.")
+        return 0
+    _, stamp = utc_now()
+    keep = os.path.join(BACKUP_DIR, vm, "definitions")
+    for d in (BACKUP_DIR, os.path.join(BACKUP_DIR, vm), keep):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+    saved = os.path.join(keep, f"{stamp}.before-tune.xml")
+    # Holds --security-info secrets (graphics passwords): 0600 from the start.
+    with os.fdopen(os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+        f.write(secret)
+    fd, tmp = tempfile.mkstemp(prefix="cst-vm-tune.", suffix=".xml")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(s_after)
+        rc, _, err = virsh("define", tmp)
+    finally:
+        os.unlink(tmp)
+    if rc != 0:
+        raise Refused(f"virsh define: {first_line(err) or f'exit {rc}'} (nothing changed; "
+                      f"the definition is as before, also saved in {saved})")
+    print(f"Defined. Effective at the next start of {vm}.")
+    print(f"Previous definition saved in {saved} (restore: sudo virsh -c {URI} define {shlex.quote(saved)}).")
+    rc, now, _ = virsh("dumpxml", "--inactive", vm)
+    if rc == 0:
+        _, left, _, _ = tune_domain(now, kn, allow_bus)
+        if left:
+            print("Note: libvirt changed the definition again: still different: " + "; ".join(left))
+    return 0
+
+
+def tune_line(xml_text):
+    """One status line: whether the hardware matches tune (all changes, as if
+    the drivers were there; Windows gets the hint to read the plan)."""
+    try:
+        _, changes, _, _ = tune_domain(xml_text, knobs(), True)
+        kind, _ = guest_kind(ET.fromstring(xml_text))
+    except ET.ParseError:
+        return "hardware: definition not readable"
+    if not changes:
+        return "hardware: disks and network card as tune recommends"
+    extra = " (Windows: virtio drivers first, the plan shows how)" if kind != "linux" else ""
+    return f"hardware: {len(changes)} difference(s) from tune{extra}: {CST} vm tune plan"
 
 
 # ---- command line --------------------------------------------------------------------------------
 def parse_args(argv):
+    """{cmd, sub, vm, full, guest_virtio, root}."""
+    a = {"cmd": "help", "sub": None, "vm": None, "full": False, "guest_virtio": False, "root": False}
     if not argv or argv[0] in ("help", "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
-        return "help", None, False
-    cmd, rest = argv[0], argv[1:]
-    if cmd not in ("backup", "list", "status"):
-        raise Usage(f"unknown command '{cmd}'")
-    vm, full = None, False
-    for a in rest:
-        if a == "--full" and cmd == "backup" and not full:
-            full = True
-        elif not a.startswith("-") and vm is None:
-            vm = a
+        return a
+    a["cmd"], rest = argv[0], argv[1:]
+    if a["cmd"] not in ("backup", "list", "status", "tune", "nocow"):
+        raise Usage(f"unknown command '{a['cmd']}'")
+    if a["cmd"] in ("tune", "nocow"):
+        if not rest or rest[0] not in ("plan", "apply"):
+            raise Usage(f"{a['cmd']}: plan or apply")
+        a["sub"], rest = rest[0], rest[1:]
+    flags = {"backup": {"--full": "full"}, "tune": {"--guest-has-virtio": "guest_virtio"},
+             "nocow": {"--root": "root"} if a["sub"] == "plan" else {}}.get(a["cmd"], {})
+    takes_vm = a["cmd"] != "nocow"
+    for x in rest:
+        if x in flags and not a[flags[x]]:
+            a[flags[x]] = True
+        elif takes_vm and not x.startswith("-") and a["vm"] is None:
+            a["vm"] = x
         else:
-            raise Usage(f"{cmd}: unexpected argument '{a}'")
-    return cmd, vm, full
+            raise Usage(f"{' '.join(filter(None, (a['cmd'], a['sub'])))}: unexpected argument '{x}'")
+    return a
 
 
 def main(argv):
     try:
-        cmd, vm, full = parse_args(argv)
+        a = parse_args(argv)
     except Usage as e:
         print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
         return 2
+    cmd, vm = a["cmd"], a["vm"]
     if cmd == "help":
         print(__doc__)
         return 0
     try:
         if cmd == "list":
             return cmd_list(vm)
+        if cmd == "nocow":
+            return cmd_nocow_plan(a["root"]) if a["sub"] == "plan" else cmd_nocow_apply()
         vm = vm or default_vm()
         if cmd == "status":
             return cmd_status(vm)
-        return cmd_backup(vm, full)
+        if cmd == "tune":
+            return cmd_tune(vm, a["sub"] == "apply", a["guest_virtio"])
+        return cmd_backup(vm, a["full"])
     except Refused as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 1
