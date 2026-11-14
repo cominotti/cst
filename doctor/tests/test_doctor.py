@@ -74,6 +74,20 @@ echo "stat $*" >>"$STUB_LOG"
 [ -f "$FIX_STATFS" ] && exec cat "$FIX_STATFS"
 exit 1
 """
+# virsh: no libvirt unless a test sets FIX_VIRSH (a folder: list.txt,
+# caps.xml, NAME.xml for dumpxml); every other subcommand fails.
+VIRSH = """#!/bin/sh
+echo "virsh $*" >>"$STUB_LOG"
+[ -n "$FIX_VIRSH" ] || { echo "error: failed to connect to the hypervisor" >&2; exit 1; }
+for a in "$@"; do last="$a"; done
+case " $* " in
+  *" list --all --name "*) exec cat "$FIX_VIRSH/list.txt" ;;
+  *" domcapabilities "*) [ -f "$FIX_VIRSH/caps.xml" ] && exec cat "$FIX_VIRSH/caps.xml" ;;
+  *" dumpxml --inactive "*) [ -f "$FIX_VIRSH/$last.xml" ] && exec cat "$FIX_VIRSH/$last.xml" ;;
+esac
+echo "error: unsupported in the stub" >&2
+exit 1
+"""
 FLATPAK_SPAWN = """#!/bin/sh
 echo "flatpak-spawn $*" >>"$STUB_LOG"
 [ "$1" = --host ] || exit 1
@@ -98,7 +112,8 @@ class Scratch(unittest.TestCase):
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
         for name, body in (("rpm-ostree", RPM_OSTREE), ("systemctl", SYSTEMCTL),
-                           ("findmnt", FINDMNT), ("stat", STAT), ("flatpak-spawn", FLATPAK_SPAWN)):
+                           ("findmnt", FINDMNT), ("stat", STAT), ("flatpak-spawn", FLATPAK_SPAWN),
+                           ("virsh", VIRSH)):
             p = os.path.join(self.bin, name)
             with open(p, "w") as f:
                 f.write(body)
@@ -128,6 +143,7 @@ class Scratch(unittest.TestCase):
             "FIX_USER_FAILED": self.user_failed,
             "FIX_FINDMNT": os.path.join(self.tmp, "findmnt.out"),
             "FIX_STATFS": os.path.join(self.tmp, "statfs.out"),
+            "FIX_VIRSH": "",
         }
 
     def status(self, name):
@@ -147,10 +163,13 @@ class Scratch(unittest.TestCase):
     def assert_read_only(self):
         allowed = ("rpm-ostree status --json", "rpm-ostree db list ", "systemctl list-units --state=failed",
                    "systemctl --user list-units --state=failed", "flatpak-spawn --host ",
-                   "findmnt -rn -t btrfs -o SOURCE,TARGET", "stat -f -c %S %b ")
+                   "findmnt -rn -t btrfs -o SOURCE,TARGET", "stat -f -c %S %b ",
+                   "virsh -r -c qemu:///system list --all --name", "virsh -r -c qemu:///system dumpxml --inactive ",
+                   "virsh -c qemu:///system domcapabilities")
         for c in self.calls():
             self.assertTrue(c.startswith(allowed), f"unexpected call: {c}")
             self.assertNotIn("sudo", c)
+            self.assertNotIn("--security-info", c)
 
 
 # ---- names and versions ------------------------------------------------------------------------
@@ -657,6 +676,222 @@ class BtrfsTest(Scratch):
         self.assert_read_only()
 
 
+# ---- vm ----------------------------------------------------------------------------------------
+ROLLBACK = "r" * 64
+CPU_FEATURES = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
+CAPS_QEMU11 = ("<domainCapabilities><cpu><mode name='host-passthrough' supported='yes'/>"
+               "<mode name='host-model' supported='yes'><model>Arrow</model>"
+               + "".join(f"<feature policy='require' name='{n}'/>" for n in CPU_FEATURES + ("invtsc",))
+               + "</mode></cpu></domainCapabilities>\n")
+CAPS_QEMU10 = ("<domainCapabilities><cpu><mode name='host-model' supported='yes'>"
+               "<feature policy='require' name='invtsc'/></mode></cpu></domainCapabilities>\n")
+
+
+def domain(cpu):
+    return f"<domain type='kvm'><name>win</name><vcpu>12</vcpu>{cpu}</domain>\n"
+
+
+PASSTHROUGH_BARE = domain("<cpu mode='host-passthrough' check='none'/>")
+PASSTHROUGH_FIXED = domain("<cpu mode='host-passthrough'>" + "".join(
+    f"<feature policy='disable' name='{n}'/>" for n in CPU_FEATURES) + "</cpu>")
+
+
+class VmTest(Scratch):
+    def setUp(self):
+        super().setUp()
+        self.virsh = os.path.join(self.tmp, "virsh")
+        os.makedirs(self.virsh)
+        self.env["FIX_VIRSH"] = self.virsh
+        self.libvirt(["win"], {"win": PASSTHROUGH_FIXED}, CAPS_QEMU11)
+
+    def libvirt(self, names, defs, caps):
+        with open(os.path.join(self.virsh, "list.txt"), "w") as f:
+            f.write("".join(n + "\n" for n in names) + "\n")
+        for n, xml in defs.items():
+            with open(os.path.join(self.virsh, n + ".xml"), "w") as f:
+                f.write(xml)
+        caps_file = os.path.join(self.virsh, "caps.xml")
+        if caps is None:
+            if os.path.exists(caps_file):
+                os.unlink(caps_file)
+        else:
+            with open(caps_file, "w") as f:
+                f.write(caps)
+
+    def vm_lines(self, r):
+        return [ln for ln in r.stdout.split("== vm", 1)[-1].splitlines() if ln.strip().startswith(
+            ("ok", "info", "WARN", "ERROR", "fix"))]
+
+    # -- deployments with and without a virt stack change
+    def deployments(self, rollback_pinned=False, booted_qemu="11.1.3-1.fc45", rollback_qemu="10.2.2-1.fc44"):
+        base = json.load(open(os.path.join(FIX, "unpinned.json")))
+        booted = base["deployments"][0]
+        booted["version"] = "45.20261107.0"
+        booted["timestamp"] = NOW - 7 * 86400
+        rb = dict(booted, checksum=ROLLBACK, booted=False, pinned=rollback_pinned, version="44.20261028.0",
+                  timestamp=NOW - 20 * 86400)
+        base["deployments"] = [booted, rb]
+        path = os.path.join(self.tmp, "virt-status.json")
+        with open(path, "w") as f:
+            json.dump(base, f)
+        self.env["FIX_STATUS"] = path
+        for csum, qemu, fc in ((BOOTED, booted_qemu, "fc45"), (ROLLBACK, rollback_qemu, "fc44")):
+            with open(os.path.join(self.db, csum), "w") as f:
+                f.write(f"ostree commit: {csum[:8]} ({csum})\n vim-9.1-1.{fc}.x86_64\n"
+                        f" qemu-kvm-{qemu}.x86_64\n qemu-system-x86-core-{qemu}.x86_64\n"
+                        f" libvirt-daemon-12.6.0-2.{fc}.x86_64\n")
+
+    def backup_index(self, epoch):
+        d = os.path.join(self.root, "var", "lib", "cst")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "vm-backups.json"), "w") as f:
+            json.dump({"version": 1, "backups": [{"vm": "win", "epoch": epoch, "path": "/x",
+                                                  "timestamp": "t"}]}, f)
+
+    def test_fixed_vm_is_ok(self):
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("ok     VM win: host-passthrough with cet-ss, cet-ibt", r.stdout)
+        # domcapabilities needs a read-write connection: asked only when a disable is missing.
+        self.assertNotIn("virsh -c qemu:///system domcapabilities", self.calls())
+        self.assert_read_only()
+
+    def test_missing_disables_warn_when_qemu_offers_them(self):
+        self.libvirt(["win"], {"win": PASSTHROUGH_BARE}, CAPS_QEMU11)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("WARN   VM win: host-passthrough passes cet-ss, cet-ibt, vmx-mbec, vmx-exit-save-cet, "
+                      "vmx-entry-load-cet to the guest", r.stdout)
+        self.assertIn("gitlab.com/qemu-project/qemu/-/issues/3215", r.stdout)
+        self.assertIn("  fix: cst cpu vm-pin plan", r.stdout)
+        self.assertEqual(self.calls().count("virsh -c qemu:///system domcapabilities"), 1)
+        self.assert_read_only()
+
+    def test_only_offered_features_count(self):
+        self.libvirt(["win"], {"win": PASSTHROUGH_BARE}, CAPS_QEMU10)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("this QEMU does not offer", r.stdout)
+
+    def test_unreadable_caps_is_info(self):
+        self.libvirt(["win"], {"win": PASSTHROUGH_BARE}, None)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("info   VM win: host-passthrough without disabling", r.stdout)
+
+    def test_other_cpu_modes_ok(self):
+        self.libvirt(["win", "lin"], {"win": domain("<cpu mode='host-model'/>"), "lin": domain("")}, CAPS_QEMU11)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("VM win: cpu mode host-model", r.stdout)
+        self.assertIn("VM lin: cpu mode not set", r.stdout)
+
+    def test_empty_knob_skips(self):
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("VM_NAME='win'\nVM_CPU_DISABLE=''\n")
+        self.libvirt(["win"], {"win": PASSTHROUGH_BARE}, CAPS_QEMU11)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("VM_CPU_DISABLE is empty", r.stdout)
+
+    def test_last_knob_line_wins(self):
+        # As in vm-pin's conf() and the shell: a later assignment overrides an earlier one.
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("VM_CPU_DISABLE='cet-ss cet-ibt'\n# VM_CPU_DISABLE='vmx-mbec'\nVM_CPU_DISABLE=''\n")
+        self.assertEqual(D.cpu_disable_names(D.Host(self.env)), [])
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("VM_CPU_DISABLE=''\nVM_CPU_DISABLE=\"cet-ss\"\n")
+        self.assertEqual(D.cpu_disable_names(D.Host(self.env)), ["cet-ss"])
+
+    def test_knob_from_vm_pin(self):
+        host = D.Host(self.env)
+        self.assertEqual(D.cpu_disable_names(host), list(CPU_FEATURES))
+
+    def test_no_libvirt_is_info_never_warn(self):
+        for env in ({"FIX_VIRSH": ""}, {"PATH": f"{self.bin}:/usr/bin:/bin"}):
+            self.env.update(env)
+            if "PATH" in env:
+                # No virsh: a stub that cannot start (the real one in /usr/bin must not answer).
+                with open(os.path.join(self.bin, "virsh"), "w") as f:
+                    f.write("#!/bin/sh\necho 'virsh: not found' >&2\nexit 127\n")
+            self.deployments()
+            r = self.run_tool()
+            self.assertEqual(r.returncode, 0, r.stdout)
+            self.assertNotIn("  WARN ", r.stdout)
+            self.assertIn("libvirt VMs: not checked", r.stdout)
+        self.assertIn("no virsh: libvirt is not installed", r.stdout)
+
+    def test_no_domains_is_ok(self):
+        self.libvirt([], {}, CAPS_QEMU11)
+        self.deployments()
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("ok     libvirt: no VM defined", r.stdout)
+        self.assertIn("no libvirt VM defined", r.stdout)
+
+    def test_virt_change_unpinned_no_backup_warns_twice(self):
+        self.deployments()
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("virtualization packages changed from the rollback deployment 44.20261028.0 to the booted "
+                      "one: libvirt-daemon 12.6.0-2.fc44 -> 12.6.0-2.fc45, qemu-kvm 10.2.2-1.fc44 -> "
+                      "11.1.3-1.fc45, qemu-system-x86-core 10.2.2-1.fc44 -> 11.1.3-1.fc45", r.stdout)
+        self.assertIn("fix: sudo ostree admin pin 1", r.stdout)
+        self.assertIn("  fix: cst vm backup", r.stdout)
+        self.assert_read_only()
+
+    def test_virt_change_pinned_and_backed_up_is_info(self):
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("rollback pinned and VM backup present", r.stdout)
+
+    def test_backup_older_than_booted_still_warns(self):
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 10 * 86400)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("ostree admin pin", r.stdout)
+        self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+
+    def test_pin_index_follows_the_list(self):
+        """A staged deployment first: booted is 1, rollback 2."""
+        self.deployments()
+        data = json.load(open(self.env["FIX_STATUS"]))
+        staged = dict(data["deployments"][0], checksum=STAGED, booted=False, staged=True, version="45.2")
+        data["deployments"].insert(0, staged)
+        with open(self.env["FIX_STATUS"], "w") as f:
+            json.dump(data, f)
+        r = self.run_tool()
+        self.assertIn("fix: sudo ostree admin pin 2", r.stdout)
+
+    def test_unchanged_virt_stack_is_ok(self):
+        self.deployments(rollback_qemu="11.1.3-1.fc45")
+        with open(os.path.join(self.db, ROLLBACK)) as f:
+            text = f.read().replace("libvirt-daemon-12.6.0-2.fc44", "libvirt-daemon-12.6.0-2.fc45")
+        with open(os.path.join(self.db, ROLLBACK), "w") as f:
+            f.write(text)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("ok     virtualization packages: the same", r.stdout)
+
+    def test_not_ostree_is_info(self):
+        os.unlink(os.path.join(self.root, "run", "ostree-booted"))
+        r = self.run_tool()
+        self.assertIn("info   virtualization packages: not compared (not an rpm-ostree system)", r.stdout)
+
+    def test_virt_changes_text(self):
+        self.assertEqual(D.virt_changes({"a": "1"}, {"a": "1"}), "")
+        many = {f"libvirt-daemon-driver-{i}": "1" for i in range(5)}
+        self.assertEqual(D.virt_changes(many, {}), "libvirt-daemon-driver-0 1 -> none, libvirt-daemon-driver-1 "
+                         "1 -> none, libvirt-daemon-driver-2 1 -> none, and 2 more virtualization package(s)")
+        self.assertEqual(D.virt_versions(["qemu-kvm-2:11.1.3-1.fc45.x86_64", "vim-9-1.fc45.x86_64"]),
+                         {"qemu-kvm": "2:11.1.3-1.fc45"})
+
+
 class CommandLineTest(Scratch):
     def test_usage_and_help(self):
         r = self.run_tool("--bogus")
@@ -714,7 +949,7 @@ class CommandLineTest(Scratch):
         for a, _ in D.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs"])
+        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "vm"])
 
 
 class ToolboxTest(Scratch):

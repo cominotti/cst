@@ -1,10 +1,13 @@
 #!/usr/bin/python3 -I
-"""vm-pin: keep a libvirt VM off the P-cores and the game's E-cores.
+"""vm-pin: keep a libvirt VM off the P-cores and the game's E-cores, and
+keep the CPU features off that make Windows bootloop under QEMU 11.
 
 Installed as /usr/local/sbin/cpu-vm-pin; run by `cst cpu vm-pin plan|apply|status [VM]`.
 
   plan    print the domain XML diff: <vcpu> VCPUS, every vCPU and the
-          emulator threads pinned to CPUS (default 12 vCPUs on 12-23); no change
+          emulator threads pinned to CPUS (default 12 vCPUs on 12-23) and,
+          with <cpu mode='host-passthrough'>, the features of VM_CPU_DISABLE
+          (default: CET and nested MBEC) set to policy='disable'; no change
   apply   same diff, asks, then `virsh define`: takes effect at the VM's next
           start (shutting it down/starting it is left to the user)
   status  current vCPU count and pinning (live and persistent)
@@ -20,9 +23,21 @@ import xml.etree.ElementTree as ET
 URI = "qemu:///system"
 CONF = "/etc/cpu-setup/cpu-setup.conf"
 
+# CPU features hidden from a host-passthrough guest. QEMU 11 (Fedora 45)
+# started to pass Intel CET (shadow stacks, indirect branch tracking) and
+# nested MBEC to the guest; Windows 11 with Hyper-V/VBS/WSL2 then loops in
+# Automatic Repair. Upstream reports:
+#   https://gitlab.com/qemu-project/qemu/-/issues/3215
+#   https://forum.proxmox.com/threads/windows-11-bootloop-with-kernel-7-0-works-with-kernel-6-17.185608/
+# Retire this list (set VM_CPU_DISABLE='' and re-apply) once QEMU/KVM or
+# Windows fix it upstream. cpu-setup.conf's VM_CPU_DISABLE overrides it;
+# cst doctor reads this line too.
+CPU_DISABLE_DEFAULT = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
+
 
 def conf():
-    vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23"}
+    vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23",
+            "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
     try:
         with open(CONF) as f:
             for line in f:
@@ -49,7 +64,23 @@ def keep_prefixes(xml_text):
         ET.register_namespace(prefix, uri)
 
 
-def pinned(xml_text, vcpus, cpus):
+def disable_features(root, names):
+    """With <cpu mode='host-passthrough'>, every feature in names present as
+    <feature policy='disable' name=.../>: an existing one keeps its place
+    (only its policy changes), missing ones are appended. Other modes, or no
+    <cpu>, are left alone."""
+    cpu = root.find("cpu")
+    if not names or cpu is None or cpu.get("mode") != "host-passthrough":
+        return
+    have = {f.get("name"): f for f in cpu.findall("feature")}
+    for n in names:
+        if n in have:
+            have[n].set("policy", "disable")
+        else:
+            ET.SubElement(cpu, "feature", {"policy": "disable", "name": n})
+
+
+def pinned(xml_text, vcpus, cpus, disable=()):
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
     vcpu = root.find("vcpu")
@@ -72,8 +103,38 @@ def pinned(xml_text, vcpus, cpus):
     for i in range(vcpus):
         ET.SubElement(tune, "vcpupin", {"vcpu": str(i), "cpuset": cpus})
     ET.SubElement(tune, "emulatorpin", {"cpuset": cpus})
+    disable_features(root, disable)
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode") + "\n"
+
+
+def features_note(root, disable, planned=False):
+    """How the CPU features stand (or will stand, planned) for the messages."""
+    cpu = root.find("cpu")
+    mode = cpu.get("mode") if cpu is not None else None
+    if not disable:
+        return "CPU features not managed (VM_CPU_DISABLE is empty)"
+    if mode != "host-passthrough":
+        return f"CPU features left alone (cpu mode {mode or 'not set'}, not host-passthrough)"
+    return f"CPU features {'to be ' if planned else ''}disabled: {' '.join(disable)}"
+
+
+def cpu_line(xml_text, disable):
+    """One status line: the cpu mode and which managed features are off."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return "cpu: definition not readable"
+    cpu = root.find("cpu")
+    mode = cpu.get("mode") if cpu is not None else "not set"
+    off = {f.get("name") for f in (cpu.findall("feature") if cpu is not None else [])
+           if f.get("policy") == "disable"}
+    missing = [n for n in disable if n not in off]
+    if not disable or mode != "host-passthrough":
+        return f"cpu mode: {mode} ({features_note(root, disable)})"
+    if missing:
+        return f"cpu mode: {mode}; NOT disabled yet: {' '.join(missing)} (fix: cst cpu vm-pin plan)"
+    return f"cpu mode: {mode}; disabled: {' '.join(disable)}"
 
 
 def main():
@@ -81,9 +142,11 @@ def main():
     c = conf()
     name = sys.argv[2] if len(sys.argv) > 2 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
+    disable = c["VM_CPU_DISABLE"].split()
     if action == "status":
         state = virsh("domstate", name).strip()
         print(f"{name}: {state}")
+        print(cpu_line(virsh("dumpxml", "--inactive", name, check=False), disable))
         print(virsh("vcpucount", name, check=False).rstrip())
         print(virsh("vcpupin", name, "--config", check=False).rstrip())
         print("emulator (persistent):", virsh("emulatorpin", name, "--config", check=False).split()[-1:])
@@ -100,10 +163,10 @@ def main():
             sys.exit(f"{name} has <{path}>: adjust it by hand (virsh edit {name}); nothing changed")
     ET.indent(cur_root := ET.fromstring(cur), space="  ")
     before = ET.tostring(cur_root, encoding="unicode") + "\n"
-    after = pinned(cur, vcpus, cpus)
+    after = pinned(cur, vcpus, cpus, disable)
     diff = list(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "current", "pinned"))
     if not diff:
-        print(f"{name}: already {vcpus} vCPUs pinned to {cpus}.")
+        print(f"{name}: already {vcpus} vCPUs pinned to {cpus}; {features_note(croot, disable)}.")
         return 0
     sys.stdout.writelines(diff)
     if action == "plan":
@@ -111,7 +174,7 @@ def main():
         return 0
     if not sys.stdin.isatty():
         sys.exit("apply asks for confirmation: run it in a terminal")
-    if input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus}? [y/N] ").strip()[:1] not in ("y", "Y", "s", "S"):
+    if input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] ").strip()[:1] not in ("y", "Y", "s", "S"):
         print("Nothing changed.")
         return 0
     backup = f"/etc/cpu-setup/{name}.xml.before-vm-pin"
