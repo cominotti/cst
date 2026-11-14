@@ -376,7 +376,11 @@ def copy(src, dest, mode, big):
         if os.path.isfile(src) and nocow(src):
             precreate_nocow(dest)
     else:
-        flags = ["--reflink=never", "--sparse=always"]
+        # --sparse=auto keeps the source's holes only. --sparse=always also turns
+        # every run of zero blocks inside the data into a hole: a 92 GiB image
+        # became 1.05 million extents (the source had 0.6 million), and the guest
+        # writing into those holes allocates new extents even on a NOCOW file.
+        flags = ["--reflink=never", "--sparse=auto"]
     rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * 3600)
     if rc != 0:
         raise Refused(f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}" +
@@ -765,7 +769,7 @@ def convert_lines(img, system):
     return [f"{s}mv {f} {old}",
             f"{s}install -m 0600 /dev/null {f}      # new empty file, private until cp -a sets the mode",
             f"{s}chattr +C {f}",
-            f"{s}cp -a --reflink=never --sparse=always {old} {f}",
+            f"{s}cp -a --reflink=never --sparse=auto {old} {f}",
             f"{s}cmp {old} {f} && echo same",
             f"# start the VM; after a good boot: {s}rm {old}"]
 
