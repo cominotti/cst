@@ -4,7 +4,9 @@ The helper runs as root at boot and rewrites Docker volumes. These tests load
 it as a module and never let it reach the machine:
 
 - every path it writes or reads state from (VOLUMES, FLAG, ATTEMPTS, NOTIFY)
-  points into a temporary folder of the test;
+  points into a temporary folder of the test, and so does PROC, the /proc
+  where it looks for a dockerd (a fake tree: no process unless a test adds
+  one);
 - the file attribute ioctls (FS_IOC_GETFLAGS / FS_IOC_SETFLAGS, under
   flags() and set_nocow()) go to a fake that keeps the flags of each inode in
   a dictionary, and refuses any file outside the temporary folder;
@@ -315,6 +317,9 @@ class Base(unittest.TestCase):
         self.flag = os.path.join(self.tmp, "etc/btrfs-setup/docker-nocow-pending")
         self.attempts = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/attempts")
         self.notify = os.path.join(self.tmp, "usr/local/sbin/btrfs-notify")
+        # The processes the helper looks at: none, unless a test adds one.
+        self.proc = os.path.join(self.tmp, "proc")
+        os.makedirs(self.proc)
         os.makedirs(self.vols)
         os.makedirs(os.path.dirname(self.flag))
         # Docker keeps its volume database next to the volumes: a file, not a volume.
@@ -326,6 +331,7 @@ class Base(unittest.TestCase):
             ("FLAG", self.flag),
             ("ATTEMPTS", self.attempts),
             ("NOTIFY", self.notify),
+            ("PROC", self.proc),
             ("fcntl", SimpleNamespace(ioctl=self.fs.ioctl)),
             ("subprocess", SimpleNamespace(run=self.fs.run)),
         ):
@@ -337,7 +343,7 @@ class Base(unittest.TestCase):
         self.enterContext(warnings.catch_warnings())
         warnings.filterwarnings("ignore", r"unclosed file <_io\.TextIOWrapper name='[^']*/attempts'", ResourceWarning)
         # Nothing of the helper may point outside the test folder.
-        for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.NOTIFY):
+        for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.NOTIFY, M.PROC):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
 
     def fresh(self) -> None:
@@ -451,6 +457,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(loaded.VOLUMES, "/var/lib/docker/volumes")
         self.assertEqual(loaded.FLAG, "/etc/btrfs-setup/docker-nocow-pending")
         self.assertEqual(loaded.ATTEMPTS, "/var/lib/docker-volumes-nocow/attempts")
+        self.assertEqual(loaded.PROC, "/proc")
 
     def test_docker_root_reads_data_root(self) -> None:
         for text, want in (
@@ -915,8 +922,10 @@ class MigrateTest(Base):
         self.assertEqual(self.read_attempts(), "1")
 
 
-class DockerRunningTest(Base):
-    """docker_busy(): the ActiveState of docker.service, failing closed."""
+class PostponeBase(Base):
+    """A scheduled CoW volume, one attempt made, and a leftover of an
+    interrupted copy (recover() would remove it): what a postponed boot must
+    leave as it is."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -932,6 +941,17 @@ class DockerRunningTest(Base):
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assert_all_nocow(self.top)
         self.assert_no_leftovers("cow")
+
+    def assert_postponed(self, out: str, why: str) -> None:
+        self.assertEqual(out, f"<4>{TAG}: {why}: migration left for the next boot\n")
+        self.assertEqual(self.fs.sets, [])
+        self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)  # recover() not run either
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(self.read_attempts(), "1")
+
+
+class DockerRunningTest(PostponeBase):
+    """docker_busy(): the ActiveState of docker.service, failing closed."""
 
     def test_running_postpones_without_touching_anything(self) -> None:
         for state in ("active", "activating", "reloading", "deactivating"):
@@ -957,13 +977,6 @@ class DockerRunningTest(Base):
                 self.fresh()
                 self.fs.docker_state = state
                 self.assert_migrated(self.call(M.migrate)[1])
-
-    def assert_postponed(self, out: str, why: str) -> None:
-        self.assertEqual(out, f"<4>{TAG}: {why}: migration left for the next boot\n")
-        self.assertEqual(self.fs.sets, [])
-        self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)  # recover() not run either
-        self.assertTrue(os.path.exists(self.flag))
-        self.assertEqual(self.read_attempts(), "1")
 
     def test_unknown_state_postpones(self) -> None:
         # Fails closed: only exit code 0 with "inactive" or "failed" lets the
@@ -995,6 +1008,185 @@ class DockerRunningTest(Base):
         self.assert_postponed(
             out, "cannot ask systemd about docker.service ([Errno 2] No such file or directory: 'systemctl')"
         )
+
+
+class DockerdTest(PostponeBase):
+    """dockerd_busy(): a dockerd outside docker.service, in a fake /proc.
+
+    Each process is PROC/PID with comm, cmdline, and the links exe, root (the
+    / of its mount namespace) and cwd. root pointing at the test folder is a
+    dockerd in our mount namespace; pointing at another folder, one in a
+    container or in rootless Docker's namespace."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Another mount namespace (a container): its own /var/lib/docker.
+        self.other = os.path.join(self.tmp, "other-ns")
+        os.makedirs(os.path.join(self.other, "var/lib/docker/volumes"))
+
+    def process(
+        self,
+        pid: int,
+        args: list[str],
+        root: str | None = None,
+        comm: str = "dockerd",
+        exe: str | None = "/usr/bin/dockerd",
+        cwd: str = "/",
+    ) -> str:
+        d = os.path.join(self.proc, str(pid))
+        os.makedirs(d)
+        with open(os.path.join(d, "comm"), "w") as f:
+            f.write(comm + "\n")
+        with open(os.path.join(d, "cmdline"), "wb") as f:
+            f.write(b"".join(a.encode() + b"\0" for a in args))
+        if exe is not None:
+            os.symlink(exe, os.path.join(d, "exe"))
+        top = self.tmp if root is None else root
+        os.symlink(top, os.path.join(d, "root"))
+        os.symlink(os.path.join(top, cwd.lstrip("/")), os.path.join(d, "cwd"))
+        return d
+
+    def daemon_json(self, top: str, text: str, name: str = "daemon.json") -> None:
+        os.makedirs(os.path.join(top, "etc/docker"), exist_ok=True)
+        with open(os.path.join(top, "etc/docker", name), "w") as f:
+            f.write(text)
+
+    # ---- dockerd processes that use this data root -------------------------
+
+    def ours_default(self) -> None:
+        self.process(7, ["/usr/bin/dockerd"])
+
+    def ours_data_root_equals(self) -> None:
+        self.process(7, ["dockerd", "--data-root=/var/lib/docker"])
+
+    def ours_data_root_space(self) -> None:
+        self.process(7, ["dockerd", "-H", "fd://", "--data-root", "/var/lib/docker"])
+
+    def ours_short_g(self) -> None:
+        self.process(7, ["dockerd", "-g", "/var/lib/docker"])
+
+    def ours_relative(self) -> None:
+        self.process(7, ["dockerd", "--data-root=docker"], cwd="/var/lib")
+
+    def ours_daemon_json(self) -> None:
+        self.daemon_json(self.tmp, '{"data-root": "/var/lib/docker"}')
+        self.process(7, ["dockerd"])
+
+    def ours_daemon_json_not_an_object(self) -> None:
+        self.daemon_json(self.tmp, '["data-root"]')  # dockerd's default then
+        self.process(7, ["dockerd"])
+
+    def ours_config_file(self) -> None:
+        os.makedirs(os.path.join(self.tmp, "srv"))
+        os.symlink("../var/lib/docker", os.path.join(self.tmp, "srv/docker"))
+        self.daemon_json(self.tmp, '{"data-root": "/srv/docker"}', "custom.json")
+        self.process(7, ["dockerd", "--config-file", "/etc/docker/custom.json"])
+
+    def ours_by_program_file(self) -> None:
+        # Renamed process, program file replaced by an upgrade.
+        self.process(7, ["d"], comm="d", exe="/usr/bin/dockerd (deleted)")
+
+    def ours_bind_mounted(self) -> None:
+        # A container that bind-mounts this data root (a link stands in for
+        # the bind mount: the same directory, seen from another namespace).
+        os.makedirs(os.path.join(self.other, "srv"))
+        os.symlink("../../var/lib/docker", os.path.join(self.other, "srv/docker"))
+        self.process(7, ["dockerd", "--data-root=/srv/docker"], root=self.other)
+
+    def test_dockerd_on_this_data_root_postpones(self) -> None:
+        for add in (
+            self.ours_default,
+            self.ours_data_root_equals,
+            self.ours_data_root_space,
+            self.ours_short_g,
+            self.ours_relative,
+            self.ours_daemon_json,
+            self.ours_daemon_json_not_an_object,
+            self.ours_config_file,
+            self.ours_by_program_file,
+            self.ours_bind_mounted,
+        ):
+            with self.subTest(case=add.__name__):
+                self.fresh()
+                add()
+                rc, out = self.call(M.migrate)
+                self.assertEqual(rc, 0)
+                self.assert_postponed(out, f"dockerd (pid 7) uses {self.vols} outside docker.service")
+
+    def test_unreadable_data_root_postpones(self) -> None:
+        # Fails closed: a dockerd whose data root cannot be read may be ours.
+        d = self.process(7, ["dockerd"])
+        real_stat = os.stat
+        blocked = os.path.join(d, "root", "var/lib/docker/volumes")
+
+        def stat(path: str, *a: object, **kw: object) -> os.stat_result:
+            if path == blocked:
+                raise PermissionError(13, "Permission denied", path)
+            return real_stat(path)
+
+        with mock.patch.object(os, "stat", stat):
+            rc, out = self.call(M.migrate)
+        self.assertEqual(rc, 0)
+        why = f"dockerd (pid 7) is running and its data root cannot be read ([Errno 13] Permission denied: '{blocked}')"
+        self.assert_postponed(out, why)
+
+    # ---- processes that must not hold the migration back -------------------
+
+    def other_rootless(self) -> None:
+        # Rootless Docker: its data in the home folder, and the script that
+        # starts it, whose name begins with "dockerd".
+        os.makedirs(os.path.join(self.tmp, "home/u/.local/share/docker/volumes"))
+        self.process(7, ["dockerd", "--data-root=/home/u/.local/share/docker"])
+        self.process(8, ["/bin/sh", "/usr/bin/dockerd-rootless.sh"], comm="dockerd-rootless", exe="/usr/bin/bash")
+
+    def other_containerised(self) -> None:
+        # In a container: the /var/lib/docker of its own mount namespace.
+        self.process(7, ["dockerd"], root=self.other)
+
+    def other_containerised_daemon_json(self) -> None:
+        # Its own daemon.json is read, not ours (which names our data root).
+        self.daemon_json(self.tmp, '{"data-root": "/var/lib/docker"}')
+        self.daemon_json(self.other, '{"data-root": "/data/docker"}')
+        os.makedirs(os.path.join(self.other, "data/docker/volumes"))
+        self.process(7, ["dockerd"], root=self.other)
+
+    def other_data_root(self) -> None:
+        # Our namespace, another data root, with no volumes folder yet.
+        self.process(7, ["dockerd", "--data-root=/srv/docker"])
+
+    def other_not_dockerd(self) -> None:
+        self.process(7, ["sleep", "--data-root=/var/lib/docker"], comm="sleep", exe=None)
+
+    def other_ended(self) -> None:
+        # Ended while the helper looked: only its empty folder is left.
+        os.makedirs(os.path.join(self.proc, "7"))
+
+    def other_not_processes(self) -> None:
+        os.makedirs(os.path.join(self.proc, "sys/kernel"))
+        os.symlink("8", os.path.join(self.proc, "self"))
+        self.process(
+            8,
+            ["/usr/bin/python3", "-I", "/usr/local/sbin/docker-volumes-nocow", "migrate"],
+            comm="python3",
+            exe="/usr/bin/python3.14",
+        )
+
+    def test_other_dockerd_does_not_postpone(self) -> None:
+        for add in (
+            self.other_rootless,
+            self.other_containerised,
+            self.other_containerised_daemon_json,
+            self.other_data_root,
+            self.other_not_dockerd,
+            self.other_ended,
+            self.other_not_processes,
+        ):
+            with self.subTest(case=add.__name__):
+                self.fresh()
+                add()
+                rc, out = self.call(M.migrate)
+                self.assertEqual(rc, 0)
+                self.assert_migrated(out)
 
 
 class RecoverTest(Base):

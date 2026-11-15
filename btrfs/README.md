@@ -577,6 +577,15 @@ docker volume rm <name>         # or one volume by name
   so Docker reads `inactive` then). Any other answer, an error, or no
   `systemctl` at all postpones the migration to the next boot, with the reason
   in the journal. A postponed boot does not count as an attempt.
+- It also postpones while a `dockerd` outside `docker.service` (started by
+  hand, or by another unit) uses the same volumes folder. It finds such a
+  daemon in `/proc` by its name or program file, reads its `--data-root` (or
+  the `data-root` of its config file, or the default `/var/lib/docker`) in the
+  daemon's own view (`/proc/PID/root`), and compares that folder with the
+  volumes folder by device and inode. So a rootless Docker or a Docker inside
+  a container, which keep their data elsewhere, do not count; a container
+  that bind-mounts this data root does. A daemon whose data folder cannot be
+  read counts too.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. This runs early at boot,
   before anyone has logged in, so the desktop alert is **kept and shown at

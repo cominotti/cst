@@ -19,7 +19,7 @@ RAID1 episode such volumes should be recreated, not trusted.
                                  CoW files into a NOCOW copy: +C only applies to
                                  empty files, so the data has to be copied.
                                  Waits unless systemd says docker.service is
-                                 stopped.
+                                 stopped and no other dockerd uses the dir.
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
@@ -37,6 +37,7 @@ GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
 FLAG = "/etc/btrfs-setup/docker-nocow-pending"
 ATTEMPTS = "/var/lib/docker-volumes-nocow/attempts"
 NOTIFY = "/usr/local/sbin/btrfs-notify"
+PROC = "/proc"  # where running dockerd processes are looked for (tests point it elsewhere)
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
 
 
@@ -205,6 +206,80 @@ def docker_busy():
     return f"docker.service state unknown (systemctl exit {r.returncode}, ActiveState {state!r})"
 
 
+def is_dockerd(proc):
+    """The process in /proc/PID is a dockerd (its name or its program file)."""
+    with open(os.path.join(proc, "comm"), "rb") as f:
+        names = {f.read().strip()}
+    try:
+        names.add(os.path.basename(os.readlink(os.path.join(proc, "exe")).removesuffix(" (deleted)")).encode())
+    except OSError:
+        pass  # a kernel thread, or a process that just ended
+    return b"dockerd" in names
+
+
+def daemon_volumes(proc, args):
+    """The volumes folder of the dockerd in /proc/PID, as a path this process
+    can open: its --data-root, else data-root in its config file
+    (--config-file, default /etc/docker/daemon.json), else /var/lib/docker.
+    Paths are read in the daemon's own view, through /proc/PID/root (its
+    mount namespace) and /proc/PID/cwd (a relative path)."""
+
+    def inside(path):
+        if path.startswith("/"):
+            return os.path.join(proc, "root", path.lstrip("/"))
+        return os.path.join(proc, "cwd", path)
+
+    root, config = None, "/etc/docker/daemon.json"
+    rest = iter(args[1:])
+    for arg in rest:
+        key, eq, value = arg.partition("=")
+        if key in ("--data-root", "-g", "--graph", "--config-file"):
+            if not eq:
+                value = next(rest, "")
+            if key == "--config-file":
+                config = value
+            else:
+                root = value
+    if not root:
+        try:
+            with open(inside(config)) as f:
+                root = json.load(f).get("data-root")
+        except FileNotFoundError, ValueError, AttributeError:
+            pass  # no such file, or not a JSON object: dockerd's own default
+    if not isinstance(root, str) or not root:
+        root = "/var/lib/docker"
+    return os.path.join(inside(root), "volumes")
+
+
+def dockerd_busy():
+    """None when no dockerd uses VOLUMES, else why the migration waits.
+
+    A dockerd started by hand or by another unit is not docker.service. It
+    counts when its volumes folder is the same directory as VOLUMES (device
+    and inode, seen through its own mount namespace): a rootless dockerd or
+    one in a container keeps its data elsewhere and does not count, while a
+    container that bind-mounts this data root does. A dockerd whose data root
+    cannot be read counts too (fails closed)."""
+    mine = os.stat(VOLUMES)
+    for pid in sorted(os.listdir(PROC)):
+        if not pid.isdigit():
+            continue
+        proc = os.path.join(PROC, pid)
+        try:
+            if not is_dockerd(proc):
+                continue
+            with open(os.path.join(proc, "cmdline"), "rb") as f:
+                args = [a.decode(errors="surrogateescape") for a in f.read().split(b"\0")]
+            st = os.stat(daemon_volumes(proc, args))
+        except FileNotFoundError, ProcessLookupError:
+            continue  # the process ended, or its data root has no volumes folder
+        except OSError as e:
+            return f"dockerd (pid {pid}) is running and its data root cannot be read ({e})"
+        if (st.st_dev, st.st_ino) == (mine.st_dev, mine.st_ino):
+            return f"dockerd (pid {pid}) uses {VOLUMES} outside docker.service"
+    return None
+
+
 def migrate_one(name, data):
     """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
     new, old = data + ".nocow-new", data + f".cow-old-{int(time.time())}"
@@ -261,7 +336,7 @@ def request_migration():
 def migrate():
     if not os.path.isdir(VOLUMES):
         return 0
-    busy = docker_busy()
+    busy = docker_busy() or dockerd_busy()
     if busy:
         log(4, f"{busy}: migration left for the next boot")
         return 0
