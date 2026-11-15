@@ -2,8 +2,9 @@
 # changed what a line does, not one that only changed its layout. GitHub reads
 # this file by itself. Locally, once per clone:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
-# Add only commits that change layout and nothing else (full SHA, the one
-# that landed on main, with a comment naming its pull request).
+# Add only commits whose code changes are layout only (full SHA, the one that
+# landed on main, with a comment naming its pull request). Blame skips the
+# whole commit, so any config or doc lines it changed are skipped too.
 
-# #16: ruff format at line length 120 (no behaviour change)
+# #16: ruff format at line length 120; it also added the format gate
 be3f0f97fe613b88ddc429e3e03cdf4d01249b76

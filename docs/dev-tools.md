@@ -82,11 +82,11 @@ repository:
   - `check=False` when the code reads `returncode` itself, or when a failure
     really does not matter (say why in a comment).
 
-  The existing calls all got `check=False`, which is what they did before
-  (Python's default), so that pull request changed no behaviour. Turning
-  one into `check=True` changes behaviour: do it in its own pull request,
-  with a test. ruff does not lint the Python examples in Markdown files;
-  write `check=` in them by hand.
+  When the rule was turned on, every existing call got `check=False`,
+  which is what it did before (Python's default), so no behaviour changed.
+  Turning one into `check=True` changes behaviour: do it in its own pull
+  request, with a test. ruff does not lint the Python examples in Markdown
+  files; write `check=` in them by hand.
 - **The format check** (`ruff format --check`, the second half of
   `test pylint`): every Python file must already look the way `ruff format`
   writes it. Lines are up to 120 characters (`line-length` in `[tool.ruff]`;
@@ -132,18 +132,20 @@ repository:
 ## Layout-only commits and `git blame`
 
 `.git-blame-ignore-revs` at the top of the repository lists the commits
-that only changed the layout of the code, such as the `ruff format` run of
-#16. `git blame` skips them and shows the commit that last changed what each
-line does. GitHub reads the file by itself. For `git blame` on your machine,
-run once per clone:
+whose code changes are layout only, such as the `ruff format` run of #16.
+`git blame` skips them and shows the commit that last changed what each line
+does. GitHub reads the file by itself. For `git blame` on your machine, run
+once per clone:
 
 ```
 git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
 
-Add a commit there only when it changes nothing but layout, by the full SHA
-that landed on `main` (the squash commit), with a comment naming its pull
-request.
+Add a commit there only when its code changes are layout only, by the full
+SHA that landed on `main` (the squash commit), with a comment naming its pull
+request. `git blame` skips the whole commit, so any config or doc lines it
+changed are skipped too (#16 also added the format gate to the config and
+the docs).
 
 ## Upgrading a pin
 
