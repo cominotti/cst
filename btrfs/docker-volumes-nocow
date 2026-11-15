@@ -25,6 +25,7 @@ RAID1 episode such volumes should be recreated, not trusted.
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
+import errno
 import fcntl
 import json
 import os
@@ -336,6 +337,32 @@ def postponed_line():
     return f"  migration postponed at {rec.get('boots', '?')} boot(s), last {when}: {rec.get('reason', '?')}"
 
 
+def label(path):
+    """The SELinux label of path itself (a link is not followed), without the
+    trailing NUL the kernel may keep; None when it has none or the
+    filesystem keeps no labels."""
+    try:
+        value = os.getxattr(path, "security.selinux", follow_symlinks=False)
+    except OSError as e:
+        if e.errno in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+            return None
+        raise
+    return value.rstrip(b"\0")
+
+
+def labels(top):
+    """{path relative to top: label} for top and every entry below it, walked
+    like cow_files (a link is an entry; another filesystem is not entered)."""
+    out = {".": label(top)}
+    dev = os.lstat(top).st_dev
+    for root, dirs, files in os.walk(top):
+        for name in dirs + files:
+            p = os.path.join(root, name)
+            out[os.path.relpath(p, top)] = label(p)
+        dirs[:] = real_dirs(root, dirs, dev)
+    return out
+
+
 def migrate_one(name, data):
     """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
     new, old = data + ".nocow-new", data + f".cow-old-{int(time.time())}"
@@ -365,6 +392,20 @@ def migrate_one(name, data):
         raise RuntimeError(
             f"copy check failed (entries {entries_old} vs {entries_new}, bytes "
             f"{bytes_old} vs {bytes_new}, CoW files {n_cow})"
+        )
+    # cp -a keeps SELinux labels when it can and says nothing when it cannot;
+    # a container cannot open a file whose label changed.
+    labels_old, labels_new = labels(data), labels(new)
+    differ = sorted(k for k in labels_old.keys() | labels_new.keys() if labels_old.get(k) != labels_new.get(k))
+    if differ:
+        rel = differ[0]
+
+        def shown(v):
+            return "none" if v is None else v.decode(errors="replace")
+
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(
+            f"copy check failed (SELinux label of {rel}: {shown(labels_old.get(rel))} vs {shown(labels_new.get(rel))})"
         )
     os.sync()
     os.rename(data, old)

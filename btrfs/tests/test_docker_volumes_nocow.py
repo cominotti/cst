@@ -158,6 +158,7 @@ class FakeSystem:
     def __init__(self, root: str) -> None:
         self.root = root
         self.attrs: dict[tuple[int, int], int] = {}
+        self.labels: dict[tuple[int, int], bytes] = {}  # security.selinux of each inode; none by default
         self.sets: list[str] = []  # paths whose flags the helper set (FS_IOC_SETFLAGS)
         self.calls: list[list[str]] = []
         self.docker_state = "inactive"
@@ -206,6 +207,34 @@ class FakeSystem:
             return 0
         raise AssertionError(f"unexpected ioctl request {request:#x}")
 
+    # ---- SELinux labels (os.getxattr) ---------------------------------------
+
+    def label(self, path: str, value: bytes | None) -> None:
+        """Give path's inode this label (None: no label)."""
+        if value is None:
+            self.labels.pop(self.key(path), None)
+        else:
+            self.labels[self.key(path)] = value
+
+    def label_of(self, path: str) -> bytes | None:
+        return self.labels.get(self.key(path))
+
+    def getxattr(self, path: str, attribute: str, *, follow_symlinks: bool = True) -> bytes:
+        if attribute != "security.selinux":
+            raise AssertionError(f"unexpected xattr {attribute} of {path}")
+        if follow_symlinks:
+            raise AssertionError(f"getxattr follows the link {path}")
+        if path != self.root and not path.startswith(self.root + os.sep):
+            raise AssertionError(f"getxattr on {path}, outside the test folder {self.root}")
+        value = self.labels.get(self.key(path))
+        if value is None:
+            raise OSError(61, "No data available", path)  # ENODATA
+        return value
+
+    def copy_label(self, src: str, dst: str) -> None:
+        """What cp -a and chcon --reference do with the label."""
+        self.label(dst, self.label_of(src))
+
     # ---- the commands -----------------------------------------------------
 
     def run(self, args: list[str], **kw: object) -> subprocess.CompletedProcess:
@@ -226,6 +255,10 @@ class FakeSystem:
             answers = self.systemctl_rc == 0 or self.systemctl_out_on_error
             return done(self.systemctl_rc, self.docker_state + "\n" if answers else "")
         if args[0] == "chcon":
+            if args[1:2] != ["--reference"] or len(args) != 4:
+                raise AssertionError(f"unexpected chcon call: {args}")
+            if self.chcon_rc == 0:
+                self.copy_label(args[2], args[3])
             return done(self.chcon_rc)
         if args[0] == "btrfs":
             if args[:4] != ["btrfs", "filesystem", "usage", "-b"]:
@@ -265,8 +298,9 @@ class FakeSystem:
         self.attrs[self.key(path)] = NOCOW if parent else 0
 
     def copy(self, src: str, dst: str) -> tuple[int, str]:
-        """`cp -a SRC/. DST/`: the contents and SRC's own mode and times."""
+        """`cp -a SRC/. DST/`: the contents and SRC's own mode, times and label."""
         self.copy_into(src, dst)
+        self.copy_label(src, dst)
         st = os.lstat(src)
         os.chmod(dst, stat.S_IMODE(st.st_mode))
         os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
@@ -305,6 +339,7 @@ class FakeSystem:
             if not stat.S_ISLNK(st.st_mode):
                 os.chmod(d, stat.S_IMODE(st.st_mode))
             os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns), follow_symlinks=False)
+            self.copy_label(s, d)
             n += 1
             if stop_after is not None and n >= stop_after:
                 raise Crash(f"killed during the copy, after {n} entries")
@@ -342,6 +377,7 @@ class Base(unittest.TestCase):
         ):
             self.enterContext(mock.patch.object(M, name, value))
         self.enterContext(mock.patch.object(os, "sync", self.fs.sync))
+        self.enterContext(mock.patch.object(os, "getxattr", self.fs.getxattr))
         # The helper opens the attempts file without closing it (bugs.md,
         # "attempts file left open"); CPython closes it at once, but the
         # ResourceWarning would fill the test output.
@@ -776,10 +812,13 @@ class MigrateTest(Base):
         self.assertIsNone(self.read_attempts())
         self.assertIn(f"<5>{TAG}: rewriting 0 volume(s)", out)
 
-    def migrate_refused(self, cp: Callable[[str, str], tuple[int, str]], why: str) -> None:
-        """Migrate the CoW volume "cow" with this cp: the copy is refused, and
-        the original stays as it was, to be tried again at the next boot."""
-        top = self.volume("cow")
+    def migrate_refused(
+        self, cp: Callable[[str, str], tuple[int, str]], why: str, make: Callable[[], str] | None = None
+    ) -> None:
+        """Migrate the CoW volume "cow" (made by make, if given) with this cp:
+        the copy is refused, and the original stays as it was, to be tried
+        again at the next boot."""
+        top = make() if make else self.volume("cow")
         before, old_ino = tree(top), ino(top)
         self.schedule()
         self.fs.cp = cp
@@ -829,6 +868,81 @@ class MigrateTest(Base):
             return 1, "cp: error writing 'db/base/1': No space left on device\n"
 
         self.migrate_refused(full_disk, "copy failed: cp: error writing 'db/base/1': No space left on device")
+
+    # ---- SELinux labels -----------------------------------------------------
+    # Tier 2 cannot show real labels (CI's kernel has no SELinux); these use
+    # the fake getxattr, which cp -a and chcon --reference copy across.
+    CONTAINER = b"system_u:object_r:container_file_t:s0:c12,c34"
+
+    def labelled_volume(self) -> str:
+        top = self.volume("cow")
+        self.fs.label(top, self.CONTAINER + b"\0")  # as the kernel returns it
+        for p, _ in entries(top):
+            self.fs.label(p, self.CONTAINER)
+        return top
+
+    def test_labels_kept(self) -> None:
+        top = self.labelled_volume()
+        self.schedule()
+        rc, out = self.call(M.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assertEqual(self.fs.label_of(top), self.CONTAINER + b"\0")
+        for p, _ in entries(top):
+            self.assertEqual(self.fs.label_of(p), self.CONTAINER, p)
+
+    def test_copy_check_refuses_a_lost_or_changed_label(self) -> None:
+        other = b"system_u:object_r:var_lib_t:s0"
+        old = self.CONTAINER.decode()
+        for name, change, why in (
+            (
+                "drops a file's label",
+                lambda dst: self.fs.label(os.path.join(dst, "db/base/1"), None),
+                f"db/base/1: {old} vs none",
+            ),
+            (
+                "changes a folder's label",
+                lambda dst: self.fs.label(os.path.join(dst, "db/wal"), other),
+                f"db/wal: {old} vs {other.decode()}",
+            ),
+            (
+                "changes a link's own label",
+                lambda dst: self.fs.label(os.path.join(dst, "latest"), other),
+                f"latest: {old} vs {other.decode()}",
+            ),
+            ("loses the top label", lambda dst: self.fs.label(dst, None), f".: {old} vs none"),
+        ):
+            with self.subTest(cp=name):
+                self.fresh()
+                self.migrate_refused(
+                    self.fs.copy_then(change), f"copy check failed (SELinux label of {why})", self.labelled_volume
+                )
+
+    def test_labels_equal_up_to_the_trailing_nul(self) -> None:
+        top = self.labelled_volume()
+        self.schedule()
+        # The copy's README reads back with a NUL, the original's without.
+        self.fs.cp = self.fs.copy_then(lambda dst: self.fs.label(os.path.join(dst, "README"), self.CONTAINER + b"\0"))
+        rc, out = self.call(M.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+
+    def test_label_unsupported_or_unreadable(self) -> None:
+        top = self.volume("cow")
+        for err, want in ((95, None), (61, None)):  # EOPNOTSUPP, ENODATA: no label
+            with self.subTest(errno=err):
+
+                def getxattr(path: str, attribute: str, *, follow_symlinks: bool = True, err: int = err) -> bytes:
+                    raise OSError(err, os.strerror(err), path)
+
+                with mock.patch.object(os, "getxattr", getxattr):
+                    self.assertEqual(M.label(top), want)
+                    self.assertEqual(set(M.labels(top).values()), {None})
+
+        def denied(path: str, attribute: str, *, follow_symlinks: bool = True) -> bytes:
+            raise PermissionError(13, "Permission denied", path)
+
+        with mock.patch.object(os, "getxattr", denied), self.assertRaises(PermissionError):
+            M.label(top)
 
     def test_one_failing_volume_does_not_stop_the_others(self) -> None:
         bad = self.volume("a-bad")

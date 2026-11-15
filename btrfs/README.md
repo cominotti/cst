@@ -569,8 +569,10 @@ docker volume rm <name>         # or one volume by name
   It also resets the counter of attempts (see below).
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
   starts**. For each volume with copy-on-write data it makes a full NOCOW copy,
-  checks that the copy has the same number of entries and bytes, swaps the names
-  and deletes the old copy. It skips a volume if free space is less than its size
+  checks that the copy has the same number of entries and bytes and the same
+  SELinux label on every entry (`cp -a` drops a label it cannot set without a
+  word, and a container cannot open a file whose label changed), swaps the
+  names and deletes the old copy. It skips a volume if free space is less than its size
   plus 20 GiB. One failing volume does not stop the others.
 - It copies only when systemd answers that `docker.service` is stopped
   (`inactive` or `failed`; at boot Docker's start job waits for this service,
