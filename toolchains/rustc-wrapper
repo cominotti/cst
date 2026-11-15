@@ -32,6 +32,20 @@
 # network: one sccache server on 127.0.0.1:4226 would run the compilers of
 # another environment. So each environment gets its own unix socket,
 # $XDG_RUNTIME_DIR/cst-sccache-<toolbox name or host>.sock.
+#
+# Always set for sccache (not only when unset): TMPDIR=/tmp, the value a caller
+# without TMPDIR already gets. When no server answers, the sccache client
+# starts one, and that server keeps the client's TMPDIR for its own temporary
+# folders for as long as it runs. A build run with a private TMPDIR that is
+# deleted afterwards (a temporary scope, a test harness) would leave a server
+# whose every later compile fails with "Failed to create temp dir"; a TMPDIR
+# too long for a unix socket path would fail the first compile ("path must be
+# shorter than SUN_LEN"). This holds with your own SCCACHE_SERVER_UDS or port
+# too. sccache hands the client's environment to rustc, so rustc's own
+# temporary files go to /tmp too. Compiles that go straight to the compiler
+# (the list above) keep the caller's TMPDIR. A server started by an older copy
+# of this wrapper keeps its TMPDIR until it stops (after 10 minutes without
+# work, or `sccache --stop-server` with the same SCCACHE_SERVER_UDS).
 
 cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
 workspace=yes # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
@@ -101,4 +115,6 @@ if [ -z "${SCCACHE_SERVER_UDS:-}" ] && [ -z "${SCCACHE_SERVER_PORT:-}" ]; then
     export SCCACHE_SERVER_UDS="${run_dir}/cst-sccache-${env_id}.sock"
 fi
 
+# A server this client starts must not keep the caller's TMPDIR (see the top).
+export TMPDIR=/tmp
 exec sccache "$@"
