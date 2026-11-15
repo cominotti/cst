@@ -1029,7 +1029,7 @@ class NocowTest(unittest.TestCase):
             marked.append(p)
             self.flags[p] = self.m.FS_NOCOW_FL
 
-        def fake_sub_run(cmd, env=None):
+        def fake_sub_run(cmd, check=False, env=None):
             sudo.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
 
@@ -1054,7 +1054,7 @@ class NocowTest(unittest.TestCase):
         self.flags[self.boxes] = self.m.FS_NOCOW_FL
         sudo = []
 
-        def fake_sub_run(cmd, env=None):
+        def fake_sub_run(cmd, check=False, env=None):
             sudo.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
 
@@ -1099,7 +1099,7 @@ class NocowTest(unittest.TestCase):
         self.assertNotIn("not created yet", out)
         sudo = []
         with (
-            mock.patch.object(self.m.subprocess, "run", lambda cmd, env=None: sudo.append(cmd)),
+            mock.patch.object(self.m.subprocess, "run", lambda cmd, check=False, env=None: sudo.append(cmd)),
             mock.patch.object(self.m, "confirm", lambda q: True),
         ):
             rc, out = self.out(self.m.cmd_nocow_apply)
