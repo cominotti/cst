@@ -601,7 +601,8 @@ docker volume rm <name>         # or one volume by name
   it as `migration postponed at N boot(s), last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
-  The first boot that is not held back removes the record. To run the
+  The first boot that is not held back removes the record, and so does a
+  boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
   migration by hand once nothing uses the volumes:
   `sudo systemctl stop docker.socket docker.service` and then
   `sudo systemctl start docker-volumes-nocow.service`.

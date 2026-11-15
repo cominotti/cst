@@ -456,6 +456,7 @@ def request_migration():
 
 def migrate():
     if not os.path.isdir(VOLUMES):
+        clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
         return 0
     busy = docker_busy() or dockerd_busy()
     if busy:

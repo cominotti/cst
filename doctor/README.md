@@ -298,7 +298,8 @@ is not counted as a failed attempt and sends no alert, so a migration could
 wait forever without a word. The helper records it instead, in
 `/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
 time, and how many boots were held back (once per boot). The first boot
-that is not held back removes the record.
+that is not held back removes the record, and so does a boot that finds no
+volumes folder (Docker removed, or its `data-root` moved).
 
 One boot is `info`: it can happen once (Docker started by hand early, for
 example). From two boots on it is a `WARN`: something holds the migration

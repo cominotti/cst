@@ -1513,6 +1513,16 @@ class PostponedRecordTest(PostponeBase):
         self.assertEqual(out, f"<4>{TAG}: Docker is running: migration left for the next boot\n")
         self.assertIsNone(self.record())
 
+    def test_volumes_folder_gone_drops_the_record(self) -> None:
+        # Docker removed, or data-root moved: no volumes, nothing waits. The
+        # old record must not keep `cst doctor` warning (status hides it).
+        self.fs.docker_state = "active"
+        self.boot("b1", 1000)
+        self.assertIsNotNone(self.record())
+        shutil.rmtree(self.vols)
+        self.assertEqual(self.boot("b2", 2000), (0, ""))
+        self.assertIsNone(self.record())
+
     def test_a_damaged_record_starts_afresh(self) -> None:
         self.fs.docker_state = "active"
         for text in ("not json", "[1, 2]", '{"boots": "3", "first": 1}', '{"boots": 2, "first": true}', ""):
