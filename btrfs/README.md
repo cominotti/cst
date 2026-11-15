@@ -221,15 +221,25 @@ section 8). It alerts about:
 | Little unallocated space (below 50 GiB on a disk; critical below 5 GiB) | `only N GiB unallocated on ...` / `CRITICAL: only N MiB unallocated` |
 | Metadata almost full | `CRITICAL: metadata almost full` |
 | Automatic reclaim is configured but switched off, or it failed | `automatic reclaim is configured but data/... is off` / `automatic ... reclaim failed` |
-| The NVMe disk's own health log (SMART, read with `nvme smart-log`): a critical warning, media errors, spare blocks below the disk's own threshold, or wear (`percentage_used`) of 80% or more. **Spare blocks** are reserve blocks the disk uses to replace worn-out ones. | `NVMe nvme0n1: ...` |
+| The NVMe disk's own health log (SMART, read with `nvme smart-log`): a critical warning, media errors, spare blocks below the disk's own threshold, or wear (`percentage_used`) of 80% or more. **Spare blocks** are reserve blocks the disk uses to replace worn-out ones. It is read for the btrfs disks and for the disks under every swap device in `/proc/swaps` (see below). | `NVMe nvme0n1: ...` / `NVMe nvme1n1 (swap): ...` |
 | A software RAID (md) is degraded | `md RAID degraded` |
 | This boot or a past boot was degraded (only with the degraded-boot part) | `this boot is DEGRADED` / `booted DEGRADED on ...` |
 | The degraded-boot rule was made for another filesystem (only with the degraded-boot part) | `btrfs-last-resort: /etc/udev/rules.d/65-btrfs-last-resort.rules is for ... but the root fs is ...; re-run 'cst btrfs degraded-boot'` |
 | A Fedora update changed the udev rule that degraded-boot depends on (only with the degraded-boot part) | `udev: .../64-btrfs.rules changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)` |
 | Hourly snapshots stopped working (only with snapshots set up) | `snapshots: no successful hourly run for over 3 hours` |
 
+**Swap disks too.** Swap has no second copy: if the swap disk fails, the
+programs whose memory was swapped out crash or hang. So the SMART checks also
+run for the NVMe disk under each swap device listed in `/proc/swaps`. An
+encrypted swap (`dm-2`) is followed down to its disk (`nvme1n1`), like the
+btrfs disks. Swap files and zram are skipped: a swap file lives on a
+filesystem that is already checked, and zram is memory. A disk that holds
+both btrfs and swap is checked once. Only SMART is read for swap disks; the
+other checks in the table are about btrfs.
+
 When everything is fine it writes one line to the **journal** (the system log
-of systemd; you read it with `journalctl`): `btrfs-health-check: OK (...)`.
+of systemd; you read it with `journalctl`):
+`btrfs-health-check: OK (<mounts>; disks: nvme0n1 nvme2n1; swap disks: nvme1n1)`.
 When there are problems it sends **one critical desktop alert** titled
 `Disk health: problems detected`. Its text starts with the number of problems
 (`2 problem(s):`), then one line per problem.
@@ -367,8 +377,20 @@ kernel shows its own state as files) and in the cgroup tree.
   An episode opens when IO pressure is 10% or more, when 3 or more tasks wait on
   storage, or when a btrfs commit takes 1 s or more.
 - It follows the kernel log (`/dev/kmsg`) for btrfs and disk errors.
+- It sorts each waiting task by what it waits for: storage, a network share
+  (FUSE), btrfs maintenance (trim, scrub, balance), **memory** (memory
+  reclaim, reading a page back from swap or zswap, a page fault or an `mmap`
+  call waiting for the program's memory map lock), or nothing in particular
+  (idle). A thread that waits only for the memory map lock waits for another
+  thread of the same program: it counts as memory if a thread of that program
+  is in reclaim or swap, else as storage (or FUSE) if one waits there. Only
+  storage waits count as "tasks waiting on storage" and open an episode. Daemons
+  before version 8 counted memory waits as storage; the report corrects old
+  logs (see 7.4).
 - Fedora kernels have no "hung task" detector, so the monitor does this job: a
-  task waiting on storage for 30 s **without making progress** is reported.
+  task waiting on storage for 30 s **without making progress** is reported. A
+  task stuck the same way in memory reclaim or swap gets its own alert, not a
+  storage one.
 - Data goes to `/var/log/btrfs-stall-monitor`, one file per day, **8 days** kept.
   Only members of the `wheel` group (the users who are allowed to use `sudo`)
   can read it, because it contains process names and kernel messages.
@@ -389,6 +411,7 @@ every 15 minutes.
 | `Kernel: btrfs/device error` | a severe btrfs or disk error on these disks in the kernel log | critical |
 | `btrfs commit stall on <label>` | a btrfs commit took (or is still running after) 5 s or more | normal |
 | `Task stuck in an uninterruptible wait (likely storage)` | a task waited on storage 30 s with no progress | normal |
+| `Task stuck in an uninterruptible wait (memory reclaim / swap)` | a task waited 30 s with no progress in memory reclaim, swap or zswap: memory ran short; the disks are not the cause | normal |
 | `A program has waited on storage for 10+ minutes (progressing)` | a task was busy with storage at every sample for 10 min, but still progressing (for example a program that calls fsync again and again, see 4.10) | normal |
 | `btrfs maintenance (fstrim/scrub) stuck for 15 min` | trim, scrub or balance waited 15 min with no progress | normal |
 | `Program waiting on a FUSE filesystem (network share / portal)` | a program waited 30 s on a network share or on the document portal (the Flatpak service that gives sandboxed apps access to your files) | normal |
@@ -733,16 +756,16 @@ $ btrfs-stall-report --since '13:59' --until '14:01' --no-below
 window   2026-10-13 13:59:00 -> 14:01:00  kernel 7.2.9-200.fc44.x86_64     (1)
 recorded 13:58:55 -> 14:00:57 (121 s of 120 s)                             (2)
 
-verdict  Blocked tasks: up to 3 tasks in D state (...)                     (3)
+verdict  Blocked tasks: up to 3 tasks waiting on storage in D state (...)  (3)
 verdict  Where blocked tasks waited (share of sampled D-state tasks): fsync log-tree sync (btrfs_sync_log) 86%, ...   (4)
 verdict  fsync-heavy workload: every fsync writes the btrfs log tree and flushes the disk cache of both RAID1 members (...). The lever is fsync frequency in the application, ...   (5)
 verdict  Worst episode: 13:59:30-13:59:57 (26 s, 3 D tasks, commit 101 ms).   (6)
-verdict  btrfs NVMe members NOT saturated (await 0.6 ms, queue depth 0.5); dm-crypt layer await 0.9 ms.   (7)
+verdict  btrfs disks NOT saturated: dm-crypt layer (what btrfs waits for) await 0.9 ms (...), queue depth 0.5; NVMe below await 0.6 ms (...), information only (...).   (7)
 
 pressure io some/full 1.4% / 1.3%   memory some/full 0.0% / 0.0%   cpu some 0.4%   (% of recorded time)   (8)
 btrfs    fedora: 343 commits, avg 14 ms, longest 101 ms @13:59:32; ... new device errors 0   (9)
 disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it
-  nvme0n1  btrfs:fedora  await   0.6 ms  flush await   3.2 ms (3264 flushes)  queue  0.5  ...   (10)
+  nvme0n1  btrfs:fedora  await   0.6 ms (r ... / w ...)  flush await   3.2 ms (3264 flushes)  queue  0.5  ...   (10)
 ...
 episodes 1 (worst first)
   13:59:30-13:59:57   26s  opened by: 3 tasks waiting on storage; ...       (11)
@@ -756,11 +779,14 @@ episodes 1 (worst first)
 5. A hint for that category. Here: the programs call fsync very often; the
    programs must change, not the disk settings.
 6. The worst moment: 26 s long.
-7. The disks were not at their limit (low `await`, short queue). So the disks
-   were not slow; there were simply many small fsync calls.
+7. The disks were not at their limit (low `await`, short queue at the
+   dm-crypt layer, which is what btrfs waits for). So the disks were not slow;
+   there were simply many small fsync calls. The `(...)` parts give read and
+   write `await` apart.
 8. How much of the time tasks waited on IO, memory or CPU (see `pressure` below).
 9. btrfs commits: the longest took 101 ms, which is short. No new disk errors.
-10. One disk: average time per request (`await`) and the queue length.
+10. One disk: average time per request (`await`, then read `r` and write `w`
+    apart) and the queue length.
 11. The episode and why it opened.
 12. Which programs waited (`comms`) and on what (`[log-sync]`).
 
@@ -774,10 +800,14 @@ episodes 1 (worst first)
 | `btrfs device error counters INCREASED in this window.` | a disk reported new read, write or checksum errors | treat it like a health-check alert (section 13, `non-zero device error counters`) |
 | `Storage was NOT a bottleneck` | the disks were not the reason | look at CPU, memory, the network or the program itself. Extra lines may say `CPU contention` or `Memory pressure`. For CPU sharing between games, builds, Docker and the VM, see [../cpu/README.md](../cpu/README.md). |
 | `Little activity recorded: check that the window really covers the workload.` | almost nothing happened in this window | the window is probably wrong; check the times |
-| `IO wait`, `Blocked tasks`, `Slow btrfs commits` | storage **was** a bottleneck | read the next line, `Where blocked tasks waited`, and the hint after it |
+| `IO wait`, `Blocked tasks`, `Slow btrfs commits` | storage **was** a bottleneck. `Blocked tasks` counts only tasks waiting on storage (not memory, network shares or maintenance) | read the next line, `Where blocked tasks waited`, and the hint after it |
+| `Memory, not storage, blocked up to N tasks (...)` | tasks waited on memory: reclaim, reading pages back from swap or zswap, or a page fault or `mmap` call waiting for the program's memory map lock. It can follow `Storage was NOT a bottleneck`. With `estimated from the stacks` the window was recorded by a daemon before version 8, which counted these waits as storage; the report estimates the split from the stacks of each episode | the cause is memory, not the disks: see the `memory` line, `cst swap status` and [../swap/README.md](../swap/README.md) |
+| `Memory waits: up to N tasks also waited on memory ...` | some tasks waited on memory, fewer than on storage | read the storage lines first |
+| `Blocked tasks: also up to N tasks waiting on storage ...` | printed after the `Memory, not storage` line when storage waits came at the same time, but fewer | memory came first; check storage only if the number is large |
+| `Episode still open: since ...` | the monitor is in a stall right now (it samples every second) and 3 or more tasks wait on storage, but the episode has no record yet: the monitor writes it, with the stacks, when the episode ends. The `Blocked tasks` number comes from the samples | wait until it ends, then run the report again for the categories and stacks |
 | `Worst episode: ...` | the time of the worst stall moment | narrow the window to it if you want more detail |
-| `btrfs NVMe members look SATURATED (...)` | the disks themselves were at their limit (`await` 5 ms or more, or a long queue) | the workload wrote or read more than the disks can do; reduce or spread it |
-| `btrfs NVMe members NOT saturated (...)` | the disks had capacity left | the waiting came from btrfs or the program (for example many fsync calls), not from slow disks |
+| `btrfs disks look SATURATED (...)` | the disks were at their limit: at the dm-crypt layer, which is what btrfs waits for, requests took 5 ms or more on average (`await`), or the queue was 8 or longer. On a PC without dm-crypt the member disks are judged instead | the workload wrote or read more than the disks can do; reduce or spread it |
+| `btrfs disks NOT saturated (...)` | the disks had capacity left | the waiting came from btrfs or the program (for example many fsync calls), not from slow disks |
 | `Swap-out of ...: memory pressure also loaded the swap disk.` | memory was short, so the kernel moved memory to swap | the cause is memory, not the filesystem; `cst swap status` shows which cgroup swaps and how much comes back from disk ([../swap/README.md](../swap/README.md#6-reading-the-status)) |
 | `FUSE waits` | a program waited on a network share or the document portal | usually the network, not the disks |
 | `Busy waits` | a program kept the disk busy (for example many fsync calls), but it progressed | the program must change; it is a slow disk only if the disk lines show high `await` or errors |
@@ -790,8 +820,22 @@ The other lines:
 - `pressure`: how much of the time tasks waited on IO, memory or CPU. **PSI**
   (pressure stall information) is the kernel's own measure of this.
 - `btrfs`: number of commits, average and longest commit time.
-- `disks`: per disk, `await` (average time per request) and `queue` (how many
-  requests were waiting). `dm-N` is the encryption layer above each NVMe.
+- `disks`: per disk, `await` (average time per request; `r` and `w` give reads
+  and writes apart) and `queue` (how many requests were waiting). `dm-N` is the
+  encryption layer above each NVMe. The saturation verdict uses the `dm-N`
+  numbers: that is what btrfs waits for. The NVMe numbers below it are shown
+  for information only. On this PC the NVMe write `await` of the btrfs disks
+  is higher than the `dm-N` one above it, even when the PC is idle (6 to 8 ms
+  against about 1 ms); its time can include disk cache flushes, so do not
+  read it as the time btrfs waited.
+- `memory`: `zswap in/out` is what was decompressed from and compressed into
+  the zswap pool (in RAM, no disk IO, but CPU time and locks), and
+  `disk swap in/out` is what was read from and written to the swap disk.
+  Disk swap-out already includes what zswap wrote back to the disk. Only
+  swap-out that bypassed zswap gets its own figure: `(N of it not through
+  zswap)`. Then direct reclaim (memory taken back by the programs that asked
+  for it) and allocation stalls. With `n/a (daemon < v7)` the window was
+  recorded by a daemon that could not read the zswap counters.
 - `cgroups`: which service or container waited and wrote.
 - `below top writers/readers`: which processes did the IO.
 - `episodes`: the worst stall moments. Each line shows the `[category]` of the
@@ -811,7 +855,6 @@ The other lines:
 | `space` | btrfs had to free or reserve space | Yes, if it is frequent: check unallocated space in `status`. |
 | `metadata-read` | reading the file index from disk (something walked many files) | No; a search or a big checkout. |
 | `btrfs-locks` | many writers in the same place inside btrfs | Only if frequent; many writers in one folder. |
-| `reclaim` | memory pressure or swap, not the filesystem | The cause is memory, not the disks; see `cst swap status`. |
 | `device` | requests queued at the NVMe or encryption layer | Yes, if the disk lines also show high `await`. |
 | `wbt` | Linux slowed background writes so that reads stay fast | No; normal under heavy writing. |
 | `overlayfs` | containers copying big files from image layers | No; container start-up. |
@@ -820,16 +863,26 @@ The other lines:
 | `page-read` | reading file data that was not in memory | No. |
 | `other`, `no-stack` | other kernel waits; unknown (no kernel stack captured) | Only if they are large. |
 
-Three categories are **not counted as storage**:
+Four categories are **not counted as storage**:
 
 | Category | Plain meaning |
 |---|---|
+| `reclaim` | waiting on memory: memory reclaim, reading a page back from swap or zswap, or a page fault or `mmap` call waiting for the program's memory map lock. The cause is memory, not the disks; see `cst swap status`. In logs of a daemon before version 8 these waits were counted as storage; the report takes them out again (an estimate from the stacks of each episode). |
 | `fuse` | waiting on a **FUSE** filesystem: a filesystem served by a normal program, here gvfs network shares (`/run/user/<uid>/gvfs`) and the document portal. The cause is usually the network. A typical case is a `find` that walked into a share. |
 | `idle` | programs waiting for each other or for events (for example for a keyboard, USB or the graphics card), not for the disk |
 | `maintenance` | trim, scrub, balance: background work that may wait minutes on purpose |
 
 Note: the verdict line `Maintenance` and the category `maintenance` mean the
 same thing. Only the capital letter differs.
+
+**JSON keys** (`--json`) added with these lines: `peak.mem_tasks` (most tasks
+waiting on memory at once), `sample_d_tasks` (most tasks waiting on storage in
+one sample), `open_episode` (`null`, or `since`, `last` and `d_tasks` of an
+episode without a record yet), `vm.zswap_in_bytes`, `vm.zswap_out_bytes` and
+`vm.swap_out_bypass_bytes` (`null` when no sample came from a daemon version 7
+or later), and `read_await_ms` / `write_await_ms` per disk. Each episode
+has `max_d_mem` (most tasks waiting on memory at once); episodes of a daemon
+before version 8 whose numbers were corrected carry `"estimated": true`. The `units` block of the JSON output explains them too.
 
 ### 7.5 `watch`: label a run for comparisons
 
@@ -1570,6 +1623,10 @@ btrfs-stall-report --since '10 min ago'
 
 Read the `verdict` lines and the worst episode. Changes to mount options,
 `vm.dirty_*` or the kernel are a decision for you; the report only proposes them.
+
+The alert `Task stuck in an uninterruptible wait (memory reclaim / swap)` means
+memory ran short, not that a disk is slow. The report shows it in the
+`Memory, not storage` line; `cst swap status` shows which cgroup swaps.
 
 ### I got `Kernel: btrfs/device error`
 

@@ -313,3 +313,44 @@ EOF
                 restic snapshots --json | grep -q '/tmp/nas-payload'
             """,
         )
+
+    def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self):
+        """systemd's real drop-in order: a `set-property --runtime` value (the game
+        profile) must survive a daemon-reload next to CST's baseline drop-in,
+        which only works because its name sorts before 50-<Property>.conf."""
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            src="$(ls /opt/cst-rw/cpu/units/machine.slice.d-*-cpu-setup.conf)"
+            name="${src##*/machine.slice.d-}"
+            d=/etc/systemd/system/e2e-order.slice.d
+            printf '[Unit]\nDescription=CST E2E drop-in order\n' >/etc/systemd/system/e2e-order.slice
+            mkdir -p "$d"
+            cp "$src" "$d/$name"
+            systemctl daemon-reload
+            systemctl start e2e-order.slice
+            [[ "$(systemctl show -P CPUWeight e2e-order.slice)" == 50 ]]
+            systemctl set-property --runtime e2e-order.slice CPUWeight=10 IOWeight=10
+            systemctl daemon-reload
+            [[ "$(systemctl show -P CPUWeight e2e-order.slice)" == 10 ]]
+            [[ "$(systemctl show -P IOWeight e2e-order.slice)" == 10 ]]
+            # The old name, 50-cpu-setup.conf, sorts after 50-CPUWeight.conf and wins
+            # after a reload: the bug the rename fixed.
+            mv "$d/$name" "$d/50-cpu-setup.conf"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P CPUWeight e2e-order.slice)" == 50 ]]
+            # What uresourced does: a same-named file in /etc/systemd/system.control
+            # hides the runtime one after a reload, so only the watchdog's drift
+            # repair (cpu/game-profile tick) can put MemoryLow back.
+            mkdir -p /etc/systemd/system.control/e2e-order.slice.d
+            printf '[Slice]\nMemoryLow=0\n' >/etc/systemd/system.control/e2e-order.slice.d/50-MemoryLow.conf
+            systemctl set-property --runtime e2e-order.slice MemoryLow=16G
+            [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 17179869184 ]]
+            systemctl daemon-reload
+            [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 0 ]]
+            systemctl stop e2e-order.slice
+            rm -rf /etc/systemd/system/e2e-order.slice "$d" /run/systemd/system.control/e2e-order.slice.d \
+                /etc/systemd/system.control/e2e-order.slice.d
+            systemctl daemon-reload
+            """,
+        )

@@ -64,7 +64,14 @@ SRC="$(dirname "${SELF}")/cpu"
 UNIT_DIR="/etc/systemd/system"
 CONF=/etc/cpu-setup/cpu-setup.conf
 POLKIT_RULE=/etc/polkit-1/rules.d/50-cpu-setup-game.rules
-MACHINE_DROPIN="${UNIT_DIR}/machine.slice.d/50-cpu-setup.conf"
+# Baseline drop-ins start with 10-: systemd reads drop-ins in file-name order
+# (the last one read wins), and the game profile's runtime overrides from
+# `systemctl set-property` are named 50-<Property>.conf. A 50-cpu-setup.conf
+# sorted after them ("50-CPUWeight" < "50-cpu-setup": upper case first), so
+# every daemon-reload put the baseline back over the running profile.
+DROPIN_NAME=10-cpu-setup.conf
+OLD_DROPIN_NAME=50-cpu-setup.conf   # until 2026-11; install and uninstall remove it
+MACHINE_DROPIN="${UNIT_DIR}/machine.slice.d/${DROPIN_NAME}"
 DELEGATE_DROPIN="${UNIT_DIR}/user@.service.d/50-cpu-setup-cpuset.conf"
 DAEMON_JSON=/etc/docker/daemon.json
 # intel_pstate: raise the frequency at once when a task wakes up after an I/O
@@ -161,8 +168,21 @@ check_syntax() {
     fi
 }
 section() { printf '\n== %s\n' "$1"; }
-toolbox_dropin() { echo "$(user_home)/.config/systemd/user/user.slice.d/50-cpu-setup.conf"; }
-helper_dropin() { echo "$(user_home)/.config/systemd/user/flatpak-session-helper.service.d/50-cpu-setup.conf"; }
+toolbox_dropin() { echo "$(user_home)/.config/systemd/user/user.slice.d/${1:-${DROPIN_NAME}}"; }
+helper_dropin() { echo "$(user_home)/.config/systemd/user/flatpak-session-helper.service.d/${1:-${DROPIN_NAME}}"; }
+# The baseline drop-ins under their old name, from before the rename to 10-:
+# they would still sort after the game profile's overrides. install and
+# uninstall remove them; both reload the managers afterwards.
+remove_old_dropins() {
+    local f
+    local -a old=("$(dirname "${MACHINE_DROPIN}")/${OLD_DROPIN_NAME}")
+    if [[ -n "${target_user}" ]]; then
+        old+=("$(toolbox_dropin "${OLD_DROPIN_NAME}")" "$(helper_dropin "${OLD_DROPIN_NAME}")")
+    fi
+    for f in "${old[@]}"; do
+        if [[ -e "${f}" ]]; then rm -fv "${f}"; fi
+    done
+}
 e_cores() { cat /sys/devices/cpu_atom/cpus 2>/dev/null || true; }
 # cpuset in use by the user manager (not just offered to it): it shows in
 # the manager's own subtree_control only once a manager started with the
@@ -193,7 +213,7 @@ install_all() {
     for f in "${UNITS[@]}"; do
         install_file "${SRC}/units/${f}" "${UNIT_DIR}/${f}" 0644
     done
-    install_file "${SRC}/units/machine.slice.d-50-cpu-setup.conf" "${MACHINE_DROPIN}" 0644
+    install_file "${SRC}/units/machine.slice.d-${DROPIN_NAME}" "${MACHINE_DROPIN}" 0644
     install_file "${SRC}/units/user@.service.d-50-cpu-setup-cpuset.conf" "${DELEGATE_DROPIN}" 0644
     if [[ -w "${HWP_BOOST}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST): intel_pstate HWP dynamic boost on." \
@@ -220,6 +240,7 @@ install_all() {
             install_text "$(toolbox_dropin)" 0644 "${target_user}"
         rm -fv "$(helper_dropin)"
     fi
+    remove_old_dropins   # the daemon-reloads below then read without them
     sed "s/@USER@/${target_user}/g" "${SRC}/cpu-game.rules.in" | install_text "${POLKIT_RULE}" 0644
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
@@ -263,6 +284,7 @@ uninstall() {
     systemctl disable --now cpu-game-watchdog.timer 2>/dev/null || true
     for f in "${UNITS[@]}"; do rm -fv "${UNIT_DIR}/${f}"; done
     rm -fv "${MACHINE_DROPIN}" "${DELEGATE_DROPIN}" "${POLKIT_RULE}"
+    remove_old_dropins
     if [[ -f "${HWP_TMPFILES}" ]]; then
         rm -fv "${HWP_TMPFILES}"
         [[ -w "${HWP_BOOST}" ]] && echo 0 >"${HWP_BOOST}" && echo "set:       ${HWP_BOOST} = 0"

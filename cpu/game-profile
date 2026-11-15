@@ -18,10 +18,15 @@
 #          switched on by hand); 'on' if a client runs and the profile is off
 #          (fallback if the GameMode hook could not start the unit), unless
 #          switched off by hand during that game; new containers get pinned
-#          and new Steam scopes (the game itself) get the memory protection.
-#   state  what is applied now.
+#          and new Steam scopes (the game itself) get the memory protection;
+#          a setting that something undid meanwhile (a daemon-reload, or
+#          uresourced resetting MemoryLow) is set again and logged.
+#   state  what is applied now, and which settings drifted from what 'on' set.
 #
-# Everything is runtime-only: a reboot clears it too.
+# Everything is runtime-only: a reboot clears it too. A runtime override is
+# not permanent within a boot either: every daemon-reload re-reads the
+# drop-ins, and a drop-in that sorts after it, or a same-named file in
+# /etc/systemd/system.control (uresourced's 50-MemoryLow.conf), wins again.
 # Settings: /etc/cpu-setup/cpu-setup.conf.
 
 set -Euo pipefail
@@ -30,6 +35,10 @@ CONF=/etc/cpu-setup/cpu-setup.conf
 RUN=/run/cpu-setup
 STATE="${RUN}/game.state"
 MANUAL="${RUN}/manual"
+# What 'on' set, as systemctl show reported it right after (16G reads back in
+# bytes), for the drift repair of tick(). A separate file, so game.state keeps
+# the format off() reads; a profile switched on by an older version has none.
+INTENDED="${RUN}/game.intended"
 SUPPRESS="${RUN}/suppress"   # 'game off' by hand: no automatic 'on' until the game ends
 
 # Defaults; cpu-setup.conf overrides.
@@ -78,7 +87,10 @@ ctl_file() {   # mgr unit prop: where `set-property --runtime` writes
 prop() { ctl "$1" show -P "$3" "$2" 2>/dev/null | sed 's/^\[not set\]$//'; }
 
 # setp MGR UNIT PROP=VALUE...: record, per property, whether a runtime
-# override already existed (and its value), then apply.
+# override already existed (and its value), then apply. For fixed units (not
+# the transient scopes, which have no drop-in that could win over the
+# override), also record the value as systemctl show reports it now, in
+# INTENDED: "prop MGR UNIT PROP VALUE SHOWN".
 setp() {
     local mgr="$1" unit="$2" kv p
     shift 2
@@ -90,7 +102,15 @@ setp() {
             printf 'prop %q %q %q new -\n' "${mgr}" "${unit}" "${p}" >>"${STATE}"
         fi
     done
-    ctl "${mgr}" set-property --runtime "${unit}" "$@" || log 4 "${unit}: could not set $*"
+    if ! ctl "${mgr}" set-property --runtime "${unit}" "$@"; then
+        log 4 "${unit}: could not set $*"
+        return 0
+    fi
+    [[ "${unit}" == *.scope ]] && return 0
+    for kv in "$@"; do
+        p="${kv%%=*}"
+        printf 'prop %q %q %q %q %q\n' "${mgr}" "${unit}" "${p}" "${kv#*=}" "$(prop "${mgr}" "${unit}" "${p}")" >>"${INTENDED}"
+    done
 }
 
 # Every Steam scope: the client has one, and each game it starts gets its own
@@ -132,7 +152,11 @@ cpus_fallback() {   # usr UNIT
     old="$(cat "${f}")"
     [[ "${old}" == "${BUILD_CPUS}" ]] && return 0
     printf 'cgw %q %q\n' "${f}" "${old}" >>"${STATE}"
-    echo "${BUILD_CPUS}" >"${f}" 2>/dev/null || log 4 "$1: could not write ${f}"
+    if echo "${BUILD_CPUS}" >"${f}" 2>/dev/null; then
+        printf 'cgw %q %q %q\n' "${f}" "${BUILD_CPUS}" "$(cat "${f}")" >>"${INTENDED}"
+    else
+        log 4 "$1: could not write ${f}"
+    fi
 }
 
 pin_docker() {
@@ -151,6 +175,7 @@ on() {
     # Recorded before each change, straight into the state file: if 'on' dies
     # halfway, 'off' still undoes whatever was changed.
     : >"${STATE}"
+    : >"${INTENDED}"
     local cpu f u vm_io_weight
     # 1. VM and Docker: off the P-cores and off 8-11 (the game's E-core
     #    workers), low weight.
@@ -233,8 +258,83 @@ off() {
     # cgroup settings (defaults, or the /etc drop-ins).
     if (( reload_sys )); then systemctl daemon-reload; fi
     if (( reload_usr )); then ctl usr daemon-reload; fi
-    rm -f "${STATE}" "${MANUAL}"
+    rm -f "${STATE}" "${INTENDED}" "${MANUAL}"
     log 5 "off: previous CPU, weight, memory, zswap writeback and EPP settings restored"
+}
+
+# drift: one line (fields quoted with %q) per setting in INTENDED that no
+# longer holds: "prop MGR UNIT PROP VALUE SHOWN NOW" or "cgw FILE VALUE SHOWN
+# NOW". One systemctl show per unit, so a tick stays cheap. Skipped, as
+# nothing can be compared: a record with an empty SHOWN (systemd reported
+# nothing), a unit systemd cannot be asked about or has not loaded (the
+# user manager is gone after a logout, builds.slice was removed), and a
+# cgroup file that is gone.
+drift() {
+    [[ -s "${INTENDED}" ]] || return 0
+    local line key l mgr unit out
+    local -a rec lines args
+    local -A props=() now=() loaded=()
+    mapfile -t lines <"${INTENDED}"
+    for line in "${lines[@]}"; do
+        [[ -n "${line}" ]] || continue
+        eval "rec=(${line})"   # fields were written with %q
+        [[ "${rec[0]}" == prop ]] || continue
+        key="${rec[1]} ${rec[2]}"
+        props[${key}]+=" ${rec[3]}"
+    done
+    for key in "${!props[@]}"; do
+        mgr="${key%% *}"; unit="${key#* }"
+        args=(-p LoadState)
+        for l in ${props[${key}]}; do args+=(-p "${l}"); done
+        out="$(ctl "${mgr}" show "${args[@]}" "${unit}" 2>/dev/null)" || continue
+        while IFS= read -r l; do
+            [[ "${l}" == *=* ]] || continue
+            [[ "${l}" == *'=[not set]' ]] && l="${l%%=*}="
+            now["${key} ${l%%=*}"]="${l#*=}"
+        done <<<"${out}"
+        [[ "${now["${key} LoadState"]:-}" == loaded ]] && loaded[${key}]=1
+    done
+    for line in "${lines[@]}"; do
+        [[ -n "${line}" ]] || continue
+        eval "rec=(${line})"
+        case "${rec[0]}" in
+            prop)
+                [[ -n "${rec[5]:-}" && -n "${loaded["${rec[1]} ${rec[2]}"]:-}" ]] || continue
+                l="${now["${rec[1]} ${rec[2]} ${rec[3]}"]:-}"
+                [[ "${l}" == "${rec[5]}" ]] && continue
+                printf '%q %q %q %q %q %q %q\n' "${rec[@]:0:6}" "${l}"
+                ;;
+            cgw)
+                # A cgroup that is gone (its unit stopped) has nothing to compare.
+                [[ -n "${rec[3]:-}" && -e "${rec[1]}" ]] || continue
+                l="$(cat "${rec[1]}" 2>/dev/null)"
+                [[ "${l}" == "${rec[3]}" ]] && continue
+                printf '%q %q %q %q %q\n' "${rec[@]:0:4}" "${l}"
+                ;;
+        esac
+    done
+}
+
+# Set again what drift() lists, straight with set-property: not with setp,
+# which would add a second record to game.state and make 'off' restore the
+# profile's own value instead of the one from before 'on'.
+repair_drift() {
+    local line
+    local -a rec
+    while IFS= read -r line; do
+        eval "rec=(${line})"
+        if [[ "${rec[0]}" == cgw ]]; then
+            if echo "${rec[2]}" >"${rec[1]}" 2>/dev/null; then
+                log 5 "drift: ${rec[1]} was '${rec[4]}', wrote ${rec[2]} again"
+            else
+                log 4 "drift: ${rec[1]} is '${rec[4]}', could not write ${rec[2]} again"
+            fi
+        elif ctl "${rec[1]}" set-property --runtime "${rec[2]}" "${rec[3]}=${rec[4]}" 2>/dev/null; then
+            log 5 "drift: ${rec[2]} ${rec[3]} was '${rec[6]}' instead of '${rec[5]}' (daemon-reload or uresourced?): set ${rec[3]}=${rec[4]} again"
+        else
+            log 4 "drift: ${rec[2]} ${rec[3]} is '${rec[6]}' instead of '${rec[5]}': could not set it again"
+        fi
+    done < <(drift)
 }
 
 tick() {
@@ -254,6 +354,7 @@ tick() {
     fi
     pin_docker      # containers started meanwhile
     protect_steam   # the game's own scope, started after 'on'
+    repair_drift    # settings a daemon-reload or uresourced undid
 }
 
 state() {
@@ -277,6 +378,46 @@ state() {
     printf '  EPP cpu0 %s, cpu%s %s\n' \
         "$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)" \
         "${BUILD_CPUS%%-*}" "$(cat "/sys/devices/system/cpu/cpu${BUILD_CPUS%%-*}/cpufreq/energy_performance_preference" 2>/dev/null)"
+    [[ -e "${STATE}" ]] && state_drift
+    return 0
+}
+
+# The command that switches the profile off and on again in the same mode:
+# off() drops the by-hand mark, so a restart of the unit alone would let the
+# watchdog switch a by-hand profile off at the next tick when no game runs.
+again_cmd() {
+    if [[ -e "${MANUAL}" ]]; then
+        echo "cst cpu game off && cst cpu game on"
+    else
+        echo "sudo systemctl restart cpu-game.service"
+    fi
+}
+
+# The drift part of 'state': each setting that no longer holds, or that none
+# drifted.
+state_drift() {
+    if [[ ! -e "${INTENDED}" ]]; then
+        echo "  drift: not checked (switched on by an older version, which kept no record of its values;"
+        echo "         $(again_cmd) switches it off and on again with one)"
+        return 0
+    fi
+    local line n=0
+    local -a rec
+    while IFS= read -r line; do
+        eval "rec=(${line})"
+        n=$((n + 1))
+        if [[ "${rec[0]}" == cgw ]]; then
+            printf '  DRIFT: %s is %s, the profile wrote %s\n' "${rec[1]}" "'${rec[4]}'" "'${rec[3]}'"
+        else
+            printf '  DRIFT: %s %s is %s, the profile set %s\n' "${rec[2]}" "${rec[3]}" "'${rec[6]}'" "'${rec[5]}'"
+        fi
+    done < <(drift)
+    if (( n )); then
+        echo "  (a daemon-reload or uresourced undid these; the watchdog sets them again within 30 s;"
+        echo "   if they stay: $(again_cmd))"
+    else
+        echo "  drift: none (every setting the profile made still holds)"
+    fi
 }
 
 # on/off/tick never interleave (e.g. a tick re-pinning containers after 'off').

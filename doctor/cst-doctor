@@ -25,6 +25,8 @@ Areas checked:
   btrfs        how full the chunks are (data, metadata), automatic data reclaim
                switched on, unallocated space per device (from sysfs; warning
                and critical levels as btrfs-health-check)
+  cpu          while the game profile is on: the settings it made that a
+               daemon-reload or uresourced undid since (drift)
   vm           libvirt VMs with <cpu mode='host-passthrough'> that still pass
                CET/MBEC to the guest while this QEMU offers them (Windows then
                bootloops); the virtualization packages (QEMU, libvirt, UEFI
@@ -49,6 +51,7 @@ starts it as the user who called sudo.
 
 import json
 import os
+import pwd
 import re
 import shlex
 import subprocess
@@ -919,6 +922,156 @@ def check_btrfs_allocation(host):
             yield Result(INFO, f"{name}: {needs_root}")
 
 
+# ---- cpu: the game profile ----------------------------------------------------------------------
+# cpu/game-profile records in /run/cpu-setup/game.intended what each setting
+# read back as right after 'on' (16G reads back in bytes). A daemon-reload
+# re-reads the drop-ins, and uresourced's /etc/systemd/system.control
+# 50-MemoryLow.conf (or a live call of uresourced) can undo the MemoryLow
+# chain; the watchdog sets them again within 30 s. This check only compares.
+GAME_RUN = "/run/cpu-setup"
+GAME_STATE = f"{GAME_RUN}/game.state"
+GAME_INTENDED = f"{GAME_RUN}/game.intended"
+GAME_MANUAL = f"{GAME_RUN}/manual"
+
+
+def game_again(host):
+    """The command that switches the profile off and on again in its mode:
+    'off' drops the by-hand mark, so after a restart of the unit alone the
+    watchdog would switch a by-hand profile off when no game runs."""
+    if os.path.exists(host.path(GAME_MANUAL)):
+        return "cst cpu game off && cst cpu game on"
+    return "sudo systemctl restart cpu-game.service"
+
+
+def read_intended(text):
+    """Records of game.intended (fields written with bash printf %q):
+    ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
+    A line that does not parse, or of another kind, is skipped."""
+    out = []
+    for line in text.splitlines():
+        try:
+            f = shlex.split(line)
+        except ValueError:
+            continue
+        if len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr"):
+            out.append(tuple(f))
+        elif len(f) == 4 and f[0] == "cgw":
+            out.append(tuple(f))
+    return out
+
+
+def conf_value(host, path, key):
+    """The last KEY= of a shell settings file (quotes removed), or None. The
+    last assignment wins, as in the shell and in vm-pin's conf()."""
+    value = None
+    try:
+        with open(host.path(path)) as f:
+            for line in f:
+                if line.strip().startswith(f"{key}="):
+                    value = line.strip().split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return value
+
+
+def user_manager(host):
+    """(systemctl args for the target user's manager, or None, why not)."""
+    target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
+    if host.uid == 0:
+        if not target:
+            return None, f"no TARGET_USER in {CPU_CONF}"
+        return ["systemctl", "--user", "-M", f"{target}@"], ""
+    try:
+        me = pwd.getpwuid(host.uid).pw_name
+    except KeyError:
+        me = ""
+    if target and me and target != me:
+        return None, f"the profile is for {target}, this is {me}"
+    return ["systemctl", "--user"], ""
+
+
+def unit_props(host, base, unit, props):
+    """{prop: value} of a loaded unit ("[not set]" as ""), or None when the
+    manager cannot be asked or the unit is not loaded."""
+    cmd = base + ["show", "-p", "LoadState"] + [a for p in props for a in ("-p", p)] + [unit]
+    rc, out, _ = host.run(cmd, timeout=20)
+    if rc != 0:
+        return None
+    vals = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k] = "" if v == "[not set]" else v
+    if vals.get("LoadState") != "loaded":
+        return None
+    return vals
+
+
+@check("cpu")
+def check_game_profile_drift(host):
+    """WARN while the game profile is on and a setting it made no longer
+    holds; ok when they all hold; info when it cannot tell."""
+    if not os.path.exists(host.path(GAME_STATE)):
+        if os.path.exists(host.path(CPU_CONF)):
+            yield Result(OK, "game profile: off")
+        return
+    try:
+        with open(host.path(GAME_INTENDED)) as f:
+            records = read_intended(f.read(65536))
+    except FileNotFoundError:
+        yield Result(INFO, "game profile: ON, but switched on by an older cpu-game-profile that kept no "
+                     "record of the values it set, so drift is not checked. Switching it off and on again "
+                     f"records them: {game_again(host)}")
+        return
+    except OSError as e:
+        yield Result(INFO, f"game profile: ON; drift not checked ({GAME_INTENDED}: {e.strerror})")
+        return
+    managers = {"sys": (["systemctl"], "")}
+    managers["usr"] = user_manager(host)
+    wanted = {}
+    for r in records:
+        if r[0] == "prop" and r[5]:
+            wanted.setdefault((r[1], r[2]), []).append(r[3])
+    current, unknown = {}, []
+    for (mgr, unit), props in wanted.items():
+        base, why = managers[mgr]
+        vals = unit_props(host, base, unit, props) if base else None
+        if vals is None:
+            unknown.append(f"{unit} ({why or 'not loaded, or systemd did not answer'})")
+            continue
+        for p in props:
+            current[(mgr, unit, p)] = vals.get(p, "")
+    drifted, checked = [], 0
+    for r in records:
+        if r[0] == "prop":
+            key = (r[1], r[2], r[3])
+            if not r[5] or key not in current:
+                continue
+            checked += 1
+            if current[key] != r[5]:
+                drifted.append(f"{r[2]} {r[3]} is {current[key] or 'not set'} (the profile set {r[5]})")
+        elif r[3]:
+            try:
+                with open(host.path(r[1])) as f:
+                    now = f.read(256).strip()
+            except OSError:
+                continue              # the cgroup is gone: nothing to compare
+            checked += 1
+            if now != r[3]:
+                drifted.append(f"{r[1]} is {now or 'empty'} (the profile wrote {r[3]})")
+    if drifted:
+        yield Result(WARN, f"game profile: ON, but {len(drifted)} of its settings no longer hold: "
+                     f"{'; '.join(drifted)}. A daemon-reload or uresourced undid them. The watchdog "
+                     "(cpu-game-watchdog.timer) sets them again within 30 s; if this stays, switch the "
+                     "profile off and on again", game_again(host))
+    elif checked:
+        yield Result(OK, f"game profile: ON, the {checked} settings it made still hold")
+    if unknown:
+        yield Result(INFO, f"game profile: drift not checked for {', '.join(unknown)}")
+    if not drifted and not checked and not unknown:
+        yield Result(INFO, "game profile: ON, no recorded setting to compare")
+
+
 # ---- vm: libvirt guests --------------------------------------------------------------------------
 # Everything here is a query of libvirt's system connection (list, dumpxml
 # --inactive without secrets, domcapabilities), which the user may make when
@@ -995,14 +1148,7 @@ def vm_module():
 def cpu_disable_names(host):
     """VM_CPU_DISABLE of cpu-setup.conf when set there (also empty), else the
     default of cpu/vm-pin (this copy, else the installed one)."""
-    value = None                  # the last assignment wins, as in vm-pin's conf() and the shell
-    try:
-        with open(host.path(CPU_CONF)) as f:
-            for line in f:
-                if line.strip().startswith("VM_CPU_DISABLE="):
-                    value = line.strip().split("=", 1)[1].strip().strip("'\"")
-    except OSError:
-        pass
+    value = conf_value(host, CPU_CONF, "VM_CPU_DISABLE")
     if value is not None:
         return value.split()
     for path in (VM_PIN_REPO, host.path(VM_PIN_HOST)):

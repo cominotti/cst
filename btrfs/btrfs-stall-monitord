@@ -23,9 +23,11 @@
 #     filesystem (gvfs SMB shares, the document portal: the network, not the
 #     disks), btrfs maintenance (fstrim/FITRIM, async discard, scrub,
 #     balance/relocation: background housekeeping that legitimately sits in
-#     D state for minutes), or something idle-ish (futex, epoll, USB). Only
-#     storage waits open episodes or raise the "stuck on IO" alert; a
-#     maintenance task is reported only if it stays in D for MAINT_HUNG_SECONDS.
+#     D state for minutes), memory (direct reclaim, swap-in, zswap: the cause
+#     is too little free memory, not the disks), or something idle-ish (futex,
+#     epoll, USB). Only storage waits open episodes or raise the "stuck on IO"
+#     alert; a maintenance task is reported only if it stays in D for
+#     MAINT_HUNG_SECONDS, and a task stuck in memory reclaim gets its own alert.
 #   * Fedora kernels have no hung-task detector (CONFIG_DETECT_HUNG_TASK is
 #     off), so a task in D state for HUNG_SECONDS without progress is reported
 #     here instead. Progress = the task ran on a CPU between two samples
@@ -57,7 +59,12 @@ import sys
 import threading
 import time
 
-VERSION = 7   # v7: reads /proc and /sys files to the end (zswap counters were 0 before)
+# v7: reads /proc and /sys files to the end (zswap counters were 0 before).
+# v8: a "memory" wait kind (reclaim, swap-in, zswap, page faults and mmap calls
+#     waiting for the memory map lock). Samples count it in "d_mem", not in "d"; it opens no
+#     episode; episodes record "max_d_mem". Daemons before v8 counted these
+#     waits as storage.
+VERSION = 8
 
 BASE_INTERVAL = 5.0          # s between full samples
 EPISODE_INTERVAL = 1.0       # s between full samples during an episode
@@ -350,35 +357,89 @@ MAINT_FRAME = re.compile(
     r"|btrfs_discard_workfn|btrfs_ioctl_scrub|btrfs_scrub_dev|scrub_\w+|flush_scrub_stripes"
     r"|btrfs_ioctl_balance|btrfs_balance\w*|btrfs_relocate_\w+|relocate_\w+|btrfs_reclaim_bgs_work)$")
 NEW_KTHREAD = {"kthread", "ret_from_fork", "ret_from_fork_asm"}
-# Frames that prove a wait is on the local block stack, not on a FUSE daemon.
+# Memory waits. The swap path anywhere on the stack: a page fault that reads
+# a page back from swap or from the zswap pool, or reclaim that writes one
+# out, waits because memory ran short, even when the innermost frame is the
+# block layer of the swap disk.
+SWAP_FRAME = re.compile(
+    r"^(?:do_swap_page|swap_read_folio\w*|swap_cluster_readahead|swapin_readahead|swap_vma_readahead"
+    r"|__read_swap_cache_async|read_swap_cache_async|__swap_writepage|swap_writepage\w*|swap_writeout"
+    r"|zswap_\w+)$")
+# Reclaim, allocation and memory-cgroup throttling: these decide only as the
+# innermost frame that names a subsystem (see wait_kind), because reclaim can
+# call into btrfs (a shrinker evicting an inode) and then wait on btrfs.
+MEM_FRAME = re.compile(
+    r"^(?:shrink_(?:node|lruvec|list|inactive_list|active_list|folio_list|zones|slab|many|one)\w*"
+    r"|do_shrink_slab|try_to_free_(?:pages|mem_cgroup_pages)|throttle_direct_reclaim|reclaim_throttle|__perform_reclaim"
+    r"|__alloc_pages\w*|alloc_pages\w*|__alloc_frozen_pages\w*|__folio_alloc\w*"
+    r"|mem_cgroup_handle_over_high|try_charge_memcg|charge_memcg|__mem_cgroup_charge\w*"
+    r"|try_to_compact_pages|compact_zone\w*|__alloc_pages_direct_compact|kcompactd\w*)$")
+# Waits for the process's memory map lock (mmap_lock, or a VMA lock): a page
+# fault (lock_mm_and_find_vma), or mmap/munmap/mprotect/madvise waiting for
+# the faulting threads to leave. Seen in JVM GC threads while other threads
+# fault through zswap. Only as the innermost meaningful frame (mmap of a file
+# can also wait inside the filesystem). Memory, unless the same process has a
+# thread waiting on storage or FUSE (see describe_all).
+MMAP_LOCK_FRAME = re.compile(
+    r"^(?:lock_mm_and_find_vma|__vma_start_exclude_readers|__vma_start_write|vma_start_write\w*"
+    r"|vm_mmap_pgoff|__vm_munmap|vm_munmap|do_mprotect_pkey|do_madvise|__do_sys_brk)$")
+# Frames that prove a wait is on the local block stack, not on a FUSE daemon
+# (and, as the innermost such frame, not on memory reclaim).
 LOCAL_IO_FRAME = re.compile(r"^(?:btrfs_\w+|blk_\w+|bio_\w+|submit_bio\w*|nvme_\w+|dm_\w+|kcryptd\w*"
                             r"|folio_wait_writeback|filemap_fdatawait\w*|balance_dirty_pages\w*)$")
 
 
 def wait_kind(frames, wchan):
-    """"fuse", "maintenance", "idle" or "storage" for a task in D state.
+    """"fuse", "maintenance", "memory", "idle" or "storage" for a task in D state.
 
     Precedence: FUSE (the wait is on a userspace daemon even if btrfs is
-    below it), then btrfs maintenance, then idle vs storage.
-    Conservative: anything not positively idle counts as storage, e.g.
-    io_destroy waiting for in-flight AIO, whose frames are all generic."""
+    below it), then btrfs maintenance, then the swap path anywhere on the
+    stack (memory), then the innermost meaningful frame: idle-ish (idle) or
+    a memory map lock (memory), then the innermost frame that names a
+    subsystem: memory reclaim/allocation (memory) or btrfs and the block
+    layer (storage).
+    Conservative: anything not positively idle or memory counts as storage,
+    e.g. io_destroy waiting for in-flight AIO, whose frames are all generic."""
     if frames:
         if any(FUSE_FRAME.match(f) for f in frames):
             return "fuse"
         if any(MAINT_FRAME.match(f) for f in frames):
             return "maintenance"
+        if any(SWAP_FRAME.match(f) for f in frames):
+            return "memory"
         meaningful = [f for f in frames if not GENERIC_FRAME.match(f)]
         if not meaningful:
             # A freshly created kthread waits in D inside kthread() until its first wakeup.
             return "idle" if set(frames) <= NEW_KTHREAD else "storage"
-        return "idle" if IDLE_FRAME.match(meaningful[0]) else "storage"
+        if IDLE_FRAME.match(meaningful[0]):
+            return "idle"
+        if MMAP_LOCK_FRAME.match(meaningful[0]):
+            return "memory"
+        for f in meaningful:
+            if MEM_FRAME.match(f):
+                return "memory"
+            if LOCAL_IO_FRAME.match(f):
+                return "storage"
+        return "storage"
     if wchan:
         if FUSE_FRAME.match(wchan):
             return "fuse"
         if MAINT_FRAME.match(wchan):
             return "maintenance"
+        if SWAP_FRAME.match(wchan) or MEM_FRAME.match(wchan) or MMAP_LOCK_FRAME.match(wchan):
+            return "memory"
         return "idle" if IDLE_FRAME.match(wchan) else "storage"
     return "storage"
+
+
+def mmap_lock_only(frames, wchan):
+    """True if a "memory" wait is only a wait for the memory map lock (no
+    reclaim or swap of its own): its innermost meaningful frame (or wchan)."""
+    if not frames:
+        return bool(wchan and MMAP_LOCK_FRAME.match(wchan))
+    meaningful = [f for f in frames if not GENERIC_FRAME.match(f)]
+    return bool(meaningful) and bool(MMAP_LOCK_FRAME.match(meaningful[0])) and not any(
+        SWAP_FRAME.match(f) for f in frames)
 
 
 # Timed sleeps wake up periodically (and so get scheduled) while still
@@ -478,6 +539,7 @@ class Episode:
         self.quiet = 0
         self.snapshots = 0
         self.max_d = 0          # storage waits only
+        self.max_d_mem = 0      # memory waits (reclaim, swap, zswap)
         self.max_d_all = 0
         self.peak = {"io_some_avg10": 0.0, "io_full_avg10": 0.0, "iowait_tasks": 0, "commit_ms": 0}
         self.sigs = {}      # "sig|ctx" -> {"n", "comms", "cgroups"}
@@ -496,7 +558,8 @@ class Episode:
             })
         return {"t": "ep", "ts": round(self.start, 3), "start": round(self.start, 3),
                 "end": round(self.end, 3), "reason": self.reason, "snapshots": self.snapshots,
-                "max_d": self.max_d, "max_d_all": self.max_d_all, "peak": self.peak, "sigs": out}
+                "max_d": self.max_d, "max_d_mem": self.max_d_mem, "max_d_all": self.max_d_all,
+                "peak": self.peak, "sigs": out}
 
 
 class Monitor:
@@ -630,11 +693,13 @@ class Monitor:
         st = read_kv("/proc/stat")
         # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
         rec["procs"] = [st.get("procs_running", 0), st.get("procs_blocked", 0)]
-        # "d": tasks waiting on storage; "d_all" also counts FUSE, maintenance and idle-ish waits.
+        # "d": tasks waiting on storage; "d_all" also counts FUSE, maintenance,
+        # memory and idle-ish waits.
         rec["d"] = sum(1 for t in d_tasks if t[5] == "storage")
         rec["d_all"] = len(d_tasks)
         rec["d_fuse"] = sum(1 for t in d_tasks if t[5] == "fuse")
         rec["d_maint"] = sum(1 for t in d_tasks if t[5] == "maintenance")
+        rec["d_mem"] = sum(1 for t in d_tasks if t[5] == "memory")
         rec["load1"] = float((read_text("/proc/loadavg") or "0").split()[0])
 
         fs = {}
@@ -733,11 +798,29 @@ class Monitor:
         for t in out:
             if t[5] == "storage" and t[0] in fuse_pids and not any(LOCAL_IO_FRAME.match(f) for f in t[3]):
                 t[5] = "fuse"
+        # A thread waiting for the memory map lock waits for whatever the
+        # holder (another thread of the process) waits on: memory if a thread
+        # of the process is in reclaim or swap itself (a JVM whose threads
+        # fault through zswap, even with one thread in fsync), else storage or
+        # FUSE if a thread of the process waits there, memory otherwise.
+        lock_only = [t for t in out if t[5] == "memory" and mmap_lock_only(t[3], t[4])]
+        lock_tids = {t[1] for t in lock_only}
+        mem_pids = {t[0] for t in out if t[5] == "memory" and t[1] not in lock_tids}
+        storage_pids = {t[0] for t in out if t[5] == "storage"}
+        fuse_pids = {t[0] for t in out if t[5] == "fuse"}
+        for t in lock_only:
+            if t[0] in mem_pids:
+                continue
+            if t[0] in storage_pids:
+                t[5] = "storage"
+            elif t[0] in fuse_pids:
+                t[5] = "fuse"
         return [tuple(t) for t in out]
 
     def snapshot_stacks(self, ep, d_tasks):
         ep.snapshots += 1
         ep.max_d = max(ep.max_d, sum(1 for t in d_tasks if t[5] == "storage"))
+        ep.max_d_mem = max(ep.max_d_mem, sum(1 for t in d_tasks if t[5] == "memory"))
         ep.max_d_all = max(ep.max_d_all, len(d_tasks))
         if ep.snapshots > MAX_STACK_SNAPSHOTS:
             return
@@ -824,6 +907,16 @@ class Monitor:
                 self.emit({"t": "ev", "ts": round(time.time(), 3), "msg": msg, "severe": False,
                            "ours": False, "kind": "fuse-wait", "stack": frames[:16]})
                 self.alert("fuse", "normal", "Program waiting on a FUSE filesystem (network share / portal)", msg)
+                continue
+            if kind == "memory":
+                # Not a disk or filesystem problem, so not severe and no
+                # storage episode; the report shows it with the memory waits.
+                msg = (f"{where} waited {now - first:.0f}s without progress in memory reclaim / swap "
+                       f"(too little free memory, not the disks) at {at}")
+                self.emit({"t": "ev", "ts": round(time.time(), 3), "msg": msg, "severe": False,
+                           "ours": True, "kind": "hung-memory", "stack": frames[:16]})
+                self.alert("hung-memory", "warning",
+                           "Task stuck in an uninterruptible wait (memory reclaim / swap)", msg)
                 continue
             msg = f"{where} in D state for {now - first:.0f}s at {at}"
             self.emit({"t": "ev", "ts": round(time.time(), 3), "msg": msg, "severe": True,

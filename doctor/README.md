@@ -46,6 +46,7 @@ cst doctor help
 | `alerts` | `/var/lib/f44-alerts` (a link or folder left by the versions named f44-tools) | `WARN`, fix: `cst btrfs install` |
 | `btrfs` | How full the chunks are: data and metadata, used of allocated, and metadata as a share of data (see [section 6](#6-the-btrfs-check-chunks-and-unallocated-space)) | `ok` (numbers only) |
 | `btrfs` | Automatic data reclaim (`dynamic_reclaim`, `periodic_reclaim`) on | `WARN` when off on the root filesystem, fix: `cst btrfs install`; `info` on other btrfs filesystems or on kernels without these switches |
+| `cpu` | While the game profile is on (`/run/cpu-setup/game.state` exists): the settings it made that no longer hold ("drift"), compared with what it recorded in `/run/cpu-setup/game.intended` right after `on` (see [section 8](#8-the-cpu-check-game-profile-drift)) | `WARN`, fix: `sudo systemctl restart cpu-game.service` (`cst cpu game off && cst cpu game on` for a profile switched on by hand); `ok` when they all hold, or "game profile: off"; `info` when a profile switched on by an older version recorded nothing, or a unit could not be asked; nothing when the cpu module is not installed |
 | `vm` | A libvirt VM with `<cpu mode='host-passthrough'>` that does not disable CET and nested MBEC (`cet-ss`, `cet-ibt`, `vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`) while this QEMU offers them (see [section 7](#7-the-vm-checks)) | `WARN`, fix: `cst cpu vm-pin plan`; `ok` when QEMU does not offer them; `info` when that could not be read |
 | `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no VM backup, local or on the NAS, was made since the booted deployment was built (fix: `cst vm backup --nas` when the NAS backup is set up, else `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
 | `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
@@ -185,6 +186,14 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   and image folder checks load `vm/cst-vm` of the same CST copy (no second
   copy of its rules) and read the folders' inode flags with an ioctl; they
   run no extra command.
+- The `cpu` check reads `/run/cpu-setup/game.state`, `game.intended` and
+  `manual` (the by-hand mark, which picks the fix command), and `TARGET_USER` in `/etc/cpu-setup/cpu-setup.conf` (all world-readable),
+  and asks `systemctl show -p LoadState -p PROP... UNIT` once per unit, of
+  the system and of your user manager (`systemctl --user show`; as root,
+  `systemctl --user -M TARGET_USER@ show`). When the profile is for another
+  user than the one running the doctor, the user manager's units are skipped
+  (`info`). A `cpuset.cpus` file the profile wrote directly is read under
+  `/sys/fs/cgroup`.
 - The `btrfs` check reads `/sys/fs/btrfs` (under `/run/host` in a toolbox),
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
@@ -341,7 +350,37 @@ A folder that is a symbolic link is not checked. With `VM_NOCOW=no` in
 folders are not managed. Details:
 [vm/README.md, section 9](../vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write).
 
-## 8. Adding a check
+## 8. The cpu check: game profile drift
+
+While a game runs, `cst cpu`'s game profile changes systemd properties with
+`systemctl set-property --runtime` (CPU weights and CPU sets of the VM, the
+toolboxes and Docker, and `MemoryLow` along the game's chain of boxes).
+Those changes can be undone before the game ends: a `daemon-reload` reads
+every drop-in again, and uresourced (a Fedora service) keeps
+`50-MemoryLow.conf` files with `MemoryLow=0` that win over the profile's.
+The profile's watchdog sets them again within 30 s. The check compares, for
+each setting, the value the profile read back right after setting it with
+the value systemd reports now, and says `WARN` for each one that differs:
+
+```
+== cpu
+  WARN   game profile: ON, but 2 of its settings no longer hold: machine.slice CPUWeight is 50 (the profile set 10); user.slice MemoryLow is 0 (the profile set 17179869184). ...
+         fix: sudo systemctl restart cpu-game.service
+```
+
+Right after a reload this can show for up to 30 s, until the watchdog's
+next run; run the doctor again before acting. If it stays, the fix switches
+the profile off (the exact revert) and on again. For a profile switched on
+by hand (`/run/cpu-setup/manual` exists) the fix is
+`cst cpu game off && cst cpu game on` instead: `off` removes the by-hand
+mark, so after a plain restart the watchdog would switch the profile off
+when no game runs. Details, and why each cause happens: [cpu/README.md, section 7.5](../cpu/README.md#75-when-something-undoes-a-setting-drift).
+
+A profile switched on by a version of `cpu-game-profile` older than this
+check recorded no values: the check says so (`info`) and compares nothing
+until the profile is switched off and on again.
+
+## 9. Adding a check
 
 Each check is a small function in `cst-doctor`, registered with
 `@check("area")`. It gets the `Host` (how to run a query and where host
@@ -351,7 +390,7 @@ one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 
-## 9. Tests
+## 10. Tests
 
 ```
 python3 -I -B -m unittest discover -s doctor/tests -t . -v
@@ -359,7 +398,8 @@ python3 -I -B -m unittest discover -s doctor/tests -t . -v
 
 The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
-built per test, and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
+built per test, fixture `systemctl show` answers and game profile records,
+and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the
 toolbox path, the `cst status` section, and that only read-only queries were
