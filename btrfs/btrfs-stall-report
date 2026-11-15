@@ -34,6 +34,9 @@ GAP_MAX = 30.0        # s; a larger gap between samples means the daemon was not
 HUNG_SECONDS = 30             # the daemon's threshold for hung / busy waits
 FRESH_MAX = 25.0      # s; newer data may still be buffered in the daemon
 PAGE = 4096
+# /proc/vmstat keys that daemons before v7 always stored as 0 (they sit after
+# the first 4 KiB of the file, and those daemons read only one page).
+ZSWAP_KEYS = ("zswpin", "zswpout", "zswpwb")
 
 DISK_FIELDS = ("rd_ios", "rd_merges", "rd_sectors", "rd_ticks", "wr_ios", "wr_merges",
                "wr_sectors", "wr_ticks", "inflight", "io_ticks", "time_in_queue",
@@ -253,6 +256,13 @@ def fmt_ts(ts):
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
+def zswap_text(vm):
+    if vm["zswap_writeback_bytes"] is None:
+        return "n/a (daemon < v7)"
+    since = vm.get("zswap_counted_from")
+    return fmt_bytes(vm["zswap_writeback_bytes"]) + (f" (from {fmt_ts(since)})" if since else "")
+
+
 def fmt_counts(d, n=4):
     return ", ".join(f"{k}({v})" for k, v in list(d.items())[:n])
 
@@ -331,15 +341,18 @@ def below_top(since, until, field, top=8):
 
 def analyse(recs, since, until, with_below, verbose):
     meta = None
-    v6_since = None   # first record of a daemon with progress checks (v6+)
+    # Earliest record of a daemon at version >= N: v6 added progress checks,
+    # v7 reads all of /proc/vmstat (zswap counters).
+    first_at = {}
     samples, episodes, events, alerts = [], [], [], []
     for r in recs:
         t = r.get("t")
         if t == "meta":
             if r.get("ts", 0) <= until:
                 meta = r
-            if r.get("v", 0) >= 6 and (v6_since is None or r.get("ts", 0) < v6_since):
-                v6_since = r.get("ts", 0)
+            for n in (6, 7):
+                if r.get("v", 0) >= n:
+                    first_at[n] = min(first_at.get(n, r.get("ts", 0)), r.get("ts", 0))
         elif t == "s":
             if since - GAP_MAX <= r["ts"] <= until:
                 samples.append(r)
@@ -383,6 +396,8 @@ def analyse(recs, since, until, with_below, verbose):
     gaps = 0
     old_d = []          # (ts, d) of v3/v4 samples, whose "d" also counted btrfs maintenance
     maint_samples = 0   # v5+ samples with a btrfs maintenance task in D state
+    v6_since, v7_since = first_at.get(6), first_at.get(7)
+    zswap_ok = False    # some sample pair came from a v7+ daemon (zswap counters usable)
     for a, b in zip(samples, samples[1:]):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
@@ -409,7 +424,14 @@ def analyse(recs, since, until, with_below, verbose):
                 old_d.append((b["ts"], b.get("d", 0)))
         peak["dirty_bytes"] = max(peak["dirty_bytes"], vmget(b, "nr_dirty") * PAGE)
         peak["writeback_bytes"] = max(peak["writeback_bytes"], vmget(b, "nr_writeback") * PAGE)
+        # Daemons before v7 read only the first page of /proc/vmstat and stored
+        # the zswap counters as 0. Skip them there: a pair that spans the
+        # upgrade would otherwise add the whole counter since boot.
+        full_vm = v7_since is not None and a["ts"] >= v7_since
+        zswap_ok |= full_vm
         for k in vmd:
+            if k in ZSWAP_KEYS and not full_vm:
+                continue
             d = vmget(b, k) - vmget(a, k)
             if d > 0:
                 vmd[k] += d
@@ -465,8 +487,13 @@ def analyse(recs, since, until, with_below, verbose):
     res["pressure"] = pct
     res["peak"] = peak
     res["maintenance_samples"] = maint_samples
+    # None: no sample in the window came from a v7+ daemon.
+    zswap_wb = vmd.get("zswpwb", 0) * PAGE if zswap_ok else None
+    # Set when the window starts before the v7 upgrade: zswap is counted from there on.
+    counted_from = v7_since if zswap_ok and v7_since > samples[0]["ts"] else None
     res["vm"] = {"swap_in_bytes": vmd.get("pswpin", 0) * PAGE, "swap_out_bytes": vmd.get("pswpout", 0) * PAGE,
-                 "zswap_writeback_bytes": vmd.get("zswpwb", 0) * PAGE,
+                 "zswap_writeback_bytes": zswap_wb,
+                 "zswap_counted_from": counted_from,
                  "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
                  "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
                  "dirty_limit_bytes": meta.get("dirty_bytes", 0)}
@@ -734,7 +761,7 @@ def print_report(res, meta, verbose):
               f"({d['fl_ios']} flushes)  queue {d['queue_depth']:4.1f}  read {fmt_bytes(d['read_bytes'])}  "
               f"write {fmt_bytes(d['write_bytes'])}")
     print(f"memory   swap in/out {fmt_bytes(vm['swap_in_bytes'])} / {fmt_bytes(vm['swap_out_bytes'])}  "
-          f"zswap writeback {fmt_bytes(vm['zswap_writeback_bytes'])}  direct reclaim scanned "
+          f"zswap writeback {zswap_text(vm)}  direct reclaim scanned "
           f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}")
     names = container_names() if any(k.startswith(("docker-", "libpod-")) for k in res["cgroups"]) else {}
     print("cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "

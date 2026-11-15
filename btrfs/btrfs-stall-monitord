@@ -57,7 +57,7 @@ import sys
 import threading
 import time
 
-VERSION = 6
+VERSION = 7   # v7: reads /proc and /sys files to the end (zswap counters were 0 before)
 
 BASE_INTERVAL = 5.0          # s between full samples
 EPISODE_INTERVAL = 1.0       # s between full samples during an episode
@@ -117,12 +117,25 @@ def log(msg, prio=6):
 
 
 def read_bytes(path, size=65536):
+    """Up to `size` bytes of a file, or None if it cannot be read.
+
+    Reads until end of file: one read() of a /proc file such as /proc/vmstat
+    returns only about one page (4 KiB), and the rest comes in later reads.
+    """
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError:
         return None
     try:
-        return os.read(fd, size)
+        chunks = []
+        left = size
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
     except OSError:
         return None
     finally:

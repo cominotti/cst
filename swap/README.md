@@ -65,8 +65,10 @@ cold pages move from the pool to the disk by themselves. Pages that do not
 compress: on current kernels (6.18 and later; sophia runs 7.x) zswap keeps
 them in the pool **uncompressed** (counted in `stored_incompressible_pages`,
 [section 6](#6-reading-the-status)) and writes them on to disk like the
-rest. Older kernels rejected them, so they went straight to disk. The pool's memory is
-counted to the cgroup that owns the pages, which `systemd-oomd` relies on.
+rest, except in a cgroup with zswap writeback off, where they stay in RAM
+(`reject_compress_fail`, section 6). Older kernels rejected them, so they
+went straight to disk. The pool's memory is counted to the cgroup that owns
+the pages, which `systemd-oomd` relies on.
 
 zram in front of a disk swap does the opposite: it fills fast RAM with the
 **first** pages that went cold, and has no way to move them on to the disk
@@ -310,10 +312,28 @@ readings a few minutes apart to see what happens now.
 **zswap debug counters** (root only; `needs root` otherwise):
 `pool_limit_hit` counts how often the pool was full. If it grows steadily,
 raise `max_pool_percent` a little (section 2.1). The `reject_*` lines count
-pages zswap refused, by reason (pool full and writeback failed, compressed
-to no gain, compression error, no memory). `stored_incompressible_pages`
-counts pages in the pool that did not compress and are stored as they are
-(section 2.1). `written_back_pages` is the same as `zswpwb`.
+pages zswap did not take, by reason. Three of them do not mean what their
+kernel names suggest:
+
+- `reject_compress_fail` and `reject_compress_poor`: a page did not
+  compress (`_poor`: the compressor said its output did not fit in a page;
+  `_fail`: any other compressor result) while its cgroup had zswap
+  writeback switched off. zswap normally stores such a page as it is, but
+  only when it may write it on to the disk later; with writeback off it
+  refuses the page, and the page stays in RAM. The `cpu` module's game
+  profile switches writeback off for `app.slice` while a game runs (see
+  [../cpu/README.md](../cpu/README.md)), so these counters grow during
+  games. That is expected, not an error.
+- `reject_reclaim_fail`: the zswap shrinker tried to write a page from the
+  pool to the disk and could not. Most often the page was already in the
+  swap cache (it is being read back), which is the kernel's normal sign to
+  stop shrinking, because it reached pages that are in use. It does not mean
+  the pool was full: that is `pool_limit_hit`.
+
+The others: `reject_alloc_fail` / `reject_kmemcache_fail` (no memory for
+the compressed copy or for the entry). `stored_incompressible_pages` counts
+pages in the pool that did not compress and are stored as they are (section
+2.1). `written_back_pages` is the same as `zswpwb`.
 
 **swap devices**: `/proc/swaps`, with `dm-N` translated to `swap0`.
 
