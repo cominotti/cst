@@ -305,11 +305,11 @@ One boot is `info`: it can happen once (Docker started by hand early, for
 example). From two boots on it is a `WARN`: something holds the migration
 back at every boot. The fix line only shows that boot's journal; the reasons
 and what to do are in
-[btrfs/README.md, section 13](../btrfs/README.md#docker-volumes-migration-postponed-at-n-boots).
+[btrfs/README.md, section 13](../btrfs/README.md#docker-volumes-migration-postponed-at-n-boots-in-a-row).
 
 ```
 == btrfs
-  WARN   Docker volumes NOCOW: the boot-time migration was postponed at 3 boot(s), last 2026-11-15 08:02: Docker is running; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them
+  WARN   Docker volumes NOCOW: the boot-time migration was postponed at 3 boot(s) in a row, last 2026-11-15 08:02: Docker is running; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them
          fix: journalctl -b -u docker-volumes-nocow
 ```
 

@@ -862,7 +862,7 @@ class DockerNocowPostponedTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s), last "
+                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
                 "2026-11-05 17:33: Docker is running; tried again at the next boot"
             ],
         )
@@ -875,7 +875,9 @@ class DockerNocowPostponedTest(Scratch):
         self.assertEqual(r.returncode, 1)
         got = self.lines(r.stdout)
         self.assertEqual(len(got), 1, r.stdout)
-        self.assertIn("WARN   Docker volumes NOCOW: the boot-time migration was postponed at 2 boot(s), last ", got[0])
+        self.assertIn(
+            "WARN   Docker volumes NOCOW: the boot-time migration was postponed at 2 boot(s) in a row, last ", got[0]
+        )
         self.assertIn(f": {reason}; the volumes keep copy-on-write data", got[0])
         self.assertIn("fix: journalctl -b -u docker-volumes-nocow", r.stdout)
         self.assert_read_only()
@@ -886,7 +888,7 @@ class DockerNocowPostponedTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s), last "
+                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
                 "at an unknown time: no reason recorded; tried again at the next boot"
             ],
         )

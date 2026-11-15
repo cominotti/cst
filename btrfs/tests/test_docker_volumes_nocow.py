@@ -1519,7 +1519,7 @@ class PostponedRecordTest(PostponeBase):
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertIn(
             "  1 with copy-on-write data (2 MiB), migration at the next boot\n"
-            f"  migration postponed at 3 boot(s), last {when}: Docker is running\n",
+            f"  migration postponed at 3 boot(s) in a row, last {when}: Docker is running\n",
             out,
         )
         # A boot that is not held back removes the record.
@@ -1572,7 +1572,7 @@ class PostponedRecordTest(PostponeBase):
                 rec = self.record()
                 assert rec is not None
                 self.assertEqual((rec["boots"], rec["first"]), (1, 1000))
-                self.assertIn("postponed at 1 boot(s)", self.call(M.status)[1])
+                self.assertIn("postponed at 1 boot(s) in a row", self.call(M.status)[1])
 
     def test_without_a_boot_id(self) -> None:
         # No boot id to read: the first postponement is still recorded.

@@ -180,7 +180,7 @@ test ! -e "$attempts"
 # Not an attempt, but recorded for status and cst doctor (world-readable).
 grep -q '"reason": "Docker is running", "boots": 1,' "$postponed"
 [[ "$(stat -c %a "$postponed")" == 644 ]]
-grep -q '^  migration postponed at 1 boot(s), last .*: Docker is running$' <<<"$("$helper" status)"
+grep -q '^  migration postponed at 1 boot(s) in a row, last .*: Docker is running$' <<<"$("$helper" status)"
 echo "E2E-NOCOW postponed: docker.service $(systemctl show -P ActiveState docker.service)"
 if [[ ! -s "$seen" ]]; then
     echo "the helper did not go through the systemctl wrapper ($wrap)" >&2

@@ -1132,7 +1132,7 @@ def check_docker_nocow_postponed(host: Host) -> Iterator[Result]:
         boots = 1
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "at an unknown time"
     reason = str(rec.get("reason") or "no reason recorded")
-    msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s), last {when}: {reason}"
+    msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s) in a row, last {when}: {reason}"
     if boots >= NOCOW_WARN_BOOTS:
         yield Result(
             WARN,

@@ -358,7 +358,7 @@ def postponed_line():
         return ""
     last = rec.get("last")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if isinstance(last, int) else "?"
-    return f"  migration postponed at {rec.get('boots', '?')} boot(s), last {when}: {rec.get('reason', '?')}"
+    return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"
 
 
 def label(path):

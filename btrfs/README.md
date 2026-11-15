@@ -598,14 +598,15 @@ docker volume rm <name>         # or one volume by name
   work to do (a scheduled migration, or a volumes folder without `+C`):
   `/var/lib/docker-volumes-nocow/postponed` keeps the latest reason, the time
   and how many boots were held back (counted once per boot). `status` shows
-  it as `migration postponed at N boot(s), last ...: <reason>`, and
+  it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
   The first boot that is not held back removes the record, and so does a
   boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
   migration by hand once nothing uses the volumes:
-  `sudo systemctl stop docker.socket docker.service` and then
-  `sudo systemctl start docker-volumes-nocow.service`.
+  `sudo systemctl stop docker.socket docker.service`, then
+  `sudo systemctl start docker-volumes-nocow.service`, and when it is done
+  start Docker again with `sudo systemctl start docker.socket docker.service`.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. This runs early at boot,
   before anyone has logged in, so the desktop alert is **kept and shown at
@@ -657,7 +658,7 @@ Read-only. Sections:
 | `last health check` | the last result lines of the health check |
 | `last scrub` | start, status, duration, error summary |
 | `last fstrim` | the last trim results |
-| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s)` with the reason when boots had to wait (section 4.10) |
+| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
 | `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry `compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file |
@@ -1753,7 +1754,7 @@ tried again at the next boot (two more attempts). With no "gave up" line in the
 journal, an older helper may have lost the request (section 4.10): `install`
 schedules it again too.
 
-### Docker volumes: `migration postponed at N boot(s)`
+### Docker volumes: `migration postponed at N boot(s) in a row`
 
 `status` (and a `cst doctor` warning) shows that the boot-time migration had
 to wait, with the reason of the last boot:
