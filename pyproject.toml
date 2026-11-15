@@ -74,7 +74,7 @@ select = ["F", "B", "UP", "E9", "PLW1510"]
 # `ruff check --select ANN` in `invowk cmd test types`) is ignored everywhere
 # except the files in the braces; add a module here once it is fully typed
 # (and ty-clean, see [tool.ty.src] below).
-"!{swap/swap-status,tests/mutation/cst-mutation,doctor/cst-doctor}" = ["ANN"]
+"!{swap/swap-status,tests/mutation/cst-mutation,doctor/cst-doctor,btrfs/btrfs-stall-report}" = ["ANN"]
 
 # ---- ty ---------------------------------------------------------------------
 
@@ -92,6 +92,7 @@ include = [
     "bluetooth/bt-ldac-watch",
     "bluetooth/tests/__init__.py",
     "btrfs/__init__.py",
+    "btrfs/btrfs-stall-report",
     "btrfs/chrome-cache",
     "btrfs/docker-volumes-nocow",
     "btrfs/tests/__init__.py",

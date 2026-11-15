@@ -53,7 +53,6 @@ NOT_YET_CLEAN = frozenset(
         "btrfs/btrfs-bulk",
         "btrfs/btrfs-snapshot-core",
         "btrfs/btrfs-stall-monitord",
-        "btrfs/btrfs-stall-report",
         "btrfs/docker-gc",
         "btrfs/tests/test_btrfs_bulk.py",
         "btrfs/tests/test_btrfs_snapshot_core.py",
