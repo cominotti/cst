@@ -3,8 +3,9 @@
 The helper runs as root at boot and rewrites Docker volumes. These tests load
 it as a module and never let it reach the machine:
 
-- every path it writes or reads state from (VOLUMES, FLAG, ATTEMPTS, NOTIFY)
-  points into a temporary folder of the test, and so does PROC, the /proc
+- every path it writes or reads state from (VOLUMES, FLAG, ATTEMPTS,
+  POSTPONED, NOTIFY) points into a temporary folder of the test, and so does
+  PROC, the /proc
   where it looks for a dockerd (a fake tree: no process unless a test adds
   one);
 - the file attribute ioctls (FS_IOC_GETFLAGS / FS_IOC_SETFLAGS, under
@@ -33,6 +34,7 @@ import contextlib
 import fcntl
 import importlib.machinery
 import io
+import json
 import os
 import shutil
 import stat
@@ -40,6 +42,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 from collections.abc import Callable, Iterator
@@ -316,6 +319,7 @@ class Base(unittest.TestCase):
         self.vols = os.path.join(self.tmp, "var/lib/docker/volumes")
         self.flag = os.path.join(self.tmp, "etc/btrfs-setup/docker-nocow-pending")
         self.attempts = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/attempts")
+        self.postponed = os.path.join(self.tmp, "var/lib/docker-volumes-nocow/postponed")
         self.notify = os.path.join(self.tmp, "usr/local/sbin/btrfs-notify")
         # The processes the helper looks at: none, unless a test adds one.
         self.proc = os.path.join(self.tmp, "proc")
@@ -330,6 +334,7 @@ class Base(unittest.TestCase):
             ("VOLUMES", self.vols),
             ("FLAG", self.flag),
             ("ATTEMPTS", self.attempts),
+            ("POSTPONED", self.postponed),
             ("NOTIFY", self.notify),
             ("PROC", self.proc),
             ("fcntl", SimpleNamespace(ioctl=self.fs.ioctl)),
@@ -343,7 +348,7 @@ class Base(unittest.TestCase):
         self.enterContext(warnings.catch_warnings())
         warnings.filterwarnings("ignore", r"unclosed file <_io\.TextIOWrapper name='[^']*/attempts'", ResourceWarning)
         # Nothing of the helper may point outside the test folder.
-        for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.NOTIFY, M.PROC):
+        for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.POSTPONED, M.NOTIFY, M.PROC):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
 
     def fresh(self) -> None:
@@ -457,6 +462,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(loaded.VOLUMES, "/var/lib/docker/volumes")
         self.assertEqual(loaded.FLAG, "/etc/btrfs-setup/docker-nocow-pending")
         self.assertEqual(loaded.ATTEMPTS, "/var/lib/docker-volumes-nocow/attempts")
+        self.assertEqual(loaded.POSTPONED, "/var/lib/docker-volumes-nocow/postponed")
         self.assertEqual(loaded.PROC, "/proc")
 
     def test_docker_root_reads_data_root(self) -> None:
@@ -965,9 +971,8 @@ class DockerRunningTest(PostponeBase):
                 self.assertEqual(self.fs.sets, [])
                 self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)  # recover() not run either
                 self.assertTrue(os.path.exists(self.flag))
-                # Not counted as an attempt, and nobody is told: a migration
-                # postponed at every boot stays pending without a notice
-                # (design B2 makes that visible).
+                # Not counted as an attempt and no alert; the boot is
+                # recorded instead (PostponedRecordTest).
                 self.assertEqual(self.read_attempts(), "1")
                 self.assertEqual(self.fs.commands(self.notify), [])
 
@@ -1187,6 +1192,119 @@ class DockerdTest(PostponeBase):
                 rc, out = self.call(M.migrate)
                 self.assertEqual(rc, 0)
                 self.assert_migrated(out)
+
+
+class PostponedRecordTest(PostponeBase):
+    """POSTPONED: each boot at which the migration had to wait, for status
+    and `cst doctor` (a postponed boot counts no attempt and sends no alert)."""
+
+    def boot(self, boot_id: str, at: int) -> tuple[int | None, str]:
+        """migrate() during boot boot_id, at time at, with Docker running."""
+        os.makedirs(os.path.join(self.proc, "sys/kernel/random"), exist_ok=True)
+        with open(os.path.join(self.proc, "sys/kernel/random/boot_id"), "w") as f:
+            f.write(boot_id + "\n")
+        with mock.patch.object(M.time, "time", lambda: at + 0.5):
+            return self.call(M.migrate)
+
+    def record(self) -> dict[str, object] | None:
+        try:
+            with open(self.postponed) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+
+    def test_counts_boots_not_runs(self) -> None:
+        self.fs.docker_state = "active"
+        self.boot("b1", 1000)
+        self.assertEqual(
+            self.record(),
+            {"reason": "Docker is running", "boots": 1, "first": 1000, "last": 1000, "boot_id": "b1"},
+        )
+        self.assertEqual(stat.S_IMODE(os.stat(self.postponed).st_mode), 0o644)  # cst doctor reads it as the user
+        # Run again in the same boot, for another reason: still one boot.
+        self.fs.docker_state = "maintenance"
+        self.boot("b1", 1100)
+        rec = self.record()
+        assert rec is not None
+        self.assertEqual((rec["boots"], rec["first"], rec["last"]), (1, 1000, 1100))
+        self.assertEqual(rec["reason"], "docker.service state unknown (systemctl exit 0, ActiveState 'maintenance')")
+        # The next boots.
+        self.fs.docker_state = "active"
+        self.boot("b2", 2000)
+        self.boot("b3", 3000)
+        self.assertEqual(
+            self.record(),
+            {"reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
+        )
+        self.assertEqual(sorted(os.listdir(os.path.dirname(self.postponed))), ["attempts", "postponed"])  # no .new
+        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(self.fs.commands(self.notify), [])
+        # status shows it.
+        rc, out = self.call(M.status)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
+        self.assertIn(
+            "  1 with copy-on-write data (2 MiB), migration at the next boot\n"
+            f"  migration postponed at 3 boot(s), last {when}: Docker is running\n",
+            out,
+        )
+        # A boot that is not held back removes the record.
+        self.fs.docker_state = "inactive"
+        rc, out = self.boot("b4", 4000)
+        self.assert_migrated(out)
+        self.assertIsNone(self.record())
+        self.assertNotIn("postponed", self.call(M.status)[1])
+
+    def test_recorded_when_the_folder_has_no_nocow_flag(self) -> None:
+        # Nothing scheduled, but the volumes folder lost +C (Docker installed
+        # after install): that is work the boot could not do either.
+        os.remove(self.flag)
+        self.fs.set(self.vols, False)
+        self.fs.docker_state = "active"
+        self.boot("b1", 1000)
+        rec = self.record()
+        assert rec is not None
+        self.assertEqual(rec["boots"], 1)
+        self.assertEqual(self.fs.sets, [])
+
+    def test_nothing_to_do_records_nothing_and_drops_an_old_record(self) -> None:
+        os.remove(self.flag)  # nothing scheduled, the folder has +C
+        self.fs.docker_state = "active"
+        os.makedirs(os.path.dirname(self.postponed), exist_ok=True)
+        with open(self.postponed, "w") as f:
+            f.write('{"reason": "Docker is running", "boots": 4, "first": 1, "last": 2, "boot_id": "old"}\n')
+        rc, out = self.boot("b1", 1000)
+        self.assertEqual(out, f"<4>{TAG}: Docker is running: migration left for the next boot\n")
+        self.assertIsNone(self.record())
+
+    def test_a_damaged_record_starts_afresh(self) -> None:
+        self.fs.docker_state = "active"
+        for text in ("not json", "[1, 2]", '{"boots": "3", "first": 1}', '{"boots": 2, "first": true}', ""):
+            with self.subTest(text=text):
+                os.makedirs(os.path.dirname(self.postponed), exist_ok=True)
+                with open(self.postponed, "w") as f:
+                    f.write(text)
+                self.boot("b1", 1000)
+                rec = self.record()
+                assert rec is not None
+                self.assertEqual((rec["boots"], rec["first"]), (1, 1000))
+                self.assertIn("postponed at 1 boot(s)", self.call(M.status)[1])
+
+    def test_without_a_boot_id(self) -> None:
+        # No boot id to read: the first postponement is still recorded.
+        self.fs.docker_state = "active"
+        with mock.patch.object(M.time, "time", lambda: 1000.0):
+            self.call(M.migrate)
+        rec = self.record()
+        assert rec is not None
+        self.assertEqual((rec["boots"], rec["boot_id"]), (1, ""))
+
+    def test_unmark_removes_the_record(self) -> None:
+        self.fs.docker_state = "active"
+        self.boot("b1", 1000)
+        self.assertIsNotNone(self.record())
+        self.call(M.unmark)
+        self.assertIsNone(self.record())
+        self.assertEqual(self.call(M.unmark), (0, ""))  # and again, with nothing to remove
 
 
 class RecoverTest(Base):

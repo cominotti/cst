@@ -56,6 +56,7 @@ helper=/usr/local/sbin/docker-volumes-nocow
 vols=/var/lib/docker/volumes
 flag=/etc/btrfs-setup/docker-nocow-pending
 attempts=/var/lib/docker-volumes-nocow/attempts
+postponed=/var/lib/docker-volumes-nocow/postponed
 stub=/run/systemd/system/docker.service
 dropin=/run/systemd/system/docker-volumes-nocow.service.d
 target=/run/systemd/system/e2e-nocow-boot.target
@@ -74,7 +75,7 @@ cleanup() {
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
     rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4"
-    rm -f "$flag" "$attempts"
+    rm -f "$flag" "$attempts" "$postponed"
     if [[ -d "$saved" ]]; then
         rm -rf /etc/btrfs-setup
         mv "$saved" /etc/btrfs-setup
@@ -164,7 +165,7 @@ before="$(manifest "$d")"
 ino="$(stat -c %i "$d")"
 install -d -m 0755 /etc/btrfs-setup
 touch "$flag"
-rm -f "$attempts"
+rm -f "$attempts" "$postponed"
 systemctl start docker.service
 out="$(PATH="$wrap:$PATH" "$helper" migrate)"
 printf '%s\n' "$out"
@@ -174,6 +175,10 @@ grep -q 'Docker is running: migration left for the next boot' <<<"$out"
 test -e "$flag"
 test ! -e "$attempts"
 [[ "$(ls -A "$vols/e2e-cow")" == _data ]]
+# Not an attempt, but recorded for status and cst doctor (world-readable).
+grep -q '"reason": "Docker is running", "boots": 1,' "$postponed"
+[[ "$(stat -c %a "$postponed")" == 644 ]]
+grep -q '^  migration postponed at 1 boot(s), last .*: Docker is running$' <<<"$("$helper" status)"
 echo "E2E-NOCOW postponed: docker.service $(systemctl show -P ActiveState docker.service)"
 if [[ ! -s "$seen" ]]; then
     echo "the helper did not go through the systemctl wrapper ($wrap)" >&2
@@ -192,6 +197,7 @@ grep -q "^<4>docker-volumes-nocow: dockerd (pid [0-9]*) uses $vols outside docke
 [[ "$(stat -c %i "$d")" == "$ino" && "$(manifest "$d")" == "$before" ]]
 test -e "$flag"
 test ! -e "$attempts"
+grep -q '"reason": "dockerd (pid [0-9]*) uses .*", "boots": 1,' "$postponed"   # the same boot: still 1
 echo "E2E-NOCOW dockerd outside docker.service: $(grep -o 'dockerd (pid [0-9]*)' <<<"$out")"
 systemctl stop e2e-dind.service
 
@@ -217,6 +223,7 @@ echo "E2E-NOCOW free (estimated) bytes: $(btrfs filesystem usage -b "$vols" | aw
 out="$("$helper" migrate)"
 printf '%s\n' "$out"
 grep -q 'all Docker volumes are NOCOW now' <<<"$out"
+test ! -e "$postponed"   # a boot not held back removes the record
 kill "$other"
 wait "$other" || true
 other=

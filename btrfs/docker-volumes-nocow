@@ -19,7 +19,9 @@ RAID1 episode such volumes should be recreated, not trusted.
                                  CoW files into a NOCOW copy: +C only applies to
                                  empty files, so the data has to be copied.
                                  Waits unless systemd says docker.service is
-                                 stopped and no other dockerd uses the dir.
+                                 stopped and no other dockerd uses the dir;
+                                 a boot that waits is recorded in POSTPONED
+                                 (shown by status and cst doctor).
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
@@ -36,6 +38,9 @@ import time
 GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
 FLAG = "/etc/btrfs-setup/docker-nocow-pending"
 ATTEMPTS = "/var/lib/docker-volumes-nocow/attempts"
+# The boots at which migrate had to wait (JSON, world-readable): shown by
+# status and by `cst doctor`, removed at the first boot that is not held back.
+POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
 NOTIFY = "/usr/local/sbin/btrfs-notify"
 PROC = "/proc"  # where running dockerd processes are looked for (tests point it elsewhere)
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
@@ -280,6 +285,57 @@ def dockerd_busy():
     return None
 
 
+def read_postponed():
+    """The record of postponed boots (a dict), or None."""
+    try:
+        with open(POSTPONED) as f:
+            rec = json.load(f)
+    except OSError, ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def note_postponed(why):
+    """Count this boot as postponed (once per boot, by the kernel's boot id)
+    and keep the latest reason."""
+    try:
+        with open(os.path.join(PROC, "sys/kernel/random/boot_id")) as f:
+            boot = f.read().strip()
+    except OSError:
+        boot = ""
+    rec = read_postponed() or {}
+    now = int(time.time())
+    boots, first = rec.get("boots"), rec.get("first")
+    if type(boots) is not int or type(first) is not int or boots < 1:
+        boots, first = 0, now  # no record, or one this helper did not write
+    if not boots or rec.get("boot_id") != boot:
+        boots += 1
+    os.makedirs(os.path.dirname(POSTPONED), exist_ok=True)
+    tmp = POSTPONED + ".new"
+    with open(tmp, "w") as f:
+        json.dump({"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}, f)
+        f.write("\n")
+    os.chmod(tmp, 0o644)  # cst doctor reads it as the user
+    os.replace(tmp, POSTPONED)
+
+
+def clear_postponed():
+    try:
+        os.remove(POSTPONED)
+    except FileNotFoundError:
+        pass
+
+
+def postponed_line():
+    """The status line of a postponed migration, or ""."""
+    rec = read_postponed()
+    if not rec:
+        return ""
+    last = rec.get("last")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if isinstance(last, int) else "?"
+    return f"  migration postponed at {rec.get('boots', '?')} boot(s), last {when}: {rec.get('reason', '?')}"
+
+
 def migrate_one(name, data):
     """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
     new, old = data + ".nocow-new", data + f".cow-old-{int(time.time())}"
@@ -339,7 +395,15 @@ def migrate():
     busy = docker_busy() or dockerd_busy()
     if busy:
         log(4, f"{busy}: migration left for the next boot")
+        # Not an attempt and no alert, but recorded when there was work to
+        # do (a scheduled migration, or the dir still without +C), so status
+        # and `cst doctor` can show a migration held back boot after boot.
+        if os.path.exists(FLAG) or not flags(VOLUMES) & NOCOW:
+            note_postponed(busy)
+        else:
+            clear_postponed()
         return 0
+    clear_postponed()
     recover()
     # Every boot: Docker may have been installed after btrfs-setup, creating
     # the volumes dir without +C; the volumes made in between are migrated too.
@@ -415,6 +479,7 @@ def mark():
 
 
 def unmark():
+    clear_postponed()
     if os.path.isdir(VOLUMES):
         set_nocow(VOLUMES, False)
     return 0
@@ -433,6 +498,9 @@ def status():
     if todo:
         state = "at the next boot" if os.path.exists(FLAG) else "not scheduled"
         print(f"  {len(todo)} with copy-on-write data ({sum(t[3] for t in todo) >> 20} MiB), migration {state}")
+    line = postponed_line()
+    if line:
+        print(line)
     return 0
 
 

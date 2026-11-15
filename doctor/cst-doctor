@@ -26,7 +26,8 @@ Areas checked:
                switched on, unallocated space per device (from sysfs; warning
                and critical levels as btrfs-health-check); snapshots left
                writable (an interrupted snapshot run, or an entry named like
-               CST's snapshots that no CST run made)
+               CST's snapshots that no CST run made); the boot-time NOCOW
+               migration of Docker volumes postponed boot after boot
   cpu          while the game profile is on: the settings it made that a
                daemon-reload or uresourced undid since (drift); while it is
                off: its MemoryLow drop-ins left behind; slices of your user
@@ -1103,6 +1104,43 @@ def check_snapshots_writable(host: Host) -> Iterator[Result]:
         )
     if not unfinished and not foreign:
         yield Result(OK, "snapshots: none left writable")
+
+
+# btrfs/docker-volumes-nocow records each boot at which its migration had to
+# wait (Docker running, an unknown docker.service state, another dockerd on
+# the same data root): JSON {"reason", "boots", "first", "last", "boot_id"},
+# world-readable, removed by the first boot that is not held back. Such a boot
+# counts no attempt and sends no alert, so this check is where it shows.
+NOCOW_POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
+NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
+
+
+@check("btrfs")
+def check_docker_nocow_postponed(host: Host) -> Iterator[Result]:
+    try:
+        with open(host.path(NOCOW_POSTPONED), encoding="utf-8", errors="replace") as f:
+            rec = json.loads(f.read(65536))
+    except FileNotFoundError:
+        return  # never postponed, or not set up
+    except OSError, ValueError:
+        rec = None
+    if not isinstance(rec, dict):
+        yield Result(INFO, f"Docker volumes NOCOW: cannot read {NOCOW_POSTPONED}")
+        return
+    boots, last = rec.get("boots"), rec.get("last")
+    if type(boots) is not int or boots < 1:
+        boots = 1
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "at an unknown time"
+    reason = str(rec.get("reason") or "no reason recorded")
+    msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s), last {when}: {reason}"
+    if boots >= NOCOW_WARN_BOOTS:
+        yield Result(
+            WARN,
+            f"{msg}; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them",
+            "journalctl -b -u docker-volumes-nocow",
+        )
+    else:
+        yield Result(INFO, f"{msg}; tried again at the next boot")
 
 
 # ---- cpu: the game profile ----------------------------------------------------------------------
