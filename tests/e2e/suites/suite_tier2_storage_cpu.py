@@ -48,12 +48,15 @@ top_level_opts() {
 # with E2E-NOCOW go to the CI log). Part 3 starts the unit and docker.service
 # through one target, so both jobs are in one transaction, as at boot when
 # multi-user.target pulls in both (`systemctl start A B` asks for each unit in
-# turn, so the order of the names could decide instead).
+# turn, so the order of the names could decide instead). Parts 4 and 5 move
+# /etc/btrfs-setup aside: Docker installed after install on such a machine,
+# and the recovery of a machine an older helper left unscheduled.
 NOCOW_MIGRATE_SCRIPT = r"""
 helper=/usr/local/sbin/docker-volumes-nocow
 vols=/var/lib/docker/volumes
 flag=/etc/btrfs-setup/docker-nocow-pending
 attempts=/var/lib/docker-volumes-nocow/attempts
+postponed=/var/lib/docker-volumes-nocow/postponed
 stub=/run/systemd/system/docker.service
 dropin=/run/systemd/system/docker-volumes-nocow.service.d
 target=/run/systemd/system/e2e-nocow-boot.target
@@ -61,12 +64,25 @@ target=/run/systemd/system/e2e-nocow-boot.target
 # be executed is skipped without a word (the real systemctl answers instead).
 wrap=/usr/local/libexec/e2e-nocow-wrap
 seen=/run/e2e-nocow-seen
+# Parts 4 and 5 need a machine without /etc/btrfs-setup: the real one waits here.
+saved=/etc/btrfs-setup.e2e-saved
 echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
 
+fake=/usr/local/libexec/e2e-nocow-other
+other=   # the pid of a stand-in dockerd in another mount namespace (part 2)
+user=    # the pid of a stand-in dockerd that does not run as root (part 2)
 cleanup() {
-    systemctl stop e2e-nocow-boot.target docker.service 2>/dev/null || true
-    rm -rf "$stub" "$dropin" "$target" "$wrap" "$seen" "$vols/e2e-cow" "$vols/e2e-cow2"
-    rm -f "$flag" "$attempts"
+    [[ -z "$other" ]] || kill "$other" 2>/dev/null || true
+    [[ -z "$user" ]] || kill "$user" 2>/dev/null || true
+    systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
+    rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
+    rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4"
+    rm -f "$flag" "$attempts" "$postponed"
+    if [[ -d "$saved" ]]; then
+        rm -rf /etc/btrfs-setup
+        mv "$saved" /etc/btrfs-setup
+    fi
+    chattr +C "$vols" 2>/dev/null || true   # as install left it
     systemctl daemon-reload
 }
 trap cleanup EXIT
@@ -151,7 +167,7 @@ before="$(manifest "$d")"
 ino="$(stat -c %i "$d")"
 install -d -m 0755 /etc/btrfs-setup
 touch "$flag"
-rm -f "$attempts"
+rm -f "$attempts" "$postponed"
 systemctl start docker.service
 out="$(PATH="$wrap:$PATH" "$helper" migrate)"
 printf '%s\n' "$out"
@@ -161,6 +177,10 @@ grep -q 'Docker is running: migration left for the next boot' <<<"$out"
 test -e "$flag"
 test ! -e "$attempts"
 [[ "$(ls -A "$vols/e2e-cow")" == _data ]]
+# Not an attempt, but recorded for status and cst doctor (world-readable).
+grep -q '"reason": "Docker is running", "boots": 1,' "$postponed"
+[[ "$(stat -c %a "$postponed")" == 644 ]]
+grep -q '^  migration postponed at 1 boot(s) in a row, last .*: Docker is running$' <<<"$("$helper" status)"
 echo "E2E-NOCOW postponed: docker.service $(systemctl show -P ActiveState docker.service)"
 if [[ ! -s "$seen" ]]; then
     echo "the helper did not go through the systemctl wrapper ($wrap)" >&2
@@ -170,11 +190,59 @@ cat "$seen"
 rm -f "$seen"
 systemctl stop docker.service
 
+# 1b. A dockerd outside docker.service on this data root (test_05's DinD unit
+# runs dockerd --data-root=/var/lib/docker): postponed, found through /proc.
+systemctl start e2e-dind.service
+out="$("$helper" migrate)"
+printf '%s\n' "$out"
+grep -q "^<4>docker-volumes-nocow: dockerd (pid [0-9]*) uses $vols outside docker.service: migration left" <<<"$out"
+[[ "$(stat -c %i "$d")" == "$ino" && "$(manifest "$d")" == "$before" ]]
+test -e "$flag"
+test ! -e "$attempts"
+grep -q '"reason": "dockerd (pid [0-9]*) uses .*", "boots": 1,' "$postponed"   # the same boot: still 1
+echo "E2E-NOCOW dockerd outside docker.service: $(grep -o 'dockerd (pid [0-9]*)' <<<"$out")"
+systemctl stop e2e-dind.service
+
+# A process named dockerd in another mount namespace with its own
+# /var/lib/docker (as in a container) must not hold the migration back: it
+# runs during part 2. A copy of sleep stands in for it.
+mkdir -p "$fake"
+cp /usr/bin/sleep "$fake/dockerd"
+unshare --mount --propagation private sh -c \
+    'mount -t tmpfs e2e-other-ns /var/lib/docker && mkdir /var/lib/docker/volumes && exec "$1" infinity' \
+    _ "$fake/dockerd" &
+other=$!
+for _ in $(seq 1 50); do
+    [[ "$(cat "/proc/$other/comm" 2>/dev/null)" == dockerd ]] && break
+    sleep 0.1
+done
+[[ "$(cat "/proc/$other/comm")" == dockerd ]]
+[[ "$(readlink "/proc/$other/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]]
+test -d "/proc/$other/root/var/lib/docker/volumes"
+# And one in our mount namespace, with no flags (so the default data root,
+# ours), that does not run as root: what rootless Docker looks like from
+# here (plain dockerd as the user; its namespace keeps our /). It cannot
+# write to the root-owned data root and must not hold the migration back.
+setpriv --reuid=65534 --regid=65534 --clear-groups "$fake/dockerd" infinity &
+user=$!
+for _ in $(seq 1 50); do
+    [[ "$(cat "/proc/$user/comm" 2>/dev/null)" == dockerd ]] && break
+    sleep 0.1
+done
+[[ "$(cat "/proc/$user/comm")" == dockerd ]]
+[[ "$(awk '/^Uid:/ {print $3}' "/proc/$user/status")" == 65534 ]]
+[[ "$(readlink "/proc/$user/ns/mnt")" == "$(readlink /proc/self/ns/mnt)" ]]
+
 # 2. docker.service inactive: the volume is rewritten NOCOW.
 echo "E2E-NOCOW free (estimated) bytes: $(btrfs filesystem usage -b "$vols" | awk '/Free \(estimated\)/ {print $3}')"
 out="$("$helper" migrate)"
 printf '%s\n' "$out"
 grep -q 'all Docker volumes are NOCOW now' <<<"$out"
+test ! -e "$postponed"   # a boot not held back removes the record
+kill "$other" "$user"
+wait "$other" "$user" || true
+other=''
+user=''
 [[ "$(manifest "$d")" == "$before" ]]
 [[ "$(stat -c %i "$d")" != "$ino" ]]   # a new copy
 all_nocow "$d"
@@ -224,6 +292,54 @@ all_nocow "$d2"
 test ! -e "$flag"
 test ! -e "$attempts"
 journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 5 2>/dev/null | sed 's/^/E2E-NOCOW journal: /' || true
+systemctl stop e2e-nocow-boot.target docker.service
+
+# 4. Docker installed after `cst btrfs install`, on a machine without
+# /etc/btrfs-setup (install creates it only when it finds CoW data): the
+# volumes folder has no +C and holds a CoW volume. The unit, at that boot,
+# writes the flag (creating its folder) before it sets +C, and migrates.
+mv /etc/btrfs-setup "$saved"
+chattr -C "$vols"
+make_volume e2e-cow3
+d3="$vols/e2e-cow3/_data"
+before3="$(manifest "$d3")"
+ino3="$(stat -c %i "$d3")"
+systemctl start docker-volumes-nocow.service
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 3 2>/dev/null | sed 's/^/E2E-NOCOW part 4: /' || true
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]
+[[ "$(manifest "$d3")" == "$before3" ]]
+[[ "$(stat -c %i "$d3")" != "$ino3" ]]
+all_nocow "$d3"
+[[ "$(ls -A "$vols/e2e-cow3")" == _data ]]
+test -d /etc/btrfs-setup
+test ! -e "$flag"
+test ! -e "$attempts"
+
+# 5. A machine an older helper left behind in that case: the volumes folder
+# has +C, a volume still holds CoW data, and nothing is scheduled. Running
+# `cst btrfs install` again schedules it (mark finds the CoW data; install
+# creates /etc/btrfs-setup and the flag), and the next boot migrates it.
+rm -rf /etc/btrfs-setup
+make_volume e2e-cow4
+d4="$vols/e2e-cow4/_data"
+before4="$(manifest "$d4")"
+ino4="$(stat -c %i "$d4")"
+st="$("$helper" status)"
+printf '%s\n' "$st"
+grep -q 'with copy-on-write data (.*), migration not scheduled' <<<"$st"
+SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs install --no-below
+test -f "$flag"
+grep -q 'migration at the next boot' <<<"$("$helper" status)"
+systemctl start docker-volumes-nocow.service
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+[[ "$(manifest "$d4")" == "$before4" ]]
+[[ "$(stat -c %i "$d4")" != "$ino4" ]]
+all_nocow "$d4"
+[[ "$(ls -A "$vols/e2e-cow4")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after install on an affected machine"
 """
 
 
@@ -752,7 +868,8 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
 
     def test_05a_docker_volumes_nocow_migrate_postponed_and_boot_order(self):
         """docker-volumes-nocow migrate on loopback btrfs: postponed while docker.service is active; a CoW volume
-        rewritten NOCOW with the same data; and run when its unit and docker.service start in one transaction."""
+        rewritten NOCOW with the same data; run when its unit and docker.service start in one transaction; Docker
+        installed after install without /etc/btrfs-setup; and install re-scheduling an affected machine."""
         out = exec_bash(self.PRIV_CONTAINER, NOCOW_MIGRATE_SCRIPT).stdout
         for line in out.splitlines():
             if line.startswith("E2E-NOCOW"):

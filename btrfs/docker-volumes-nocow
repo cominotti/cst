@@ -18,10 +18,14 @@ RAID1 episode such volumes should be recreated, not trusted.
                                  docker.service) marks the dir; if flagged, rewrites each volume that has
                                  CoW files into a NOCOW copy: +C only applies to
                                  empty files, so the data has to be copied.
-                                 Refuses while Docker runs.
+                                 Waits unless systemd says docker.service is
+                                 stopped and no other dockerd uses the dir;
+                                 a boot that waits is recorded in POSTPONED
+                                 (shown by status and cst doctor).
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
+import errno
 import fcntl
 import json
 import os
@@ -35,7 +39,11 @@ import time
 GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
 FLAG = "/etc/btrfs-setup/docker-nocow-pending"
 ATTEMPTS = "/var/lib/docker-volumes-nocow/attempts"
+# The boots at which migrate had to wait (JSON, world-readable): shown by
+# status and by `cst doctor`, removed at the first boot that is not held back.
+POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
 NOTIFY = "/usr/local/sbin/btrfs-notify"
+PROC = "/proc"  # where running dockerd processes are looked for (tests point it elsewhere)
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
 
 
@@ -43,12 +51,24 @@ def log(prio, msg):
     print(f"<{prio}>docker-volumes-nocow: {msg}", flush=True)
 
 
+def configured_root(path):
+    """data-root in the dockerd config file at path; None when there is no
+    such file, it is not a JSON object, or it names no data root (dockerd's
+    default then). Any other error reading it is raised."""
+    try:
+        with open(path) as f:
+            root = json.load(f).get("data-root")
+    except FileNotFoundError, ValueError, AttributeError:
+        return None
+    return root if isinstance(root, str) and root else None
+
+
 def docker_root():
     try:
-        with open("/etc/docker/daemon.json") as f:
-            return os.path.join(json.load(f).get("data-root") or "/var/lib/docker", "volumes")
-    except OSError, ValueError:
-        return "/var/lib/docker/volumes"
+        root = configured_root("/etc/docker/daemon.json")
+    except OSError:
+        root = None
+    return os.path.join(root or "/var/lib/docker", "volumes")
 
 
 VOLUMES = docker_root()
@@ -185,11 +205,186 @@ def free_bytes():
     return 0
 
 
-def docker_active():
-    r = subprocess.run(
-        ["systemctl", "show", "-P", "ActiveState", "docker.service"], check=False, capture_output=True, text=True
-    )
-    return r.stdout.strip() in ("active", "activating", "reloading", "deactivating")
+def docker_busy():
+    """None when docker.service is known to be stopped, else why the migration
+    waits. Fails closed: only a clear "inactive" or "failed" lets it run (at
+    boot docker.service reads "inactive" while its start job waits for this
+    unit). No systemctl, an error or any other answer postpones."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "-P", "ActiveState", "docker.service"], check=False, capture_output=True, text=True
+        )
+    except OSError as e:
+        return f"cannot ask systemd about docker.service ({e})"
+    state = r.stdout.strip()
+    if r.returncode == 0 and state in ("inactive", "failed"):
+        return None
+    if r.returncode == 0 and state in ("active", "activating", "reloading", "deactivating"):
+        return "Docker is running"
+    return f"docker.service state unknown (systemctl exit {r.returncode}, ActiveState {state!r})"
+
+
+def is_dockerd(proc):
+    """The process in /proc/PID is a dockerd (its name or its program file)."""
+    with open(os.path.join(proc, "comm"), "rb") as f:
+        names = {f.read().strip()}
+    try:
+        # As bytes: a program file name need not be valid UTF-8.
+        names.add(os.path.basename(os.readlink(os.fsencode(os.path.join(proc, "exe"))).removesuffix(b" (deleted)")))
+    except OSError:
+        pass  # a kernel thread, or a process that just ended
+    return b"dockerd" in names
+
+
+def runs_as_root(proc):
+    """False when the process in /proc/PID has an effective uid other than 0
+    (as this process sees it); True when it is 0 or cannot be told."""
+    with open(os.path.join(proc, "status"), "rb") as f:
+        for line in f:
+            if line.startswith(b"Uid:"):
+                fields = line.split()
+                return not (len(fields) > 2 and fields[2].isdigit() and int(fields[2]) != 0)
+    return True
+
+
+def daemon_volumes(proc, args):
+    """The volumes folder of the dockerd in /proc/PID, as a path this process
+    can open: its --data-root, else data-root in its config file
+    (--config-file, default /etc/docker/daemon.json), else /var/lib/docker.
+    Paths are read in the daemon's own view, through /proc/PID/root (its
+    mount namespace) and /proc/PID/cwd (a relative path). An absolute
+    symlink on that path is still followed from our own root."""
+
+    def inside(path):
+        if path.startswith("/"):
+            return os.path.join(proc, "root", path.lstrip("/"))
+        return os.path.join(proc, "cwd", path)
+
+    root, config = None, "/etc/docker/daemon.json"
+    rest = iter(args[1:])
+    for arg in rest:
+        if arg[:2] == "-g" and arg[2:3] not in ("", "="):
+            arg = "-g=" + arg[2:]  # the shorthand with its value attached: -g/path
+        key, eq, value = arg.partition("=")
+        if key in ("--data-root", "-g", "--graph", "--config-file"):
+            if not eq:
+                value = next(rest, "")
+            if key == "--config-file":
+                config = value
+            else:
+                root = value
+    root = root or configured_root(inside(config)) or "/var/lib/docker"
+    return os.path.join(inside(root), "volumes")
+
+
+def dockerd_busy():
+    """None when no dockerd uses VOLUMES, else why the migration waits.
+
+    A dockerd started by hand or by another unit is not docker.service. It
+    counts when its volumes folder is the same directory as VOLUMES (device
+    and inode, seen through its own mount namespace): one in a container
+    keeps its data elsewhere and does not count, while a container that
+    bind-mounts this data root does. A dockerd that does not run as root does
+    not count either: it cannot write to the root-owned data root. That is
+    rootless Docker, which runs plain `dockerd` (its data in the home folder)
+    in a namespace that keeps this machine's /, so its default path would
+    look like ours. A dockerd whose uid or data root cannot be read counts
+    (fails closed)."""
+    mine = os.stat(VOLUMES)
+    for pid in sorted(os.listdir(PROC)):
+        if not pid.isdigit():
+            continue
+        proc = os.path.join(PROC, pid)
+        try:
+            if not is_dockerd(proc) or not runs_as_root(proc):
+                continue
+            with open(os.path.join(proc, "cmdline"), "rb") as f:
+                args = [a.decode(errors="surrogateescape") for a in f.read().split(b"\0")]
+            st = os.stat(daemon_volumes(proc, args))
+        except FileNotFoundError, ProcessLookupError:
+            continue  # the process ended, or its data root has no volumes folder
+        except OSError as e:
+            return f"dockerd (pid {pid}) is running and its data root cannot be read ({e})"
+        if (st.st_dev, st.st_ino) == (mine.st_dev, mine.st_ino):
+            return f"dockerd (pid {pid}) uses {VOLUMES} outside docker.service"
+    return None
+
+
+def read_postponed():
+    """The record of postponed boots (a dict), or None."""
+    try:
+        with open(POSTPONED) as f:
+            rec = json.load(f)
+    except OSError, ValueError:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def note_postponed(why):
+    """Count this boot as postponed (once per boot, by the kernel's boot id)
+    and keep the latest reason."""
+    try:
+        with open(os.path.join(PROC, "sys/kernel/random/boot_id")) as f:
+            boot = f.read().strip()
+    except OSError:
+        boot = ""
+    rec = read_postponed() or {}
+    now = int(time.time())
+    boots, first = rec.get("boots"), rec.get("first")
+    if type(boots) is not int or type(first) is not int or boots < 1:
+        boots, first = 0, now  # no record, or one this helper did not write
+    if not boots or rec.get("boot_id") != boot:
+        boots += 1
+    os.makedirs(os.path.dirname(POSTPONED), exist_ok=True)
+    tmp = POSTPONED + ".new"
+    with open(tmp, "w") as f:
+        json.dump({"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}, f)
+        f.write("\n")
+    os.chmod(tmp, 0o644)  # cst doctor reads it as the user
+    os.replace(tmp, POSTPONED)
+
+
+def clear_postponed():
+    try:
+        os.remove(POSTPONED)
+    except FileNotFoundError:
+        pass
+
+
+def postponed_line():
+    """The status line of a postponed migration, or ""."""
+    rec = read_postponed()
+    if not rec:
+        return ""
+    last = rec.get("last")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if isinstance(last, int) else "?"
+    return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"
+
+
+def label(path):
+    """The SELinux label of path itself (a link is not followed), without the
+    trailing NUL the kernel may keep; None when it has none or the
+    filesystem keeps no labels."""
+    try:
+        value = os.getxattr(path, "security.selinux", follow_symlinks=False)
+    except OSError as e:
+        if e.errno in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+            return None
+        raise
+    return value.rstrip(b"\0")
+
+
+def labels(top):
+    """{path relative to top: label} for top and every entry below it, walked
+    like cow_files (a link is an entry; another filesystem is not entered)."""
+    out = {".": label(top)}
+    dev = os.lstat(top).st_dev
+    for root, dirs, files in os.walk(top):
+        for name in dirs + files:
+            p = os.path.join(root, name)
+            out[os.path.relpath(p, top)] = label(p)
+        dirs[:] = real_dirs(root, dirs, dev)
+    return out
 
 
 def migrate_one(name, data):
@@ -222,6 +417,20 @@ def migrate_one(name, data):
             f"copy check failed (entries {entries_old} vs {entries_new}, bytes "
             f"{bytes_old} vs {bytes_new}, CoW files {n_cow})"
         )
+    # cp -a keeps SELinux labels when it can and says nothing when it cannot;
+    # a container cannot open a file whose label changed.
+    labels_old, labels_new = labels(data), labels(new)
+    differ = sorted(k for k in labels_old.keys() | labels_new.keys() if labels_old.get(k) != labels_new.get(k))
+    if differ:
+        rel = differ[0]
+
+        def shown(v):
+            return "none" if v is None else v.decode(errors="replace")
+
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(
+            f"copy check failed (SELinux label of {rel}: {shown(labels_old.get(rel))} vs {shown(labels_new.get(rel))})"
+        )
     os.sync()
     os.rename(data, old)
     try:
@@ -232,24 +441,61 @@ def migrate_one(name, data):
     shutil.rmtree(old)
 
 
+def request_migration():
+    """Write the flag (and its folder, which install creates only when it
+    found CoW data), and make it durable before +C is set: the data root may
+    be on another filesystem than /etc, and after a power loss +C must not
+    stay while the flag is lost. False, with a log line, when that fails."""
+    folder = os.path.dirname(FLAG)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(FLAG, "a"):
+            pass
+        for path in (FLAG, folder, os.path.dirname(folder)):  # the file, its entry, its folder's entry
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    except OSError as e:
+        log(3, f"cannot schedule the migration ({e}); {VOLUMES} keeps copy-on-write, the next boot tries again")
+        return False
+    return True
+
+
 def migrate():
     if not os.path.isdir(VOLUMES):
+        clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
         return 0
-    if docker_active():
-        log(4, "Docker is running: migration left for the next boot")
+    busy = docker_busy() or dockerd_busy()
+    if busy:
+        log(4, f"{busy}: migration left for the next boot")
+        # Not an attempt and no alert, but recorded when there was work to
+        # do (a scheduled migration, or the dir still without +C), so status
+        # and `cst doctor` can show a migration held back boot after boot.
+        if os.path.exists(FLAG) or not flags(VOLUMES) & NOCOW:
+            note_postponed(busy)
+        else:
+            clear_postponed()
         return 0
+    clear_postponed()
     recover()
     # Every boot: Docker may have been installed after btrfs-setup, creating
     # the volumes dir without +C; the volumes made in between are migrated too.
+    # The dir without +C is the only sign of those volumes, so the flag is
+    # written first: if that fails, the dir keeps no +C and the next boot sees
+    # the same sign again (setting +C first would lose the request for good).
     if not flags(VOLUMES) & NOCOW:
+        if pending() and not request_migration():
+            return 0
         set_nocow(VOLUMES, True)
-        if pending(fix=True):
-            open(FLAG, "a").close()
+        pending(fix=True)
     if not os.path.exists(FLAG):
         return 0
     os.makedirs(os.path.dirname(ATTEMPTS), exist_ok=True)
     try:
-        attempts = int(open(ATTEMPTS).read())
+        with open(ATTEMPTS) as f:
+            attempts = int(f.read())
     except OSError, ValueError:
         attempts = 0
     if attempts >= 2:
@@ -265,7 +511,8 @@ def migrate():
             capture_output=True,
         )
         return 0
-    open(ATTEMPTS, "w").write(str(attempts + 1))
+    with open(ATTEMPTS, "w") as f:
+        f.write(str(attempts + 1))
     set_nocow(VOLUMES, True)
     todo = pending(fix=True)
     log(5, f"rewriting {len(todo)} volume(s) without copy-on-write before Docker starts")
@@ -309,6 +556,7 @@ def mark():
 
 
 def unmark():
+    clear_postponed()
     if os.path.isdir(VOLUMES):
         set_nocow(VOLUMES, False)
     return 0
@@ -327,6 +575,9 @@ def status():
     if todo:
         state = "at the next boot" if os.path.exists(FLAG) else "not scheduled"
         print(f"  {len(todo)} with copy-on-write data ({sum(t[3] for t in todo) >> 20} MiB), migration {state}")
+    line = postponed_line()
+    if line:
+        print(line)
     return 0
 
 

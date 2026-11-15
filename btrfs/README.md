@@ -569,9 +569,44 @@ docker volume rm <name>         # or one volume by name
   It also resets the counter of attempts (see below).
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
   starts**. For each volume with copy-on-write data it makes a full NOCOW copy,
-  checks that the copy has the same number of entries and bytes, swaps the names
-  and deletes the old copy. It skips a volume if free space is less than its size
+  checks that the copy has the same number of entries and bytes and the same
+  SELinux label on every entry (`cp -a` drops a label it cannot set without a
+  word, and a container cannot open a file whose label changed), swaps the
+  names and deletes the old copy. It skips a volume if free space is less than its size
   plus 20 GiB. One failing volume does not stop the others.
+- It copies only when systemd answers that `docker.service` is stopped
+  (`inactive` or `failed`; at boot Docker's start job waits for this service,
+  so Docker reads `inactive` then). Any other answer, an error, or no
+  `systemctl` at all postpones the migration to the next boot, with the reason
+  in the journal. A postponed boot does not count as an attempt.
+- It also postpones while a `dockerd` outside `docker.service` (started by
+  hand, or by another unit) uses the same volumes folder. It finds such a
+  daemon in `/proc` by its name or program file, reads its `--data-root` (or
+  the `data-root` of its config file, or the default `/var/lib/docker`) in the
+  daemon's own view (`/proc/PID/root`), and compares that folder with the
+  volumes folder by device and inode. So a Docker inside a container, which
+  keeps its data elsewhere, does not count; a container that bind-mounts this
+  data root does. A daemon that does not run as root does not count either,
+  because it cannot write to the root-owned data folder. That is how a
+  rootless Docker is left out: it runs a plain `dockerd` as your user, keeps
+  its data in your home folder, and sees this machine's `/`, so by its path
+  alone it would look like the system Docker. A daemon whose user or data
+  folder cannot be read counts. One limit: an absolute symbolic link on a containerised
+  daemon's data path is followed from this machine's `/`, not the
+  container's, so that one case can be judged wrongly.
+- A postponed boot sends no alert, so it is recorded instead, when there was
+  work to do (a scheduled migration, or a volumes folder without `+C`):
+  `/var/lib/docker-volumes-nocow/postponed` keeps the latest reason, the time
+  and how many boots were held back (counted once per boot). `status` shows
+  it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
+  `cst doctor` reports it (`WARN` from two boots on; see
+  [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).
+  The first boot that is not held back removes the record, and so does a
+  boot that finds no volumes folder (Docker removed, `data-root` moved). To run the
+  migration by hand once nothing uses the volumes:
+  `sudo systemctl stop docker.socket docker.service`, then
+  `sudo systemctl start docker-volumes-nocow.service`, and when it is done
+  start Docker again with `sudo systemctl start docker.socket docker.service`.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. This runs early at boot,
   before anyone has logged in, so the desktop alert is **kept and shown at
@@ -581,7 +616,20 @@ docker volume rm <name>         # or one volume by name
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,
   its volumes folder is also marked, and its volumes are migrated at that
-  boot.
+  boot. A volumes folder without `+C` is the only sign of those volumes, so
+  the service first writes the flag file (it creates `/etc/btrfs-setup` if
+  needed), flushes it to disk (the data folder may be on another filesystem
+  than `/etc`, and a power loss must not keep `+C` and lose the flag), and
+  only then sets `+C`. If it cannot write or flush the flag, it leaves the
+  folder without `+C` and logs why, so the next boot tries again.
+- Older copies of the helper set `+C` first. On a machine without
+  `/etc/btrfs-setup` (install creates it only when it finds copy-on-write
+  data; the snapshots setup creates it too), writing the flag then failed,
+  and the request was lost. Such a machine shows `migration not scheduled`
+  and stays that way. Run `cst btrfs install` once: its `mark` finds the
+  copy-on-write data, install creates the folder and the flag, and the next
+  boot migrates the volumes (the same `install` also puts the fixed helper in
+  place).
 
 Note: `cst cpu docker-slice install` also edits
 `/etc/docker/daemon.json` (it adds `cgroup-parent`, see
@@ -610,7 +658,7 @@ Read-only. Sections:
 | `last health check` | the last result lines of the health check |
 | `last scrub` | start, status, duration, error summary |
 | `last fstrim` | the last trim results |
-| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled` |
+| `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
 | `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry `compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file |
@@ -672,8 +720,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   tuned is not running, the old values come back at the next boot;
 - the reclaim file, **only if this script created it**. The switches stay on in
   the running kernel until the next reboot;
-- the Docker NOCOW service. The `+C` flag is removed from the volumes folder, so
-  **new** volumes are copy-on-write again. **Existing** volumes (their files and
+- the Docker NOCOW service and its record of postponed boots. The `+C` flag is
+  removed from the volumes folder, so **new** volumes are copy-on-write again. **Existing** volumes (their files and
   their folders) stay NOCOW, so new files inside them are still NOCOW;
 - `/var/lib/btrfs-health-check`;
 - the alerts kept for the next login (section 4.9): the user unit
@@ -1702,7 +1750,29 @@ journalctl -u docker-volumes-nocow
 
 Common causes are low free space or a copy error. The volumes are still usable
 (copy-on-write). Fix the cause and run `install` again; the migration is then
-tried again at the next boot (two more attempts).
+tried again at the next boot (two more attempts). With no "gave up" line in the
+journal, an older helper may have lost the request (section 4.10): `install`
+schedules it again too.
+
+### Docker volumes: `migration postponed at N boot(s) in a row`
+
+`status` (and a `cst doctor` warning) shows that the boot-time migration had
+to wait, with the reason of the last boot:
+
+- `Docker is running`: something started Docker before
+  `docker-volumes-nocow.service` ran at boot (the unit is ordered before
+  `docker.service`, so look for another unit or a script that starts it);
+- `docker.service state unknown (...)` or `cannot ask systemd ...`: systemd
+  gave no clear answer; the journal of that boot says more;
+- `dockerd (pid N) uses ... outside docker.service`: a dockerd started by
+  hand or by another unit uses the same data folder.
+
+```
+journalctl -b -u docker-volumes-nocow
+```
+
+Remove the cause, or run the migration by hand once nothing uses the volumes
+(section 4.10).
 
 ### No desktop alerts arrive
 

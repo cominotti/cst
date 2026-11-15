@@ -837,6 +837,77 @@ class SnapshotsWritableTest(Scratch):
         self.assertIn("info   snapshots: cannot read /var/lib/btrfs-snapshot/core-unfinished", r.stdout)
 
 
+class DockerNocowPostponedTest(Scratch):
+    """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
+    keeps of the boots at which its migration had to wait."""
+
+    def record(self, text):
+        d = os.path.join(self.root, "var", "lib", "docker-volumes-nocow")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "postponed")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def lines(self, out):
+        return [ln for ln in out.splitlines() if "Docker volumes NOCOW" in ln]
+
+    def test_no_record_is_silent(self):
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_one_boot_is_info(self):
+        self.record(json.dumps({"reason": "Docker is running", "boots": 1, "first": NOW, "last": NOW, "boot_id": "b"}))
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
+                "2026-11-05 17:33: Docker is running; tried again at the next boot"
+            ],
+        )
+        self.assert_read_only()
+
+    def test_two_boots_warn(self):
+        reason = "dockerd (pid 812) uses /var/lib/docker/volumes outside docker.service"
+        self.record(json.dumps({"reason": reason, "boots": 2, "first": NOW - 86400, "last": NOW, "boot_id": "c"}))
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        got = self.lines(r.stdout)
+        self.assertEqual(len(got), 1, r.stdout)
+        self.assertIn(
+            "WARN   Docker volumes NOCOW: the boot-time migration was postponed at 2 boot(s) in a row, last ", got[0]
+        )
+        self.assertIn(f": {reason}; the volumes keep copy-on-write data", got[0])
+        self.assertIn("fix: journalctl -b -u docker-volumes-nocow", r.stdout)
+        self.assert_read_only()
+
+    def test_odd_fields(self):
+        self.record(json.dumps({"boots": "7", "last": "yesterday"}))
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
+                "at an unknown time: no reason recorded; tried again at the next boot"
+            ],
+        )
+
+    def test_unreadable_record_is_info(self):
+        for text in ("not json", "[1, 2]"):
+            with self.subTest(text=text):
+                self.record(text)
+                r = self.run_tool()
+                self.assertEqual(
+                    self.lines(r.stdout),
+                    ["  info   Docker volumes NOCOW: cannot read /var/lib/docker-volumes-nocow/postponed"],
+                )
+        os.remove(self.record(""))
+        os.mkdir(os.path.join(self.root, "var", "lib", "docker-volumes-nocow", "postponed"))
+        r = self.run_tool()
+        self.assertIn("info   Docker volumes NOCOW: cannot read", r.stdout)
+
+
 # ---- vm ----------------------------------------------------------------------------------------
 ROLLBACK = "r" * 64
 CPU_FEATURES = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")

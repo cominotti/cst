@@ -57,6 +57,7 @@ cst doctor help
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
+| `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks); `info` for one boot, or when the record cannot be read; nothing when there is no record |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
 The **booted** one is running now; a **staged** one was prepared by an
@@ -210,6 +211,9 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `TOP`/`SNAP_DIR_NAME` from `/etc/btrfs-setup/snapshots.conf` for the path in
   its fix line. It never opens the snapshot folder (root-only) and runs no
   command.
+- The Docker NOCOW check reads `/var/lib/docker-volumes-nocow/postponed`
+  (world-readable, written by `docker-volumes-nocow` at boot). It never opens
+  Docker's folders (root-only) and runs no command.
 - Which alerts you have already seen comes from your record in
   `~/.local/state/cst-alerts/delivered` (written by `cst-pending-alerts` at
   login; the older `~/.local/state/f44-alerts` is read when the new one does
@@ -280,6 +284,33 @@ two lists the run keeps in `/var/lib/btrfs-snapshot` (world-readable):
 == btrfs
   WARN   snapshots: Workspace.20261115T0400 left writable by an interrupted run (cache folders perhaps not dropped yet); the next hourly run finishes it (if this stays: journalctl -u btrfs-snapshot)
          fix: sudo systemctl start btrfs-snapshot.service
+```
+
+### 6.2 Docker volumes: NOCOW migration postponed
+
+At every boot, before Docker starts, `docker-volumes-nocow.service` rewrites
+Docker volumes that still hold copy-on-write data
+([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
+It waits, and tries again at the next boot, when it cannot be sure nothing
+uses the volumes: Docker is running, systemd gives no clear state for
+`docker.service`, or another `dockerd` uses the same data folder. Such a boot
+is not counted as a failed attempt and sends no alert, so a migration could
+wait forever without a word. The helper records it instead, in
+`/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
+time, and how many boots were held back (once per boot). The first boot
+that is not held back removes the record, and so does a boot that finds no
+volumes folder (Docker removed, or its `data-root` moved).
+
+One boot is `info`: it can happen once (Docker started by hand early, for
+example). From two boots on it is a `WARN`: something holds the migration
+back at every boot. The fix line only shows that boot's journal; the reasons
+and what to do are in
+[btrfs/README.md, section 13](../btrfs/README.md#docker-volumes-migration-postponed-at-n-boots-in-a-row).
+
+```
+== btrfs
+  WARN   Docker volumes NOCOW: the boot-time migration was postponed at 3 boot(s) in a row, last 2026-11-15 08:02: Docker is running; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them
+         fix: journalctl -b -u docker-volumes-nocow
 ```
 
 ## 7. The vm checks
@@ -485,7 +516,8 @@ The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
 built per test, fixture `systemctl show` answers and game profile records,
 a fixture cgroup tree of the user manager and leftover game drop-ins,
-fixture lists of snapshots left writable,
+fixture lists of snapshots left writable, fixture records of postponed
+Docker NOCOW migrations,
 and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the
