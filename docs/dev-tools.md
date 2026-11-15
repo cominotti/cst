@@ -8,7 +8,7 @@ are not part of CST: nothing installed on the machine uses them.
 | Tool | What it does here | Pinned in |
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
-| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors; missing type annotations in the typed modules. Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
+| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations in the typed modules. Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing (its own `mutation` group; CI does not install it) | `pyproject.toml`, `uv.lock` |
 
@@ -19,7 +19,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ## Running them
 
 ```
-invowk cmd test pylint        # ruff check (F, B, UP, E9), then ruff format --check: every Python file
+invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), then ruff format --check: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on the typed list
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
@@ -70,10 +70,23 @@ repository:
   `vm/cst-vm`, ...). ruff finds `*.py` files by itself, but not these. A new
   helper must be added here; the test fails until it is.
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
-  (syntax errors) for every Python file (`test pylint`). `ANN` (annotations)
-  is not in the selected rules: `test types` runs it on its own
-  (`ruff check --select ANN`), and the typed list below limits it to the
+  (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
+  (annotations) is not in the selected rules: `test types` runs it on its
+  own (`ruff check --select ANN`), and the typed list below limits it to the
   typed modules.
+- **`PLW1510`: every `subprocess.run` passes `check=`.** Without it, a
+  command that fails (exit status not 0) does not stop the program, and
+  nothing in the code says whether that was meant. At a new call site write:
+  - `check=True` when a failure must stop the program (`subprocess.run`
+    then raises `CalledProcessError`);
+  - `check=False` when the code reads `returncode` itself, or when a failure
+    really does not matter (say why in a comment).
+
+  The existing calls all got `check=False`, which is what they did before
+  (Python's default), so that pull request changed no behaviour. Turning
+  one into `check=True` changes behaviour: do it in its own pull request,
+  with a test. ruff does not lint the Python examples in Markdown files;
+  write `check=` in them by hand.
 - **The format check** (`ruff format --check`, the second half of
   `test pylint`): every Python file must already look the way `ruff format`
   writes it. Lines are up to 120 characters (`line-length` in `[tool.ruff]`;
@@ -115,6 +128,22 @@ repository:
   set to `"ignore"`, or `analysis.allowed-unresolved-imports`), when
   `error-on-warning` is not `true`, and when a ty-gated file has a
   `ty: ignore` or `type: ignore` comment.
+
+## Layout-only commits and `git blame`
+
+`.git-blame-ignore-revs` at the top of the repository lists the commits
+that only changed the layout of the code, such as the `ruff format` run of
+#16. `git blame` skips them and shows the commit that last changed what each
+line does. GitHub reads the file by itself. For `git blame` on your machine,
+run once per clone:
+
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+Add a commit there only when it changes nothing but layout, by the full SHA
+that landed on `main` (the squash commit), with a comment naming its pull
+request.
 
 ## Upgrading a pin
 

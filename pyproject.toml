@@ -64,7 +64,9 @@ exclude = ["*.md"]
 # (ANN) are not here: `invowk cmd test types` runs them on their own
 # (`ruff check --select ANN`), only for the typed modules (see
 # per-file-ignores below).
-select = ["F", "B", "UP", "E9"]
+# PLW1510: every subprocess.run says check=True or check=False. Whether a
+# failed command stops the program is a decision, not a default.
+select = ["F", "B", "UP", "E9", "PLW1510"]
 
 [tool.ruff.lint.per-file-ignores]
 # The typed modules: every function annotated. ANN (selected by
