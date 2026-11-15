@@ -57,39 +57,43 @@ DEBUG_HELP = {
 
 # ---- records -----------------------------------------------------------------
 
+
 class ZswapSummary(TypedDict):
     """What zswap_summary returns. Sizes in bytes, counters in pages,
     shares as fractions (None where the divisor is 0 or a value is missing)."""
-    pool: int | None            # compressed size in RAM (meminfo Zswap)
-    stored: int | None          # what the pool holds, uncompressed (Zswapped)
-    limit: int | None           # max_pool_percent of MemTotal
+
+    pool: int | None  # compressed size in RAM (meminfo Zswap)
+    stored: int | None  # what the pool holds, uncompressed (Zswapped)
+    limit: int | None  # max_pool_percent of MemTotal
     pool_of_limit: float | None
-    accept_below: int | None    # accept_threshold_percent of the limit
-    ratio: float | None         # stored / pool
+    accept_below: int | None  # accept_threshold_percent of the limit
+    ratio: float | None  # stored / pool
     zswpout: int
     zswpin: int
     zswpwb: int
     pswpout: int
     pswpin: int
-    loaded_back: float | None   # zswpin / zswpout
+    loaded_back: float | None  # zswpin / zswpout
     written_back: float | None  # zswpwb / zswpout
-    bypassed: int               # pswpout - zswpwb, at least 0
-    read_back: float | None     # pswpin / pswpout
+    bypassed: int  # pswpout - zswpwb, at least 0
+    read_back: float | None  # pswpin / pswpout
 
 
 class CgroupRow(TypedDict):
     """What cgroup_row returns for one cgroup. Sizes in bytes."""
-    swap: int | None            # memory.swap.current
+
+    swap: int | None  # memory.swap.current
     zswap: int | None
     zswapped: int | None
     zswpout: int
     zswpwb: int
     pswpin: int
     written_back: float | None  # zswpwb / zswpout
-    read_back: float | None     # pswpin / pswpout
+    read_back: float | None  # pswpin / pswpout
 
 
 # ---- parsing (pure) ----------------------------------------------------------
+
 
 def parse_kv(text: str) -> dict[str, int]:
     """'name value' lines (vmstat, memory.stat) -> {name: int}."""
@@ -158,6 +162,7 @@ def same_param(live: str, desired: str) -> bool:
 
 # ---- maths (pure) ------------------------------------------------------------
 
+
 def share(num: float, den: float | None) -> float | None:
     """num/den as a fraction, None when den is 0."""
     return None if not den else num / den
@@ -176,14 +181,13 @@ def human(n: int | None) -> str:
     return f"{n} B"
 
 
-def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int],
-                  params: Mapping[str, str]) -> ZswapSummary:
+def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int], params: Mapping[str, str]) -> ZswapSummary:
     """The numbers status prints about the pool and the swap traffic.
 
     meminfo in bytes, vmstat in pages, params as read from sysfs."""
     total = meminfo.get("MemTotal", 0)
-    pool = meminfo.get("Zswap")          # compressed size in RAM
-    stored = meminfo.get("Zswapped")     # what it holds, uncompressed
+    pool = meminfo.get("Zswap")  # compressed size in RAM
+    stored = meminfo.get("Zswapped")  # what it holds, uncompressed
     try:
         max_pct = int(params.get("max_pool_percent", ""))
     except ValueError:
@@ -202,7 +206,11 @@ def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int],
         "pool_of_limit": share(pool or 0, limit) if pool is not None else None,
         "accept_below": limit * accept // 100 if limit is not None and accept is not None else None,
         "ratio": (stored / pool) if pool and stored is not None else None,
-        "zswpout": zout, "zswpin": zin, "zswpwb": zwb, "pswpout": pout, "pswpin": pin,
+        "zswpout": zout,
+        "zswpin": zin,
+        "zswpwb": zwb,
+        "pswpout": pout,
+        "pswpin": pin,
         # of the pages zswap took: loaded back from RAM / pushed on to disk
         "loaded_back": share(zin, zout),
         "written_back": share(zwb, zout),
@@ -232,6 +240,7 @@ def cgroup_row(stat: Mapping[str, int], swap_current: int | None) -> CgroupRow:
 
 
 # ---- reading -----------------------------------------------------------------
+
 
 @overload
 def read(path: str) -> str | None: ...
@@ -301,6 +310,7 @@ def cgroups() -> list[tuple[str, str]]:
 
 # ---- printing ----------------------------------------------------------------
 
+
 def section(title: str) -> None:
     print(f"\n== {title}")
 
@@ -328,14 +338,22 @@ def show_settings(params: Mapping[str, str]) -> None:
         rows.append(("-", "machine.slice memory.low", "slice not active (no VM running)", human(want)))
     else:
         ok = live.isdigit() and int(live) == want
-        rows.append(("ok" if ok else "DIFF", "machine.slice memory.low",
-                     human(int(live)) if live.isdigit() else live, human(want)))
+        rows.append(
+            (
+                "ok" if ok else "DIFF",
+                "machine.slice memory.low",
+                human(int(live)) if live.isdigit() else live,
+                human(want),
+            )
+        )
     for state, label, live, want in rows:
         extra = "" if state == "ok" or not want else f"   (desired {want})"
         print(f"  {state:<5} {label:<28} {live}{extra}")
     if any(r[0] == "exp" for r in rows):
-        print(f"  exp: the cpu experiment {exp_name} is on and sets {exp_key}; apply leaves it alone."
-              f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply")
+        print(
+            f"  exp: the cpu experiment {exp_name} is on and sets {exp_key}; apply leaves it alone."
+            f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply"
+        )
 
 
 def show_pool(params: Mapping[str, str], s: ZswapSummary) -> None:
@@ -346,8 +364,10 @@ def show_pool(params: Mapping[str, str], s: ZswapSummary) -> None:
         return
     print(f"  pool in RAM: {human(s['pool'])} of a {human(s['limit'])} limit ({pct(s['pool_of_limit'])})")
     if s["accept_below"] is not None:
-        print(f"  after the pool was full, zswap takes new pages again below {human(s['accept_below'])}"
-              f" (accept_threshold_percent of the limit)")
+        print(
+            f"  after the pool was full, zswap takes new pages again below {human(s['accept_below'])}"
+            f" (accept_threshold_percent of the limit)"
+        )
     ratio = "-" if s["ratio"] is None else f"{s['ratio']:.2f} : 1"
     print(f"  holds {human(s['stored'])} of memory compressed into {human(s['pool'])}: ratio {ratio}")
 
@@ -357,14 +377,20 @@ def show_traffic(s: ZswapSummary) -> None:
     p = lambda n: human(n * PAGE)  # noqa: E731
     print(f"  into the pool    zswpout {p(s['zswpout']):>10}")
     print(f"  back from pool   zswpin  {p(s['zswpin']):>10}   {pct(s['loaded_back'])} of what went in")
-    print(f"  pool -> disk     zswpwb  {p(s['zswpwb']):>10}   {pct(s['written_back'])} of what went in was written back")
+    print(
+        f"  pool -> disk     zswpwb  {p(s['zswpwb']):>10}   {pct(s['written_back'])} of what went in was written back"
+    )
     if s["bypassed"]:
-        print(f"  written to disk  pswpout {p(s['pswpout']):>10}   {p(s['bypassed'])} of it bypassed zswap"
-              " (rejected, or written while zswap was off)")
+        print(
+            f"  written to disk  pswpout {p(s['pswpout']):>10}   {p(s['bypassed'])} of it bypassed zswap"
+            " (rejected, or written while zswap was off)"
+        )
     else:
         print(f"  written to disk  pswpout {p(s['pswpout']):>10}   = zswpwb: no page bypassed zswap")
-    print(f"  read from disk   pswpin  {p(s['pswpin']):>10}   {pct(s['read_back'])} of what was written to disk"
-          " was read back")
+    print(
+        f"  read from disk   pswpin  {p(s['pswpin']):>10}   {pct(s['read_back'])} of what was written to disk"
+        " was read back"
+    )
     print("  How to read: a high 'written back' share is fine while 'read back' stays low (the disk")
     print("  holds pages nobody needs). A growing 'read back' share means pages come back from the")
     print("  NVMe instead of RAM: see swap/README.md, 'Reading the status'.")
@@ -405,8 +431,10 @@ def show_devices() -> None:
 
 def show_cgroups() -> None:
     section("per cgroup (memory.stat; counters since the cgroup was created)")
-    head = (f"  {'cgroup':<32} {'swap':>9} {'zswapped':>9} {'zswap':>9} {'->pool':>9} {'->disk':>9}"
-            f" {'disk in':>9} {'wb%':>6} {'rb%':>6} {'zswap.wb':>8} {'low':>8} {'psi60':>6}")
+    head = (
+        f"  {'cgroup':<32} {'swap':>9} {'zswapped':>9} {'zswap':>9} {'->pool':>9} {'->disk':>9}"
+        f" {'disk in':>9} {'wb%':>6} {'rb%':>6} {'zswap.wb':>8} {'low':>8} {'psi60':>6}"
+    )
     print(head)
     meminfo = parse_meminfo(read(os.path.join(PROC, "meminfo"), ""))
     for label, path in cgroups():
@@ -421,9 +449,11 @@ def show_cgroups() -> None:
         low = human(int(low)) if low.isdigit() and int(low) else ("0" if low == "0" else low)
         psi = psi_line(os.path.join(path, "memory.pressure")) or "-"
         pc = lambda f: "-" if f is None else f"{f * 100:.0f}"  # noqa: E731
-        print(f"  {label:<32} {human(r['swap']):>9} {human(r['zswapped']):>9} {human(r['zswap']):>9}"
-              f" {human(r['zswpout']):>9} {human(r['zswpwb']):>9} {human(r['pswpin']):>9}"
-              f" {pc(r['written_back']):>6} {pc(r['read_back']):>6} {wb:>8} {low:>8} {psi:>6}")
+        print(
+            f"  {label:<32} {human(r['swap']):>9} {human(r['zswapped']):>9} {human(r['zswap']):>9}"
+            f" {human(r['zswpout']):>9} {human(r['zswpwb']):>9} {human(r['pswpin']):>9}"
+            f" {pc(r['written_back']):>6} {pc(r['read_back']):>6} {wb:>8} {low:>8} {psi:>6}"
+        )
     print("  swap = memory.swap.current (pool + disk); zswapped/zswap = held in the pool, uncompressed/")
     print("  compressed; ->pool = zswpout, ->disk = zswpwb, disk in = pswpin; wb% = zswpwb/zswpout;")
     print("  rb% = pswpin/pswpout (read back from disk); zswap.wb = memory.zswap.writeback (1 = the")

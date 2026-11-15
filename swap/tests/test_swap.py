@@ -32,8 +32,10 @@ NEW = "# managed-by: swap-setup.sh (CST)"
 # What apply-swap-config.sh wrote on the host (fstab line verbatim; the
 # crypttab line is the one that script builds).
 OLD_FSTAB = f"/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 {OLD}"
-OLD_CRYPTTAB = ("swap0 /dev/disk/by-partuuid/612551b1-ca02-4514-86ad-7d8902e612dc /dev/urandom "
-                f"swap,cipher=aes-xts-plain64,size=512,sector-size=4096,discard {OLD}")
+OLD_CRYPTTAB = (
+    "swap0 /dev/disk/by-partuuid/612551b1-ca02-4514-86ad-7d8902e612dc /dev/urandom "
+    f"swap,cipher=aes-xts-plain64,size=512,sector-size=4096,discard {OLD}"
+)
 OLD_TMPFILES = """\
 # Managed by apply-swap-config.sh — enable zswap at boot.
 # Written via tmpfiles.d (not kernel args) so the zstd module is loadable
@@ -79,7 +81,8 @@ class StatusMathTest(unittest.TestCase):
         s = self.m.zswap_summary(
             {"MemTotal": 100 * gib, "Zswap": 2 * gib, "Zswapped": 6 * gib},
             {"zswpout": 1000, "zswpin": 250, "zswpwb": 400, "pswpout": 400, "pswpin": 100},
-            {"max_pool_percent": "20", "accept_threshold_percent": "90"})
+            {"max_pool_percent": "20", "accept_threshold_percent": "90"},
+        )
         self.assertEqual(s["limit"], 20 * gib)
         self.assertAlmostEqual(s["pool_of_limit"], 0.1)
         self.assertEqual(s["accept_below"], 18 * gib)
@@ -87,12 +90,12 @@ class StatusMathTest(unittest.TestCase):
         self.assertAlmostEqual(s["loaded_back"], 0.25)
         self.assertAlmostEqual(s["written_back"], 0.4)
         self.assertEqual(s["bypassed"], 0)
-        self.assertAlmostEqual(s["read_back"], 0.25)   # = pswpin/zswpwb here
+        self.assertAlmostEqual(s["read_back"], 0.25)  # = pswpin/zswpwb here
 
     def test_summary_bypass_and_empty(self):
         s = self.m.zswap_summary({"MemTotal": 0}, {"pswpout": 50, "zswpwb": 20}, {})
         self.assertEqual(s["bypassed"], 30)
-        self.assertIsNone(s["written_back"])           # nothing went into zswap
+        self.assertIsNone(s["written_back"])  # nothing went into zswap
         self.assertIsNone(s["limit"])
         self.assertIsNone(s["pool"])
         self.assertIsNone(s["ratio"])
@@ -103,28 +106,28 @@ class StatusMathTest(unittest.TestCase):
         # either value there is nothing to show, not a crash or a guess.
         gib = 2**30
         meminfo = {"MemTotal": 100 * gib, "Zswap": 2 * gib, "Zswapped": 6 * gib}
-        for params, limit in (({"max_pool_percent": "20"}, 20 * gib),
-                              ({"max_pool_percent": "20", "accept_threshold_percent": "?"}, 20 * gib),
-                              ({"accept_threshold_percent": "90"}, None)):
+        for params, limit in (
+            ({"max_pool_percent": "20"}, 20 * gib),
+            ({"max_pool_percent": "20", "accept_threshold_percent": "?"}, 20 * gib),
+            ({"accept_threshold_percent": "90"}, None),
+        ):
             with self.subTest(params=params):
                 s = self.m.zswap_summary(meminfo, {}, params)
                 self.assertEqual(s["limit"], limit)
                 self.assertIsNone(s["accept_below"])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.m.show_pool({"max_pool_percent": "20"},
-                             self.m.zswap_summary(meminfo, {}, {"max_pool_percent": "20"}))
+            self.m.show_pool({"max_pool_percent": "20"}, self.m.zswap_summary(meminfo, {}, {"max_pool_percent": "20"}))
         self.assertIn("pool in RAM: 2.0 GiB of a 20.0 GiB limit (10.0 %)", out.getvalue())
         self.assertNotIn("takes new pages again", out.getvalue())
 
     def test_cgroup_row(self):
-        r = self.m.cgroup_row({"zswpout": 10, "zswpwb": 5, "pswpout": 5, "pswpin": 1,
-                               "zswapped": 4096}, 123)
+        r = self.m.cgroup_row({"zswpout": 10, "zswpwb": 5, "pswpout": 5, "pswpin": 1, "zswapped": 4096}, 123)
         self.assertEqual(r["swap"], 123)
         self.assertEqual(r["zswpwb"], 5 * self.m.PAGE)
-        self.assertEqual(r["zswpout"], 10 * self.m.PAGE)          # pages -> bytes, like zswpwb
+        self.assertEqual(r["zswpout"], 10 * self.m.PAGE)  # pages -> bytes, like zswpwb
         self.assertEqual(r["pswpin"], 1 * self.m.PAGE)
-        self.assertEqual(r["zswapped"], 4096)                     # memory.stat sizes are bytes already
+        self.assertEqual(r["zswapped"], 4096)  # memory.stat sizes are bytes already
         self.assertAlmostEqual(r["written_back"], 0.5)
         self.assertAlmostEqual(r["read_back"], 0.2)
         self.assertIsNone(self.m.cgroup_row({}, None)["read_back"])
@@ -154,19 +157,21 @@ class StatusMathTest(unittest.TestCase):
         os.makedirs(run)
         if exp_on:
             open(os.path.join(run, "exp-wsf-300"), "w").close()
-        self.m.PROC, self.m.CGROUP, self.m.CPU_RUN = (os.path.join(tmp, "proc"),
-                                                      os.path.join(tmp, "cg"), run)
+        self.m.PROC, self.m.CGROUP, self.m.CPU_RUN = (os.path.join(tmp, "proc"), os.path.join(tmp, "cg"), run)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.m.show_settings({})
-        return [l.split()[:2] for l in out.getvalue().splitlines() if "watermark_scale" in l
-                and not l.lstrip().startswith("exp:")], out.getvalue()
+        return [
+            l.split()[:2]
+            for l in out.getvalue().splitlines()
+            if "watermark_scale" in l and not l.lstrip().startswith("exp:")
+        ], out.getvalue()
 
     def test_wsf_experiment_is_not_a_diff(self):
         rows, text = self.settings_output("300", exp_on=True)
         self.assertEqual(rows, [["exp", "vm.watermark_scale_factor"]])
         self.assertIn("experiment off wsf-300", text)
-        self.assertNotIn("  DIFF", text)                 # apply's verification passes
+        self.assertNotIn("  DIFF", text)  # apply's verification passes
         rows, text = self.settings_output("300", exp_on=False)
         self.assertEqual(rows, [["DIFF", "vm.watermark_scale_factor"]])
         self.assertNotIn("exp:", text)
@@ -190,8 +195,12 @@ class StatusMathTest(unittest.TestCase):
 
         tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.addCleanup(shutil.rmtree, tmp)
-        for name, val in (("reject_compress_fail", "164000"), ("reject_reclaim_fail", "42"),
-                          ("pool_limit_hit", "0"), ("new_kernel_counter", "7")):
+        for name, val in (
+            ("reject_compress_fail", "164000"),
+            ("reject_reclaim_fail", "42"),
+            ("pool_limit_hit", "0"),
+            ("new_kernel_counter", "7"),
+        ):
             with open(os.path.join(tmp, name), "w") as f:
                 f.write(val + "\n")
         self.m.ZSWAP_DEBUG = tmp
@@ -219,16 +228,32 @@ class MarkerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
         with open(SETUP) as f:
-            self.defs = "".join(l for l in f if l.startswith(
-                ("DISK_SWAP_PARTUUID=", "DISK_SWAP_NAME=", "DISK_SWAP_MAPPER=", "DISK_SWAP_DEV=",
-                 "CRYPTTAB_LINE=", "FSTAB_LINE=")))
+            self.defs = "".join(
+                l
+                for l in f
+                if l.startswith(
+                    (
+                        "DISK_SWAP_PARTUUID=",
+                        "DISK_SWAP_NAME=",
+                        "DISK_SWAP_MAPPER=",
+                        "DISK_SWAP_DEV=",
+                        "CRYPTTAB_LINE=",
+                        "FSTAB_LINE=",
+                    )
+                )
+            )
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
     def bash(self, script, *args):
-        r = subprocess.run(["bash", "-c", f'set -euo pipefail; source "$0"; {self.defs}\n{script}',
-                            LIB, *args], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", f'set -euo pipefail; source "$0"; {self.defs}\n{script}', LIB, *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
         return r.stdout.strip()
 
     def path(self, name, text=None):
@@ -239,8 +264,7 @@ class MarkerTest(unittest.TestCase):
         return p
 
     def state(self, p, which="fstab"):
-        line, key = (("$FSTAB_LINE", "$DISK_SWAP_MAPPER") if which == "fstab"
-                     else ("$CRYPTTAB_LINE", "$DISK_SWAP_NAME"))
+        line, key = ("$FSTAB_LINE", "$DISK_SWAP_MAPPER") if which == "fstab" else ("$CRYPTTAB_LINE", "$DISK_SWAP_NAME")
         return self.bash(f'marked_line_state "$1" "{line}" "{key}"', p)
 
     def write(self, p, which="fstab"):
@@ -254,8 +278,8 @@ class MarkerTest(unittest.TestCase):
             self.write(p, which)
             with open(p) as f:
                 lines = f.read().splitlines()
-            self.assertEqual(len(lines), 4)                      # no duplicate
-            self.assertEqual(lines[2], old.replace(OLD, NEW))    # same place
+            self.assertEqual(len(lines), 4)  # no duplicate
+            self.assertEqual(lines[2], old.replace(OLD, NEW))  # same place
             self.assertEqual(self.state(p, which), "ok")
             with open(p + ".pre-swap-config.bak") as f:
                 self.assertIn(OLD, f.read())
@@ -319,9 +343,12 @@ class MarkerTest(unittest.TestCase):
     def test_sysctl_payload_matches_old_script(self):
         # Only the header comment changed: same settings, same order.
         src = os.path.join(SWAP, "sysctl", "99-swap-tuning.conf")
-        old = self.path("s", "# Managed by apply-swap-config.sh — VM tunables\n"
-                        "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
-                        "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n")
+        old = self.path(
+            "s",
+            "# Managed by apply-swap-config.sh — VM tunables\n"
+            "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
+            "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n",
+        )
         self.assertEqual(self.bash('file_state "$1" "$2"', src, old), "adopt")
 
 

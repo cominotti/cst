@@ -60,8 +60,14 @@ printf '{"packages": [%s], "workspace_root": "%s", "build_directory": "%s/%s/%s"
     "$pk" "$d" "$FAKE_ROOT" "$(echo "$h" | cut -c1-2)" "$(echo "$h" | cut -c3-16)"
 """
 
-GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t",
-           "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+}
 
 
 def key_of(folder):
@@ -76,8 +82,12 @@ class RulesBase(Base):
         self.cargo_log = os.path.join(self.tmp, "cargo.log")
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
-        env = dict(GIT_ENV, FAKE_ROOT=self.root, FAKE_CARGO_LOG=self.cargo_log,
-                   PATH=self.bin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"))
+        env = dict(
+            GIT_ENV,
+            FAKE_ROOT=self.root,
+            FAKE_CARGO_LOG=self.cargo_log,
+            PATH=self.bin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+        )
         p = mock.patch.dict(os.environ, env)
         p.start()
         self.addCleanup(p.stop)
@@ -131,8 +141,8 @@ class OrphanTest(RulesBase):
         nested = self.worktree(main, os.path.join(main, "target/proof/wt"))
         for d in (main, wt, nested):
             self.folder(key_of(d), 10)
-        self.folder("ee/0123456789abcd", 10)             # nobody's
-        self.folder("ef/0123456789abcd", 1)              # nobody's, but within MIN_KEEP
+        self.folder("ee/0123456789abcd", 10)  # nobody's
+        self.folder("ef/0123456789abcd", 1)  # nobody's, but within MIN_KEEP
         rc, out = self.run_main("prune", "plan")
         self.assertEqual(rc, 0, out)
         self.assertIn("3 folder(s) claimed by a workspace, 2 not claimed", out)
@@ -160,9 +170,9 @@ class OrphanTest(RulesBase):
         rc, out = self.run_main("prune", "plan")
         self.assertEqual(rc, 0, out)
         asked = "\n".join(self.asked())
-        self.assertNotIn("crates/a", asked)                   # answered by the workspace root
-        self.assertNotIn("vendor-home", asked)                # a cache folder: not searched
-        self.assertIn("fuzz", asked)                           # asked, builds nothing: not a failure
+        self.assertNotIn("crates/a", asked)  # answered by the workspace root
+        self.assertNotIn("vendor-home", asked)  # a cache folder: not searched
+        self.assertIn("fuzz", asked)  # asked, builds nothing: not a failure
         self.assertIn("1 folder(s) claimed by a workspace, 1 not claimed", out)
         self.assertNotIn("NOT looked for", out)
 
@@ -194,7 +204,7 @@ class OrphanTest(RulesBase):
 
     def test_repository_that_git_cannot_list_means_no_orphans(self):
         main = self.repo("proj")
-        os.makedirs(os.path.join(self.ws, "broken/.git"))           # an empty .git folder
+        os.makedirs(os.path.join(self.ws, "broken/.git"))  # an empty .git folder
         self.folder(key_of(main), 10)
         self.folder("ee/0123456789abcd", 10)
         rc, out = self.run_main("prune", "apply")
@@ -226,15 +236,20 @@ class OrphanTest(RulesBase):
         main = self.repo("proj")
         self.folder(key_of(main), 10)
         self.folder("ee/0123456789abcd", 10)
-        plan = self.m.decide(self.m.scan(self.root, NOW)[0], self.m.Settings(self.home).policy["rust:build"], NOW,
-                             {"ee/0123456789abcd": [(7, "rustc")]}, {key_of(main): [main]})
+        plan = self.m.decide(
+            self.m.scan(self.root, NOW)[0],
+            self.m.Settings(self.home).policy["rust:build"],
+            NOW,
+            {"ee/0123456789abcd": [(7, "rustc")]},
+            {key_of(main): [main]},
+        )
         self.assertEqual({f.key: a for f, a, _ in plan}["ee/0123456789abcd"], "keep")
 
     @unittest.skipUnless(shutil.which("cargo") and shutil.which("rustup"), "cargo not installed")
     def test_real_cargo_names_the_same_folder(self):
         """The real cargo (read only) answers with a folder in the root."""
         real = os.path.expanduser("~/.rustup")
-        os.environ["RUSTUP_HOME"] = real          # read only: the installed toolchains
+        os.environ["RUSTUP_HOME"] = real  # read only: the installed toolchains
         os.unlink(os.path.join(self.home, ".cargo/bin/cargo"))
         main = self.repo("real")
         os.makedirs(os.path.join(main, "src"))
@@ -245,15 +260,17 @@ class OrphanTest(RulesBase):
         self.assertEqual(ws.incomplete, "")
         self.assertEqual(len(ws.claimed), 1)
         self.assertRegex(next(iter(ws.claimed)), r"\A[0-9a-f]{2}/[0-9a-f]{14}\Z")
-        self.assertEqual(os.listdir(self.root), [])              # metadata created nothing
+        self.assertEqual(os.listdir(self.root), [])  # metadata created nothing
 
 
 class IncrementalTest(RulesBase):
     def build_folder(self, key, age_h):
         path = self.folder(key, age_h)
-        for rel in ("debug/incremental/foo-1/s-abc/dep-graph.bin",
-                    "x86_64-unknown-linux-gnu/debug/incremental/bar-2/s-def/query-cache.bin",
-                    "x86_64-unknown-linux-gnu/debug/deps/libbar.rlib"):
+        for rel in (
+            "debug/incremental/foo-1/s-abc/dep-graph.bin",
+            "x86_64-unknown-linux-gnu/debug/incremental/bar-2/s-def/query-cache.bin",
+            "x86_64-unknown-linux-gnu/debug/deps/libbar.rlib",
+        ):
             p = os.path.join(path, rel)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "wb") as f:
@@ -264,14 +281,16 @@ class IncrementalTest(RulesBase):
     def test_measure_finds_incremental(self):
         self.build_folder("aa/0123456789abcd", 10)
         f = self.m.scan(self.root, NOW)[0][0]
-        self.assertEqual(sorted(os.path.relpath(p, f.path) for p, _ in f.inc),
-                         ["debug/incremental", "x86_64-unknown-linux-gnu/debug/incremental"])
+        self.assertEqual(
+            sorted(os.path.relpath(p, f.path) for p, _ in f.inc),
+            ["debug/incremental", "x86_64-unknown-linux-gnu/debug/incremental"],
+        )
         self.assertGreaterEqual(f.inc_size, 64 * 1024)
         self.assertLess(f.inc_size, f.size)
 
     def test_idle_folder_loses_only_incremental(self):
         path = self.build_folder("aa/0123456789abcd", 10)
-        self.build_folder("bb/0123456789abcd", 3)            # used 3h ago: untouched
+        self.build_folder("bb/0123456789abcd", 3)  # used 3h ago: untouched
         before = self.m.scan(self.root, NOW)[0]
         activity = {f.key: f.activity for f in before}
         rc, out = self.run_main("prune", "plan")
@@ -290,7 +309,7 @@ class IncrementalTest(RulesBase):
         # The folder's last activity did not move: MAX_IDLE still counts from the last build.
         self.assertEqual(after["aa/0123456789abcd"].activity, activity["aa/0123456789abcd"])
         self.assertEqual(after["aa/0123456789abcd"].inc, [])
-        self.assertEqual([n for n in os.listdir(self.root) if n.startswith(".")], [])     # no trash left
+        self.assertEqual([n for n in os.listdir(self.root) if n.startswith(".")], [])  # no trash left
         rc, out = self.run_main("status", "--brief")
         self.assertIn("incremental of 1 folder(s)", out)
 
@@ -341,7 +360,9 @@ class UvBase(RulesBase):
         self.fake_uv()
 
     def fake_uv(self, prune='echo "Removed 3 files (1.5MiB)"', help_extra=""):
-        self.exe(os.path.join(self.bin, "uv"), f"""#!/bin/sh
+        self.exe(
+            os.path.join(self.bin, "uv"),
+            f"""#!/bin/sh
 echo "$* | $UV_LOCK_TIMEOUT" >>"$FAKE_UV_LOG"
 case "$*" in
     --version) echo "uv 0.0.0-test" ;;
@@ -349,7 +370,8 @@ case "$*" in
     "cache prune --dry-run"*) echo "Would remove 2 files (1.0MiB)" ;;
     "cache prune"*) {prune} ;;
 esac
-""")
+""",
+        )
 
     def uv_calls(self):
         try:
@@ -357,7 +379,6 @@ esac
                 return [c for c in f.read().splitlines() if "--help" not in c and "--version" not in c]
         except FileNotFoundError:
             return []
-
 
 
 class UvTest(UvBase):
@@ -400,7 +421,7 @@ class UvTest(UvBase):
         open(lock, "w").close()
         fd = os.open(lock, os.O_RDONLY)
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH)          # what every running uv command holds
+            fcntl.flock(fd, fcntl.LOCK_SH)  # what every running uv command holds
             rc, out = self.run_main("prune", "apply", "python:uv")
             rc2, out2 = self.run_main("prune", "plan", "python:uv")
         finally:
@@ -413,9 +434,11 @@ class UvTest(UvBase):
     def test_failures(self):
         os.makedirs(self.cache)
         # uv 0.12's own words when UV_LOCK_TIMEOUT runs out: a skip, retried next run.
-        self.fake_uv(prune="echo 'Cache is currently in-use, waiting for other uv processes to finish'; "
-                           "echo 'error: Timeout (60s) when waiting for lock on `/c` at `/c/.lock`, is another "
-                           "uv process running? You can set `UV_LOCK_TIMEOUT` to increase the timeout.' >&2; exit 2")
+        self.fake_uv(
+            prune="echo 'Cache is currently in-use, waiting for other uv processes to finish'; "
+            "echo 'error: Timeout (60s) when waiting for lock on `/c` at `/c/.lock`, is another "
+            "uv process running? You can set `UV_LOCK_TIMEOUT` to increase the timeout.' >&2; exit 2"
+        )
         rc, out = self.run_main("prune", "apply", "python:uv")
         self.assertEqual(rc, 0, out)
         self.assertIn("uv waited 60s for its cache lock", out)
@@ -426,9 +449,11 @@ class UvTest(UvBase):
         self.assertIn("uv cache prune failed: error: something else", out)
         # An error that names the lock but is not the timeout (a root-owned
         # cache after `sudo uv`) is a failure, not a lock wait.
-        for err in ("error: failed to open file `/c/.lock`: Permission denied (os error 13)",
-                    "error: Could not acquire lock: Read-only file system (os error 30)",
-                    "error: the cache is in use by root"):
+        for err in (
+            "error: failed to open file `/c/.lock`: Permission denied (os error 13)",
+            "error: Could not acquire lock: Read-only file system (os error 30)",
+            "error: the cache is in use by root",
+        ):
             self.fake_uv(prune=f"echo '{err}' >&2; exit 2")
             rc, out = self.run_main("prune", "apply", "python:uv")
             self.assertEqual(rc, 1, (err, out))
@@ -455,11 +480,11 @@ class UvBudgetTest(UvBase):
         self.assertEqual(rc, 0, out)
         self.assertLess(out.index("python:uv:"), out.index("rust:build:"))
         rc, out = self.run_main("prune", "plan")
-        self.assertLess(out.index("== rust:build"), out.index("== python:uv"))      # plan keeps the order
+        self.assertLess(out.index("== rust:build"), out.index("== python:uv"))  # plan keeps the order
 
     def test_used_up_budget_starts_nothing(self):
         os.makedirs(self.cache)
-        self.folder("aa/0123456789abcd", 100)           # MAX_IDLE: would be deleted
+        self.folder("aa/0123456789abcd", 100)  # MAX_IDLE: would be deleted
         self.m.RUN_BUDGET = 0
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
@@ -468,7 +493,7 @@ class UvBudgetTest(UvBase):
         self.assertIn("stopped at the time budget", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
         self.assertEqual(self.uv_calls(), [])
-        self.assertIsNone(self.m.read_state(self.home, "python:uv"))         # tried again next run
+        self.assertIsNone(self.m.read_state(self.home, "python:uv"))  # tried again next run
 
     def test_uv_timeout_follows_the_budget(self):
         os.makedirs(self.cache)
@@ -495,7 +520,7 @@ class ManagerPathTest(UvBase):
     manager's), not with this command's (root's, from snapshots setup)."""
 
     def test_uv_on_the_managers_path_only(self):
-        self.write_cargo_config('[build]\nbuild-dir = "/tmp/elsewhere"\n')     # rust:build refuses
+        self.write_cargo_config('[build]\nbuild-dir = "/tmp/elsewhere"\n')  # rust:build refuses
         self.manager_env = f"LANG=C\nPATH={self.bin}:/usr/bin\n"
         with mock.patch.dict(os.environ, {"PATH": self.tmp}):
             rc, out = self.run_main("auto", "on")
@@ -507,7 +532,7 @@ class ManagerPathTest(UvBase):
 
     def test_uv_missing_on_the_managers_path(self):
         self.manager_env = "PATH=/usr/bin:/bin\n"
-        rc, out = self.run_main("auto", "on")          # uv is on this command's PATH (self.bin)
+        rc, out = self.run_main("auto", "on")  # uv is on this command's PATH (self.bin)
         self.assertEqual(rc, 0, out)
         self.assertIn("python:uv: uv not found on PATH", out)
         self.assertIn("looked for in the PATH of your user manager, which the timer uses", out)
@@ -554,10 +579,11 @@ class RecheckTest(RulesBase):
                     f.write(b"x" * 4096)
                 os.utime(p, (NOW - age_h * H, NOW - age_h * H))
             return real(root, uid)
+
         self.m.proc_users = hooked
 
     def test_built_after_the_scan_is_kept(self):
-        self.folder("aa/0123456789abcd", 100)                      # MAX_IDLE: planned for deletion
+        self.folder("aa/0123456789abcd", 100)  # MAX_IDLE: planned for deletion
         self.touch_after_scan("aa/0123456789abcd/debug/deps/libnew.rlib", 0.1)
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
@@ -568,14 +594,14 @@ class RecheckTest(RulesBase):
 
     def test_still_idle_after_the_scan_is_deleted(self):
         self.folder("aa/0123456789abcd", 100)
-        self.touch_after_scan("aa/0123456789abcd/debug/deps/libnew.rlib", 60)      # still > MAX_IDLE
+        self.touch_after_scan("aa/0123456789abcd/debug/deps/libnew.rlib", 60)  # still > MAX_IDLE
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
         self.assertFalse(self.present("aa/0123456789abcd"), out)
         self.assertIn("deleted aa/0123456789abcd", out)
 
     def test_trim_rechecked(self):
-        path = self.build_folder("aa/0123456789abcd", 10)          # INCREMENTAL_IDLE: planned trim
+        path = self.build_folder("aa/0123456789abcd", 10)  # INCREMENTAL_IDLE: planned trim
         self.touch_after_scan("aa/0123456789abcd/debug/incremental/foo-1/s-new/dep-graph.bin", 0.5)
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
@@ -596,7 +622,7 @@ class RecheckTest(RulesBase):
 
     def test_cap_takes_the_next_after_a_recheck(self):
         self.write_conf("MAX_TOTAL=100K\nINCREMENTAL_IDLE=off\n")
-        self.folder("aa/00000000000001", 20, kib=96)                # least recently active: the cap's first pick
+        self.folder("aa/00000000000001", 20, kib=96)  # least recently active: the cap's first pick
         self.folder("aa/00000000000002", 10, kib=96)
         self.touch_after_scan("aa/00000000000001/debug/deps/libnew.rlib", 0.2)
         rc, out = self.run_main("prune", "apply")
@@ -641,7 +667,7 @@ class ToolchainReportTest(RulesBase):
         self.assertRegex(lines, r"stable +the default")
         self.assertIn("rustup toolchain uninstall 1.95.0 nightly\n", lines + "\n")
         self.assertIn("pinned but not installed (the next build there downloads it): 1.80.0", lines)
-        self.assertEqual(len(os.listdir(os.path.join(rh, "toolchains"))), 5)        # nothing removed
+        self.assertEqual(len(os.listdir(os.path.join(rh, "toolchains"))), 5)  # nothing removed
         rc, out = self.run_main("status")
         self.assertIn("== rust toolchains (a report: CST never removes one)", out)
 
@@ -688,25 +714,36 @@ class ToolchainReportTest(RulesBase):
         rh = os.path.join(self.tmp, "rustup")
         os.environ["RUSTUP_HOME"] = rh
         os.makedirs(os.path.join(rh, "toolchains", "1.95.0-x86_64-unknown-linux-gnu"))
-        lines = "\n".join(self.m.toolchain_lines(self.home))       # no ~/Workspace: incomplete
+        lines = "\n".join(self.m.toolchain_lines(self.home))  # no ~/Workspace: incomplete
         self.assertIn("no removal command, because the search was incomplete", lines)
         self.assertNotIn("rustup toolchain uninstall", lines)
 
     def test_toolchain_pattern(self):
         p = self.m.toolchain_pattern
-        for name, text in (("nightly", "cargo +nightly fuzz"), ("nightly", "toolchain: nightly\n"),
-                           ("nightly-2026-06-01", "TC ?= nightly-2026-06-01"), ("1.98.0", "@1.98.0\n"),
-                           ("1.98.0", "cargo +1.98.0-x86_64-unknown-linux-gnu build")):
+        for name, text in (
+            ("nightly", "cargo +nightly fuzz"),
+            ("nightly", "toolchain: nightly\n"),
+            ("nightly-2026-06-01", "TC ?= nightly-2026-06-01"),
+            ("1.98.0", "@1.98.0\n"),
+            ("1.98.0", "cargo +1.98.0-x86_64-unknown-linux-gnu build"),
+        ):
             self.assertTrue(p(name).search(text.encode()), (name, text))
-        for name, text in (("nightly", "nightly-2026-06-01"), ("1.98.0", "1.98.0.1"), ("1.98.0", "21.98.0"),
-                           ("nightly", "nightlyx"), ("stable", "unstable")):
+        for name, text in (
+            ("nightly", "nightly-2026-06-01"),
+            ("1.98.0", "1.98.0.1"),
+            ("1.98.0", "21.98.0"),
+            ("nightly", "nightlyx"),
+            ("stable", "unstable"),
+        ):
             self.assertFalse(p(name).search(text.encode()), (name, text))
 
     def test_pinned_channel(self):
         d = os.path.join(self.tmp, "p")
         os.makedirs(d)
-        cases = {"rust-toolchain.toml": ('[toolchain]\nchannel = "1.99.1"\n', "1.99.1"),
-                 "rust-toolchain": ("stable\n", "stable")}
+        cases = {
+            "rust-toolchain.toml": ('[toolchain]\nchannel = "1.99.1"\n', "1.99.1"),
+            "rust-toolchain": ("stable\n", "stable"),
+        }
         for name, (text, want) in cases.items():
             with open(os.path.join(d, name), "w") as f:
                 f.write(text)
@@ -746,7 +783,7 @@ class LeanDebugInfoTest(RulesBase):
         data = tomllib.loads(text)
         self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
         self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)
-        self.assertEqual(self.m.resolve_root(self.home), self.root)        # build-dir still read
+        self.assertEqual(self.m.resolve_root(self.home), self.root)  # build-dir still read
         rc, out = self.run_main("config", "apply")
         self.assertIn("lean debug info already set", out)
         self.assertEqual(self.cfg(), text)
@@ -769,11 +806,11 @@ class LeanDebugInfoTest(RulesBase):
         self.assertIn("[profile.dev] debug = true is yours: left as it is", out)
         data = tomllib.loads(self.cfg())
         self.assertIs(data["profile"]["dev"]["debug"], True)
-        self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)    # the other key: added
+        self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)  # the other key: added
 
     def test_existing_table_needs_a_hand(self):
         with open(os.path.join(self.home, ".cargo/config.toml"), "a") as f:
-            f.write("\n[profile.dev]\nopt-level = 1\n\n[profile.dev.package.\"*\"]\nopt-level = 2\n")
+            f.write('\n[profile.dev]\nopt-level = 1\n\n[profile.dev.package."*"]\nopt-level = 2\n')
         before = self.cfg()
         rc, out = self.run_main("config", "plan", "--lean-debuginfo")
         self.assertIn("BY HAND", out)
@@ -795,20 +832,27 @@ class LeanDebugInfoTest(RulesBase):
         self.write_conf_raw("RUST_LEAN_DEBUGINFO=yes\n")
         os.unlink(os.path.join(self.home, ".cargo/config.toml"))
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        script = ('set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-                  'runuser() { shift 3; "$@"; }\n'
-                  'snap_home() { echo "$H"; }\n'
-                  'snap_chrome() { :; }\n'
-                  'snap_toolchains_config_preview\n'
-                  'snap_user_configs "$H"\n')
+        script = (
+            'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
+            'runuser() { shift 3; "$@"; }\n'
+            'snap_home() { echo "$H"; }\n'
+            "snap_chrome() { :; }\n"
+            "snap_toolchains_config_preview\n"
+            'snap_user_configs "$H"\n'
+        )
         env = dict(os.environ, CST_TOOLCHAINS_SYSTEMCTL=os.path.join(self.bin, "systemctl"))
         self.exe(env["CST_TOOLCHAINS_SYSTEMCTL"], "#!/bin/sh\nexit 0\n")
-        r = subprocess.run(["bash", "-c", script, "_", os.path.join(repo, "btrfs"), self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script, "_", os.path.join(repo, "btrfs"), self.home, "cst btrfs"],
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("lean debug info: off", r.stdout)
         self.assertNotIn("profile", self.cfg())
-        self.assertIn("sccache: off", r.stdout)                    # nor sccache (RUST_SCCACHE=no)
+        self.assertIn("sccache: off", r.stdout)  # nor sccache (RUST_SCCACHE=no)
         self.assertNotIn("rustc-wrapper", self.cfg())
         self.assertIn("build-dir", self.cfg())
 
@@ -846,9 +890,11 @@ class SccacheConfigTest(RulesBase):
         self.assertFalse(os.path.lexists(self.wrapper))
 
     def test_flag_inserts_into_the_existing_build_table(self):
-        self.write_cargo_config('# mine\n[build]\n'
-                                f'build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n\n'
-                                '[profile.dev]\ndebug = 1\n')
+        self.write_cargo_config(
+            "# mine\n[build]\n"
+            f'build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n\n'
+            "[profile.dev]\ndebug = 1\n"
+        )
         before = tomllib.loads(self.cfg())
         rc, out = self.run_main("config", "plan", "--sccache")
         self.assertIn('[build] rustc-wrapper = "~/.local/libexec/cst/rustc-wrapper"', out)
@@ -888,7 +934,7 @@ class SccacheConfigTest(RulesBase):
         self.assertIs(data["net"]["offline"], True)
 
     def test_no_build_table_and_no_file(self):
-        self.write_cargo_config('[net]\noffline = true')          # no final newline
+        self.write_cargo_config("[net]\noffline = true")  # no final newline
         rc, out = self.run_main("config", "apply", "--sccache", "--lean-debuginfo")
         self.assertEqual(rc, 0, out)
         data = self.data()
@@ -899,7 +945,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(rc, 0, out)
         data = self.data()
         self.assertEqual(data["build"]["rustc-wrapper"], self.wrapper)
-        self.assertIn("build-dir", data["build"])                  # CST's build-dir came first
+        self.assertIn("build-dir", data["build"])  # CST's build-dir came first
 
     def test_dotted_keys_need_a_hand(self):
         self.write_cargo_config("build.jobs = 4\n")
@@ -922,7 +968,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.cfg(), before)
         self.assertFalse(os.path.lexists(self.wrapper))
         rc, out = self.run_main("config", "apply", "--no-sccache")
-        self.assertEqual(self.cfg(), before)                       # never removed either
+        self.assertEqual(self.cfg(), before)  # never removed either
 
     def test_setting_turns_it_on_no_keeps_it_flag_removes_it(self):
         before = self.cfg()
@@ -942,7 +988,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.wrapper_value(), self.wrapper)
         with open(self.wrapper) as f:
             self.assertIn("cache_size=10G # cst:", f.read())
-        os.unlink(self.wrapper)                                    # a missing wrapper is put back
+        os.unlink(self.wrapper)  # a missing wrapper is put back
         rc, out = self.run_main("config", "apply")
         self.assertTrue(os.path.isfile(self.wrapper))
         rc, out = self.run_main("status")
@@ -973,7 +1019,7 @@ class SccacheConfigTest(RulesBase):
     def test_removal_of_csts_own_build_table_beside_a_subtable(self):
         # Only a [build.x] subtable: CST appends its own [build]; removal
         # takes the whole block back, the subtable stays.
-        original = '[build.foo]\nbar = 1\n'
+        original = "[build.foo]\nbar = 1\n"
         self.write_cargo_config(original)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
@@ -984,17 +1030,19 @@ class SccacheConfigTest(RulesBase):
         self.assertNotIn("Added by", self.cfg())
 
     def test_removal_keeps_a_build_table_with_other_keys(self):
-        self.write_cargo_config('[build]\njobs = 2\n')
+        self.write_cargo_config("[build]\njobs = 2\n")
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
-        self.assertEqual(self.cfg(), '[build]\njobs = 2\n')
+        self.assertEqual(self.cfg(), "[build]\njobs = 2\n")
 
     def test_removal_leaves_a_changed_line_alone(self):
         # Our value, but not CST's line (the user wrote it as a dotted key).
-        self.write_cargo_config(f'build.build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n'
-                                f'build.rustc-wrapper = "{self.wrapper}"\n')
+        self.write_cargo_config(
+            f'build.build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n'
+            f'build.rustc-wrapper = "{self.wrapper}"\n'
+        )
         before = self.cfg()
         rc, out = self.run_main("config", "plan", "--no-sccache")
         self.assertIn("BY HAND", out)
@@ -1006,7 +1054,7 @@ class SccacheConfigTest(RulesBase):
     def test_foreign_wrapper_file_blocks_the_line(self):
         os.makedirs(os.path.dirname(self.wrapper))
         with open(self.wrapper, "w") as f:
-            f.write("#!/bin/sh\nexec \"$@\"\n")
+            f.write('#!/bin/sh\nexec "$@"\n')
         before = self.cfg()
         rc, out = self.run_main("config", "apply", "--sccache")
         self.assertEqual(rc, 1, out)
@@ -1028,7 +1076,8 @@ class SccacheConfigTest(RulesBase):
             broken, n = re.subn(rf"(?m)^{line}.*\n", "", source)
             self.assertEqual(n, 1, line)
             self.m.read_text = lambda path, text=broken: (
-                text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path))
+                text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path)
+            )
             self.assertIsNone(self.m.wrapper_text(self.m.WrapperValues()), line)
             before = self.cfg()
             rc, out = self.run_main("config", "apply", "--sccache")
@@ -1044,7 +1093,7 @@ class SccacheConfigTest(RulesBase):
         self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=no\n")
         rc, out = self.run_main("config", "plan")
         self.assertIn("sccache wrapper (missing; cache size 25G; local crates straight to rustc)", out)
-        self.assertFalse(os.path.lexists(self.wrapper))            # plan changes nothing
+        self.assertFalse(os.path.lexists(self.wrapper))  # plan changes nothing
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
         self.assertIn("(sccache wrapper, cache size 25G; local crates straight to rustc)", out)
@@ -1081,10 +1130,11 @@ class SccacheConfigTest(RulesBase):
     def test_workspace_setting_is_checked(self):
         self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=maybe\n")
         rc, out = self.run_main("status")
-        self.assertIn("BAD SETTINGS: ~/.config/cst/toolchains.conf: RUST_SCCACHE_WORKSPACE: 'maybe' is not yes or no",
-                      out)
+        self.assertIn(
+            "BAD SETTINGS: ~/.config/cst/toolchains.conf: RUST_SCCACHE_WORKSPACE: 'maybe' is not yes or no", out
+        )
         rc, out = self.run_main("config", "apply")
-        self.assertFalse(os.path.lexists(self.wrapper))            # bad settings: sccache treated as off
+        self.assertFalse(os.path.lexists(self.wrapper))  # bad settings: sccache treated as off
 
     def test_upgrade_from_a_wrapper_without_the_workspace_setting(self):
         # Settings written before the key existed: the default (yes) applies.
@@ -1101,7 +1151,7 @@ class SccacheConfigTest(RulesBase):
         cfg = self.cfg()
         rc, out = self.run_main("config", "plan")
         self.assertIn("sccache wrapper (outdated; cache size 25G)", out)
-        self.assertEqual(self.wrapper_file(), old)                 # plan changes nothing
+        self.assertEqual(self.wrapper_file(), old)  # plan changes nothing
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
         self.assertIn(f"written:   {self.wrapper} (sccache wrapper, cache size 25G)", out)
@@ -1134,7 +1184,7 @@ class SccacheConfigTest(RulesBase):
                 p(bad)
 
     def test_status_lines(self):
-        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"     # no real sccache
+        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"  # no real sccache
         rc, out = self.run_main("status")
         self.assertIn("sccache: off (opt-in", out)
         self.assertIn("sccache cache: ~/.cache/sccache not there yet", out)
@@ -1143,7 +1193,7 @@ class SccacheConfigTest(RulesBase):
             f.write(b"x" * (3 << 20))
         rc, out = self.run_main("status")
         self.assertIn("sccache cache: ~/.cache/sccache 3 MiB", out)
-        self.assertNotIn("sccache server", out)                    # no sccache on PATH, no socket
+        self.assertNotIn("sccache server", out)  # no sccache on PATH, no socket
         self.assertNotIn("no server running", out)
 
     def test_status_finds_sccache_in_cargo_bin(self):
@@ -1168,15 +1218,20 @@ class SccacheConfigTest(RulesBase):
         stale.bind(os.path.join(run, "cst-sccache-host.sock"))
         stale.close()
         log = os.path.join(self.tmp, "sccache.log")
-        self.exe(os.path.join(self.bin, "sccache"),
-                 f'#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"{log}"\n'
-                 'printf "Compile requests                    12\\nCache hits                           7\\n'
-                 'Cache hits (Rust)                    7\\nCache misses                         5\\n'
-                 'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n')
+        self.exe(
+            os.path.join(self.bin, "sccache"),
+            f'#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"{log}"\n'
+            'printf "Compile requests                    12\\nCache hits                           7\\n'
+            "Cache hits (Rust)                    7\\nCache misses                         5\\n"
+            'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n',
+        )
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
-        self.assertIn("sccache server devbox: compile requests 12, cache hits 7, cache misses 5, "
-                      "cache size 1 GiB, max cache size 25 GiB", out)
+        self.assertIn(
+            "sccache server devbox: compile requests 12, cache hits 7, cache misses 5, "
+            "cache size 1 GiB, max cache size 25 GiB",
+            out,
+        )
         self.assertNotIn("server host", out)
         with open(log) as f:
             self.assertEqual(f.read(), f"{sock_path} --show-stats\n")
@@ -1205,10 +1260,12 @@ class RustcWrapperTest(unittest.TestCase):
             os.makedirs(d)
         self.log = os.path.join(self.tmp, "log")
         # Each fake prints who ran and the variables that matter.
-        report = ('printf "%s|uds=%s|dir=%s|size=%s|io=%s|inc=%s|binc=%s|allow=%s|args=%s\\n" "{who}" '
-                  '"${{SCCACHE_SERVER_UDS-}}" "${{SCCACHE_DIR-}}" "${{SCCACHE_CACHE_SIZE-}}" '
-                  '"${{SCCACHE_IGNORE_SERVER_IO_ERROR-}}" "${{CARGO_INCREMENTAL-unset}}" '
-                  '"${{CARGO_BUILD_INCREMENTAL-unset}}" "${{SCCACHE_ALLOW_INCREMENTAL-unset}}" "$*" >>"{log}"\n')
+        report = (
+            'printf "%s|uds=%s|dir=%s|size=%s|io=%s|inc=%s|binc=%s|allow=%s|args=%s\\n" "{who}" '
+            '"${{SCCACHE_SERVER_UDS-}}" "${{SCCACHE_DIR-}}" "${{SCCACHE_CACHE_SIZE-}}" '
+            '"${{SCCACHE_IGNORE_SERVER_IO_ERROR-}}" "${{CARGO_INCREMENTAL-unset}}" '
+            '"${{CARGO_BUILD_INCREMENTAL-unset}}" "${{SCCACHE_ALLOW_INCREMENTAL-unset}}" "$*" >>"{log}"\n'
+        )
         for name in ("rustc", "kani-compiler", "clippy-driver"):
             self.fake(os.path.join(self.tools, name), report.format(who=name, log=self.log))
         self.sccache = os.path.join(self.bin, "sccache")
@@ -1227,8 +1284,9 @@ class RustcWrapperTest(unittest.TestCase):
         """Run a copy of the wrapper with RUST_SCCACHE_WORKSPACE=WORKSPACE written
         in, as `config apply` writes it."""
         with open(WRAPPER) as f:
-            text, n = re.subn(r"(?m)^workspace=yes(?= # cst: RUST_SCCACHE_WORKSPACE )",
-                              f"workspace={workspace}", f.read())
+            text, n = re.subn(
+                r"(?m)^workspace=yes(?= # cst: RUST_SCCACHE_WORKSPACE )", f"workspace={workspace}", f.read()
+            )
         self.assertEqual(n, 1, "the wrapper has no workspace=yes line for config apply")
         self.script = os.path.join(self.tmp, "rustc-wrapper")
         with open(self.script, "w") as f:
@@ -1241,17 +1299,24 @@ class RustcWrapperTest(unittest.TestCase):
         os.chmod(path, 0o755)
 
     def run_wrapper(self, *args, **env):
-        base = {"PATH": f"{self.bin}:{self.sys}", "HOME": self.home, "XDG_RUNTIME_DIR": self.run_dir,
-                "CST_SCCACHE_CONTAINERENV": self.containerenv}
+        base = {
+            "PATH": f"{self.bin}:{self.sys}",
+            "HOME": self.home,
+            "XDG_RUNTIME_DIR": self.run_dir,
+            "CST_SCCACHE_CONTAINERENV": self.containerenv,
+        }
         base.update(env)
         base = {k: v for k, v in base.items() if v is not None}
         open(self.log, "w").close()
-        r = subprocess.run([self.sh, self.script, *args], env=base, capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            [self.sh, self.script, *args], env=base, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.log) as f:
-            return [dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
-                    for ln in f.read().splitlines()]
+            return [
+                dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
+                for ln in f.read().splitlines()
+            ]
 
     def rustc(self):
         return os.path.join(self.tools, "rustc")
@@ -1275,7 +1340,7 @@ class RustcWrapperTest(unittest.TestCase):
         for name in ("kani-compiler", "clippy-driver"):
             calls = self.run_wrapper(os.path.join(self.tools, name), self.rustc(), "--crate-name", "x")
             self.assertEqual([c["who"] for c in calls], [name], name)
-            self.assertEqual(calls[0]["uds"], "", name)        # nothing set for them
+            self.assertEqual(calls[0]["uds"], "", name)  # nothing set for them
 
     def test_escape_hatch_and_missing_sccache(self):
         calls = self.run_wrapper(self.rustc(), "a", CST_SCCACHE="0")
@@ -1311,10 +1376,17 @@ class RustcWrapperTest(unittest.TestCase):
         calls = self.run_wrapper(self.rustc(), "x")
         self.assertEqual(calls[0]["uds"], os.path.join(self.run_dir, "cst-sccache-container.sock"))
         # Yours win: an address already set is kept (a port too).
-        calls = self.run_wrapper(self.rustc(), "x", SCCACHE_SERVER_UDS="/x.sock", SCCACHE_DIR="/c",
-                                 SCCACHE_CACHE_SIZE="1G", SCCACHE_IGNORE_SERVER_IO_ERROR="0")
-        self.assertEqual((calls[0]["uds"], calls[0]["dir"], calls[0]["size"], calls[0]["io"]),
-                         ("/x.sock", "/c", "1G", "0"))
+        calls = self.run_wrapper(
+            self.rustc(),
+            "x",
+            SCCACHE_SERVER_UDS="/x.sock",
+            SCCACHE_DIR="/c",
+            SCCACHE_CACHE_SIZE="1G",
+            SCCACHE_IGNORE_SERVER_IO_ERROR="0",
+        )
+        self.assertEqual(
+            (calls[0]["uds"], calls[0]["dir"], calls[0]["size"], calls[0]["io"]), ("/x.sock", "/c", "1G", "0")
+        )
         calls = self.run_wrapper(self.rustc(), "x", SCCACHE_SERVER_PORT="4300")
         self.assertEqual(calls[0]["uds"], "")
 
@@ -1366,10 +1438,16 @@ class RustcWrapperTest(unittest.TestCase):
         for setting, env in (("yes", {}), ("no", {}), ("no", {"CST_SCCACHE_WORKSPACE": "1"})):
             self.written(setting)
             for extra in ([], ["--cap-lints", "allow"]):
-                self.assertEqual(self.who(passthrough, self.rustc(), *self.LOCAL, *extra, **env),
-                                 ["passthrough", "rustc"], (setting, env, extra))
-                self.assertEqual(self.who(os.path.join(self.tools, "clippy-driver"), self.rustc(), *extra, **env),
-                                 ["clippy-driver"], (setting, env, extra))
+                self.assertEqual(
+                    self.who(passthrough, self.rustc(), *self.LOCAL, *extra, **env),
+                    ["passthrough", "rustc"],
+                    (setting, env, extra),
+                )
+                self.assertEqual(
+                    self.who(os.path.join(self.tools, "clippy-driver"), self.rustc(), *extra, **env),
+                    ["clippy-driver"],
+                    (setting, env, extra),
+                )
 
     def test_shell_lint(self):
         r = subprocess.run(["sh", "-n", WRAPPER], capture_output=True, text=True, stdin=subprocess.DEVNULL)

@@ -29,7 +29,7 @@ def main(argv):
     if repo not in sys.path:
         sys.path.insert(0, repo)
     ours, theirs = socket.socketpair()
-    os.dup2(theirs.fileno(), 0)        # fd 0 is now a socket, inherited by every child
+    os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
     sys.stdin = open(0, closefd=False)
     suite = unittest.defaultTestLoader.discover(repo)

@@ -129,10 +129,14 @@ def binary_sha256(archive: Path) -> str:
 
 def verify_cosign(cosign: str, workdir: Path, tag: str) -> None:
     cmd = [
-        cosign, "verify-blob",
-        "--bundle", str(workdir / BUNDLE),
-        "--certificate-identity", certificate_identity(tag),
-        "--certificate-oidc-issuer", OIDC_ISSUER,
+        cosign,
+        "verify-blob",
+        "--bundle",
+        str(workdir / BUNDLE),
+        "--certificate-identity",
+        certificate_identity(tag),
+        "--certificate-oidc-issuer",
+        OIDC_ISSUER,
         str(workdir / CHECKSUMS),
     ]
     if subprocess.run(cmd, check=False).returncode != 0:
@@ -161,7 +165,9 @@ def run(tag: str, skip_cosign: bool) -> list:
         raise PinError(f"'{tag}' is not a release tag like v0.16.0")
     cosign = shutil.which("cosign")
     if cosign is None and not skip_cosign:
-        raise PinError("cosign is not on PATH; install it, or pass --skip-cosign (invowk: --skip_cosign; not recommended)")
+        raise PinError(
+            "cosign is not on PATH; install it, or pass --skip-cosign (invowk: --skip_cosign; not recommended)"
+        )
 
     base = f"https://github.com/{REPO}/releases/download/{tag}"
     with tempfile.TemporaryDirectory(prefix="pin-invowk-") as tmp:
@@ -194,8 +200,11 @@ def run(tag: str, skip_cosign: bool) -> list:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Print setup-invowk SHA256 pins for an invowk release.")
     parser.add_argument("version", help="exact release tag, e.g. v0.16.0")
-    parser.add_argument("--skip-cosign", action="store_true",
-                        help="do not verify the cosign signature of checksums.txt (prints a warning)")
+    parser.add_argument(
+        "--skip-cosign",
+        action="store_true",
+        help="do not verify the cosign signature of checksums.txt (prints a warning)",
+    )
     args = parser.parse_args(argv)
     try:
         lines = run(args.version, args.skip_cosign)

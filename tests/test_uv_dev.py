@@ -58,8 +58,14 @@ class UvDevTest(unittest.TestCase):
 
     def run_uv_dev(self, *args, script=UV_DEV, env=None, cwd=None):
         base = {"PATH": f"{self.bin}:{self.tools}", "HOME": self.home}
-        return subprocess.run([os.path.join(self.tools, "bash"), script, *args], capture_output=True, text=True,
-                              env={**base, **(env or {})}, cwd=cwd or self.tmp.name, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            [os.path.join(self.tools, "bash"), script, *args],
+            capture_output=True,
+            text=True,
+            env={**base, **(env or {})},
+            cwd=cwd or self.tmp.name,
+            stdin=subprocess.DEVNULL,
+        )
 
     def test_runs_the_locked_dev_group_from_the_repository(self):
         self.fake_uv()
@@ -67,9 +73,10 @@ class UvDevTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         got = json.loads(r.stdout)
         real = os.path.realpath(REPO)
-        self.assertEqual(got["argv"], ["run", "--locked", "--project", real, "--group", "dev",
-                                       "ruff", "check", "--select", "ANN"])
-        self.assertEqual(got["cwd"], real)       # started elsewhere, runs at the top of the checkout
+        self.assertEqual(
+            got["argv"], ["run", "--locked", "--project", real, "--group", "dev", "ruff", "check", "--select", "ANN"]
+        )
+        self.assertEqual(got["cwd"], real)  # started elsewhere, runs at the top of the checkout
 
     def test_environment_is_outside_the_checkout_one_per_checkout(self):
         self.fake_uv()
@@ -99,7 +106,7 @@ class UvDevTest(unittest.TestCase):
         self.assertEqual(self.run_uv_dev("ruff", "check", env={"FAKE_UV_RC": "1"}).returncode, 1)
 
     def test_without_uv_it_says_so(self):
-        r = self.run_uv_dev("ruff", "check")      # no fake uv this time
+        r = self.run_uv_dev("ruff", "check")  # no fake uv this time
         self.assertEqual(r.returncode, 127)
         self.assertIn("uv-dev: uv is not installed", r.stderr)
 

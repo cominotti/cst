@@ -20,8 +20,12 @@ def repo_files(repo: str = REPO) -> list[str]:
     "dubious ownership", when the checkout belongs to another user), this
     fails: skipping there would turn the gates off without anyone noticing.
     """
-    out = subprocess.run(["git", "-C", repo, "ls-files", "-co", "--exclude-standard"],
-                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    out = subprocess.run(
+        ["git", "-C", repo, "ls-files", "-co", "--exclude-standard"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
     if out.returncode != 0:
         if not os.path.exists(os.path.join(repo, ".git")):
             raise unittest.SkipTest("not a git checkout: " + out.stderr.strip())

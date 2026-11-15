@@ -20,8 +20,7 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
     p = subprocess.run(full, input=input_text, capture_output=True, text=True)
     if check and p.returncode != 0:
         raise AssertionError(
-            f"command failed (rc={p.returncode}): {' '.join(cmd)}\n"
-            f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+            f"command failed (rc={p.returncode}): {' '.join(cmd)}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}"
         )
     return p
 
@@ -92,9 +91,7 @@ class Tier2StorageCpuE2ETest(unittest.TestCase):
     def tearDownClass(cls):
         after = read_host_guard_snapshot()
         if after != cls.HOST_GUARD_BEFORE:
-            raise AssertionError(
-                f"HOST ISOLATION BREACH! Before={cls.HOST_GUARD_BEFORE}, After={after}"
-            )
+            raise AssertionError(f"HOST ISOLATION BREACH! Before={cls.HOST_GUARD_BEFORE}, After={after}")
 
     def test_01_loop_btrfs_raid1_and_host_shadows_active(self):
         """Loopback RAID1 covers /sysroot, /var, /var/home and shadow bind-mounts protect host kernel."""
@@ -269,7 +266,9 @@ EOF
             SIG='Signature: 8a477f597d28d172789f06886806bc55'
 
             # The top level, mounted as test_03 does (no udev for the automount here).
-            """ + TOP_LEVEL_OPTS_FN + r"""
+            """
+            + TOP_LEVEL_OPTS_FN
+            + r"""
             opts="$(top_level_opts)"
             mkdir -p "$TOP"
             if ! mountpoint -q "$TOP"; then

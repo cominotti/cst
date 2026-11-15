@@ -37,8 +37,7 @@ CPU_DISABLE_DEFAULT = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-
 
 
 def conf():
-    vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23",
-            "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
+    vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
     try:
         with open(CONF) as f:
             for line in f:
@@ -63,8 +62,9 @@ def keep_prefixes(xml_text):
     (xmlns='...' on a <metadata> child) is not registered: as "" ElementTree
     would write it on <domain>, moving every libvirt element into it."""
     import io
+
     for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
-        if prefix and not re.fullmatch(r"ns\d+", prefix):    # ns0...: ElementTree's own, it refuses them
+        if prefix and not re.fullmatch(r"ns\d+", prefix):  # ns0...: ElementTree's own, it refuses them
             ET.register_namespace(prefix, uri)
 
 
@@ -131,8 +131,7 @@ def cpu_line(xml_text, disable):
         return "cpu: definition not readable"
     cpu = root.find("cpu")
     mode = cpu.get("mode") if cpu is not None else "not set"
-    off = {f.get("name") for f in (cpu.findall("feature") if cpu is not None else [])
-           if f.get("policy") == "disable"}
+    off = {f.get("name") for f in (cpu.findall("feature") if cpu is not None else []) if f.get("policy") == "disable"}
     missing = [n for n in disable if n not in off]
     if not disable or mode != "host-passthrough":
         return f"cpu mode: {mode} ({features_note(root, disable)})"
@@ -178,7 +177,9 @@ def main():
         return 0
     if not sys.stdin.isatty():
         sys.exit("apply asks for confirmation: run it in a terminal")
-    if input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] ").strip()[:1] not in ("y", "Y", "s", "S"):
+    if input(
+        f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] "
+    ).strip()[:1] not in ("y", "Y", "s", "S"):
         print("Nothing changed.")
         return 0
     backup = f"/etc/cpu-setup/{name}.xml.before-vm-pin"

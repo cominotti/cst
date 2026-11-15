@@ -95,7 +95,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.assertEqual((state, changed), ("absent", True))
         self.assertEqual(self.read(), self.block())
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o644)
-        self.assertEqual(os.listdir(self.cfg), ["chrome-flags.conf"])   # no temp file left
+        self.assertEqual(os.listdir(self.cfg), ["chrome-flags.conf"])  # no temp file left
 
     def test_user_install_counts(self):
         self.install("user")
@@ -104,7 +104,7 @@ class ChromeCacheTest(unittest.TestCase):
 
     def test_unrelated_flags_kept_in_order(self):
         self.install()
-        user = "# my flags\n--ozone-platform-hint=auto\n\n--enable-features=VaapiVideoDecoder"   # no final newline
+        user = "# my flags\n--ozone-platform-hint=auto\n\n--enable-features=VaapiVideoDecoder"  # no final newline
         self.write(user, 0o600)
         self.assertTrue(self.m.apply(self.home)[2])
         self.assertEqual(self.read(), user + "\n" + self.block())
@@ -119,7 +119,7 @@ class ChromeCacheTest(unittest.TestCase):
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("managed", False))
         self.assertEqual(self.read(), first)
-        self.assertEqual(os.stat(self.path).st_ino, st.st_ino)   # not even rewritten
+        self.assertEqual(os.stat(self.path).st_ino, st.st_ino)  # not even rewritten
 
     def test_user_set_dir_not_overwritten(self):
         self.install()
@@ -143,7 +143,7 @@ class ChromeCacheTest(unittest.TestCase):
 
     def test_user_same_dir_other_size_kept_with_warning(self):
         self.install()
-        text = "--disk-cache-dir=/tmp/chrome-cache --disk-cache-size=4294967296\n"   # two flags on one line
+        text = "--disk-cache-dir=/tmp/chrome-cache --disk-cache-size=4294967296\n"  # two flags on one line
         self.write(text)
         state, msg, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("user", False))
@@ -169,13 +169,18 @@ class ChromeCacheTest(unittest.TestCase):
         self.write(f"--a\n{self.m.ON_LINE}\n--disk-cache-dir=/tmp/chrome-cache\n--b\n")
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("cap-missing", True))
-        self.assertEqual(self.read(), f"--a\n{self.m.ON_LINE}\n--disk-cache-dir=/tmp/chrome-cache\n"
-                                      "--disk-cache-size=536870912\n--b\n")
+        self.assertEqual(
+            self.read(),
+            f"--a\n{self.m.ON_LINE}\n--disk-cache-dir=/tmp/chrome-cache\n--disk-cache-size=536870912\n--b\n",
+        )
 
     def test_marker_with_non_exact_dir_line_is_user_not_crash(self):
         self.install()
-        for line in ("--disk-cache-dir=/tmp/chrome-cache  # mine", '"--disk-cache-dir=/tmp/chrome-cache"',
-                     "--disk-cache-dir=/tmp/chrome-cache --x"):
+        for line in (
+            "--disk-cache-dir=/tmp/chrome-cache  # mine",
+            '"--disk-cache-dir=/tmp/chrome-cache"',
+            "--disk-cache-dir=/tmp/chrome-cache --x",
+        ):
             with self.subTest(line=line):
                 text = f"{self.m.ON_LINE}\n{line}\n"
                 state, new, msg = self.m.decide(text)
@@ -233,6 +238,7 @@ class ChromeCacheTest(unittest.TestCase):
             with open(self.path, "a") as f:
                 f.write("--written-meanwhile=1\n")
             return r
+
         self.m.decide = racing
         with self.assertRaises(self.m.Refused):
             self.m.apply(self.home)
@@ -265,7 +271,7 @@ class ChromeCacheTest(unittest.TestCase):
 
     def test_manual_undo_keeps_marker_means_off(self):
         self.install()
-        self.write(f"--a\n{self.m.ON_LINE}\n")   # flag lines deleted by hand, comment kept
+        self.write(f"--a\n{self.m.ON_LINE}\n")  # flag lines deleted by hand, comment kept
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("off", False))
 
@@ -280,7 +286,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.write("--a\n" + old)
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("managed", False))
-        self.assertEqual(self.read(), "--a\n" + old)   # not rewritten for the new name
+        self.assertEqual(self.read(), "--a\n" + old)  # not rewritten for the new name
         msg, changed, still_set = self.m.off(self.home)
         self.assertEqual((changed, still_set), (True, False))
         self.assertEqual(self.read(), f"--a\n{self.m.OFF_LINE}\n")
@@ -336,7 +342,7 @@ class ChromeCacheTest(unittest.TestCase):
         rc, out = self.status()
         self.assertIn("absent; 'snapshots setup'", out)
         self.assertIn("on-disk HTTP cache:", out)
-        self.assertNotIn("rm -rf", out)          # not before the flags are there
+        self.assertNotIn("rm -rf", out)  # not before the flags are there
         self.m.apply(self.home)
         rc, out = self.status()
         self.assertEqual(rc, 0)
@@ -372,13 +378,20 @@ class SnapExcludeTest(unittest.TestCase):
     """The list setup-snapshots.bash converts (sourced the way the frontend does)."""
 
     def entries(self):
-        r = subprocess.run(["bash", "-c", 'SRC="$1"; . "$1/setup-snapshots.bash"; printf "%s\\n" "${SNAP_EXCLUDE[@]}"',
-                            "_", BTRFS], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", 'SRC="$1"; . "$1/setup-snapshots.bash"; printf "%s\\n" "${SNAP_EXCLUDE[@]}"', "_", BTRFS],
+            capture_output=True,
+            text=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
         return r.stdout.splitlines()
 
     def test_chrome_cache_no_longer_a_subvolume(self):
-        self.assertEqual(self.entries(), ["aside .cache/uv", "copy .cache", "copy .local/share/flatpak",
-                                          "copy Workspace", "copy Bulk"])
+        self.assertEqual(
+            self.entries(),
+            ["aside .cache/uv", "copy .cache", "copy .local/share/flatpak", "copy Workspace", "copy Bulk"],
+        )
 
     def stale(self, plan_lines):
         with tempfile.TemporaryDirectory() as d:
@@ -386,14 +399,30 @@ class SnapExcludeTest(unittest.TestCase):
             with open(plan, "w") as f:
                 f.write("# Managed by btrfs-setup.sh (CST): <aside|copy> <absolute path>\n")
                 f.write("".join(line + "\n" for line in plan_lines))
-            r = subprocess.run(["bash", "-c", 'SRC="$1"; . "$1/setup-snapshots.bash"; SNAP_PLAN="$2"; '
-                                'snap_plan_stale /home/u', "_", BTRFS, plan],
-                               capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+            r = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'SRC="$1"; . "$1/setup-snapshots.bash"; SNAP_PLAN="$2"; snap_plan_stale /home/u',
+                    "_",
+                    BTRFS,
+                    plan,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
             return r.stdout
 
     def test_old_plan_with_chrome_is_pointed_out(self):
-        current = ["aside /home/u/.cache/uv", "copy /home/u/.cache", "copy /home/u/.local/share/flatpak",
-                   "copy /home/u/Workspace", "copy /home/u/Bulk"]
+        current = [
+            "aside /home/u/.cache/uv",
+            "copy /home/u/.cache",
+            "copy /home/u/.local/share/flatpak",
+            "copy /home/u/Workspace",
+            "copy /home/u/Bulk",
+        ]
         self.assertEqual(self.stale(current), "")
         old = current[:3] + ["copy /home/u/.var/app/com.google.Chrome/cache"] + current[3:]
         out = self.stale(old)

@@ -92,7 +92,7 @@ class ReadBytesTest(unittest.TestCase):
             self.assertEqual(cm.exception.errno, errno.EBADF, f"fd {fd} left open")
 
     def test_reads_past_the_first_page(self):
-        data = bytes(range(256)) * 40          # 10240 bytes: two and a half pages
+        data = bytes(range(256)) * 40  # 10240 bytes: two and a half pages
         path = self.write("big", data)
         self.assertEqual(self.m.read_bytes(path), data)
         self.assertGreaterEqual(self.reads, 3)
@@ -119,7 +119,7 @@ class ReadBytesTest(unittest.TestCase):
         path = self.write("stat", b"x" * (3 * PAGE))
         got = self.m.read_bytes(path, 1024)
         self.assertEqual(got, b"x" * 1024)
-        self.assertEqual(self.reads, 1)        # stops once it has `size` bytes
+        self.assertEqual(self.reads, 1)  # stops once it has `size` bytes
         self.assert_closed()
 
     def test_size_cap_across_several_reads(self):
@@ -182,46 +182,151 @@ class ReadBytesTest(unittest.TestCase):
 
 # Kernel stacks, innermost frame first, as parse_stack() returns them.
 PAGE_FAULT = ["do_user_addr_fault", "exc_page_fault", "asm_exc_page_fault"]
-DIRECT_RECLAIM = ["shrink_folio_list", "shrink_lruvec", "shrink_node", "do_try_to_free_pages",
-                  "try_to_free_pages", "__alloc_pages_slowpath", "__alloc_frozen_pages_noprof"]
+DIRECT_RECLAIM = [
+    "shrink_folio_list",
+    "shrink_lruvec",
+    "shrink_node",
+    "do_try_to_free_pages",
+    "try_to_free_pages",
+    "__alloc_pages_slowpath",
+    "__alloc_frozen_pages_noprof",
+]
 STACKS = {
     # A JVM GC thread compressing a page into zswap during direct reclaim
     # (recorded on this PC, 2026-11-14 23:15, MGLRU reclaim).
-    "zswap_compress": ["__schedule", "schedule", "schedule_preempt_disabled", "__mutex_lock",
-                       "zswap_compress", "zswap_store_page", "zswap_store", "swap_writeout", "pageout",
-                       "shrink_folio_list", "evict_folios", "try_to_shrink_lruvec", "shrink_one", "shrink_many"],
+    "zswap_compress": [
+        "__schedule",
+        "schedule",
+        "schedule_preempt_disabled",
+        "__mutex_lock",
+        "zswap_compress",
+        "zswap_store_page",
+        "zswap_store",
+        "swap_writeout",
+        "pageout",
+        "shrink_folio_list",
+        "evict_folios",
+        "try_to_shrink_lruvec",
+        "shrink_one",
+        "shrink_many",
+    ],
     # A page fault that reads the page back from the zswap pool.
-    "zswap_decompress": ["__schedule", "schedule", "__mutex_lock", "zswap_decompress", "zswap_load",
-                         "swap_read_folio", "do_swap_page", "__handle_mm_fault", "handle_mm_fault"] + PAGE_FAULT,
+    "zswap_decompress": [
+        "__schedule",
+        "schedule",
+        "__mutex_lock",
+        "zswap_decompress",
+        "zswap_load",
+        "swap_read_folio",
+        "do_swap_page",
+        "__handle_mm_fault",
+        "handle_mm_fault",
+    ]
+    + PAGE_FAULT,
     # A page fault reading from the swap disk: block layer innermost, still memory.
-    "swap_in_disk": ["__schedule", "schedule", "io_schedule", "submit_bio_wait", "swap_read_folio_bdev_sync",
-                     "swap_read_folio", "do_swap_page", "handle_mm_fault"] + PAGE_FAULT,
-    "throttle_direct_reclaim": ["__schedule", "schedule", "schedule_timeout", "throttle_direct_reclaim",
-                                "try_to_free_pages", "__alloc_pages_slowpath", "__alloc_frozen_pages_noprof"],
-    "memcg_high": ["__schedule", "schedule", "schedule_timeout", "mem_cgroup_handle_over_high",
-                   "irqentry_exit_to_user_mode"],
+    "swap_in_disk": [
+        "__schedule",
+        "schedule",
+        "io_schedule",
+        "submit_bio_wait",
+        "swap_read_folio_bdev_sync",
+        "swap_read_folio",
+        "do_swap_page",
+        "handle_mm_fault",
+    ]
+    + PAGE_FAULT,
+    "throttle_direct_reclaim": [
+        "__schedule",
+        "schedule",
+        "schedule_timeout",
+        "throttle_direct_reclaim",
+        "try_to_free_pages",
+        "__alloc_pages_slowpath",
+        "__alloc_frozen_pages_noprof",
+    ],
+    "memcg_high": [
+        "__schedule",
+        "schedule",
+        "schedule_timeout",
+        "mem_cgroup_handle_over_high",
+        "irqentry_exit_to_user_mode",
+    ],
     # Another thread of the same JVM waiting for the memory map lock.
-    "mmap_lock": ["__schedule", "schedule", "rwsem_down_read_slowpath", "down_read_killable",
-                  "lock_mm_and_find_vma"] + PAGE_FAULT,
+    "mmap_lock": ["__schedule", "schedule", "rwsem_down_read_slowpath", "down_read_killable", "lock_mm_and_find_vma"]
+    + PAGE_FAULT,
     # mmap() waiting for the threads faulting in that VMA (same event).
-    "vma_write": ["__schedule", "schedule", "__vma_start_exclude_readers", "__vma_start_write", "vma_expand",
-                  "vma_merge_new_range", "__mmap_region", "do_mmap", "vm_mmap_pgoff", "do_syscall_64",
-                  "entry_SYSCALL_64_after_hwframe"],
-    "mmap_write_lock": ["__schedule", "schedule", "rwsem_down_write_slowpath", "down_write_killable",
-                        "vm_mmap_pgoff", "do_syscall_64", "entry_SYSCALL_64_after_hwframe"],
+    "vma_write": [
+        "__schedule",
+        "schedule",
+        "__vma_start_exclude_readers",
+        "__vma_start_write",
+        "vma_expand",
+        "vma_merge_new_range",
+        "__mmap_region",
+        "do_mmap",
+        "vm_mmap_pgoff",
+        "do_syscall_64",
+        "entry_SYSCALL_64_after_hwframe",
+    ],
+    "mmap_write_lock": [
+        "__schedule",
+        "schedule",
+        "rwsem_down_write_slowpath",
+        "down_write_killable",
+        "vm_mmap_pgoff",
+        "do_syscall_64",
+        "entry_SYSCALL_64_after_hwframe",
+    ],
     # mmap() of a file that waits inside btrfs: storage, although vm_mmap_pgoff is on the stack.
-    "mmap_file_btrfs": ["__schedule", "schedule", "io_schedule", "folio_wait_bit_common", "folio_wait_writeback",
-                        "btrfs_file_mmap", "mmap_region", "do_mmap", "vm_mmap_pgoff", "do_syscall_64"],
-    "fsync": ["__schedule", "schedule", "io_schedule", "folio_wait_bit_common", "folio_wait_writeback",
-              "btrfs_wait_ordered_range", "btrfs_sync_file", "__x64_sys_fsync", "do_syscall_64"],
+    "mmap_file_btrfs": [
+        "__schedule",
+        "schedule",
+        "io_schedule",
+        "folio_wait_bit_common",
+        "folio_wait_writeback",
+        "btrfs_file_mmap",
+        "mmap_region",
+        "do_mmap",
+        "vm_mmap_pgoff",
+        "do_syscall_64",
+    ],
+    "fsync": [
+        "__schedule",
+        "schedule",
+        "io_schedule",
+        "folio_wait_bit_common",
+        "folio_wait_writeback",
+        "btrfs_wait_ordered_range",
+        "btrfs_sync_file",
+        "__x64_sys_fsync",
+        "do_syscall_64",
+    ],
     "sync_log": ["__schedule", "schedule", "btrfs_sync_log", "btrfs_sync_file", "__x64_sys_fdatasync"],
     # Reclaim that entered btrfs through a shrinker and waits on a btrfs lock: storage.
-    "shrinker_btrfs_lock": ["__schedule", "schedule", "btrfs_tree_lock_nested", "btrfs_lock_root_node",
-                            "btrfs_search_slot", "btrfs_evict_inode", "evict", "prune_icache_sb",
-                            "super_cache_scan", "do_shrink_slab", "shrink_slab"] + DIRECT_RECLAIM[2:],
+    "shrinker_btrfs_lock": [
+        "__schedule",
+        "schedule",
+        "btrfs_tree_lock_nested",
+        "btrfs_lock_root_node",
+        "btrfs_search_slot",
+        "btrfs_evict_inode",
+        "evict",
+        "prune_icache_sb",
+        "super_cache_scan",
+        "do_shrink_slab",
+        "shrink_slab",
+    ]
+    + DIRECT_RECLAIM[2:],
     "fuse": ["__schedule", "schedule", "request_wait_answer", "fuse_simple_request", "fuse_lookup"],
-    "fstrim": ["__schedule", "schedule", "io_schedule", "submit_bio_wait", "btrfs_trim_free_extents",
-               "btrfs_trim_fs", "btrfs_ioctl_fitrim"],
+    "fstrim": [
+        "__schedule",
+        "schedule",
+        "io_schedule",
+        "submit_bio_wait",
+        "btrfs_trim_free_extents",
+        "btrfs_trim_fs",
+        "btrfs_ioctl_fitrim",
+    ],
     "futex": ["__schedule", "schedule", "futex_wait_queue", "futex_wait", "do_futex"],
 }
 
@@ -234,8 +339,16 @@ class WaitKindTest(unittest.TestCase):
         return self.m.wait_kind(STACKS[name], None)
 
     def test_memory_waits(self):
-        for name in ("zswap_compress", "zswap_decompress", "swap_in_disk", "throttle_direct_reclaim",
-                     "memcg_high", "mmap_lock", "vma_write", "mmap_write_lock"):
+        for name in (
+            "zswap_compress",
+            "zswap_decompress",
+            "swap_in_disk",
+            "throttle_direct_reclaim",
+            "memcg_high",
+            "mmap_lock",
+            "vma_write",
+            "mmap_write_lock",
+        ):
             with self.subTest(name):
                 self.assertEqual(self.kind(name), "memory")
 
@@ -268,11 +381,11 @@ class FakeProc:
     """The /proc reads of the sampling code, from fixed data."""
 
     def __init__(self, m, tasks):
-        self.tasks = tasks          # tid -> (pid, comm, frames)
+        self.tasks = tasks  # tid -> (pid, comm, frames)
         self.patches = [
             mock.patch.object(m, "d_comm", lambda pid, tid: self.tasks[tid][1] if tid in self.tasks else None),
             mock.patch.object(m, "short_cgroup", lambda pid: "app.slice"),
-            mock.patch.object(m, "run_slices", lambda pid, tid: 7),     # never scheduled: no progress
+            mock.patch.object(m, "run_slices", lambda pid, tid: 7),  # never scheduled: no progress
             mock.patch.object(m, "read_text", lambda path: None),
             mock.patch.object(m, "read_kv", lambda path: {}),
             mock.patch.object(m, "read_int", lambda path: 0),
@@ -295,8 +408,7 @@ def monitor(m):
     mon.prev = mon.episode = mon.want_episode = None
     mon.buffer, mon.alerts = [], []
     mon.d_since, mon.hung_reported, mon.cmax = {}, {}, {}
-    mon.topo = types.SimpleNamespace(fs={}, disks={}, top_devs=set(), containers={},
-                                     scan_cgroups=lambda now: None)
+    mon.topo = types.SimpleNamespace(fs={}, disks={}, top_devs=set(), containers={}, scan_cgroups=lambda now: None)
     mon.alert = lambda kind, level, title, body: mon.alerts.append((kind, title))
     mon.describe = lambda pid, tid: (mon.fake.tasks[tid][2], None)
     return mon
@@ -309,8 +421,9 @@ class MemoryKindSamplingTest(unittest.TestCase):
 
     def tasks(self, spec):
         """spec: [(pid, stack name)] -> {tid: (pid, comm, frames)}"""
-        return {str(100 + i): (pid, "java" if pid == "10" else "cargo", STACKS[name])
-                for i, (pid, name) in enumerate(spec)}
+        return {
+            str(100 + i): (pid, "java" if pid == "10" else "cargo", STACKS[name]) for i, (pid, name) in enumerate(spec)
+        }
 
     def run_sample(self, spec):
         self.mon.fake = FakeProc(self.m, self.tasks(spec))
@@ -321,8 +434,12 @@ class MemoryKindSamplingTest(unittest.TestCase):
         return rec, d_tasks
 
     def test_memory_waits_count_in_d_mem_and_open_no_episode(self):
-        rec, _ = self.run_sample([("10", "zswap_compress")] * 20 + [("10", "mmap_lock")] * 10
-                                 + [("10", "zswap_decompress")] * 5 + [("20", "fsync")])
+        rec, _ = self.run_sample(
+            [("10", "zswap_compress")] * 20
+            + [("10", "mmap_lock")] * 10
+            + [("10", "zswap_decompress")] * 5
+            + [("20", "fsync")]
+        )
         self.assertEqual(rec["d"], 1)
         self.assertEqual(rec["d_mem"], 35)
         self.assertEqual(rec["d_all"], 36)
@@ -342,16 +459,18 @@ class MemoryKindSamplingTest(unittest.TestCase):
         self.assertEqual(kinds["folio_wait_writeback"], "storage")
 
     def test_mmap_lock_waiter_follows_a_storage_thread_of_its_process(self):
-        _, d_tasks = self.run_sample([("20", "fsync"), ("20", "mmap_lock"), ("10", "mmap_lock"),
-                                      ("10", "vma_write"), ("10", "zswap_compress")])
+        _, d_tasks = self.run_sample(
+            [("20", "fsync"), ("20", "mmap_lock"), ("10", "mmap_lock"), ("10", "vma_write"), ("10", "zswap_compress")]
+        )
         self.assertEqual([t[5] for t in d_tasks], ["storage", "storage", "memory", "memory", "memory"])
 
     def test_mmap_lock_waiter_stays_memory_when_its_process_also_swaps(self):
         # One JVM: threads faulting through zswap, GC threads waiting for the
         # memory map lock, and one thread in fsync. The lock waiters wait on
         # the faulting threads, not on the fsync.
-        _, d_tasks = self.run_sample([("10", "zswap_decompress"), ("10", "mmap_lock"), ("10", "vma_write"),
-                                      ("10", "fsync")])
+        _, d_tasks = self.run_sample(
+            [("10", "zswap_decompress"), ("10", "mmap_lock"), ("10", "vma_write"), ("10", "fsync")]
+        )
         self.assertEqual([t[5] for t in d_tasks], ["memory", "memory", "memory", "storage"])
 
     def test_version_is_8(self):
@@ -377,9 +496,10 @@ class HungKindTest(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "hung-memory")
         self.assertFalse(events[0]["severe"])
         self.assertIn("memory reclaim / swap", events[0]["msg"])
-        self.assertEqual(self.mon.alerts, [("hung-memory",
-                                            "Task stuck in an uninterruptible wait (memory reclaim / swap)")])
-        self.assertIsNone(self.mon.episode)       # no storage episode
+        self.assertEqual(
+            self.mon.alerts, [("hung-memory", "Task stuck in an uninterruptible wait (memory reclaim / swap)")]
+        )
+        self.assertIsNone(self.mon.episode)  # no storage episode
 
     def test_storage_hung_task_unchanged(self):
         events = self.stuck("sync_log")

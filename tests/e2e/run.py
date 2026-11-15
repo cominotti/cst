@@ -106,11 +106,19 @@ def wait_systemd_ready(container, *, user="tester", timeout_s=45):
     while time.monotonic() < deadline:
         up = run(
             [
-                "docker", "exec", container,
-                "runuser", "-u", user, "--", "env",
+                "docker",
+                "exec",
+                container,
+                "runuser",
+                "-u",
+                user,
+                "--",
+                "env",
                 "XDG_RUNTIME_DIR=/run/user/1000",
                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-                "systemctl", "--user", "is-system-running",
+                "systemctl",
+                "--user",
+                "is-system-running",
             ],
             check=False,
             capture=True,
@@ -157,17 +165,30 @@ def run_tier1(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
     try:
         run(["docker", "network", "create", net])
         run(["docker", "run", "-d", "--name", nas, "--network", net, IMG_NAS])
-        run([
-            "docker", "run", "-d", "--name", sysd, "--network", net,
-            "--cap-add", "SYS_ADMIN",
-            *host_lsm_security_opts(),
-            "--cgroupns=private",
-            "--tmpfs", "/run",
-            "--tmpfs", "/run/lock",
-            "--tmpfs", "/tmp",
-            "-v", f"{REPO_ROOT}:/opt/cst:ro",
-            IMG_SYSTEMD,
-        ])
+        run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                sysd,
+                "--network",
+                net,
+                "--cap-add",
+                "SYS_ADMIN",
+                *host_lsm_security_opts(),
+                "--cgroupns=private",
+                "--tmpfs",
+                "/run",
+                "--tmpfs",
+                "/run/lock",
+                "--tmpfs",
+                "/tmp",
+                "-v",
+                f"{REPO_ROOT}:/opt/cst:ro",
+                IMG_SYSTEMD,
+            ]
+        )
         wait_systemd_ready(sysd)
 
         os.environ["CST_E2E_SYSTEMD_CONTAINER"] = sysd
@@ -199,17 +220,30 @@ def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
     try:
         run(["docker", "network", "create", net])
         run(["docker", "run", "-d", "--name", nas, "--network", net, IMG_NAS])
-        run([
-            "docker", "run", "-d", "--name", priv, "--network", net,
-            "--privileged",
-            "--cgroupns=private",
-            "--tmpfs", "/run",
-            "--tmpfs", "/run/lock",
-            "--tmpfs", "/tmp",
-            "-e", "E2E_LOOP_BTRFS=1",
-            "-v", f"{REPO_ROOT}:/opt/cst:ro",
-            IMG_PRIV,
-        ])
+        run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                priv,
+                "--network",
+                net,
+                "--privileged",
+                "--cgroupns=private",
+                "--tmpfs",
+                "/run",
+                "--tmpfs",
+                "/run/lock",
+                "--tmpfs",
+                "/tmp",
+                "-e",
+                "E2E_LOOP_BTRFS=1",
+                "-v",
+                f"{REPO_ROOT}:/opt/cst:ro",
+                IMG_PRIV,
+            ]
+        )
         wait_systemd_ready(priv, timeout_s=60)
 
         os.environ["CST_E2E_PRIV_CONTAINER"] = priv
@@ -226,13 +260,19 @@ def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
         # Stop services holding btrfs mounts, detach loop devices inside priv,
         # remove containers, and assert no /e2e-disks loop device leaks on host.
         run(
-            ["docker", "exec", priv, "bash", "-c",
-             "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
-             "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
-             "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
-             "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
-             "if [ -f /run/e2e-loop-devs ]; then "
-             "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi"],
+            [
+                "docker",
+                "exec",
+                priv,
+                "bash",
+                "-c",
+                "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
+                "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
+                "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
+                "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
+                "if [ -f /run/e2e-loop-devs ]; then "
+                "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi",
+            ],
             check=False,
             capture=True,
         )

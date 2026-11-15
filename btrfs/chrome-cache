@@ -44,7 +44,7 @@ import sys
 
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
-CACHE_SIZE = 512 * 1024 * 1024          # 536870912: mandatory cap (shared tmpfs)
+CACHE_SIZE = 512 * 1024 * 1024  # 536870912: mandatory cap (shared tmpfs)
 FLAG_DIR = f"--disk-cache-dir={CACHE_DIR}"
 FLAG_SIZE = f"--disk-cache-size={CACHE_SIZE}"
 APP_DIR = f".var/app/{APP}"
@@ -56,10 +56,14 @@ MARK = "# btrfs-setup.sh (CST) chrome-cache"
 # one (a file it is in is not rewritten for the new name), never written.
 MARKS = (MARK, "# btrfs-setup.sh (f44-tools) chrome-cache")
 # No quotes or apostrophes: cobalt parses lines as shell words.
-ON_LINE = (MARK + ": HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB."
-           " Undo: delete the 2 lines below and keep this one (so setup does not add them again).")
-OFF_LINE = (MARK + " off: setup adds no cache flags while this line is here"
-            " (delete it, then run cst btrfs snapshots chrome-cache apply, to turn them on).")
+ON_LINE = (
+    MARK + ": HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB."
+    " Undo: delete the 2 lines below and keep this one (so setup does not add them again)."
+)
+OFF_LINE = (
+    MARK + " off: setup adds no cache flags while this line is here"
+    " (delete it, then run cst btrfs snapshots chrome-cache apply, to turn them on)."
+)
 # Where a system or user install of the app has its deployed files.
 SYSTEM_INSTALLS = ["/var/lib/flatpak", "/run/host/var/lib/flatpak"]
 USER_INSTALL_REL = ".local/share/flatpak"
@@ -92,7 +96,7 @@ def flag_value(tokens, name):
         if t == name:
             val = ""
         elif t.startswith(name + "="):
-            val = t[len(name) + 1:]
+            val = t[len(name) + 1 :]
     return val
 
 
@@ -108,9 +112,12 @@ def inspect(text):
         if not s or s.startswith("#"):
             continue
         tokens += words(s)
-    return {"dir": flag_value(tokens, "--disk-cache-dir"),
-            "size": flag_value(tokens, "--disk-cache-size"),
-            "on": on, "off": off}
+    return {
+        "dir": flag_value(tokens, "--disk-cache-dir"),
+        "size": flag_value(tokens, "--disk-cache-size"),
+        "on": on,
+        "off": off,
+    }
 
 
 def decide(text):
@@ -129,8 +136,11 @@ def decide(text):
             return "managed", None, "flags present (managed by CST)"
         return "user-same", None, "flags present (written by you, same values): left as they are"
     if i["on"] and ours_d and s is None and has_line(text, FLAG_DIR):
-        return "cap-missing", add_after(text, FLAG_DIR, FLAG_SIZE), \
-            "the 512 MiB cap line is missing under the marker: add it back"
+        return (
+            "cap-missing",
+            add_after(text, FLAG_DIR, FLAG_SIZE),
+            "the 512 MiB cap line is missing under the marker: add it back",
+        )
     note = ""
     if ours_d and s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
         note = "; WARNING: that cache lives in RAM, keep it small"
@@ -258,8 +268,11 @@ def write_flags(dfd, name, text, old_st):
         except FileNotFoundError:
             now = None
         same = (now is None and old_st is None) or (
-            now is not None and old_st is not None and stat.S_ISREG(now.st_mode)
-            and (now.st_ino, now.st_size, now.st_mtime_ns) == (old_st.st_ino, old_st.st_size, old_st.st_mtime_ns))
+            now is not None
+            and old_st is not None
+            and stat.S_ISREG(now.st_mode)
+            and (now.st_ino, now.st_size, now.st_mtime_ns) == (old_st.st_ino, old_st.st_size, old_st.st_mtime_ns)
+        )
         if not same:
             raise Refused(f"~/{FLAGS_REL} changed meanwhile (nothing changed; run again)")
         os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
@@ -273,7 +286,7 @@ def write_flags(dfd, name, text, old_st):
 
 # ---- facts about the app -------------------------------------------------------------------
 def installed(home):
-    """"system", "user" or None."""
+    """ "system", "user" or None."""
     for base in SYSTEM_INSTALLS:
         if os.path.isdir(os.path.join(base, "app", APP, "current", "active")):
             return "system"
@@ -331,7 +344,7 @@ def is_subvol(path):
 
 
 def size_text(n):
-    return f"{n / 1024 ** 3:.1f} GiB" if n >= 1024 ** 3 // 10 else f"{n >> 20} MiB"
+    return f"{n / 1024**3:.1f} GiB" if n >= 1024**3 // 10 else f"{n >> 20} MiB"
 
 
 # ---- actions -------------------------------------------------------------------------------
@@ -374,9 +387,11 @@ def off_message(text, new):
     i, left = inspect(text), inspect(new)
     if left["dir"] is not None or left["size"] is not None:
         what = "our flag lines removed" if i["on"] else "off marker added"
-        return (f"{what}, but cache flags not written by CST are still there"
-                f" ({fmt(left['dir'], left['size'])}): left as they are; to turn them off,"
-                " delete those lines by hand")
+        return (
+            f"{what}, but cache flags not written by CST are still there"
+            f" ({fmt(left['dir'], left['size'])}): left as they are; to turn them off,"
+            " delete those lines by hand"
+        )
     if not i["on"]:
         return "off marker added (there were no cache flags); setup will not add them"
     return "off: our flag lines removed (your other lines kept); setup will not add them again"
@@ -437,7 +452,7 @@ def status(home):
     http, code, profiles = old_cache(home)
     sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
     where = "" if sub else ", in /home snapshots"
-    if state in ("managed", "user-same") and http >= 1024 ** 2:
+    if state in ("managed", "user-same") and http >= 1024**2:
         print(f"  old on-disk HTTP cache: {size_text(http)} in {profiles} profile(s){where}. Quit Chrome")
         print("                         (all windows), start it again, then delete it (never done automatically):")
         print(f"                         rm -rf ~/{OLD_CACHE_REL}/*/Cache")
@@ -482,8 +497,11 @@ def main(argv):
             return 0
         if cmd == "apply":
             state, msg, changed = apply(home)
-            print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}" if state != "no-app"
-                  else f"{'kept:':<10} {msg}")
+            print(
+                f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}"
+                if state != "no-app"
+                else f"{'kept:':<10} {msg}"
+            )
             if changed:
                 print("           Takes effect when Chrome starts again (quit all its windows first).")
             return 0

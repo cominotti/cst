@@ -36,7 +36,7 @@ import threading
 import time
 from datetime import datetime
 
-STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")   # override: tests
+STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")  # override: tests
 LAST_USED = os.path.join(STATE_DIR, "last-used.json")
 LAST_RUN = os.path.join(STATE_DIR, "last-run.json")
 LOCK = "/run/docker-gc.lock"
@@ -44,19 +44,27 @@ DAY = 86400
 KEEP_CONTAINER_DAYS = int(os.environ.get("KEEP_CONTAINER_DAYS", 7))
 KEEP_IMAGE_DAYS = int(os.environ.get("KEEP_IMAGE_DAYS", 14))
 KEEP_BUILD_CACHE_DAYS = int(os.environ.get("KEEP_BUILD_CACHE_DAYS", 14))
-PROTECTED = tuple(r.strip() + "/" for r in
-                  os.environ.get("DOCKER_GC_PROTECT", "registry.example.com").split(",") if r.strip())
+PROTECTED = tuple(
+    r.strip() + "/" for r in os.environ.get("DOCKER_GC_PROTECT", "registry.example.com").split(",") if r.strip()
+)
 FLUSH_SECONDS = int(os.environ.get("DOCKER_GC_FLUSH", 30))
 HEARTBEAT_SECONDS = 300
-MIN_UPTIME = 600   # after boot, restart-policy containers are still coming up
+MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up
 # Containers that belong to something the user manages as a unit.
-KEEP_LABEL_PREFIXES = ("com.docker.compose.", "k3d.", "io.x-k8s.kind.", "dev.containers.",
-                       "devcontainer.", "com.docker.desktop.")
+KEEP_LABEL_PREFIXES = (
+    "com.docker.compose.",
+    "k3d.",
+    "io.x-k8s.kind.",
+    "dev.containers.",
+    "devcontainer.",
+    "com.docker.desktop.",
+)
 TESTCONTAINERS_LABEL = "org.testcontainers"
 
 # Docker's generated names (moby pkg/namesgenerator, v28.5.2): left_right, plus
 # one digit after a collision. A user's own "redis_cache" matches neither list.
-NAMES_LEFT = frozenset('''
+NAMES_LEFT = frozenset(
+    """
 admiring adoring affectionate agitated amazing angry awesome beautiful blissful bold
 boring brave busy charming clever compassionate competent condescending confident cool
 cranky crazy dazzling determined distracted dreamy eager ecstatic elastic elated elegant
@@ -68,8 +76,10 @@ pedantic pensive practical priceless quirky quizzical recursing relaxed reverent
 romantic sad serene sharp silly sleepy stoic strange stupefied suspicious sweet tender
 thirsty trusting unruffled upbeat vibrant vigilant vigorous wizardly wonderful
 xenodochial youthful zealous zen
-'''.split())
-NAMES_RIGHT = frozenset('''
+""".split()
+)
+NAMES_RIGHT = frozenset(
+    """
 agnesi albattani allen almeida antonelli archimedes ardinghelli aryabhata austin babbage
 banach banzai bardeen bartik bassi beaver bell benz bhabha bhaskara black blackburn
 blackwell bohr booth borg bose bouman boyd brahmagupta brattain brown buck burnell
@@ -92,14 +102,14 @@ shaw shirley shockley shtern sinoussi snyder solomon spence stonebraker sutherla
 swanson swartz swirles taussig tesla tharp thompson torvalds tu turing varahamihira
 vaughan villani visvesvaraya volhard wescoff wilbur wiles williams williamson wilson
 wing wozniak wright wu yalow yonath zhukovsky
-'''.split())
+""".split()
+)
 
 
 def auto_named(name):
     m = re.fullmatch(r"([a-z]+)_([a-z]+)[0-9]?", name)
     # The generator never returns boring_wozniak: that one was chosen by hand.
-    return bool(m and m.group(1) in NAMES_LEFT and m.group(2) in NAMES_RIGHT
-                and not name.startswith("boring_wozniak"))
+    return bool(m and m.group(1) in NAMES_LEFT and m.group(2) in NAMES_RIGHT and not name.startswith("boring_wozniak"))
 
 
 def log(prio, msg):
@@ -123,7 +133,7 @@ def inspect_all(kind, list_args):
     ids = sorted(set(docker(*list_args).stdout.split()))
     out = []
     for i in range(0, len(ids), 100):
-        r = docker(kind, "inspect", *ids[i:i + 100], check=False)
+        r = docker(kind, "inspect", *ids[i : i + 100], check=False)
         try:
             out.extend(json.loads(r.stdout or "[]"))
         except json.JSONDecodeError as e:
@@ -166,7 +176,7 @@ def load_state():
             st = json.load(f)
         if isinstance(st.get("images"), dict) and isinstance(st.get("since"), (int, float)):
             return st
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
     return {"since": time.time(), "images": {}, "heartbeat": 0}
 
@@ -205,7 +215,7 @@ def record():
         st["since"] = time.time()
         log(5, "recorder was down for a while: image clock restarted")
     lock = threading.Lock()
-    resolved = {}    # image reference -> (image id, resolved at)
+    resolved = {}  # image reference -> (image id, resolved at)
     dirty = [False]
 
     def use(iid, t):
@@ -219,10 +229,10 @@ def record():
         use(c.get("Image", ""), container_use(c))
     with lock:
         st["heartbeat"] = time.time()
-        save_state(st)   # also fixes "since" on the very first start
+        save_state(st)  # also fixes "since" on the very first start
         dirty[0] = False
 
-    def flusher():   # on a clock, not only when an event arrives
+    def flusher():  # on a clock, not only when an event arrives
         last_beat = time.time()
         while True:
             time.sleep(FLUSH_SECONDS)
@@ -232,8 +242,9 @@ def record():
                     try:
                         save_state(st)
                         dirty[0] = False
-                    except OSError as e:   # stale heartbeat = images held: safe
+                    except OSError as e:  # stale heartbeat = images held: safe
                         log(3, f"cannot save state: {e}")
+
     threading.Thread(target=flusher, daemon=True).start()
 
     def image_id(ref):
@@ -249,14 +260,17 @@ def record():
         resolved[ref] = (iid, time.time())
         return iid
 
-    proc = subprocess.Popen(["docker", "events", "--format", "{{json .}}",
-                             "--filter", "type=container", "--filter", "type=image"],
-                            stdout=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        ["docker", "events", "--format", "{{json .}}", "--filter", "type=container", "--filter", "type=image"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     stopping = []
 
-    def stop(*_):   # systemctl stop: end the loop, flush below
+    def stop(*_):  # systemctl stop: end the loop, flush below
         stopping.append(True)
         proc.terminate()
+
     signal.signal(signal.SIGTERM, stop)
     log(6, "recording image use from docker events")
     for line in proc.stdout:
@@ -292,9 +306,11 @@ def ephemeral(c):
     name = c.get("Name", "").lstrip("/")
     labels = (c.get("Config") or {}).get("Labels") or {}
     restart = ((c.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name") or "no"
-    return ((auto_named(name) or TESTCONTAINERS_LABEL in labels)
-            and not any(k.startswith(KEEP_LABEL_PREFIXES) for k in labels)
-            and restart == "no")
+    return (
+        (auto_named(name) or TESTCONTAINERS_LABEL in labels)
+        and not any(k.startswith(KEEP_LABEL_PREFIXES) for k in labels)
+        and restart == "no"
+    )
 
 
 def plan(now, timed=True):
@@ -311,10 +327,20 @@ def plan(now, timed=True):
         state = c.get("State") or {}
         ended = ts(state.get("FinishedAt")) or ts(c.get("Created"))
         vols = {m.get("Name") for m in c.get("Mounts") or [] if m.get("Type") == "volume"}
-        if (state.get("Status") in ("exited", "created", "dead") and ephemeral(c)
-                and ended and now - ended >= KEEP_CONTAINER_DAYS * DAY):
-            drop_c.append({"id": c["Id"], "name": c.get("Name", "").lstrip("/"),
-                           "image": (c.get("Config") or {}).get("Image", "?"), "ended": ended})
+        if (
+            state.get("Status") in ("exited", "created", "dead")
+            and ephemeral(c)
+            and ended
+            and now - ended >= KEEP_CONTAINER_DAYS * DAY
+        ):
+            drop_c.append(
+                {
+                    "id": c["Id"],
+                    "name": c.get("Name", "").lstrip("/"),
+                    "image": (c.get("Config") or {}).get("Image", "?"),
+                    "ended": ended,
+                }
+            )
             freed_vols |= vols
         else:
             keep_images.add(iid)
@@ -323,8 +349,11 @@ def plan(now, timed=True):
     # Anonymous volumes no remaining container uses: today's orphans plus
     # those of the containers removed above. Named volumes never.
     volumes = inspect_all("volume", ("volume", "ls", "-q"))
-    drop_v = sorted(v["Name"] for v in volumes
-                    if "com.docker.volume.anonymous" in (v.get("Labels") or {}) and v["Name"] not in kept_vols)
+    drop_v = sorted(
+        v["Name"]
+        for v in volumes
+        if "com.docker.volume.anonymous" in (v.get("Labels") or {}) and v["Name"] not in kept_vols
+    )
 
     images = inspect_all("image", ("image", "ls", "-aq", "--no-trunc"))
     recorder_ok = recorder_alive(st)
@@ -335,8 +364,7 @@ def plan(now, timed=True):
             continue
         # Uses: recorded events, containers (also those removed now: until
         # they stopped), and the local tag time (pull, build, tag).
-        used = max(st["images"].get(iid, 0), used_by.get(iid, 0),
-                   ts((im.get("Metadata") or {}).get("LastTagTime")))
+        used = max(st["images"].get(iid, 0), used_by.get(iid, 0), ts((im.get("Metadata") or {}).get("LastTagTime")))
         if timed:
             used = max(used, st["since"])
         if now - used < KEEP_IMAGE_DAYS * DAY:
@@ -345,10 +373,23 @@ def plan(now, timed=True):
         if timed and (prot or not recorder_ok):
             held += 1
             continue
-        drop_i.append({"id": iid, "tags": im.get("RepoTags") or [], "size": im.get("Size", 0) or 0,
-                       "used": used, "protected": prot})
-    return {"containers": drop_c, "volumes": drop_v, "images": drop_i, "held": held,
-            "recorder_ok": recorder_ok, "at": now}
+        drop_i.append(
+            {
+                "id": iid,
+                "tags": im.get("RepoTags") or [],
+                "size": im.get("Size", 0) or 0,
+                "used": used,
+                "protected": prot,
+            }
+        )
+    return {
+        "containers": drop_c,
+        "volumes": drop_v,
+        "images": drop_i,
+        "held": held,
+        "recorder_ok": recorder_ok,
+        "at": now,
+    }
 
 
 def show(p, full=False):
@@ -386,7 +427,7 @@ def remove_image(img, plan_at):
     for t in img["tags"]:
         r = docker("image", "inspect", "--format", "{{.Id}}", t, check=False)
         if r.returncode != 0 or r.stdout.strip() != iid:
-            continue   # re-pulled or retagged meanwhile: that tag is not ours
+            continue  # re-pulled or retagged meanwhile: that tag is not ours
         r = docker("image", "rm", t, check=False)
         if r.returncode != 0:
             return f"cannot remove {t}: {r.stderr.strip()[:100]}"
@@ -394,7 +435,7 @@ def remove_image(img, plan_at):
     if r.returncode == 0:
         try:
             left = json.loads(r.stdout)[0].get("RepoTags") or []
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             left = ["?"]
         if left:
             return "got new tags meanwhile"
@@ -470,15 +511,25 @@ def run(dry):
     before = df()
     failed = apply(p)
     after = df()
-    summary = {"at": p["at"], "containers": len(p["containers"]), "volumes": len(p["volumes"]),
-               "images": len(p["images"]), "image_bytes": sum(i["size"] for i in p["images"]),
-               "failed": failed, "before": before, "after": after}
+    summary = {
+        "at": p["at"],
+        "containers": len(p["containers"]),
+        "volumes": len(p["volumes"]),
+        "images": len(p["images"]),
+        "image_bytes": sum(i["size"] for i in p["images"]),
+        "failed": failed,
+        "before": before,
+        "after": after,
+    }
     os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
     with open(LAST_RUN, "w") as f:
         json.dump(summary, f)
-    log(5, f"removed {summary['containers']} container(s), {summary['volumes']} anonymous volume(s), "
-           f"{summary['images']} image(s) planned ({human(summary['image_bytes'])}), old build cache; "
-           f"failures {failed}; images {before.get('Images', '?')} -> {after.get('Images', '?')}")
+    log(
+        5,
+        f"removed {summary['containers']} container(s), {summary['volumes']} anonymous volume(s), "
+        f"{summary['images']} image(s) planned ({human(summary['image_bytes'])}), old build cache; "
+        f"failures {failed}; images {before.get('Images', '?')} -> {after.get('Images', '?')}",
+    )
     return 0
 
 
@@ -503,12 +554,16 @@ def cleanup_now():
         return 0
     prot = [i for i in p["images"] if i["protected"]]
     p["images"] = [i for i in p["images"] if not i["protected"]]
-    if not ask(f"\nRemove the containers, volumes and {len(p['images'])} image(s) above"
-               f"{' (the [protected registry] ones are asked next)' if prot else ''}? [y/N] "):
+    if not ask(
+        f"\nRemove the containers, volumes and {len(p['images'])} image(s) above"
+        f"{' (the [protected registry] ones are asked next)' if prot else ''}? [y/N] "
+    ):
         print("Nothing removed.")
         return 0
-    if prot and ask(f"Also remove the {len(prot)} image(s) marked [protected registry]? "
-                    f"Re-pulling them needs the private tunnel. [y/N] "):
+    if prot and ask(
+        f"Also remove the {len(prot)} image(s) marked [protected registry]? "
+        f"Re-pulling them needs the private tunnel. [y/N] "
+    ):
         p["images"] += prot
     failed = apply(p)
     print(f"Done; failures: {failed}. Now: {df()}")
@@ -518,19 +573,23 @@ def cleanup_now():
 def status():
     st = load_state() if os.path.exists(LAST_USED) else None
     if st:
-        print(f"image use recorded since {datetime.fromtimestamp(st['since']).strftime('%F %T')}"
-              f" ({len(st['images'])} image(s) seen); timed image removal possible from "
-              f"{day(st['since'] + KEEP_IMAGE_DAYS * DAY)}; recorder "
-              f"{'ok' if recorder_alive(st) else 'NOT running (images are held back)'}")
+        print(
+            f"image use recorded since {datetime.fromtimestamp(st['since']).strftime('%F %T')}"
+            f" ({len(st['images'])} image(s) seen); timed image removal possible from "
+            f"{day(st['since'] + KEEP_IMAGE_DAYS * DAY)}; recorder "
+            f"{'ok' if recorder_alive(st) else 'NOT running (images are held back)'}"
+        )
     else:
         print("image use not recorded yet (recorder not started)")
     try:
         with open(LAST_RUN) as f:
             lr = json.load(f)
-        print(f"last run {datetime.fromtimestamp(lr['at']).strftime('%F %T')}: {lr['containers']} container(s), "
-              f"{lr['volumes']} volume(s), {lr['images']} image(s) ({human(lr['image_bytes'])}), "
-              f"failures {lr['failed']}")
-    except (OSError, ValueError, KeyError):
+        print(
+            f"last run {datetime.fromtimestamp(lr['at']).strftime('%F %T')}: {lr['containers']} container(s), "
+            f"{lr['volumes']} volume(s), {lr['images']} image(s) ({human(lr['image_bytes'])}), "
+            f"failures {lr['failed']}"
+        )
+    except OSError, ValueError, KeyError:
         print("last run: never")
     if not docker_up():
         return 0

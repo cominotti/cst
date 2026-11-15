@@ -41,14 +41,14 @@ import time
 # headset and WirePlumber are often still busy just after a connection).
 SETTLE = 5.0
 COOLDOWN = 600.0
-DEBOUNCE = 1.0          # events come in bursts: one look after the burst
-FALLBACK = 120.0        # a look now and then, should an event be missed
-BACKOFF_MAX = 60.0      # pactl subscribe restarted after 1, 2, 4 ... 60 s
-SBC_WAIT = 6.0          # how long the SBC profile may take to come up
-SBC_HOLD = 2.0          # then kept this long, so the stream really closes
-LDAC_WAIT = 10.0        # how long LDAC may take to come back with a rate
-RELAPSE = 300.0         # wrong rate again this soon after a fix: the fix did not hold
-MAX_TRIES = 2           # attempts per connection, whatever happens
+DEBOUNCE = 1.0  # events come in bursts: one look after the burst
+FALLBACK = 120.0  # a look now and then, should an event be missed
+BACKOFF_MAX = 60.0  # pactl subscribe restarted after 1, 2, 4 ... 60 s
+SBC_WAIT = 6.0  # how long the SBC profile may take to come up
+SBC_HOLD = 2.0  # then kept this long, so the stream really closes
+LDAC_WAIT = 10.0  # how long LDAC may take to come back with a rate
+RELAPSE = 300.0  # wrong rate again this soon after a fix: the fix did not hold
+MAX_TRIES = 2  # attempts per connection, whatever happens
 
 
 def log(msg, level=6):
@@ -78,7 +78,7 @@ def serial(props):
     s = props.get("object.serial")
     try:
         return int(s)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -88,8 +88,7 @@ def snapshot(dev, objs):
     profile), out (output node serial), codec, rate, mic (the headset's input
     node is running). Missing parts are None."""
     mac = dev.replace("_", ":")
-    snap = {"card": None, "profile": None, "out": None, "codec": None, "rate": None,
-            "inputs": [], "mic": False}
+    snap = {"card": None, "profile": None, "out": None, "codec": None, "rate": None, "inputs": [], "mic": False}
     for o in objs:
         if not isinstance(o, dict):
             continue
@@ -148,11 +147,11 @@ class Tracker:
         self.relapse, self.max_tries = relapse, max_tries
         self.card = self.out = None
         self.tried = False
-        self.failed = None          # why this connection gets no more attempts
-        self.tries = 0              # attempts on this connection
-        self.fixed = None           # time of the last attempt that worked, this connection
-        self.last = None            # time of the last attempt (any connection)
-        self.since = None           # wrong rate seen first at
+        self.failed = None  # why this connection gets no more attempts
+        self.tries = 0  # attempts on this connection
+        self.fixed = None  # time of the last attempt that worked, this connection
+        self.last = None  # time of the last attempt (any connection)
+        self.since = None  # wrong rate seen first at
 
     def _new_connection(self):
         self.tried = False
@@ -182,8 +181,7 @@ class Tracker:
             # The wrong rate is back soon after a fix, on the same connection:
             # the headset set the stream up again by itself. Another bounce
             # would not hold either and would only repeat the dropout.
-            self.failed = (f"the headset went back to {snap['rate']} Hz by itself "
-                           f"{now - self.fixed:.0f} s after the fix")
+            self.failed = f"the headset went back to {snap['rate']} Hz by itself {now - self.fixed:.0f} s after the fix"
         if self.failed:
             return "done", f"{self.failed}: given up until it connects again"
         if self.tries >= self.max_tries:
@@ -320,6 +318,7 @@ def bounce(live, ldac, alt, rate):
     def on_alt():
         c = live.cards()
         return c is not None and profiles(live.dev, c)[0] == alt
+
     if not wait_until(on_alt, SBC_WAIT):
         log(f"{alt} did not become active within {SBC_WAIT:.0f} s", 4)
     time.sleep(SBC_HOLD)
@@ -333,20 +332,23 @@ def bounce(live, ldac, alt, rate):
     if c is not None and now is None:
         return False, "the headset went away during the switch", snap
     if snap is not None and snap["mic"]:
-        return False, f"the headset's microphone came into use during the switch: left on {now or alt} " \
-                      f"({hint})", snap
+        return False, f"the headset's microphone came into use during the switch: left on {now or alt} ({hint})", snap
     if now is not None and now not in (alt, ldac):
-        return False, f"the card went to {now} during the switch (WirePlumber or the user): left there " \
-                      f"({hint})", snap
+        return False, f"the card went to {now} during the switch (WirePlumber or the user): left there ({hint})", snap
     if not live.set_profile(ldac):
         time.sleep(1)
         if not live.set_profile(ldac):
-            return False, f"pactl could not switch back to {ldac}: the headset stays on {alt} " \
-                          f"(pactl set-card-profile bluez_card.{live.dev} {ldac})", live.snap()
+            return (
+                False,
+                f"pactl could not switch back to {ldac}: the headset stays on {alt} "
+                f"(pactl set-card-profile bluez_card.{live.dev} {ldac})",
+                live.snap(),
+            )
 
     def ldac_back():
         s = live.snap()
         return s if s and s["codec"] == "ldac" and s["rate"] else None
+
     snap = wait_until(ldac_back, LDAC_WAIT, step=1.0)
     if snap is None:
         return False, f"LDAC did not come back within {LDAC_WAIT:.0f} s", live.snap()
@@ -368,7 +370,7 @@ class Stop:
     @classmethod
     def handler(cls, signum, frame):
         if cls.busy:
-            cls.asked = True        # the sleeps and pactl calls carry on (PEP 475)
+            cls.asked = True  # the sleeps and pactl calls carry on (PEP 475)
             return
         raise SystemExit(0)
 
@@ -420,8 +422,7 @@ class Watcher:
         cards = self.live.cards()
         active, ldac, alt = profiles(self.dev, cards or [])
         if cards is None or ldac is None or active != ldac:
-            self.say("skip", f"{why}, but the LDAC profile is not the active one "
-                             f"(active {active}, LDAC {ldac})")
+            self.say("skip", f"{why}, but the LDAC profile is not the active one (active {active}, LDAC {ldac})")
             return None
         if alt is None:
             self.tracker.attempted(time.monotonic())
@@ -451,13 +452,13 @@ class Watcher:
         return None
 
     def run(self):
-        log(f"watching bluez_card.{self.dev}: LDAC wanted at {self.rate} Hz"
-            f"{' (dry run)' if self.dry else ''}")
+        log(f"watching bluez_card.{self.dev}: LDAC wanted at {self.rate} Hz{' (dry run)' if self.dry else ''}")
         backoff = 1.0
         while True:
             try:
-                proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, bufsize=0)
+                proc = subprocess.Popen(
+                    ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+                )
             except OSError as e:
                 log(f"cannot start pactl subscribe ({e}); again in {backoff:.0f} s", 4)
                 time.sleep(backoff)
@@ -477,10 +478,10 @@ class Watcher:
         """Reads events until pactl ends. A look right away (also after a
         reconnection), DEBOUNCE after a relevant event, and every FALLBACK."""
         now = time.monotonic()
-        due = now                       # next look
+        due = now  # next look
         fallback = now + FALLBACK
         fd = proc.stdout.fileno()
-        buf = b""                       # read by hand: select() cannot see Python's buffer
+        buf = b""  # read by hand: select() cannot see Python's buffer
         while True:
             now = time.monotonic()
             if due is not None and now >= due:
@@ -526,10 +527,10 @@ def main(argv):
         return 0
     signal.signal(signal.SIGTERM, Stop.handler)
     signal.signal(signal.SIGINT, Stop.handler)
-    os.environ.setdefault("LC_ALL", "C")     # pactl's event lines in English
+    os.environ.setdefault("LC_ALL", "C")  # pactl's event lines in English
     try:
         Watcher(dev, a.rate, a.dry_run).run()
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt, SystemExit:
         log("stopped")
     return 0
 

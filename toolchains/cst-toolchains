@@ -211,7 +211,7 @@ def journal_stdout():
     try:
         dev, ino = (int(x) for x in os.environ.get("JOURNAL_STREAM", "").split(":"))
         st = os.fstat(sys.stdout.fileno())
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return False
     return (st.st_dev, st.st_ino) == (dev, ino)
 
@@ -267,7 +267,7 @@ def when(ts):
 
 
 def tilde(path, home):
-    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+    return "~" + path[len(home) :] if path == home or path.startswith(home + "/") else path
 
 
 def where_text(path, home):
@@ -349,8 +349,12 @@ def parse_sccache_size(text):
 
 
 # Settings that belong to no prune target: {KEY: parser}.
-OPTIONS = {"RUST_LEAN_DEBUGINFO": parse_bool, "RUST_SCCACHE": parse_bool,
-           "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size, "RUST_SCCACHE_WORKSPACE": parse_bool}
+OPTIONS = {
+    "RUST_LEAN_DEBUGINFO": parse_bool,
+    "RUST_SCCACHE": parse_bool,
+    "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size,
+    "RUST_SCCACHE_WORKSPACE": parse_bool,
+}
 
 
 def parse_off_or_duration(text):
@@ -459,8 +463,9 @@ def resolve_root(home):
     build = data.get("build")
     value = build.get("build-dir") if isinstance(build, dict) else None
     if value != want:
-        raise Refused(f"build-dir in {tilde(cfg, home)} is {value!r}, not the one CST writes "
-                      f"({want!r}): nothing is done")
+        raise Refused(
+            f"build-dir in {tilde(cfg, home)} is {value!r}, not the one CST writes ({want!r}): nothing is done"
+        )
     root = want[: -len("/" + HASH_VAR)]
     try:
         st = os.lstat(root)
@@ -595,7 +600,7 @@ def scan(root, now):
             with os.scandir(e.path) as it2:
                 leaves = sorted(it2, key=lambda x: x.name)
         except FileNotFoundError:
-            continue        # removed meanwhile (apply removes an XX/ it emptied)
+            continue  # removed meanwhile (apply removes an XX/ it emptied)
         except OSError as err:
             others.append((e.name, f"cannot read: {err.strerror}"))
             continue
@@ -631,7 +636,7 @@ def prefixes(root):
     Silverblue and in toolbox containers."""
     out = {root}
     if root.startswith("/var/home/"):
-        out.add(root[len("/var"):])
+        out.add(root[len("/var") :])
     elif root.startswith("/home/"):
         out.add("/var" + root)
     return tuple(sorted(out))
@@ -656,7 +661,7 @@ def proc_users(root, uid=None):
             path = path[: -len(" (deleted)")]
         for p in pre:
             if path.startswith(p + "/"):
-                parts = path[len(p) + 1:].split("/")
+                parts = path[len(p) + 1 :].split("/")
                 key = parts[0] if parts[0].startswith(TRASH_PREFIX) else "/".join(parts[:2])
                 lst = found.setdefault(key, [])
                 if (pid, comm) not in lst:
@@ -822,7 +827,7 @@ def cargo_procs(uid=None):
         except OSError:
             pass
         if not os.path.exists(base):
-            continue        # ended meanwhile
+            continue  # ended meanwhile
         out.append(p)
     return out
 
@@ -849,8 +854,10 @@ def cargo_binary(p, home):
     if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == "cargo" and os.access(exe, os.X_OK):
         return exe
     ch = p["env"].get("CARGO_HOME") or os.environ.get("CARGO_HOME", "")
-    for c in (os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
-              shutil.which("cargo")):
+    for c in (
+        os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
+        shutil.which("cargo"),
+    ):
         if c and os.access(c, os.X_OK):
             return c
     return ""
@@ -867,7 +874,7 @@ def cargo_query(p, home):
         return None, "no cargo program found to ask"
     cmd = [cargo]
     if len(p["args"]) > 1 and p["args"][1].startswith("+"):
-        cmd.append(p["args"][1])       # rustup's +toolchain (the process is rustup's proxy)
+        cmd.append(p["args"][1])  # rustup's +toolchain (the process is rustup's proxy)
     cmd += ["metadata", "--no-deps", "--offline", "--format-version", "1"]
     manifest = manifest_arg(p["args"], cwd)
     if manifest:
@@ -884,8 +891,7 @@ def ask_cargo(cmd, env, cwd):
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                           text=True, timeout=60)
+        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"cargo metadata: {e}"
     if r.returncode != 0:
@@ -893,7 +899,7 @@ def ask_cargo(cmd, env, cwd):
         return None, f"cargo metadata: {last}"
     try:
         bd = json.loads(r.stdout).get("build_directory")
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return None, "cargo metadata: unexpected output"
     # No build_directory: a cargo without build-dir support, so not this root.
     return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
@@ -918,7 +924,7 @@ def cargo_users(root, home, cache):
             continue
         for pr in pre:
             if bd.startswith(pr + "/"):
-                k = "/".join(bd[len(pr) + 1:].split("/")[:2])
+                k = "/".join(bd[len(pr) + 1 :].split("/")[:2])
                 lst = found.setdefault(k, [])
                 if (p["pid"], p["comm"]) not in lst:
                     lst.append((p["pid"], p["comm"]))
@@ -955,24 +961,29 @@ WORKSPACE_REL = "Workspace"
 # Hidden folders are skipped too; worktrees inside them (.claude/worktrees/...)
 # are still found, through `git worktree list`.
 SCAN_SKIP = frozenset({"node_modules", "target", "__pycache__", "venv"})
-REPO_DEPTH = 6          # levels below ~/Workspace searched for repositories
-CRATE_DEPTH = 6         # levels below a worktree searched for Cargo.toml
-ENUM_BUDGET = 600       # seconds for the whole search; longer: incomplete
-CMD_TIMEOUT = 60        # seconds for one git or cargo call
+REPO_DEPTH = 6  # levels below ~/Workspace searched for repositories
+CRATE_DEPTH = 6  # levels below a worktree searched for Cargo.toml
+ENUM_BUDGET = 600  # seconds for the whole search; longer: incomplete
+CMD_TIMEOUT = 60  # seconds for one git or cargo call
 PIN_NAMES = ("rust-toolchain.toml", "rust-toolchain")
 # Files that may name a toolchain without pinning it (`cargo +nightly fuzz`,
 # TOOLCHAIN ?= nightly-2026-06-01, a CI job): the toolchains report reads
 # them so that it never offers to uninstall a toolchain named there.
-TOOL_FILE_NAMES = frozenset({"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile",
-                             "Taskfile.yml", "Taskfile.yaml"})
+TOOL_FILE_NAMES = frozenset(
+    {"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile", "Taskfile.yml", "Taskfile.yaml"}
+)
 TOOL_FILE_SUFFIXES = (".mk", ".just", ".sh", ".bash")
 # Read too, from a worktree's top (walk_dirs skips hidden folders): CI jobs
 # and cargo aliases. {folder: suffixes}
-TOOL_FILE_DIRS = {".github/workflows": (".yml", ".yaml"), ".cargo": ("config", "config.toml"),
-                  ".circleci": (".yml", ".yaml"), ".buildkite": (".yml", ".yaml")}
+TOOL_FILE_DIRS = {
+    ".github/workflows": (".yml", ".yaml"),
+    ".cargo": ("config", "config.toml"),
+    ".circleci": (".yml", ".yaml"),
+    ".buildkite": (".yml", ".yaml"),
+}
 TOOL_FILE_TOP = (".gitlab-ci.yml",)
-TOOL_FILE_MAX = 1 << 20     # bytes read of one file
-TOOL_FILES_MAX = 100000     # files read in all; more: the report counts as incomplete
+TOOL_FILE_MAX = 1 << 20  # bytes read of one file
+TOOL_FILES_MAX = 100000  # files read in all; more: the report counts as incomplete
 # A folder with this file is a cache (cargo's target/ and registry, ...): not searched.
 CACHE_TAG = "CACHEDIR.TAG"
 NOT_A_MEMBER = "believes it's in a workspace when it's not"
@@ -995,8 +1006,16 @@ def run_idle(cmd, cwd, env, timeout):
     """subprocess.run at idle CPU and IO priority (ionice -c 3 when present)."""
     io = shutil.which("ionice")
     full = ([io, "-c", "3"] if io else []) + list(cmd)
-    return subprocess.run(full, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, timeout=timeout, preexec_fn=lower_priority)
+    return subprocess.run(
+        full,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        preexec_fn=lower_priority,
+    )
 
 
 def walk_dirs(top, depth_max, deadline, stop=None):
@@ -1058,7 +1077,7 @@ def git_common_dir(wt):
         with open(os.path.join(gd, "commondir"), encoding="utf-8") as f:
             return os.path.realpath(os.path.join(gd, f.read().strip()))
     except FileNotFoundError:
-        return os.path.realpath(gd)     # a submodule: its own repository
+        return os.path.realpath(gd)  # a submodule: its own repository
     except OSError:
         return None
 
@@ -1071,8 +1090,12 @@ def git_worktrees(wt, deadline):
         raise Incomplete("git not found on PATH")
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
     try:
-        r = run_idle([git, "-C", wt, "worktree", "list", "--porcelain"], wt, env,
-                     max(1, min(CMD_TIMEOUT, deadline - time.monotonic())))
+        r = run_idle(
+            [git, "-C", wt, "worktree", "list", "--porcelain"],
+            wt,
+            env,
+            max(1, min(CMD_TIMEOUT, deadline - time.monotonic())),
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Incomplete(f"git worktree list in {wt}: {e}") from None
     if r.returncode != 0:
@@ -1081,7 +1104,7 @@ def git_worktrees(wt, deadline):
     out, cur, bare = [], None, False
     for line in r.stdout.splitlines() + [""]:
         if line.startswith("worktree "):
-            cur, bare = line[len("worktree "):], False
+            cur, bare = line[len("worktree ") :], False
         elif line == "bare":
             bare = True
         elif line == "" and cur is not None:
@@ -1101,9 +1124,9 @@ class Workspaces:
         self.manifests = 0
         self.asked = 0
         self.claimed = {}
-        self.pins = []          # rust-toolchain(.toml) files
-        self.tool_files = []    # files that may name a toolchain (TOOL_FILE_NAMES, ...)
-        self.failures = []      # [(manifest, why)]
+        self.pins = []  # rust-toolchain(.toml) files
+        self.tool_files = []  # files that may name a toolchain (TOOL_FILE_NAMES, ...)
+        self.failures = []  # [(manifest, why)]
         self.incomplete = ""
         self.seconds = 0.0
 
@@ -1127,7 +1150,7 @@ def find_worktrees(home, deadline, ws):
             groups.setdefault(common, d)
     for _common, d in sorted(groups.items()):
         for wt in git_worktrees(d, deadline):
-            if os.path.isdir(wt):           # a "prunable" one is gone: nothing to claim
+            if os.path.isdir(wt):  # a "prunable" one is gone: nothing to claim
                 roots.add(os.path.realpath(wt))
     return sorted(roots)
 
@@ -1171,8 +1194,10 @@ def metadata_env(home):
 
 def user_cargo(home):
     ch = os.environ.get("CARGO_HOME", "")
-    for c in (os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
-              shutil.which("cargo")):
+    for c in (
+        os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
+        shutil.which("cargo"),
+    ):
         if c and os.access(c, os.X_OK):
             return c
     return ""
@@ -1184,8 +1209,12 @@ def workspace_metadata(cargo, manifest, env, deadline):
     if left <= 0:
         raise Incomplete(f"the search of workspaces took longer than {ENUM_BUDGET}s")
     try:
-        r = run_idle([cargo, "metadata", "--offline", "--no-deps", "--format-version", "1",
-                      "--manifest-path", manifest], os.path.dirname(manifest), env, min(CMD_TIMEOUT, left))
+        r = run_idle(
+            [cargo, "metadata", "--offline", "--no-deps", "--format-version", "1", "--manifest-path", manifest],
+            os.path.dirname(manifest),
+            env,
+            min(CMD_TIMEOUT, left),
+        )
     except subprocess.TimeoutExpired:
         return None, f"cargo metadata took longer than {int(min(CMD_TIMEOUT, left))}s"
     except OSError as e:
@@ -1246,11 +1275,11 @@ def claimed_folders(root, home, with_cargo=True):
                     covered.add(os.path.join(os.path.normpath(wr), "Cargo.toml"))
                 bd = data.get("build_directory")
                 if not isinstance(bd, str) or not bd:
-                    continue        # a cargo without build-dir support: not in this root
+                    continue  # a cargo without build-dir support: not in this root
                 bd = os.path.normpath(bd)
                 for pr in pre:
                     if bd.startswith(pr + "/"):
-                        key = "/".join(bd[len(pr) + 1:].split("/")[:2])
+                        key = "/".join(bd[len(pr) + 1 :].split("/")[:2])
                         lst = ws.claimed.setdefault(key, [])
                         shown = wr if isinstance(wr, str) else os.path.dirname(m)
                         if shown not in lst:
@@ -1329,9 +1358,13 @@ def remove_tree(path, timeout=None):
     None: none): rm is stopped then; what is left of PATH (an already
     renamed-away folder) is a leftover that the next run deletes."""
     try:
-        r = subprocess.run(["rm", "-rf", "--one-file-system", "--", path],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           timeout=None if timeout is None else max(1, timeout))
+        r = subprocess.run(
+            ["rm", "-rf", "--one-file-system", "--", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=None if timeout is None else max(1, timeout),
+        )
     except subprocess.TimeoutExpired:
         return False, f"stopped after {int(max(1, timeout))}s (the run's time budget); the next run deletes the rest"
     return r.returncode == 0, r.stdout.strip()
@@ -1394,7 +1427,7 @@ def delete_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None
     if result != "moved":
         return result, detail
     try:
-        os.rmdir(top)       # the XX folder, when this was its last hash
+        os.rmdir(top)  # the XX folder, when this was its last hash
     except OSError:
         pass
     ok, msg = remove_tree(trash, time_left(rm_deadline))
@@ -1474,7 +1507,7 @@ def read_state(home, tid):
     try:
         with open(state_path(home, tid)) as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -1541,11 +1574,14 @@ class RustBuild(Target):
         if pol["min_keep"] < MIN_KEEP_FLOOR:
             raise ConfigError(f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} is below the floor of 15m")
         if pol["max_idle"] < pol["min_keep"]:
-            raise ConfigError(f"{prefix}_MAX_IDLE={vals['MAX_IDLE']} is shorter than "
-                              f"{prefix}_MIN_KEEP={vals['MIN_KEEP']}")
+            raise ConfigError(
+                f"{prefix}_MAX_IDLE={vals['MAX_IDLE']} is shorter than {prefix}_MIN_KEEP={vals['MIN_KEEP']}"
+            )
         if pol["incremental_idle"] and pol["incremental_idle"] < pol["min_keep"]:
-            raise ConfigError(f"{prefix}_INCREMENTAL_IDLE={vals['INCREMENTAL_IDLE']} is shorter than "
-                              f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} (0 or off turns it off)")
+            raise ConfigError(
+                f"{prefix}_INCREMENTAL_IDLE={vals['INCREMENTAL_IDLE']} is shorter than "
+                f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} (0 or off turns it off)"
+            )
         return pol
 
     @staticmethod
@@ -1553,8 +1589,10 @@ class RustBuild(Target):
         cap = gib(pol["max_total"]) if pol["max_total"] else "off"
         inc = span(pol["incremental_idle"]) if pol.get("incremental_idle") else "off"
         orph = "on" if pol.get("orphans", True) else "off"
-        return (f"MAX_IDLE {span(pol['max_idle'])}, MAX_TOTAL {cap}, MIN_KEEP {span(pol['min_keep'])}, "
-                f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}")
+        return (
+            f"MAX_IDLE {span(pol['max_idle'])}, MAX_TOTAL {cap}, MIN_KEEP {span(pol['min_keep'])}, "
+            f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}"
+        )
 
     def location(self):
         return os.path.join(self.home, ROOT_REL)
@@ -1586,15 +1624,19 @@ class RustBuild(Target):
     def workspace_lines(self, ws, claimed, folders):
         if ws is None:
             return ["orphans: the rule is off (RUST_BUILD_ORPHANS=no)"]
-        out = [f"workspaces: {ws.repos} repositories under ~/{WORKSPACE_REL}, {len(ws.worktrees)} worktree(s), "
-               f"{ws.manifests} Cargo.toml, {ws.asked} asked (cargo metadata --offline --no-deps), "
-               f"{ws.seconds:.0f}s"]
+        out = [
+            f"workspaces: {ws.repos} repositories under ~/{WORKSPACE_REL}, {len(ws.worktrees)} worktree(s), "
+            f"{ws.manifests} Cargo.toml, {ws.asked} asked (cargo metadata --offline --no-deps), "
+            f"{ws.seconds:.0f}s"
+        ]
         if claimed is None:
             out.append(f"orphans: NOT looked for in this run: {ws.incomplete}")
         else:
             unclaimed = [f for f in folders if f.key not in claimed]
-            out.append(f"orphans: {len(claimed)} folder(s) claimed by a workspace, {len(unclaimed)} not claimed "
-                       f"({gib(sum(f.size for f in unclaimed))})")
+            out.append(
+                f"orphans: {len(claimed)} folder(s) claimed by a workspace, {len(unclaimed)} not claimed "
+                f"({gib(sum(f.size for f in unclaimed))})"
+            )
         return out
 
     def plan(self):
@@ -1604,8 +1646,10 @@ class RustBuild(Target):
             say(f"  ~/{ROOT_REL} does not exist yet: nothing to do")
             return 0
         say(f"  root: {tilde(root, home)}/XX/YYYYYYYYYYYYYY (cargo build-dir)")
-        say(f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
-            "(sizes as du shows them: before btrfs compression; on disk usually less, twice with RAID1)")
+        say(
+            f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+            "(sizes as du shows them: before btrfs compression; on disk usually less, twice with RAID1)"
+        )
         claimed, ws = self.workspaces(root)
         for line in self.workspace_lines(ws, claimed, folders):
             say(f"  {line}")
@@ -1620,15 +1664,22 @@ class RustBuild(Target):
         print_others(others, trash)
         gone = [f for f, a, _ in plan if a == "delete"]
         trims = [f for f, a, _ in plan if a == "trim"]
-        say(f"  apply would delete {len(gone)} folder(s), {gib(sum(f.size for f in gone))}"
-            + (f", and the incremental folders of {len(trims)} more, {gib(sum(f.inc_size for f in trims))}"
-               if trims else "")
-            + f"; left: {gib(after_total(plan))} in {len(plan) - len(gone)} folder(s)")
+        say(
+            f"  apply would delete {len(gone)} folder(s), {gib(sum(f.size for f in gone))}"
+            + (
+                f", and the incremental folders of {len(trims)} more, {gib(sum(f.inc_size for f in trims))}"
+                if trims
+                else ""
+            )
+            + f"; left: {gib(after_total(plan))} in {len(plan) - len(gone)} folder(s)"
+        )
         if pol["max_total"] and after_total(plan) > pol["max_total"]:
             say("  still above MAX_TOTAL afterwards: the rest is active within MIN_KEEP, in use or left alone")
         if unreadable:
-            say(f"  note: {unreadable} Rust tool process(es) of yours could not be inspected (run on the host to "
-                "see all); cargo's own lock is still checked before each deletion")
+            say(
+                f"  note: {unreadable} Rust tool process(es) of yours could not be inspected (run on the host to "
+                "see all); cargo's own lock is still checked before each deletion"
+            )
         if unknown and (gone or trims):
             say(f"  note: {unknown_text(unknown)}; apply deletes nothing while it runs")
         return 0
@@ -1638,8 +1689,21 @@ class RustBuild(Target):
         root, folders, trash, others = self.gather()
         if root is None:
             self.tsay(f"~/{ROOT_REL} does not exist yet: nothing to do")
-            write_state(home, self.ID, {"time": now, "deleted": 0, "freed": 0, "total": 0, "folders": 0,
-                                        "busy": 0, "failed": 0, "trimmed": 0, "trim_freed": 0})
+            write_state(
+                home,
+                self.ID,
+                {
+                    "time": now,
+                    "deleted": 0,
+                    "freed": 0,
+                    "total": 0,
+                    "folders": 0,
+                    "busy": 0,
+                    "failed": 0,
+                    "trimmed": 0,
+                    "trim_freed": 0,
+                },
+            )
             return 0
         before = sum(f.size for f in folders)
         self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {self.policy_text(pol)}")
@@ -1653,15 +1717,18 @@ class RustBuild(Target):
         users, unreadable = proc_users(root)
         users = merge_users(users, cargo_users(root, home, cache)[0])
         if unreadable:
-            self.tsay(f"{unreadable} Rust tool process(es) of yours could not be inspected; "
-                      "cargo's lock is still checked", 5)
+            self.tsay(
+                f"{unreadable} Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", 5
+            )
         for t in trash:
             if users.get(t.key):
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
                 continue
             ok, msg = remove_tree(t.path, self.time_left())
-            self.tsay(f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
-                      6 if ok else 3)
+            self.tsay(
+                f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
+                6 if ok else 3,
+            )
         deleted, trimmed = {}, {}
         nbusy = failed = 0
         left = list(folders)
@@ -1678,16 +1745,21 @@ class RustBuild(Target):
             """Measure F again (the locks are held) and plan again with it:
             '' when the rule still gives action A (or a delete when A is a
             trim), else why not. F takes the fresh measurement either way."""
+
             def check():
                 cur = self.clock()
                 top, leaf = f.key.split("/")
                 fresh = measure(Folder(root, top, leaf), dev, cur)
-                got, gwhy = next((x, w) for g, x, w in decide([fresh if g is f else g for g in left], pol, cur,
-                                                            users, claimed) if g is fresh)
+                got, gwhy = next(
+                    (x, w)
+                    for g, x, w in decide([fresh if g is f else g for g in left], pol, cur, users, claimed)
+                    if g is fresh
+                )
                 f.__dict__.update(fresh.__dict__)
                 if got == a or (a == "trim" and got == "delete" and f.inc):
                     return ""
                 return f"measured again: {gwhy}" if got == "keep" else f"measured again: now {got}: {gwhy}"
+
             return check
 
         # One folder at a time, planned again after each: a folder found busy (or
@@ -1703,8 +1775,11 @@ class RustBuild(Target):
             left_s = self.time_left()
             if left_s is not None and left_s < RM_MARGIN:
                 stopped_by_budget = True
-                self.tsay(f"stopped before {f.key}: the run's time budget ({span(RUN_BUDGET)}) is nearly used up; "
-                          "the next run goes on", 5)
+                self.tsay(
+                    f"stopped before {f.key}: the run's time budget ({span(RUN_BUDGET)}) is nearly used up; "
+                    "the next run goes on",
+                    5,
+                )
                 break
             if a == "delete":
                 result, detail = delete_folder(root, f, now, home, cache, recheck(f, a), self.deadline)
@@ -1727,9 +1802,11 @@ class RustBuild(Target):
                 continue
             if result == "trimmed":
                 trimmed[f.key] = f.inc_size
-                self.tsay(f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active "
-                          f"{when(f.activity)}): {why}")
-                f.size -= f.inc_size        # planned again without them (the cap counts what is left)
+                self.tsay(
+                    f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active "
+                    f"{when(f.activity)}): {why}"
+                )
+                f.size -= f.inc_size  # planned again without them (the cap counts what is left)
                 f.inc = []
                 continue
             if result == "stop":
@@ -1742,36 +1819,55 @@ class RustBuild(Target):
             else:
                 failed += 1
                 rc = 1
-                self.tsay(f"could not delete {'the incremental folders of ' if a == 'trim' else ''}{f.key}: "
-                          f"{detail}", 3)
+                self.tsay(
+                    f"could not delete {'the incremental folders of ' if a == 'trim' else ''}{f.key}: {detail}", 3
+                )
             if a == "delete" and not os.path.lexists(f.path):
-                left.remove(f)       # renamed away; the next run deletes the leftover
+                left.remove(f)  # renamed away; the next run deletes the leftover
             users = dict(users)
             users[f.key] = [("-", detail)]
         freed = sum(f.size for f in deleted.values())
         trim_freed = sum(trimmed.values())
         total = before - freed - trim_freed
-        self.tsay(f"done: deleted {len(deleted)} folder(s), freed {gib(freed)}"
-                  + (f"; incremental of {len(trimmed)} folder(s), freed {gib(trim_freed)}" if trimmed else "")
-                  + f"; left {gib(total)} in {len(folders) - len(deleted)} folder(s)"
-                  + (f"; {nbusy} busy" if nbusy else "")
-                  + ("; stopped at the time budget" if stopped_by_budget else ""))
+        self.tsay(
+            f"done: deleted {len(deleted)} folder(s), freed {gib(freed)}"
+            + (f"; incremental of {len(trimmed)} folder(s), freed {gib(trim_freed)}" if trimmed else "")
+            + f"; left {gib(total)} in {len(folders) - len(deleted)} folder(s)"
+            + (f"; {nbusy} busy" if nbusy else "")
+            + ("; stopped at the time budget" if stopped_by_budget else "")
+        )
         if pol["max_total"] and total > pol["max_total"] and not stopped_by_budget:
-            self.tsay(f"still above MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}): "
-                      "the rest is active within MIN_KEEP, in use or left alone", 4)
-        write_state(home, self.ID, {"time": now, "deleted": len(deleted), "freed": freed, "total": total,
-                                    "folders": len(folders) - len(deleted), "busy": nbusy, "failed": failed,
-                                    "trimmed": len(trimmed), "trim_freed": trim_freed})
+            self.tsay(
+                f"still above MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}): "
+                "the rest is active within MIN_KEEP, in use or left alone",
+                4,
+            )
+        write_state(
+            home,
+            self.ID,
+            {
+                "time": now,
+                "deleted": len(deleted),
+                "freed": freed,
+                "total": total,
+                "folders": len(folders) - len(deleted),
+                "busy": nbusy,
+                "failed": failed,
+                "trimmed": len(trimmed),
+                "trim_freed": trim_freed,
+            },
+        )
         return rc
 
     @staticmethod
     def last_run_text(s):
         extra = f", {s['busy']} busy" if s.get("busy") else ""
         extra += f", {s['failed']} failed" if s.get("failed") else ""
-        trim = (f", incremental of {s['trimmed']} folder(s) ({gib(s.get('trim_freed', 0))})"
-                if s.get("trimmed") else "")
-        return (f"{when(s['time'])}, deleted {s['deleted']} folder(s) ({gib(s['freed'])}){trim}{extra}; "
-                f"left {gib(s['total'])} in {s['folders']} folder(s)")
+        trim = f", incremental of {s['trimmed']} folder(s) ({gib(s.get('trim_freed', 0))})" if s.get("trimmed") else ""
+        return (
+            f"{when(s['time'])}, deleted {s['deleted']} folder(s) ({gib(s['freed'])}){trim}{extra}; "
+            f"left {gib(s['total'])} in {s['folders']} folder(s)"
+        )
 
     def status_lines(self):
         """Size and age of the folders, or why they are not looked at."""
@@ -1782,15 +1878,19 @@ class RustBuild(Target):
         if root is None:
             return [f"size:     ~/{ROOT_REL} does not exist yet"]
         folders, trash, others = scan(root, self.now)
-        out = [f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
-               "(as du shows it: before btrfs compression)"]
+        out = [
+            f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+            "(as du shows it: before btrfs compression)"
+        ]
         if folders:
             old = min(folders, key=lambda f: f.activity)
             new = max(folders, key=lambda f: f.activity)
-            out.append(f"oldest:   {when(old.activity)} ({ago(self.now - old.activity)} ago, {old.key}, "
-                       f"{gib(old.size)})")
-            out.append(f"newest:   {when(new.activity)} ({ago(self.now - new.activity)} ago, {new.key}, "
-                       f"{gib(new.size)})")
+            out.append(
+                f"oldest:   {when(old.activity)} ({ago(self.now - old.activity)} ago, {old.key}, {gib(old.size)})"
+            )
+            out.append(
+                f"newest:   {when(new.activity)} ({ago(self.now - new.activity)} ago, {new.key}, {gib(new.size)})"
+            )
         out += [f"left alone: {name} ({why})" for name, why in others]
         out += [f"leftover of an interrupted run: {t.key} ({gib(t.size)}): deleted by apply" for t in trash]
         return out
@@ -1805,16 +1905,25 @@ def print_others(others, trash):
 
 # ---- python:uv ------------------------------------------------------------------------------
 UV_CACHE_REL = ".cache/uv"
-UV_TIMEOUT = 10 * 60        # seconds for one `uv cache prune` (also bounded by the run's budget)
-UV_LOCK_WAIT = 60           # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
+UV_TIMEOUT = 10 * 60  # seconds for one `uv cache prune` (also bounded by the run's budget)
+UV_LOCK_WAIT = 60  # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
 # What uv says when UV_LOCK_TIMEOUT ran out ("Timeout (60s) when waiting for
 # lock on `...` at `.../.lock`, is another uv process running?"). Any other
 # error, also one that names the lock file (permission denied, ...), is a
 # failure.
 UV_LOCK_TIMED_OUT = re.compile(r"Timeout \(\d+(?:\.\d+)?s\) when waiting for lock on ")
 UV_REMOVED = re.compile(r"Removed (\d+) files? \(([\d.]+)\s*([KMGT]?i?B)\)")
-UV_UNITS = {"b": 1, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40,
-            "kb": 1000, "mb": 10 ** 6, "gb": 10 ** 9, "tb": 10 ** 12}
+UV_UNITS = {
+    "b": 1,
+    "kib": 1 << 10,
+    "mib": 1 << 20,
+    "gib": 1 << 30,
+    "tib": 1 << 40,
+    "kb": 1000,
+    "mb": 10**6,
+    "gb": 10**9,
+    "tb": 10**12,
+}
 
 
 def tree_size(path):
@@ -1890,7 +1999,7 @@ class PythonUv(Target):
         try:
             v = self.run_uv(uv, ["--version"], 20).stdout.strip()
             h = self.run_uv(uv, ["cache", "prune", "--help"], 20).stdout
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError, subprocess.TimeoutExpired:
             return "?", False
         return v or "?", "--dry-run" in h
 
@@ -1936,9 +2045,11 @@ class PythonUv(Target):
             except (OSError, subprocess.TimeoutExpired) as e:
                 say(f"  uv cache prune --dry-run: {e}")
         else:
-            say("  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
+            say(
+                "  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
                 "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
-                "only known afterwards")
+                "only known afterwards"
+            )
         return 0
 
     def apply(self):
@@ -1958,7 +2069,9 @@ class PythonUv(Target):
         left = self.time_left()
         if left is not None:
             if left < 2 * UV_LOCK_WAIT:
-                self.tsay(f"skipped: the run's time budget ({span(RUN_BUDGET)}) is used up; the next run tries again", 5)
+                self.tsay(
+                    f"skipped: the run's time budget ({span(RUN_BUDGET)}) is used up; the next run tries again", 5
+                )
                 return 0
             timeout = min(timeout, left)
         try:
@@ -1972,8 +2085,11 @@ class PythonUv(Target):
         text = (r.stdout + "\n" + r.stderr).strip()
         if r.returncode != 0:
             if UV_LOCK_TIMED_OUT.search(text) or uv_lock_busy(c):
-                self.tsay(f"skipped: uv waited {UV_LOCK_WAIT}s for its cache lock (another uv runs); "
-                          "the next run tries again", 5)
+                self.tsay(
+                    f"skipped: uv waited {UV_LOCK_WAIT}s for its cache lock (another uv runs); "
+                    "the next run tries again",
+                    5,
+                )
                 return 0
             last = (text.splitlines() or ["failed"])[-1]
             self.tsay(f"uv cache prune failed: {last}", 3)
@@ -2041,7 +2157,7 @@ def rustup_default(home, rh):
             d = tomllib.load(f).get("default_toolchain")
         if isinstance(d, str) and d:
             return d
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         pass
     rustup = shutil.which("rustup")
     if not rustup:
@@ -2049,9 +2165,10 @@ def rustup_default(home, rh):
     env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
     env.pop("RUSTUP_TOOLCHAIN", None)
     try:
-        r = subprocess.run([rustup, "default"], cwd=home, env=env, stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
+        r = subprocess.run(
+            [rustup, "default"], cwd=home, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20
+        )
+    except OSError, subprocess.TimeoutExpired:
         return ""
     words = r.stdout.split() if r.returncode == 0 else []
     return words[0] if words else ""
@@ -2113,20 +2230,20 @@ def toolchain_lines(home):
     try:
         with open(os.path.join(rh, "settings.toml"), "rb") as f:
             overrides = tomllib.load(f).get("overrides") or {}
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         overrides = {}
     for path, ch in overrides.items() if isinstance(overrides, dict) else ():
         if isinstance(ch, str):
             pins.setdefault(short_toolchain(ch), []).append(f"rustup override for {path}")
     default = rustup_default(home, rh)
-    out = [f"where:    {where_text(tdir, home)}",
-           f"default:  {short_toolchain(default) if default else 'unknown'}"]
+    out = [f"where:    {where_text(tdir, home)}", f"default:  {short_toolchain(default) if default else 'unknown'}"]
     if ws.incomplete:
         out.append(f"note:     the search for rust-toolchain files was incomplete ({ws.incomplete})")
     rows, total, unused = [], 0, []
     is_default = {n: bool(default) and short_toolchain(n) == short_toolchain(default) for n in names}
-    loose = [short_toolchain(n) for n in names
-             if not is_default[n] and not pins.get(short_toolchain(n)) and not pins.get(n)]
+    loose = [
+        short_toolchain(n) for n in names if not is_default[n] and not pins.get(short_toolchain(n)) and not pins.get(n)
+    ]
     # Files in the home first (a linked worktree elsewhere, e.g. in /tmp, is shown only when it is the only one).
     files = sorted(ws.tool_files, key=lambda p: not (p == home or p.startswith(home + "/")))
     named, read_all = named_in(files, loose) if loose else ({}, True)
@@ -2148,24 +2265,32 @@ def toolchain_lines(home):
         else:
             pin = "not pinned or named under ~/Workspace"
             unused.append(short)
-        rows.append(f"  {gib(size):>10}  {short:<22} {pin}" + ("  (a link: rustup toolchain link)"
-                                                              if os.path.islink(path) else ""))
+        rows.append(
+            f"  {gib(size):>10}  {short:<22} {pin}"
+            + ("  (a link: rustup toolchain link)" if os.path.islink(path) else "")
+        )
     out.append(f"{len(names)} toolchain(s), {gib(total)} (as du shows it):")
     out += rows
     known = {short_toolchain(n) for n in names} | set(names)
     missing = sorted(ch for ch in pins if ch not in known)
     if missing:
         out.append("pinned but not installed (the next build there downloads it): " + ", ".join(missing))
-    out.append(f"(read: rust-toolchain.toml and rust-toolchain files, Makefiles, justfiles, *.mk and *.sh "
-               f"files, CI workflows and .cargo/config.toml of the git worktrees under ~/{WORKSPACE_REL}, and "
-               "rustup overrides)")
+    out.append(
+        f"(read: rust-toolchain.toml and rust-toolchain files, Makefiles, justfiles, *.mk and *.sh "
+        f"files, CI workflows and .cargo/config.toml of the git worktrees under ~/{WORKSPACE_REL}, and "
+        "rustup overrides)"
+    )
     if unused and ws.incomplete:
-        out.append(f"not pinned, not the default and not named in the files read: {', '.join(unused)}; no "
-                   "removal command, because the search was incomplete")
+        out.append(
+            f"not pinned, not the default and not named in the files read: {', '.join(unused)}; no "
+            "removal command, because the search was incomplete"
+        )
     elif unused:
-        out.append("not pinned, not the default and not named in those files. NOT CHECKED: projects outside "
-                   f"~/{WORKSPACE_REL}, other scripts and programs, RUSTUP_TOOLCHAIN. If none of those needs "
-                   "them, you can remove them yourself (CST never does):")
+        out.append(
+            "not pinned, not the default and not named in those files. NOT CHECKED: projects outside "
+            f"~/{WORKSPACE_REL}, other scripts and programs, RUSTUP_TOOLCHAIN. If none of those needs "
+            "them, you can remove them yourself (CST never does):"
+        )
         out.append(f"  rustup toolchain uninstall {' '.join(unused)}")
     return out
 
@@ -2175,8 +2300,10 @@ def toolchain_lines(home):
 TARGETS = {cls.ID: cls for cls in (RustBuild, PythonUv)}
 # Planned, not implemented yet: (where, how).
 PLANNED = {
-    "rust:registry": ("~/.cargo/registry, ~/.cargo/git",
-                      "cargo already deletes downloads unused for months by itself; maybe cargo clean gc limits"),
+    "rust:registry": (
+        "~/.cargo/registry, ~/.cargo/git",
+        "cargo already deletes downloads unused for months by itself; maybe cargo clean gc limits",
+    ),
     "go:build": ("~/.cache/go-build", "Go already trims entries unused for 5 days by itself"),
     "go:mod": ("~/go/pkg/mod", "by age"),
     "node:npm": ("~/.npm/_cacache", "npm cache verify / by age"),
@@ -2233,7 +2360,7 @@ def cmd_prune(home, now, action, names):
     deadline = None
     if action == "apply":
         deadline = time.monotonic() + RUN_BUDGET
-        chosen = sorted(chosen, key=lambda c: c[0].MAX_SECONDS is None)     # stable: bounded ones first
+        chosen = sorted(chosen, key=lambda c: c[0].MAX_SECONDS is None)  # stable: bounded ones first
     for cls, named in chosen:
         t = cls(home, now, settings.policy[cls.ID])
         t.named = named
@@ -2284,8 +2411,7 @@ def systemctl_env():
 def systemctl(*args, check=False):
     """Output (stripped) of systemctl --user; '' when it could not run."""
     try:
-        r = subprocess.run(systemctl_cmd(*args), capture_output=True,
-                           text=True, env=systemctl_env(), timeout=60)
+        r = subprocess.run(systemctl_cmd(*args), capture_output=True, text=True, env=systemctl_env(), timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {e}") from None
@@ -2300,7 +2426,7 @@ def manager_path():
     it cannot be read."""
     for line in systemctl("show-environment").splitlines():
         if line.startswith("PATH="):
-            val = line[len("PATH="):]
+            val = line[len("PATH=") :]
             # systemd quotes a value with special characters ($'...'): not parsed here.
             return None if val[:1] in ("$", "'", '"') else val
     return None
@@ -2441,15 +2567,21 @@ def remove_stale(home):
 
 def old_conf_note(home):
     if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
-        say(f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
-            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it", 4, err=True)
+        say(
+            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
+            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
+            4,
+            err=True,
+        )
 
 
 def cmd_auto_on(home, now, unless_off=False):
     remove_stale(home)
     if unless_off and turned_off(home):
-        say(f"left off: you turned the automatic pruning off ({PROG} auto off left ~/{OFF_REL}); "
-            f"'{PROG} auto on' turns it on again")
+        say(
+            f"left off: you turned the automatic pruning off ({PROG} auto off left ~/{OFF_REL}); "
+            f"'{PROG} auto on' turns it on again"
+        )
         return 0
     settings = Settings(home)
     enabled = [cls for tid, cls in TARGETS.items() if settings.enabled[tid]]
@@ -2473,12 +2605,19 @@ def cmd_auto_on(home, now, unless_off=False):
             refused.append(f"{cls.ID}: {e}")
     if len(refused) == len(enabled):
         raise Refused("; ".join(refused))
-    where = ("in the PATH of your user manager, which the timer uses" if mpath is not None else
-             "in the PATH of this command; the timer uses your user manager's PATH (systemctl --user "
-             "show-environment), which could not be read")
+    where = (
+        "in the PATH of your user manager, which the timer uses"
+        if mpath is not None
+        else "in the PATH of this command; the timer uses your user manager's PATH (systemctl --user "
+        "show-environment), which could not be read"
+    )
     for r in refused:
-        say(f"note: {r} (looked for {where}): each timer run tries it and reports it as refused (an error) "
-            f"until it is fixed; or set its _ENABLED=no in ~/{CONF_REL}", 4, err=True)
+        say(
+            f"note: {r} (looked for {where}): each timer run tries it and reports it as refused (an error) "
+            f"until it is fixed; or set its _ENABLED=no in ~/{CONF_REL}",
+            4,
+            err=True,
+        )
     st = unit_states(home)
     conflicts = [k for k, v in st.items() if v == "conflict"]
     if conflicts:
@@ -2530,7 +2669,7 @@ def cmd_auto_off(home, now):
         elif st[rel] == "conflict":
             say(f"left alone: ~/{rel} (not written by CST)", 4, err=True)
     try:
-        os.rmdir(os.path.join(home, LIB_REL))       # only when empty (bluetooth keeps its watcher there)
+        os.rmdir(os.path.join(home, LIB_REL))  # only when empty (bluetooth keeps its watcher there)
     except OSError:
         pass
     for tid in TARGETS:
@@ -2539,10 +2678,13 @@ def cmd_auto_off(home, now):
         except OSError:
             pass
     if not turned_off(home):
-        write_atomic(os.path.join(home, OFF_REL),
-                     f"{MARKER}: written by `cst toolchains auto off`.\n"
-                     "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
-                     "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n", 0o644)
+        write_atomic(
+            os.path.join(home, OFF_REL),
+            f"{MARKER}: written by `cst toolchains auto off`.\n"
+            "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
+            "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n",
+            0o644,
+        )
         say(f"written:   ~/{OFF_REL} (snapshots setup leaves the pruning off)")
     say(f"toolchain caches are no longer pruned automatically (settings in ~/{CONF_REL} kept, if any)")
     return 0
@@ -2551,8 +2693,10 @@ def cmd_auto_off(home, now):
 def timer_text(home):
     if file_state(os.path.join(home, UNIT_DIR_REL, TIMER), render_timer()) == "missing":
         if turned_off(home):
-            return (f"timer {TIMER}: turned off by you ({PROG} auto off; "
-                    f"snapshots setup leaves it off; {PROG} auto on turns it on)")
+            return (
+                f"timer {TIMER}: turned off by you ({PROG} auto off; "
+                f"snapshots setup leaves it off; {PROG} auto on turns it on)"
+            )
         return f"timer {TIMER}: not installed ({PROG} auto on)"
     en = systemctl("is-enabled", TIMER)
     ac = systemctl("is-active", TIMER)
@@ -2569,7 +2713,7 @@ def timer_text(home):
 # comments, same rules): a setting already there is never changed.
 CARGO_CFG_REL = ".cargo/config.toml"
 UV_CFG_REL = ".config/uv/uv.toml"
-_WS = r"[^\S\n]"      # a blank that is not a line break (grep's [[:space:]] within a line)
+_WS = r"[^\S\n]"  # a blank that is not a line break (grep's [[:space:]] within a line)
 CARGO_HAS_BUILD_DIR = re.compile(rf"^{_WS}*build-dir{_WS}*=|^{_WS}*build\.build-dir", re.M)
 CARGO_HAS_BUILD = re.compile(rf"^{_WS}*\[{_WS}*build{_WS}*\]|^{_WS}*build\.", re.M)
 UV_HAS_LINK_MODE = re.compile(rf"^{_WS}*link-mode{_WS}*=", re.M)
@@ -2577,14 +2721,18 @@ UV_HAS_TABLE = re.compile(rf"^{_WS}*\[", re.M)
 
 
 def cargo_text(home):
-    return ("\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
-            "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
-            f"[build]\nbuild-dir = \"{home}/{ROOT_REL}/{HASH_VAR}\"\n")
+    return (
+        "\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
+        "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
+        f'[build]\nbuild-dir = "{home}/{ROOT_REL}/{HASH_VAR}"\n'
+    )
 
 
-UV_TEXT = ("# Added by btrfs-setup.sh (CST): ~/.cache is its own subvolume and\n"
-           "# hardlinks cannot cross subvolumes; reflink clones can.\n"
-           "link-mode = \"clone\"\n")
+UV_TEXT = (
+    "# Added by btrfs-setup.sh (CST): ~/.cache is its own subvolume and\n"
+    "# hardlinks cannot cross subvolumes; reflink clones can.\n"
+    'link-mode = "clone"\n'
+)
 
 
 def read_cfg(path):
@@ -2631,7 +2779,7 @@ def cargo_build_dir_is_csts(home):
     try:
         with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
             build = tomllib.load(f).get("build")
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError, tomllib.TOMLDecodeError:
         return False
     return isinstance(build, dict) and build.get("build-dir") == expected_template(home)
 
@@ -2641,16 +2789,24 @@ def cargo_build_dir_is_csts(home):
 # snapshots setup` passes --no-lean-debuginfo, so it never turns it on.
 # Changing debug info changes every dev build's fingerprint: the first build of
 # each workspace afterwards compiles everything again.
-LEAN_HEAD = ("\n# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes: smaller dev builds.\n"
-             "# Your own crates keep line tables (backtraces show file:line); dependencies get no\n"
-             "# debug info. These lines take precedence over [profile.dev] in each project's Cargo.toml.\n")
+LEAN_HEAD = (
+    "\n# Added by toolchains-setup.sh (CST) for RUST_LEAN_DEBUGINFO=yes: smaller dev builds.\n"
+    "# Your own crates keep line tables (backtraces show file:line); dependencies get no\n"
+    "# debug info. These lines take precedence over [profile.dev] in each project's Cargo.toml.\n"
+)
 LEAN_KEYS = (
     ("profile.dev", ("profile", "dev"), "line-tables-only", '[profile.dev]\ndebug = "line-tables-only"\n'),
-    ('profile.dev.package."*"', ("profile", "dev", "package", "*"), False,
-     '[profile.dev.package."*"]\ndebug = false\n'),
+    (
+        'profile.dev.package."*"',
+        ("profile", "dev", "package", "*"),
+        False,
+        '[profile.dev.package."*"]\ndebug = false\n',
+    ),
 )
-LEAN_REBUILD = ("turning it on makes the next dev build of every workspace compile everything once "
-                "(all at once if many worktrees build together): apply it while builds are quiet")
+LEAN_REBUILD = (
+    "turning it on makes the next dev build of every workspace compile everything once "
+    "(all at once if many worktrees build together): apply it while builds are quiet"
+)
 
 
 def dig(data, path):
@@ -2717,7 +2873,8 @@ def lean_wanted(settings, lean):
     if settings is None:
         return False, "bad settings"
     return settings.options["RUST_LEAN_DEBUGINFO"], "RUST_LEAN_DEBUGINFO=" + (
-        "yes" if settings.options["RUST_LEAN_DEBUGINFO"] else "no")
+        "yes" if settings.options["RUST_LEAN_DEBUGINFO"] else "no"
+    )
 
 
 def lean_lines(home, verb, settings, lean):
@@ -2729,8 +2886,15 @@ def lean_lines(home, verb, settings, lean):
     if not want:
         if not st["add"] and not st["conflicts"]:
             return [("on", shown, f"lean debug info is set ({why} does not remove it: delete the lines by hand)")]
-        return [("off", shown, "lean debug info: off (opt-in; RUST_LEAN_DEBUGINFO=yes in ~/" + CONF_REL
-                 + f", or config apply --lean-debuginfo); {LEAN_REBUILD}")]
+        return [
+            (
+                "off",
+                shown,
+                "lean debug info: off (opt-in; RUST_LEAN_DEBUGINFO=yes in ~/"
+                + CONF_REL
+                + f", or config apply --lean-debuginfo); {LEAN_REBUILD}",
+            )
+        ]
     out = [("keep", shown, c) for c in st["conflicts"]]
     if not st["add"]:
         if not st["conflicts"]:
@@ -2738,11 +2902,18 @@ def lean_lines(home, verb, settings, lean):
         return out
     what = "; ".join(b.replace("\n", " ").strip() for _, b in st["add"])
     if st["append"]:
-        out.append(("write", shown, f"lean debug info ({why}): {what}; {LEAN_REBUILD}"
-                    + ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+        out.append(
+            (
+                "write",
+                shown,
+                f"lean debug info ({why}): {what}; {LEAN_REBUILD}"
+                + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+            )
+        )
     else:
-        out.append(("BY HAND", shown, f"lean debug info ({why}): the file already has these tables: add "
-                                      f"yourself: {what}"))
+        out.append(
+            ("BY HAND", shown, f"lean debug info ({why}): the file already has these tables: add yourself: {what}")
+        )
     return out
 
 
@@ -2785,17 +2956,21 @@ WRAPPER_NAME = "rustc-wrapper"
 WRAPPER_REL = ".local/libexec/cst/rustc-wrapper"
 SCCACHE_DIR_REL = ".cache/sccache"
 SCCACHE_DEFAULT_SIZE = "25G"
-SCCACHE_HEAD = ("# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through "
-                "sccache (~/.cache/sccache).")
+SCCACHE_HEAD = (
+    "# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through sccache (~/.cache/sccache)."
+)
 SCCACHE_SIZE_LINE = re.compile(r"(?m)^cache_size=\S*(?= # cst: RUST_SCCACHE_CACHE_SIZE)")
 SCCACHE_WORKSPACE_LINE = re.compile(r"(?m)^workspace=\S*(?= # cst: RUST_SCCACHE_WORKSPACE)")
-SCCACHE_REBUILD = ("turning it on rebuilds nothing: the cache fills as crates are compiled anew "
-                   "(a new worktree, cargo update, a new toolchain)")
+SCCACHE_REBUILD = (
+    "turning it on rebuilds nothing: the cache fills as crates are compiled anew "
+    "(a new worktree, cargo update, a new toolchain)"
+)
 BUILD_HEADER = re.compile(rf"^{_WS}*\[{_WS}*build{_WS}*\]{_WS}*(?:#.*)?$", re.M)
 KEY_LINE = re.compile(rf"^{_WS}*[A-Za-z0-9_.\"'-]+{_WS}*=", re.M)
 ANY_HEADER = re.compile(rf"^{_WS}*\[", re.M)
-SCCACHE_STATS = re.compile(r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S.*?)\s*$",
-                           re.M)
+SCCACHE_STATS = re.compile(
+    r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S.*?)\s*$", re.M
+)
 
 
 def wrapper_path(home):
@@ -2805,8 +2980,9 @@ def wrapper_path(home):
 @dataclasses.dataclass(frozen=True)
 class WrapperValues:
     """The settings `config apply` writes into the installed wrapper."""
+
     size: str = SCCACHE_DEFAULT_SIZE
-    workspace: bool = True          # local crates through sccache too
+    workspace: bool = True  # local crates through sccache too
 
     def __str__(self):
         return f"cache size {self.size}" + ("" if self.workspace else "; local crates straight to rustc")
@@ -2874,7 +3050,7 @@ def sccache_state(home):
     want = wrapper_path(home)
     build = data.get("build")
     if build is not None and not isinstance(build, dict):
-        return st                                   # build = 1: no add, no remove
+        return st  # build = 1: no add, no remove
     value = (build or {}).get("rustc-wrapper")
     st["value"], st["ours"] = value, value == want
     keyline = f"rustc-wrapper = {json.dumps(want)}"
@@ -2912,12 +3088,16 @@ def sccache_state(home):
             # CST's own appended block (a [build] header whose own section
             # holds only this key; [build.x] subtables may follow): all of it.
             after = []
-            for ln in lines[i + 1:]:
+            for ln in lines[i + 1 :]:
                 if ANY_HEADER.match(ln):
                     break
                 after.append(ln)
-            if (i > 1 and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n")) and lines[i - 2].startswith(SCCACHE_HEAD[:48])
-                    and not any(KEY_LINE.match(ln) for ln in after)):
+            if (
+                i > 1
+                and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))
+                and lines[i - 2].startswith(SCCACHE_HEAD[:48])
+                and not any(KEY_LINE.match(ln) for ln in after)
+            ):
                 drop |= {i - 1, i - 2}
                 if i > 2 and not lines[i - 3].strip():
                     drop.add(i - 3)
@@ -2941,15 +3121,27 @@ def sccache_wanted(settings, flag):
 def wrapper_lines(home, verb, text, values):
     shown = tilde(wrapper_path(home), home)
     if text is None:
-        return [("?", shown, f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
-                             f"run {PROG} config apply from CST")]
+        return [
+            (
+                "?",
+                shown,
+                f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
+                f"run {PROG} config apply from CST",
+            )
+        ]
     st = wrapper_state(home, text)
     if st == "ok":
         return [("ok", shown, f"sccache wrapper up to date ({values})")]
     if st == "conflict":
         return [("keep", shown, "not CST's file (or a symlink): left alone, so CST writes no rustc-wrapper line")]
-    return [("write", shown, f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; {values})"
-             + ("" if verb == "plan" else f" (fix: {PROG} config apply)"))]
+    return [
+        (
+            "write",
+            shown,
+            f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; {values})"
+            + ("" if verb == "plan" else f" (fix: {PROG} config apply)"),
+        )
+    ]
 
 
 def sccache_lines(home, verb, settings, flag):
@@ -2957,8 +3149,7 @@ def sccache_lines(home, verb, settings, flag):
     shown = tilde(st["path"], home)
     want, why = sccache_wanted(settings, flag)
     values = wrapper_values(settings)
-    off = (f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); "
-           f"{SCCACHE_REBUILD}")
+    off = f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); {SCCACHE_REBUILD}"
     if st["error"]:
         return [("?", shown, f"sccache: the file {st['error']}")]
     foreign = st["value"] is not None and not st["ours"]
@@ -2966,16 +3157,33 @@ def sccache_lines(home, verb, settings, flag):
     if flag is False:
         if st["ours"]:
             if st["remove"]:
-                return [("remove", shown, f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
-                                          f"~/{WRAPPER_REL} stays (unused, harmless)")]
-            return [("BY HAND", shown, f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: "
-                                       f"delete it yourself")]
+                return [
+                    (
+                        "remove",
+                        shown,
+                        f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
+                        f"~/{WRAPPER_REL} stays (unused, harmless)",
+                    )
+                ]
+            return [
+                (
+                    "BY HAND",
+                    shown,
+                    f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
+                )
+            ]
         return [("keep", shown, f"sccache ({why}): {yours}")] if foreign else [("off", shown, "sccache: off")]
     text = wrapper_text(values)
     if not want:
         if st["ours"]:
-            out = [("on", shown, f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
-                                 f"{PROG} config apply --no-sccache does)")]
+            out = [
+                (
+                    "on",
+                    shown,
+                    f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
+                    f"{PROG} config apply --no-sccache does)",
+                )
+            ]
             return out + [ln for ln in wrapper_lines(home, verb, text, values) if ln[0] != "ok"]
         return [("off", shown, off + (f"; {yours}" if foreign else ""))]
     if foreign:
@@ -2984,11 +3192,23 @@ def sccache_lines(home, verb, settings, flag):
     if st["ours"]:
         out.append(("ok", shown, f"sccache: rustc-wrapper set ({why})"))
     elif st["add"]:
-        out.append(("write", shown, f"sccache ({why}): [build] rustc-wrapper = \"~/{WRAPPER_REL}\"; {SCCACHE_REBUILD}"
-                    + ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+        out.append(
+            (
+                "write",
+                shown,
+                f'sccache ({why}): [build] rustc-wrapper = "~/{WRAPPER_REL}"; {SCCACHE_REBUILD}'
+                + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+            )
+        )
     else:
-        out.append(("BY HAND", shown, f"sccache ({why}): CST cannot add the key safely here: put "
-                                      f"rustc-wrapper = \"{wrapper_path(home)}\" into [build] yourself"))
+        out.append(
+            (
+                "BY HAND",
+                shown,
+                f"sccache ({why}): CST cannot add the key safely here: put "
+                f'rustc-wrapper = "{wrapper_path(home)}" into [build] yourself',
+            )
+        )
     return out
 
 
@@ -3011,8 +3231,11 @@ def install_wrapper(home, values):
     text = wrapper_text(values)
     path = wrapper_path(home)
     if text is None:
-        say(f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {PROG} config apply from CST",
-            3, err=True)
+        say(
+            f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {PROG} config apply from CST",
+            3,
+            err=True,
+        )
         return 1
     st = wrapper_state(home, text)
     if st == "conflict":
@@ -3043,8 +3266,11 @@ def sccache_apply(home, settings, flag):
         if not st["ours"]:
             return 0
         if not st["remove"]:
-            say(f"NOTE: sccache: {path}: CST cannot remove its rustc-wrapper line safely: delete it yourself",
-                5, err=True)
+            say(
+                f"NOTE: sccache: {path}: CST cannot remove its rustc-wrapper line safely: delete it yourself",
+                5,
+                err=True,
+            )
             return 0
         err = write_cfg(path, st["remove"])
         if err:
@@ -3057,8 +3283,12 @@ def sccache_apply(home, settings, flag):
         # never names a missing program.
         return install_wrapper(home, wrapper_values(settings)) if st["ours"] else 0
     if st["value"] is not None and not st["ours"]:
-        say(f"NOTE: sccache: {path}: rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is "
-            f"(sccache not set up)", 5, err=True)
+        say(
+            f"NOTE: sccache: {path}: rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is "
+            f"(sccache not set up)",
+            5,
+            err=True,
+        )
         return 0
     # The wrapper first: the line must never name a missing program.
     if install_wrapper(home, wrapper_values(settings)):
@@ -3114,8 +3344,10 @@ def sccache_status_lines(home):
     cache = os.path.join(home, SCCACHE_DIR_REL)
     out = []
     if os.path.isdir(cache):
-        out.append(f"sccache cache: {where_text(cache, home)} {gib(tree_size(cache))} (sccache keeps it under "
-                   f"its size cap itself, least recently used first; ~/.cache is not in /home snapshots)")
+        out.append(
+            f"sccache cache: {where_text(cache, home)} {gib(tree_size(cache))} (sccache keeps it under "
+            f"its size cap itself, least recently used first; ~/.cache is not in /home snapshots)"
+        )
     else:
         out.append(f"sccache cache: ~/{SCCACHE_DIR_REL} not there yet")
     exe = shutil.which("sccache") or ""
@@ -3132,21 +3364,30 @@ def sccache_status_lines(home):
     if not socks:
         out.append("sccache: no server running (each environment starts its own on its first build)")
     for sock in socks:
-        env_id = os.path.basename(sock)[len("cst-sccache-"):-len(".sock")]
+        env_id = os.path.basename(sock)[len("cst-sccache-") : -len(".sock")]
         env = {k: v for k, v in os.environ.items() if not k.startswith("SCCACHE_")}
         env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1")
         try:
-            r = subprocess.run([exe, "--show-stats"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, text=True, timeout=5)
+            r = subprocess.run(
+                [exe, "--show-stats"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
             stats = dict(SCCACHE_STATS.findall(r.stdout)) if r.returncode == 0 else {}
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError, subprocess.TimeoutExpired:
             stats = {}
         if not stats:
             out.append(f"sccache server {env_id}: no answer")
             continue
-        shown = ", ".join(f"{k.lower()} {stats[k]}" for k in
-                          ("Compile requests", "Cache hits", "Cache misses", "Cache size", "Max cache size")
-                          if k in stats)
+        shown = ", ".join(
+            f"{k.lower()} {stats[k]}"
+            for k in ("Compile requests", "Cache hits", "Cache misses", "Cache size", "Max cache size")
+            if k in stats
+        )
         out.append(f"sccache server {env_id}: {shown}")
     return out
 
@@ -3162,24 +3403,46 @@ def config_lines(home, verb, settings=None, lean=None, sccache=None):
                 if cargo_build_dir_is_csts(home):
                     out.append(("ok", shown, "build-dir = CST's line (rust:build prunes that folder)"))
                 else:
-                    out.append(("keep", shown, "build-dir set to your own value: left as it is "
-                                               "(rust:build then prunes nothing)"))
+                    out.append(
+                        (
+                            "keep",
+                            shown,
+                            "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
+                        )
+                    )
             elif st == "by-hand":
-                out.append(("BY HAND", shown, f"has a [build] table: add build-dir = "
-                                              f"\"{home}/{ROOT_REL}/{HASH_VAR}\" there yourself"))
+                out.append(
+                    (
+                        "BY HAND",
+                        shown,
+                        f'has a [build] table: add build-dir = "{home}/{ROOT_REL}/{HASH_VAR}" there yourself',
+                    )
+                )
             elif st == "write":
-                out.append(("write", shown, f"[build] build-dir = \"~/{ROOT_REL}/{HASH_VAR}\"" +
-                            ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+                out.append(
+                    (
+                        "write",
+                        shown,
+                        f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
+                        + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                    )
+                )
             else:
                 out.append(("?", shown, "cannot be read"))
         else:
             if st == "set":
                 out.append(("ok", shown, "link-mode already set"))
             elif st == "by-hand":
-                out.append(("BY HAND", shown, "has tables: add link-mode = \"clone\" at its top yourself"))
+                out.append(("BY HAND", shown, 'has tables: add link-mode = "clone" at its top yourself'))
             elif st == "write":
-                out.append(("write", shown, "link-mode = \"clone\" (hardlinks cannot cross subvolumes)" +
-                            ("" if verb == "plan" else f" (missing: {PROG} config apply)")))
+                out.append(
+                    (
+                        "write",
+                        shown,
+                        'link-mode = "clone" (hardlinks cannot cross subvolumes)'
+                        + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                    )
+                )
             else:
                 out.append(("?", shown, "cannot be read"))
     out += lean_lines(home, verb, settings, lean)
@@ -3231,11 +3494,11 @@ def cmd_config(home, action, lean=None, sccache=None):
             say(f"kept:      {path} (build-dir already set)")
         elif name == "cargo" and st == "by-hand":
             say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
-            say(f"      build-dir = \"{home}/{ROOT_REL}/{HASH_VAR}\"", 5, err=True)
+            say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
         elif name == "uv" and st == "set":
             say(f"kept:      {path} (link-mode already set)")
         elif name == "uv" and st == "by-hand":
-            say(f"NOTE: {path} has tables: add link-mode = \"clone\" at its top by hand", 5, err=True)
+            say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
         else:
             err = append_text(path, text)
             if err:
@@ -3291,8 +3554,10 @@ def cmd_status(home, now, brief):
     st = unit_states(home)
     say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
     for path, ours in stale_files(home):
-        say(f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"
-            + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)"))
+        say(
+            f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"
+            + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)")
+        )
     old_conf_note(home)
     return 0
 
@@ -3333,12 +3598,20 @@ def parse_args(argv):
                 raise Usage("--home needs a folder")
         elif a.startswith("--home="):
             home = a.split("=", 1)[1]
-            if not home:      # an empty value must never mean "your real home"
+            if not home:  # an empty value must never mean "your real home"
                 raise Usage("--home needs a folder")
         else:
             args.append(a)
-    out = {"cmd": "help", "action": None, "targets": [], "brief": False, "unless_off": False, "home": home,
-           "lean": None, "sccache": None}
+    out = {
+        "cmd": "help",
+        "action": None,
+        "targets": [],
+        "brief": False,
+        "unless_off": False,
+        "home": home,
+        "lean": None,
+        "sccache": None,
+    }
     if not args or args[0] in ("help", "-h", "--help"):
         return out
     cmd, rest = args[0], args[1:]
@@ -3398,14 +3671,15 @@ def main(argv):
         # inspected: the same program runs on the host (same home path).
         me = os.path.realpath(__file__)
         try:
-            os.execvp("flatpak-spawn", ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}",
-                                        "/usr/bin/python3", "-I", me, *argv])
+            os.execvp(
+                "flatpak-spawn",
+                ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", "/usr/bin/python3", "-I", me, *argv],
+            )
         except OSError as e:
-            print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); "
-                  f"run it on the host", file=sys.stderr)
+            print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)
             return 1
     home = os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if a["home"] is None else a["home"])
-    now = float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time())   # override: tests
+    now = float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time())  # override: tests
     cmd, action = a["cmd"], a["action"]
     try:
         if cmd == "status":

@@ -46,7 +46,7 @@ from itertools import islice
 
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
 CG = "/sys/fs/cgroup"
-GAME_STATE = "/run/cpu-setup/game.state"   # cpu/game-profile: the profile is on
+GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
 
 
 def read(path, default=""):
@@ -139,16 +139,20 @@ def watch(argv):
     while i < len(argv):
         a = argv[i]
         if a == "--":
-            cmd = argv[i + 1:]
+            cmd = argv[i + 1 :]
             break
         if a in ("-l", "--label"):
-            label = argv[i + 1]; i += 2
+            label = argv[i + 1]
+            i += 2
         elif a == "--game":
-            game = argv[i + 1]; i += 2
+            game = argv[i + 1]
+            i += 2
         elif a == "--seconds":
-            seconds = int(argv[i + 1]); i += 2
+            seconds = int(argv[i + 1])
+            i += 2
         elif a == "--mangohud":
-            mangohud = os.path.expanduser(argv[i + 1]); i += 2
+            mangohud = os.path.expanduser(argv[i + 1])
+            i += 2
         else:
             print(f"unknown argument {a}", file=sys.stderr)
             return 2
@@ -165,8 +169,19 @@ def watch(argv):
     prev = {}
     rows = []
     pid, cg = None, ""
-    fields = ["t", "profile_on", "game_pid", "game_cpu_wait_ms", "game_mem_stall_ms", "game_invol_switches",
-              "sys_cpu_some_ms", "p_mhz", "e_mhz", "vm_cpus_used", "builds_cpus_used"]
+    fields = [
+        "t",
+        "profile_on",
+        "game_pid",
+        "game_cpu_wait_ms",
+        "game_mem_stall_ms",
+        "game_invol_switches",
+        "sys_cpu_some_ms",
+        "p_mhz",
+        "e_mhz",
+        "vm_cpus_used",
+        "builds_cpus_used",
+    ]
     with open(os.path.join(run_dir, "samples.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(fields)
@@ -187,21 +202,28 @@ def watch(argv):
                 "builds": sum(usage_usec(c) for c in build_cgroups()),
             }
             if pid and cg:
-                cur["game"] = (pressure_total(os.path.join(CG, cg, "cpu.pressure"), "some") or 0,
-                               pressure_total(os.path.join(CG, cg, "memory.pressure"), "full") or 0,
-                               invol(pid))
+                cur["game"] = (
+                    pressure_total(os.path.join(CG, cg, "cpu.pressure"), "some") or 0,
+                    pressure_total(os.path.join(CG, cg, "memory.pressure"), "full") or 0,
+                    invol(pid),
+                )
             if prev:
                 dt = now - prev["t"]
                 g = cur.get("game"), prev.get("game")
-                row = [round(now - start, 1), int(os.path.exists(GAME_STATE)), pid or "",
-                       # per second of wall time (samples drift a little past 1 s)
-                       round((g[0][0] - g[1][0]) / 1000 / dt, 1) if all(g) else "",
-                       round((g[0][1] - g[1][1]) / 1000 / dt, 1) if all(g) else "",
-                       round((g[0][2] - g[1][2]) / dt) if all(g) else "",
-                       round((cur["sys"] - prev["sys"]) / 1000 / dt, 1),
-                       mean_mhz(P_CPUS), mean_mhz(E_CPUS),
-                       round((cur["vm"] - prev["vm"]) / 1e6 / dt, 2),
-                       round(max(0, cur["builds"] - prev["builds"]) / 1e6 / dt, 2)]
+                row = [
+                    round(now - start, 1),
+                    int(os.path.exists(GAME_STATE)),
+                    pid or "",
+                    # per second of wall time (samples drift a little past 1 s)
+                    round((g[0][0] - g[1][0]) / 1000 / dt, 1) if all(g) else "",
+                    round((g[0][1] - g[1][1]) / 1000 / dt, 1) if all(g) else "",
+                    round((g[0][2] - g[1][2]) / dt) if all(g) else "",
+                    round((cur["sys"] - prev["sys"]) / 1000 / dt, 1),
+                    mean_mhz(P_CPUS),
+                    mean_mhz(E_CPUS),
+                    round((cur["vm"] - prev["vm"]) / 1e6 / dt, 2),
+                    round(max(0, cur["builds"] - prev["builds"]) / 1e6 / dt, 2),
+                ]
                 w.writerow(row)
                 f.flush()
                 rows.append(row)
@@ -210,8 +232,14 @@ def watch(argv):
     end = time.time()
     if proc and proc.poll() is None:
         proc.terminate()
-    meta = {"label": label, "start": start, "end": end, "cmd": cmd, "game": game,
-            "rc": proc.returncode if proc else None}
+    meta = {
+        "label": label,
+        "start": start,
+        "end": end,
+        "cmd": cmd,
+        "game": game,
+        "rc": proc.returncode if proc else None,
+    }
     if mangohud:
         logs = [p for p in glob.glob(os.path.join(mangohud, "*.csv")) if start - 5 <= os.path.getmtime(p) <= end + 30]
         if logs:
@@ -238,7 +266,7 @@ def frametimes(path):
                 continue
             try:
                 out.append(float(row[col]))
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 pass
     return out
 
@@ -250,8 +278,9 @@ def lows(ft):
     s = sorted(ft, reverse=True)
 
     def low(frac):
-        worst = s[:max(1, int(len(s) * frac))]
+        worst = s[: max(1, int(len(s) * frac))]
         return 1000 / (sum(worst) / len(worst))
+
     return 1000 / (sum(ft) / len(ft)), low(0.01), low(0.001)
 
 
@@ -267,13 +296,22 @@ def summarize(run_dir):
 
     def avg(v):
         return sum(v) / len(v) if v else float("nan")
+
     wait, mem, inv = col("game_cpu_wait_ms"), col("game_mem_stall_ms"), col("game_invol_switches")
-    game = (f"game wait {avg(wait) / 10:5.1f}% (max {max(wait) / 10:5.1f}%)  mem stall {sum(mem):7.0f} ms"
-            f"  invol/s {avg(inv):7.0f}") if wait else f"{'no game found (--game NAME?)':62}"
-    out = (f"{os.path.basename(run_dir):40} {len(rows):5d}s  {game}"
-           f"  P {avg(col('p_mhz')):5.0f} MHz  E {avg(col('e_mhz')):5.0f} MHz"
-           f"  VM {avg(col('vm_cpus_used')):4.1f} cpu  builds {avg(col('builds_cpus_used')):4.1f} cpu"
-           f"  profile {'on' if avg(col('profile_on')) > 0.5 else 'off'}")
+    game = (
+        (
+            f"game wait {avg(wait) / 10:5.1f}% (max {max(wait) / 10:5.1f}%)  mem stall {sum(mem):7.0f} ms"
+            f"  invol/s {avg(inv):7.0f}"
+        )
+        if wait
+        else f"{'no game found (--game NAME?)':62}"
+    )
+    out = (
+        f"{os.path.basename(run_dir):40} {len(rows):5d}s  {game}"
+        f"  P {avg(col('p_mhz')):5.0f} MHz  E {avg(col('e_mhz')):5.0f} MHz"
+        f"  VM {avg(col('vm_cpus_used')):4.1f} cpu  builds {avg(col('builds_cpus_used')):4.1f} cpu"
+        f"  profile {'on' if avg(col('profile_on')) > 0.5 else 'off'}"
+    )
     mh = os.path.join(run_dir, "mangohud.csv")
     if os.path.exists(mh):
         r = lows(frametimes(mh))
@@ -283,8 +321,9 @@ def summarize(run_dir):
 
 
 def report(argv):
-    runs = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in argv] or \
-        sorted(glob.glob(os.path.join(RUNS, "*")))[-10:]
+    runs = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in argv] or sorted(
+        glob.glob(os.path.join(RUNS, "*"))
+    )[-10:]
     if not runs:
         print(f"no runs in {RUNS}; record one with: cst cpu watch -l <label> [-- <cmd>]")
         return 0
@@ -311,7 +350,7 @@ def stat_cpu(text):
     if f[:1] != ["cpu"] or len(f) < 9:
         raise ValueError("no 'cpu' line with 8 counters first")
     v = [int(x) for x in f[1:9]]
-    return sum(v), v[3] + v[4]   # iowait is idle time too
+    return sum(v), v[3] + v[4]  # iowait is idle time too
 
 
 def vmstat_pgpgout(text):
@@ -357,14 +396,42 @@ def mean_of_seconds(window, name):
 Limit = namedtuple("Limit", "name label unit flag env default file parse value")
 QUIET_LIMITS = (
     Limit("cpu", "CPU busy", "%", "--cpu", "QUIET_CPU_PCT", 10.0, "stat", stat_cpu, busy_pct),
-    Limit("cpu-pressure", "CPU pressure", "%", "--cpu-pressure", "QUIET_CPU_PSI", 5.0,
-          "pressure/cpu", some_avg10, mean_of_seconds),
-    Limit("io-pressure", "IO pressure", "%", "--io-pressure", "QUIET_IO_PSI", 5.0,
-          "pressure/io", some_avg10, mean_of_seconds),
-    Limit("memory-pressure", "memory pressure", "%", "--memory-pressure", "QUIET_MEMORY_PSI", 1.0,
-          "pressure/memory", some_avg10, mean_of_seconds),
-    Limit("writes", "disk writes", "MB/s", "--write-mbps", "QUIET_WRITE_MBPS", 10.0,
-          "vmstat", vmstat_pgpgout, write_mbps),
+    Limit(
+        "cpu-pressure",
+        "CPU pressure",
+        "%",
+        "--cpu-pressure",
+        "QUIET_CPU_PSI",
+        5.0,
+        "pressure/cpu",
+        some_avg10,
+        mean_of_seconds,
+    ),
+    Limit(
+        "io-pressure",
+        "IO pressure",
+        "%",
+        "--io-pressure",
+        "QUIET_IO_PSI",
+        5.0,
+        "pressure/io",
+        some_avg10,
+        mean_of_seconds,
+    ),
+    Limit(
+        "memory-pressure",
+        "memory pressure",
+        "%",
+        "--memory-pressure",
+        "QUIET_MEMORY_PSI",
+        1.0,
+        "pressure/memory",
+        some_avg10,
+        mean_of_seconds,
+    ),
+    Limit(
+        "writes", "disk writes", "MB/s", "--write-mbps", "QUIET_WRITE_MBPS", 10.0, "vmstat", vmstat_pgpgout, write_mbps
+    ),
 )
 
 
@@ -398,12 +465,29 @@ def quiet_tests(window, limits):
                 value = round(lim.value(window, lim.name), 2)
             except ValueError as e:
                 err = str(e)
-        tests.append({"name": lim.name, "label": lim.label, "unit": lim.unit, "limit": limits[lim.name],
-                      "value": value, "ok": err is None and value < limits[lim.name], "error": err})
+        tests.append(
+            {
+                "name": lim.name,
+                "label": lim.label,
+                "unit": lim.unit,
+                "limit": limits[lim.name],
+                "value": value,
+                "ok": err is None and value < limits[lim.name],
+                "error": err,
+            }
+        )
     on = sum(1 for s in window if s["game"])
-    tests.append({"name": "game-profile", "label": "game profile", "unit": "", "limit": "off",
-                  "value": "off" if not on else f"on in {on} of {len(window)} readings",
-                  "ok": not on, "error": None})
+    tests.append(
+        {
+            "name": "game-profile",
+            "label": "game profile",
+            "unit": "",
+            "limit": "off",
+            "value": "off" if not on else f"on in {on} of {len(window)} readings",
+            "ok": not on,
+            "error": None,
+        }
+    )
     return tests
 
 
@@ -417,8 +501,10 @@ def duration(text):
 
 def quiet_args(argv, environ):
     """(seconds, wait or None, json, limits), or ValueError for a usage error."""
-    limits = {lim.name: positive(environ[lim.env], lim.env) if environ.get(lim.env, "") != "" else lim.default
-              for lim in QUIET_LIMITS}
+    limits = {
+        lim.name: positive(environ[lim.env], lim.env) if environ.get(lim.env, "") != "" else lim.default
+        for lim in QUIET_LIMITS
+    }
     seconds, wait, as_json = 60, None, False
     flags = {lim.flag: lim.name for lim in QUIET_LIMITS}
     i = 0
@@ -514,9 +600,16 @@ def quiet(argv, sample=None, sleep=time.sleep, clock=time.monotonic, out=None, e
 
     def stamp(s):
         return datetime.fromtimestamp(s["wall"]).isoformat(sep=" ", timespec="seconds")
-    result = {"quiet": ok, "seconds": seconds, "start": stamp(window[0]), "end": stamp(window[-1]),
-              "waited_s": None if wait is None else round(clock() - start, 1), "tests": tests,
-              "failed": [t["name"] for t in tests if not t["ok"]]}
+
+    result = {
+        "quiet": ok,
+        "seconds": seconds,
+        "start": stamp(window[0]),
+        "end": stamp(window[-1]),
+        "waited_s": None if wait is None else round(clock() - start, 1),
+        "tests": tests,
+        "failed": [t["name"] for t in tests if not t["ok"]],
+    }
     print(json.dumps(result) if as_json else quiet_text(result), file=out)
     return 0 if ok else 1
 

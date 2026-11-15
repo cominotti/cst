@@ -25,29 +25,50 @@ from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, load, shell_functi
 DEV = "0A_1B_2C_3D_4E_5F"
 
 
-def pw_dump(rate=96000, codec="ldac", profile="a2dp-sink", card=500, out=600, mic_state="suspended",
-            suspended=False):
+def pw_dump(rate=96000, codec="ldac", profile="a2dp-sink", card=500, out=600, mic_state="suspended", suspended=False):
     """A shortened pw-dump of the headset as found on sophia: the card, the
     A2DP output node and WirePlumber's headset source (named with ':')."""
-    out_params = {"EnumFormat": [{"mediaType": "audio", "format": {"default": "F32LE"}, "rate": rate,
-                                  "channels": 2}],
-                  "Format": [] if suspended else [{"mediaType": "audio", "format": "F32LE", "rate": rate,
-                                                    "channels": 2}],
-                  "Props": [{"volume": 1.0}, {"quality": -1}]}
+    out_params = {
+        "EnumFormat": [{"mediaType": "audio", "format": {"default": "F32LE"}, "rate": rate, "channels": 2}],
+        "Format": [] if suspended else [{"mediaType": "audio", "format": "F32LE", "rate": rate, "channels": 2}],
+        "Props": [{"volume": 1.0}, {"quality": -1}],
+    }
     return [
-        {"id": 36, "type": "PipeWire:Interface:Device", "info": {
-            "props": {"device.name": f"bluez_card.{DEV}", "object.serial": str(card),
-                      "bluez5.a2dp.ldac.quality": "auto"},
-            "params": {"Profile": [{"index": 1, "name": profile}]}}},
-        {"id": 129, "type": "PipeWire:Interface:Node", "info": {
-            "state": "running",
-            "props": {"node.name": f"bluez_output.{DEV}.1", "object.serial": str(out),
-                      "api.bluez5.codec": codec, "api.bluez5.profile": "a2dp-sink"},
-            "params": out_params}},
-        {"id": 48, "type": "PipeWire:Interface:Node", "info": {
-            "state": mic_state,
-            "props": {"node.name": f"bluez_input.{MAC}", "object.serial": "601"},
-            "params": {"Format": []}}},
+        {
+            "id": 36,
+            "type": "PipeWire:Interface:Device",
+            "info": {
+                "props": {
+                    "device.name": f"bluez_card.{DEV}",
+                    "object.serial": str(card),
+                    "bluez5.a2dp.ldac.quality": "auto",
+                },
+                "params": {"Profile": [{"index": 1, "name": profile}]},
+            },
+        },
+        {
+            "id": 129,
+            "type": "PipeWire:Interface:Node",
+            "info": {
+                "state": "running",
+                "props": {
+                    "node.name": f"bluez_output.{DEV}.1",
+                    "object.serial": str(out),
+                    "api.bluez5.codec": codec,
+                    "api.bluez5.profile": "a2dp-sink",
+                },
+                "params": out_params,
+            },
+        },
+        {
+            "id": 48,
+            "type": "PipeWire:Interface:Node",
+            "info": {
+                "state": mic_state,
+                "props": {"node.name": f"bluez_input.{MAC}", "object.serial": "601"},
+                "params": {"Format": []},
+            },
+        },
         {"id": 106, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "bluez_midi.server"}}},
         {"id": 1, "type": "PipeWire:Interface:Core", "info": {}},
     ]
@@ -64,11 +85,13 @@ def cards(active="a2dp-sink", sbc=True, lang_names=False):
     }
     if sbc:
         profs["a2dp-sink-sbc"] = {"description": "High Fidelity Playback (A2DP Sink, codec SBC)", "available": True}
-    if lang_names:      # descriptions in another language: only the names help
+    if lang_names:  # descriptions in another language: only the names help
         for p in profs.values():
             p["description"] = "Reprodução"
-    return [{"name": "alsa_card.x", "profiles": {}}, {"name": f"bluez_card.{DEV}", "index": 500,
-                                                       "active_profile": active, "profiles": profs}]
+    return [
+        {"name": "alsa_card.x", "profiles": {}},
+        {"name": f"bluez_card.{DEV}", "index": 500, "active_profile": active, "profiles": profs},
+    ]
 
 
 class ParseTest(unittest.TestCase):
@@ -78,8 +101,18 @@ class ParseTest(unittest.TestCase):
 
     def test_snapshot(self):
         s = self.w.snapshot(DEV, pw_dump())
-        self.assertEqual(s, {"card": 500, "profile": "a2dp-sink", "out": 600, "codec": "ldac", "rate": 96000,
-                             "inputs": [601], "mic": False})
+        self.assertEqual(
+            s,
+            {
+                "card": 500,
+                "profile": "a2dp-sink",
+                "out": 600,
+                "codec": "ldac",
+                "rate": 96000,
+                "inputs": [601],
+                "mic": False,
+            },
+        )
         self.assertTrue(self.w.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
         self.assertIsNone(self.w.snapshot("00_00", pw_dump())["card"])
 
@@ -94,12 +127,17 @@ class ParseTest(unittest.TestCase):
             self.assertEqual(self.h.pw_state(DEV, objs)[4], str(self.w.snapshot(DEV, objs)["rate"]))
 
     def test_snapshot_cli(self):
-        r = subprocess.run([sys.executable, "-I", WATCH, "--device", MAC, "--snapshot"],
-                           input=json.dumps(pw_dump()), capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", WATCH, "--device", MAC, "--snapshot"],
+            input=json.dumps(pw_dump()),
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("act: LDAC at 96000 Hz (want 48000)", r.stdout)
-        r = subprocess.run([sys.executable, "-I", WATCH, "--device", "nope", "--snapshot"],
-                           input="[]", capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", WATCH, "--device", "nope", "--snapshot"], input="[]", capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 2)
 
     def test_decide(self):
@@ -302,8 +340,7 @@ class BounceTest(unittest.TestCase):
         self.w = load(WATCH, "bt_ldac_watch")
         # No waiting: sleeps do nothing, the wait limits are zero.
         clock = types.SimpleNamespace(t=0.0)
-        self.w.time = types.SimpleNamespace(monotonic=lambda: clock.t,
-                                            sleep=lambda s: setattr(clock, "t", clock.t + s))
+        self.w.time = types.SimpleNamespace(monotonic=lambda: clock.t, sleep=lambda s: setattr(clock, "t", clock.t + s))
         self.w.SBC_HOLD = 0
         self.lines = []
         self.w.log = lambda msg, level=6: self.lines.append((level, msg))
@@ -320,8 +357,14 @@ class BounceTest(unittest.TestCase):
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
         self.assertIn((6, "fixed: LDAC now at 48000 Hz"), self.lines)
-        self.assertIn((6, "act: LDAC at 96000 Hz (want 48000): switching a2dp-sink -> a2dp-sink-sbc -> "
-                          "a2dp-sink (about a second of silence)"), self.lines)
+        self.assertIn(
+            (
+                6,
+                "act: LDAC at 96000 Hz (want 48000): switching a2dp-sink -> a2dp-sink-sbc -> "
+                "a2dp-sink (about a second of silence)",
+            ),
+            self.lines,
+        )
         # The new node is ours: nothing more to do, and no second attempt.
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
@@ -361,6 +404,7 @@ class BounceTest(unittest.TestCase):
             if prof == "a2dp-sink-sbc":
                 live.active = "headset-head-unit"
             return ok
+
         live.set_profile = set_profile
         w = self.watcher(live)
         w.look()
@@ -378,12 +422,12 @@ class BounceTest(unittest.TestCase):
             if live.active == "a2dp-sink-sbc":
                 s["mic"] = True
             return s
+
         live.snap = snap_mic
         w = self.watcher(live)
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc"])
-        self.assertTrue(any(lv == 3 and "microphone came into use" in m and "by hand" in m
-                            for lv, m in self.lines))
+        self.assertTrue(any(lv == 3 and "microphone came into use" in m and "by hand" in m for lv, m in self.lines))
 
     def test_alt_never_active_still_switches_back(self):
         live = FakeLive(self.w)
@@ -393,7 +437,8 @@ class BounceTest(unittest.TestCase):
             if prof == "a2dp-sink":
                 return real(prof)
             live.calls.append(prof)
-            return True             # pactl says yes, the card stays on LDAC
+            return True  # pactl says yes, the card stays on LDAC
+
         live.set_profile = set_profile
         w = self.watcher(live)
         w.look()
@@ -406,8 +451,9 @@ class BounceTest(unittest.TestCase):
 
         def set_profile(prof):
             if prof == "a2dp-sink-sbc":
-                self.w.Stop.handler(15, None)     # SIGTERM while switching
+                self.w.Stop.handler(15, None)  # SIGTERM while switching
             return real(prof)
+
         live.set_profile = set_profile
         w = self.watcher(live)
         self.addCleanup(setattr, self.w.Stop, "asked", False)
@@ -458,7 +504,7 @@ class ListenTest(unittest.TestCase):
         os.close(wfd)
         with os.fdopen(r, "rb", buffering=0) as f:
             watcher.listen(types.SimpleNamespace(stdout=f))
-        self.assertEqual(len(looks), 1)     # nothing relevant: only the start
+        self.assertEqual(len(looks), 1)  # nothing relevant: only the start
 
     def test_relevant_burst_triggers_a_look(self):
         w = load(WATCH, "bt_ldac_watch")
@@ -473,6 +519,7 @@ class ListenTest(unittest.TestCase):
                 os.write(wfd, b"Event 'change' on client #1\nEvent 'change' on sink #600\n")
             else:
                 os.close(wfd)
+
         watcher.look = look
         watcher.known = {600}
         with os.fdopen(r, "rb", buffering=0) as f:
@@ -543,11 +590,28 @@ systemctl() {
         log = os.path.join(home, "log")
         if os.path.exists(log):
             os.remove(log)
-        script = (self.STUBS + f'LDAC_RATE="{rate}"\n' +
-                  shell_functions("lw_plan", "lw_ours_present", "lw_unit_label", "lw_prog_label",
-                                  "lw_report", "lw_install", "lw_remove", "lw_last_failure") + body)
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "LOG": log,
-               "REPO": os.path.dirname(os.path.dirname(WATCH)), **(extra_env or {})}
+        script = (
+            self.STUBS
+            + f'LDAC_RATE="{rate}"\n'
+            + shell_functions(
+                "lw_plan",
+                "lw_ours_present",
+                "lw_unit_label",
+                "lw_prog_label",
+                "lw_report",
+                "lw_install",
+                "lw_remove",
+                "lw_last_failure",
+            )
+            + body
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home,
+            "LOG": log,
+            "REPO": os.path.dirname(os.path.dirname(WATCH)),
+            **(extra_env or {}),
+        }
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         calls = []
         if os.path.exists(log):
@@ -559,8 +623,14 @@ systemctl() {
         r, calls, home = self.run_lw('lw_plan; echo "change=$LW_CHANGE"; lw_install\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("change=1", r.stdout)
-        self.assertEqual(calls, ["systemctl --user daemon-reload", "systemctl --user enable cst-bt-ldac48.service",
-                                 "systemctl --user start cst-bt-ldac48.service"])
+        self.assertEqual(
+            calls,
+            [
+                "systemctl --user daemon-reload",
+                "systemctl --user enable cst-bt-ldac48.service",
+                "systemctl --user start cst-bt-ldac48.service",
+            ],
+        )
         prog = os.path.join(home, ".local/lib/cst/bt-ldac-watch")
         self.assertTrue(os.access(prog, os.X_OK))
         with open(os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")) as f:
@@ -583,8 +653,9 @@ systemctl() {
         r, calls, _ = self.run_lw('lw_plan; echo "change=$LW_CHANGE"; lw_report; lw_remove\n', rate="", home=home)
         self.assertIn("change=1", r.stdout)
         self.assertIn("item remove LDAC rate watcher", r.stdout)
-        self.assertEqual(calls, ["systemctl --user disable --now cst-bt-ldac48.service",
-                                 "systemctl --user daemon-reload"])
+        self.assertEqual(
+            calls, ["systemctl --user disable --now cst-bt-ldac48.service", "systemctl --user daemon-reload"]
+        )
         self.assertFalse(os.path.exists(prog))
         self.assertFalse(os.path.exists(os.path.dirname(prog)))
         self.assertFalse(os.path.exists(os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")))
@@ -594,12 +665,14 @@ systemctl() {
 
     def test_plan_names_the_user_file_and_the_last_failure(self):
         from bluetooth.tests.test_bluetooth import JOURNAL
+
         home = tempfile.mkdtemp(prefix="bt-test-")
         jf = os.path.join(home, "journal")
         with open(jf, "w") as f:
             f.write(JOURNAL)
-        r, calls, _ = self.run_lw("lw_plan; lw_report\n", home=home,
-                                  extra_env={"CMD": "plan", "USER_KEYS": "LDAC_RATE", "JOURNAL": jf})
+        r, calls, _ = self.run_lw(
+            "lw_plan; lw_report\n", home=home, extra_env={"CMD": "plan", "USER_KEYS": "LDAC_RATE", "JOURNAL": jf}
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("item note LDAC rate watcher", r.stdout)
         self.assertIn("item warn LDAC rate watcher", r.stdout)
@@ -613,8 +686,9 @@ systemctl() {
         os.makedirs(os.path.join(home, ".config/systemd/user"))
         with open(os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service"), "w") as f:
             f.write("[Service]\nExecStart=/bin/true\n")
-        r, calls, _ = self.run_lw('lw_plan; echo "st=$LW_UNIT_ST change=$LW_CHANGE"; CHECK=1 lw_remove\n',
-                                  rate="", home=home)
+        r, calls, _ = self.run_lw(
+            'lw_plan; echo "st=$LW_UNIT_ST change=$LW_CHANGE"; CHECK=1 lw_remove\n', rate="", home=home
+        )
         self.assertIn("st=conflict change=0", r.stdout)
         self.assertIn("left alone", r.stderr)
         self.assertEqual(calls, [])
@@ -656,8 +730,13 @@ le_plan() {{ :; }}; lw_plan() {{ :; }}
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         log = os.path.join(tmp, "log")
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log}, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log},
+            stdin=subprocess.DEVNULL,
+        )
         r.steps = []
         if os.path.exists(log):
             with open(log) as f:

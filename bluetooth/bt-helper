@@ -176,7 +176,7 @@ def edit_general(text):
         return join_lines(lines, nl, final or not text), True
     changed = False
     for key, val in WANTED.items():
-        ranges = general_ranges(lines)          # again: an insert moves the lines
+        ranges = general_ranges(lines)  # again: an insert moves the lines
         active, commented = key_lines(lines, ranges, key)
         if active and satisfied(key, key_pattern(key).match(lines[active[-1]]).group(2)):
             continue
@@ -367,6 +367,7 @@ def other_fragments(ours, dirs):
     WirePlumber reads them: by file name, over DIRS (highest priority
     first: a name found in an earlier dir hides the same name in later ones)."""
     import os
+
     found = {}
     for d in dirs:
         try:
@@ -382,7 +383,7 @@ def other_fragments(ours, dirs):
             continue
         try:
             text = read(found[n])
-        except (OSError, UnicodeDecodeError):
+        except OSError, UnicodeDecodeError:
             continue
         if defines_section(text):
             out.append(("before" if n < ours else "after", found[n]))
@@ -405,6 +406,7 @@ def wp_effective_roles():
     cannot be loaded or the config cannot be opened."""
     import ctypes
     import os
+
     lib = ctypes.CDLL(os.environ.get("CST_BT_LIBWP") or "libwireplumber-0.5.so.0")
     lib.wp_init.argtypes = [ctypes.c_int]
     lib.wp_init(0)
@@ -465,11 +467,13 @@ def settings_set(text, key, value):
     end with a newline. Everything else is kept."""
     want = f"{key}={value}"
     if text is None:
-        return ("# CST bluetooth settings (override bluetooth/bluetooth.conf in the repo)\n"
-                f"{want}\n"), True
+        return (f"# CST bluetooth settings (override bluetooth/bluetooth.conf in the repo)\n{want}\n"), True
     lines, nl, final = split_lines(text)
-    idx = [i for i, line in enumerate(lines)
-           if "=" in line and not line.strip().startswith("#") and line.split("=", 1)[0].strip() == key]
+    idx = [
+        i
+        for i, line in enumerate(lines)
+        if "=" in line and not line.strip().startswith("#") and line.split("=", 1)[0].strip() == key
+    ]
     before = list(lines)
     if idx:
         if parse_settings(lines[idx[-1]]).get(key) != value:
@@ -527,8 +531,11 @@ def pw_state(dev, objs):
             found = True
             prof = " ".join(pr.get("name", "?") for pr in params.get("Profile", []) or [])
             rule = p.get("bluez5.a2dp.ldac.quality")
-        if (kind.endswith("Node") and str(p.get("node.name", "")).startswith("bluez_output." + dev)
-                and p.get("api.bluez5.codec")):
+        if (
+            kind.endswith("Node")
+            and str(p.get("node.name", "")).startswith("bluez_output." + dev)
+            and p.get("api.bluez5.codec")
+        ):
             codec = p["api.bluez5.codec"]
             rate = node_rate(info)
             for pr in params.get("Props", []) or []:
@@ -574,7 +581,7 @@ def lw_failure(text):
         if msg.startswith("fixed: "):
             last = None
         elif msg.startswith("failed: "):
-            last = (when, msg[len("failed: "):], prev_detail.get(ident, ""))
+            last = (when, msg[len("failed: ") :], prev_detail.get(ident, ""))
         elif msg.startswith("act: "):
             prev_detail[ident] = ""
         elif not KEYWORD.match(msg) and ident.startswith("python3"):
@@ -600,10 +607,24 @@ def main(argv):
         print(__doc__, end="")
         return 2
     cmd, args = argv[0], argv[1:]
-    arity = {"general-apply": 1, "general-show": 1, "general-revert": 2, "wp-render": 2,
-             "wp-state": 3, "ldac-unit": 2, "unit-state": 3, "adapter-path": 0, "card-state": 1, "pw-parse": 1,
-             "le-render": 0, "le-state": 1, "settings-keys": 1, "lw-failure": 0, "wp-roles": 0,
-             "settings-set": 3}
+    arity = {
+        "general-apply": 1,
+        "general-show": 1,
+        "general-revert": 2,
+        "wp-render": 2,
+        "wp-state": 3,
+        "ldac-unit": 2,
+        "unit-state": 3,
+        "adapter-path": 0,
+        "card-state": 1,
+        "pw-parse": 1,
+        "le-render": 0,
+        "le-state": 1,
+        "settings-keys": 1,
+        "lw-failure": 0,
+        "wp-roles": 0,
+        "settings-set": 3,
+    }
     if cmd == "wp-others":
         if not args:
             print(f"bt-helper: usage: see {sys.argv[0]} (no arguments)", file=sys.stderr)
@@ -692,7 +713,7 @@ def main(argv):
             return 1
         print(f"{st[0]}|{int(st[1])}|{int(st[2])}")
         return 0
-    st = pw_state(args[0], data)          # pw-parse
+    st = pw_state(args[0], data)  # pw-parse
     if st is None:
         return 4
     print("|".join(x or d for x, d in zip(st, ("?", "?", "-", "-", "-"), strict=False)))

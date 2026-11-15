@@ -30,20 +30,46 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 LOG_DIR = "/var/log/btrfs-stall-monitor"
-GAP_MAX = 30.0        # s; a larger gap between samples means the daemon was not running
-HUNG_SECONDS = 30             # the daemon's threshold for hung / busy waits
-FRESH_MAX = 25.0      # s; newer data may still be buffered in the daemon
+GAP_MAX = 30.0  # s; a larger gap between samples means the daemon was not running
+HUNG_SECONDS = 30  # the daemon's threshold for hung / busy waits
+FRESH_MAX = 25.0  # s; newer data may still be buffered in the daemon
 PAGE = 4096
 # /proc/vmstat keys that daemons before v7 always stored as 0 (they sit after
 # the first 4 KiB of the file, and those daemons read only one page).
 ZSWAP_KEYS = ("zswpin", "zswpout", "zswpwb")
 
-DISK_FIELDS = ("rd_ios", "rd_merges", "rd_sectors", "rd_ticks", "wr_ios", "wr_merges",
-               "wr_sectors", "wr_ticks", "inflight", "io_ticks", "time_in_queue",
-               "dc_ios", "dc_merges", "dc_sectors", "dc_ticks", "fl_ios", "fl_ticks")
+DISK_FIELDS = (
+    "rd_ios",
+    "rd_merges",
+    "rd_sectors",
+    "rd_ticks",
+    "wr_ios",
+    "wr_merges",
+    "wr_sectors",
+    "wr_ticks",
+    "inflight",
+    "io_ticks",
+    "time_in_queue",
+    "dc_ios",
+    "dc_merges",
+    "dc_sectors",
+    "dc_ticks",
+    "fl_ios",
+    "fl_ticks",
+)
 DI = {k: i for i, k in enumerate(DISK_FIELDS)}
-DISK_SUM = ("rd_ios", "wr_ios", "rd_ticks", "wr_ticks", "rd_sectors", "wr_sectors",
-            "io_ticks", "time_in_queue", "fl_ios", "fl_ticks")
+DISK_SUM = (
+    "rd_ios",
+    "wr_ios",
+    "rd_ticks",
+    "wr_ticks",
+    "rd_sectors",
+    "wr_sectors",
+    "io_ticks",
+    "time_in_queue",
+    "fl_ios",
+    "fl_ticks",
+)
 
 # Rules that look at the whole stack first: the reason a task waits is often
 # several frames below the innermost wait (a commit waiting for ordered extents
@@ -58,7 +84,8 @@ FUSE_RE = re.compile(r"^(?:request_wait_answer|fuse_\w+)$")
 MAINT_RE = re.compile(
     r"^(?:btrfs_ioctl_fitrim|btrfs_trim_\w+|do_trimming|trim_bitmaps|trim_no_bitmap"
     r"|btrfs_discard_workfn|btrfs_ioctl_scrub|btrfs_scrub_dev|scrub_\w+|flush_scrub_stripes"
-    r"|btrfs_ioctl_balance|btrfs_balance\w*|btrfs_relocate_\w+|relocate_\w+|btrfs_reclaim_bgs_work)$")
+    r"|btrfs_ioctl_balance|btrfs_balance\w*|btrfs_relocate_\w+|relocate_\w+|btrfs_reclaim_bgs_work)$"
+)
 # Old "hung" events/alerts (daemon <= v4) of maintenance tasks, for records
 # without a usable stack (v2 events, alerts): the task's comm or its systemd
 # unit. Alerts carry the same text as their event.
@@ -67,66 +94,99 @@ STACK_RULES = [
     ("fuse", FUSE_RE),
     ("maintenance", MAINT_RE),
     # The swap path anywhere on the stack (same list as SWAP_FRAME in btrfs-stall-monitord).
-    ("reclaim", re.compile(
-        r"^(?:do_swap_page|swap_read_folio\w*|swap_cluster_readahead|swapin_readahead|swap_vma_readahead"
-        r"|__read_swap_cache_async|read_swap_cache_async|__swap_writepage|swap_writepage\w*|swap_writeout"
-        r"|zswap_\w+)$")),
+    (
+        "reclaim",
+        re.compile(
+            r"^(?:do_swap_page|swap_read_folio\w*|swap_cluster_readahead|swapin_readahead|swap_vma_readahead"
+            r"|__read_swap_cache_async|read_swap_cache_async|__swap_writepage|swap_writepage\w*|swap_writeout"
+            r"|zswap_\w+)$"
+        ),
+    ),
     # A log sync can fall back to a full commit: then commit_transaction is on the stack.
     ("commit", re.compile(r"^(?:btrfs_commit_transaction|btrfs_wait_for_commit)$")),
     ("log-sync", re.compile(r"^btrfs_sync_log$")),
 ]
 # Then the innermost meaningful frame, first match wins.
 CATEGORIES = [
-    ("maintenance", r"^(?:btrfs_ioctl_fitrim|btrfs_trim_\w+|do_trimming|trim_bitmaps|trim_no_bitmap"
-                    r"|btrfs_discard_workfn|btrfs_ioctl_scrub|btrfs_scrub_dev|scrub_\w+|flush_scrub_stripes"
-                    r"|btrfs_ioctl_balance|btrfs_balance\w*|btrfs_relocate_\w+|relocate_\w+"
-                    r"|btrfs_reclaim_bgs_work)$",
-     "btrfs maintenance (fstrim/discard, scrub, balance)"),
-    ("zstd-workspace", r"zstd|get_workspace|find_workspace",
-     "waiting for a btrfs zstd compression workspace"),
-    ("dirty-throttle", r"^balance_dirty_pages",
-     "writers throttled by the dirty-page limit (vm.dirty_bytes)"),
-    ("commit", r"commit_transaction|transaction_kthread|wait_current_trans|wait_for_commit|btrfs_sync_fs|join_transaction"
-               r"|start_transaction",
-     "btrfs transaction commit"),
-    ("log-sync", r"tree_log|sync_log|wait_log_commit|wait_for_writer",
-     "fsync log-tree sync (btrfs_sync_log)"),
-    ("flush", r"barrier_all_devices|write_dev_flush|wait_dev_flush|wait_dev_supers|blkdev_issue_flush"
-              r"|write_all_supers",
-     "disk cache flushes (fsync / commit barriers on every RAID1 member)"),
-    ("space", r"reserve_metadata|reserve_data|reserve_ticket|flush_space|btrfs_reserve|reserve_space"
-              r"|delalloc_reserve",
-     "btrfs space reservation / flushing"),
-    ("writeback", r"ordered_extent|wait_ordered|lock_and_flush|folio_wait_writeback|page_writeback|fdatawait"
-                  r"|wait_sb_inodes|writeback_inodes|wb_wait|sync_inodes",
-     "waiting for data writeback (btrfs ordered extents / fsync)"),
+    (
+        "maintenance",
+        r"^(?:btrfs_ioctl_fitrim|btrfs_trim_\w+|do_trimming|trim_bitmaps|trim_no_bitmap"
+        r"|btrfs_discard_workfn|btrfs_ioctl_scrub|btrfs_scrub_dev|scrub_\w+|flush_scrub_stripes"
+        r"|btrfs_ioctl_balance|btrfs_balance\w*|btrfs_relocate_\w+|relocate_\w+"
+        r"|btrfs_reclaim_bgs_work)$",
+        "btrfs maintenance (fstrim/discard, scrub, balance)",
+    ),
+    ("zstd-workspace", r"zstd|get_workspace|find_workspace", "waiting for a btrfs zstd compression workspace"),
+    ("dirty-throttle", r"^balance_dirty_pages", "writers throttled by the dirty-page limit (vm.dirty_bytes)"),
+    (
+        "commit",
+        r"commit_transaction|transaction_kthread|wait_current_trans|wait_for_commit|btrfs_sync_fs|join_transaction"
+        r"|start_transaction",
+        "btrfs transaction commit",
+    ),
+    ("log-sync", r"tree_log|sync_log|wait_log_commit|wait_for_writer", "fsync log-tree sync (btrfs_sync_log)"),
+    (
+        "flush",
+        r"barrier_all_devices|write_dev_flush|wait_dev_flush|wait_dev_supers|blkdev_issue_flush"
+        r"|write_all_supers",
+        "disk cache flushes (fsync / commit barriers on every RAID1 member)",
+    ),
+    (
+        "space",
+        r"reserve_metadata|reserve_data|reserve_ticket|flush_space|btrfs_reserve|reserve_space"
+        r"|delalloc_reserve",
+        "btrfs space reservation / flushing",
+    ),
+    (
+        "writeback",
+        r"ordered_extent|wait_ordered|lock_and_flush|folio_wait_writeback|page_writeback|fdatawait"
+        r"|wait_sb_inodes|writeback_inodes|wb_wait|sync_inodes",
+        "waiting for data writeback (btrfs ordered extents / fsync)",
+    ),
     ("wbt", r"wbt_wait|rq_qos_wait", "block-layer writeback throttling (WBT)"),
-    ("metadata-read", r"read_extent_buffer_pages|read_tree_block|btrfs_read_extent_buffer|read_block_for_search"
-                      r"|btrfs_readahead_tree_block",
-     "reading btrfs metadata from disk (cold cache)"),
-    ("btrfs-locks", r"btrfs_tree_lock|btrfs_tree_read_lock|__btrfs_tree|btrfs_lock_root|btrfs_search_slot"
-                    r"|lock_extent|btrfs_inode_lock|btrfs_read_lock",
-     "btrfs b-tree / extent / inode lock contention"),
+    (
+        "metadata-read",
+        r"read_extent_buffer_pages|read_tree_block|btrfs_read_extent_buffer|read_block_for_search"
+        r"|btrfs_readahead_tree_block",
+        "reading btrfs metadata from disk (cold cache)",
+    ),
+    (
+        "btrfs-locks",
+        r"btrfs_tree_lock|btrfs_tree_read_lock|__btrfs_tree|btrfs_lock_root|btrfs_search_slot"
+        r"|lock_extent|btrfs_inode_lock|btrfs_read_lock",
+        "btrfs b-tree / extent / inode lock contention",
+    ),
     # The last names: waits for the memory map lock (MMAP_LOCK_FRAME in btrfs-stall-monitord).
-    ("reclaim", r"shrink_|try_to_free|alloc_pages|swap|zswap|mem_cgroup_handle_over_high"
-                r"|throttle_direct_reclaim|^(?:lock_mm_and_find_vma|__vma_start_exclude_readers|__vma_start_write"
-                r"|vma_start_write\w*|vm_mmap_pgoff|__vm_munmap|vm_munmap|do_mprotect_pkey|do_madvise|__do_sys_brk)$",
-     "memory reclaim / swap"),
+    (
+        "reclaim",
+        r"shrink_|try_to_free|alloc_pages|swap|zswap|mem_cgroup_handle_over_high"
+        r"|throttle_direct_reclaim|^(?:lock_mm_and_find_vma|__vma_start_exclude_readers|__vma_start_write"
+        r"|vma_start_write\w*|vm_mmap_pgoff|__vm_munmap|vm_munmap|do_mprotect_pkey|do_madvise|__do_sys_brk)$",
+        "memory reclaim / swap",
+    ),
     ("discard", r"discard", "async discard (discard=async)"),
     ("overlayfs", r"^ovl_", "overlayfs copy-up (containers)"),
-    ("device", r"blk_mq_get_tag|submit_bio_wait|^blk_|nvme|^dm_|kcryptd|dmcrypt|^crypt_|^bio_",
-     "block device queue (device or dm-crypt)"),
-    ("page-read", r"filemap_read|filemap_get_pages|folio_wait_locked|folio_lock|filemap_fault|readahead"
-                  r"|read_folio|do_readpage",
-     "reading data not in the page cache"),
+    (
+        "device",
+        r"blk_mq_get_tag|submit_bio_wait|^blk_|nvme|^dm_|kcryptd|dmcrypt|^crypt_|^bio_",
+        "block device queue (device or dm-crypt)",
+    ),
+    (
+        "page-read",
+        r"filemap_read|filemap_get_pages|folio_wait_locked|folio_lock|filemap_fault|readahead"
+        r"|read_folio|do_readpage",
+        "reading data not in the page cache",
+    ),
 ]
 # Waits that are not about storage at all (D state is used by more than IO).
 # worker_thread/kthread here only matter for daemon v2 data, where a task that
 # woke up between its stat and stack reads was still sampled.
-IDLE_SIG = re.compile(r"^(?:futex_\w+|__futex_\w+|ep_poll|do_epoll_wait|do_select|do_sys_poll|usb_\w+"
-                      r"|worker_thread|kthread|do_nanosleep|hrtimer_nanosleep|pipe_\w+"
-                      r"|unix_\w+|n_tty_\w+|tty_\w+|wait_for_partner|do_wait|kernel_wait4|rcu_\w+"
-                      r"|poll_schedule_timeout\w*|intel_\w+|drm_\w+|i915_\w+|xe_\w+|pci_\w+)$")
+IDLE_SIG = re.compile(
+    r"^(?:futex_\w+|__futex_\w+|ep_poll|do_epoll_wait|do_select|do_sys_poll|usb_\w+"
+    r"|worker_thread|kthread|do_nanosleep|hrtimer_nanosleep|pipe_\w+"
+    r"|unix_\w+|n_tty_\w+|tty_\w+|wait_for_partner|do_wait|kernel_wait4|rcu_\w+"
+    r"|poll_schedule_timeout\w*|intel_\w+|drm_\w+|i915_\w+|xe_\w+|pci_\w+)$"
+)
 # "maintenance" replaces the former "scrub" category (scrub is maintenance too).
 # "reclaim" (memory reclaim, swap, zswap) waits on memory, not on the disks:
 # daemon v8+ tags it "memory" and leaves it out of "d"; for older records the
@@ -142,17 +202,17 @@ CAT_DESC["idle"] = "non-storage waits (futex, epoll, USB, GPU / PCI power manage
 
 HINTS = {
     "commit": "btrfs transaction commits dominate; with flushoncommit every commit also flushes all dirty data. "
-              "Options to PROPOSE to the user (don't apply): lower vm.dirty_bytes, or test without flushoncommit.",
+    "Options to PROPOSE to the user (don't apply): lower vm.dirty_bytes, or test without flushoncommit.",
     "log-sync": "fsync-heavy workload: every fsync writes the btrfs log tree and flushes the disk cache of "
-                "both RAID1 members (flushoncommit and vm.dirty_* do not matter here). The lever is fsync "
-                "frequency in the application, e.g. relaxed durability settings for test databases.",
+    "both RAID1 members (flushoncommit and vm.dirty_* do not matter here). The lever is fsync "
+    "frequency in the application, e.g. relaxed durability settings for test databases.",
     "dirty-throttle": "Writers were paced by vm.dirty_bytes. Expected under heavy writes; it bounds commit "
-                      "latency by design.",
+    "latency by design.",
     "writeback": "Tasks waited for their own data to reach disk (fsync / ordered extents).",
     "flush": "fsync/commit cache flushes; each flush goes to both RAID1 members. Frequent fsync "
-             "(databases, package managers, test fixtures) pays this.",
+    "(databases, package managers, test fixtures) pays this.",
     "metadata-read": "Cold metadata reads: something walked many files or directories (find/bfs, indexers, du, "
-                     "a big checkout) after their metadata left the page cache.",
+    "a big checkout) after their metadata left the page cache.",
     "btrfs-locks": "Contention inside btrfs metadata (many writers in the same subvolume / directory).",
     "space": "btrfs had to flush to reserve metadata/data space; check the metadata line.",
     "overlayfs": "Container copy-up of large files from lower image layers.",
@@ -163,32 +223,34 @@ HINTS = {
 }
 
 UNITS = {
-    "time": "epoch seconds", "*_pct": "percent of covered wall time", "*_bytes": "bytes",
-    "*_ms": "milliseconds", "share": "fraction of sampled D-state task observations",
-    "task_samples": "one task seen in D state in one sample (1 s apart during episodes, "
-                    "so roughly task-seconds)",
+    "time": "epoch seconds",
+    "*_pct": "percent of covered wall time",
+    "*_bytes": "bytes",
+    "*_ms": "milliseconds",
+    "share": "fraction of sampled D-state task observations",
+    "task_samples": "one task seen in D state in one sample (1 s apart during episodes, so roughly task-seconds)",
     "vm.zswap_in_bytes / zswap_out_bytes": "bytes decompressed from / compressed into the zswap pool "
-                                           "(RAM, no disk IO); null when no sample came from a daemon >= v7",
+    "(RAM, no disk IO); null when no sample came from a daemon >= v7",
     "vm.swap_in_bytes / swap_out_bytes": "bytes read from / written to the swap disk (pswpin/pswpout); "
-                                         "swap-out includes zswap writeback",
+    "swap-out includes zswap writeback",
     "vm.swap_out_bypass_bytes": "swap-out that did not pass through zswap (pswpout minus zswpwb, "
-                                "v7+ samples only); null like zswap_*",
+    "v7+ samples only); null like zswap_*",
     "peak.d_tasks / mem_tasks": "most tasks at once waiting on storage / on memory (reclaim, swap, zswap); "
-                                "for records of a daemon < v8 estimated from the episodes' stacks",
+    "for records of a daemon < v8 estimated from the episodes' stacks",
     "disks.*.read_await_ms / write_await_ms": "average time per read / write request",
     "sample_d_tasks": "most tasks waiting on storage in one sample (samples of a daemon >= v5)",
     "open_episode": "null, or an episode without a record yet: since / last (epoch s) and d_tasks "
-                    "(most tasks waiting on storage in its samples)",
+    "(most tasks waiting on storage in its samples)",
     "episodes.*.max_d_mem": "most tasks waiting on memory at once in the episode",
     "episodes.*.estimated": "true when max_d / max_d_mem were estimated from the stacks "
-                            "(the episode was recorded by a daemon < v8)",
+    "(the episode was recorded by a daemon < v8)",
 }
 
 
 def classify(sig, examples, comms=(), kind=None):
-    if kind in NON_STORAGE:        # daemon v3 already classified the wait
+    if kind in NON_STORAGE:  # daemon v3 already classified the wait
         return kind
-    if kind == "memory":           # daemon v8+
+    if kind == "memory":  # daemon v8+
         return "reclaim"
     if FUSE_RE.match(sig):
         return "fuse"
@@ -249,8 +311,9 @@ def load(log_dir, since, until):
     first_day = time.strftime("%Y-%m-%d", time.localtime(since - 86400))
     # Records buffered across midnight can land in the next day's file.
     last_day = time.strftime("%Y-%m-%d", time.localtime(until + 86400))
-    paths = sorted(glob.glob(os.path.join(log_dir, "stall-*.jsonl")) +
-                   glob.glob(os.path.join(log_dir, "stall-*.jsonl.gz")))
+    paths = sorted(
+        glob.glob(os.path.join(log_dir, "stall-*.jsonl")) + glob.glob(os.path.join(log_dir, "stall-*.jsonl.gz"))
+    )
     plain = {p for p in paths if p.endswith(".jsonl")}
     for path in paths:
         day = os.path.basename(path)[6:16]
@@ -290,9 +353,11 @@ def zswap_text(vm):
         return f"zswap in/out n/a (daemon < v7)   {disk}"
     since = vm.get("zswap_counted_from")
     bypass = vm.get("swap_out_bypass_bytes") or 0
-    return (f"zswap in/out {fmt_bytes(vm['zswap_in_bytes'])} / {fmt_bytes(vm['zswap_out_bytes'])}"
-            f"{f' (from {fmt_ts(since)})' if since else ''}   {disk}"
-            f"{f' ({fmt_bytes(bypass)} of it not through zswap)' if bypass >= 2**20 else ''}")
+    return (
+        f"zswap in/out {fmt_bytes(vm['zswap_in_bytes'])} / {fmt_bytes(vm['zswap_out_bytes'])}"
+        f"{f' (from {fmt_ts(since)})' if since else ''}   {disk}"
+        f"{f' ({fmt_bytes(bypass)} of it not through zswap)' if bypass >= 2**20 else ''}"
+    )
 
 
 def fmt_counts(d, n=4):
@@ -305,9 +370,13 @@ def container_names():
         if not shutil.which(tool):
             continue
         try:
-            out = subprocess.run([tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
-                                 capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+            out = subprocess.run(
+                [tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except OSError, subprocess.TimeoutExpired:
             continue
         for line in out.stdout.splitlines():
             cid, _, name = line.partition("\t")
@@ -318,9 +387,30 @@ def container_names():
 
 def below_top(since, until, field, top=8):
     """below's per-process IO for the window: ([{comm, cgroup, bytes}], error)."""
-    cmd = ["below", "dump", "process", "-b", str(int(since)), "-e", str(int(until)),
-           "-O", "json", "--raw", "-f", "timestamp", "pid", "comm", "cgroup",
-           "io.rbytes_per_sec", "io.wbytes_per_sec", "-s", field, "--rsort", "--top", str(top)]
+    cmd = [
+        "below",
+        "dump",
+        "process",
+        "-b",
+        str(int(since)),
+        "-e",
+        str(int(until)),
+        "-O",
+        "json",
+        "--raw",
+        "-f",
+        "timestamp",
+        "pid",
+        "comm",
+        "cgroup",
+        "io.rbytes_per_sec",
+        "io.wbytes_per_sec",
+        "-s",
+        field,
+        "--rsort",
+        "--top",
+        str(top),
+    ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -366,7 +456,7 @@ def below_top(since, until, field, top=8):
         comm = str(pick(row, "comm", "name") or "?")
         cg = str(pick(row, "cgroup") or "").rstrip("/").rsplit("/", 1)[-1][:40]
         rate = num(pick(row, "wbytes", "write") if want_write else pick(row, "rbytes", "read"))
-        agg[(comm, cg)] = agg.get((comm, cg), 0.0) + rate * 5.0   # below samples every 5 s
+        agg[(comm, cg)] = agg.get((comm, cg), 0.0) + rate * 5.0  # below samples every 5 s
     items = [{"comm": c, "cgroup": g, "bytes": int(v)} for (c, g), v in agg.items() if v > 0]
     return sorted(items, key=lambda x: -x["bytes"]), None
 
@@ -402,12 +492,22 @@ def analyse(recs, since, until, with_below, verbose):
         samples.pop(0)
 
     meta = meta or {}
-    res = {"window": {"since": since, "until": until}, "kernel": meta.get("kernel"),
-           "samples": len(samples), "episodes": [], "events": events, "alerts": alerts}
+    res = {
+        "window": {"since": since, "until": until},
+        "kernel": meta.get("kernel"),
+        "samples": len(samples),
+        "episodes": [],
+        "events": events,
+        "alerts": alerts,
+    }
     window_s = until - since
-    res["coverage"] = {"window_s": round(window_s), "covered_s": 0,
-                       "first_sample": samples[0]["ts"] if samples else None,
-                       "last_sample": samples[-1]["ts"] if samples else None, "complete": False}
+    res["coverage"] = {
+        "window_s": round(window_s),
+        "covered_s": 0,
+        "first_sample": samples[0]["ts"] if samples else None,
+        "last_sample": samples[-1]["ts"] if samples else None,
+        "complete": False,
+    }
     if len(samples) < 2:
         return res, meta
 
@@ -420,29 +520,46 @@ def analyse(recs, since, until, with_below, verbose):
 
     covered = 0.0
     psi = {"io_some": 0, "io_full": 0, "mem_some": 0, "mem_full": 0, "cpu_some": 0}
-    peak = {"io_some_avg10": 0.0, "io_full_avg10": 0.0, "mem_some_avg10": 0.0, "cpu_some_avg10": 0.0,
-            "iowait_tasks": 0, "d_tasks": 0, "mem_tasks": 0, "maint_tasks": 0, "dirty_bytes": 0,
-            "writeback_bytes": 0}
-    vmd = {k: 0 for k in vm_keys if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold",
-                                                "nr_dirty_background_threshold")}
+    peak = {
+        "io_some_avg10": 0.0,
+        "io_full_avg10": 0.0,
+        "mem_some_avg10": 0.0,
+        "cpu_some_avg10": 0.0,
+        "iowait_tasks": 0,
+        "d_tasks": 0,
+        "mem_tasks": 0,
+        "maint_tasks": 0,
+        "dirty_bytes": 0,
+        "writeback_bytes": 0,
+    }
+    vmd = {
+        k: 0
+        for k in vm_keys
+        if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold", "nr_dirty_background_threshold")
+    }
     fs, disks, cg = {}, {}, {}
     gaps = 0
     # (ts, d, v5+) of samples of daemons v3-v7: their "d" also counted memory
     # waits (and, before v5, btrfs maintenance); corrected after the episodes.
     old_d = []
-    sample_d = 0        # most storage waits in one v8+ sample
-    maint_samples = 0   # v5+ samples with a btrfs maintenance task in D state
-    pswpout_v7 = 0      # pswpout of the v7+ sample pairs (compared with zswpwb)
+    sample_d = 0  # most storage waits in one v8+ sample
+    maint_samples = 0  # v5+ samples with a btrfs maintenance task in D state
+    pswpout_v7 = 0  # pswpout of the v7+ sample pairs (compared with zswpwb)
     v6_since, v7_since = first_at.get(6), first_at.get(7)
-    zswap_ok = False    # some sample pair came from a v7+ daemon (zswap counters usable)
+    zswap_ok = False  # some sample pair came from a v7+ daemon (zswap counters usable)
     for a, b in zip(samples, samples[1:], strict=False):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             gaps += 1
             continue
         covered += dt
-        for key, res_key, idx in (("io", "io_some", 1), ("io", "io_full", 3), ("memory", "mem_some", 1),
-                                  ("memory", "mem_full", 3), ("cpu", "cpu_some", 1)):
+        for key, res_key, idx in (
+            ("io", "io_some", 1),
+            ("io", "io_full", 3),
+            ("memory", "mem_some", 1),
+            ("memory", "mem_full", 3),
+            ("cpu", "cpu_some", 1),
+        ):
             pa, pb = a["psi"].get(key), b["psi"].get(key)
             if pa and pb and pb[idx] >= pa[idx]:
                 psi[res_key] += pb[idx] - pa[idx]
@@ -452,11 +569,11 @@ def analyse(recs, since, until, with_below, verbose):
         peak["mem_some_avg10"] = max(peak["mem_some_avg10"], (p.get("memory") or [0])[0])
         peak["cpu_some_avg10"] = max(peak["cpu_some_avg10"], (p.get("cpu") or [0])[0])
         peak["iowait_tasks"] = max(peak["iowait_tasks"], b["procs"][1])
-        if "d_all" in b:      # daemon v3+: "d" counts storage waits only
-            if "d_maint" in b:    # v5+: maintenance excluded from "d"
+        if "d_all" in b:  # daemon v3+: "d" counts storage waits only
+            if "d_maint" in b:  # v5+: maintenance excluded from "d"
                 peak["maint_tasks"] = max(peak["maint_tasks"], b["d_maint"])
                 maint_samples += b["d_maint"] > 0
-            if "d_mem" in b:      # v8+: memory waits excluded from "d"
+            if "d_mem" in b:  # v8+: memory waits excluded from "d"
                 sample_d = max(sample_d, b.get("d", 0))
                 peak["mem_tasks"] = max(peak["mem_tasks"], b["d_mem"])
             else:
@@ -478,8 +595,17 @@ def analyse(recs, since, until, with_below, verbose):
                     pswpout_v7 += d
         for uuid, fb in b["fs"].items():
             fa = a["fs"].get(uuid)
-            f = fs.setdefault(uuid, {"commits": 0, "commit_ms": 0, "max_commit_ms": 0, "max_at": None,
-                                     "new_device_errors": 0, "space": None})
+            f = fs.setdefault(
+                uuid,
+                {
+                    "commits": 0,
+                    "commit_ms": 0,
+                    "max_commit_ms": 0,
+                    "max_at": None,
+                    "new_device_errors": 0,
+                    "space": None,
+                },
+            )
             if fb["c"][5] > f["max_commit_ms"]:
                 f["max_commit_ms"], f["max_at"] = fb["c"][5], b["ts"]
             f["space"] = fb.get("space") or {}
@@ -520,41 +646,58 @@ def analyse(recs, since, until, with_below, verbose):
             c["wall"] += dt
 
     last = samples[-1]["ts"]
-    res["coverage"].update({"covered_s": round(covered), "gaps": gaps,
-                            # Samples are 5 s apart: tolerate up to two missing ones on short windows.
-                            "complete": covered >= min(0.8 * window_s, window_s - 2 * meta.get("base_interval", 5.0))
-                            and last >= min(until, time.time()) - FRESH_MAX})
+    res["coverage"].update(
+        {
+            "covered_s": round(covered),
+            "gaps": gaps,
+            # Samples are 5 s apart: tolerate up to two missing ones on short windows.
+            "complete": covered >= min(0.8 * window_s, window_s - 2 * meta.get("base_interval", 5.0))
+            and last >= min(until, time.time()) - FRESH_MAX,
+        }
+    )
     pct = {f"{k}_pct": v / 1e6 / covered * 100 if covered else 0.0 for k, v in psi.items()}
     res["pressure"] = pct
     res["peak"] = peak
     res["maintenance_samples"] = maint_samples
+
     # None: no sample in the window came from a v7+ daemon.
     def zswap_bytes(key):
         return vmd.get(key, 0) * PAGE if zswap_ok else None
+
     # Set when the window starts before the v7 upgrade: zswap is counted from there on.
     counted_from = v7_since if zswap_ok and v7_since > samples[0]["ts"] else None
-    res["vm"] = {"swap_in_bytes": vmd.get("pswpin", 0) * PAGE, "swap_out_bytes": vmd.get("pswpout", 0) * PAGE,
-                 "zswap_in_bytes": zswap_bytes("zswpin"), "zswap_out_bytes": zswap_bytes("zswpout"),
-                 "zswap_writeback_bytes": zswap_bytes("zswpwb"),
-                 # pswpout also counts zswap writeback; the rest bypassed zswap.
-                 "swap_out_bypass_bytes": max(0, pswpout_v7 - vmd.get("zswpwb", 0)) * PAGE if zswap_ok else None,
-                 "zswap_counted_from": counted_from,
-                 "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
-                 "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
-                 "dirty_limit_bytes": meta.get("dirty_bytes", 0)}
+    res["vm"] = {
+        "swap_in_bytes": vmd.get("pswpin", 0) * PAGE,
+        "swap_out_bytes": vmd.get("pswpout", 0) * PAGE,
+        "zswap_in_bytes": zswap_bytes("zswpin"),
+        "zswap_out_bytes": zswap_bytes("zswpout"),
+        "zswap_writeback_bytes": zswap_bytes("zswpwb"),
+        # pswpout also counts zswap writeback; the rest bypassed zswap.
+        "swap_out_bypass_bytes": max(0, pswpout_v7 - vmd.get("zswpwb", 0)) * PAGE if zswap_ok else None,
+        "zswap_counted_from": counted_from,
+        "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
+        "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
+        "dirty_limit_bytes": meta.get("dirty_bytes", 0),
+    }
     for f in fs.values():
         f["avg_commit_ms"] = f["commit_ms"] / f["commits"] if f["commits"] else 0
     res["fs"] = fs
     roles = meta.get("disks") or {}
     for name, d in disks.items():
         ios = d["rd_ios"] + d["wr_ios"]
-        d.update({"role": roles.get(name, ""), "read_bytes": d["rd_sectors"] * 512,
-                  "write_bytes": d["wr_sectors"] * 512, "await_ms": (d["rd_ticks"] + d["wr_ticks"]) / ios if ios else 0,
-                  "read_await_ms": d["rd_ticks"] / d["rd_ios"] if d["rd_ios"] else 0,
-                  "write_await_ms": d["wr_ticks"] / d["wr_ios"] if d["wr_ios"] else 0,
-                  "flush_await_ms": d["fl_ticks"] / d["fl_ios"] if d["fl_ios"] else 0,
-                  "util_pct": d["io_ticks"] / (covered * 1000) * 100 if covered else 0,
-                  "queue_depth": d["time_in_queue"] / (covered * 1000) if covered else 0})
+        d.update(
+            {
+                "role": roles.get(name, ""),
+                "read_bytes": d["rd_sectors"] * 512,
+                "write_bytes": d["wr_sectors"] * 512,
+                "await_ms": (d["rd_ticks"] + d["wr_ticks"]) / ios if ios else 0,
+                "read_await_ms": d["rd_ticks"] / d["rd_ios"] if d["rd_ios"] else 0,
+                "write_await_ms": d["wr_ticks"] / d["wr_ios"] if d["wr_ios"] else 0,
+                "flush_await_ms": d["fl_ticks"] / d["fl_ios"] if d["fl_ios"] else 0,
+                "util_pct": d["io_ticks"] / (covered * 1000) * 100 if covered else 0,
+                "queue_depth": d["time_in_queue"] / (covered * 1000) if covered else 0,
+            }
+        )
     res["disks"] = disks
     for c in cg.values():
         c["io_some_pct"] = c["io_some"] / 1e6 / c["wall"] * 100 if c["wall"] else 0.0
@@ -562,7 +705,7 @@ def analyse(recs, since, until, with_below, verbose):
     res["cgroups"] = cg
 
     cat_n, other_n = {}, {}
-    cap_eps = []        # (start, end, corrected max_d) of episodes of daemons v3-v7 with non-storage waits
+    cap_eps = []  # (start, end, corrected max_d) of episodes of daemons v3-v7 with non-storage waits
     for ep in episodes:
         sigs = []
         for s in ep["sigs"]:
@@ -603,12 +746,14 @@ def analyse(recs, since, until, with_below, verbose):
                 lead = 35 if ep.get("reason") == "hung task" else 0
                 cap_eps.append((ep["start"] - lead, ep["end"], ep["max_d"]))
         res["episodes"].append(ep)
-    res["episodes"].sort(key=lambda e: (-e["max_d"], -e["peak"].get("commit_ms", 0),
-                                        -e["peak"].get("io_full_avg10", 0)))
+    res["episodes"].sort(
+        key=lambda e: (-e["max_d"], -e["peak"].get("commit_ms", 0), -e["peak"].get("io_full_avg10", 0))
+    )
     total = sum(cat_n.values())
-    res["categories"] = [{"category": k, "description": CAT_DESC[k], "task_samples": n,
-                          "share": round(n / total, 3)}
-                         for k, n in sorted(cat_n.items(), key=lambda kv: -kv[1])]
+    res["categories"] = [
+        {"category": k, "description": CAT_DESC[k], "task_samples": n, "share": round(n / total, 3)}
+        for k, n in sorted(cat_n.items(), key=lambda kv: -kv[1])
+    ]
     res["non_storage_waits"] = other_n
     # v3-v7 samples during an episode with memory or maintenance waits: cap
     # at the episode's estimate (their "d" counted those waits as storage).
@@ -643,13 +788,17 @@ def analyse(recs, since, until, with_below, verbose):
     # text at the same time) or matches MAINT_TEXT.
     maint_msgs = set()
     for e in res["events"]:
-        if e.get("kind") == "hung" and (any(MAINT_RE.match(f) for f in e.get("stack") or ())
-                                        or MAINT_TEXT.search(e.get("msg", ""))):
+        if e.get("kind") == "hung" and (
+            any(MAINT_RE.match(f) for f in e.get("stack") or ()) or MAINT_TEXT.search(e.get("msg", ""))
+        ):
             e["kind"], e["severe"] = "maintenance-wait", False
             maint_msgs.add(e.get("msg"))
     for a in res["alerts"]:
         if a.get("kind") == "hung" and (a.get("body") in maint_msgs or MAINT_TEXT.search(a.get("body", ""))):
-            a["kind"], a["title"] = "maintenance-wait", "btrfs maintenance (fstrim/scrub) waiting (recorded as stuck on IO)"
+            a["kind"], a["title"] = (
+                "maintenance-wait",
+                "btrfs maintenance (fstrim/scrub) waiting (recorded as stuck on IO)",
+            )
     res["v6_since"] = v6_since
     if with_below and shutil.which("below"):
         with ThreadPoolExecutor(2) as ex:
@@ -691,12 +840,18 @@ def memory_lines(res, storage_d):
     if peak < 3 and not ev:
         return []
     notes = "".join(
-        (["; estimated from the stacks: recorded by a daemon < v8"]
-         if any(e.get("estimated") and e.get("max_d_mem") for e in res["episodes"]) else [])
-        + ([f"; {len(ev)} task(s) stuck 30+ s, see 'events'"] if ev else []))
+        (
+            ["; estimated from the stacks: recorded by a daemon < v8"]
+            if any(e.get("estimated") and e.get("max_d_mem") for e in res["episodes"])
+            else []
+        )
+        + ([f"; {len(ev)} task(s) stuck 30+ s, see 'events'"] if ev else [])
+    )
     if peak >= storage_d:
-        return [f"Memory, not storage, blocked up to {peak} tasks (memory reclaim, swap-in or zswap{notes}). "
-                f"See the memory line; `cst swap status` shows which cgroup swaps."]
+        return [
+            f"Memory, not storage, blocked up to {peak} tasks (memory reclaim, swap-in or zswap{notes}). "
+            f"See the memory line; `cst swap status` shows which cgroup swaps."
+        ]
     return [f"Memory waits: up to {peak} tasks also waited on memory reclaim, swap-in or zswap{notes}."]
 
 
@@ -711,17 +866,24 @@ def saturation_line(res):
         return None
 
     def fig(ds):
-        return (f"await {max(d['await_ms'] for d in ds):.1f} ms (read {max(d['read_await_ms'] for d in ds):.1f}, "
-                f"write {max(d['write_await_ms'] for d in ds):.1f})")
+        return (
+            f"await {max(d['await_ms'] for d in ds):.1f} ms (read {max(d['read_await_ms'] for d in ds):.1f}, "
+            f"write {max(d['write_await_ms'] for d in ds):.1f})"
+        )
+
     aw = max(d["await_ms"] for d in top)
     qd = max(d["queue_depth"] for d in top)
     busy = aw >= 5 or qd >= 8
-    line = (f"btrfs disks {'look SATURATED' if busy else 'NOT saturated'}: "
-            f"{'dm-crypt layer (what btrfs waits for)' if dm else 'member disks'} {fig(top)}, queue depth {qd:.1f}")
+    line = (
+        f"btrfs disks {'look SATURATED' if busy else 'NOT saturated'}: "
+        f"{'dm-crypt layer (what btrfs waits for)' if dm else 'member disks'} {fig(top)}, queue depth {qd:.1f}"
+    )
     if dm and nvme:
         aw_nvme = max(d["await_ms"] for d in nvme)
-        line += (f"; NVMe below {fig(nvme)}, information only (its time can include disk cache flushes)"
-                 f"{'; encryption queueing adds latency' if aw > 2 * aw_nvme + 1 else ''}")
+        line += (
+            f"; NVMe below {fig(nvme)}, information only (its time can include disk cache flushes)"
+            f"{'; encryption queueing adds latency' if aw > 2 * aw_nvme + 1 else ''}"
+        )
     return line + "."
 
 
@@ -730,12 +892,14 @@ def fuse_lines(res):
     ev = [e for e in res["events"] if e.get("kind") == "fuse-wait"]
     if not n and not ev:
         return []
-    return [f"FUSE waits: programs waited on a FUSE filesystem ({n} task-samples"
-            f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}): a gvfs network share "
-            f"(/run/user/*/gvfs; /run/host/run/user/*/gvfs inside toolbox) or the document portal answered "
-            f"slowly. Usually the network or the FUSE daemon, typically a find/search walking into a share "
-            f"(see 'events' for the command); it only involves the local disks if storage waits show up "
-            f"at the same time."]
+    return [
+        f"FUSE waits: programs waited on a FUSE filesystem ({n} task-samples"
+        f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}): a gvfs network share "
+        f"(/run/user/*/gvfs; /run/host/run/user/*/gvfs inside toolbox) or the document portal answered "
+        f"slowly. Usually the network or the FUSE daemon, typically a find/search walking into a share "
+        f"(see 'events' for the command); it only involves the local disks if storage waits show up "
+        f"at the same time."
+    ]
 
 
 def busy_lines(res, meta):
@@ -746,19 +910,28 @@ def busy_lines(res, meta):
     if ev:
         comms = sorted({e.get("comm") or re.sub(r":\d+ .*", "", e.get("msg", "")) for e in ev})
         long_ = sum(e.get("kind") == "io-busy-long" for e in ev)
-        out.append(f"Busy waits: {len(ev)} task(s) waited on storage at every sample for {HUNG_SECONDS}+ s while "
-                   f"still being scheduled ({', '.join(comms)[:120]})"
-                   f"{f', {long_} for 10+ min' if long_ else ''}: usually an fsync/IO loop (lever: that "
-                   f"program's fsync rate). It is a slow device only if the disk lines show high await or "
-                   f"errors.")
+        out.append(
+            f"Busy waits: {len(ev)} task(s) waited on storage at every sample for {HUNG_SECONDS}+ s while "
+            f"still being scheduled ({', '.join(comms)[:120]})"
+            f"{f', {long_} for 10+ min' if long_ else ''}: usually an fsync/IO loop (lever: that "
+            f"program's fsync rate). It is a slow device only if the disk lines show high await or "
+            f"errors."
+        )
     v6 = res.get("v6_since")
-    old = [e for e in res["events"] if e.get("kind") == "hung" and e.get("severe")
-           and (v6 is None or e.get("ts", 0) < v6)
-           and any(f in ("btrfs_sync_log", "btrfs_sync_file") for f in e.get("stack") or ())]
+    old = [
+        e
+        for e in res["events"]
+        if e.get("kind") == "hung"
+        and e.get("severe")
+        and (v6 is None or e.get("ts", 0) < v6)
+        and any(f in ("btrfs_sync_log", "btrfs_sync_file") for f in e.get("stack") or ())
+    ]
     if old:
-        out.append(f"Note: {len(old)} 'hung task' event(s) in the fsync path were recorded before progress checks "
-                   f"(daemon < v6): they may have been a program calling fsync in a loop rather than a hang; "
-                   f"check the disk lines (await, errors) of the same window.")
+        out.append(
+            f"Note: {len(old)} 'hung task' event(s) in the fsync path were recorded before progress checks "
+            f"(daemon < v6): they may have been a program calling fsync in a loop rather than a hang; "
+            f"check the disk lines (await, errors) of the same window."
+        )
     return out
 
 
@@ -769,21 +942,27 @@ def maint_lines(res):
     # A single async-discard blip is not worth a verdict line.
     if n < 3 and not ev and res.get("maintenance_samples", 0) < 3:
         return []
-    return [f"Maintenance: btrfs housekeeping ran (fstrim/discard, scrub or balance; {n} task-samples"
-            f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}"
-            f"{', up to ' + str(peak) + ' task(s) at once' if peak else ''}). Expected background work, "
-            f"not a workload stall; it only slowed the workload if storage waits show up at the same time."]
+    return [
+        f"Maintenance: btrfs housekeeping ran (fstrim/discard, scrub or balance; {n} task-samples"
+        f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}"
+        f"{', up to ' + str(peak) + ' task(s) at once' if peak else ''}). Expected background work, "
+        f"not a workload stall; it only slowed the workload if storage waits show up at the same time."
+    ]
 
 
 def verdict(res, meta):
     out = []
     cov = res["coverage"]
     if res["samples"] < 2:
-        return ["NO DATA for this window. Is btrfs-stall-monitor.service running? "
-                "(`systemctl status btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"]
+        return [
+            "NO DATA for this window. Is btrfs-stall-monitor.service running? "
+            "(`systemctl status btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"
+        ]
     if not cov["complete"]:
-        out.append(f"INCOMPLETE DATA: {cov['covered_s']} s of the {cov['window_s']} s window recorded, last sample "
-                   f"{fmt_ts(cov['last_sample'])}. Data is written every ~10 s; re-run shortly, or narrow the window.")
+        out.append(
+            f"INCOMPLETE DATA: {cov['covered_s']} s of the {cov['window_s']} s window recorded, last sample "
+            f"{fmt_ts(cov['last_sample'])}. Data is written every ~10 s; re-run shortly, or narrow the window."
+        )
     sev = [e for e in res["events"] if e.get("severe")]
     if sev:
         out.append(f"KERNEL/FS PROBLEMS: {len(sev)} severe event(s) (hung task, btrfs or device error); see 'events'.")
@@ -800,17 +979,27 @@ def verdict(res, meta):
     mem_lines = memory_lines(res, storage_d)
     mem_dominates = bool(mem_lines) and mem_lines[0].startswith("Memory, not storage")
     oe = res.get("open_episode")
-    open_lines = [f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
-                  f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
-                  f"ends; run the report again after that for the details."] if oe else []
+    open_lines = (
+        [
+            f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
+            f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
+            f"ends; run the report again after that for the details."
+        ]
+        if oe
+        else []
+    )
     commit_stall = longest >= 1000
     # Logical bytes: one RAID1 member's dm-crypt device.
-    written = max((d["write_bytes"] for n, d in res["disks"].items()
-                   if n.startswith("dm-") and d["role"].startswith("btrfs")), default=0)
+    written = max(
+        (d["write_bytes"] for n, d in res["disks"].items() if n.startswith("dm-") and d["role"].startswith("btrfs")),
+        default=0,
+    )
     if not (psi_stall or d_stall or commit_stall):
-        out.append(f"Storage was NOT a bottleneck: IO pressure {pct['io_some_pct']:.1f}%, at most "
-                   f"{peak['d_tasks']} task(s) waiting on storage, longest btrfs commit {longest} ms "
-                   f"(written {fmt_bytes(written)}).")
+        out.append(
+            f"Storage was NOT a bottleneck: IO pressure {pct['io_some_pct']:.1f}%, at most "
+            f"{peak['d_tasks']} task(s) waiting on storage, longest btrfs commit {longest} ms "
+            f"(written {fmt_bytes(written)})."
+        )
         out += mem_lines
         if pct["cpu_some_pct"] >= 20:
             out.append(f"CPU contention: runnable tasks waited for a CPU {pct['cpu_some_pct']:.0f}% of the time.")
@@ -820,19 +1009,24 @@ def verdict(res, meta):
             out.append("Little activity recorded: check that the window really covers the workload.")
         return out + fuse_lines(res) + busy_lines(res, meta) + maint_lines(res)
     if psi_stall:
-        out.append(f"IO wait: tasks waited on IO {pct['io_some_pct']:.1f}% of the time (every non-idle task at "
-                   f"once {pct['io_full_pct']:.1f}%), peak 10 s average {peak['io_some_avg10']:.0f}%.")
+        out.append(
+            f"IO wait: tasks waited on IO {pct['io_some_pct']:.1f}% of the time (every non-idle task at "
+            f"once {pct['io_full_pct']:.1f}%), peak 10 s average {peak['io_some_avg10']:.0f}%."
+        )
     if d_stall and mem_dominates:
         out += mem_lines + [f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
     elif d_stall:
-        out += [f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
-                f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."] + mem_lines
+        out += [
+            f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
+            f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."
+        ] + mem_lines
     else:
         out += mem_lines
     out += open_lines
     if commit_stall:
-        out.append(f"Slow btrfs commits: longest {longest / 1000:.1f} s"
-                   f"{' at ' + fmt_ts(longest_at) if longest_at else ''}.")
+        out.append(
+            f"Slow btrfs commits: longest {longest / 1000:.1f} s{' at ' + fmt_ts(longest_at) if longest_at else ''}."
+        )
     cats = res["categories"]
     if cats:
         desc = ", ".join(f"{c['description']} {c['share'] * 100:.0f}%" for c in cats[:3])
@@ -842,8 +1036,10 @@ def verdict(res, meta):
             if kernel_tuple(meta.get("kernel")) < (7, 2, 6):
                 out.append("Matches the btrfs zstd lost-wakeup bug fixed in 7.2.6; a kernel update fixes it.")
             else:
-                out.append("zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; "
-                           "may be plain compression contention.")
+                out.append(
+                    "zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; "
+                    "may be plain compression contention."
+                )
         elif HINTS.get(main):
             out.append(HINTS[main])
     if meta.get("stacks") is False:
@@ -851,8 +1047,10 @@ def verdict(res, meta):
     out += fuse_lines(res) + busy_lines(res, meta) + maint_lines(res)
     if res["episodes"]:
         w = res["episodes"][0]
-        out.append(f"Worst episode: {fmt_ts(w['start'])}-{fmt_ts(w['end'])} ({w['end'] - w['start']:.0f} s, "
-                   f"{w['max_d']} D tasks, commit {w['peak'].get('commit_ms', 0)} ms).")
+        out.append(
+            f"Worst episode: {fmt_ts(w['start'])}-{fmt_ts(w['end'])} ({w['end'] - w['start']:.0f} s, "
+            f"{w['max_d']} D tasks, commit {w['peak'].get('commit_ms', 0)} ms)."
+        )
     sat = saturation_line(res)
     if sat:
         out.append(sat)
@@ -863,12 +1061,16 @@ def verdict(res, meta):
 
 def print_report(res, meta, verbose):
     w = res["window"]
-    print(f"window   {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(w['since']))} -> {fmt_ts(w['until'])}"
-          f"  kernel {res.get('kernel') or '?'}")
+    print(
+        f"window   {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(w['since']))} -> {fmt_ts(w['until'])}"
+        f"  kernel {res.get('kernel') or '?'}"
+    )
     cov = res["coverage"]
     if cov.get("first_sample"):
-        print(f"recorded {fmt_ts(cov['first_sample'])} -> {fmt_ts(cov['last_sample'])} "
-              f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps') else ''})")
+        print(
+            f"recorded {fmt_ts(cov['first_sample'])} -> {fmt_ts(cov['last_sample'])} "
+            f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps') else ''})"
+        )
     print()
     for line in verdict(res, meta):
         print(f"verdict  {line}")
@@ -876,46 +1078,62 @@ def print_report(res, meta, verbose):
         return
     print()
     pct, peak, vm = res["pressure"], res["peak"], res["vm"]
-    print(f"pressure io some/full {pct['io_some_pct']:.1f}% / {pct['io_full_pct']:.1f}%   memory some/full "
-          f"{pct['mem_some_pct']:.1f}% / {pct['mem_full_pct']:.1f}%   cpu some {pct['cpu_some_pct']:.1f}%   "
-          f"(% of recorded time)")
-    print(f"peaks    io 10s-avg some/full {peak['io_some_avg10']:.0f}%/{peak['io_full_avg10']:.0f}%  "
-          f"tasks waiting on storage {peak['d_tasks']}  on memory {peak['mem_tasks']}  "
-          f"iowait tasks {peak['iowait_tasks']}  "
-          f"dirty {fmt_bytes(peak['dirty_bytes'])} (limit {fmt_bytes(vm['dirty_limit_bytes'])})  "
-          f"writeback {fmt_bytes(peak['writeback_bytes'])}")
+    print(
+        f"pressure io some/full {pct['io_some_pct']:.1f}% / {pct['io_full_pct']:.1f}%   memory some/full "
+        f"{pct['mem_some_pct']:.1f}% / {pct['mem_full_pct']:.1f}%   cpu some {pct['cpu_some_pct']:.1f}%   "
+        f"(% of recorded time)"
+    )
+    print(
+        f"peaks    io 10s-avg some/full {peak['io_some_avg10']:.0f}%/{peak['io_full_avg10']:.0f}%  "
+        f"tasks waiting on storage {peak['d_tasks']}  on memory {peak['mem_tasks']}  "
+        f"iowait tasks {peak['iowait_tasks']}  "
+        f"dirty {fmt_bytes(peak['dirty_bytes'])} (limit {fmt_bytes(vm['dirty_limit_bytes'])})  "
+        f"writeback {fmt_bytes(peak['writeback_bytes'])}"
+    )
     for uuid, f in res["fs"].items():
         label = (meta.get("fs") or {}).get(uuid, {}).get("label") or uuid[:8]
         at = f" @{fmt_ts(f['max_at'])}" if f["max_at"] and f["max_commit_ms"] else ""
         sp = (f.get("space") or {}).get("metadata") or [0, 0, 0, 0, 0]
         mu = sp[0] / sp[1] * 100 if sp[1] else 0
-        print(f"btrfs    {label}: {f['commits']} commits, avg {f['avg_commit_ms']:.0f} ms, longest "
-              f"{f['max_commit_ms']} ms{at}; metadata {mu:.0f}% of allocated chunks; new device errors "
-              f"{f['new_device_errors']}")
+        print(
+            f"btrfs    {label}: {f['commits']} commits, avg {f['avg_commit_ms']:.0f} ms, longest "
+            f"{f['max_commit_ms']} ms{at}; metadata {mu:.0f}% of allocated chunks; new device errors "
+            f"{f['new_device_errors']}"
+        )
     print("disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it")
     for name, d in sorted(res["disks"].items(), key=lambda kv: (kv[0].startswith("dm-"), kv[0])):
         if name.startswith("dm-") and not verbose and not d["role"].startswith("swap"):
             continue
-        print(f"  {name:<8} {d['role']:<13} await {d['await_ms']:5.1f} ms (r {d['read_await_ms']:.1f} / "
-              f"w {d['write_await_ms']:.1f})  flush await {d['flush_await_ms']:5.1f} ms "
-              f"({d['fl_ios']} flushes)  queue {d['queue_depth']:4.1f}  read {fmt_bytes(d['read_bytes'])}  "
-              f"write {fmt_bytes(d['write_bytes'])}")
-    print(f"memory   {zswap_text(vm)}   direct reclaim scanned "
-          f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}")
+        print(
+            f"  {name:<8} {d['role']:<13} await {d['await_ms']:5.1f} ms (r {d['read_await_ms']:.1f} / "
+            f"w {d['write_await_ms']:.1f})  flush await {d['flush_await_ms']:5.1f} ms "
+            f"({d['fl_ios']} flushes)  queue {d['queue_depth']:4.1f}  read {fmt_bytes(d['read_bytes'])}  "
+            f"write {fmt_bytes(d['write_bytes'])}"
+        )
+    print(
+        f"memory   {zswap_text(vm)}   direct reclaim scanned "
+        f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}"
+    )
     names = container_names() if any(k.startswith(("docker-", "libpod-")) for k in res["cgroups"]) else {}
-    print("cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "
-          "dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare "
-          "cgroups with each other, not with disk totals)")
+    print(
+        "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "
+        "dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare "
+        "cgroups with each other, not with disk totals)"
+    )
     shown = 0
-    for name, c in sorted(res["cgroups"].items(), key=lambda kv: (not kv[0].endswith(".slice"),
-                                                                    -(kv[1]["io_some"] + kv[1]["write_bytes"] / 1e3))):
+    for name, c in sorted(
+        res["cgroups"].items(),
+        key=lambda kv: (not kv[0].endswith(".slice"), -(kv[1]["io_some"] + kv[1]["write_bytes"] / 1e3)),
+    ):
         is_slice = name.endswith(".slice")
         if not is_slice and (c["io_some_pct"] < 1 and c["write_bytes"] < 64 * 2**20 or shown >= 6):
             continue
         shown += 0 if is_slice else 1
         label = f"{name} ({names[name]})" if name in names else name
-        print(f"  {label:<44} io some/full {c['io_some_pct']:5.1f}% / {c['io_full_pct']:5.1f}%  "
-              f"read {fmt_bytes(c['read_bytes'])}  write {fmt_bytes(c['write_bytes'])}")
+        print(
+            f"  {label:<44} io some/full {c['io_some_pct']:5.1f}% / {c['io_full_pct']:5.1f}%  "
+            f"read {fmt_bytes(c['read_bytes'])}  write {fmt_bytes(c['write_bytes'])}"
+        )
     b = res.get("below")
     if b:
         if b.get("error"):
@@ -923,23 +1141,39 @@ def print_report(res, meta, verbose):
         for title, key in (("writers", "top_writers"), ("readers", "top_readers")):
             items = b.get(key) or []
             if items:
-                print(f"below    top {title}: " + ", ".join(
-                    f"{i['comm']}[{i['cgroup']}] {fmt_bytes(i['bytes'])}" if i["cgroup"] else
-                    f"{i['comm']} {fmt_bytes(i['bytes'])}" for i in items[:6]))
+                print(
+                    f"below    top {title}: "
+                    + ", ".join(
+                        f"{i['comm']}[{i['cgroup']}] {fmt_bytes(i['bytes'])}"
+                        if i["cgroup"]
+                        else f"{i['comm']} {fmt_bytes(i['bytes'])}"
+                        for i in items[:6]
+                    )
+                )
     eps = res["episodes"]
     limit = 50 if verbose else 6
     print()
-    print(f"episodes {len(eps)}" + (" (worst first" + (f", showing {limit}" if len(eps) > limit else "") + ")"
-                                    if eps else " (no stall episode recorded)"))
+    print(
+        f"episodes {len(eps)}"
+        + (
+            " (worst first" + (f", showing {limit}" if len(eps) > limit else "") + ")"
+            if eps
+            else " (no stall episode recorded)"
+        )
+    )
     for ep in eps[:limit]:
         pk = ep["peak"]
-        print(f"  {fmt_ts(ep['start'])}-{fmt_ts(ep['end'])} {ep['end'] - ep['start']:4.0f}s  opened by: {ep['reason']}; "
-              f"peak io full {pk.get('io_full_avg10', 0):.0f}%, commit {pk.get('commit_ms', 0)} ms, "
-              f"D tasks max {ep['max_d']}")
+        print(
+            f"  {fmt_ts(ep['start'])}-{fmt_ts(ep['end'])} {ep['end'] - ep['start']:4.0f}s  opened by: {ep['reason']}; "
+            f"peak io full {pk.get('io_full_avg10', 0):.0f}%, commit {pk.get('commit_ms', 0)} ms, "
+            f"D tasks max {ep['max_d']}"
+        )
         for s in ep["sigs"][: (8 if verbose else 3)]:
             via = f" via {s['ctx']}" if s["ctx"] else ""
-            print(f"    {s['n']:5d} task-samples [{s['cat']}] {s['sig']}{via}  "
-                  f"comms: {fmt_counts(s['comms'])}  cgroups: {', '.join(list(s['cgroups'])[:3])}")
+            print(
+                f"    {s['n']:5d} task-samples [{s['cat']}] {s['sig']}{via}  "
+                f"comms: {fmt_counts(s['comms'])}  cgroups: {', '.join(list(s['cgroups'])[:3])}"
+            )
             if verbose:
                 for frames in s.get("examples", [])[:1]:
                     print("          stack: " + " <- ".join(frames[:10]))
@@ -948,7 +1182,7 @@ def print_report(res, meta, verbose):
     if res["events"]:
         print()
         print(f"events   {len(res['events'])} kernel/daemon event(s) ('!' = severe, on this host's disks):")
-        for e in res["events"][-(30 if verbose else 8):]:
+        for e in res["events"][-(30 if verbose else 8) :]:
             print(f"  {'!' if e.get('severe') else ' '} {fmt_ts(e['ts'])} {e['msg'][:170]}")
     for a in res["alerts"]:
         print(f"alert    {fmt_ts(a['ts'])} {a['title']}: {a['body']}")
@@ -956,8 +1190,12 @@ def print_report(res, meta, verbose):
 
 def main():
     ap = argparse.ArgumentParser(description="Summarise recorded IO/btrfs stalls for a time window.")
-    ap.add_argument("--since", "-s", default="30 min ago",
-                    help="start: date -d syntax ('20 min ago', '10:31') or @epoch; default 30 min ago")
+    ap.add_argument(
+        "--since",
+        "-s",
+        default="30 min ago",
+        help="start: date -d syntax ('20 min ago', '10:31') or @epoch; default 30 min ago",
+    )
     ap.add_argument("--until", "-u", default=None, help="end; default now")
     ap.add_argument("--json", action="store_true", help="machine-readable output (verdict first)")
     ap.add_argument("-v", "--verbose", action="store_true", help="more episodes, dm-crypt rows, example stacks")
@@ -970,8 +1208,10 @@ def main():
     if since >= until:
         sys.exit("--since must be before --until")
     if not os.path.isdir(args.log_dir):
-        sys.exit(f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "
-                 f"Installer: cst btrfs install (run on the host, not in toolbox)")
+        sys.exit(
+            f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "
+            f"Installer: cst btrfs install (run on the host, not in toolbox)"
+        )
     res, meta = analyse(load(args.log_dir, since, until), since, until, not args.no_below, args.verbose)
     if args.json:
         out = {"verdict": verdict(res, meta), "coverage": res.pop("coverage"), "units": UNITS}
