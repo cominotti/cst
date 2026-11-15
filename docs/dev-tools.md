@@ -55,14 +55,15 @@ only place to change when the minimum Python moves.
 
 Where to run `test pylint` and `test types`: on the host, or in a Fedora 45
 toolbox. A Fedora 44 toolbox (such as `devbox`) has Python 3.14, which is
-below `requires-python`, so uv stops there with `error: No interpreter
-found for Python >=3.15 in search path`. The unit tests, `test lint` and the E2E tasks do not
-use uv and run anywhere they ran before.
+below `requires-python`, so uv stops there with "No interpreter found for
+Python >=3.15 in search path". The unit tests, `test lint` and the E2E
+tasks do not use uv and run anywhere they ran before.
 
 ## What each gate checks
 
-All four lists live in `pyproject.toml`, and `tests/test_python_files.py`
-(a unit test, standard library only) checks them against the repository:
+Three lists live in `pyproject.toml` and one in `tests/test_python_files.py`
+(a unit test, standard library only), which checks them against the
+repository:
 
 - **`[tool.ruff] extend-include`**: the extensionless helpers (`btrfs/btrfs-bulk`,
   `vm/cst-vm`, ...). ruff finds `*.py` files by itself, but not these. A new
@@ -84,12 +85,20 @@ All four lists live in `pyproject.toml`, and `tests/test_python_files.py`
   nothing on. `error-on-warning` is on, so a warning fails it too. A file
   joins once it is clean; never remove one, or add an ignore comment, to
   get a green run.
-- **`[tool.cst.ty] not-yet-clean`**: the Python files ty is not yet clean
-  on. Only the unit test reads it. Every Python file is in the ty gate or in
-  this list, never both, so a new file cannot slip past ty unnoticed. The
-  list only shrinks: `NOT_YET_CLEAN_MAX` in the test caps its length. When a
-  file becomes clean, move it to the ty gate and lower the cap by one. A new
-  file goes straight into the ty gate.
+- **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the Python files ty
+  is not yet clean on. Every Python file is in the ty gate or in this set,
+  never both, so a new file has to join the ty gate. The set only shrinks:
+  when a file becomes clean, move it to the ty gate and delete it from the
+  set (the test says to). A renamed file keeps its entry under the new
+  name. The set sits in the test, not in `pyproject.toml`, so that adding
+  a file to it is an edit of the test that review sees. Never add one.
+- **Nothing else switches ty off**: the test also fails when a `ty.toml`
+  exists at the top of the repository (ty would read it instead of
+  `pyproject.toml`), when `[tool.ty]` sets anything but `src.include` and
+  `terminal.error-on-warning` (such as `src.exclude`, `overrides`, a rule
+  set to `"ignore"`, or `analysis.allowed-unresolved-imports`), when
+  `error-on-warning` is not `true`, and when a ty-gated file has a
+  `ty: ignore` or `type: ignore` comment.
 
 ## Upgrading a pin
 

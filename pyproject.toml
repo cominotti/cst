@@ -70,7 +70,8 @@ error-on-warning = true
 
 [tool.ty.src]
 # The ty gate: every Python file ty reports nothing on. Add a file once ty is
-# clean on it; never remove one to get a green run.
+# clean on it; never remove one to get a green run. Every other Python file is
+# in NOT_YET_CLEAN of tests/test_python_files.py, which only shrinks.
 include = [
     ".github/scripts/audit_summary.py",
     "bluetooth/__init__.py",
@@ -107,43 +108,4 @@ include = [
     "toolchains/tests/test_toolchains.py",
     "vm/__init__.py",
     "vm/tests/__init__.py",
-]
-
-# ---- CST's own lists (read only by tests/test_python_files.py) ------------
-
-[tool.cst.ty]
-# The Python files ty is not yet clean on. Every Python file is either in the
-# ty gate above or here. This list only shrinks: a file leaves it when it
-# joins the ty gate, and a new file goes into the ty gate, never here (the
-# test caps the length of this list).
-not-yet-clean = [
-    ".github/scripts/pin_invowk.py",
-    "bluetooth/tests/test_bluetooth.py",
-    "bluetooth/tests/test_ldac_watch.py",
-    "btrfs/btrfs-bulk",
-    "btrfs/btrfs-snapshot-core",
-    "btrfs/btrfs-stall-monitord",
-    "btrfs/btrfs-stall-report",
-    "btrfs/docker-gc",
-    "btrfs/tests/test_btrfs_bulk.py",
-    "btrfs/tests/test_btrfs_snapshot_core.py",
-    "btrfs/tests/test_btrfs_steam.py",
-    "btrfs/tests/test_chrome_cache.py",
-    "btrfs/tests/test_stall_monitord.py",
-    "btrfs/tests/test_stall_report.py",
-    "cpu/cpu-watch",
-    "cpu/tests/test_cpu.py",
-    "cpu/vm-pin",
-    "doctor/cst-doctor",
-    "doctor/tests/test_doctor.py",
-    "swap/tests/test_swap.py",
-    "tests/e2e/run.py",
-    "tests/e2e/test_run_guard.py",
-    "tests/test_pin_invowk.py",
-    "toolchains/cst-toolchains",
-    "toolchains/tests/test_prune_rust_build.py",
-    "toolchains/tests/test_rules.py",
-    "vm/cst-vm",
-    "vm/tests/test_vm.py",
-    "vm/tests/test_vm_nas.py",
 ]
