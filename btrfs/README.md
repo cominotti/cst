@@ -617,7 +617,9 @@ docker volume rm <name>         # or one volume by name
   its volumes folder is also marked, and its volumes are migrated at that
   boot. A volumes folder without `+C` is the only sign of those volumes, so
   the service first writes the flag file (it creates `/etc/btrfs-setup` if
-  needed) and only then sets `+C`. If it cannot write the flag, it leaves the
+  needed), flushes it to disk (the data folder may be on another filesystem
+  than `/etc`, and a power loss must not keep `+C` and lose the flag), and
+  only then sets `+C`. If it cannot write or flush the flag, it leaves the
   folder without `+C` and logs why, so the next boot tries again.
 - Older copies of the helper set `+C` first. On a machine without
   `/etc/btrfs-setup` (install creates it only when it finds copy-on-write

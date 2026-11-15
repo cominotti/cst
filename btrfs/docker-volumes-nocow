@@ -443,11 +443,20 @@ def migrate_one(name, data):
 
 def request_migration():
     """Write the flag (and its folder, which install creates only when it
-    found CoW data). False, with a log line, when that fails."""
+    found CoW data), and make it durable before +C is set: the data root may
+    be on another filesystem than /etc, and after a power loss +C must not
+    stay while the flag is lost. False, with a log line, when that fails."""
+    folder = os.path.dirname(FLAG)
     try:
-        os.makedirs(os.path.dirname(FLAG), exist_ok=True)
+        os.makedirs(folder, exist_ok=True)
         with open(FLAG, "a"):
             pass
+        for path in (FLAG, folder, os.path.dirname(folder)):  # the file, its entry, its folder's entry
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     except OSError as e:
         log(3, f"cannot schedule the migration ({e}); {VOLUMES} keeps copy-on-write, the next boot tries again")
         return False

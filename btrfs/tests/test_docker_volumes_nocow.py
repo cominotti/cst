@@ -759,6 +759,44 @@ class MigrateTest(Base):
         rc, out, _ = self.main("status")
         self.assertNotIn("with copy-on-write data", out)
 
+    def test_flag_is_durable_before_nocow_is_set(self) -> None:
+        # The flag, its entry in its folder and the folder's entry in /etc are
+        # flushed before +C is set: after a power loss, +C on the volumes
+        # folder must not stay while the flag is lost.
+        shutil.rmtree(os.path.dirname(self.flag))
+        self.fs.set(self.vols, False)
+        self.volume("cow")
+        synced: list[tuple[str, list[str]]] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            synced.append((os.readlink(f"/proc/self/fd/{fd}"), list(self.fs.sets)))
+            real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", fsync):
+            rc, out = self.call(M.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        folder = os.path.dirname(self.flag)
+        self.assertEqual(synced, [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
+
+    def test_flag_not_durable_leaves_the_folder_copy_on_write(self) -> None:
+        # fsync fails (an I/O error): treated like a flag that cannot be written.
+        self.fs.set(self.vols, False)
+        top = self.volume("cow")
+
+        def fsync(fd: int) -> None:
+            raise OSError(5, "Input/output error")
+
+        with mock.patch.object(os, "fsync", fsync):
+            rc, out = self.call(M.migrate)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); "
+            f"{self.vols} keeps copy-on-write, the next boot tries again\n",
+        )
+        self.assertEqual(self.fs.sets, [])
+        self.assertFalse(self.fs.nocow(os.path.join(top, "README")))
+
     def test_flag_not_written_leaves_the_folder_copy_on_write(self) -> None:
         # The flag cannot be written (here its folder is a file): nothing is
         # set, so the volumes folder still has no +C and the next boot sees
