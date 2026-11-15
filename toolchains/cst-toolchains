@@ -16,7 +16,8 @@ Commands:
                                  (--unless-off: not if `auto off` was run;
                                  `cst btrfs snapshots setup` uses it)
   auto off                       stop the timer, remove what `auto on` installed,
-                                 and remember the choice (~/.config/cst/toolchains-auto.off)
+                                 and remember the choice (~/.config/cst/toolchains-auto.off);
+                                 refused, with nothing removed, when the timer cannot be stopped
   config plan | apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]
                                  the toolchain settings in your home: cargo's
                                  build-dir in ~/.cargo/config.toml, uv's
@@ -2559,13 +2560,48 @@ def stale_files(home):
     return out
 
 
+def disable_timer(name):
+    """Stop and disable a timer before any of its files is removed. When the
+    user manager refuses or cannot be reached, nothing has been removed yet:
+    Refused, and a second run (once the manager answers) can finish the job.
+    Removing the files anyway would leave a timer that keeps running with no
+    file left to show it."""
+    try:
+        systemctl("disable", "--now", name, check=True)
+    except Refused as e:
+        raise Refused(
+            f"{e}; nothing was removed and {name} may still be running: run this again once your user "
+            "manager answers (`systemctl --user status` shows whether it does)"
+        ) from None
+
+
+def reload_failed():
+    """daemon-reload after unit files were removed: True (and an error line)
+    when it failed. The removal is not undone: the timer is already stopped,
+    and the manager forgets the files at its next reload or restart."""
+    try:
+        systemctl("daemon-reload", check=True)
+    except Refused as e:
+        say(
+            f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
+            "manager answers, so that it forgets them",
+            3,
+            err=True,
+        )
+        return True
+    return False
+
+
 def remove_stale(home):
+    """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
+    well; False when the daemon-reload after the removal failed (reported).
+    Refused (nothing removed) when its timer could not be stopped."""
     found = stale_files(home)
     if not found:
-        return
+        return True
     timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
     if (timer, True) in found:
-        systemctl("disable", "--now", OLD_TIMER)
+        disable_timer(OLD_TIMER)
     reload = False
     for path, ours in found:
         if not ours:
@@ -2574,8 +2610,7 @@ def remove_stale(home):
         os.unlink(path)
         say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
         reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
-    if reload:
-        systemctl("daemon-reload")
+    return not (reload and reload_failed())
 
 
 def old_conf_note(home):
@@ -2589,13 +2624,13 @@ def old_conf_note(home):
 
 
 def cmd_auto_on(home, now, unless_off=False):
-    remove_stale(home)
+    rc = 0 if remove_stale(home) else 1
     if unless_off and turned_off(home):
         say(
             f"left off: you turned the automatic pruning off ({PROG} auto off left ~/{OFF_REL}); "
             f"'{PROG} auto on' turns it on again"
         )
-        return 0
+        return rc
     settings = Settings(home)
     enabled = [cls for tid, cls in TARGETS.items() if settings.enabled[tid]]
     if not enabled:
@@ -2657,14 +2692,15 @@ def cmd_auto_on(home, now, unless_off=False):
         os.unlink(os.path.join(home, OFF_REL))
         say(f"removed:   ~/{OFF_REL} (snapshots setup keeps it enabled again)")
     old_conf_note(home)
-    return 0
+    return rc
 
 
 def cmd_auto_off(home, now):
-    remove_stale(home)
+    rc = 0 if remove_stale(home) else 1
     st = unit_states(home)
     if st[TIMER] in ("ok", "change"):
-        systemctl("disable", "--now", TIMER)
+        # Checked, before anything is removed: see disable_timer.
+        disable_timer(TIMER)
     removed = False
     for name in UNITS:
         if st[name] in ("ok", "change"):
@@ -2673,8 +2709,8 @@ def cmd_auto_off(home, now):
             removed = True
         elif st[name] == "conflict":
             say(f"left alone: {label(name)} (not written by CST)", 4, err=True)
-    if removed:
-        systemctl("daemon-reload")
+    if removed and reload_failed():
+        rc = 1
     for rel in copies():
         if st[rel] in ("ok", "change"):
             os.unlink(os.path.join(home, rel))
@@ -2700,7 +2736,7 @@ def cmd_auto_off(home, now):
         )
         say(f"written:   ~/{OFF_REL} (snapshots setup leaves the pruning off)")
     say(f"toolchain caches are no longer pruned automatically (settings in ~/{CONF_REL} kept, if any)")
-    return 0
+    return rc
 
 
 def timer_text(home):

@@ -78,7 +78,7 @@ because only the host can see the processes of every toolbox.
 | `prune plan [TARGET...]` | Dry run: every folder with what `apply` would do (`delete`, `trim` = only its incremental part, or `keep`) and why. |
 | `prune apply [TARGET...]` | Deletes now, the same as the hourly run. |
 | `auto on` | Copies the program to `~/.local/lib/cst/`, writes the timer, and starts it. `--unless-off`: not if you ran `auto off` (that is what `snapshots setup` uses). |
-| `auto off` | Stops the timer, removes what `auto on` installed, and remembers that you turned it off. |
+| `auto off` | Stops the timer, removes what `auto on` installed, and remembers that you turned it off. Refused, with nothing removed, when the timer cannot be stopped ([section 11](#11-how-to-undo)). |
 | `config plan` / `config apply` | The toolchain settings ([section 6](#6-the-toolchain-settings-config)). `--lean-debuginfo` / `--no-lean-debuginfo` turn the opt-in lean debug info on or off for this one run, whatever the settings say. `--sccache` sets up the opt-in sccache; `--no-sccache` removes CST's `rustc-wrapper` line again ([section 6](#sccache-opt-in)). |
 
 **TARGET** is `LANG:CACHE` (`rust:build`) or just `LANG` (`rust` = every
@@ -697,7 +697,24 @@ stops the timer and removes the program copies and the unit files. Your
 `~/.config/cst/toolchains.conf` stays. `auto off` also writes
 `~/.config/cst/toolchains-auto.off`, so that a later `snapshots setup` does
 not turn the timer back on (it says `left off` instead); `auto on` removes
-that file again. `cst btrfs uninstall` and `cst btrfs snapshots disable` leave
+that file again.
+
+**When your user manager cannot be reached** (for example from a session
+without `XDG_RUNTIME_DIR`, or while `systemctl --user` itself fails), `auto
+off` stops first: it asks the manager to stop and disable the timer before
+it removes any file. If that fails, it prints systemctl's error, exits with
+1 and removes nothing, so the timer may still be running and nothing is
+lost. Check that `systemctl --user status` works (log in as that user, or
+set `XDG_RUNTIME_DIR=/run/user/$(id -u)`), then run `cst toolchains auto
+off` again. The same holds for the timer of the earlier `cst btrfs
+cargo-gc` (see above), which `auto on` and `auto off` stop first. If only
+the `systemctl --user daemon-reload` after the removal fails, the timer is
+already stopped and the files stay removed: the command says so and exits
+with 1; run `systemctl --user daemon-reload` yourself once the manager
+answers. (Before this check, `auto off` removed the files anyway and left a
+timer running with no file left to show it.)
+
+`cst btrfs uninstall` and `cst btrfs snapshots disable` leave
 the timer alone: it belongs to the cargo `build-dir` setting, which also
 stays.
 

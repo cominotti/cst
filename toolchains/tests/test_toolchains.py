@@ -536,6 +536,96 @@ class AutoTest(Scratch):
         self.assertIn("not written by CST", out)
         self.assertNotIn("--user disable --now cst-cargo-build-gc.timer", self.calls())
 
+    # The user manager refusing a call (or not answering: the same exit 1
+    # from systemctl). The stub records every call, and fails the ones that
+    # contain `word` with systemctl's own error text.
+    def failing(self, word):
+        stub = os.path.join(self.tmp, "systemctl-failing")
+        with open(stub, "w") as f:
+            f.write(
+                FAKE_SYSTEMCTL + f'case " $* " in *" {word} "*) echo "Failed to connect to bus: No medium found" >&2; '
+                "exit 1;; esac\n"
+            )
+        os.chmod(stub, 0o755)
+        return mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": stub})
+
+    INSTALLED = (
+        ".config/systemd/user/cst-toolchains-prune.timer",
+        ".config/systemd/user/cst-toolchains-prune.service",
+        ".local/lib/cst/cst-toolchains",
+        ".local/lib/cst/toolchains.conf",
+    )
+
+    def exists(self, rel):
+        return os.path.exists(os.path.join(self.home, rel))
+
+    def test_auto_off_removes_nothing_when_the_timer_cannot_be_stopped(self):
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        with self.failing("disable"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user disable --now cst-toolchains-prune.timer failed", out)
+        self.assertIn("Failed to connect to bus", out)
+        self.assertIn("nothing was removed", out)
+        for rel in self.INSTALLED:
+            self.assertTrue(self.exists(rel), rel)
+        self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
+        self.assertEqual(self.calls()[-1], "--user disable --now cst-toolchains-prune.timer")  # no reload after it
+        # Once the manager answers, a second run finishes the job.
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        for rel in self.INSTALLED:
+            self.assertFalse(self.exists(rel), rel)
+        self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
+
+    def test_auto_off_reports_a_failed_daemon_reload_and_still_cleans_up(self):
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        with self.failing("daemon-reload"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user daemon-reload failed", out)
+        self.assertIn("run `systemctl --user daemon-reload` once your user manager answers", out)
+        # The timer was stopped first; the cleanup is not undone and goes on.
+        self.assertEqual(self.calls()[-2:], ["--user disable --now cst-toolchains-prune.timer", "--user daemon-reload"])
+        for rel in self.INSTALLED:
+            self.assertFalse(self.exists(rel), rel)
+        self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
+        self.assertIn("no longer pruned automatically", out)
+
+    def test_stale_timer_that_cannot_be_stopped_refuses_auto_on_and_off(self):
+        self.csts_cargo_config()
+        paths = self.stale()
+        for args in (("auto", "on"), ("auto", "off")):
+            with self.failing("disable"):
+                rc, out = self.run_main(*args)
+            self.assertEqual(rc, 1, (args, out))
+            self.assertIn("systemctl --user disable --now cst-cargo-build-gc.timer failed", out)
+            self.assertIn("nothing was removed", out)
+            for p in paths:
+                self.assertTrue(os.path.exists(p), (args, p))
+            self.assertEqual(self.calls()[-1], "--user disable --now cst-cargo-build-gc.timer")
+        self.assertFalse(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))  # auto on stopped early
+        self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))  # so did auto off
+
+    def test_stale_files_with_a_failed_daemon_reload_give_a_nonzero_exit(self):
+        # What snapshots setup runs after `auto off`: the stale files go, the
+        # failed reload is reported, and the exit code says so (snapshots
+        # setup prints a NOTE for it).
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        paths = self.stale()
+        with self.failing("daemon-reload"):
+            rc, out = self.run_main("auto", "on", "--unless-off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("left off", out)
+        self.assertIn("systemctl --user daemon-reload failed", out)
+        for p in paths:
+            self.assertFalse(os.path.exists(p), p)
+
 
 class StatusTest(Scratch):
     def test_status_sections(self):

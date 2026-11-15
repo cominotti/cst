@@ -163,12 +163,103 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             test ! -e /home/tester/.cache/cargo-build/ab/cdef0123456789
             st_out="$(/opt/cst-rw/cst toolchains status --brief)"
             grep -q 'cargo-build\\|toolchains' <<<"$st_out"
-            /opt/cst-rw/cst toolchains auto off
-            ! systemctl --user is-enabled cst-toolchains-prune.timer >/dev/null 2>&1
             """,
         )
+        self.toolchains_auto_off_without_a_user_manager()
+        self.toolchains_auto_off()
+        self.is_enabled_reads_unit_files()
         # Clean up demo workspace for later tests
         as_tester_bash(self.SYSTEMD_CONTAINER, "rm -rf /home/tester/work/demo")
+
+    # What `auto on` installed (test_04 checks them after each `auto off`).
+    TOOLCHAINS_INSTALLED = (
+        "/home/tester/.config/systemd/user/cst-toolchains-prune.timer "
+        "/home/tester/.config/systemd/user/cst-toolchains-prune.service "
+        "/home/tester/.local/lib/cst/cst-toolchains "
+        "/home/tester/.local/lib/cst/toolchains.conf"
+    )
+
+    def toolchains_auto_off_without_a_user_manager(self):
+        """auto off when the user manager cannot be reached: exit 1, nothing removed, timer still running."""
+        res = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            no_manager="$(mktemp -d)"
+            # The same call works with the session's variables, and fails with
+            # XDG_RUNTIME_DIR at an empty folder and no DBUS_SESSION_BUS_ADDRESS
+            # (no socket of the user manager to talk to).
+            systemctl --user show-environment >/dev/null
+            if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$no_manager" \\
+                systemctl --user show-environment >/dev/null 2>&1; then
+                echo "systemctl --user still reached the user manager: the test below would prove nothing" >&2
+                exit 1
+            fi
+            rc=0
+            env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$no_manager" \\
+                /opt/cst-rw/cst toolchains auto off >"$no_manager.out" 2>&1 || rc=$?
+            cat "$no_manager.out"
+            if [ "$rc" -ne 1 ]; then
+                echo "auto off without a user manager: exit $rc, expected 1" >&2
+                exit 1
+            fi
+            grep -q 'disable --now cst-toolchains-prune.timer failed' "$no_manager.out"
+            grep -q 'nothing was removed' "$no_manager.out"
+            for f in {self.TOOLCHAINS_INSTALLED}; do
+                test -e "$f" || {{ echo "removed although auto off refused: $f" >&2; exit 1; }}
+            done
+            test ! -e /home/tester/.config/cst/toolchains-auto.off
+            systemctl --user is-enabled cst-toolchains-prune.timer
+            systemctl --user is-active cst-toolchains-prune.timer
+            rm -rf "$no_manager" "$no_manager.out"
+            """,
+        )
+        self.assertIn("nothing was removed", res.stdout)
+
+    def toolchains_auto_off(self):
+        """A normal auto off (after the refusal above): the timer stops and the files go."""
+        as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            /opt/cst-rw/cst toolchains auto off
+            if systemctl --user is-active --quiet cst-toolchains-prune.timer; then
+                echo "cst-toolchains-prune.timer is still active after auto off" >&2
+                exit 1
+            fi
+            for f in {self.TOOLCHAINS_INSTALLED}; do
+                test ! -e "$f" || {{ echo "still there after auto off: $f" >&2; exit 1; }}
+            done
+            test -e /home/tester/.config/cst/toolchains-auto.off
+            """,
+        )
+
+    def is_enabled_reads_unit_files(self):
+        """Why the checks above ask is-active: is-enabled reads the unit files. For a timer that still
+        runs after its file was deleted (what auto off left before it checked `disable`) it says
+        not-found and exits non-zero, as if the timer were off."""
+        res = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            d=/home/tester/.config/systemd/user
+            printf '[Service]\\nType=oneshot\\nExecStart=/bin/true\\n' >"$d/cst-e2e-probe.service"
+            printf '[Timer]\\nOnCalendar=hourly\\n' >"$d/cst-e2e-probe.timer"
+            systemctl --user daemon-reload
+            systemctl --user enable --now cst-e2e-probe.timer >/dev/null 2>&1
+            rm "$d/cst-e2e-probe.timer"
+            en_rc=0
+            en="$(systemctl --user is-enabled cst-e2e-probe.timer 2>&1)" || en_rc=$?
+            ac_rc=0
+            ac="$(systemctl --user is-active cst-e2e-probe.timer)" || ac_rc=$?
+            echo "is-enabled: [$en] exit $en_rc; is-active: [$ac] exit $ac_rc"
+            systemctl --user stop cst-e2e-probe.timer
+            systemctl --user disable cst-e2e-probe.timer >/dev/null 2>&1 || true
+            rm -f "$d/cst-e2e-probe.service" "$d/timers.target.wants/cst-e2e-probe.timer"
+            systemctl --user daemon-reload
+            """,
+        )
+        # Seen in the Fedora 45 image: "is-enabled: [not-found] exit 4; is-active: [active] exit 0".
+        # So `! systemctl --user is-enabled` passed even when the timer kept running.
+        self.assertRegex(res.stdout, r"is-enabled: \[[^]]*\] exit [1-9]")
+        self.assertIn("is-active: [active] exit 0", res.stdout)
 
     def test_05_bluetooth_config_wp_roles_and_ldac_unit(self):
         """bluetooth plan, apply --no-restart, real libwireplumber wp-roles validation, and revert."""
