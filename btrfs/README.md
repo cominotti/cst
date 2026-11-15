@@ -372,6 +372,11 @@ kernel shows its own state as files) and in the cgroup tree.
 - Data goes to `/var/log/btrfs-stall-monitor`, one file per day, **8 days** kept.
   Only members of the `wheel` group (the users who are allowed to use `sudo`)
   can read it, because it contains process names and kernel messages.
+- Note on zswap numbers: daemons before version 7 read only the first 4 KiB
+  of `/proc/vmstat`, so they recorded `zswpin`, `zswpout` and `zswpwb` as 0.
+  The report ignores those counters in old logs: it prints `n/a (daemon < v7)`,
+  or counts zswap only from the first version 7 record. The new daemon
+  reaches the machine with `cst btrfs install`.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
   to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
   keeps sampling while everything else is stuck.

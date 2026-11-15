@@ -5,8 +5,10 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s swap/tests -t . -v
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import os
 import shutil
 import subprocess
@@ -119,8 +121,6 @@ class StatusMathTest(unittest.TestCase):
 
     def settings_output(self, wsf, exp_on):
         """show_settings against a fake /proc/sys and cpu-setup run folder."""
-        import contextlib
-        import io
         tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.addCleanup(shutil.rmtree, tmp)
         os.makedirs(os.path.join(tmp, "proc", "sys", "vm"))
@@ -155,6 +155,32 @@ class StatusMathTest(unittest.TestCase):
         # Inside a container /run is its own; the host's records are under /run/host.
         want = "/run/host/run/cpu-setup" if os.path.exists("/run/.containerenv") else "/run/cpu-setup"
         self.assertEqual(self.m.CPU_RUN, want)
+
+    def test_debug_reject_labels(self):
+        # The kernel names are misleading (mm/zswap.c): reject_compress_fail
+        # counts pages that did not compress while their cgroup had zswap
+        # writeback off (the game profile), and reject_reclaim_fail counts
+        # failed shrinker writebacks, not a full pool.
+        help_ = self.m.DEBUG_HELP
+        self.assertIn("writeback off", help_["reject_compress_fail"])
+        self.assertIn("writeback off", help_["reject_compress_poor"])
+        self.assertIn("shrinker", help_["reject_reclaim_fail"])
+
+        tmp = tempfile.mkdtemp(prefix="swap-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        for name, val in (("reject_compress_fail", "164000"), ("reject_reclaim_fail", "42"),
+                          ("pool_limit_hit", "0"), ("new_kernel_counter", "7")):
+            with open(os.path.join(tmp, name), "w") as f:
+                f.write(val + "\n")
+        self.m.ZSWAP_DEBUG = tmp
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.show_debug("")
+        lines = {l.split()[0]: l for l in out.getvalue().splitlines()[1:] if l.strip()}
+        self.assertIn("164000", lines["reject_compress_fail"])
+        self.assertTrue(lines["reject_compress_fail"].endswith(help_["reject_compress_fail"]))
+        self.assertTrue(lines["reject_reclaim_fail"].endswith(help_["reject_reclaim_fail"]))
+        self.assertEqual(lines["new_kernel_counter"].split(), ["new_kernel_counter", "7"])
 
     def test_size_and_bool(self):
         self.assertEqual(self.m.parse_size("512M"), 512 * 2**20)
