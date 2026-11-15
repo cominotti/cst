@@ -77,10 +77,16 @@ GIT_ENV = {
 FAKE_BWRAP = """#!{python} -I
 # Fake bwrap: records its arguments, then runs the command after the options
 # with the environment (--clearenv, --setenv) and folder (--chdir) it was given.
-import json, os, sys
+import json, os, stat, sys
+def stdin_is_null():
+    try:
+        st, null = os.fstat(0), os.stat(os.devnull)
+    except OSError:
+        return False
+    return stat.S_ISCHR(st.st_mode) and st.st_rdev == null.st_rdev
 args = sys.argv[1:]
 with open({log!r}, "a") as fh:
-    fh.write(json.dumps({{"bwrap": args}}) + "\\n")
+    fh.write(json.dumps({{"bwrap": args, "stdin_null": stdin_is_null()}}) + "\\n")
 with open({control!r}) as fh:
     control = json.load(fh)
 two = {{"--ro-bind", "--bind", "--setenv"}}
@@ -106,12 +112,19 @@ os.execve(cmd[0], cmd, env)
 FAKE_TOOL = """#!{python} -I
 # Fake cosmic-ray, cr-filter-lines, cr-filter-pragma and cr-report: records the
 # call, then does a small part of the real job on a session database.
-import json, os, sqlite3, sys, tomllib
+import json, os, sqlite3, stat, sys, tomllib
+def stdin_is_null():
+    try:
+        st, null = os.fstat(0), os.stat(os.devnull)
+    except OSError:
+        return False
+    return stat.S_ISCHR(st.st_mode) and st.st_rdev == null.st_rdev
 name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
 with open({control!r}) as fh:
     control = json.load(fh)
 with open({log!r}, "a") as fh:
-    fh.write(json.dumps({{"tool": name, "args": args, "cwd": os.getcwd(), "env": dict(os.environ)}}) + "\\n")
+    fh.write(json.dumps({{"tool": name, "args": args, "cwd": os.getcwd(), "env": dict(os.environ),
+                         "stdin_null": stdin_is_null()}}) + "\\n")
 step = args[0] if name == "cosmic-ray" else name
 if control.get("fail") == step:
     sys.exit(3)
@@ -139,6 +152,9 @@ elif step == "exec":
         fh.write(original + "# mutated\\n")
     with open(module, "w") as fh:
         fh.write(original)
+    if control.get("plant_links"):  # what a mutant could do: links in the output folder to files elsewhere
+        for report in ("survivors.txt", "report.txt", "counts.json"):
+            os.symlink(os.path.join(control["plant_links"], report), os.path.join(os.path.dirname(args[2]), report))
     table = {{"killed": ("KILLED", "FAIL"), "timeout": ("KILLED", "timeout"), "survived": ("SURVIVED", "ok"),
              "incompetent": ("INCOMPETENT", "Traceback")}}
     with sqlite3.connect(args[2]) as db:
@@ -252,6 +268,8 @@ class ParseArgsTest(unittest.TestCase):
             ["a/b", "a.t", "--functions", "f,"],
             ["a/b", "a.t", "--functions", "f-g"],
             ["a/b", "a.t", "--base", " "],
+            ["a/b", "a.t", "--base=--output=/tmp/x"],  # git would take it as an option and write that file
+            ["a/b", "a.t", "--base=-p"],
             ["a/b", "a.t", "--timeout", "0"],
             ["a/b", "a.t", "--timeout", "-1"],
             ["a/b", "a.t", "--timeout", "nan"],
@@ -375,12 +393,17 @@ class SandboxTest(unittest.TestCase):
 
     def test_hidden_trees(self):
         def fake(dirs, links):
-            return M.hidden_trees(isdir=lambda p: p in dirs, islink=lambda p: p in links)
+            return M.hidden_trees([], isdir=lambda p: p in dirs, islink=lambda p: p in links)
 
-        # Silverblue: /home is a symlink to /var/home.
-        self.assertEqual(fake({"/run", "/tmp", "/var/home", "/home"}, {"/home"}), ["/run", "/tmp", "/var/home"])
-        # A plain Fedora (or CI): /home is a real folder and /var/home does not exist.
-        self.assertEqual(fake({"/run", "/tmp", "/home"}, set()), ["/run", "/tmp", "/home"])
+        # Silverblue: /home, /mnt and /media are symlinks (to /var/home, /var/mnt and /run/media).
+        dirs = {"/run", "/tmp", "/var/home", "/home", "/var/mnt", "/mnt", "/media"}
+        self.assertEqual(
+            fake(dirs, {"/home", "/mnt", "/media"}), ["/run", "/tmp", "/var/home", "/var/mnt"]
+        )  # /var/mnt: CST's btrfs top level, with the home subvolume in it, is mounted there
+        # A plain Fedora (or CI): /home, /mnt and /media are real folders, /var/home and /var/mnt do not exist.
+        self.assertEqual(
+            fake({"/run", "/tmp", "/home", "/mnt", "/media"}, set()), ["/run", "/tmp", "/home", "/mnt", "/media"]
+        )
 
     def test_stubs_fail_and_say_why(self):
         with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
@@ -396,6 +419,111 @@ class SandboxTest(unittest.TestCase):
                 )
                 self.assertEqual(r.returncode, 97)
                 self.assertIn(f"{name} is not available during mutation testing", r.stderr)
+
+
+def mountinfo(*rows: str) -> list:
+    """Mounts from short rows "DEV ROOT POINT TYPE", in the format of /proc/self/mountinfo."""
+    lines = []
+    for n, row in enumerate(rows, start=20):
+        dev, root, point, fstype = row.split()
+        lines.append(f"{n} 1 {dev} {root} {point} rw,relatime shared:{n} - {fstype} /dev/x rw")
+    return M.parse_mountinfo("\n".join(lines) + "\n")
+
+
+class MountsTest(unittest.TestCase):
+    # This workstation: Silverblue, the home subvolume at /var/home, the whole
+    # btrfs (subvolid 5) automounted at /var/mnt/btrfs-top by CST's snapshot module.
+    HOST = (
+        "0:44 / / overlay",
+        "0:39 /root /sysroot btrfs",
+        "0:39 /var /var btrfs",
+        "0:29 / /run tmpfs",
+        "0:67 / /tmp tmpfs",
+        "0:39 /home /var/home btrfs",
+        "0:60 / /var/mnt/btrfs-top autofs",
+        "0:39 / /var/mnt/btrfs-top btrfs",
+        "0:35 / /proc/sys/fs/binfmt_misc autofs",
+    )
+
+    @staticmethod
+    def views(rows, hidden, dirs=None):
+        return M.other_views(mountinfo(*rows), hidden, lambda p: dirs is None or p in dirs)
+
+    def test_parse_mountinfo(self):
+        text = (
+            "29 1 0:29 / /run rw,nosuid shared:5 - tmpfs tmpfs rw\n"
+            "30 29 0:39 /home/a\\040b /mnt/with\\040space rw - btrfs /dev/dm-1 rw,subvol=/home\n"  # no tags
+            "31 29 0:40 / /x\\134y rw master:1 propagate_from:2 - ext4 /dev/sda1 rw\n"
+            "garbage\n"
+        )
+        self.assertEqual(
+            M.parse_mountinfo(text),
+            [
+                M.Mount("0:29", "/", "/run", "tmpfs"),
+                M.Mount("0:39", "/home/a b", "/mnt/with space", "btrfs"),
+                M.Mount("0:40", "/", "/x\\y", "ext4"),
+            ],
+        )
+
+    def test_the_whole_btrfs_mounted_elsewhere_shows_the_home(self):
+        # With /var/mnt not hidden, the automount point is hidden itself (what it mounts is unknown),
+        # and so is the home inside the top level when it is mounted (it is under the automount point).
+        self.assertEqual(self.views(self.HOST, ["/run", "/tmp", "/var/home"]), ["/var/mnt/btrfs-top"])
+        no_autofs = [r for r in self.HOST if "autofs" not in r]
+        self.assertEqual(self.views(no_autofs, ["/run", "/tmp", "/var/home"]), ["/var/mnt/btrfs-top/home"])
+        # With /var/mnt hidden (the default), nothing more; /proc gets a fresh mount anyway.
+        self.assertEqual(self.views(self.HOST, ["/run", "/tmp", "/var/home", "/var/mnt"]), [])
+
+    def test_a_toolbox(self):
+        # The toolbox's / is one of the overlays of the container store in the home; the user's home is a bind
+        # of the host's /home/USER; the host's /var/mnt is bound with the top level mounted in it.
+        rows = (
+            "0:182 / / overlay",
+            "0:29 / /run tmpfs",
+            "0:44 / /run/host overlay",
+            "0:39 /home /run/host/var/home btrfs",
+            "0:39 /home/u /var/home/u btrfs",
+            "0:39 /home/u/.local/share/containers/storage/overlay /var/home/u/.local/share/containers/storage/overlay btrfs",
+            "0:182 / /var/home/u/.local/share/containers/storage/overlay/abc/merged overlay",
+            "0:182 /usr/share/empty /sys/fs/selinux overlay",
+            "0:39 /var/lib/flatpak /var/lib/flatpak btrfs",
+            "0:39 /var/mnt /var/mnt btrfs",
+            "0:39 / /var/mnt/btrfs-top btrfs",
+        )
+        self.assertEqual(self.views(rows, ["/run", "/tmp", "/var/home"]), ["/var/mnt/btrfs-top/home/u"])
+        self.assertEqual(self.views(rows, ["/run", "/tmp", "/var/home", "/var/mnt"]), [])
+
+    def test_a_home_partition_mounted_twice(self):
+        rows = ("8:1 / / ext4", "8:2 / /home ext4", "8:2 / /srv/homes ext4", "8:2 /alice /srv/alice ext4")
+        # /srv/homes shows the whole partition, /srv/alice one folder of it.
+        self.assertEqual(self.views(rows, ["/run", "/tmp", "/home"]), ["/srv/homes", "/srv/alice"])
+
+    def test_a_folder_on_the_root_filesystem_and_missing_views(self):
+        # /home is a plain folder of /: the only other view is / itself, which is never hidden.
+        self.assertEqual(self.views(("8:1 / / ext4", "0:29 / /run tmpfs"), ["/run", "/tmp", "/home"]), [])
+        # A view that is not a folder here is skipped (bwrap could not mount over it).
+        rows = ("0:39 /home /var/home btrfs", "0:39 / /pool btrfs")
+        self.assertEqual(self.views(rows, ["/var/home"], dirs={"/pool/home"}), ["/pool/home"])
+        self.assertEqual(self.views(rows, ["/var/home"], dirs=set()), [])
+
+    def test_hidden_trees_adds_the_other_views(self):
+        # The whole btrfs mounted at /pool (not in a folder hidden anyway): its home is hidden too.
+        rows = ("0:39 /home /var/home btrfs", "0:39 / /pool btrfs")
+        dirs = {"/run", "/tmp", "/var/home", "/pool/home"}
+        self.assertEqual(
+            M.hidden_trees(mountinfo(*rows), isdir=lambda p: p in dirs, islink=lambda p: False),
+            ["/run", "/tmp", "/var/home", "/pool/home"],
+        )
+
+    def test_outermost_only_and_no_repeats(self):
+        rows = (
+            "0:60 / /a autofs",
+            "0:39 /home /var/home btrfs",
+            "0:39 / /a btrfs",
+            "0:39 / /b btrfs",
+            "0:61 / /a/c autofs",
+        )
+        self.assertEqual(self.views(rows, ["/var/home"]), ["/a", "/b/home"])
 
 
 class FindToolsTest(unittest.TestCase):
@@ -452,6 +580,15 @@ class SessionCountsTest(unittest.TestCase):
         )
         self.assertEqual(c.mutants, 7)
 
+    def test_a_session_cosmic_ray_wrote_differently_is_a_failed_step(self):
+        with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
+            session = os.path.join(tmp, "other.sqlite")
+            with contextlib.closing(sqlite3.connect(session)) as db:
+                db.execute("CREATE TABLE jobs (id TEXT)")
+                db.commit()
+            with self.assertRaisesRegex(M.StepError, "cannot read the numbers from"):
+                M.session_counts(session)
+
 
 class RunTest(unittest.TestCase):
     """The whole run with a fake bwrap and fake cosmic-ray tools."""
@@ -494,8 +631,8 @@ class RunTest(unittest.TestCase):
         with open(self.control, "w") as fh:
             json.dump(control, fh)
 
-    def execute(self, *args, tools=None, out=True):
-        argv = ["pkg/tool", "pkg.tests.test_tool", *args] + (["--out", self.out] if out else [])
+    def execute(self, *args, tools=None, out=True, helper="pkg/tool"):
+        argv = [helper, "pkg.tests.test_tool", *args] + (["--out", self.out] if out else [])
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             rc = M.execute(argv, repo=lambda: self.repo, tools=lambda: tools or self.tools, env={"HOME": self.tmp})
@@ -678,12 +815,71 @@ class RunTest(unittest.TestCase):
             ("pkg/missing", "not a file of the checkout"),
         ):
             with self.subTest(helper=helper):
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
-                    rc = M.execute([helper, "t", "--all"], repo=lambda: self.repo, tools=lambda: self.tools)
+                rc, _, stderr = self.execute("--all", helper=helper)
                 self.assertEqual(rc, 2)
-                self.assertIn(message, stderr.getvalue())
+                self.assertIn(message, stderr)
         self.assertEqual(self.calls(), [])
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_a_helper_whose_py_name_is_taken_is_refused(self):
+        with open(os.path.join(self.repo, "pkg/tool.py"), "w") as fh:
+            fh.write("")
+        rc, _, stderr = self.execute("--all")
+        self.assertEqual(rc, 2)
+        self.assertIn("pkg/tool.py exists, so the .py link cosmic-ray needs cannot be made", stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_functions_of_a_helper_that_is_not_valid_python(self):
+        with open(os.path.join(self.repo, "pkg/tool"), "a") as fh:
+            fh.write("def broken(:\n")
+        rc, _, stderr = self.execute("--functions", "double")
+        self.assertEqual(rc, 2)
+        self.assertIn("the helper is not valid Python", stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_an_untracked_helper_counts_as_all_new(self):
+        shutil.copy2(os.path.join(self.repo, "pkg/tool"), os.path.join(self.repo, "pkg/new_tool"))
+        rc, stdout, stderr = self.execute(helper="pkg/new_tool")  # --base main by default
+        self.assertEqual(rc, 0, stdout + stderr)
+        self.assertIn("git does not track it yet", stdout)
+        self.assertEqual(self.config()["filters"]["line-filter"]["lines"], {"pkg/new_tool.py": ["1-19"]})
+
+    def test_every_step_reads_nothing_from_the_terminal(self):
+        # A mutant must not read (or wait for) the terminal the run started from: stdin is /dev/null.
+        # The run gets a pipe as stdin here, so that a step that inherits it shows up whatever
+        # stdin the test suite itself has (it can be /dev/null already).
+        read_end, write_end = os.pipe()
+        saved = os.dup(0)
+        try:
+            os.dup2(read_end, 0)
+            rc, stdout, stderr = self.execute("--all")
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, read_end, write_end):
+                os.close(fd)
+        self.assertEqual(rc, 0, stdout + stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 15)
+        self.assertEqual([c for c in calls if not c["stdin_null"]], [])
+
+    def test_links_a_mutant_leaves_in_the_output_folder_are_not_followed(self):
+        victims = os.path.join(self.tmp, "victims")
+        os.mkdir(victims)
+        for name in ("survivors.txt", "report.txt", "counts.json"):
+            with open(os.path.join(victims, name), "w") as fh:
+                fh.write("precious\n")
+        self.set_control(outcomes=["killed", "survived"], plant_links=victims)
+        rc, stdout, stderr = self.execute("--all")
+        self.assertEqual(rc, 0, stdout + stderr)
+        for name in ("survivors.txt", "report.txt", "counts.json"):
+            with self.subTest(name=name):
+                with open(os.path.join(victims, name)) as fh:
+                    self.assertEqual(fh.read(), "precious\n")
+                self.assertFalse(os.path.islink(os.path.join(self.out, name)))
+        with open(os.path.join(self.out, "counts.json")) as fh:
+            self.assertEqual(json.load(fh)["survived"], 1)
+        with open(os.path.join(self.out, "survivors.txt")) as fh:
+            self.assertIn("--- diff 1", fh.read())
 
     def test_output_folder_must_be_new_and_outside_the_checkout(self):
         os.makedirs(self.out)
@@ -699,26 +895,43 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
 
-def usable_bwrap() -> tuple[str | None, str]:
-    """(bwrap's path, "") when it can build a sandbox here, else (None, the reason)."""
+def sandbox_folders(work: str) -> tuple[str, str, str, str]:
+    """Empty copy, out, stubs (with the stubs) and venv folders in work, for M.sandbox_argv."""
+    copy, out, stubs, venv = (os.path.join(work, d) for d in ("copy", "out", "stubs", "venv"))
+    for d in (copy, out, venv):
+        os.mkdir(d)
+    M.write_stubs(stubs)
+    return copy, out, stubs, venv
+
+
+def usable_bwrap(hidden: list[str]) -> tuple[str | None, str]:
+    """(bwrap's path, "") when it can build the sandbox's profile here, else (None, the reason).
+
+    The probe is the whole profile (--proc, --dev, the namespaces), as the
+    helper's own first step: some containers allow a user namespace but not
+    a new /proc.
+    """
     path = shutil.which("bwrap")
     if path is None:
         return None, "bwrap is not installed"
-    r = subprocess.run(
-        [path, "--ro-bind", "/", "/", "/usr/bin/true"],
-        check=False,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-    )
+    with tempfile.TemporaryDirectory(prefix="cst-mutation-probe-") as work:
+        box = M.sandbox_argv(path, *sandbox_folders(os.path.realpath(work)), hidden)
+        r = subprocess.run(
+            [*box, "/usr/bin/true"], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
     if r.returncode != 0:
-        return None, "bwrap cannot build a sandbox here: " + r.stderr.strip()
+        return None, "bwrap cannot build the sandbox here: " + r.stderr.strip()
     return path, ""
 
 
+# Run inside the sandbox. It tries to write in the copy and in two folders
+# outside (one under /tmp, one under /var/tmp), and walks the folders where
+# sockets or the home could be, six levels deep: enough for
+# ~/.cache/ibus/SOCKET under /var/mnt/btrfs-top/home/USER.
 PROBE = r"""
 import json, os, stat, sys
-outside, copy, real_home = sys.argv[1:4]
+copy, home_dev, home_ino, *outside = sys.argv[1:]
+home_id = (int(home_dev), int(home_ino))
 def attempt(folder):
     try:
         os.makedirs(folder, exist_ok=True)
@@ -727,29 +940,33 @@ def attempt(folder):
         return "written"
     except OSError as e:
         return "refused: " + str(e.strerror)
-sockets = []
-for root in ("/run", "/var/run", "/tmp", "/var/home", "/home"):
+sockets, home_views = [], []
+for root in ("/run", "/var/run", "/tmp", "/var/home", "/home", "/var/mnt", "/mnt", "/media"):
     for folder, dirs, files in os.walk(root):
-        for name in files + dirs:
-            path = os.path.join(folder, name)
+        if folder.count("/") - root.count("/") >= 6:
+            dirs[:] = []
+        for path in [folder] + [os.path.join(folder, name) for name in files + dirs]:
             try:
-                if stat.S_ISSOCK(os.lstat(path).st_mode):
-                    sockets.append(path)
+                st = os.lstat(path)
             except OSError:
-                pass
-print(json.dumps({"outside": attempt(outside), "copy": attempt(copy), "sockets": sockets,
-                  "home": os.environ.get("HOME"), "real_home_visible": os.path.exists(real_home)}))
+                continue
+            if stat.S_ISSOCK(st.st_mode):
+                sockets.append(path)
+            elif stat.S_ISDIR(st.st_mode) and (st.st_dev, st.st_ino) == home_id:
+                home_views.append(path)
+print(json.dumps({"copy": attempt(copy), "outside": [attempt(o) for o in outside], "sockets": sockets,
+                  "home_views": home_views, "home": os.environ.get("HOME")}))
 """
 
 
 class RealBwrapTest(unittest.TestCase):
     """The real sandbox, when this machine can build one (CI's container usually cannot)."""
 
-    def test_only_the_copy_is_writable_and_no_socket_is_visible(self):
-        bwrap, reason = usable_bwrap()
+    def test_only_the_copy_is_writable_and_no_socket_or_home_is_visible(self):
+        hidden = M.hidden_trees(M.read_mounts())
+        bwrap, reason = usable_bwrap(hidden)
         if bwrap is None:
             self.skipTest(reason)
-        hidden = M.hidden_trees()
         python = next(
             (
                 p
@@ -760,19 +977,21 @@ class RealBwrapTest(unittest.TestCase):
         )
         if python is None:
             self.skipTest("no Python outside the folders the sandbox hides")
-        with (
-            tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as work,
-            tempfile.TemporaryDirectory(prefix="cst-mutation-outside-") as outside,
-        ):
-            work = os.path.realpath(work)
-            copy, out, stubs, venv = (os.path.join(work, d) for d in ("copy", "out", "stubs", "venv"))
-            for d in (copy, out, venv):
-                os.mkdir(d)
-            M.write_stubs(stubs)
+        home = os.stat(os.path.expanduser("~"))
+        with contextlib.ExitStack() as stack:
+            work = os.path.realpath(stack.enter_context(tempfile.TemporaryDirectory(prefix="cst-mutation-test-")))
+            # Outside the sandbox's writable folders: one under /tmp (hidden inside, so a write lands in
+            # the sandbox's own tmpfs), one under /var/tmp (visible inside, read-only).
+            outside = [stack.enter_context(tempfile.TemporaryDirectory(prefix="cst-mutation-outside-"))]
+            with contextlib.suppress(OSError):
+                outside.append(
+                    stack.enter_context(tempfile.TemporaryDirectory(prefix="cst-mutation-outside-", dir="/var/tmp"))
+                )
+            outside = [os.path.realpath(o) for o in outside]
+            copy, out, stubs, venv = sandbox_folders(work)
             box = M.sandbox_argv(bwrap, copy, out, stubs, venv, hidden)
-            real_home = os.path.expanduser("~")
             r = subprocess.run(
-                [*box, python, "-I", "-c", PROBE, os.path.realpath(outside), copy, real_home],
+                [*box, python, "-I", "-c", PROBE, copy, str(home.st_dev), str(home.st_ino), *outside],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -780,13 +999,15 @@ class RealBwrapTest(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             got = json.loads(r.stdout)
-            self.assertEqual(os.listdir(outside), [])  # whatever happened inside, nothing reached it
+            for folder in outside:
+                self.assertEqual(os.listdir(folder), [], folder)  # whatever happened inside, nothing reached it
+            if len(outside) > 1:
+                self.assertTrue(got["outside"][1].startswith("refused: "), got["outside"])  # the root is read-only
             self.assertEqual(got["copy"], "written")
             self.assertEqual(os.listdir(copy), ["probe"])
             self.assertEqual(got["sockets"], [])
+            self.assertEqual(got["home_views"], [])
             self.assertEqual(got["home"], os.path.join(copy, ".home"))
-            if any(M.inside(real_home, h) for h in hidden):
-                self.assertFalse(got["real_home_visible"])
 
 
 if __name__ == "__main__":

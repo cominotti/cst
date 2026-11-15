@@ -168,12 +168,18 @@ The first argument is the Python file to mutate, relative to the top of the
 checkout; the second is the unittest module that tests it. Only one of
 `--base`, `--functions` and `--all`. `--functions` takes def names: every def
 with that name counts, methods and nested defs too, with their decorators;
-a name with no def is an error. `--base` uses `git diff` against the working
-tree, so uncommitted changes count; a file git does not track yet has no
-diff (use `--all`). `--timeout SEC` (default 60) is the time one mutant's
-tests get before the mutant counts as killed. `--out DIR` chooses the output
-folder (new or empty, outside the checkout); by default it is a new folder
-under `${XDG_CACHE_HOME:-~/.cache}/cst-mutation/`.
+a name with no def is an error. `--base` uses `git diff REF` against the
+working tree, so uncommitted changes count. It compares with REF itself, not
+with the point where the branch left it: when `main` has moved on since, the
+lines `main` changed count too (rebase first, or give
+`--base "$(git merge-base main HEAD)"`). A file git does not track yet is new
+as a whole, so all its lines count; a renamed file is new too, under its new
+name. `--timeout SEC` (default 60) is the time one mutant's tests get before
+the mutant counts as killed. `--out DIR` chooses the output folder (new or
+empty, outside the checkout); by default it is a new folder under
+`${XDG_CACHE_HOME:-~/.cache}/cst-mutation/`. Give it as an absolute path:
+the task runs from the top of the checkout, so a relative one lands inside
+the checkout and is refused.
 
 It needs uv, bubblewrap (`bwrap`, Fedora package `bubblewrap`) and git. It
 runs `tests/uv-dev --group mutation python3 -I -B tests/mutation/cst-mutation
@@ -222,10 +228,19 @@ every cosmic-ray command runs inside bubblewrap, with this profile
 (`sandbox_argv` in `tests/mutation/cst-mutation`):
 
 - the whole system read-only (`--ro-bind / /`), a fresh `/dev` and `/proc`;
-- `/run`, `/tmp` and the home folders (`/var/home`; `/home` too where it is a
-  real folder, not a symlink) replaced by empty folders (tmpfs). That hides
-  every daemon socket: D-Bus, Docker, libvirt, journald, systemd and, in a
-  toolbox, the whole host under `/run/host`;
+- `/run`, `/tmp`, the home folders (`/var/home`, `/home`) and the folders
+  other filesystems are mounted in (`/var/mnt`, `/mnt`, `/media`) replaced by
+  empty folders (tmpfs). One that is a symlink is skipped: on Silverblue
+  `/home`, `/mnt` and `/media` point into `/var/home`, `/var/mnt` and `/run`,
+  which are hidden. That hides every daemon socket (D-Bus, Docker, libvirt,
+  journald, systemd and, in a toolbox, the whole host under `/run/host`),
+  the real home and its sockets (such as `~/.cache/ibus`);
+- every other place where the home can be seen, found in
+  `/proc/self/mountinfo` and hidden too: the same filesystem mounted
+  elsewhere with the home in it (CST's snapshot module mounts the whole
+  btrfs, with the home subvolume, at `/var/mnt/btrfs-top`), a bind mount of
+  a folder of the home, and every automount point (what it would mount is
+  not known yet);
 - bound back in after those, so that they are not hidden: uv's virtual
   environment and a folder of stubs, read-only; the copy and the output
   folder, writable. Nothing else is writable;
@@ -248,17 +263,23 @@ What the sandbox does **not** contain:
 
 - CPU and memory: a mutant can loop or allocate until its `--timeout`
   ends it;
-- reading: everything outside `/run`, `/tmp` and the home folders can be
-  read (but not changed), such as `/etc`, `/usr` and `/proc`.
+- reading: everything outside the hidden folders above can be read (but
+  not changed), such as `/etc`, `/usr`, `/var/log` and `/proc`. A file (not
+  a folder) of the home bind-mounted somewhere else would be readable too:
+  bwrap can only put an empty folder over a folder.
 
 The unit tests in `tests/mutation/tests/` check the profile option by
 option (the binds after the tmpfs mounts, only the copy and the output
 folder writable), the order of the steps with a fake `bwrap` and fake
 cosmic-ray tools, the exit statuses, and that the checkout is unchanged
-after a run. One test uses the real `bwrap` when it can build a sandbox
-(CI's container usually cannot, so it is skipped there): a second temporary
-folder stays empty, the copy is writable, and no Unix socket is visible
-under `/run`, `/tmp` or the home folders.
+after a run, also when a mutant leaves symlinks in the output folder (the
+reports are written as new files, never through a link). One test uses the
+real `bwrap` when it can build the whole profile (CI's container usually
+cannot, so it is skipped there): the copy is writable; a write under
+`/var/tmp` is refused (the root is read-only) and a folder under `/tmp`
+outside stays empty; and, six folders deep under `/run`, `/tmp`, the home
+folders, `/var/mnt`, `/mnt` and `/media`, there is no Unix socket and no
+folder that is the real home.
 
 ## Layout-only commits and `git blame`
 

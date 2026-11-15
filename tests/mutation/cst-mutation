@@ -19,7 +19,8 @@ or by hand, from the checkout:
 HELPER is a Python file of the checkout, relative to its top (swap/swap-status);
 TEST_MODULE is the unittest module that tests it (swap.tests.test_swap).
 Which lines are mutated:
-    --base REF        the lines changed since REF (git diff; the default, REF=main)
+    --base REF        the lines changed since REF (git diff REF; the default, REF=main;
+                      a file git does not track counts as new as a whole)
     --all             the whole file
     --functions A,B   the named functions (every def with that name: methods, nested defs)
 Other options:
@@ -30,9 +31,10 @@ Other options:
 It never changes the checkout: it works on a copy in a temporary folder. Every
 cosmic-ray command runs inside bubblewrap (bwrap), because a mutant can flip
 exactly the guard that keeps a helper away from the machine: in the sandbox
-the whole system is read-only, /run, /tmp and the home folders are empty, the
-network is off, and only the copy and the output folder are writable. Without
-bwrap it refuses to run. See docs/dev-tools.md, "Mutation testing".
+the whole system is read-only; /run, /tmp, the home folders and the mount
+folders (/var/mnt, where CST mounts the whole btrfs) are empty; the network is
+off; and only the copy and the output folder are writable. Without bwrap it
+refuses to run. See docs/dev-tools.md, "Mutation testing".
 
 Exit status: 0 the run finished (survivors or not); 1 a step failed or some
 mutants could not run; 2 a usage error, a missing tool, or the tests fail
@@ -41,6 +43,7 @@ without any mutation.
 
 import argparse
 import ast
+import contextlib
 import dataclasses
 import json
 import os
@@ -54,7 +57,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, TextIO
 
 PROG = "cst-mutation"
 EXIT_FAILED = 1
@@ -64,11 +67,15 @@ DEFAULT_TIMEOUT = 60.0
 
 # The folders hidden behind an empty tmpfs inside the sandbox: daemon sockets
 # (/run: D-Bus, Docker, libvirt, journald; in a toolbox /run/host is the whole
-# host), temporary files, and the home folders (the real home, ~/.cache/ibus
-# sockets). /home is added only when it is a real folder: on Silverblue it is
-# a symlink to /var/home. A folder missing on this machine is skipped (bwrap
-# cannot create it on the read-only root).
-HIDDEN_CANDIDATES = ("/run", "/tmp", "/var/home", "/home")
+# host), temporary files, the home folders (the real home, ~/.cache/ibus
+# sockets), and the folders where other filesystems are mounted: CST's
+# snapshot module mounts the whole btrfs, home subvolume included, at
+# /var/mnt/btrfs-top, so the home would be readable (and its sockets
+# reachable) there. A folder that is a symlink here (/home -> /var/home and
+# /mnt -> /var/mnt on Silverblue) or is missing is skipped: bwrap cannot
+# mount over a symlink or create a folder on the read-only root.
+HIDDEN_CANDIDATES = ("/run", "/tmp", "/var/home", "/home", "/var/mnt", "/mnt", "/media")
+HOME_TREES = ("/var/home", "/home")
 
 # Programs that reach the host or change the machine. Inside the sandbox they
 # are replaced by a stub that fails with exit status 97 and says why, first on
@@ -177,6 +184,9 @@ def parse_args(argv: Sequence[str]) -> Options:
                 functions.append(name)
     if a.base is not None and not str(a.base).strip():
         raise UsageError("--base needs a git ref")
+    if a.base is not None and str(a.base).startswith("-"):
+        # git would read it as an option (--output=FILE writes a file anywhere).
+        raise UsageError(f"--base {a.base!r}: a git ref does not start with '-'")
     timeout = float(a.timeout)
     if not timeout > 0:
         raise UsageError("--timeout must be more than 0 seconds")
@@ -230,7 +240,10 @@ def function_ranges(source: str, names: Sequence[str]) -> list[tuple[int, int]]:
     Methods and nested defs count too. A name with no def is a usage error,
     since a typo would otherwise mutate nothing and look like a clean run.
     """
-    tree = ast.parse(source)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        raise UsageError(f"the helper is not valid Python: {e}") from None
     found: dict[str, list[tuple[int, int]]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in names:
@@ -290,11 +303,115 @@ def config_text(module_path: str, test_module: str, timeout: float, ranges: Sequ
 # ---- the sandbox ------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Mount:
+    """One line of /proc/self/mountinfo."""
+
+    dev: str  # the filesystem, as major:minor; every mount of the same filesystem has the same one
+    root: str  # the folder of that filesystem shown at `point` ("/" for its top)
+    point: str  # where it is mounted
+    fstype: str
+
+
+def _unescape(field: str) -> str:
+    # mountinfo writes a space as \040, a backslash as \134, and so on.
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def parse_mountinfo(text: str) -> list[Mount]:
+    """The mounts in the format of /proc/self/mountinfo: `ID PARENT DEV ROOT POINT OPTIONS [TAGS] - TYPE ...`."""
+    mounts = []
+    for line in text.splitlines():
+        fields = line.split()
+        if "-" not in fields[6:]:
+            continue
+        dash = fields.index("-", 6)
+        if dash + 1 < len(fields):
+            mounts.append(Mount(fields[2], _unescape(fields[3]), _unescape(fields[4]), fields[dash + 1]))
+    return mounts
+
+
+def read_mounts() -> list[Mount]:
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as fh:
+            return parse_mountinfo(fh.read())
+    except OSError:
+        return []
+
+
+def under(path: str, folder: str) -> bool:
+    """path is folder or inside it. Only the strings: nothing on disk is read (an automount is not triggered)."""
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
+def _below(root: str, rel: str) -> str:
+    return root if rel == "." else os.path.join(root, rel)
+
+
+def other_views(mounts: Sequence[Mount], hidden: Sequence[str], isdir: Callable[[str], bool]) -> list[str]:
+    """Folders outside `hidden` that show the home folders all the same, or might: hide them too.
+
+    One filesystem can be mounted at several places. When the home folder is
+    part of a filesystem that is also mounted elsewhere, with the home or a
+    folder above it (the whole btrfs, with the home subvolume in it), or with
+    a folder inside the home (a bind mount), the home can be read, and its
+    sockets reached, there too. Each such folder is returned, and every
+    automount point (autofs): what it mounts is not known until something
+    opens it. Mounts under /proc and /dev do not count (the sandbox gets
+    fresh ones), nor one that is not a folder (bwrap cannot mount over it).
+    """
+
+    def is_hidden(path: str) -> bool:
+        return any(under(path, h) for h in hidden)
+
+    # Where the home's files are, as (filesystem, folder in it): the folder of
+    # the mount each home folder is in, and every mount inside it that shows a
+    # folder of its filesystem (a bind or a subvolume, as a toolbox does with
+    # the user's home). A whole filesystem mounted inside the home (the
+    # overlays of a container store) is left out: other places mount the
+    # top of such a filesystem for their own use (a toolbox's own /).
+    places: list[tuple[str, str]] = []
+    for home in hidden:
+        if home not in HOME_TREES:
+            continue
+        holders = [m for m in mounts if under(home, m.point)]
+        if holders:
+            m = max(holders, key=lambda m: len(m.point))
+            places.append((m.dev, _below(m.root, os.path.relpath(home, m.point))))
+        places += [(m.dev, m.root) for m in mounts if under(m.point, home) and m.point != home and m.root != "/"]
+
+    views: list[str] = []
+    for m in mounts:
+        if is_hidden(m.point) or under(m.point, "/proc") or under(m.point, "/dev"):
+            continue
+        if m.fstype == "autofs":
+            views.append(m.point)
+            continue
+        for dev, folder in places:
+            if dev != m.dev:
+                continue
+            if under(folder, m.root):  # m shows a folder above the home's (the whole btrfs)
+                view = _below(m.point, os.path.relpath(folder, m.root))
+            elif under(m.root, folder):  # m shows a part of the home (a bind of a folder in it)
+                view = m.point
+            else:
+                continue
+            if view != "/" and not is_hidden(view) and isdir(view):
+                views.append(view)
+    # A tmpfs hides what is under it, and bwrap could not mount over a folder
+    # inside an earlier tmpfs: keep the outermost ones only.
+    return [v for i, v in enumerate(views) if v not in views[:i] and not any(under(v, w) for w in views if w != v)]
+
+
 def hidden_trees(
-    isdir: Callable[[str], bool] = os.path.isdir, islink: Callable[[str], bool] = os.path.islink
+    mounts: Sequence[Mount],
+    isdir: Callable[[str], bool] = os.path.isdir,
+    islink: Callable[[str], bool] = os.path.islink,
 ) -> list[str]:
-    """The folders of HIDDEN_CANDIDATES that exist here as real folders (not symlinks)."""
-    return [p for p in HIDDEN_CANDIDATES if isdir(p) and not islink(p)]
+    """The folders the sandbox hides: those of HIDDEN_CANDIDATES that exist here as
+    real folders (not symlinks), then other_views() of the home folders."""
+    hidden = [p for p in HIDDEN_CANDIDATES if isdir(p) and not islink(p)]
+    return hidden + other_views(mounts, hidden, isdir)
 
 
 def sandbox_env(copy: str, stubs: str) -> dict[str, str]:
@@ -390,6 +507,16 @@ def is_python_file(path: str) -> bool:
         return bool(PYTHON_SHEBANG.match(fh.readline(200)))
 
 
+def is_tracked(repo: str, helper: str) -> bool:
+    r = subprocess.run(
+        ["git", "-C", repo, "ls-files", "--error-unmatch", "--", helper],
+        check=False,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return r.returncode == 0
+
+
 def changed_lines(repo: str, base: str, helper: str) -> list[tuple[int, int]]:
     r = subprocess.run(
         ["git", "-C", repo, "diff", "--no-color", "--no-ext-diff", "-U0", base, "--", helper],
@@ -457,11 +584,15 @@ def _enum(value: object) -> str:
 def session_counts(session: str) -> Counts:
     """Count the outcomes in a cosmic-ray session file (SQLite, read-only)."""
     uri = Path(os.path.abspath(session)).as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
-        rows = db.execute(
-            "SELECT r.worker_outcome, r.test_outcome, r.output = 'timeout' "
-            "FROM work_items AS i LEFT JOIN work_results AS r ON r.job_id = i.job_id"
-        ).fetchall()
+    try:
+        with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+            rows = db.execute(
+                "SELECT r.worker_outcome, r.test_outcome, r.output = 'timeout' "
+                "FROM work_items AS i LEFT JOIN work_results AS r ON r.job_id = i.job_id"
+            ).fetchall()
+    except sqlite3.Error as e:
+        # Another cosmic-ray version can store its session differently.
+        raise StepError(f"cannot read the numbers from {session} ({e}); report.txt has the mutants") from None
     total = skipped = killed = timeouts = survived = incompetent = 0
     for worker, test, timed_out in rows:
         total += 1
@@ -489,6 +620,24 @@ def summary_lines(c: Counts, minutes: float) -> list[str]:
 
 
 # ---- the run ----------------------------------------------------------------
+
+
+def open_new(path: str) -> TextIO:
+    """Open path for writing as a new file, after removing what is there; a symlink is never followed.
+
+    The output folder is writable inside the sandbox, so a mutant can leave a
+    symlink there (counts.json -> ~/.bashrc) that a plain open() would follow
+    and overwrite, outside the sandbox.
+    """
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise StepError(
+            f"{path}: something in the sandbox put it there, and it cannot be removed ({e.strerror})"
+        ) from None
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644), "w")
 
 
 def say(text: str) -> None:
@@ -523,7 +672,14 @@ def run(opts: Options, repo: str, tools: Tools, env: Mapping[str, str] | None = 
         ranges, what = function_ranges(source, opts.functions), "functions " + ", ".join(opts.functions)
     else:
         base = opts.base or DEFAULT_BASE
-        ranges, what = changed_lines(repo, base, opts.helper), f"the lines changed since {base}"
+        if not is_tracked(repo, opts.helper):
+            # git diff shows nothing for a file git does not track: every line of it is new.
+            ranges, what = (
+                whole_file_range(source),
+                f"the whole file (git does not track it yet, so it is all new since {base})",
+            )
+        else:
+            ranges, what = changed_lines(repo, base, opts.helper), f"the lines changed since {base}"
         if not ranges:
             say(f"nothing to mutate: {opts.helper} has no changed lines since {base}")
             return 0
@@ -556,13 +712,13 @@ def run(opts: Options, repo: str, tools: Tools, env: Mapping[str, str] | None = 
         say(f"mutating {what} of {opts.helper} ({', '.join(f'{a}-{b}' for a, b in ranges)})")
         say(f"tests: {test_command(opts.test_module)}; output in {out}")
 
-        box = sandbox_argv(tools.bwrap, copy, out, stubs, tools.venv, hidden_trees())
+        box = sandbox_argv(tools.bwrap, copy, out, stubs, tools.venv, hidden_trees(read_mounts()))
 
         def step(label: str, argv: Sequence[str], stdout: str | None = None) -> int:
             say(label)
             if stdout is None:
                 return subprocess.run([*box, *argv], check=False, stdin=subprocess.DEVNULL).returncode
-            with open(stdout, "w") as fh:
+            with open_new(stdout) as fh:
                 return subprocess.run([*box, *argv], check=False, stdin=subprocess.DEVNULL, stdout=fh).returncode
 
         def cr(name: str, *args: str) -> list[str]:
@@ -596,7 +752,7 @@ def run(opts: Options, repo: str, tools: Tools, env: Mapping[str, str] | None = 
         counts = session_counts(session)
         for line in summary_lines(counts, (time.monotonic() - start) / 60):
             say(line)
-        with open(os.path.join(out, "counts.json"), "w") as fh:
+        with open_new(os.path.join(out, "counts.json")) as fh:
             json.dump({**dataclasses.asdict(counts), "mutants": counts.mutants}, fh, indent=2)
             fh.write("\n")
         say(f"survivors with their diffs: {os.path.join(out, 'survivors.txt')}")
