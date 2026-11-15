@@ -356,8 +356,10 @@ finish: `WARN`. The fix depends on the case, which the doctor works out from
   (`virsh domblklist`); nothing is called stale.
 
 A disk whose definition has no `<target dev=...>` (libvirt refuses such a
-definition, so this is only a safeguard) is shown as disk `?`, with a fix
-that only looks, and does not stop the check for the other disks.
+definition, so this is only a safeguard) is shown as disk `?` and does not
+stop the check for the other disks. While the VM runs, the doctor cannot
+match that disk to the live listing, so its fix only looks
+(`virsh domblklist`).
 
 After the fix, check that both `domblklist` listings show the image again,
 and only then remove the overlay file

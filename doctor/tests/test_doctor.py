@@ -1451,7 +1451,8 @@ class VmNasBackupTest(VmTest):
 
     def test_overlay_disk_without_target_dev(self):
         # libvirt requires <target dev=...>, but a definition without one must not fail the whole check
-        # (on main its None key made sorted() raise a TypeError): it is named "?" beside the normal disk.
+        # (a None key made sorted() raise a TypeError): it is named "?" beside the normal disk. The VM
+        # runs, and "?" is not in the live listing, so its fix only looks.
         data = "/var/lib/libvirt/images/data.qcow2.cst-overlay-20261114T033000Z"
         for target in ("<target bus='scsi'/>", ""):
             xml = (
@@ -1469,6 +1470,8 @@ class VmNasBackupTest(VmTest):
             self.assertIn(f"WARN   VM win: disk sda is on {self.OVERLAY}", r.stdout)
             self.assertIn(f"WARN   VM win: disk ? is on {data}", r.stdout)
             self.assertNotIn("disk None is on", r.stdout)
+            self.assertIn("fix: sudo virsh -c qemu:///system domblklist win --details", r.stdout)
+            self.assertNotIn("win ?", r.stdout)  # no blockjob or blockcommit command for disk "?"
             self.assert_read_only()
 
     def test_overlay_of_a_shut_off_vm(self):
