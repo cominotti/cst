@@ -57,8 +57,11 @@ attempts=/var/lib/docker-volumes-nocow/attempts
 stub=/run/systemd/system/docker.service
 dropin=/run/systemd/system/docker-volumes-nocow.service.d
 target=/run/systemd/system/e2e-nocow-boot.target
-wrap=/run/e2e-nocow-wrap
+# Not under /run: Docker mounts that tmpfs noexec, and a PATH entry that cannot
+# be executed is skipped without a word (the real systemctl answers instead).
+wrap=/usr/local/libexec/e2e-nocow-wrap
 seen=/run/e2e-nocow-seen
+echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
 
 cleanup() {
     systemctl stop e2e-nocow-boot.target docker.service 2>/dev/null || true
@@ -159,6 +162,10 @@ test -e "$flag"
 test ! -e "$attempts"
 [[ "$(ls -A "$vols/e2e-cow")" == _data ]]
 echo "E2E-NOCOW postponed: docker.service $(systemctl show -P ActiveState docker.service)"
+if [[ ! -s "$seen" ]]; then
+    echo "the helper did not go through the systemctl wrapper ($wrap)" >&2
+    exit 1
+fi
 cat "$seen"
 rm -f "$seen"
 systemctl stop docker.service
