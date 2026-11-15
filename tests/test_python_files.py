@@ -64,7 +64,6 @@ NOT_YET_CLEAN = frozenset(
         "cpu/cpu-watch",
         "cpu/tests/test_cpu.py",
         "cpu/vm-pin",
-        "doctor/cst-doctor",
         "doctor/tests/test_doctor.py",
         "swap/tests/test_swap.py",
         "tests/e2e/run.py",

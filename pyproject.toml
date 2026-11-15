@@ -74,7 +74,7 @@ select = ["F", "B", "UP", "E9", "PLW1510"]
 # `ruff check --select ANN` in `invowk cmd test types`) is ignored everywhere
 # except the files in the braces; add a module here once it is fully typed
 # (and ty-clean, see [tool.ty.src] below).
-"!{swap/swap-status,tests/mutation/cst-mutation}" = ["ANN"]
+"!{swap/swap-status,tests/mutation/cst-mutation,doctor/cst-doctor}" = ["ANN"]
 
 # ---- ty ---------------------------------------------------------------------
 
@@ -101,6 +101,7 @@ include = [
     "cpu/__init__.py",
     "cpu/tests/__init__.py",
     "doctor/__init__.py",
+    "doctor/cst-doctor",
     "doctor/tests/__init__.py",
     "swap/__init__.py",
     "swap/swap-status",

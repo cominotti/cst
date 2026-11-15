@@ -464,6 +464,11 @@ one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 
+`cst-doctor` is one of the typed modules (docs/dev-tools.md, "The typed
+list"): every function has type annotations, so a new check reads
+`def check_name(host: Host) -> Iterator[Result]:`, and
+`invowk cmd test types` (ty and ruff's ANN rules) fails until it does.
+
 ## 10. Tests
 
 ```
