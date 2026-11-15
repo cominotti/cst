@@ -27,6 +27,10 @@ python-downloads = "never"
 # ---- ruff -------------------------------------------------------------------
 
 [tool.ruff]
+# The line length `ruff format` aims for (its check runs in
+# `invowk cmd test pylint`). Long strings and comments can stay longer: the
+# linter's line-length rule (E501) is not selected.
+line-length = 120
 # ruff finds *.py files by itself but not the extensionless helpers: each one
 # is named here. tests/test_python_files.py fails when a Python file of the
 # repository is missing from this list.
@@ -47,6 +51,12 @@ extend-include = [
     "toolchains/cst-toolchains",
     "vm/cst-vm",
 ]
+
+[tool.ruff.format]
+# Leave the Python code blocks in Markdown files alone (ruff would format
+# them too). They are short examples wrapped to read well next to the text
+# around them, not code that runs; the format check is for the code.
+exclude = ["*.md"]
 
 [tool.ruff.lint]
 # F: pyflakes (unused names, undefined names); B: bugbear (likely bugs);
