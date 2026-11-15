@@ -312,9 +312,12 @@ snap_user_configs() {   # home
         echo "NOTE: the toolchain settings were not all written (see above); later: ${tc} config apply" >&2
     # Nothing ever deletes cargo's build folders: the user timer does (it
     # refuses, and says so, when build-dir is not the line written above).
-    # --unless-off: after `auto off` it stays off (and says so).
+    # --unless-off: after `auto off` it stays off (and says so). A failure
+    # can come after the timer was turned on, or on the "left off" path
+    # (a failed cleanup of what the earlier cargo-gc left): the NOTE only
+    # says that something went wrong.
     snap_toolchains auto on --unless-off ||
-        echo "NOTE: the hourly pruning of toolchain caches was not turned on (see above); later: ${tc} auto on" >&2
+        echo "NOTE: ${tc} auto on --unless-off reported a problem (see above); once it is fixed, run it again" >&2
     # Chrome's HTTP cache out of /home snapshots (only if its Flatpak is installed).
     snap_chrome apply || echo "NOTE: Chrome's chrome-flags.conf was left as it is (see above)" >&2
 }

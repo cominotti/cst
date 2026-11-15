@@ -83,9 +83,11 @@ class Base(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.tmp)
 
-    def fake_systemctl(self, *args, check=False):
+    def fake_systemctl(self, *args, check=False, ok=(0,)):
         if args == ("show-environment",):  # read only: the user manager's environment
             return self.manager_env
+        if args[:1] == ("is-active",):  # read only: what systemctl says of a timer that is not running
+            return "inactive"
         self.calls.append(args)
         return ""
 
