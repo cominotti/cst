@@ -531,7 +531,11 @@ class ManagerPathTest(UvBase):
         self.assertNotIn("the timer skips it", out)
 
     def test_uv_missing_on_the_managers_path(self):
-        self.manager_env = "PATH=/usr/bin:/bin\n"
+        # A manager PATH of the test's own: an empty folder. /usr/bin:/bin
+        # would find a uv installed there (Fedora packages one).
+        empty = os.path.join(self.tmp, "manager-bin")
+        os.makedirs(empty)
+        self.manager_env = f"PATH={empty}\n"
         rc, out = self.run_main("auto", "on")  # uv is on this command's PATH (self.bin)
         self.assertEqual(rc, 0, out)
         self.assertIn("python:uv: uv not found on PATH", out)
@@ -1185,7 +1189,10 @@ class SccacheConfigTest(RulesBase):
                 p(bad)
 
     def test_status_lines(self):
-        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"  # no real sccache
+        # Only the test's fakes on PATH: status needs no system program, and a
+        # sccache in /usr/bin (a toolbox has one) would answer.
+        os.environ["PATH"] = self.bin
+        self.assertIsNone(shutil.which("sccache"))
         rc, out = self.run_main("status")
         self.assertIn("sccache: off (opt-in", out)
         self.assertIn("sccache cache: ~/.cache/sccache not there yet", out)
@@ -1198,7 +1205,8 @@ class SccacheConfigTest(RulesBase):
         self.assertNotIn("no server running", out)
 
     def test_status_finds_sccache_in_cargo_bin(self):
-        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin:/bin"
+        os.environ["PATH"] = self.bin  # no sccache on PATH: only ~/.cargo/bin can have it
+        self.assertIsNone(shutil.which("sccache"))
         self.exe(os.path.join(self.home, ".cargo/bin/sccache"), "#!/bin/sh\nexit 0\n")
         rc, out = self.run_main("status")
         self.assertIn("sccache: no server running", out)

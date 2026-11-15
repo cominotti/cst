@@ -40,6 +40,192 @@ top_level_opts() {
 }
 """
 
+# test_05a: docker-volumes-nocow migrate on the real btrfs, with a stub
+# docker.service (no dockerd: a oneshot that stays active) so that only its
+# ActiveState matters. The helper and its unit come from test_02's
+# `cst btrfs install`. A wrapper systemctl, first on the helper's PATH, logs
+# what docker.service's ActiveState was when the helper asked (lines starting
+# with E2E-NOCOW go to the CI log). Part 3 starts the unit and docker.service
+# through one target, so both jobs are in one transaction, as at boot when
+# multi-user.target pulls in both (`systemctl start A B` asks for each unit in
+# turn, so the order of the names could decide instead).
+NOCOW_MIGRATE_SCRIPT = r"""
+helper=/usr/local/sbin/docker-volumes-nocow
+vols=/var/lib/docker/volumes
+flag=/etc/btrfs-setup/docker-nocow-pending
+attempts=/var/lib/docker-volumes-nocow/attempts
+stub=/run/systemd/system/docker.service
+dropin=/run/systemd/system/docker-volumes-nocow.service.d
+target=/run/systemd/system/e2e-nocow-boot.target
+# Not under /run: Docker mounts that tmpfs noexec, and a PATH entry that cannot
+# be executed is skipped without a word (the real systemctl answers instead).
+wrap=/usr/local/libexec/e2e-nocow-wrap
+seen=/run/e2e-nocow-seen
+echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
+
+cleanup() {
+    systemctl stop e2e-nocow-boot.target docker.service 2>/dev/null || true
+    rm -rf "$stub" "$dropin" "$target" "$wrap" "$seen" "$vols/e2e-cow" "$vols/e2e-cow2"
+    rm -f "$flag" "$attempts"
+    systemctl daemon-reload
+}
+trap cleanup EXIT
+
+test -x "$helper"
+test -f /etc/systemd/system/docker-volumes-nocow.service
+systemctl stop e2e-dind.service 2>/dev/null || true   # no dockerd on /var/lib/docker
+mkdir -p "$vols"
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]   # marked by install
+
+# A volume as Docker had it before the volumes folder had +C: every folder and
+# file copy-on-write, files with data, an empty file, a hard link, a symlink,
+# a fifo, an empty folder, and _data and db owned by uid 1000 (README stays root's).
+make_volume() {
+    local d="$vols/$1/_data"
+    mkdir "$vols/$1"
+    chattr -C "$vols/$1"
+    mkdir "$d"
+    mkdir -p "$d/db/base" "$d/cache"
+    head -c 8M /dev/urandom >"$d/db/base/1"
+    head -c 300001 /dev/urandom >"$d/db/wal"
+    printf 'hello volume\n' >"$d/README"
+    : >"$d/db/empty"
+    ln "$d/README" "$d/README.hard"
+    ln -s db/wal "$d/latest"
+    mkfifo "$d/db/pipe"
+    chown -R 1000:1000 "$d/db"
+    chown 1000:1000 "$d"   # as database images do: _data not owned by root
+    chmod 0750 "$d"
+    if find "$d" \( -type f -o -type d \) -exec lsattr -d {} + | awk '$1 ~ /C/ {bad=1} END {exit !bad}'; then
+        echo "set-up: $d already has NOCOW entries" >&2
+        return 1
+    fi
+}
+# Paths, types, modes, owners, link counts, symlink targets and file contents.
+manifest() {
+    (cd "$1" && find . -printf '%p %y %m %U:%G %n %l\n' | sort && find . -type f -print0 | sort -z | xargs -0 sha256sum)
+}
+all_nocow() {
+    local bad
+    bad="$(find "$1" \( -type f -o -type d \) -exec lsattr -d {} + | awk '$1 !~ /C/')"
+    [[ -z "$bad" ]] || { echo "not NOCOW:" >&2; echo "$bad" >&2; return 1; }
+}
+
+mkdir -p "$wrap"
+cat >"$wrap/systemctl" <<'EOF'
+#!/bin/bash
+out="$(/usr/bin/systemctl "$@")"
+rc=$?
+{
+    printf 'E2E-NOCOW helper asked: systemctl %s -> rc=%s answer=%s\n' "$*" "$rc" "$out"
+    /usr/bin/systemctl list-jobs --no-legend --no-pager | sed 's/^/E2E-NOCOW   queued job: /'
+} >>/run/e2e-nocow-seen
+printf '%s\n' "$out"
+exit "$rc"
+EOF
+chmod 0755 "$wrap/systemctl"
+
+cat >"$stub" <<'EOF'
+[Unit]
+Description=E2E stub of docker.service (no dockerd)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+EOF
+systemctl daemon-reload
+[[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
+# Fedora's generic service.d drop-ins may apply; one of docker.service may not.
+dropins="$(systemctl show -P DropInPaths docker.service)"
+echo "E2E-NOCOW stub docker.service drop-ins: ${dropins:-none}"
+if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
+    echo "a docker.service drop-in applies to the stub: $dropins" >&2
+    exit 1
+fi
+
+# 1. docker.service active: postponed, nothing touched, no attempt counted.
+make_volume e2e-cow
+d="$vols/e2e-cow/_data"
+before="$(manifest "$d")"
+ino="$(stat -c %i "$d")"
+install -d -m 0755 /etc/btrfs-setup
+touch "$flag"
+rm -f "$attempts"
+systemctl start docker.service
+out="$(PATH="$wrap:$PATH" "$helper" migrate)"
+printf '%s\n' "$out"
+grep -q 'Docker is running: migration left for the next boot' <<<"$out"
+[[ "$(stat -c %i "$d")" == "$ino" && "$(manifest "$d")" == "$before" ]]
+[[ "$(lsattr -d "$d/db/base/1" | awk '{print $1}')" != *C* ]]
+test -e "$flag"
+test ! -e "$attempts"
+[[ "$(ls -A "$vols/e2e-cow")" == _data ]]
+echo "E2E-NOCOW postponed: docker.service $(systemctl show -P ActiveState docker.service)"
+if [[ ! -s "$seen" ]]; then
+    echo "the helper did not go through the systemctl wrapper ($wrap)" >&2
+    exit 1
+fi
+cat "$seen"
+rm -f "$seen"
+systemctl stop docker.service
+
+# 2. docker.service inactive: the volume is rewritten NOCOW.
+echo "E2E-NOCOW free (estimated) bytes: $(btrfs filesystem usage -b "$vols" | awk '/Free \(estimated\)/ {print $3}')"
+out="$("$helper" migrate)"
+printf '%s\n' "$out"
+grep -q 'all Docker volumes are NOCOW now' <<<"$out"
+[[ "$(manifest "$d")" == "$before" ]]
+[[ "$(stat -c %i "$d")" != "$ino" ]]   # a new copy
+all_nocow "$d"
+[[ "$(ls -A "$vols/e2e-cow")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+st="$("$helper" status)"
+printf '%s\n' "$st"
+if grep -q 'with copy-on-write data' <<<"$st"; then
+    echo "status still shows copy-on-write data" >&2
+    exit 1
+fi
+# A second run changes nothing more.
+ino="$(stat -c %i "$d")"
+[[ -z "$("$helper" migrate)" ]]
+[[ "$(stat -c %i "$d")" == "$ino" ]]
+
+# 3. The unit and docker.service started in one transaction (as at boot):
+# docker.service's job waits for the unit (Before=docker.service), so the
+# helper still migrates.
+make_volume e2e-cow2
+d2="$vols/e2e-cow2/_data"
+before2="$(manifest "$d2")"
+ino2="$(stat -c %i "$d2")"
+touch "$flag"
+mkdir -p "$dropin"
+printf '[Service]\nEnvironment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin\n' "$wrap" \
+    >"$dropin/50-e2e-wrap.conf"
+printf '[Unit]\nDescription=E2E boot-like transaction\nWants=docker-volumes-nocow.service docker.service\n' \
+    >"$target"
+systemctl daemon-reload
+systemctl start e2e-nocow-boot.target
+cat "$seen"
+grep -q 'helper asked: systemctl show -P ActiveState docker.service' "$seen"
+echo "E2E-NOCOW transaction: helper saw docker.service" \
+    "$(sed -n 's/.*ActiveState docker.service -> rc=[0-9]* answer=//p' "$seen" | head -n 1)"
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+[[ "$(systemctl show -P ActiveState docker.service)" == active ]]
+done_at="$(systemctl show -P InactiveEnterTimestampMonotonic docker-volumes-nocow.service)"
+docker_at="$(systemctl show -P InactiveExitTimestampMonotonic docker.service)"
+echo "E2E-NOCOW transaction: nocow unit done at ${done_at}, docker.service started at ${docker_at} (monotonic us)"
+(( done_at > 0 && done_at <= docker_at ))
+[[ "$(manifest "$d2")" == "$before2" ]]
+[[ "$(stat -c %i "$d2")" != "$ino2" ]]
+all_nocow "$d2"
+[[ "$(ls -A "$vols/e2e-cow2")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 5 2>/dev/null | sed 's/^/E2E-NOCOW journal: /' || true
+"""
+
 
 def as_tester_bash(container, script, *, check=True):
     quoted = shlex.quote(script)
@@ -563,6 +749,14 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             systemctl stop e2e-dind.service
             """,
         )
+
+    def test_05a_docker_volumes_nocow_migrate_postponed_and_boot_order(self):
+        """docker-volumes-nocow migrate on loopback btrfs: postponed while docker.service is active; a CoW volume
+        rewritten NOCOW with the same data; and run when its unit and docker.service start in one transaction."""
+        out = exec_bash(self.PRIV_CONTAINER, NOCOW_MIGRATE_SCRIPT).stdout
+        for line in out.splitlines():
+            if line.startswith("E2E-NOCOW"):
+                print(f"\ntest_05a: {line}")
 
     def test_06_cpu_cgroups_game_profile_watchdog_polkit_and_vm_pin(self):
         """cpu install, cgroup v2 weights/IOWeight, game-profile on/off, Polkit check, vm-pin XML plan, and uninstall."""
