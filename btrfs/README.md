@@ -584,10 +584,14 @@ docker volume rm <name>         # or one volume by name
   daemon in `/proc` by its name or program file, reads its `--data-root` (or
   the `data-root` of its config file, or the default `/var/lib/docker`) in the
   daemon's own view (`/proc/PID/root`), and compares that folder with the
-  volumes folder by device and inode. So a rootless Docker or a Docker inside
-  a container, which keep their data elsewhere, do not count; a container
-  that bind-mounts this data root does. A daemon whose data folder cannot be
-  read counts too. One limit: an absolute symbolic link on a containerised
+  volumes folder by device and inode. So a Docker inside a container, which
+  keeps its data elsewhere, does not count; a container that bind-mounts this
+  data root does. A daemon that does not run as root does not count either,
+  because it cannot write to the root-owned data folder. That is how a
+  rootless Docker is left out: it runs a plain `dockerd` as your user, keeps
+  its data in your home folder, and sees this machine's `/`, so by its path
+  alone it would look like the system Docker. A daemon whose user or data
+  folder cannot be read counts. One limit: an absolute symbolic link on a containerised
   daemon's data path is followed from this machine's `/`, not the
   container's, so that one case can be judged wrongly.
 - A postponed boot sends no alert, so it is recorded instead, when there was

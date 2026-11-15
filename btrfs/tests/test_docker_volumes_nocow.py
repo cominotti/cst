@@ -503,6 +503,9 @@ class ImportTest(unittest.TestCase):
             ('{"cgroup-parent": "builds.slice"}', "/var/lib/docker/volumes"),
             ('{"data-root": ""}', "/var/lib/docker/volumes"),
             ("not json {", "/var/lib/docker/volumes"),
+            # Not an object, or not a path: dockerd's default (these crashed the helper at load).
+            ('["data-root"]', "/var/lib/docker/volumes"),
+            ('{"data-root": 5}', "/var/lib/docker/volumes"),
         ):
             with self.subTest(text=text):
 
@@ -1142,10 +1145,11 @@ class DockerRunningTest(PostponeBase):
 class DockerdTest(PostponeBase):
     """dockerd_busy(): a dockerd outside docker.service, in a fake /proc.
 
-    Each process is PROC/PID with comm, cmdline, and the links exe, root (the
-    / of its mount namespace) and cwd. root pointing at the test folder is a
-    dockerd in our mount namespace; pointing at another folder, one in a
-    container or in rootless Docker's namespace."""
+    Each process is PROC/PID with comm, cmdline, status (its uids), and the
+    links exe, root (the / of its mount namespace) and cwd. root pointing at
+    the test folder is a dockerd in our mount namespace (or in rootless
+    Docker's, which keeps our /); pointing at another folder, one in a
+    container."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1161,6 +1165,7 @@ class DockerdTest(PostponeBase):
         comm: str = "dockerd",
         exe: str | None = "/usr/bin/dockerd",
         cwd: str = "/",
+        uid_line: str = "Uid:\t0\t0\t0\t0",
     ) -> str:
         d = os.path.join(self.proc, str(pid))
         os.makedirs(d)
@@ -1168,6 +1173,8 @@ class DockerdTest(PostponeBase):
             f.write(comm + "\n")
         with open(os.path.join(d, "cmdline"), "wb") as f:
             f.write(b"".join(a.encode() + b"\0" for a in args))
+        with open(os.path.join(d, "status"), "w") as f:
+            f.write(f"Name:\t{comm}\nUmask:\t0022\nState:\tS (sleeping)\n{uid_line}\nGid:\t0\t0\t0\t0\n")
         if exe is not None:
             os.symlink(exe, os.path.join(d, "exe"))
         top = self.tmp if root is None else root
@@ -1180,25 +1187,56 @@ class DockerdTest(PostponeBase):
         with open(os.path.join(top, "etc/docker", name), "w") as f:
             f.write(text)
 
+    def decoy(self) -> None:
+        """/etc/docker/daemon.json names /data/docker, a data root that is
+        not ours: a dockerd whose flags were not read would look elsewhere."""
+        os.makedirs(os.path.join(self.tmp, "data/docker/volumes"))
+        self.daemon_json(self.tmp, '{"data-root": "/data/docker"}')
+
+    def alias(self) -> str:
+        """/srv/docker, another name for our data root, with the decoy: a
+        case that postpones proves the path was read."""
+        self.decoy()
+        os.makedirs(os.path.join(self.tmp, "srv"))
+        os.symlink("../var/lib/docker", os.path.join(self.tmp, "srv/docker"))
+        return "/srv/docker"
+
     # ---- dockerd processes that use this data root -------------------------
 
     def ours_default(self) -> None:
         self.process(7, ["/usr/bin/dockerd"])
 
     def ours_data_root_equals(self) -> None:
-        self.process(7, ["dockerd", "--data-root=/var/lib/docker"])
+        self.process(7, ["dockerd", f"--data-root={self.alias()}"])
 
     def ours_data_root_space(self) -> None:
-        self.process(7, ["dockerd", "-H", "fd://", "--data-root", "/var/lib/docker"])
+        self.process(7, ["dockerd", "-H", "fd://", "--data-root", self.alias()])
+
+    def ours_last_data_root_wins(self) -> None:
+        self.process(7, ["dockerd", "--data-root=/data/docker", "--data-root", self.alias()])
 
     def ours_short_g(self) -> None:
-        self.process(7, ["dockerd", "-g", "/var/lib/docker"])
+        # -g and --graph: the old names of --data-root (removed in Docker 23).
+        self.process(7, ["dockerd", "-g", self.alias()])
+
+    def ours_short_g_attached(self) -> None:
+        self.process(7, ["dockerd", f"-g{self.alias()}"])
+
+    def ours_short_g_equals(self) -> None:
+        self.process(7, ["dockerd", f"-g={self.alias()}"])
+
+    def ours_graph(self) -> None:
+        self.process(7, ["dockerd", "--graph", self.alias()])
+
+    def ours_graph_equals(self) -> None:
+        self.process(7, ["dockerd", f"--graph={self.alias()}"])
 
     def ours_relative(self) -> None:
+        self.decoy()
         self.process(7, ["dockerd", "--data-root=docker"], cwd="/var/lib")
 
     def ours_daemon_json(self) -> None:
-        self.daemon_json(self.tmp, '{"data-root": "/var/lib/docker"}')
+        self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}')
         self.process(7, ["dockerd"])
 
     def ours_daemon_json_not_an_object(self) -> None:
@@ -1206,14 +1244,32 @@ class DockerdTest(PostponeBase):
         self.process(7, ["dockerd"])
 
     def ours_config_file(self) -> None:
-        os.makedirs(os.path.join(self.tmp, "srv"))
-        os.symlink("../var/lib/docker", os.path.join(self.tmp, "srv/docker"))
-        self.daemon_json(self.tmp, '{"data-root": "/srv/docker"}', "custom.json")
+        # --config-file names ours; /etc/docker/daemon.json (the decoy) is not read then.
+        self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}', "custom.json")
         self.process(7, ["dockerd", "--config-file", "/etc/docker/custom.json"])
+
+    def ours_config_file_equals(self) -> None:
+        self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}', "custom.json")
+        self.process(7, ["dockerd", "--config-file=/etc/docker/custom.json"])
 
     def ours_by_program_file(self) -> None:
         # Renamed process, program file replaced by an upgrade.
         self.process(7, ["d"], comm="d", exe="/usr/bin/dockerd (deleted)")
+
+    def ours_by_name(self) -> None:
+        # Its program file cannot be read (exe missing): the name is enough.
+        self.process(7, ["/opt/docker/bin/x"], exe=None)
+
+    def ours_no_uid_line(self) -> None:
+        # Whether it runs as root cannot be told: counted (fails closed).
+        self.process(7, ["dockerd"], uid_line="")
+
+    def ours_uid_garbled(self) -> None:
+        self.process(7, ["dockerd"], uid_line="Uid:\t1000\tx\t1000\t1000")
+
+    def ours_root_after_setuid(self) -> None:
+        # The effective uid decides (the second field), not the real one.
+        self.process(7, ["dockerd"], uid_line="Uid:\t1000\t0\t0\t0")
 
     def ours_bind_mounted(self) -> None:
         # A container that bind-mounts this data root (a link stands in for
@@ -1227,12 +1283,22 @@ class DockerdTest(PostponeBase):
             self.ours_default,
             self.ours_data_root_equals,
             self.ours_data_root_space,
+            self.ours_last_data_root_wins,
             self.ours_short_g,
+            self.ours_short_g_attached,
+            self.ours_short_g_equals,
+            self.ours_graph,
+            self.ours_graph_equals,
             self.ours_relative,
             self.ours_daemon_json,
             self.ours_daemon_json_not_an_object,
             self.ours_config_file,
+            self.ours_config_file_equals,
             self.ours_by_program_file,
+            self.ours_by_name,
+            self.ours_no_uid_line,
+            self.ours_uid_garbled,
+            self.ours_root_after_setuid,
             self.ours_bind_mounted,
         ):
             with self.subTest(case=add.__name__):
@@ -1241,6 +1307,25 @@ class DockerdTest(PostponeBase):
                 rc, out = self.call(M.migrate)
                 self.assertEqual(rc, 0)
                 self.assert_postponed(out, f"dockerd (pid 7) uses {self.vols} outside docker.service")
+
+    def test_unreadable_config_file_postpones(self) -> None:
+        # Fails closed: a config file that exists but cannot be read may name
+        # our data root (dockerd's default is not assumed).
+        d = self.process(7, ["dockerd"])
+        self.daemon_json(self.tmp, '{"data-root": "/data/docker"}')
+        blocked = os.path.join(d, "root", "etc/docker/daemon.json")
+        real_open = builtins.open
+
+        def fake_open(path: str, mode: str = "r") -> object:
+            if path == blocked:
+                raise PermissionError(13, "Permission denied", path)
+            return real_open(path, mode)
+
+        with mock.patch.object(builtins, "open", fake_open):
+            rc, out = self.call(M.migrate)
+        self.assertEqual(rc, 0)
+        why = f"dockerd (pid 7) is running and its data root cannot be read ([Errno 13] Permission denied: '{blocked}')"
+        self.assert_postponed(out, why)
 
     def test_unreadable_data_root_postpones(self) -> None:
         # Fails closed: a dockerd whose data root cannot be read may be ours.
@@ -1262,11 +1347,36 @@ class DockerdTest(PostponeBase):
     # ---- processes that must not hold the migration back -------------------
 
     def other_rootless(self) -> None:
-        # Rootless Docker: its data in the home folder, and the script that
-        # starts it, whose name begins with "dockerd".
+        # Rootless Docker as dockerd-rootless.sh starts it: plain `dockerd`
+        # (its data root comes from $XDG_DATA_HOME or $HOME, not the command
+        # line) as the user, in a namespace that keeps our / (so our
+        # /var/lib/docker is what its default path shows). And the script
+        # that starts it, whose name begins with "dockerd" (comm keeps 15
+        # characters).
         os.makedirs(os.path.join(self.tmp, "home/u/.local/share/docker/volumes"))
-        self.process(7, ["dockerd", "--data-root=/home/u/.local/share/docker"])
-        self.process(8, ["/bin/sh", "/usr/bin/dockerd-rootless.sh"], comm="dockerd-rootless", exe="/usr/bin/bash")
+        self.process(7, ["dockerd"], uid_line="Uid:\t1000\t1000\t1000\t1000")
+        self.process(
+            8,
+            ["/bin/sh", "/usr/bin/dockerd-rootless.sh"],
+            comm="dockerd-rootles",
+            exe="/usr/bin/bash",
+            uid_line="Uid:\t1000\t1000\t1000\t1000",
+        )
+
+    def other_user_dockerd_in_a_userns(self) -> None:
+        # The same, as root in its own user namespace that maps to uid
+        # 100000 here (status shows the uid as seen from this namespace).
+        self.process(7, ["dockerd", "--data-root=/var/lib/docker"], uid_line="Uid:\t100000\t100000\t100000\t100000")
+
+    def other_config_file(self) -> None:
+        # /etc/docker/daemon.json names our data root, but --config-file another.
+        self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}')
+        self.daemon_json(self.tmp, '{"data-root": "/data/docker"}', "custom.json")
+        self.process(7, ["dockerd", "--config-file", "/etc/docker/custom.json"])
+
+    def other_odd_program_name(self) -> None:
+        # A program file name that is not valid UTF-8 (read as bytes, not decoded).
+        self.process(7, ["x"], comm="caf", exe=os.fsdecode(b"/opt/x/caf\xe9"))
 
     def other_containerised(self) -> None:
         # In a container: the /var/lib/docker of its own mount namespace.
@@ -1303,6 +1413,9 @@ class DockerdTest(PostponeBase):
     def test_other_dockerd_does_not_postpone(self) -> None:
         for add in (
             self.other_rootless,
+            self.other_user_dockerd_in_a_userns,
+            self.other_config_file,
+            self.other_odd_program_name,
             self.other_containerised,
             self.other_containerised_daemon_json,
             self.other_data_root,

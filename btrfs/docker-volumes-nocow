@@ -51,12 +51,24 @@ def log(prio, msg):
     print(f"<{prio}>docker-volumes-nocow: {msg}", flush=True)
 
 
+def configured_root(path):
+    """data-root in the dockerd config file at path; None when there is no
+    such file, it is not a JSON object, or it names no data root (dockerd's
+    default then). Any other error reading it is raised."""
+    try:
+        with open(path) as f:
+            root = json.load(f).get("data-root")
+    except FileNotFoundError, ValueError, AttributeError:
+        return None
+    return root if isinstance(root, str) and root else None
+
+
 def docker_root():
     try:
-        with open("/etc/docker/daemon.json") as f:
-            return os.path.join(json.load(f).get("data-root") or "/var/lib/docker", "volumes")
-    except OSError, ValueError:
-        return "/var/lib/docker/volumes"
+        root = configured_root("/etc/docker/daemon.json")
+    except OSError:
+        root = None
+    return os.path.join(root or "/var/lib/docker", "volumes")
 
 
 VOLUMES = docker_root()
@@ -217,10 +229,22 @@ def is_dockerd(proc):
     with open(os.path.join(proc, "comm"), "rb") as f:
         names = {f.read().strip()}
     try:
-        names.add(os.path.basename(os.readlink(os.path.join(proc, "exe")).removesuffix(" (deleted)")).encode())
+        # As bytes: a program file name need not be valid UTF-8.
+        names.add(os.path.basename(os.readlink(os.fsencode(os.path.join(proc, "exe"))).removesuffix(b" (deleted)")))
     except OSError:
         pass  # a kernel thread, or a process that just ended
     return b"dockerd" in names
+
+
+def runs_as_root(proc):
+    """False when the process in /proc/PID has an effective uid other than 0
+    (as this process sees it); True when it is 0 or cannot be told."""
+    with open(os.path.join(proc, "status"), "rb") as f:
+        for line in f:
+            if line.startswith(b"Uid:"):
+                fields = line.split()
+                return not (len(fields) > 2 and fields[2].isdigit() and int(fields[2]) != 0)
+    return True
 
 
 def daemon_volumes(proc, args):
@@ -239,6 +263,8 @@ def daemon_volumes(proc, args):
     root, config = None, "/etc/docker/daemon.json"
     rest = iter(args[1:])
     for arg in rest:
+        if arg[:2] == "-g" and arg[2:3] not in ("", "="):
+            arg = "-g=" + arg[2:]  # the shorthand with its value attached: -g/path
         key, eq, value = arg.partition("=")
         if key in ("--data-root", "-g", "--graph", "--config-file"):
             if not eq:
@@ -247,14 +273,7 @@ def daemon_volumes(proc, args):
                 config = value
             else:
                 root = value
-    if not root:
-        try:
-            with open(inside(config)) as f:
-                root = json.load(f).get("data-root")
-        except FileNotFoundError, ValueError, AttributeError:
-            pass  # no such file, or not a JSON object: dockerd's own default
-    if not isinstance(root, str) or not root:
-        root = "/var/lib/docker"
+    root = root or configured_root(inside(config)) or "/var/lib/docker"
     return os.path.join(inside(root), "volumes")
 
 
@@ -263,17 +282,21 @@ def dockerd_busy():
 
     A dockerd started by hand or by another unit is not docker.service. It
     counts when its volumes folder is the same directory as VOLUMES (device
-    and inode, seen through its own mount namespace): a rootless dockerd or
-    one in a container keeps its data elsewhere and does not count, while a
-    container that bind-mounts this data root does. A dockerd whose data root
-    cannot be read counts too (fails closed)."""
+    and inode, seen through its own mount namespace): one in a container
+    keeps its data elsewhere and does not count, while a container that
+    bind-mounts this data root does. A dockerd that does not run as root does
+    not count either: it cannot write to the root-owned data root. That is
+    rootless Docker, which runs plain `dockerd` (its data in the home folder)
+    in a namespace that keeps this machine's /, so its default path would
+    look like ours. A dockerd whose uid or data root cannot be read counts
+    (fails closed)."""
     mine = os.stat(VOLUMES)
     for pid in sorted(os.listdir(PROC)):
         if not pid.isdigit():
             continue
         proc = os.path.join(PROC, pid)
         try:
-            if not is_dockerd(proc):
+            if not is_dockerd(proc) or not runs_as_root(proc):
                 continue
             with open(os.path.join(proc, "cmdline"), "rb") as f:
                 args = [a.decode(errors="surrogateescape") for a in f.read().split(b"\0")]

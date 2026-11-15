@@ -70,8 +70,10 @@ echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
 
 fake=/usr/local/libexec/e2e-nocow-other
 other=   # the pid of a stand-in dockerd in another mount namespace (part 2)
+user=    # the pid of a stand-in dockerd that does not run as root (part 2)
 cleanup() {
     [[ -z "$other" ]] || kill "$other" 2>/dev/null || true
+    [[ -z "$user" ]] || kill "$user" 2>/dev/null || true
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
     rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4"
@@ -217,6 +219,19 @@ done
 [[ "$(cat "/proc/$other/comm")" == dockerd ]]
 [[ "$(readlink "/proc/$other/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]]
 test -d "/proc/$other/root/var/lib/docker/volumes"
+# And one in our mount namespace, with no flags (so the default data root,
+# ours), that does not run as root: what rootless Docker looks like from
+# here (plain dockerd as the user; its namespace keeps our /). It cannot
+# write to the root-owned data root and must not hold the migration back.
+setpriv --reuid=65534 --regid=65534 --clear-groups "$fake/dockerd" infinity &
+user=$!
+for _ in $(seq 1 50); do
+    [[ "$(cat "/proc/$user/comm" 2>/dev/null)" == dockerd ]] && break
+    sleep 0.1
+done
+[[ "$(cat "/proc/$user/comm")" == dockerd ]]
+[[ "$(awk '/^Uid:/ {print $3}' "/proc/$user/status")" == 65534 ]]
+[[ "$(readlink "/proc/$user/ns/mnt")" == "$(readlink /proc/self/ns/mnt)" ]]
 
 # 2. docker.service inactive: the volume is rewritten NOCOW.
 echo "E2E-NOCOW free (estimated) bytes: $(btrfs filesystem usage -b "$vols" | awk '/Free \(estimated\)/ {print $3}')"
@@ -224,9 +239,10 @@ out="$("$helper" migrate)"
 printf '%s\n' "$out"
 grep -q 'all Docker volumes are NOCOW now' <<<"$out"
 test ! -e "$postponed"   # a boot not held back removes the record
-kill "$other"
-wait "$other" || true
-other=
+kill "$other" "$user"
+wait "$other" "$user" || true
+other=''
+user=''
 [[ "$(manifest "$d")" == "$before" ]]
 [[ "$(stat -c %i "$d")" != "$ino" ]]   # a new copy
 all_nocow "$d"
