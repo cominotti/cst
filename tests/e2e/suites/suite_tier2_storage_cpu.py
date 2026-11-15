@@ -76,7 +76,7 @@ mkdir -p "$vols"
 
 # A volume as Docker had it before the volumes folder had +C: every folder and
 # file copy-on-write, files with data, an empty file, a hard link, a symlink,
-# a fifo, an empty folder, and another owner below _data.
+# a fifo, an empty folder, and _data and db owned by uid 1000 (README stays root's).
 make_volume() {
     local d="$vols/$1/_data"
     mkdir "$vols/$1"
@@ -91,6 +91,7 @@ make_volume() {
     ln -s db/wal "$d/latest"
     mkfifo "$d/db/pipe"
     chown -R 1000:1000 "$d/db"
+    chown 1000:1000 "$d"   # as database images do: _data not owned by root
     chmod 0750 "$d"
     if find "$d" \( -type f -o -type d \) -exec lsattr -d {} + | awk '$1 ~ /C/ {bad=1} END {exit !bad}'; then
         echo "set-up: $d already has NOCOW entries" >&2
@@ -214,6 +215,7 @@ echo "E2E-NOCOW transaction: nocow unit done at ${done_at}, docker.service start
 all_nocow "$d2"
 [[ "$(ls -A "$vols/e2e-cow2")" == _data ]]
 test ! -e "$flag"
+test ! -e "$attempts"
 journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 5 2>/dev/null | sed 's/^/E2E-NOCOW journal: /' || true
 """
 
