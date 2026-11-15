@@ -460,39 +460,43 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
     def setUpClass(cls):
         cls.m = load()
 
+    def open_episode(self, samples, episodes=()):
+        return self.m.open_episode(samples, list(episodes))
+
     def test_two_samples_one_second_apart_are_an_open_episode(self):
-        got = self.m.open_episode([waits(T0, 3), waits(T0 + 1, 5)], [])
+        got = self.open_episode([waits(T0, 3), waits(T0 + 1, 5)])
         self.assertEqual(got, {"since": T0, "last": T0 + 1, "d_tasks": 5})
 
     def test_fewer_than_two_samples_are_not_an_episode(self):
-        self.assertIsNone(self.m.open_episode([], []))
-        self.assertIsNone(self.m.open_episode([waits(T0, 9)], []))
+        self.assertIsNone(self.open_episode([]))
+        self.assertIsNone(self.open_episode([waits(T0, 9)]))
 
     def test_since_last_and_peak_come_from_the_whole_run(self):
         # since = the oldest sample of the run, last = the newest one, d_tasks =
-        # the most storage waits in any sample of the run (here the newest).
-        samples = [waits(T0, 4), waits(T0 + 1, 3), waits(T0 + 2, 5), waits(T0 + 3, 7)]
-        got = self.m.open_episode(samples, [])
-        self.assertEqual(got, {"since": T0, "last": T0 + 3, "d_tasks": 7})
+        # the most storage waits in any sample of the run, wherever it is.
+        for where, ds in (("newest", (4, 3, 5, 7)), ("middle", (4, 7, 5, 3))):
+            with self.subTest(peak=where):
+                samples = [waits(T0 + i, d) for i, d in enumerate(ds)]
+                self.assertEqual(self.open_episode(samples), {"since": T0, "last": T0 + 3, "d_tasks": 7})
 
     def test_newest_sample_without_d_maint_is_not_an_episode(self):
         # A sample of a daemon < v5 (no d_maint) does not count storage waits
         # apart, even when the older samples before it do.
         samples = [waits(T0, 9), waits(T0 + 1, 9), waits(T0 + 2, 9, v5=False)]
-        self.assertIsNone(self.m.open_episode(samples, []))
+        self.assertIsNone(self.open_episode(samples))
 
     def test_newest_sample_alone_after_a_gap_is_not_an_episode(self):
         samples = [waits(T0, 9), waits(T0 + 1, 9), waits(T0 + 3, 9)]
-        self.assertIsNone(self.m.open_episode(samples, []))
+        self.assertIsNone(self.open_episode(samples))
 
     def test_gap_of_more_than_1_5_s_ends_the_run(self):
         """Pins current behaviour: a gap of exactly 1.5 s keeps the samples in one
         run, 2 s splits it (neither the docstring nor btrfs/README.md states the
         1.5 s limit). A busy sample before the gap does not count."""
         on_edge = [waits(T0, 4), waits(T0 + 1.5, 4), waits(T0 + 2.5, 4)]
-        self.assertEqual(self.m.open_episode(on_edge, []), {"since": T0, "last": T0 + 2.5, "d_tasks": 4})
+        self.assertEqual(self.open_episode(on_edge), {"since": T0, "last": T0 + 2.5, "d_tasks": 4})
         past_edge = [waits(T0, 9), waits(T0 + 2, 4), waits(T0 + 3, 4)]
-        self.assertEqual(self.m.open_episode(past_edge, []), {"since": T0 + 2, "last": T0 + 3, "d_tasks": 4})
+        self.assertEqual(self.open_episode(past_edge), {"since": T0 + 2, "last": T0 + 3, "d_tasks": 4})
 
     def test_episode_record_covers_the_newest_sample_within_one_second(self):
         """Pins current behaviour: an episode record from start - 1 s to end + 1 s
@@ -508,7 +512,7 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
             (end + 1.5, False),
         ):
             with self.subTest(last=last - T0):
-                got = self.m.open_episode([waits(last - 1, 5), waits(last, 5)], episodes)
+                got = self.open_episode([waits(last - 1, 5), waits(last, 5)], episodes)
                 self.assertEqual(got, None if covered else {"since": last - 1, "last": last, "d_tasks": 5})
 
 

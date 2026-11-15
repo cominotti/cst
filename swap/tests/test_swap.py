@@ -63,6 +63,10 @@ def load_status():
     return mod
 
 
+# 1023 KiB of RAM: 20 % of it, and 85 % of that, do not divide evenly.
+ODD_RAM = 1023 * 1024
+
+
 class StatusMathTest(unittest.TestCase):
     def setUp(self):
         self.m = load_status()
@@ -133,10 +137,9 @@ class StatusMathTest(unittest.TestCase):
         self.assertIsNone(self.m.cgroup_row({}, None)["read_back"])
 
     def test_summary_full_result_and_types(self):
-        # Sizes are whole bytes (int, rounded down), shares are float. 20 % of
-        # 1023 KiB and 85 % of that limit do not divide evenly.
+        # Sizes are whole bytes (int, rounded down), shares are float.
         s = self.m.zswap_summary(
-            {"MemTotal": 1023 * 1024, "Zswap": 41902, "Zswapped": 146657},
+            {"MemTotal": ODD_RAM, "Zswap": 41902, "Zswapped": 146657},
             {"zswpout": 800, "zswpin": 200, "zswpwb": 300, "pswpout": 500, "pswpin": 125},
             {"max_pool_percent": "20", "accept_threshold_percent": "85"},
         )
@@ -160,20 +163,18 @@ class StatusMathTest(unittest.TestCase):
                 "read_back": 0.25,
             },
         )
-        self.assertIs(type(s["limit"]), int)
-        self.assertIs(type(s["accept_below"]), int)
-        self.assertIs(type(s["ratio"]), float)
-        self.assertIs(type(s["pool_of_limit"]), float)
+        for key, kind in (("limit", int), ("accept_below", int), ("ratio", float), ("pool_of_limit", float)):
+            self.assertIs(type(s[key]), kind, key)
 
     def test_summary_empty_pool_and_missing_stored(self):
         # None where the divisor is 0 or a value is missing (ZswapSummary).
-        meminfo = {"MemTotal": 1023 * 1024, "Zswap": 0, "Zswapped": 0}
-        s = self.m.zswap_summary(meminfo, {}, {"max_pool_percent": "20"})
+        params = {"max_pool_percent": "20"}
+        s = self.m.zswap_summary({"MemTotal": ODD_RAM, "Zswap": 0, "Zswapped": 0}, {}, params)
         self.assertEqual((s["pool"], s["stored"], s["limit"]), (0, 0, 209510))
         self.assertEqual(s["pool_of_limit"], 0.0)
         self.assertIs(type(s["pool_of_limit"]), float)
         self.assertIsNone(s["ratio"])
-        s = self.m.zswap_summary({"MemTotal": 1023 * 1024, "Zswap": 41902}, {}, {"max_pool_percent": "20"})
+        s = self.m.zswap_summary({"MemTotal": ODD_RAM, "Zswap": 41902}, {}, params)
         self.assertIsNone(s["stored"])
         self.assertIsNone(s["ratio"])
         self.assertEqual(s["pool_of_limit"], 0.2)
