@@ -15,6 +15,7 @@ import fcntl
 import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -760,6 +761,140 @@ class AutoTest(Scratch):
         self.assertIn("not written by CST", out)
         self.assertTrue(os.path.islink(link))
         self.assertEqual(self.calls(), [])
+
+    def run_split(self, *args):
+        """run_main, with stdout and stderr apart: warnings and errors go to stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.m.main([*args, "--home", self.home])
+        return rc, out.getvalue(), err.getvalue()
+
+    def raw_calls(self):
+        """Every systemctl call, the questions (is-active, ...) too."""
+        try:
+            with open(self.log) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_auto_off_leaves_a_foreign_unit_file_and_program_copy_alone(self):
+        # A service file and a program copy with CST's names that CST did not
+        # write: auto off keeps them and says so on stderr; what is CST's goes.
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        service = self.write(".config/systemd/user/cst-toolchains-prune.service", "[Service]\nExecStart=/bin/true\n")
+        prog = self.write(".local/lib/cst/cst-toolchains", "#!/bin/sh\necho mine\n")
+        open(self.log, "w").close()
+        rc, out, err = self.run_split("auto", "off")
+        self.assertEqual(rc, 0, out + err)
+        with open(service) as f:
+            self.assertEqual(f.read(), "[Service]\nExecStart=/bin/true\n")
+        with open(prog) as f:
+            self.assertEqual(f.read(), "#!/bin/sh\necho mine\n")
+        self.assertFalse(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))
+        self.assertFalse(self.exists(".local/lib/cst/toolchains.conf"))
+        left = (
+            "left alone: ~/.config/systemd/user/cst-toolchains-prune.service (not written by CST)",
+            "left alone: ~/.local/lib/cst/cst-toolchains (not written by CST)",
+        )
+        for line in left:
+            self.assertIn(line, err)
+            self.assertNotIn(line, out)
+        self.assertIn("removed:   ~/.config/systemd/user/cst-toolchains-prune.timer", out)
+        self.assertIn("removed:   ~/.local/lib/cst/toolchains.conf", out)
+        self.assertEqual(self.calls(), ["--user disable --now cst-toolchains-prune.timer", "--user daemon-reload"])
+        # Run again: the foreign files are reported again, and only they (the
+        # files that are gone are not "left alone"); nothing else is called.
+        open(self.log, "w").close()
+        rc, out, err = self.run_split("auto", "off")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual([x for x in err.splitlines() if x.startswith("left alone:")], list(left))
+        self.assertNotIn("left alone", out)
+        self.assertEqual(self.calls(), [])
+        self.assertTrue(os.path.exists(service))
+        self.assertTrue(os.path.exists(prog))
+
+    def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self):
+        # A running timer whose file is there but not CST's is not the
+        # orphan that auto off stops: the manager is not even asked about it.
+        self.write(".config/systemd/user/cst-toolchains-prune.timer", "[Timer]\nOnCalendar=daily\n")
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.raw_calls(), [])
+        self.assertNotIn("stopped:", out)
+        self.assertTrue(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))
+
+    def test_auto_off_exits_1_when_the_reload_after_the_stale_files_fails(self):
+        # Only the earlier cargo-gc's files are there: the one daemon-reload
+        # is remove_stale's, and its failure alone gives exit 1 (on stderr).
+        paths = self.stale()
+        with self.failing("daemon-reload"):
+            rc, out, err = self.run_split("auto", "off")
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.calls(), ["--user disable --now cst-cargo-build-gc.timer", "--user daemon-reload"])
+        self.assertIn("systemctl --user daemon-reload failed", err)
+        self.assertIn("run `systemctl --user daemon-reload` once your user manager answers", err)
+        self.assertNotIn("daemon-reload", out)
+        for p in paths:
+            self.assertFalse(os.path.exists(p), p)
+        self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
+        self.assertIn("no longer pruned automatically", out)
+
+    def test_stale_files_after_a_foreign_one_are_still_removed(self):
+        # The earlier timer is not CST's (it comes first): it stays, is not
+        # stopped, and every other stale file still goes.
+        paths = self.stale()
+        timer = self.write(".config/systemd/user/cst-cargo-build-gc.timer", "# my own\n[Timer]\n")
+        rc, out, err = self.run_split("auto", "off")
+        self.assertEqual(rc, 0, out + err)
+        self.assertTrue(os.path.exists(timer))
+        for p in paths:
+            if p != timer:
+                self.assertFalse(os.path.exists(p), p)
+        line = "left alone: ~/.config/systemd/user/cst-cargo-build-gc.timer (not written by CST)"
+        self.assertIn(line, err)
+        self.assertNotIn(line, out)
+        self.assertIn("removed:   ~/.config/systemd/user/cst-cargo-build-gc.service", out)
+        self.assertEqual(self.calls(), ["--user daemon-reload"])  # the service file went; no disable
+
+    def test_stale_files_reload_only_when_a_unit_file_was_removed(self):
+        # The earlier cargo-gc's files without its unit files: removed, and
+        # no daemon-reload (no unit changed), by auto off and by auto on.
+        for args in (("auto", "off"), ("auto", "on", "--unless-off")):
+            paths = self.stale()
+            for unit in paths[:2]:
+                os.unlink(unit)
+            paths = paths[2:]
+            open(self.log, "w").close()
+            rc, out = self.run_main(*args)
+            self.assertEqual(rc, 0, (args, out))
+            for p in paths:
+                self.assertFalse(os.path.exists(p), (args, p))
+            self.assertEqual(self.calls(), [], args)
+
+    def test_auto_off_removes_the_state_file_of_every_target(self):
+        states = [self.m.state_path(self.home, tid) for tid in self.m.TARGETS]
+        self.assertEqual(len(states), 2)
+        for path in states:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("{}")
+        other = self.write(".local/state/cst/other.json", "{}")
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        for path in states:
+            self.assertFalse(os.path.exists(path), path)
+        self.assertTrue(os.path.exists(other))
+
+    def test_auto_off_writes_the_off_file_with_mode_0644(self):
+        old = os.umask(0o077)
+        self.addCleanup(os.umask, old)
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        mode = os.stat(os.path.join(self.home, ".config/cst/toolchains-auto.off")).st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o644)
 
     def hold_lock(self):
         path = os.path.join(self.home, ".local/state/cst/toolchains.lock")
