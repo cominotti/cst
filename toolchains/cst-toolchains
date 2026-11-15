@@ -3446,7 +3446,9 @@ def sccache_status_lines(home):
     for sock in socks:
         env_id = os.path.basename(sock)[len("cst-sccache-") : -len(".sock")]
         env = {k: v for k, v in os.environ.items() if not k.startswith("SCCACHE_")}
-        env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1")
+        # TMPDIR=/tmp as in rustc-wrapper: if the server stops right after the
+        # socket check, this client call starts a new one, which keeps its TMPDIR.
+        env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1", TMPDIR="/tmp")
         try:
             r = subprocess.run(
                 [exe, "--show-stats"],

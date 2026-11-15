@@ -316,7 +316,9 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   that go straight to rustc (the cases above, and `CST_SCCACHE=0 cargo
   build` for a build that needs its own `TMPDIR`) keep yours. Build scripts
   and tests keep yours as well: cargo runs them itself, only their compiles
-  go through the wrapper.
+  go through the wrapper. `cst toolchains status` asks each running server
+  for its numbers with `TMPDIR=/tmp` too: if that server stops right after
+  the socket check, the question starts a new one.
   The fix reaches the machine with `cst toolchains config apply`, which
   copies the new wrapper (`config plan` shows it as outdated until then). A
   server that is already running keeps the `TMPDIR` it started with until it

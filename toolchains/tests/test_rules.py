@@ -1229,11 +1229,14 @@ class SccacheConfigTest(RulesBase):
         log = os.path.join(self.tmp, "sccache.log")
         self.exe(
             os.path.join(self.bin, "sccache"),
-            f'#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"{log}"\n'
+            f'#!/bin/sh\necho "$SCCACHE_SERVER_UDS ${{TMPDIR-unset}} $*" >>"{log}"\n'
             'printf "Compile requests                    12\\nCache hits                           7\\n'
             "Cache hits (Rust)                    7\\nCache misses                         5\\n"
             'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n',
         )
+        # If the server stops between the socket check and --show-stats, that
+        # client call starts a new one: it must not get the caller's TMPDIR.
+        os.environ["TMPDIR"] = os.path.join(self.tmp, "private-tmp")
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
         self.assertIn(
@@ -1243,7 +1246,7 @@ class SccacheConfigTest(RulesBase):
         )
         self.assertNotIn("server host", out)
         with open(log) as f:
-            self.assertEqual(f.read(), f"{sock_path} --show-stats\n")
+            self.assertEqual(f.read(), f"{sock_path} /tmp --show-stats\n")
 
 
 def stat_mode(st):
