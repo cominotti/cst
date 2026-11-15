@@ -74,17 +74,20 @@ GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "test@example.invalid",
 }
 
-FAKE_BWRAP = """#!{python} -I
-# Fake bwrap: records its arguments, then runs the command after the options
-# with the environment (--clearenv, --setenv) and folder (--chdir) it was given.
-import json, os, stat, sys
-def stdin_is_null():
+# Both fakes record whether their stdin is /dev/null.
+STDIN_IS_NULL = """def stdin_is_null():
     try:
         st, null = os.fstat(0), os.stat(os.devnull)
     except OSError:
         return False
     return stat.S_ISCHR(st.st_mode) and st.st_rdev == null.st_rdev
-args = sys.argv[1:]
+"""
+
+FAKE_BWRAP = """#!{python} -I
+# Fake bwrap: records its arguments, then runs the command after the options
+# with the environment (--clearenv, --setenv) and folder (--chdir) it was given.
+import json, os, stat, sys
+{stdin_is_null}args = sys.argv[1:]
 with open({log!r}, "a") as fh:
     fh.write(json.dumps({{"bwrap": args, "stdin_null": stdin_is_null()}}) + "\\n")
 with open({control!r}) as fh:
@@ -113,13 +116,7 @@ FAKE_TOOL = """#!{python} -I
 # Fake cosmic-ray, cr-filter-lines, cr-filter-pragma and cr-report: records the
 # call, then does a small part of the real job on a session database.
 import json, os, sqlite3, stat, sys, tomllib
-def stdin_is_null():
-    try:
-        st, null = os.fstat(0), os.stat(os.devnull)
-    except OSError:
-        return False
-    return stat.S_ISCHR(st.st_mode) and st.st_rdev == null.st_rdev
-name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+{stdin_is_null}name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
 with open({control!r}) as fh:
     control = json.load(fh)
 with open({log!r}, "a") as fh:
@@ -604,13 +601,18 @@ class RunTest(unittest.TestCase):
         bin_dir = os.path.join(self.tmp, "bin")
         os.mkdir(bin_dir)
         self.bwrap = os.path.join(bin_dir, "bwrap")
-        self.write_exec(self.bwrap, FAKE_BWRAP.format(python=sys.executable, log=self.log, control=self.control))
+        self.write_exec(
+            self.bwrap,
+            FAKE_BWRAP.format(python=sys.executable, log=self.log, control=self.control, stdin_is_null=STDIN_IS_NULL),
+        )
         self.venv = os.path.join(self.tmp, "venv")
         os.makedirs(os.path.join(self.venv, "bin"))
         for name in M.TOOLS:
             self.write_exec(
                 os.path.join(self.venv, "bin", name),
-                FAKE_TOOL.format(python=sys.executable, log=self.log, control=self.control),
+                FAKE_TOOL.format(
+                    python=sys.executable, log=self.log, control=self.control, stdin_is_null=STDIN_IS_NULL
+                ),
             )
         self.tools = M.Tools(bwrap=self.bwrap, python=sys.executable, venv=self.venv)
         self.out = os.path.join(self.tmp, "out")

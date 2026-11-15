@@ -344,8 +344,10 @@ def under(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
-def _below(root: str, rel: str) -> str:
-    return root if rel == "." else os.path.join(root, rel)
+def moved(path: str, old: str, new: str) -> str:
+    """path, which is under the folder old, as the same place under the folder new."""
+    rel = os.path.relpath(path, old)
+    return new if rel == "." else os.path.join(new, rel)
 
 
 def other_views(mounts: Sequence[Mount], hidden: Sequence[str], isdir: Callable[[str], bool]) -> list[str]:
@@ -377,7 +379,7 @@ def other_views(mounts: Sequence[Mount], hidden: Sequence[str], isdir: Callable[
         holders = [m for m in mounts if under(home, m.point)]
         if holders:
             m = max(holders, key=lambda m: len(m.point))
-            places.append((m.dev, _below(m.root, os.path.relpath(home, m.point))))
+            places.append((m.dev, moved(home, m.point, m.root)))
         places += [(m.dev, m.root) for m in mounts if under(m.point, home) and m.point != home and m.root != "/"]
 
     views: list[str] = []
@@ -391,7 +393,7 @@ def other_views(mounts: Sequence[Mount], hidden: Sequence[str], isdir: Callable[
             if dev != m.dev:
                 continue
             if under(folder, m.root):  # m shows a folder above the home's (the whole btrfs)
-                view = _below(m.point, os.path.relpath(folder, m.root))
+                view = moved(folder, m.root, m.point)
             elif under(m.root, folder):  # m shows a part of the home (a bind of a folder in it)
                 view = m.point
             else:
@@ -399,8 +401,9 @@ def other_views(mounts: Sequence[Mount], hidden: Sequence[str], isdir: Callable[
             if view != "/" and not is_hidden(view) and isdir(view):
                 views.append(view)
     # A tmpfs hides what is under it, and bwrap could not mount over a folder
-    # inside an earlier tmpfs: keep the outermost ones only.
-    return [v for i, v in enumerate(views) if v not in views[:i] and not any(under(v, w) for w in views if w != v)]
+    # inside an earlier tmpfs: keep the outermost ones only, once each.
+    views = list(dict.fromkeys(views))
+    return [v for v in views if not any(w != v and under(v, w) for w in views)]
 
 
 def hidden_trees(
@@ -550,8 +553,8 @@ def default_out(helper: str, env: Mapping[str, str], now: float) -> str:
 
 
 def inside(path: str, folder: str) -> bool:
-    path, folder = os.path.realpath(path), os.path.realpath(folder)
-    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+    """Like under(), after resolving symlinks on both sides."""
+    return under(os.path.realpath(path), os.path.realpath(folder))
 
 
 def find_tools(
@@ -716,9 +719,7 @@ def run(opts: Options, repo: str, tools: Tools, env: Mapping[str, str] | None = 
 
         def step(label: str, argv: Sequence[str], stdout: str | None = None) -> int:
             say(label)
-            if stdout is None:
-                return subprocess.run([*box, *argv], check=False, stdin=subprocess.DEVNULL).returncode
-            with open_new(stdout) as fh:
+            with open_new(stdout) if stdout else contextlib.nullcontext() as fh:
                 return subprocess.run([*box, *argv], check=False, stdin=subprocess.DEVNULL, stdout=fh).returncode
 
         def cr(name: str, *args: str) -> list[str]:
