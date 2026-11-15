@@ -104,6 +104,8 @@ class Result(tuple):
 # types (str, bool, int, lists, dicts), read with .get and checked where it
 # matters. CST does not build it, so it is not a TypedDict.
 type Deployment = dict[str, Any]
+# (booted, pending, error) of ostree_deployments.
+type OstreeAnswer = tuple[Deployment | None, Deployment | None, str]
 
 
 # ---- where the host is -------------------------------------------------------------------------
@@ -113,8 +115,9 @@ class Host:
     (1 or 0), CST_DOCTOR_ROOT (the host's / for files) and CST_DOCTOR_NOW."""
 
     # Answers asked once per run, set by the functions that ask (deployments,
-    # ostree_deployments, libvirt_domains); absent until then (hasattr).
-    _ostree: tuple[Deployment | None, Deployment | None, str]
+    # ostree_deployments, libvirt_domains); absent until then (read with hasattr
+    # or getattr).
+    _ostree: OstreeAnswer
     _ostree_list: list[Deployment]
     _domains: tuple[list[str] | None, str]
 
@@ -182,7 +185,13 @@ def check(area: str) -> Callable[[CheckFn], CheckFn]:
 
 
 # ---- rpm-ostree: package names and versions ----------------------------------------------------
-def parse_nevra(s: str) -> tuple[str, str, str, str, str] | None:
+# (name, epoch, version, release, arch) of a package, from parse_nevra.
+type Nevra = tuple[str, str, str, str, str]
+# (request, spec, how) of one requested package, from classify_requests.
+type Request = tuple[str, str, str]
+
+
+def parse_nevra(s: str) -> Nevra | None:
     """'name-[epoch:]version-release.arch' -> (name, epoch, version, release,
     arch), or None. The arch is the part after the last dot; version and
     release never contain a dash, so the name is everything before them."""
@@ -203,7 +212,7 @@ def parse_nevra(s: str) -> tuple[str, str, str, str, str] | None:
     return name, epoch, ev, rel, arch
 
 
-def spellings(pkg: tuple[str, str, str, str, str]) -> dict[str, bool]:
+def spellings(pkg: Nevra) -> dict[str, bool]:
     """Every way a request can name this exact package with a version:
     {spelling: True if it names the architecture}."""
     name, epoch, ver, rel, arch = pkg
@@ -240,7 +249,7 @@ def install_spec(name: str, arch: str, named: bool, native: str) -> str:
 
 def classify_requests(
     requests: Iterable[str], packages: Iterable[str] | None, native: str | None = None
-) -> list[tuple[str, str, str]]:
+) -> list[Request]:
     """Split requested-packages into by name and pinned to a version.
     packages: the deployment's installed NEVRAs, or None if unknown.
     Returns a list of (request, spec, how). how is:
@@ -290,7 +299,7 @@ def classify_requests(
     return out
 
 
-def unpin_command(classified: Iterable[tuple[str, str, str]]) -> str:
+def unpin_command(classified: Iterable[Request]) -> str:
     """One command that swaps every pinned request for its bare name (a name
     already requested on its own is not requested twice). Inactive pins are
     only dropped: nothing installed matches them, so nothing is asked back."""
@@ -352,7 +361,7 @@ def describe(d: Deployment) -> str:
     return f"pending deployment {ver} (next boot)"
 
 
-def ostree_deployments(host: Host) -> tuple[Deployment | None, Deployment | None, str]:
+def ostree_deployments(host: Host) -> OstreeAnswer:
     """(booted, pending, error). pending is the deployment of the next boot
     when it is not the booted one: rpm-ostree lists it first (for the booted
     system's osname), staged or not (rpm-ostree rollback leaves an unstaged
@@ -387,7 +396,7 @@ def installed_packages(host: Host, d: Deployment) -> list[str] | None:
     return pkgs or None
 
 
-def deployments(host: Host) -> tuple[Deployment | None, Deployment | None, str]:
+def deployments(host: Host) -> OstreeAnswer:
     """ostree_deployments, asked once per run (several checks use it)."""
     if not hasattr(host, "_ostree"):
         host._ostree = ostree_deployments(host)
@@ -400,7 +409,7 @@ def check_pinned_layering(host: Host) -> Iterator[Result]:
     if err:
         yield Result(INFO if err.startswith("not an") else WARN, f"layered packages: not checked ({err})")
         return
-    found: dict[int, tuple[Deployment, list[str], list[tuple[str, str, str]], list[tuple[str, str, str]]]] = {}
+    found: dict[int, tuple[Deployment, list[str], list[Request], list[Request]]] = {}
     for d in (booted, pending):
         if d is None:
             continue
@@ -1452,7 +1461,6 @@ def vm_module() -> ModuleType | None:
         import importlib.machinery
         import importlib.util
 
-        mod: ModuleType | None
         try:
             loader = importlib.machinery.SourceFileLoader("cst_vm", VM_TOOL)
             # The cast only tells ty what spec_from_loader takes: its stub asks for a
