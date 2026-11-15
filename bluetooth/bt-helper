@@ -695,7 +695,7 @@ def main(argv):
     st = pw_state(args[0], data)          # pw-parse
     if st is None:
         return 4
-    print("|".join(x or d for x, d in zip(st, ("?", "?", "-", "-", "-"))))
+    print("|".join(x or d for x, d in zip(st, ("?", "?", "-", "-", "-"), strict=False)))
     return 0
 
 

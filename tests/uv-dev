@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# uv-dev: run a developer tool (ruff, ty) from the locked "dev" group of
+# pyproject.toml, through uv.
+#
+#   tests/uv-dev ruff check            # what `invowk cmd test pylint` runs
+#   tests/uv-dev ty check              # part of `invowk cmd test types`
+#   tests/uv-dev ruff check --fix      # anything else, by hand
+#
+# The tools' virtual environment never goes inside the checkout (it would
+# land in the snapshots of ~/Workspace): it lives under
+# ${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>, one per checkout or
+# worktree, where <key> is the first 12 hex digits of the SHA-1 of the
+# checkout's physical path. ruff's cache goes next to it. `--locked` makes uv
+# refuse to run when uv.lock does not match pyproject.toml, and installs
+# exactly the locked versions (hashes checked). See docs/dev-tools.md.
+set -euo pipefail
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv-dev: uv is not installed (see docs/dev-tools.md)" >&2
+    exit 127
+fi
+
+repo="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+key="$(printf '%s' "${repo}" | sha1sum | cut -c1-12)"
+cache="${XDG_CACHE_HOME:-${HOME}/.cache}"
+export UV_PROJECT_ENVIRONMENT="${cache}/cst-dev-venv/${key}"
+export RUFF_CACHE_DIR="${cache}/cst-dev-ruff/${key}"
+
+cd "${repo}"
+exec uv run --locked --project "${repo}" --group dev "$@"

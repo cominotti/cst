@@ -20,25 +20,19 @@ in a variable).
 
 import ast
 import os
-import subprocess
 import unittest
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests.repo_files import REPO, repo_files
+
 CALLS = {"run", "Popen", "call", "check_call", "check_output"}
 SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
 
 
 def test_files():
-    out = subprocess.run(["git", "-C", REPO, "ls-files", "-co", "--exclude-standard", "*.py"],
-                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise unittest.SkipTest("not a git checkout: " + out.stderr.strip())
-    for rel in out.stdout.splitlines():
+    for rel in repo_files():
         parts = rel.split("/")
-        if "tests" in parts[:-1] or parts[0] == "tests":
-            path = os.path.join(REPO, rel)
-            if os.path.isfile(path):
-                yield rel, path
+        if rel.endswith(".py") and "tests" in parts[:-1]:
+            yield rel, os.path.join(REPO, rel)
 
 
 def runs_a_shell(call):

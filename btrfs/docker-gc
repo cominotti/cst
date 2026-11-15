@@ -109,8 +109,8 @@ def log(prio, msg):
 def docker(*args, timeout=600, check=True):
     try:
         r = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s")
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from e
     if check and r.returncode != 0:
         raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
     return r
@@ -127,7 +127,7 @@ def inspect_all(kind, list_args):
         try:
             out.extend(json.loads(r.stdout or "[]"))
         except json.JSONDecodeError as e:
-            raise RuntimeError(f"{kind} inspect: unreadable output ({e})")
+            raise RuntimeError(f"{kind} inspect: unreadable output ({e})") from e
     got = {o.get("Id") or o.get("Name") for o in out}
     missing = set(ids) - got
     if missing and missing & set(docker(*list_args).stdout.split()):

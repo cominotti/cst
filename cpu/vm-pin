@@ -174,7 +174,7 @@ def main():
         return 0
     sys.stdout.writelines(diff)
     if action == "plan":
-        print(f"\nPlan only. Apply with: cst cpu vm-pin apply   (effective at the VM's next start)")
+        print("\nPlan only. Apply with: cst cpu vm-pin apply   (effective at the VM's next start)")
         return 0
     if not sys.stdin.isatty():
         sys.exit("apply asks for confirmation: run it in a terminal")

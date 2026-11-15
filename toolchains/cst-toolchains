@@ -884,8 +884,8 @@ def ask_cargo(cmd, env, cwd):
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, text=True, timeout=60)
+        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"cargo metadata: {e}"
     if r.returncode != 0:
@@ -995,8 +995,8 @@ def run_idle(cmd, cwd, env, timeout):
     """subprocess.run at idle CPU and IO priority (ionice -c 3 when present)."""
     io = shutil.which("ionice")
     full = ([io, "-c", "3"] if io else []) + list(cmd)
-    return subprocess.run(full, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, timeout=timeout, preexec_fn=lower_priority)
+    return subprocess.run(full, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=timeout, preexec_fn=lower_priority)
 
 
 def walk_dirs(top, depth_max, deadline, stop=None):
@@ -1125,7 +1125,7 @@ def find_worktrees(home, deadline, ws):
         roots.add(os.path.realpath(d))
         if common:
             groups.setdefault(common, d)
-    for common, d in sorted(groups.items()):
+    for _common, d in sorted(groups.items()):
         for wt in git_worktrees(d, deadline):
             if os.path.isdir(wt):           # a "prunable" one is gone: nothing to claim
                 roots.add(os.path.realpath(wt))
@@ -2050,7 +2050,7 @@ def rustup_default(home, rh):
     env.pop("RUSTUP_TOOLCHAIN", None)
     try:
         r = subprocess.run([rustup, "default"], cwd=home, env=env, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     words = r.stdout.split() if r.returncode == 0 else []
@@ -2284,7 +2284,7 @@ def systemctl_env():
 def systemctl(*args, check=False):
     """Output (stripped) of systemctl --user; '' when it could not run."""
     try:
-        r = subprocess.run(systemctl_cmd(*args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        r = subprocess.run(systemctl_cmd(*args), capture_output=True,
                            text=True, env=systemctl_env(), timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         if check:

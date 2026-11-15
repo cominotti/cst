@@ -258,7 +258,7 @@ def local_tz(name=None):
         with open("/etc/localtime", "rb") as f:
             return zoneinfo.ZoneInfo.from_file(f, key="localtime")
     except (OSError, ValueError):
-        return dt.timezone.utc
+        return dt.UTC
 
 
 def wall_to_epoch(wall, tz):

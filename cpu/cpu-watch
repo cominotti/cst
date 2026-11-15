@@ -256,7 +256,9 @@ def lows(ft):
 
 
 def summarize(run_dir):
-    meta = json.loads(read(os.path.join(run_dir, "meta.json"), "{}") or "{}")
+    # The value is not used; the line stays so that a corrupt meta.json
+    # still stops the report here, as before.
+    json.loads(read(os.path.join(run_dir, "meta.json"), "{}") or "{}")
     with open(os.path.join(run_dir, "samples.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
 

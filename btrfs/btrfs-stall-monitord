@@ -825,7 +825,7 @@ class Monitor:
         if ep.snapshots > MAX_STACK_SNAPSHOTS:
             return
         cg_cache = {}
-        for pid, tid, comm, frames, wchan, kind in d_tasks:
+        for pid, _tid, comm, frames, wchan, kind in d_tasks:
             sig, ctx = stack_signature(frames, wchan)
             key = f"{sig}|{ctx}"
             if pid not in cg_cache:

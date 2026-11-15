@@ -521,7 +521,8 @@ def main(argv):
         except ValueError:
             return 3
         print(json.dumps(snap, sort_keys=True))
-        print("%s: %s" % decide(snap, a.rate))
+        what, why = decide(snap, a.rate)
+        print(f"{what}: {why}")
         return 0
     signal.signal(signal.SIGTERM, Stop.handler)
     signal.signal(signal.SIGINT, Stop.handler)

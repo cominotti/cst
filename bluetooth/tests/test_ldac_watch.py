@@ -20,7 +20,7 @@ import unittest
 
 sys.dont_write_bytecode = True
 
-from bluetooth.tests.test_bluetooth import HELPER, MAC, SETUP, WATCH, load, shell_functions  # noqa: E402
+from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, load, shell_functions  # noqa: E402
 
 DEV = "0A_1B_2C_3D_4E_5F"
 

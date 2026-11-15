@@ -253,7 +253,7 @@ def human(n):
 
 def utc_now():
     now = float(os.environ.get("CST_VM_NOW") or time.time())
-    return now, datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return now, datetime.datetime.fromtimestamp(now, datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 # ---- what the domain is made of -----------------------------------------------------------------
@@ -579,7 +579,7 @@ def cmd_backup(vm, full):
         try:
             check_shut_off(vm)
         except Refused as e:
-            raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}")
+            raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}") from e
         def now_fp(p):
             try:
                 return fingerprint(p)
@@ -920,13 +920,13 @@ def commit_back(vm, overlaid):
         problems.append(f"{vm} stopped during the backup: its disks still point to the overlay files"
                         if state in ("shut off", "crashed") else
                         f"the state of {vm} could not be read ({state or 'virsh domstate failed'}): nothing merged")
-        for t, (base, overlay) in overlaid.items():
+        for t, (base, _overlay) in overlaid.items():
             how[t] = overlay_kind(state, None, base)
         return problems, how
     if state != "running":
         print(f"  {vm} is {state}: merging back anyway (a block job works on it)", flush=True)
     deadline = time.monotonic() + COMMIT_TIMEOUT
-    for t, (base, overlay) in overlaid.items():
+    for t, (base, _overlay) in overlaid.items():
         left = max(60, int(deadline - time.monotonic()))
         print(f"  merging the overlay of {t} back into {base} (virsh blockcommit --active --pivot)", flush=True)
         # --timeout: virsh aborts the job itself (the disk stays on the overlay, no job
@@ -1117,7 +1117,7 @@ def nas_run(vm, keep, quiesce, nas, live):
         if sorted(b for b, _ in specs.values()) != sorted(p for p, k in sources if k == "disk"):
             raise Refused(f"{vm}: the running VM's disks differ from its definition (changed since it started): "
                           "restart it, then back up")
-        for t, (_, overlay) in specs.items():
+        for _t, (_, overlay) in specs.items():
             if os.path.lexists(overlay):
                 raise Refused(f"{overlay} already exists: wait a second and run it again")
         agent = agent_state(live_xml)

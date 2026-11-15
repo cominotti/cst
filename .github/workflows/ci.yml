@@ -118,8 +118,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The checkout belongs to root and the gates run as ci: without this, git
+      # refuses to read it ("dubious ownership"), and the repository gate tests
+      # (tests/repo_files.py, used by test_repo_paths, test_python_files and
+      # test_subprocess_hygiene) fail because they cannot list its files.
+      - name: Let the ci user's git read the checkout
+        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
+
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk
+
+      # uv runs ruff and ty from the locked "dev" group (uv.lock, hashes checked).
+      # The uv release and its archive SHA256 are pinned here; move both together
+      # (the hash is in uv-x86_64-unknown-linux-gnu.tar.gz.sha256 of the release).
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.0'
+          checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
+          # No GitHub cache: two small wheels, and a cache dir under RUNNER_TEMP
+          # would not be writable by the ci user.
+          enable-cache: 'false'
 
       - name: Validate invowk module
         run: runuser -u ci -- env "PATH=${PATH}" invowk validate cst.invowkmod
@@ -143,6 +162,12 @@ jobs:
 
       - name: Run shell syntax and ShellCheck gate
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test lint
+
+      - name: Run Python lint gate (ruff)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test pylint
+
+      - name: Run Python type gate (ty, annotations)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test types
 
       - name: Run unit tests
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test unit
