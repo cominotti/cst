@@ -108,11 +108,11 @@ repository:
   `[tool.ruff.lint.per-file-ignores]`. ANN is ignored everywhere except the
   files in the braces, whose functions must all have type annotations. Their
   record dicts are `TypedDict` classes, so ty can check the keys and value
-  types. Today: `swap/swap-status`, `tests/mutation/cst-mutation` and
-  `doctor/cst-doctor`. Every typed file must also be in the ty gate. Add a
-  file inside the braces of that one entry: no other per-file-ignores entry
-  may ignore ANN, since ruff would then skip ANN for the typed files too and
-  still report "All checks passed".
+  types. Today: `swap/swap-status`, `tests/mutation/cst-mutation`,
+  `doctor/cst-doctor` and `btrfs/btrfs-stall-report`. Every typed file must
+  also be in the ty gate. Add a file inside the braces of that one entry: no
+  other per-file-ignores entry may ignore ANN, since ruff would then skip ANN
+  for the typed files too and still report "All checks passed".
 - **The ty gate, `[tool.ty.src] include`**: every Python file ty reports
   nothing on. `error-on-warning` is on, so a warning fails it too. A file
   joins once it is clean; never remove one, or add an ignore comment, to
