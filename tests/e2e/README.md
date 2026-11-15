@@ -6,8 +6,8 @@ call `tests/e2e/run.py` directly.
 
 | Tier | Command | What it does | Privileged? |
 |------|---------|--------------|-------------|
-| 1 | `invowk cmd test e2e tier1` | systemd, toolchains, bluetooth/WirePlumber files, restic over SFTP to a NAS container, alerts, `cst doctor` | No (`--cap-add SYS_ADMIN` only) |
-| 2 | `invowk cmd test e2e tier2 --allow_privileged` | loopback btrfs RAID1, Docker-in-Docker, cgroups v2, Polkit | **Yes** (`--privileged`) |
+| 1 | `invowk cmd test e2e tier1` | systemd, toolchains, bluetooth/WirePlumber files, restic over SFTP to a NAS container, alerts, `cst doctor`, the drop-in order the cpu game profile relies on (`set-property --runtime` vs CST's `10-` baseline and a uresourced-style `system.control` file, across `daemon-reload`) | No (`--cap-add SYS_ADMIN` only) |
+| 2 | `invowk cmd test e2e tier2 --allow_privileged` | loopback btrfs RAID1, Docker-in-Docker, cgroups v2 (the game profile's weights also after a `daemon-reload`), Polkit | **Yes** (`--privileged`) |
 
 Both commands take `--keep_logs` (keep the journald/systemd logs in
 `tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).

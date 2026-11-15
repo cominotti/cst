@@ -58,9 +58,15 @@ case "$1" in
 esac
 exit 1
 """
+# systemctl show: prints $FIX_SHOW/<sys|usr>/<unit> (K=V lines), or fails
+# when that file is missing; everything else is the failed-units list.
 SYSTEMCTL = """#!/bin/sh
 echo "systemctl $*" >>"$STUB_LOG"
 case " $* " in
+  *" show "*) for a in "$@"; do last="$a"; done
+              mgr=sys; case " $* " in *" --user "*) mgr=usr ;; esac
+              [ -f "$FIX_SHOW/$mgr/$last" ] && exec cat "$FIX_SHOW/$mgr/$last"
+              echo "Failed to connect to bus" >&2; exit 1 ;;
   *" --user "*) cat "$FIX_USER_FAILED" ;;
   *) cat "$FIX_SYSTEM_FAILED" ;;
 esac
@@ -151,6 +157,7 @@ class Scratch(unittest.TestCase):
             "FIX_FINDMNT": os.path.join(self.tmp, "findmnt.out"),
             "FIX_STATFS": os.path.join(self.tmp, "statfs.out"),
             "FIX_VIRSH": "",
+            "FIX_SHOW": os.path.join(self.tmp, "show"),
         }
 
     def status(self, name):
@@ -173,7 +180,8 @@ class Scratch(unittest.TestCase):
                    "findmnt -rn -t btrfs -o SOURCE,TARGET", "stat -f -c %S %b ",
                    "virsh -r -c qemu:///system list --all --name", "virsh -r -c qemu:///system dumpxml --inactive ",
                    "virsh -c qemu:///system domcapabilities", "virsh -r -c qemu:///system domblklist ",
-                   "virsh -r -c qemu:///system domstate ")
+                   "virsh -r -c qemu:///system domstate ", "systemctl show -p LoadState ",
+                   "systemctl --user show -p LoadState ", "systemctl --user -M tester@ show -p LoadState ")
         for c in self.calls():
             self.assertTrue(c.startswith(allowed), f"unexpected call: {c}")
             self.assertNotIn("sudo", c)
@@ -704,6 +712,151 @@ PASSTHROUGH_FIXED = domain("<cpu mode='host-passthrough'>" + "".join(
     f"<feature policy='disable' name='{n}'/>" for n in CPU_FEATURES) + "</cpu>")
 
 
+class GameProfileTest(Scratch):
+    """The cpu check: drift of the game profile's settings (cpu/game-profile
+    records them in /run/cpu-setup/game.intended)."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_dir = os.path.join(self.root, "run", "cpu-setup")
+        os.makedirs(self.run_dir)
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='nobody-here'\n")
+        self.cg = os.path.join(self.root, "sys", "fs", "cgroup", "inner", "cpuset.cpus")
+        os.makedirs(os.path.dirname(self.cg))
+        with open(self.cg, "w") as f:
+            f.write("12-23\n")
+        # As written by game-profile: printf %q, systemctl show values.
+        self.intended = (
+            "prop sys machine.slice AllowedCPUs 12-23 12-23\n"
+            "prop sys machine.slice CPUWeight 10 10\n"
+            "prop sys machine.slice IOWeight 10 10\n"
+            "prop sys user.slice MemoryLow 16G 17179869184\n"
+            "prop sys user-1000.slice MemoryLow 16G 17179869184\n"
+            "prop sys user@1000.service MemoryLow 16G 17179869184\n"
+            "prop usr user.slice CPUWeight idle idle\n"
+            "prop usr app.slice MemoryZSwapWriteback no ''\n"
+            "cgw /sys/fs/cgroup/inner/cpuset.cpus 12-23 12-23\n"
+        )
+        self.show("sys", "machine.slice", AllowedCPUs="12-23", CPUWeight="10", IOWeight="10")
+        for u in ("user.slice", "user-1000.slice", "user@1000.service"):
+            self.show("sys", u, MemoryLow="17179869184")
+        self.show("usr", "user.slice", CPUWeight="idle")
+        self.show("usr", "app.slice", MemoryZSwapWriteback="[not set]")
+
+    def show(self, mgr, unit, load="loaded", **props):
+        d = os.path.join(self.tmp, "show", mgr)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, unit), "w") as f:
+            f.write(f"LoadState={load}\n" + "".join(f"{k}={v}\n" for k, v in props.items()))
+
+    def profile_on(self, intended=True):
+        open(os.path.join(self.run_dir, "game.state"), "w").close()
+        if intended:
+            with open(os.path.join(self.run_dir, "game.intended"), "w") as f:
+                f.write(self.intended)
+
+    def results(self):
+        """The check called directly, as root (the user manager is asked with
+        -M TARGET_USER@), with the stubs first in PATH."""
+        host = D.Host(self.env)
+        host.uid = 0
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='tester'\n")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(D.check_game_profile_drift(host))
+        self.assert_read_only()
+        return res
+
+    def test_read_intended(self):
+        recs = D.read_intended(self.intended + "bogus line\nprop sys 'unclosed\n")
+        self.assertEqual(len(recs), 9)
+        self.assertEqual(recs[3], ("prop", "sys", "user.slice", "MemoryLow", "16G", "17179869184"))
+        self.assertEqual(recs[7][5], "")
+        self.assertEqual(recs[8], ("cgw", "/sys/fs/cgroup/inner/cpuset.cpus", "12-23", "12-23"))
+
+    def test_off_is_ok_and_absent_module_is_silent(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(D.check_game_profile_drift(D.Host(self.env)))
+            self.assertEqual([(r.status, r.message) for r in res], [(D.OK, "game profile: off")])
+            os.remove(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"))
+            self.assertEqual(list(D.check_game_profile_drift(D.Host(self.env))), [])
+        self.assertEqual(self.calls(), [])
+
+    def test_all_settings_hold(self):
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.OK], res)
+        self.assertIn("the 8 settings it made still hold", res[0].message)   # empty SHOWN skipped
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER=''\n")      # no target: the doctor's own user manager
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ok     game profile: ON, the 8 settings it made still hold", r.stdout)
+        self.assert_read_only()
+
+    def test_drift_warns_with_the_restart_fix(self):
+        self.profile_on()
+        self.show("sys", "machine.slice", AllowedCPUs="12-23", CPUWeight="50", IOWeight="50")
+        self.show("sys", "user.slice", MemoryLow="0")
+        self.show("usr", "user.slice", CPUWeight="30")
+        with open(self.cg, "w") as f:
+            f.write("8-23\n")
+        res = self.results()
+        self.assertEqual(res[0].status, D.WARN)
+        m = res[0].message
+        self.assertIn("5 of its settings no longer hold", m)
+        self.assertIn("machine.slice CPUWeight is 50 (the profile set 10)", m)
+        self.assertIn("user.slice MemoryLow is 0 (the profile set 17179869184)", m)
+        self.assertIn("user.slice CPUWeight is 30 (the profile set idle)", m)
+        self.assertIn("/sys/fs/cgroup/inner/cpuset.cpus is 8-23 (the profile wrote 12-23)", m)
+        self.assertEqual(res[0].fix, "sudo systemctl restart cpu-game.service")
+        self.assertEqual(len(res), 1)
+        # Switched on by hand: a restart would drop the by-hand mark, and the
+        # watchdog would then switch the profile off with no game running.
+        open(os.path.join(self.run_dir, "manual"), "w").close()
+        self.assertEqual(self.results()[0].fix, "cst cpu game off && cst cpu game on")
+
+    def test_whole_run_as_user_asks_the_own_manager(self):
+        self.profile_on()
+        self.show("usr", "user.slice", CPUWeight="30")
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER=''\n")      # no target: the doctor's own user manager
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("WARN   game profile: ON, but 1 of its settings no longer hold: "
+                      "user.slice CPUWeight is 30 (the profile set idle)", r.stdout)
+        self.assertIn("fix: sudo systemctl restart cpu-game.service", r.stdout)
+        self.assertIn("systemctl --user show -p LoadState -p CPUWeight user.slice", self.calls())
+        self.assert_read_only()
+
+    def test_unreachable_manager_and_unloaded_unit_are_info(self):
+        self.profile_on()
+        shutil.rmtree(os.path.join(self.tmp, "show", "usr"))
+        self.show("sys", "user@1000.service", load="not-found", MemoryLow="0")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.OK, D.INFO], res)
+        self.assertIn("the 6 settings it made still hold", res[0].message)
+        self.assertIn("user@1000.service", res[1].message)
+        self.assertIn("user.slice", res[1].message)
+
+    def test_other_user_skips_the_user_manager(self):
+        self.profile_on()
+        host = D.Host(self.env)
+        mgr, why = D.user_manager(host)       # TARGET_USER='nobody-here' is not this user
+        self.assertIsNone(mgr)
+        self.assertIn("the profile is for nobody-here", why)
+
+    def test_old_format_state_is_info(self):
+        self.profile_on(intended=False)
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.INFO])
+        self.assertIn("older cpu-game-profile", res[0].message)
+        self.assertIn("sudo systemctl restart cpu-game.service", res[0].message)
+        self.assertEqual(self.calls(), [])     # nothing asked
+
+
 class VmTest(Scratch):
     def setUp(self):
         super().setUp()
@@ -1179,7 +1332,7 @@ class CommandLineTest(Scratch):
         for a, _ in D.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "vm"])
+        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "vm"])
 
 
 class ToolboxTest(Scratch):

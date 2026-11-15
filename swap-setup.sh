@@ -23,7 +23,7 @@
 #       * /etc/sysctl.d/99-swap-tuning.conf (swappiness 100, page-cluster 0,
 #         watermarks), applied live
 #       * machine.slice MemoryLow=48G (drop-in 50-memory-low.conf, next to
-#         cpu-setup.sh's 50-cpu-setup.conf; different settings, no clash)
+#         cpu-setup.sh's 10-cpu-setup.conf; different settings, no clash)
 #       * verification at the end
 #   status [--root]        read-only: config files, live settings, zswap pool
 #                          and traffic, swap devices, per-cgroup swap, memory

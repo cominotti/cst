@@ -66,7 +66,11 @@ MAINT_TEXT = re.compile(r"(?:^|task )fstrim:\d+|cgroup (?:fstrim|btrfs-scrub|btr
 STACK_RULES = [
     ("fuse", FUSE_RE),
     ("maintenance", MAINT_RE),
-    ("reclaim", re.compile(r"^(?:do_swap_page|swap_read_folio|swap_cluster_readahead|__swap_writepage)$")),
+    # The swap path anywhere on the stack (same list as SWAP_FRAME in btrfs-stall-monitord).
+    ("reclaim", re.compile(
+        r"^(?:do_swap_page|swap_read_folio\w*|swap_cluster_readahead|swapin_readahead|swap_vma_readahead"
+        r"|__read_swap_cache_async|read_swap_cache_async|__swap_writepage|swap_writepage\w*|swap_writeout"
+        r"|zswap_\w+)$")),
     # A log sync can fall back to a full commit: then commit_transaction is on the stack.
     ("commit", re.compile(r"^(?:btrfs_commit_transaction|btrfs_wait_for_commit)$")),
     ("log-sync", re.compile(r"^btrfs_sync_log$")),
@@ -103,8 +107,10 @@ CATEGORIES = [
     ("btrfs-locks", r"btrfs_tree_lock|btrfs_tree_read_lock|__btrfs_tree|btrfs_lock_root|btrfs_search_slot"
                     r"|lock_extent|btrfs_inode_lock|btrfs_read_lock",
      "btrfs b-tree / extent / inode lock contention"),
+    # The last names: waits for the memory map lock (MMAP_LOCK_FRAME in btrfs-stall-monitord).
     ("reclaim", r"shrink_|try_to_free|alloc_pages|swap|zswap|mem_cgroup_handle_over_high"
-                r"|throttle_direct_reclaim",
+                r"|throttle_direct_reclaim|^(?:lock_mm_and_find_vma|__vma_start_exclude_readers|__vma_start_write"
+                r"|vma_start_write\w*|vm_mmap_pgoff|__vm_munmap|vm_munmap|do_mprotect_pkey|do_madvise|__do_sys_brk)$",
      "memory reclaim / swap"),
     ("discard", r"discard", "async discard (discard=async)"),
     ("overlayfs", r"^ovl_", "overlayfs copy-up (containers)"),
@@ -122,7 +128,10 @@ IDLE_SIG = re.compile(r"^(?:futex_\w+|__futex_\w+|ep_poll|do_epoll_wait|do_selec
                       r"|unix_\w+|n_tty_\w+|tty_\w+|wait_for_partner|do_wait|kernel_wait4|rcu_\w+"
                       r"|poll_schedule_timeout\w*|intel_\w+|drm_\w+|i915_\w+|xe_\w+|pci_\w+)$")
 # "maintenance" replaces the former "scrub" category (scrub is maintenance too).
-NON_STORAGE = ("fuse", "idle", "maintenance")
+# "reclaim" (memory reclaim, swap, zswap) waits on memory, not on the disks:
+# daemon v8+ tags it "memory" and leaves it out of "d"; for older records the
+# report takes it out of the storage counts itself (see analyse()).
+NON_STORAGE = ("fuse", "idle", "maintenance", "reclaim")
 V2_HUNG_SIG = re.compile(r" at (\S+)")
 CAT_RE = [(k, re.compile(rx)) for k, rx, _ in CATEGORIES]
 CAT_DESC = {k: d for k, _, d in CATEGORIES}
@@ -146,7 +155,6 @@ HINTS = {
                      "a big checkout) after their metadata left the page cache.",
     "btrfs-locks": "Contention inside btrfs metadata (many writers in the same subvolume / directory).",
     "space": "btrfs had to flush to reserve metadata/data space; check the metadata line.",
-    "reclaim": "Memory reclaim / swap, not the filesystem, held tasks up.",
     "overlayfs": "Container copy-up of large files from lower image layers.",
     "device": "Requests queued at the block layer (NVMe or dm-crypt busy).",
     "wbt": "The block layer throttled background writeback to protect read latency.",
@@ -159,12 +167,29 @@ UNITS = {
     "*_ms": "milliseconds", "share": "fraction of sampled D-state task observations",
     "task_samples": "one task seen in D state in one sample (1 s apart during episodes, "
                     "so roughly task-seconds)",
+    "vm.zswap_in_bytes / zswap_out_bytes": "bytes decompressed from / compressed into the zswap pool "
+                                           "(RAM, no disk IO); null when no sample came from a daemon >= v7",
+    "vm.swap_in_bytes / swap_out_bytes": "bytes read from / written to the swap disk (pswpin/pswpout); "
+                                         "swap-out includes zswap writeback",
+    "vm.swap_out_bypass_bytes": "swap-out that did not pass through zswap (pswpout minus zswpwb, "
+                                "v7+ samples only); null like zswap_*",
+    "peak.d_tasks / mem_tasks": "most tasks at once waiting on storage / on memory (reclaim, swap, zswap); "
+                                "for records of a daemon < v8 estimated from the episodes' stacks",
+    "disks.*.read_await_ms / write_await_ms": "average time per read / write request",
+    "sample_d_tasks": "most tasks waiting on storage in one sample (samples of a daemon >= v5)",
+    "open_episode": "null, or an episode without a record yet: since / last (epoch s) and d_tasks "
+                    "(most tasks waiting on storage in its samples)",
+    "episodes.*.max_d_mem": "most tasks waiting on memory at once in the episode",
+    "episodes.*.estimated": "true when max_d / max_d_mem were estimated from the stacks "
+                            "(the episode was recorded by a daemon < v8)",
 }
 
 
 def classify(sig, examples, comms=(), kind=None):
     if kind in NON_STORAGE:        # daemon v3 already classified the wait
         return kind
+    if kind == "memory":           # daemon v8+
+        return "reclaim"
     if FUSE_RE.match(sig):
         return "fuse"
     for frames in examples:
@@ -257,10 +282,17 @@ def fmt_ts(ts):
 
 
 def zswap_text(vm):
-    if vm["zswap_writeback_bytes"] is None:
-        return "n/a (daemon < v7)"
+    """zswap pool traffic and disk swap: 'zswap in/out X / Y   disk swap in/out A / B'.
+    pswpout counts zswap writeback too, so only swap-out that bypassed zswap
+    gets its own figure."""
+    disk = f"disk swap in/out {fmt_bytes(vm['swap_in_bytes'])} / {fmt_bytes(vm['swap_out_bytes'])}"
+    if vm["zswap_out_bytes"] is None:
+        return f"zswap in/out n/a (daemon < v7)   {disk}"
     since = vm.get("zswap_counted_from")
-    return fmt_bytes(vm["zswap_writeback_bytes"]) + (f" (from {fmt_ts(since)})" if since else "")
+    bypass = vm.get("swap_out_bypass_bytes") or 0
+    return (f"zswap in/out {fmt_bytes(vm['zswap_in_bytes'])} / {fmt_bytes(vm['zswap_out_bytes'])}"
+            f"{f' (from {fmt_ts(since)})' if since else ''}   {disk}"
+            f"{f' ({fmt_bytes(bypass)} of it not through zswap)' if bypass >= 2**20 else ''}")
 
 
 def fmt_counts(d, n=4):
@@ -389,13 +421,18 @@ def analyse(recs, since, until, with_below, verbose):
     covered = 0.0
     psi = {"io_some": 0, "io_full": 0, "mem_some": 0, "mem_full": 0, "cpu_some": 0}
     peak = {"io_some_avg10": 0.0, "io_full_avg10": 0.0, "mem_some_avg10": 0.0, "cpu_some_avg10": 0.0,
-            "iowait_tasks": 0, "d_tasks": 0, "maint_tasks": 0, "dirty_bytes": 0, "writeback_bytes": 0}
+            "iowait_tasks": 0, "d_tasks": 0, "mem_tasks": 0, "maint_tasks": 0, "dirty_bytes": 0,
+            "writeback_bytes": 0}
     vmd = {k: 0 for k in vm_keys if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold",
                                                 "nr_dirty_background_threshold")}
     fs, disks, cg = {}, {}, {}
     gaps = 0
-    old_d = []          # (ts, d) of v3/v4 samples, whose "d" also counted btrfs maintenance
+    # (ts, d, v5+) of samples of daemons v3-v7: their "d" also counted memory
+    # waits (and, before v5, btrfs maintenance); corrected after the episodes.
+    old_d = []
+    sample_d = 0        # most storage waits in one v8+ sample
     maint_samples = 0   # v5+ samples with a btrfs maintenance task in D state
+    pswpout_v7 = 0      # pswpout of the v7+ sample pairs (compared with zswpwb)
     v6_since, v7_since = first_at.get(6), first_at.get(7)
     zswap_ok = False    # some sample pair came from a v7+ daemon (zswap counters usable)
     for a, b in zip(samples, samples[1:]):
@@ -417,11 +454,13 @@ def analyse(recs, since, until, with_below, verbose):
         peak["iowait_tasks"] = max(peak["iowait_tasks"], b["procs"][1])
         if "d_all" in b:      # daemon v3+: "d" counts storage waits only
             if "d_maint" in b:    # v5+: maintenance excluded from "d"
-                peak["d_tasks"] = max(peak["d_tasks"], b.get("d", 0))
                 peak["maint_tasks"] = max(peak["maint_tasks"], b["d_maint"])
                 maint_samples += b["d_maint"] > 0
+            if "d_mem" in b:      # v8+: memory waits excluded from "d"
+                sample_d = max(sample_d, b.get("d", 0))
+                peak["mem_tasks"] = max(peak["mem_tasks"], b["d_mem"])
             else:
-                old_d.append((b["ts"], b.get("d", 0)))
+                old_d.append((b["ts"], b.get("d", 0), "d_maint" in b))
         peak["dirty_bytes"] = max(peak["dirty_bytes"], vmget(b, "nr_dirty") * PAGE)
         peak["writeback_bytes"] = max(peak["writeback_bytes"], vmget(b, "nr_writeback") * PAGE)
         # Daemons before v7 read only the first page of /proc/vmstat and stored
@@ -435,6 +474,8 @@ def analyse(recs, since, until, with_below, verbose):
             d = vmget(b, k) - vmget(a, k)
             if d > 0:
                 vmd[k] += d
+                if k == "pswpout" and full_vm:
+                    pswpout_v7 += d
         for uuid, fb in b["fs"].items():
             fa = a["fs"].get(uuid)
             f = fs.setdefault(uuid, {"commits": 0, "commit_ms": 0, "max_commit_ms": 0, "max_at": None,
@@ -488,11 +529,15 @@ def analyse(recs, since, until, with_below, verbose):
     res["peak"] = peak
     res["maintenance_samples"] = maint_samples
     # None: no sample in the window came from a v7+ daemon.
-    zswap_wb = vmd.get("zswpwb", 0) * PAGE if zswap_ok else None
+    def zswap_bytes(key):
+        return vmd.get(key, 0) * PAGE if zswap_ok else None
     # Set when the window starts before the v7 upgrade: zswap is counted from there on.
     counted_from = v7_since if zswap_ok and v7_since > samples[0]["ts"] else None
     res["vm"] = {"swap_in_bytes": vmd.get("pswpin", 0) * PAGE, "swap_out_bytes": vmd.get("pswpout", 0) * PAGE,
-                 "zswap_writeback_bytes": zswap_wb,
+                 "zswap_in_bytes": zswap_bytes("zswpin"), "zswap_out_bytes": zswap_bytes("zswpout"),
+                 "zswap_writeback_bytes": zswap_bytes("zswpwb"),
+                 # pswpout also counts zswap writeback; the rest bypassed zswap.
+                 "swap_out_bypass_bytes": max(0, pswpout_v7 - vmd.get("zswpwb", 0)) * PAGE if zswap_ok else None,
                  "zswap_counted_from": counted_from,
                  "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
                  "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
@@ -505,6 +550,8 @@ def analyse(recs, since, until, with_below, verbose):
         ios = d["rd_ios"] + d["wr_ios"]
         d.update({"role": roles.get(name, ""), "read_bytes": d["rd_sectors"] * 512,
                   "write_bytes": d["wr_sectors"] * 512, "await_ms": (d["rd_ticks"] + d["wr_ticks"]) / ios if ios else 0,
+                  "read_await_ms": d["rd_ticks"] / d["rd_ios"] if d["rd_ios"] else 0,
+                  "write_await_ms": d["wr_ticks"] / d["wr_ios"] if d["wr_ios"] else 0,
                   "flush_await_ms": d["fl_ticks"] / d["fl_ios"] if d["fl_ios"] else 0,
                   "util_pct": d["io_ticks"] / (covered * 1000) * 100 if covered else 0,
                   "queue_depth": d["time_in_queue"] / (covered * 1000) if covered else 0})
@@ -515,7 +562,7 @@ def analyse(recs, since, until, with_below, verbose):
     res["cgroups"] = cg
 
     cat_n, other_n = {}, {}
-    maint_eps = []      # (start, end, corrected max_d) of v3/v4 episodes with maintenance
+    cap_eps = []        # (start, end, corrected max_d) of episodes of daemons v3-v7 with non-storage waits
     for ep in episodes:
         sigs = []
         for s in ep["sigs"]:
@@ -532,18 +579,29 @@ def analyse(recs, since, until, with_below, verbose):
             # (FUSE and idle waits too): estimate the storage ones as the mean
             # number of storage task-samples per snapshot.
             storage_n = sum(x["n"] for x in sigs if x["cat"] not in NON_STORAGE)
+            mem_n = sum(x["n"] for x in sigs if x["cat"] == "reclaim")
             total_n = sum(x["n"] for x in sigs)
             ep["max_d_all"] = ep["max_d"]
             ep["max_d"] = math.ceil(ep["max_d_all"] * storage_n / total_n) if total_n else 0
-        elif not any(x.get("kind") == "maintenance" for x in sigs):
-            # Daemon v3/v4 counted btrfs maintenance (fstrim, scrub) as storage
-            # waits: same estimate, applied to the maintenance task-samples.
-            maint_n = sum(x["n"] for x in sigs if x["cat"] == "maintenance")
-            storage_n = sum(x["n"] for x in sigs if x["cat"] not in NON_STORAGE)
-            if maint_n:
-                ep["max_d"] = math.ceil(ep["max_d"] * storage_n / (storage_n + maint_n))
+            ep["max_d_mem"] = math.ceil(ep["max_d_all"] * mem_n / total_n) if total_n else 0
+            ep["estimated"] = True
+        elif "max_d_mem" not in ep:
+            # Daemons v3-v7 counted in max_d every wait they tagged "storage":
+            # memory reclaim / swap, and before v5 btrfs maintenance (fstrim,
+            # scrub), too. Same estimate, applied to those task-samples.
+            counted = [x for x in sigs if x.get("kind", "storage") == "storage"]
+            counted_n = sum(x["n"] for x in counted)
+            storage_n = sum(x["n"] for x in counted if x["cat"] not in NON_STORAGE)
+            mem_n = sum(x["n"] for x in counted if x["cat"] == "reclaim")
+            ep["max_d_mem"] = 0
+            if counted_n and storage_n < counted_n:
+                counted_d = ep["max_d"]
+                ep["max_d"] = math.ceil(counted_d * storage_n / counted_n)
+                ep["max_d_mem"] = math.ceil(counted_d * mem_n / counted_n)
+                ep["estimated"] = True
                 # A "hung task" episode opens HUNG_SECONDS (30 s) after the wait began.
-                maint_eps.append((ep["start"] - 35, ep["end"], ep["max_d"]))
+                lead = 35 if ep.get("reason") == "hung task" else 0
+                cap_eps.append((ep["start"] - lead, ep["end"], ep["max_d"]))
         res["episodes"].append(ep)
     res["episodes"].sort(key=lambda e: (-e["max_d"], -e["peak"].get("commit_ms", 0),
                                         -e["peak"].get("io_full_avg10", 0)))
@@ -552,14 +610,23 @@ def analyse(recs, since, until, with_below, verbose):
                           "share": round(n / total, 3)}
                          for k, n in sorted(cat_n.items(), key=lambda kv: -kv[1])]
     res["non_storage_waits"] = other_n
-    # v3/v4 samples during an episode with btrfs maintenance: cap at the episode's estimate.
-    for ts, d in old_d:
-        for start, end, max_d in maint_eps:
+    # v3-v7 samples during an episode with memory or maintenance waits: cap
+    # at the episode's estimate (their "d" counted those waits as storage).
+    for ts, d, v5 in old_d:
+        for start, end, max_d in cap_eps:
             if start <= ts <= end:
                 d = min(d, max_d)
         res["peak"]["d_tasks"] = max(res["peak"]["d_tasks"], d)
+        if v5:
+            sample_d = max(sample_d, d)
+    res["peak"]["d_tasks"] = max(res["peak"]["d_tasks"], sample_d)
+    # Peak storage waits seen in v5+ samples: an episode opens at 3, so this
+    # also catches an episode that is still open (no record yet).
+    res["sample_d_tasks"] = sample_d
     # Samples from daemon v2 did not separate storage waits: use the episodes' estimate.
     res["peak"]["d_tasks"] = max([res["peak"]["d_tasks"]] + [e["max_d"] for e in res["episodes"]])
+    res["peak"]["mem_tasks"] = max([res["peak"]["mem_tasks"]] + [e.get("max_d_mem", 0) for e in res["episodes"]])
+    res["open_episode"] = open_episode(samples, res["episodes"])
     # Daemon v2 flagged FUSE waits as hung *disk* tasks; they are not.
     for e in res["events"] + res["alerts"]:
         m = V2_HUNG_SIG.search(e.get("msg", e.get("body", "")))
@@ -593,6 +660,69 @@ def analyse(recs, since, until, with_below, verbose):
     elif with_below:
         res["below"] = {"error": "below not installed (no per-process attribution)"}
     return res, meta
+
+
+def open_episode(samples, episodes):
+    """An episode the daemon has not written yet: the newest samples are 1 s
+    apart (episode sampling) with 3+ storage waits (v5+ samples), and no
+    episode record covers them. None otherwise."""
+    if len(samples) < 2 or "d_maint" not in samples[-1]:
+        return None
+    run = [samples[-1]]
+    for a in reversed(samples[:-1]):
+        if run[-1]["ts"] - a["ts"] > 1.5:
+            break
+        run.append(a)
+    if len(run) < 2:
+        return None
+    last = samples[-1]["ts"]
+    if any(ep["start"] - 1 <= last <= ep["end"] + 1 for ep in episodes):
+        return None
+    peak = max(r.get("d", 0) for r in run)
+    if peak < 3:
+        return None
+    return {"since": run[-1]["ts"], "last": last, "d_tasks": peak}
+
+
+def memory_lines(res, storage_d):
+    """Memory waits (reclaim, swap, zswap): not counted as storage."""
+    peak = res.get("peak", {}).get("mem_tasks", 0)
+    ev = [e for e in res["events"] if e.get("kind") == "hung-memory"]
+    if peak < 3 and not ev:
+        return []
+    notes = "".join(
+        (["; estimated from the stacks: recorded by a daemon < v8"]
+         if any(e.get("estimated") and e.get("max_d_mem") for e in res["episodes"]) else [])
+        + ([f"; {len(ev)} task(s) stuck 30+ s, see 'events'"] if ev else []))
+    if peak >= storage_d:
+        return [f"Memory, not storage, blocked up to {peak} tasks (memory reclaim, swap-in or zswap{notes}). "
+                f"See the memory line; `cst swap status` shows which cgroup swaps."]
+    return [f"Memory waits: up to {peak} tasks also waited on memory reclaim, swap-in or zswap{notes}."]
+
+
+def saturation_line(res):
+    """Were the btrfs disks at their limit? Judged at the dm-crypt layer,
+    which is what btrfs waits for; the NVMe figures below it are information
+    only. Without dm-crypt, the member disks themselves."""
+    nvme = [d for n, d in res["disks"].items() if d["role"].startswith("btrfs") and not n.startswith("dm-")]
+    dm = [d for n, d in res["disks"].items() if d["role"].startswith("btrfs") and n.startswith("dm-")]
+    top = dm or nvme
+    if not top:
+        return None
+
+    def fig(ds):
+        return (f"await {max(d['await_ms'] for d in ds):.1f} ms (read {max(d['read_await_ms'] for d in ds):.1f}, "
+                f"write {max(d['write_await_ms'] for d in ds):.1f})")
+    aw = max(d["await_ms"] for d in top)
+    qd = max(d["queue_depth"] for d in top)
+    busy = aw >= 5 or qd >= 8
+    line = (f"btrfs disks {'look SATURATED' if busy else 'NOT saturated'}: "
+            f"{'dm-crypt layer (what btrfs waits for)' if dm else 'member disks'} {fig(top)}, queue depth {qd:.1f}")
+    if dm and nvme:
+        aw_nvme = max(d["await_ms"] for d in nvme)
+        line += (f"; NVMe below {fig(nvme)}, information only (its time can include disk cache flushes)"
+                 f"{'; encryption queueing adds latency' if aw > 2 * aw_nvme + 1 else ''}")
+    return line + "."
 
 
 def fuse_lines(res):
@@ -663,7 +793,16 @@ def verdict(res, meta):
     longest = max((f["max_commit_ms"] for f in res["fs"].values()), default=0)
     longest_at = next((f["max_at"] for f in res["fs"].values() if f["max_commit_ms"] == longest), None)
     psi_stall = pct["io_some_pct"] >= 3 or peak["io_some_avg10"] >= 15
-    d_stall = any(ep["max_d"] >= 3 for ep in res["episodes"])
+    # Episode records (written when an episode ends) and v5+ samples, which
+    # also show an episode that is still open.
+    storage_d = max([ep["max_d"] for ep in res["episodes"]] + [res.get("sample_d_tasks", 0)])
+    d_stall = storage_d >= 3
+    mem_lines = memory_lines(res, storage_d)
+    mem_dominates = bool(mem_lines) and mem_lines[0].startswith("Memory, not storage")
+    oe = res.get("open_episode")
+    open_lines = [f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
+                  f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
+                  f"ends; run the report again after that for the details."] if oe else []
     commit_stall = longest >= 1000
     # Logical bytes: one RAID1 member's dm-crypt device.
     written = max((d["write_bytes"] for n, d in res["disks"].items()
@@ -672,6 +811,7 @@ def verdict(res, meta):
         out.append(f"Storage was NOT a bottleneck: IO pressure {pct['io_some_pct']:.1f}%, at most "
                    f"{peak['d_tasks']} task(s) waiting on storage, longest btrfs commit {longest} ms "
                    f"(written {fmt_bytes(written)}).")
+        out += mem_lines
         if pct["cpu_some_pct"] >= 20:
             out.append(f"CPU contention: runnable tasks waited for a CPU {pct['cpu_some_pct']:.0f}% of the time.")
         if pct["mem_some_pct"] >= 5:
@@ -682,9 +822,14 @@ def verdict(res, meta):
     if psi_stall:
         out.append(f"IO wait: tasks waited on IO {pct['io_some_pct']:.1f}% of the time (every non-idle task at "
                    f"once {pct['io_full_pct']:.1f}%), peak 10 s average {peak['io_some_avg10']:.0f}%.")
-    if d_stall:
-        out.append(f"Blocked tasks: up to {max(ep['max_d'] for ep in res['episodes'])} tasks in D state "
-                   f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure).")
+    if d_stall and mem_dominates:
+        out += mem_lines + [f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
+    elif d_stall:
+        out += [f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
+                f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."] + mem_lines
+    else:
+        out += mem_lines
+    out += open_lines
     if commit_stall:
         out.append(f"Slow btrfs commits: longest {longest / 1000:.1f} s"
                    f"{' at ' + fmt_ts(longest_at) if longest_at else ''}.")
@@ -708,16 +853,9 @@ def verdict(res, meta):
         w = res["episodes"][0]
         out.append(f"Worst episode: {fmt_ts(w['start'])}-{fmt_ts(w['end'])} ({w['end'] - w['start']:.0f} s, "
                    f"{w['max_d']} D tasks, commit {w['peak'].get('commit_ms', 0)} ms).")
-    nvme = [d for n, d in res["disks"].items() if d["role"].startswith("btrfs") and not n.startswith("dm-")]
-    dm = [d for n, d in res["disks"].items() if d["role"].startswith("btrfs") and n.startswith("dm-")]
-    if nvme:
-        aw_nvme = max(d["await_ms"] for d in nvme)
-        aw_dm = max((d["await_ms"] for d in dm), default=0)
-        qd = max(d["queue_depth"] for d in nvme)
-        busy = aw_nvme >= 5 or qd >= 8
-        out.append(f"btrfs NVMe members {'look SATURATED' if busy else 'NOT saturated'} (await {aw_nvme:.1f} ms, "
-                   f"queue depth {qd:.1f}); dm-crypt layer await {aw_dm:.1f} ms"
-                   f"{' (encryption queueing adds latency)' if aw_dm > 2 * aw_nvme + 1 else ''}.")
+    sat = saturation_line(res)
+    if sat:
+        out.append(sat)
     if res["vm"]["swap_out_bytes"] >= 256 * 2**20:
         out.append(f"Swap-out of {fmt_bytes(res['vm']['swap_out_bytes'])}: memory pressure also loaded the swap disk.")
     return out
@@ -742,7 +880,8 @@ def print_report(res, meta, verbose):
           f"{pct['mem_some_pct']:.1f}% / {pct['mem_full_pct']:.1f}%   cpu some {pct['cpu_some_pct']:.1f}%   "
           f"(% of recorded time)")
     print(f"peaks    io 10s-avg some/full {peak['io_some_avg10']:.0f}%/{peak['io_full_avg10']:.0f}%  "
-          f"tasks waiting on storage {peak['d_tasks']}  iowait tasks {peak['iowait_tasks']}  "
+          f"tasks waiting on storage {peak['d_tasks']}  on memory {peak['mem_tasks']}  "
+          f"iowait tasks {peak['iowait_tasks']}  "
           f"dirty {fmt_bytes(peak['dirty_bytes'])} (limit {fmt_bytes(vm['dirty_limit_bytes'])})  "
           f"writeback {fmt_bytes(peak['writeback_bytes'])}")
     for uuid, f in res["fs"].items():
@@ -757,11 +896,11 @@ def print_report(res, meta, verbose):
     for name, d in sorted(res["disks"].items(), key=lambda kv: (kv[0].startswith("dm-"), kv[0])):
         if name.startswith("dm-") and not verbose and not d["role"].startswith("swap"):
             continue
-        print(f"  {name:<8} {d['role']:<13} await {d['await_ms']:5.1f} ms  flush await {d['flush_await_ms']:5.1f} ms "
+        print(f"  {name:<8} {d['role']:<13} await {d['await_ms']:5.1f} ms (r {d['read_await_ms']:.1f} / "
+              f"w {d['write_await_ms']:.1f})  flush await {d['flush_await_ms']:5.1f} ms "
               f"({d['fl_ios']} flushes)  queue {d['queue_depth']:4.1f}  read {fmt_bytes(d['read_bytes'])}  "
               f"write {fmt_bytes(d['write_bytes'])}")
-    print(f"memory   swap in/out {fmt_bytes(vm['swap_in_bytes'])} / {fmt_bytes(vm['swap_out_bytes'])}  "
-          f"zswap writeback {zswap_text(vm)}  direct reclaim scanned "
+    print(f"memory   {zswap_text(vm)}   direct reclaim scanned "
           f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}")
     names = container_names() if any(k.startswith(("docker-", "libpod-")) for k in res["cgroups"]) else {}
     print("cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "

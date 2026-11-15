@@ -141,7 +141,7 @@ the VM's own scope without any libvirt setting. Raise the value in
 `units/machine.slice.d-50-memory-low.conf` if the VM grows.
 
 The drop-in is `machine.slice.d/50-memory-low.conf`. The `cpu` module
-has its own drop-in in the same folder, `50-cpu-setup.conf`, with
+has its own drop-in in the same folder, `10-cpu-setup.conf`, with
 `CPUWeight=50`; the two set different things and do not clash. While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory

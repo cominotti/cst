@@ -298,7 +298,7 @@ EOF
             self.PRIV_CONTAINER,
             """
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu install
-            grep -q 'IOWeight=50' /etc/systemd/system/machine.slice.d/50-cpu-setup.conf
+            grep -q 'IOWeight=50' /etc/systemd/system/machine.slice.d/10-cpu-setup.conf
             grep -q 'Delegate=cpuset' /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf
             systemctl is-active cpu-game-watchdog.timer
 
@@ -324,6 +324,9 @@ EOF
             /usr/local/sbin/cpu-game-profile on
             grep -qx '10' /sys/fs/cgroup/machine.slice/cpu.weight
             grep -q '10' /sys/fs/cgroup/machine.slice/io.weight
+            # A daemon-reload must not put the baseline drop-in back over the profile.
+            systemctl daemon-reload
+            grep -qx '10' /sys/fs/cgroup/machine.slice/cpu.weight
             gp_state="$(/usr/local/sbin/cpu-game-profile state)"
             grep -q 'game profile: ON' <<<"$gp_state"
             /usr/local/sbin/cpu-game-profile off
@@ -352,7 +355,7 @@ EOF
 
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall
-            test ! -e /etc/systemd/system/machine.slice.d/50-cpu-setup.conf
+            test ! -e /etc/systemd/system/machine.slice.d/10-cpu-setup.conf
             test ! -e /etc/polkit-1/rules.d/50-cpu-setup-game.rules
             test ! -e /etc/tmpfiles.d/btrfs-automatic-reclaim.conf
             ! systemctl is-active -q cpu-game-watchdog.timer

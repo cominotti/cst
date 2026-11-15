@@ -192,7 +192,7 @@ cst cpu help
 | `install` | needs sudo (asks for password) | Installs everything in section 6. Safe to run again (idempotent: running it twice gives the same result; unchanged files print `unchanged:`). |
 | `status` | needs sudo | The whole picture (sample in 6.5). |
 | `uninstall` | needs sudo | Removes what `install` added. |
-| `game on\|off\|state` | needs sudo | Switch the game profile by hand, or show it. |
+| `game on\|off\|state` | needs sudo | Switch the game profile by hand, or show it (`state` also flags each setting that drifted, 7.5). |
 | `vm-pin plan\|apply\|status` | needs sudo | Pin the VM to CPUs 12-23 permanently, and keep CET/MBEC off for a host-passthrough VM (8.1). |
 | `docker-slice install\|status\|uninstall` | needs sudo | Put Docker containers in `builds.slice`. |
 | `experiment list\|on NAME\|off NAME` | needs sudo | Runtime-only memory settings for A/B tests. |
@@ -228,17 +228,31 @@ Rules:
 | `~/.local/bin/cst` | Link to the `cst` of the CST folder, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
-| `/etc/systemd/system/machine.slice.d/50-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
+| `/etc/systemd/system/machine.slice.d/10-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
 | `/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf` | `Delegate=cpuset` for user managers (6.3). |
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
-| `~/.config/systemd/user/user.slice.d/50-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. |
-| `~/.config/systemd/user/flatpak-session-helper.service.d/50-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23`. |
+| `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. |
+| `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23`. |
 | `~/.config/gamemode.ini` | GameMode config (only if you do not have your own). |
 | `/etc/group`, `/etc/gshadow` | `gamemode` group copied in, your user added (6.4). |
 
 A **drop-in** is a small extra file in a `<unit>.d/` folder that changes one
 part of a systemd unit, without editing the unit itself.
+
+**Why the baseline drop-ins start with `10-`.** systemd reads all drop-ins
+of a unit sorted by file name, whatever folder they are in, and when two set
+the same thing, the one read last wins. The game profile's changes are
+drop-ins too: `systemctl set-property --runtime` writes them as
+`50-CPUWeight.conf`, `50-AllowedCPUs.conf` and so on. Up to 2026-11 the
+baseline was named `50-cpu-setup.conf`, which sorts **after** those
+(upper-case letters come before lower-case ones), so every `daemon-reload`
+put the baseline back over the running game profile. `10-cpu-setup.conf`
+sorts first, so the game profile wins. `install` deletes the old
+`50-cpu-setup.conf` files (it prints `removed '...'`) and reloads both systemd
+instances; `uninstall` deletes both names. The `user@.service` drop-in keeps
+its name `50-cpu-setup-cpuset.conf`: it sets `Delegate=`, which the game
+profile never changes.
 
 The E-core list (`8-23`) is read from `/sys/devices/cpu_atom/cpus`, not from
 the settings file. If that file is missing, the script prints
@@ -443,9 +457,12 @@ game profile: ON (by hand)
   app.slice       zswap writeback=no
   toolboxes       cpus effective=12-23
   EPP cpu0 performance, cpu12 balance_performance
+  drift: none (every setting the profile made still holds)
 ```
 
-`(by hand)` appears only after `game on`.
+`(by hand)` appears only after `game on`. The last line compares what the
+profile set with what systemd reports now (section 7.5); a setting that
+changed shows as a `DRIFT:` line instead.
 
 ---
 
@@ -457,6 +474,12 @@ game profile: ON (by hand)
 systemd changes are **runtime overrides** (drop-ins under `/run`, written by
 `systemctl set-property --runtime`), and EPP is a value in sysfs (the kernel's
 `/sys` folder). A reboot clears both.
+
+A runtime override is not guaranteed to hold until the game ends, though:
+every `systemctl daemon-reload` (an install, `systemctl enable`, a package
+update) makes systemd read all drop-ins again, and another drop-in can win
+over the override. The watchdog checks for that every 30 s and sets the
+value again (section 7.5).
 
 The first column says which finding of section 3 the change fixes. The values
 are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
@@ -528,6 +551,8 @@ that has GameMode's library (`libgamemode`) loaded.
   is a fallback if the GameMode hook failed.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
   and Steam scopes started in the meantime (the game's own) get `MemoryLow`.
+  A setting of the profile that something undid in the meantime is set again
+  (section 7.5).
 
 `on`, `off` and `tick` never run at the same time: they share a lock file,
 `/run/cpu-setup/lock`, and wait up to 60 s for it.
@@ -579,7 +604,71 @@ so if `on` stops halfway, `off` can still undo what was done.
 - a `cpuset.cpus` file written directly (7.1, toolboxes): its old value is
   written back (usually empty, which means "no limit of its own").
 
-Then it logs `off: previous CPU, weight, memory, zswap writeback and EPP settings restored`.
+Then it logs `off: previous CPU, weight, memory, zswap writeback and EPP settings restored`
+and deletes `game.state` and `game.intended` (section 7.5).
+
+### 7.5 When something undoes a setting (drift)
+
+"Drift" means: the profile is on, but a setting it made is no longer in
+effect. Two things cause it:
+
+- **`daemon-reload`.** systemd reads all drop-ins again, sorted by file name,
+  and the last one wins (6.1). With CST's own baseline named `10-` this no
+  longer undoes the CPU and IO settings, but another drop-in that sorts after
+  `50-<Property>.conf` still could.
+- **uresourced** (a Fedora service that gives the active user's session some
+  memory protection). It keeps its own `50-MemoryLow.conf` files for
+  `user.slice`, `user-<uid>.slice` and `user@<uid>.service` (on this machine
+  `MemoryLow=0`), in `/etc/systemd/system.control`. That
+  folder comes before `/run/systemd/system.control` (where the profile's
+  overrides are), and a file there with the same name hides the profile's
+  file. So after every `daemon-reload` those three get `MemoryLow=0` back.
+  uresourced also changes these values by itself at times (for example when
+  the active session changes). Since `memory.low` only protects as far as
+  every parent box also protects, one of them at `0` voids the game's
+  16 GiB protection.
+
+What the profile does about it:
+
+- Right after `on` sets a property, it reads it back from systemd
+  (`systemctl show`; `16G` reads back as `17179869184` bytes) and writes the
+  value to `/run/cpu-setup/game.intended`, one line per property:
+  `prop sys user.slice MemoryLow 16G 17179869184`. A `cpuset.cpus` file it
+  wrote directly (7.1) gets a `cgw` line. The transient scopes (Docker
+  containers, Steam) are not recorded: no drop-in can win over theirs.
+- Every watchdog run (`tick`, every 30 s) asks systemd once per unit and
+  compares. Each setting that differs is set again with
+  `systemctl set-property --runtime` and logged at level notice, for example:
+  `drift: user.slice MemoryLow was '0' instead of '17179869184' (daemon-reload or uresourced?): set MemoryLow=16G again`.
+  It does not add a line to `game.state`, so `off` still restores the value
+  from before `on`. A unit that systemd has not loaded (or a user manager
+  that is gone after a logout) is skipped, and so is a `cpuset.cpus` file
+  whose cgroup is gone.
+- `cst cpu game state` prints a `DRIFT:` line per setting that differs
+  (section 6.5), and `cst doctor` shows a `WARN` in its `cpu` area
+  ([../doctor/README.md](../doctor/README.md)).
+
+So after a reload, the settings can be wrong for up to 30 s. If `DRIFT:` lines
+stay (the watchdog timer is off, or something sets the value back every
+time), switch the profile off and on again:
+
+```bash
+sudo systemctl restart cpu-game.service
+```
+
+That is for a profile the game switched on. For one switched on **by hand**
+(`game state` shows `(by hand)`, 7.3) use `cst cpu game off && cst cpu game on`
+instead: `off` removes the by-hand mark, so after a plain restart the watchdog
+would switch the profile off when no game runs. `game state` and
+`cst doctor` print the right one of the two. (`game off && game on` on a
+profile the game switched on leaves it on by hand: it then does not switch
+off when the game ends.)
+
+**A profile switched on by an older version.** A version without
+`game.intended` writes no intended values. Until the profile is switched off
+and on again, `tick` skips the comparison, and `game state` prints
+`drift: not checked (switched on by an older version ...)`. `off` works as
+before.
 
 ---
 
@@ -763,7 +852,10 @@ a toolbox (section 11).
 
 - Commands in a **host terminal** (not in a toolbox): they run in `app.slice`,
   the same box as the game, with normal weight and on all CPUs.
-- `systemd-run --user` jobs: they go to `app.slice` too.
+- `systemd-run --user` jobs: they go to `app.slice` too. Jobs started with
+  `systemd-run --user --slice=X` land in `X` and are not covered either,
+  unless `X` nests under the toolboxes' `user.slice` (a name of the form
+  `user-*.slice`, such as `user-builds.slice`).
 - IDE builds: an IDE started from the desktop runs in `app.slice`, and so do
   its builds. (An IDE inside a toolbox is covered.)
 - Podman **Quadlets** (containers that run as systemd user services): user
@@ -919,10 +1011,11 @@ cst cpu uninstall
 `uninstall`:
 
 - stops `cpu-game.service` (this runs the exact revert), disables the timer;
-- removes the units, the `machine.slice` and `user@.service` drop-ins, the
+- removes the units, the `machine.slice` and `user@.service` drop-ins (also
+  `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the
   polkit rule and the three programs;
-- removes the two user drop-ins and `~/.config/gamemode.ini` (only if it is the
-  script's file);
+- removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
+  and `~/.config/gamemode.ini` (only if it is the script's file);
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
   boost back to `0`;
 - reloads systemd.
@@ -996,6 +1089,13 @@ process). Close it, or use `game off`.
 without the profile), compare with `report`, and look at `game wait` and
 `mem stall`. If `mem stall` is above zero, try one memory experiment
 (section 12).
+
+**`game state` shows `DRIFT:` lines, or `cst doctor` warns about the game
+profile.** A `daemon-reload` or uresourced undid a setting (section 7.5).
+Wait 30 s: the watchdog sets it again and logs a `drift:` line
+(`journalctl -b -u cpu-game-watchdog.service`). If the lines stay, check
+`systemctl is-active cpu-game-watchdog.timer`, then switch the profile off
+and on again with the command `game state` prints (section 7.5).
 
 **`lock busy` in the journal.** Another `on`/`off`/`tick` ran for more than 60 s.
 Run `game state`, then `game off` if needed.
@@ -1078,13 +1178,13 @@ this is harmless.
 
 | File | Installed as / used by |
 |------|------------------------|
-| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`) |
+| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin` |
 | `cpu-watch` | `/usr/local/bin/cpu-watch` |
 | `gamemode.ini` | `~/.config/gamemode.ini` |
 | `cpu-game.rules.in` | polkit rule (`@USER@` replaced by your user) |
 | `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer` | `/etc/systemd/system/` |
-| `units/machine.slice.d-50-cpu-setup.conf` | `machine.slice.d/50-cpu-setup.conf` |
+| `units/machine.slice.d-10-cpu-setup.conf` | `machine.slice.d/10-cpu-setup.conf` |
 | `units/user@.service.d-50-cpu-setup-cpuset.conf` | `user@.service.d/50-cpu-setup-cpuset.conf` |
 | `units/builds.slice` | `/etc/systemd/system/builds.slice` (by `docker-slice install`) |
 
