@@ -81,8 +81,10 @@ repository:
   default style: double quotes, four spaces, and a trailing comma keeps a
   call split over several lines. When the check fails, run
   `tests/uv-dev ruff format` and commit the result. It changes only the
-  layout, never what the code does (at most, it adds a space inside a
-  docstring that starts with a quote). Do not use `# fmt: off` or
+  layout, never what the code does. Inside docstrings it can change
+  whitespace (a space after an opening quote, trailing spaces, tabs, the
+  indentation of the lines), so check the diff when a docstring is printed
+  as help text (`print(__doc__)`, argparse). Do not use `# fmt: off` or
   `# fmt: skip` to get a green run. Markdown files are excluded
   (`[tool.ruff.format] exclude`): ruff would also format the Python code
   blocks in them, which are short examples wrapped to read well next to the
@@ -121,7 +123,9 @@ One tool per pull request, so that new findings are clearly the new version's:
 1. Change the version in `[dependency-groups]` of `pyproject.toml`.
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
-   version finds, or explain in the pull request why it is noise.
+   version finds, or explain in the pull request why it is noise. A new ruff
+   can also lay out code differently: when the format check fails, run
+   `tests/uv-dev ruff format` and commit the result in the same pull request.
 
 For uv itself, change `version` and `checksum` of the `Setup uv` step in
 `.github/workflows/ci.yml` together. The checksum is the content of
