@@ -7,18 +7,45 @@ pinning). Replaces btrbk for LOCAL snapshots only. Stdlib only, runs as root.
 Everything comes from the command line; it reads no configuration file.
 
   btrfs-snapshot-core snapshot --snapdir DIR --source NAME=PATH:POLICY [...]
-                      [--dry-run] [--force]
+                      [--dry-run] [--force] [--exclude-caches [--caches-skip NAME=REL ...]]
       per source: creates SNAPDIR/NAME.YYYYMMDDTHHMM (read-only) if the source
       changed since its newest snapshot (or that one is older than 24 h, or
       --force), then deletes what POLICY no longer keeps.
   btrfs-snapshot-core prune --snapdir DIR --source NAME=PATH:POLICY [...]
-                      [--dry-run] [--allow-mass-delete]
+                      [--dry-run] [--allow-mass-delete] [--exclude-caches ...]
       deletions only (the emergency purge passes POLICY '24h 3d' and
       --allow-mass-delete).
+  btrfs-snapshot-core finish --snapdir DIR --source NAME=PATH:POLICY [...] [--exclude-caches ...]
+      only finishes the snapshots an interrupted run left writable (below);
+      snapshot and prune do that first too.
   btrfs-snapshot-core list --snapdir DIR --source NAME=PATH:POLICY [...] [--json]
       every snapshot with the keep/delete decision and its reason.
+  btrfs-snapshot-core caches --snapdir DIR --source NAME=PATH:POLICY [...]
+                      [--caches-skip NAME=REL ...] [--json]
+      the cache folders --exclude-caches would drop from each source's next
+      snapshot, with their files and sizes (read from the sources).
   btrfs-snapshot-core latest --snapdir DIR --name NAME [--source-path PATH]
       prints the path of the newest snapshot of NAME (by "Gen at creation").
+
+Cache folders (--exclude-caches): a new snapshot is first recorded in
+--state-dir/core-unfinished, then created writable, then every cache folder
+in it is deleted, then it is made read-only, checked, and taken off that list.
+A cache folder is one that holds a regular file CACHEDIR.TAG starting with
+"Signature: 8a477f597d28d172789f06886806bc55" (restic's --exclude-caches, the
+NAS copy); not followed: symlinks; not entered: .git, node_modules, other
+devices (nested subvolumes, mounts), the --caches-skip paths, and anything
+below a cache folder; the snapshot's root is never deleted. A cache folder
+that holds a skip path is kept. Only the snapshot changes, never the source,
+and its "Gen at creation" (the change detection) does not move. Anything that
+goes wrong after the creation still ends with the snapshot read-only (its
+caches perhaps kept, an error in the log, the run's result not affected). A
+run that dies before that leaves a writable snapshot, which is never "ours"
+(below); the next snapshot/prune/finish run finishes the listed ones that are
+a subvolume in DIR, named like a source's snapshots, with that source's
+Parent UUID, and leaves anything else alone with a warning. Every snapshot
+and prune run writes --state-dir/core-writable (when it changed): the
+writable entries named like ours it saw (cst doctor cannot open DIR); a
+finish run takes the entries it made read-only off it.
 
 POLICY: like btrbk's snapshot_preserve, '<N>h <N>d <N>w <N>m <N>y' separated by
 spaces or commas, '*' for "all"; e.g. '72h 7d 4w 3m'. The decisions are those of
@@ -111,6 +138,7 @@ per snapshot/prune run.
 import argparse
 import dataclasses
 import datetime as dt
+import errno
 import fcntl
 import json
 import os
@@ -129,7 +157,15 @@ DEFAULT_CONFIRM_HINT = "btrfs-snapshot-core prune --snapdir DIR --source NAME=PA
 DEFAULT_PIN_FILE = "/run/btrfs-snapshot/pinned"
 DEFAULT_STATE_DIR = "/var/lib/btrfs-snapshot"
 STATE_FILE = "core-last-run"       # "EPOCH BOOT_ID BOOTTIME" of the last successful synchronized run
+UNFINISHED_FILE = "core-unfinished"   # snapshots created writable and not yet read-only, one entry per line
+WRITABLE_FILE = "core-writable"       # writable entries named like ours that the last run saw (for cst doctor)
 BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id"
+
+# Cache folders: the CACHEDIR.TAG standard (https://bford.info/cachedir/),
+# the same test as restic's --exclude-caches.
+CACHE_TAG = "CACHEDIR.TAG"
+CACHE_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
+WALK_PRUNE = frozenset({".git", "node_modules"})   # never entered (size of the walk)
 
 TS_FORMAT = "%Y%m%dT%H%M"          # btrbk timestamp_format long, local time
 NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -456,6 +492,247 @@ def unexplained_deletions(decisions, snaps, policy, tz, pins, since, ref=None):
     return [d for d in doomed if not (id(d.snap) in kept_then and id(d.snap) in due_now)]
 
 
+# ---- cache folders ---------------------------------------------------------------------
+@dataclasses.dataclass
+class CacheDir:
+    rel: str                   # path relative to the walked root
+    files: int = 0             # entries that are not folders (files, symlinks, ...)
+    size: int = 0              # apparent size of the regular files, bytes
+
+
+@dataclasses.dataclass
+class CacheWalk:
+    folders: list              # CacheDir: tagged folders (dropped in "drop" mode)
+    kept: list                 # rel: tagged, but holding a skipped path, so kept and walked
+    skipped: list              # rel: skip paths that exist (never entered)
+    problems: list             # (rel, text): what could not be read or deleted
+    seconds: float = 0.0
+
+    @property
+    def files(self):
+        return sum(c.files for c in self.folders)
+
+    @property
+    def size(self):
+        return sum(c.size for c in self.folders)
+
+
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+NOATIME = getattr(os, "O_NOATIME", 0)
+
+
+def open_noatime(name, flags, dir_fd):
+    """os.open with O_NOATIME: reading a folder or a tag must not write its
+    access time (with relatime, the first read after a change, or after a
+    day, would: one metadata write per folder in the snapshot, or a change of
+    the source in a dry run). O_NOATIME needs the owner or root (CAP_FOWNER);
+    without it (EPERM) the plain open."""
+    try:
+        return os.open(name, flags | NOATIME, dir_fd=dir_fd)
+    except PermissionError as e:
+        if not NOATIME or e.errno != errno.EPERM:
+            raise
+        return os.open(name, flags, dir_fd=dir_fd)
+
+
+def has_cache_tag(dir_fd):
+    """The folder open as DIR_FD holds a regular file CACHEDIR.TAG that starts
+    with the signature. Never follows a symlink and never opens anything
+    but a regular file (a FIFO or device named CACHEDIR.TAG is no tag)."""
+    try:
+        st = os.stat(CACHE_TAG, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        fd = open_noatime(CACHE_TAG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd)
+    except OSError:
+        return False
+    try:
+        # A regular file: a short read only at its end.
+        return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, len(CACHE_SIGNATURE)) == CACHE_SIGNATURE
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def subdirs(dir_fd):
+    """Names of the folders directly in DIR_FD (not symlinks to folders), sorted."""
+    with os.scandir(dir_fd) as it:
+        return sorted(e.name for e in it if e.is_dir(follow_symlinks=False))
+
+
+@dataclasses.dataclass
+class Level:
+    """One open folder on a walk's stack (tree, walk_caches)."""
+    fd: int
+    name: str                  # its name in the folder below it on the stack
+    rel: str                   # its path relative to the walk's root
+    todo: list = None          # subfolders left to visit; None = not listed yet
+
+
+def tree(parent_fd, name, top, dev, delete, problems, rel):
+    """Count (and with DELETE remove) the folder NAME below PARENT_FD, open
+    as TOP (closed here), and everything in it. File descriptors only: no
+    symlink is followed, and a
+    folder on another device (a mount, another subvolume) is never entered;
+    with DELETE it is only removed if empty. The CACHEDIR.TAG of the top
+    folder goes last, so a run that stops halfway leaves a folder that is
+    still recognised as a cache (it stays when anything below could not be
+    deleted). Returns a CacheDir; failures go to PROBLEMS (rel, text) and the
+    rest goes on."""
+    out = CacheDir(rel)
+    before = len(problems)
+    stack = [Level(top, name, rel)]
+    while stack:
+        level = stack[-1]
+        is_top = len(stack) == 1
+        if level.todo is None:
+            level.todo = []
+            try:
+                with os.scandir(level.fd) as it:
+                    entries = list(it)
+            except OSError as e:
+                problems.append((level.rel, f"cannot list: {e.strerror}"))
+                entries = []
+            for e in sorted(entries, key=lambda x: x.name):
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        level.todo.append(e.name)
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                except OSError as err:
+                    problems.append((os.path.join(level.rel, e.name), err.strerror))
+                    continue
+                out.files += 1
+                if stat.S_ISREG(st.st_mode):
+                    out.size += st.st_size
+                if delete and not (is_top and e.name == CACHE_TAG):     # the top's tag goes last
+                    try:
+                        os.unlink(e.name, dir_fd=level.fd)
+                    except OSError as err:
+                        problems.append((os.path.join(level.rel, e.name), f"cannot delete: {err.strerror}"))
+            level.todo.reverse()
+        if level.todo:
+            child = level.todo.pop()
+            crel = os.path.join(level.rel, child)
+            try:
+                cfd = open_noatime(child, DIR_FLAGS, level.fd)
+            except OSError as e:
+                problems.append((crel, f"cannot open: {e.strerror}"))
+                continue
+            if os.fstat(cfd).st_dev != dev:
+                os.close(cfd)
+                if delete:
+                    try:
+                        os.rmdir(child, dir_fd=level.fd)  # an empty placeholder; never a mount's content
+                    except OSError as e:
+                        problems.append((crel, f"on another device, not entered: {e.strerror}"))
+                continue
+            stack.append(Level(cfd, child, crel))
+            continue
+        # Every subfolder handled: close this one and remove it from its parent.
+        stack.pop()
+        failed = len(problems) > before
+        if delete and is_top and not failed:
+            try:
+                os.unlink(CACHE_TAG, dir_fd=level.fd)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                problems.append((os.path.join(level.rel, CACHE_TAG), f"cannot delete: {e.strerror}"))
+                failed = True
+        os.close(level.fd)
+        # The top stays when anything in it failed (still a cache, its tag kept).
+        if delete and not (is_top and failed):
+            try:
+                os.rmdir(level.name, dir_fd=parent_fd if is_top else stack[-1].fd)
+            except OSError as e:
+                # Not empty because something below could not go: already reported.
+                if not (failed and e.errno == errno.ENOTEMPTY):
+                    problems.append((level.rel, f"cannot delete: {e.strerror}"))
+    return out
+
+
+def walk_caches(root, skips=(), mode="count"):
+    """The cache folders below ROOT (never ROOT itself): folders holding a
+    CACHEDIR.TAG with the signature (has_cache_tag). Not followed: symlinks;
+    not entered: .git, node_modules, the paths in SKIPS (relative to ROOT,
+    "." = all of ROOT), folders on another device (a nested subvolume or a
+    mount: checked before the tag), and anything below a cache folder. A
+    tagged folder that holds a skipped path is kept and walked further.
+    MODE: "count" finds them and counts their files and bytes, "drop"
+    deletes them (counting as it goes). Returns a CacheWalk."""
+    start = time.monotonic()
+    skips = {os.path.normpath(s) for s in skips}
+    holders = set()                              # folders above a skipped path
+    for s in skips:
+        parent = os.path.dirname(s)
+        while parent:
+            holders.add(parent)
+            parent = os.path.dirname(parent)
+    result = CacheWalk([], [], [], [])
+    if "." in skips:
+        result.skipped.append(".")
+        return result
+    root_fd = open_noatime(root, DIR_FLAGS, None)
+    dev = os.fstat(root_fd).st_dev
+    stack = [Level(root_fd, "", "")]
+    try:
+        while stack:
+            level = stack[-1]
+            if level.todo is None:
+                try:
+                    level.todo = subdirs(level.fd)[::-1]
+                except OSError as e:
+                    result.problems.append((level.rel or ".", f"cannot list: {e.strerror}"))
+                    level.todo = []
+            if not level.todo:
+                os.close(stack.pop().fd)
+                continue
+            name = level.todo.pop()
+            crel = os.path.join(level.rel, name) if level.rel else name
+            if name in WALK_PRUNE:
+                continue
+            if crel in skips:
+                result.skipped.append(crel)
+                continue
+            try:
+                cfd = open_noatime(name, DIR_FLAGS, level.fd)
+            except OSError as e:
+                result.problems.append((crel, f"cannot open: {e.strerror}"))
+                continue
+            # The device first: a nested subvolume (~/Bulk, ~/.cache) with a
+            # tag is an empty placeholder in a snapshot, nothing to drop.
+            if os.fstat(cfd).st_dev != dev:
+                os.close(cfd)
+                continue
+            if not has_cache_tag(cfd):
+                stack.append(Level(cfd, name, crel))
+                continue
+            if crel in holders:
+                result.kept.append(crel)
+                stack.append(Level(cfd, name, crel))
+                continue
+            result.folders.append(tree(level.fd, name, cfd, dev, mode == "drop", result.problems, crel))
+    finally:
+        for level in stack:
+            os.close(level.fd)
+    result.seconds = time.monotonic() - start
+    return result
+
+
+def err_text(e):
+    """An OSError's strerror, else the exception's text (ParseError, an OSError without one)."""
+    return getattr(e, "strerror", None) or str(e)
+
+
+def fmt_bytes(n):
+    for unit, size in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
+
+
 # ---- btrfs ---------------------------------------------------------------------------
 SHOW_LABELS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Generation": "generation",
                "Gen at creation": "cgen"}
@@ -538,6 +815,9 @@ class Host:
     def mkdir(self, path, mode):
         os.mkdir(path, mode)
 
+    def walk_caches(self, root, skips, mode):
+        return walk_caches(root, skips, mode)
+
 
 class Btrfs:
     def __init__(self, host):
@@ -560,8 +840,11 @@ class Btrfs:
             return False
         raise ParseError(f"unexpected property output {value!r}")
 
-    def snapshot(self, source, dest):
-        return self.host.run(["btrfs", "subvolume", "snapshot", "-r", source, dest])
+    def snapshot(self, source, dest, readonly=True):
+        return self.host.run(["btrfs", "subvolume", "snapshot"] + (["-r"] if readonly else []) + [source, dest])
+
+    def set_readonly(self, path):
+        return self.host.run(["btrfs", "property", "set", "-ts", path, "ro", "true"])
 
     def delete(self, path):
         return self.host.run(["btrfs", "subvolume", "delete", path])
@@ -572,11 +855,19 @@ class Scan:
     owned: list
     ignored: list              # (path, reason): not ours, never touched
     unverifiable: list         # (path, reason): could be ours, blocks deletions
+    writable: list = dataclasses.field(default_factory=list)   # paths of the "not read-only" entries in ignored
+
+
+def other_parent(info, source_uuid):
+    """Why a subvolume with show() INFO is no snapshot of SOURCE_UUID (None = it is)."""
+    if info["parent_uuid"] == source_uuid:
+        return None
+    return f"snapshot of another subvolume (Parent UUID {info['parent_uuid'] or '-'})"
 
 
 def scan_snapshots(host, btrfs, snapdir, name, source_uuid):
     """Owned snapshots of one source. source_uuid None = skip the parent check (latest)."""
-    owned, ignored, unverifiable = [], [], []
+    owned, ignored, unverifiable, writable = [], [], [], []
     try:
         entries = host.listdir(snapdir)
     except FileNotFoundError:
@@ -604,13 +895,15 @@ def scan_snapshots(host, btrfs, snapdir, name, source_uuid):
             continue
         if not ro:
             ignored.append((path, "not read-only"))
+            writable.append(path)
             continue
-        if source_uuid is not None and info["parent_uuid"] != source_uuid:
-            ignored.append((path, f"snapshot of another subvolume (Parent UUID {info['parent_uuid'] or '-'})"))
+        other = other_parent(info, source_uuid) if source_uuid is not None else None
+        if other:
+            ignored.append((path, other))
             continue
         owned.append(Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path,
                           uuid=info["uuid"], cgen=info["cgen"]))
-    return Scan(owned, ignored, unverifiable)
+    return Scan(owned, ignored, unverifiable, writable)
 
 
 # ---- run context -----------------------------------------------------------------------
@@ -620,6 +913,7 @@ class Source:
     path: str
     policy: dict
     policy_text: str
+    skips: list = dataclasses.field(default_factory=list)   # --caches-skip, relative to path
 
 
 def parse_source(text, need_policy=True):
@@ -643,6 +937,17 @@ def parse_source(text, need_policy=True):
         except ValueError as e:
             raise UsageError(f"--source {text!r}: {e}") from None
     return Source(name, os.path.normpath(path), policy, policy_text.strip())
+
+
+def parse_skip(text, names):
+    """'NAME=REL' -> (NAME, normalized REL); REL relative, inside the source."""
+    name, sep, rel = text.partition("=")
+    if not sep or name not in names:
+        raise UsageError(f"--caches-skip {text!r}: expected NAME=REL with NAME one of the --source names")
+    norm = os.path.normpath(rel) if rel else ""
+    if not norm or norm.startswith("/") or norm == ".." or norm.startswith("../"):
+        raise UsageError(f"--caches-skip {text!r}: REL must be a path inside the source, relative to its root")
+    return name, norm
 
 
 @dataclasses.dataclass
@@ -682,6 +987,72 @@ class Run:
         self._ntp = None
         self._pins = None
         self._last_run = None
+        self.writable = set()      # writable entries named like ours, seen by this run's scans
+        self.scanned_all = True    # False: a source could not be scanned (keep the old record)
+
+    # Lists in the state directory ----------------------------------------------
+    def state_file(self, name):
+        return os.path.join(self.args.state_dir, name)
+
+    def read_list(self, name):
+        """The entries (one per line) of STATE/name; [] if it does not exist.
+        OSError if it cannot be read. Bytes that are not UTF-8 become U+FFFD
+        (such a line names no snapshot, so it is left alone with a warning)."""
+        try:
+            with open(self.state_file(name), encoding="utf-8", errors="replace") as f:
+                return [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def write_list(self, name, entries, sync_dir=True):
+        """Replace STATE/name with ENTRIES, durably (fsync of the file and,
+        with SYNC_DIR, the folder); removed when ENTRIES is empty.
+        World-readable: cst doctor runs as the user."""
+        path = self.state_file(name)
+        if not entries:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        os.makedirs(self.args.state_dir, mode=0o755, exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644)
+        os.fchmod(fd, 0o644)                     # whatever the umask (sudo keeps a user's 077)
+        with os.fdopen(fd, "w") as f:
+            f.write("".join(f"{e}\n" for e in entries))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        if not sync_dir:
+            return
+        dfd = os.open(self.args.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+
+    def list_add(self, name, entry):
+        entries = self.read_list(name)
+        if entry not in entries:
+            self.write_list(name, entries + [entry])
+
+    def list_remove(self, name, entry):
+        entries = self.read_list(name)
+        if entry in entries:
+            self.write_list(name, [e for e in entries if e != entry])
+
+    def record_writable(self):
+        """STATE/core-writable: the writable entries the scans saw (cst doctor
+        cannot open the root-only snapshot folder); removed when none."""
+        if not self.scanned_all:
+            return
+        entries = sorted(self.writable)
+        try:
+            if self.read_list(WRITABLE_FILE) != entries:     # unchanged: no rewrite, no fsync
+                self.write_list(WRITABLE_FILE, entries)
+        except OSError as e:
+            log(4, f"cannot write {self.state_file(WRITABLE_FILE)}: {e.strerror}")
 
     # Clock guards -----------------------------------------------------------
     def ntp_problem(self):
@@ -692,22 +1063,20 @@ class Run:
             self._ntp = (rc == 0 and out.strip() == "yes")
         return None if self._ntp else "the system clock is not NTP-synchronized (timedatectl NTPSynchronized != yes)"
 
-    def state_path(self):
-        return os.path.join(self.args.state_dir, STATE_FILE)
-
     def last_run(self):
         """(LastRun or None, problem or None)."""
         if self._last_run is None:
             try:
-                with open(self.state_path()) as f:
+                with open(self.state_file(STATE_FILE)) as f:
                     text = f.read().strip()
                 record = parse_state(text)
                 self._last_run = (record, None) if record else \
-                    (None, f"unreadable state {self.state_path()} ({text[:60]!r}); remove it if the clock is right")
+                    (None, f"unreadable state {self.state_file(STATE_FILE)} ({text[:60]!r}); "
+                           f"remove it if the clock is right")
             except FileNotFoundError:
                 self._last_run = (None, None)
             except (OSError, UnicodeDecodeError) as e:
-                self._last_run = (None, f"cannot read {self.state_path()}: {e}")
+                self._last_run = (None, f"cannot read {self.state_file(STATE_FILE)}: {e}")
         return self._last_run
 
     def behind_last_run(self):
@@ -717,7 +1086,7 @@ class Run:
             return problem
         if last is not None and self.now < last.epoch - CLOCK_SLACK:
             return (f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the last successful run "
-                    f"({fmt_epoch(last.epoch, self.tz)}); if the clock is right, remove {self.state_path()}")
+                    f"({fmt_epoch(last.epoch, self.tz)}); if the clock is right, remove {self.state_file(STATE_FILE)}")
         return None
 
     def backwards_problem(self, newest):
@@ -812,19 +1181,14 @@ class Run:
             if self.now < last.epoch - CLOCK_SLACK:
                 log(4, f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the last successful run "
                        f"({fmt_epoch(last.epoch, self.tz)}); keeping that record - if the clock is right, "
-                       f"remove {self.state_path()}")
+                       f"remove {self.state_file(STATE_FILE)}")
             return
         line = str(int(self.now))
         if self.boot_id and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
             line += f" {self.boot_id} {self.boottime:.3f}"
-        os.makedirs(self.args.state_dir, mode=0o755, exist_ok=True)
-        path = self.state_path()
-        tmp = f"{path}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            f.write(line + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # The file is fsynced, its folder is not (a crash at worst keeps the
+        # previous record): one btrfs log sync less per run.
+        self.write_list(STATE_FILE, [line], sync_dir=False)
         self._last_run = (parse_state(line), None)
 
     # Per source ---------------------------------------------------------------
@@ -921,13 +1285,16 @@ def process_source(run, src, create):
         log(3, f"{src.name}: cannot read source {src.path}: {e}; nothing done")
         res.worse(EXIT_ERROR)
         res.note = "source unreadable"
+        run.scanned_all = False
         return res
     try:
         scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
     except ParseError as e:
         log(3, f"{src.name}: {e}; nothing done")
         res.worse(EXIT_ERROR)
+        run.scanned_all = False
         return res
+    note_writable(run, scan)
     for path, why in scan.unverifiable:
         log(4, f"{src.name}: cannot verify {path}: {why}")
     newest = newest_of(scan.owned)
@@ -963,6 +1330,8 @@ def process_source(run, src, create):
                 dest = os.path.join(run.snapdir, entry)
                 if dry:
                     log(5, f"{src.name}: would create {dest} ({reason})")
+                    if args.exclude_caches:
+                        preview_drop(run, src)
                     # The real snapshot's "Gen at creation" is the running transaction:
                     # above the source's generation and every existing snapshot's.
                     cgen = max([info["generation"]] + [s.cgen for s in scan.owned]) + 1
@@ -976,7 +1345,9 @@ def process_source(run, src, create):
                     except ParseError as e:
                         log(3, f"{src.name}: {e}; no deletions")
                         res.worse(EXIT_ERROR)
+                        run.scanned_all = False
                         return res
+                    note_writable(run, scan)
                     if not any(s.entry == entry for s in scan.owned):
                         log(3, f"{src.name}: created {dest} but it does not pass the ownership check")
                         res.worse(EXIT_ERROR)
@@ -1085,12 +1456,194 @@ def create_snapshot(run, src, info, dest, entry, reason):
         except OSError as e:
             log(3, f"cannot create {run.snapdir}: {e.strerror}")
             return False
-    rc, _, err = run.btrfs.snapshot(src.path, dest)
+    # With --exclude-caches the snapshot is taken writable (to drop its cache
+    # folders), but only once it is recorded: if the run dies before it is
+    # read-only, the next run finds it in the list and finishes it (a writable
+    # snapshot is never "ours" otherwise, so it would stay forever).
+    tracked = False
+    if run.args.exclude_caches:
+        try:
+            run.list_add(UNFINISHED_FILE, entry)
+            tracked = True
+        except OSError as e:
+            log(4, f"{src.name}: cannot record {entry} in {run.state_file(UNFINISHED_FILE)} "
+                   f"({err_text(e)}); this snapshot keeps its cache folders")
+    rc, _, err = run.btrfs.snapshot(src.path, dest, readonly=not tracked)
     if rc != 0:
         log(3, f"{src.name}: creating {dest} failed (rc={rc}): {err.strip()}")
+        if tracked and run.host.kind(dest) == "missing":
+            try:
+                run.list_remove(UNFINISHED_FILE, entry)
+            except OSError:
+                pass        # the next run sees it missing and forgets it
         return False
     log(5, f"{src.name}: created {entry} ({reason})")
-    return True
+    return seal(run, src, dest, entry, info["uuid"], created=True) == "sealed" if tracked else True
+
+
+def ours_writable(run, src, dest, entry, source_uuid):
+    """(problem, readonly): problem is why DEST is not a snapshot of SRC that
+    this tool may change (None = it is: directly in the snapshot folder,
+    named like SRC's snapshots, a subvolume with SRC's Parent UUID)."""
+    if os.path.dirname(dest) != run.snapdir or not name_regex(src.name).fullmatch(entry):
+        return f"not a snapshot name of {src.name} in {run.snapdir}", None
+    kind = run.host.kind(dest)
+    if kind != "subvol":
+        return ("missing" if kind == "missing" else f"not a subvolume ({kind})"), None
+    try:
+        info = run.btrfs.show(dest)
+        ro = run.btrfs.readonly(dest)
+    except ParseError as e:
+        return str(e), None
+    other = other_parent(info, source_uuid)
+    return (f"a {other}" if other else None), ro
+
+
+def seal(run, src, dest, entry, source_uuid, created):
+    """The second half of a snapshot taken writable: drop its cache folders
+    (with --exclude-caches), make it read-only, check that it is, and take
+    it off the unfinished list. CREATED: this run has just made it, so any
+    failure still ends with it read-only (the snapshot is kept, its caches
+    perhaps too). Otherwise it is a listed leftover of an interrupted run,
+    changed only once ours_writable() proves it is ours. Returns "sealed",
+    "left" (not ours: untouched, still listed) or "error"."""
+    problem, ro = ours_writable(run, src, dest, entry, source_uuid)
+    if problem:
+        if not created:
+            log(4, f"{src.name}: {entry} is listed in {run.state_file(UNFINISHED_FILE)} but is {problem}; "
+                   f"left alone - check it, then remove its line from that file")
+            return "left"
+        log(3, f"{src.name}: cannot check {dest} after creating it: {problem}; its cache folders stay, "
+               f"making it read-only")
+    elif ro is False and run.args.exclude_caches:
+        drop_caches(run, src, dest, entry)
+    if ro is not True:
+        rc, _, err = run.btrfs.set_readonly(dest)
+        if rc != 0:
+            log(3, f"{src.name}: making {dest} read-only failed (rc={rc}): {err.strip()}; it stays listed in "
+                   f"{run.state_file(UNFINISHED_FILE)} and the next run tries again")
+            run.writable.add(entry)
+            return "error"
+        try:
+            ro = run.btrfs.readonly(dest)
+        except ParseError as e:
+            ro = f"cannot check: {e}"
+        if ro is not True:
+            log(3, f"{src.name}: {dest} is not read-only after setting it ({ro}); it stays listed in "
+                   f"{run.state_file(UNFINISHED_FILE)} and the next run tries again")
+            run.writable.add(entry)
+            return "error"
+    try:
+        run.list_remove(UNFINISHED_FILE, entry)
+    except OSError as e:
+        log(4, f"{src.name}: cannot update {run.state_file(UNFINISHED_FILE)} "
+               f"({err_text(e)}); the next run finds {entry} read-only and forgets it")
+    # Read-only now: off the doctor's record too. Snapshot and prune runs
+    # rewrite it from run.writable at the end; a `finish` run (as in purge)
+    # writes no new record, so a stale line would read as a foreign entry.
+    run.writable.discard(entry)
+    if run.args.cmd == "finish":
+        try:
+            run.list_remove(WRITABLE_FILE, entry)
+        except OSError as e:
+            log(4, f"cannot update {run.state_file(WRITABLE_FILE)}: {err_text(e)}")
+    return "sealed"
+
+
+def report_walk(src, where, walk, verb):
+    """Log lines for a cache walk of SRC (WHERE: the snapshot or source)."""
+    level = 3 if verb == "dropped" else 4
+    for c in walk.folders:
+        log(6, f"{src.name}: {verb} {c.rel} ({c.files} files, {fmt_bytes(c.size)})")
+    for rel in walk.kept:
+        log(6, f"{src.name}: kept {rel}: a cache folder that holds a skipped path")
+    for rel, why in walk.problems[:20]:
+        log(level, f"{src.name}: {where}: {rel}: {why}")
+    if len(walk.problems) > 20:
+        log(level, f"{src.name}: {where}: and {len(walk.problems) - 20} more problem(s)")
+
+
+def drop_caches(run, src, dest, entry):
+    """Delete the cache folders in the fresh writable snapshot DEST. Never
+    fails the run: a folder that cannot be deleted (or a walk that breaks)
+    is logged as an error and simply stays in the snapshot."""
+    try:
+        walk = run.host.walk_caches(dest, src.skips, "drop")
+    except Exception as e:  # noqa: BLE001 - whatever breaks here, the snapshot must still end read-only
+        log(3, f"{src.name}: dropping the cache folders from {entry} failed ({type(e).__name__}: {e}); "
+               f"the snapshot keeps them")
+        return
+    report_walk(src, entry, walk, "dropped")
+    tail = (f"; {len(walk.problems)} problem(s): what could not be deleted stays in the snapshot"
+            if walk.problems else "")
+    log(3 if walk.problems else 5,
+        f"{src.name}: dropped {len(walk.folders)} cache folder(s) from {entry}: {walk.files} files, "
+        f"{fmt_bytes(walk.size)} (apparent size), {walk.seconds:.1f} s{tail}")
+
+
+def preview_drop(run, src):
+    """Dry run: what the new snapshot would lose, read from the source."""
+    try:
+        walk = run.host.walk_caches(src.path, src.skips, "count")
+    except OSError as e:
+        log(4, f"{src.name}: cannot look for cache folders in {src.path}: {e.strerror}")
+        return
+    report_walk(src, src.path, walk, "would drop")
+    log(5, f"{src.name}: would drop {len(walk.folders)} cache folder(s) from the new snapshot: "
+           f"{walk.files} files, {fmt_bytes(walk.size)} (apparent size)")
+
+
+def note_writable(run, scan):
+    run.writable.update(os.path.basename(p) for p in scan.writable)
+
+
+def finish_unfinished(run):
+    """Before anything else (snapshot, prune, finish): the snapshots listed in
+    the unfinished file are leftovers of a run that stopped between creating
+    a writable snapshot and making it read-only. Only a listed entry that is
+    proven ours (seal) is finished; a listed name that was never created is
+    forgotten; anything else is left alone with a warning. Returns an exit
+    status (EXIT_ERROR if finishing one failed)."""
+    path = run.state_file(UNFINISHED_FILE)
+    try:
+        entries = run.read_list(UNFINISHED_FILE)
+    except OSError as e:
+        log(4, f"cannot read {path} ({err_text(e)}); interrupted snapshots are not finished")
+        return EXIT_OK
+    status = EXIT_OK
+    infos = {}
+    for entry in entries:
+        src = next((s for s in run.args.sources if "/" not in entry and name_regex(s.name).fullmatch(entry)), None)
+        if src is None:
+            log(4, f"{entry!r} is listed in {path} but is no snapshot name of "
+                   f"{', '.join(s.name for s in run.args.sources)}; left alone")
+            continue
+        dest = os.path.join(run.snapdir, entry)
+        if run.host.kind(dest) == "missing":
+            if run.args.dry_run:
+                log(6, f"{src.name}: would forget {entry} (listed in {path}, never created)")
+                continue
+            log(6, f"{src.name}: {entry} (listed in {path}) was never created; forgotten")
+            try:
+                run.list_remove(UNFINISHED_FILE, entry)
+            except OSError as e:
+                log(4, f"cannot update {path}: {err_text(e)}")
+            continue
+        if src.name not in infos:
+            try:
+                infos[src.name] = run.source_info(src)["uuid"]
+            except ParseError as e:
+                infos[src.name] = None
+                log(4, f"{src.name}: cannot read source {src.path}: {e}; its interrupted snapshots wait")
+        if infos[src.name] is None:
+            continue
+        if run.args.dry_run:
+            log(5, f"{src.name}: would finish {entry}, left writable by an interrupted run")
+            continue
+        log(4, f"{src.name}: finishing {entry}, left writable by an interrupted run")
+        if seal(run, src, dest, entry, infos[src.name], created=False) == "error":
+            status = EXIT_ERROR
+    return status
 
 
 # ---- commands ------------------------------------------------------------------------
@@ -1113,23 +1666,28 @@ def check_snapdir(host, snapdir):
         raise UsageError(f"--snapdir {snapdir} is a symlink")
 
 
-def cmd_snapshot_or_prune(args, host, create):
+def locked(args, host, body):
+    """BODY() under the run lock (EXIT_BUSY, BODY not run, when another run holds it)."""
     check_snapdir(host, args.snapdir)
     fd = take_lock(args)
     if fd is None:
         log(5, f"another run holds {args.lock}; skipped")
         return EXIT_BUSY
     try:
-        return snapshot_or_prune(args, host, create)
+        return body()
     finally:
         if fd >= 0:
             os.close(fd)
 
 
+def cmd_snapshot_or_prune(args, host, create):
+    return locked(args, host, lambda: snapshot_or_prune(args, host, create))
+
+
 def snapshot_or_prune(args, host, create):
     run = Run(args, host)
+    status = finish_unfinished(run)
     results = [process_source(run, src, create) for src in args.sources]
-    status = EXIT_OK
     for r in results:
         if r.status == EXIT_ERROR or (r.status == EXIT_REFUSED and status == EXIT_OK):
             status = r.status
@@ -1142,6 +1700,8 @@ def snapshot_or_prune(args, host, create):
     log(5 if status == EXIT_OK else 4 if status == EXIT_REFUSED else 3,
         f"{'dry run ' if args.dry_run else ''}{'snapshot' if create else 'prune'} summary: "
         + "; ".join(parts) + f"; result: {word}")
+    if not args.dry_run:
+        run.record_writable()
     if status == EXIT_OK and not args.dry_run:
         try:
             run.record_success()
@@ -1154,6 +1714,10 @@ def cmd_list(args, host):
     run = Run(args, host)
     out = []
     status = EXIT_OK
+    try:
+        unfinished = set(run.read_list(UNFINISHED_FILE))
+    except OSError:
+        unfinished = set()
     for src in args.sources:
         entry = {"name": src.name, "source": src.path, "policy": format_policy(src.policy)}
         try:
@@ -1174,6 +1738,15 @@ def cmd_list(args, host):
             continue
         decisions, doomed, refusal = run.decide(src, scan)
         newest = newest_of(scan.owned)
+        ignored = []
+        writable = set(scan.writable)
+        for p, r in scan.ignored:
+            entry_name = os.path.basename(p)
+            if p in writable and entry_name in unfinished:
+                problem, _ = ours_writable(run, src, p, entry_name, info["uuid"])
+                r += (", left by an interrupted run: the next run finishes it" if problem is None else
+                      f", listed as left by an interrupted run but {problem}: left alone")
+            ignored.append((p, r))
         entry.update({
             "uuid": info["uuid"], "generation": info["generation"],
             "changed": newest is None or info["generation"] > newest.cgen,
@@ -1181,7 +1754,7 @@ def cmd_list(args, host):
                            "time": d.snap.wall.strftime("%Y-%m-%dT%H:%M"), "uuid": d.snap.uuid,
                            "gen_at_creation": d.snap.cgen, "action": d.action, "reason": d.reason}
                           for d in decisions],
-            "ignored": [{"path": p, "reason": r} for p, r in scan.ignored],
+            "ignored": [{"path": p, "reason": r} for p, r in ignored],
             "unverifiable": [{"path": p, "reason": r} for p, r in scan.unverifiable],
             "deletions_blocked": refusal,
         })
@@ -1205,6 +1778,61 @@ def cmd_list(args, host):
         n_del = sum(1 for s in e["snapshots"] if s["action"] == "delete")
         print(f"  {len(e['snapshots'])} snapshot(s), {n_del} due for deletion"
               + (f"; deletions would be blocked: {e['deletions_blocked']}" if e["deletions_blocked"] else ""))
+    return status
+
+
+def cmd_finish(args, host):
+    """Only the recovery of interrupted snapshots (btrfs-snapshot purge runs it
+    first, so they become ours and are deleted too)."""
+    status = locked(args, host, lambda: finish_unfinished(Run(args, host)))
+    if status == EXIT_BUSY:
+        return status
+    log(5 if status == EXIT_OK else 3,
+        f"{'dry run ' if args.dry_run else ''}finish summary: result: {'ok' if status == EXIT_OK else 'error'}")
+    return status
+
+
+def cmd_caches(args, host):
+    """What --exclude-caches drops from each source's next snapshot (read from
+    the sources; changes nothing)."""
+    run = Run(args, host)
+    out = []
+    status = EXIT_OK
+    for src in args.sources:
+        entry = {"name": src.name, "source": src.path, "skips": list(src.skips)}
+        try:
+            run.source_info(src)
+            walk = host.walk_caches(src.path, src.skips, "count")
+        except (ParseError, OSError) as e:
+            entry["error"] = err_text(e)
+            log(3, f"{src.name}: cannot read source {src.path}: {entry['error']}")
+            out.append(entry)
+            status = EXIT_ERROR
+            continue
+        entry.update({
+            "folders": [{"path": c.rel, "files": c.files, "bytes": c.size} for c in walk.folders],
+            "files": walk.files, "bytes": walk.size, "kept": walk.kept, "skipped": walk.skipped,
+            "problems": [{"path": p, "reason": r} for p, r in walk.problems], "seconds": round(walk.seconds, 2),
+        })
+        out.append(entry)
+    if args.json:
+        json.dump({"sources": out}, sys.stdout, indent=2)
+        print()
+        return status
+    for e in out:
+        if "error" in e:
+            print(f"{e['name']}: {e['source']}: ERROR {e['error']}")
+            continue
+        print(f"{e['name']}: {e['source']}: {len(e['folders'])} cache folder(s), {e['files']} files, "
+              f"{fmt_bytes(e['bytes'])} (apparent size); walk {e['seconds']:.1f} s")
+        for c in e["folders"]:
+            print(f"  DROP   {c['path']:<56} {c['files']:>9} files {fmt_bytes(c['bytes']):>10}")
+        for rel in e["kept"]:
+            print(f"  KEEP   {rel}  (a cache folder that holds a skipped path)")
+        for rel in e["skipped"]:
+            print(f"  SKIP   {rel}  (skip list: kept whole)")
+        for p in e["problems"]:
+            print(f"  ERROR  {p['path']}: {p['reason']}")
     return status
 
 
@@ -1254,17 +1882,33 @@ def build_parser():
         sp.add_argument("--confirm-hint", default=DEFAULT_CONFIRM_HINT, metavar="COMMAND",
                         help="command named in messages to confirm a mass deletion")
 
-    for name, helptext in (("snapshot", "create changed snapshots, then prune"), ("prune", "prune only")):
+    def caches(sp, exclude=True):
+        if exclude:
+            sp.add_argument("--exclude-caches", action="store_true",
+                            help="take new snapshots writable, drop their CACHEDIR.TAG folders, then make them "
+                                 "read-only")
+        sp.add_argument("--caches-skip", action="append", default=[], metavar="NAME=REL",
+                        help="a path in source NAME (relative to its root, '.' = all of it) kept whole: "
+                             "never entered by the cache walk")
+
+    for name, helptext in (("snapshot", "create changed snapshots, then prune"), ("prune", "prune only"),
+                           ("finish", "only finish snapshots an interrupted run left writable")):
         sp = sub.add_parser(name, help=helptext)
         common(sp)
         sp.add_argument("--dry-run", action="store_true", help="show what would be created/deleted")
-        sp.add_argument("--allow-mass-delete", action="store_true", help="disable the circuit breaker")
+        if name != "finish":
+            sp.add_argument("--allow-mass-delete", action="store_true", help="disable the circuit breaker")
         sp.add_argument("--lock", default=DEFAULT_LOCK, help=f"lock file (default {DEFAULT_LOCK})")
         sp.add_argument("--no-lock", action="store_true", help="the caller already holds the lock")
+        caches(sp)
         if name == "snapshot":
             sp.add_argument("--force", action="store_true", help="create even if unchanged")
     sp = sub.add_parser("list", help="list snapshots with the retention decision")
     common(sp)
+    sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("caches", help="the cache folders --exclude-caches would drop from the next snapshots")
+    common(sp)
+    caches(sp, exclude=False)
     sp.add_argument("--json", action="store_true")
     sp = sub.add_parser("latest", help="print the newest snapshot of NAME")
     sp.add_argument("--snapdir", required=True)
@@ -1278,8 +1922,8 @@ def main(argv=None, host=None):
     host = host or Host()
     parser = build_parser()
     args = parser.parse_args(argv)
-    LOG_STREAM = sys.stderr if args.cmd == "latest" or getattr(args, "json", False) else sys.stdout
-    for attr in ("force", "allow_mass_delete", "dry_run", "no_lock"):
+    LOG_STREAM = sys.stderr if args.cmd in ("latest", "caches") or getattr(args, "json", False) else sys.stdout
+    for attr in ("force", "allow_mass_delete", "dry_run", "no_lock", "exclude_caches"):
         if not hasattr(args, attr):
             setattr(args, attr, False)
     for attr, default in (("list_hint", DEFAULT_LIST_HINT), ("confirm_hint", DEFAULT_CONFIRM_HINT)):
@@ -1302,8 +1946,15 @@ def main(argv=None, host=None):
         paths = [s.path for s in args.sources]
         if len(set(names)) != len(names) or len(set(paths)) != len(paths):
             raise UsageError("each --source needs its own NAME and PATH")
+        for text in getattr(args, "caches_skip", []):
+            name, rel = parse_skip(text, names)
+            args.sources[names.index(name)].skips.append(rel)
         if args.cmd == "list":
             return cmd_list(args, host)
+        if args.cmd == "caches":
+            return cmd_caches(args, host)
+        if args.cmd == "finish":
+            return cmd_finish(args, host)
         return cmd_snapshot_or_prune(args, host, create=(args.cmd == "snapshot"))
     except UsageError as e:
         parser.print_usage(sys.stderr)

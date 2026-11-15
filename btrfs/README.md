@@ -1054,6 +1054,14 @@ of them:
   sandbox, with a 512 MiB limit. That cache is then in no snapshot, without
   one more subvolume ([SNAPSHOTS.md, section 3](SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume)).
 
+Cache folders, marked by a `CACHEDIR.TAG` file (every cargo `target/`,
+`.flatpak-builder`, ...), are dropped from each new snapshot: the snapshot is taken
+writable, those folders are deleted in it, then it is made read-only. Your
+own folders are not touched, and no subvolume is made for them. The NAS
+backup left them out already. `snapshots caches` lists them;
+`SNAPSHOT_EXCLUDE_CACHES=no` in `/etc/btrfs-setup/snapshots.conf` turns it
+off ([SNAPSHOTS.md, section 3](SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
+
 Folders that are in use are handled at the next boot, before the login. The
 exact list is in [SNAPSHOTS.md, section 3](SNAPSHOTS.md#3-which-folders-are-left-out-of-home-snapshots-and-why).
 
@@ -1084,7 +1092,7 @@ deletes older snapshots (the newest ones and the last 24 hours are kept).
 There is an optional daily backup to the NAS with **restic** (a backup program).
 
 Commands: `snapshots setup [--yes]`, `status`, `list [--json]`,
-`prune [--confirm]`, `clean-targets [--apply]`, `disable [--purge]`,
+`caches [--json]`, `prune [--confirm]`, `clean-targets [--apply]`, `disable [--purge]`,
 `nas setup --path DIR ...`, `nas status|disable|run`,
 `chrome-cache [status|apply|off]`.
 

@@ -465,9 +465,21 @@ snap_list() {
 snap_status() {
     local home entry strategy rel state timer name
     local -a snaps
+    # snapshots.conf, read as btrfs-snapshot reads it (sourced: quotes,
+    # comments, the last value wins).
+    local NAS_ENABLED=0 NAS_HOST="" NAS_PORT="" NAS_USER="" NAS_PATH="" SNAPSHOT_EXCLUDE_CACHES=""
+    # shellcheck source=/dev/null
+    [[ -r "${SNAP_CONF}" ]] && . "${SNAP_CONF}"
     home="$(snap_home)"
     timer="$(systemctl is-enabled btrfs-snapshot.timer 2>/dev/null)" || timer=off
     echo "hourly snapshots: ${timer}, keep ${SNAP_PRESERVE_TEXT} (btrfs-snapshot-core)"
+    if [[ "${SNAPSHOT_EXCLUDE_CACHES}" == no ]]; then
+        echo "  cache folders (CACHEDIR.TAG): kept in new snapshots (SNAPSHOT_EXCLUDE_CACHES=no)"
+    else
+        echo "  cache folders (CACHEDIR.TAG): dropped from new snapshots; which ones: ${PROG} snapshots caches"
+    fi
+    [[ -s "${SNAP_STATE}/core-unfinished" ]] &&
+        echo "  left writable by an interrupted run (the next run finishes them): $(tr '\n' ' ' <"${SNAP_STATE}/core-unfinished")"
     if [[ -d "${SNAP_TOP}/${SNAP_DIR_NAME}" ]]; then
         for name in home Workspace; do
             mapfile -t snaps < <(snap_list | grep "^${name}\.")
@@ -508,9 +520,6 @@ snap_status() {
     snap_plan_stale "${home}"
     echo "toolchain caches (~/.cache/cargo-build) and settings: see $(snap_toolchains_prog) status"
     snap_chrome status 2>&1 || true
-    local NAS_ENABLED=0 NAS_HOST="" NAS_PORT="" NAS_USER="" NAS_PATH=""
-    # shellcheck source=/dev/null
-    [[ -r "${SNAP_CONF}" ]] && . "${SNAP_CONF}"
     if [[ "${NAS_ENABLED}" == 1 ]]; then
         echo "NAS backup (restic): sftp:${SNAP_SSH_ALIAS}:${NAS_PATH} (${NAS_USER}@${NAS_HOST}:${NAS_PORT}), timer $(systemctl is-enabled btrfs-snapshot-nas.timer 2>/dev/null || true)"
         command -v restic >/dev/null || echo "  restic not active yet (rpm-ostree): backups start after the next reboot"
@@ -840,9 +849,9 @@ snapshots_cmd() {
     case "${action}" in
         setup) snap_setup "$@" ;;
         status) snap_status ;;
-        list)
+        list|caches)
             [[ -x "${SNAP_RUNTIME}" ]] || { echo "Not set up: ${PROG} snapshots setup" >&2; exit 1; }
-            "${SNAP_RUNTIME}" list "$@" ;;
+            "${SNAP_RUNTIME}" "${action}" "$@" ;;
         prune) snap_prune "$@" ;;
         clean-targets) snap_clean_targets "$@" ;;
         disable) snap_disable "$@" ;;
@@ -852,6 +861,6 @@ snapshots_cmd() {
                 status|apply|off) snap_chrome "${1:-status}" ;;
                 *) echo "snapshots chrome-cache: status|apply|off" >&2; exit 2 ;;
             esac ;;
-        *) echo "snapshots: setup|status|list [--json]|prune [--confirm]|clean-targets|disable|nas|chrome-cache" >&2; exit 2 ;;
+        *) echo "snapshots: setup|status|list [--json]|caches [--json]|prune [--confirm]|clean-targets|disable|nas|chrome-cache" >&2; exit 2 ;;
     esac
 }

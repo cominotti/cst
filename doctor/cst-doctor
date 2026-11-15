@@ -24,7 +24,9 @@ Areas checked:
                and the folder versions named f44-tools left behind
   btrfs        how full the chunks are (data, metadata), automatic data reclaim
                switched on, unallocated space per device (from sysfs; warning
-               and critical levels as btrfs-health-check)
+               and critical levels as btrfs-health-check); snapshots left
+               writable (an interrupted snapshot run, or an entry named like
+               CST's snapshots that no CST run made)
   cpu          while the game profile is on: the settings it made that a
                daemon-reload or uresourced undid since (drift); while it is
                off: its MemoryLow drop-ins left behind; slices of your user
@@ -925,6 +927,53 @@ def check_btrfs_allocation(host):
             yield Result(INFO, f"{name}: {needs_root}")
 
 
+# ---- btrfs: snapshots left writable ------------------------------------------------------------
+# btrfs-snapshot-core takes a snapshot writable, drops its cache folders and
+# makes it read-only; it lists it in core-unfinished until then. It writes
+# core-writable on every run: the writable entries named like its snapshots
+# (the snapshot folder itself is root-only, and this check runs as the user).
+SNAP_STATE = "/var/lib/btrfs-snapshot"
+SNAP_UNFINISHED = f"{SNAP_STATE}/core-unfinished"
+SNAP_WRITABLE = f"{SNAP_STATE}/core-writable"
+SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"    # also read by the VM NAS check
+
+
+def read_entries(host, path):
+    """The non-empty lines of a small state file: [] if missing, None if unreadable."""
+    try:
+        with open(host.path(path), encoding="utf-8", errors="replace") as f:
+            return [ln.strip() for ln in f.read(65536).splitlines() if ln.strip()]
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+
+
+@check("btrfs")
+def check_snapshots_writable(host):
+    if not os.path.isdir(host.path(SNAP_STATE)):
+        return                                   # snapshots never set up
+    unfinished = read_entries(host, SNAP_UNFINISHED)
+    writable = read_entries(host, SNAP_WRITABLE)
+    if unfinished is None or writable is None:
+        yield Result(INFO, f"snapshots: cannot read {SNAP_UNFINISHED} or {SNAP_WRITABLE}")
+        return
+    snapdir = os.path.join(conf_value(host, SNAP_CONF, "TOP") or "/var/mnt/btrfs-top",
+                           conf_value(host, SNAP_CONF, "SNAP_DIR_NAME") or "snapshots")
+    if unfinished:
+        yield Result(WARN, f"snapshots: {name_list(unfinished)} left writable by an interrupted run (cache "
+                     f"folders perhaps not dropped yet); the next hourly run finishes it (if this stays: "
+                     f"journalctl -u btrfs-snapshot)", "sudo systemctl start btrfs-snapshot.service")
+    foreign = [e for e in writable if e not in unfinished]
+    if foreign:
+        yield Result(WARN, f"snapshots: {name_list(foreign)} in {snapdir}: writable, named like CST's "
+                     f"snapshots, but not left by a CST run; never deleted by the retention and not counted: "
+                     f"look at it, then delete or rename it",
+                     f"sudo btrfs subvolume show {shlex.quote(os.path.join(snapdir, foreign[0]))}")
+    if not unfinished and not foreign:
+        yield Result(OK, "snapshots: none left writable")
+
+
 # ---- cpu: the game profile ----------------------------------------------------------------------
 # cpu/game-profile records in /run/cpu-setup/game.intended what each setting
 # read back as right after 'on' (16G reads back in bytes). A daemon-reload
@@ -1206,7 +1255,6 @@ VM_OVERLAY_MARK = ".cst-overlay-"           # as OVERLAY_MARK in vm/cst-vm
 VM_LIVE_STATES = ("running", "paused", "pmsuspended")   # QEMU alive: a block job works
 VM_RUN_DIR = "/run/cst-vm"                  # nas-<vm>.lock: the pid of a NAS backup in progress
 VM_TIMER_WANTS = "/etc/systemd/system/timers.target.wants"
-NAS_CONF = "/etc/btrfs-setup/snapshots.conf"
 # Packages that make up the guest's virtual hardware: name prefixes.
 VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 # The ones named in the message (the others are only counted).
@@ -1439,7 +1487,7 @@ def nas_configured(host):
     """The /home NAS backup is set up (snapshots.conf is world-readable)."""
     vals = {}
     try:
-        with open(host.path(NAS_CONF)) as f:
+        with open(host.path(SNAP_CONF)) as f:
             for line in f:
                 if "=" in line and not line.lstrip().startswith("#"):
                     k, v = line.strip().split("=", 1)

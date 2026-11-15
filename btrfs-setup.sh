@@ -72,10 +72,13 @@
 #                          directories wait for it (btrfs-snapshot-core, in
 #                          this repo: no package to layer; /home 72h 7d 4w 3m,
 #                          ~/Workspace 48h 7d; space guard: none at <=250 GiB
-#                          free, emergency purge at <=150 GiB).
-#   snapshots status | list [--json] | prune [--confirm] | clean-targets [--apply]
-#             | disable [--purge]
+#                          free, emergency purge at <=150 GiB; cache folders
+#                          with a CACHEDIR.TAG, e.g. cargo target/, are dropped
+#                          from each new snapshot: SNAPSHOT_EXCLUDE_CACHES).
+#   snapshots status | list [--json] | caches [--json] | prune [--confirm]
+#             | clean-targets [--apply] | disable [--purge]
 #                          list: every snapshot with its keep/delete reason;
+#                          caches: the cache folders the next snapshots drop;
 #                          prune: the retention by hand, also what the circuit
 #                          breaker held back (e.g. after a shorter retention in
 #                          snapshots.conf); dry run unless --confirm;

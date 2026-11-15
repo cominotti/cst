@@ -693,6 +693,65 @@ class BtrfsTest(Scratch):
         self.assert_read_only()
 
 
+class SnapshotsWritableTest(Scratch):
+    """check_snapshots_writable: the lists btrfs-snapshot-core keeps in
+    /var/lib/btrfs-snapshot (the snapshot folder itself is root-only)."""
+
+    def snap_state(self, unfinished=None, writable=None):
+        d = os.path.join(self.root, "var", "lib", "btrfs-snapshot")
+        os.makedirs(d, exist_ok=True)
+        for name, lines in (("core-unfinished", unfinished), ("core-writable", writable)):
+            if lines is not None:
+                with open(os.path.join(d, name), "w") as f:
+                    f.write("".join(f"{x}\n" for x in lines))
+        return d
+
+    def lines(self, out):
+        return [ln for ln in out.splitlines() if "snapshots:" in ln]
+
+    def test_not_set_up_is_silent(self):
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_nothing_left_is_ok(self):
+        self.snap_state()
+        r = self.run_tool()
+        self.assertIn("ok     snapshots: none left writable", r.stdout)
+        self.assert_read_only()
+
+    def test_unfinished_warns_with_the_run_as_fix(self):
+        self.snap_state(unfinished=["Workspace.20261115T0400"], writable=["Workspace.20261115T0400"])
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        got = self.lines(r.stdout)
+        self.assertEqual(len(got), 1, r.stdout)       # listed in both: one warning, not two
+        self.assertIn("WARN   snapshots: Workspace.20261115T0400 left writable by an interrupted run", got[0])
+        self.assertIn("fix: sudo systemctl start btrfs-snapshot.service", r.stdout)
+        self.assert_read_only()
+
+    def test_foreign_writable_warns_with_a_read_only_look(self):
+        self.snap_state(writable=["home.20260101T0000", "home.20260102T0000"])
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+            f.write("TOP=/mnt/top\nSNAP_DIR_NAME='snaps'\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("WARN   snapshots: home.20260101T0000, home.20260102T0000 in /mnt/top/snaps: writable, "
+                      "named like CST's snapshots, but not left by a CST run", r.stdout)
+        self.assertIn("fix: sudo btrfs subvolume show /mnt/top/snaps/home.20260101T0000", r.stdout)
+
+    def test_default_snapshot_folder(self):
+        self.snap_state(writable=["home.20260101T0000"])
+        r = self.run_tool()
+        self.assertIn("fix: sudo btrfs subvolume show /var/mnt/btrfs-top/snapshots/home.20260101T0000", r.stdout)
+
+    def test_unreadable_list_is_info(self):
+        d = self.snap_state()
+        os.mkdir(os.path.join(d, "core-unfinished"))
+        r = self.run_tool()
+        self.assertIn("info   snapshots: cannot read /var/lib/btrfs-snapshot/core-unfinished", r.stdout)
+
+
 # ---- vm ----------------------------------------------------------------------------------------
 ROLLBACK = "r" * 64
 CPU_FEATURES = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")

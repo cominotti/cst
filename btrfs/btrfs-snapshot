@@ -13,8 +13,9 @@
 #   btrfs-snapshot hourly   (btrfs-snapshot.service) finishes pending conversions,
 #                           then space guard and btrfs-snapshot-core: a read-only
 #                           snapshot of /home and of ~/Workspace (once it is a
-#                           subvolume) if they changed, then deletes what the
-#                           retention no longer keeps. Local only: nothing here
+#                           subvolume) if they changed, without their cache
+#                           folders (SNAPSHOT_EXCLUDE_CACHES), then deletes what
+#                           the retention no longer keeps. Local only: nothing here
 #                           waits for the NAS. No new snapshot while planned
 #                           conversions (or btrfs-bulk's moves into ~/Bulk) wait
 #                           for the next boot, a move into ~/Bulk is unfinished
@@ -27,6 +28,8 @@
 #                           Never creates or deletes local snapshots; a failure
 #                           is logged, alerted only once the copy is stale.
 #   btrfs-snapshot list [--json]  every snapshot with its keep/delete decision.
+#   btrfs-snapshot caches [--json]  the cache folders (CACHEDIR.TAG) the next
+#                           snapshots drop (`cst btrfs snapshots caches`; read only).
 #   btrfs-snapshot prune [--dry-run] [--allow-mass-delete]  deletions by the
 #                           normal retention only; --allow-mass-delete confirms
 #                           what the circuit breaker blocked (`cst btrfs
@@ -81,6 +84,13 @@ SNAP_DIR_NAME=snapshots    # below the top level: outside the visible tree
 HOME_PRESERVE="72h 7d 4w 3m"   # every hour 3 days, a day 1 week, a week 1 month, a month 3 months
 WS_PRESERVE="48h 7d"           # ~/Workspace: builds churn there, git has the long history
 EMERGENCY_PRESERVE="24h 3d"
+# Cache folders (a CACHEDIR.TAG with the standard signature, e.g. every cargo
+# target/) are dropped from each new snapshot, as the NAS copy (restic
+# --exclude-caches) leaves them out. SNAPSHOT_CACHES_SKIP: paths in your home
+# (relative to HOME_DIR, separated by spaces) whose cache folders stay: podman's
+# image layers would be broken by a hole.
+SNAPSHOT_EXCLUDE_CACHES=yes
+SNAPSHOT_CACHES_SKIP=".local/share/containers"
 # Space guard on btrfs' "Free (estimated)": no new snapshot at or below 250
 # GiB (resume only above 270, hysteresis); emergency purge at or below 150.
 SKIP_AT_OR_BELOW_GIB=250
@@ -512,16 +522,19 @@ convert_boot() {
 configure() { return 0; }
 
 # core_sources HOME_POLICY WS_POLICY: sets SRC_NAMES/SRC_PATHS (snapshot name,
-# source subvolume below the top level) and CORE_SOURCES (their --source
-# arguments). ~/Workspace has snapshots of its own only once it is a subvolume;
-# until then it is simply part of /home's.
+# source subvolume below the top level), HOME_REL (HOME_DIR inside the home
+# subvolume, e.g. "danilo"; empty when it is the subvolume's root) and
+# CORE_SOURCES (their --source arguments). ~/Workspace has snapshots of its
+# own only once it is a subvolume; until then it is simply part of /home's.
 core_sources() {
     local i policy
+    HOME_REL="${HOME_DIR#"${HOME_MOUNT}"}"
+    HOME_REL="${HOME_REL#/}"
     SRC_NAMES=(home)
     SRC_PATHS=("${TOP}/${HOME_SUBVOL}")
     if is_subvol "${HOME_DIR}/Workspace"; then
         SRC_NAMES+=(Workspace)
-        SRC_PATHS+=("${TOP}/${HOME_SUBVOL}${HOME_DIR#"${HOME_MOUNT}"}/Workspace")
+        SRC_PATHS+=("${TOP}/${HOME_SUBVOL}${HOME_REL:+/${HOME_REL}}/Workspace")
     fi
     CORE_SOURCES=()
     for i in "${!SRC_NAMES[@]}"; do
@@ -529,6 +542,42 @@ core_sources() {
         [[ "${SRC_NAMES[i]}" == Workspace ]] && policy="$2"
         CORE_SOURCES+=(--source "${SRC_NAMES[i]}=${SRC_PATHS[i]}:${policy}")
     done
+}
+
+# core_cache_args: the core's cache options for the sources core_sources set
+# (call it after core_sources). CORE_CACHE_SKIPS: one --caches-skip per
+# SNAPSHOT_CACHES_SKIP path, given to the source that holds it (relative to
+# that source's root: <user>/<path> for home, <path> without Workspace/ for
+# Workspace once it is a source). CORE_CACHE_ARGS: those, after
+# --exclude-caches when SNAPSHOT_EXCLUDE_CACHES is yes (anything but yes/no:
+# a warning, then yes).
+core_cache_args() {
+    local rel
+    local -a skips=()
+    CORE_CACHE_ARGS=()
+    CORE_CACHE_SKIPS=()
+    case "${SNAPSHOT_EXCLUDE_CACHES}" in
+        yes) CORE_CACHE_ARGS+=(--exclude-caches) ;;
+        no) ;;
+        *) log 4 "SNAPSHOT_EXCLUDE_CACHES='${SNAPSHOT_EXCLUDE_CACHES}' is not yes or no; using yes"
+           CORE_CACHE_ARGS+=(--exclude-caches) ;;
+    esac
+    read -r -a skips <<<"${SNAPSHOT_CACHES_SKIP}"
+    for rel in "${skips[@]}"; do
+        rel="${rel#./}"
+        rel="${rel%/}"
+        if [[ -z "${rel}" || "${rel}" == /* || "/${rel}/" == */../* || "/${rel}/" == */./* ]]; then
+            log 4 "SNAPSHOT_CACHES_SKIP: '${rel}' is not a path inside your home; ignored"
+            continue
+        fi
+        if [[ " ${SRC_NAMES[*]} " == *" Workspace "* && ( "${rel}" == Workspace || "${rel}" == Workspace/* ) ]]; then
+            [[ "${rel}" == Workspace ]] && rel=Workspace/.
+            CORE_CACHE_SKIPS+=(--caches-skip "Workspace=${rel#Workspace/}")
+        else
+            CORE_CACHE_SKIPS+=(--caches-skip "home=${HOME_REL:+${HOME_REL}/}${rel}")
+        fi
+    done
+    CORE_CACHE_ARGS+=("${CORE_CACHE_SKIPS[@]}")
 }
 
 # What the core names in its messages to review or confirm deletions: our
@@ -590,7 +639,8 @@ core_result() {
 prune_only() {
     local rc
     core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
-    core_run prune "${CORE_SOURCES[@]}"; rc=$?
+    core_cache_args
+    core_run prune "${CORE_SOURCES[@]}" "${CORE_CACHE_ARGS[@]}"; rc=$?
     core_result prune "${rc}" || (( rc == 3 || rc == 4 )) ||
         alert prune-failed critical "Snapshots: purge failed" \
             "btrfs-snapshot-core rc=${rc}; see journalctl -u btrfs-snapshot."
@@ -628,7 +678,8 @@ hourly() {
         # Mass deletion is the point here (no circuit breaker); pinned
         # snapshots, the 3 newest and those of the last 24 h are still kept.
         core_sources "${EMERGENCY_PRESERVE}" "${EMERGENCY_PRESERVE}"
-        core_run prune "${CORE_SOURCES[@]}" --allow-mass-delete; rc=$?
+        core_cache_args
+        core_run prune "${CORE_SOURCES[@]}" "${CORE_CACHE_ARGS[@]}" --allow-mass-delete; rc=$?
         core_result "emergency purge" "${rc}" || (( rc == 3 || rc == 4 )) ||
             alert prune-failed critical "Snapshots: emergency purge failed" \
                 "btrfs-snapshot-core rc=${rc}; see journalctl -u btrfs-snapshot."
@@ -707,7 +758,8 @@ hourly() {
     clear_alert bulk-wait
 
     core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
-    core_run snapshot "${CORE_SOURCES[@]}"; rc=$?
+    core_cache_args
+    core_run snapshot "${CORE_SOURCES[@]}" "${CORE_CACHE_ARGS[@]}"; rc=$?
     if core_result snapshot "${rc}"; then
         date +%s >"${STATE}/last-ok"
         clear_alert prune-failed
@@ -734,7 +786,8 @@ manual_prune() {
         esac
     done
     core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
-    core_run prune "${CORE_SOURCES[@]}" "${extra[@]}"; rc=$?
+    core_cache_args
+    core_run prune "${CORE_SOURCES[@]}" "${CORE_CACHE_ARGS[@]}" "${extra[@]}"; rc=$?
     (( rc == 0 && ! dry )) && clear_alert blocked
     return "${rc}"
 }
@@ -748,15 +801,32 @@ list_snapshots() {
         "${CORE_SOURCES[@]}" "$@"
 }
 
+# The cache folders (CACHEDIR.TAG) the next snapshots drop, per source, with
+# their size; read only (no lock), whatever SNAPSHOT_EXCLUDE_CACHES says.
+list_caches() {
+    [[ -n "${HOME_DIR}" ]] || { echo "not set up; run 'cst btrfs snapshots setup'" >&2; return 1; }
+    core_sources "${HOME_PRESERVE}" "${WS_PRESERVE}"
+    core_cache_args >&2        # its warnings must not go into --json output
+    if [[ "${SNAPSHOT_EXCLUDE_CACHES}" == no ]]; then      # any other value means yes
+        echo "SNAPSHOT_EXCLUDE_CACHES=no in ${CONF}: new snapshots keep their cache folders; with yes they would drop:" >&2
+    fi
+    "${CORE}" caches --snapdir "${SNAPDIR}" "${CORE_SOURCES[@]}" "${CORE_CACHE_SKIPS[@]}" "$@"
+}
+
 # Delete every snapshot the core owns (its naming and ownership rules: name,
 # real read-only subvolume, Parent UUID of the source); anything else in the
-# directory is left alone. Pinned ones (a NAS run) are skipped.
+# directory is left alone. Pinned ones (a NAS run) are skipped. Snapshots an
+# interrupted run left writable are finished first (made read-only, their
+# cache folders not dropped), so they are owned and deleted too.
 purge() {
     local out p n_left
     local -a paths=() batch=()
     [[ -n "${HOME_DIR}" && -d "${SNAPDIR}" ]] || { echo "No snapshot directory: nothing to delete."; return 0; }
     # The policy does not matter here: only the ownership check of `list` is used.
     core_sources 1h 1h
+    if [[ -s "${STATE}/core-unfinished" ]]; then
+        core_run finish "${CORE_SOURCES[@]}" || log 4 "purge: finishing interrupted snapshots failed"
+    fi
     out="$("${CORE}" list --json --snapdir "${SNAPDIR}" --pin-file "${PIN_FILE}" --state-dir "${STATE}" \
         "${CORE_SOURCES[@]}")" || { log 3 "purge: cannot list the snapshots; nothing deleted"; return 1; }
     while IFS= read -r p; do
@@ -790,6 +860,8 @@ for src in json.load(sys.stdin)["sources"]:
     else
         rmdir "${SNAPDIR}" 2>/dev/null || true
     fi
+    # The hourly run's lists: they describe snapshots that are gone now.
+    rm -f "${STATE}/core-unfinished" "${STATE}/core-writable"
     return 0
 }
 
@@ -1234,11 +1306,12 @@ case "${1:-}" in
     convert) lock -x; convert ;;
     convert-boot) lock -x; convert_boot ;;
     list) shift; list_snapshots "$@" ;;
+    caches) shift; list_caches "$@" ;;
     prune) shift; lock -x; manual_prune "$@" ;;
     purge) lock -x; purge ;;
     configure) configure ;;
     planned-left) planned_left ;;
     busy) shift; busy "$@" ;;
     convert-one) lock -x; convert_single "${2:?usage: btrfs-snapshot convert-one PATH}" ;;
-    *) echo "usage: btrfs-snapshot hourly|nas|convert|convert-boot|list [--json]|prune [--dry-run] [--allow-mass-delete]|purge|planned-left|busy [--home DIR] PATH...|convert-one PATH" >&2; exit 2 ;;
+    *) echo "usage: btrfs-snapshot hourly|nas|convert|convert-boot|list [--json]|caches [--json]|prune [--dry-run] [--allow-mass-delete]|purge|planned-left|busy [--home DIR] PATH...|convert-one PATH" >&2; exit 2 ;;
 esac

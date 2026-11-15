@@ -21,11 +21,14 @@ import json
 import os
 import random
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zoneinfo
+from unittest import mock
 
 sys.dont_write_bytecode = True   # keep __pycache__ out of the repository
 
@@ -606,6 +609,10 @@ class FakeHost:
         self.on_listdir = None
         self.listdir_calls = 0
         self.show_override = {}   # path -> raw text
+        self.on_snapshot = None   # callback(host, dest) before a snapshot is made
+        self.set_ro_rc = 0        # rc of `btrfs property set ... ro true`
+        self.walk_error = None    # exception walk_caches raises
+        self.walk_result = None   # callable(root, skips, mode) -> CacheWalk; default: one folder
 
     # helpers
     def new_uuid(self):
@@ -629,7 +636,17 @@ class FakeHost:
 
     def mutating_calls(self):
         return [c for c in self.calls if c[:3] in (["btrfs", "subvolume", "snapshot"],
-                                                    ["btrfs", "subvolume", "delete"])]
+                                                    ["btrfs", "subvolume", "delete"],
+                                                    ["btrfs", "property", "set"])
+                or (c[0] == "walk" and c[3] == "drop")]
+
+    def walk_caches(self, root, skips, mode):
+        self.calls.append(["walk", root, list(skips), mode])
+        if self.walk_error:
+            raise self.walk_error
+        if self.walk_result:
+            return self.walk_result(root, skips, mode)
+        return core.CacheWalk([core.CacheDir("u/proj/target", 3, 1024)], [], list(skips), [], 0.5)
 
     def step_clock(self, seconds):
         """The wall clock jumps; the time since boot does not."""
@@ -693,15 +710,26 @@ class FakeHost:
             if sv is None:
                 return 1, "", "ERROR: not a subvolume"
             return 0, f"ro={'true' if sv['ro'] else 'false'}\n", ""
-        if argv[:4] == ["btrfs", "subvolume", "snapshot", "-r"]:
-            src, dest = argv[4], argv[5]
+        if argv[:3] == ["btrfs", "subvolume", "snapshot"]:
+            ro = argv[3] == "-r"
+            src, dest = argv[4:6] if ro else argv[3:5]
+            if self.on_snapshot:
+                self.on_snapshot(self, dest)
             if dest in self.subvols or dest in self.other or os.path.dirname(dest) not in self.dirs:
                 return 1, "", "ERROR: cannot snapshot"
             self.transid += 1
             # Kernel >= 7.1: the source's generation stays behind the new cgen while idle.
             self.subvols[dest] = {"uuid": self.new_uuid(), "parent": self.subvols[src]["uuid"],
-                                  "gen": self.transid, "cgen": self.transid, "ro": True}
-            return 0, f"Create readonly snapshot of '{src}' in '{dest}'\n", ""
+                                  "gen": self.transid, "cgen": self.transid, "ro": ro}
+            return 0, f"Create {'readonly ' if ro else ''}snapshot of '{src}' in '{dest}'\n", ""
+        if argv[:4] == ["btrfs", "property", "set", "-ts"] and argv[5:] == ["ro", "true"]:
+            sv = self.subvols.get(argv[4])
+            if sv is None:
+                return 1, "", "ERROR: not a subvolume"
+            if self.set_ro_rc:
+                return self.set_ro_rc, "", "ERROR: failed to set flags"
+            sv["ro"] = True
+            return 0, "", ""
         if argv[:3] == ["btrfs", "subvolume", "delete"]:
             path = argv[3]
             if self.on_delete:
@@ -730,15 +758,16 @@ class CliTestCase(unittest.TestCase):
         h.add_source("/top/home", gen)
         return h
 
-    def cli(self, host, cmd, *extra, source="home=/top/home:72h 7d 4w 3m", sources=None, clock_ok=False):
-        argv = [cmd, "--snapdir", "/top/snapshots"]
+    def cli(self, host, cmd, *extra, source="home=/top/home:72h 7d 4w 3m", sources=None, clock_ok=False,
+            snapdir="/top/snapshots"):
+        argv = [cmd, "--snapdir", snapdir]
         if cmd != "latest":
             argv += ["--tz", "Europe/Berlin"]
         for s in (sources if sources is not None else [source]):
             argv += ["--source", s]
-        if cmd in ("snapshot", "prune", "list"):
+        if cmd in ("snapshot", "prune", "list", "finish", "caches"):
             argv += ["--state-dir", self.state, "--pin-file", self.pins]
-        if cmd in ("snapshot", "prune"):
+        if cmd in ("snapshot", "prune", "finish"):
             argv += ["--lock", self.lock]
         if clock_ok:
             argv += ["--assume-clock-ok"]
@@ -774,6 +803,23 @@ class ChangeDetectionTests(CliTestCase):
         self.assertEqual(h.snapshots(), ["home.20261013T1407"])
         self.assertIn("summary: home: created home.20261013T1407", self.out)
         self.assertTrue(os.path.exists(os.path.join(self.state, core.STATE_FILE)))
+
+    def test_the_last_run_record_does_not_sync_its_folder(self):
+        # It is fsynced itself; a folder fsync on every run (twice an hour)
+        # would only cost a btrfs log sync.
+        h = self.host("2026-10-13 14:07")
+        folders = []
+        real = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                folders.append(fd)
+            return real(fd)
+        with mock.patch.object(core.os, "fsync", fsync):
+            self.assertEqual(self.cli(h, "snapshot", clock_ok=True), 0)
+        with open(os.path.join(self.state, core.STATE_FILE)) as f:
+            self.assertEqual(f.read().split()[0], str(int(h.now)))
+        self.assertEqual(folders, [])
 
     def test_idle_source_creates_nothing(self):
         h = self.host("2026-10-13 14:07")
@@ -1455,6 +1501,544 @@ class LatestTests(CliTestCase):
         self.assertEqual((rc, self.out.strip()), (0, "/top/snapshots/home.20261013T1200"))
         self.assertEqual(self.cli(h, "latest", "--name", "Workspace", sources=[]), 1)
         self.assertEqual(self.out, "")
+
+
+
+# ---- cache folders (CACHEDIR.TAG) ----------------------------------------------------------
+TAG_TEXT = core.CACHE_SIGNATURE.decode() + "\n# This file is a cache directory tag.\n"
+
+
+def put(root, rel, text="x"):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
+def tag(root, rel, text=TAG_TEXT):
+    return put(root, os.path.join(rel, core.CACHE_TAG), text)
+
+
+class CacheWalkTests(unittest.TestCase):
+    """walk_caches on real folders in a temporary directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self.tmp.name, "root")
+        os.makedirs(self.root)
+
+    def tearDown(self):
+        for dirpath, dirnames, _ in os.walk(self.tmp.name):
+            for d in dirnames:
+                os.chmod(os.path.join(dirpath, d), 0o755)
+        self.tmp.cleanup()
+
+    def rels(self, walk):
+        return [c.rel for c in walk.folders]
+
+    def test_tagged_folders_only_the_top_one_and_never_the_root(self):
+        tag(self.root, ".")                                   # the root itself: never a candidate
+        tag(self.root, "proj/target")
+        tag(self.root, "proj/target/debug/build/inner")       # below a cache folder: not looked at
+        put(self.root, "proj/src/main.rs")
+        tag(self.root, "a/b/c/deep")
+        walk = core.walk_caches(self.root)
+        self.assertEqual(sorted(self.rels(walk)), ["a/b/c/deep", "proj/target"])
+        self.assertEqual(walk.problems, [])
+
+    def test_signature_rules(self):
+        tag(self.root, "good")
+        tag(self.root, "longer", core.CACHE_SIGNATURE.decode() + " and more text")
+        tag(self.root, "wrong", "Signature: 0000000000000000000000000000000\n")
+        tag(self.root, "short", core.CACHE_SIGNATURE.decode()[:-1])
+        tag(self.root, "empty", "")
+        tag(self.root, "lower", core.CACHE_SIGNATURE.decode().lower())
+        os.makedirs(os.path.join(self.root, "tagdir", core.CACHE_TAG))         # a folder named like the tag
+        os.makedirs(os.path.join(self.root, "symtag"))
+        os.symlink(os.path.join(self.root, "good", core.CACHE_TAG),            # restic follows it; we do not
+                   os.path.join(self.root, "symtag", core.CACHE_TAG))
+        os.makedirs(os.path.join(self.root, "fifo"))
+        os.mkfifo(os.path.join(self.root, "fifo", core.CACHE_TAG))             # must not block the walk
+        self.assertEqual(sorted(self.rels(core.walk_caches(self.root))), ["good", "longer"])
+
+    def test_symlinks_are_not_followed(self):
+        outside = os.path.join(self.tmp.name, "outside")
+        tag(outside, "cache")
+        tag(self.root, "real")
+        os.symlink(outside, os.path.join(self.root, "to-outside"))
+        os.symlink(os.path.join(self.root, "real"), os.path.join(self.root, "to-real"))
+        self.assertEqual(self.rels(core.walk_caches(self.root)), ["real"])
+
+    def test_git_and_node_modules_are_not_entered(self):
+        tag(self.root, "p/.git/lfs/cache")
+        tag(self.root, "p/node_modules/.cache")
+        tag(self.root, "p/git/cache")                         # only the exact names are pruned
+        tag(self.root, "p/node_modules2/.cache")
+        self.assertEqual(sorted(self.rels(core.walk_caches(self.root))), ["p/git/cache", "p/node_modules2/.cache"])
+
+    def test_skip_list(self):
+        tag(self.root, "u/.local/share/containers/storage/overlay/l1/diff/var/cache/dnf")
+        tag(self.root, "u/.local")                            # holds a skipped path: kept and walked
+        tag(self.root, "u/.local/state/tool-cache")           # ... so this one is still found
+        tag(self.root, "u/other")
+        walk = core.walk_caches(self.root, ["u/.local/share/containers", "u/not-there"])
+        self.assertEqual(sorted(self.rels(walk)), ["u/.local/state/tool-cache", "u/other"])
+        self.assertEqual(walk.kept, ["u/.local"])
+        self.assertEqual(walk.skipped, ["u/.local/share/containers"])
+        whole = core.walk_caches(self.root, ["."])
+        self.assertEqual((whole.folders, whole.skipped), ([], ["."]))
+
+    def test_count_mode_counts_without_deleting(self):
+        tag(self.root, "t")
+        put(self.root, "t/a", "12345")
+        put(self.root, "t/sub/b", "123")
+        os.symlink("a", os.path.join(self.root, "t", "link"))
+        walk = core.walk_caches(self.root, mode="count")
+        (c,) = walk.folders
+        # Files: the tag, a, b and the symlink; bytes: regular files only.
+        self.assertEqual((c.rel, c.files, c.size), ("t", 4, len(TAG_TEXT) + 8))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "t", "sub", "b")))
+
+    def test_drop_deletes_only_cache_folders_and_follows_no_link(self):
+        outside = put(self.tmp.name, "outside/keep.txt", "precious")
+        outside_dir = os.path.dirname(outside)
+        tag(self.root, "proj/target")
+        put(self.root, "proj/target/debug/app", "binary")
+        os.symlink(outside, os.path.join(self.root, "proj", "target", "to-file"))
+        os.symlink(outside_dir, os.path.join(self.root, "proj", "target", "to-dir"))
+        os.symlink("target", os.path.join(self.root, "proj", "link-to-target"))
+        put(self.root, "proj/src/main.rs", "fn main() {}")
+        tag(self.root, "proj/wrong", "not a tag")
+        walk = core.walk_caches(self.root, mode="drop")
+        self.assertEqual(self.rels(walk), ["proj/target"])
+        self.assertEqual(walk.problems, [])
+        self.assertEqual(walk.folders[0].files, 4)
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "proj", "target")))
+        self.assertTrue(os.path.islink(os.path.join(self.root, "proj", "link-to-target")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "proj", "src", "main.rs")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "proj", "wrong", core.CACHE_TAG)))
+        with open(outside) as f:
+            self.assertEqual(f.read(), "precious")
+        # A second drop finds nothing more.
+        self.assertEqual(core.walk_caches(self.root, mode="drop").folders, [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the permission that makes the delete fail")
+    def test_drop_failure_keeps_the_tag_and_goes_on(self):
+        tag(self.root, "a/stuck")
+        put(self.root, "a/stuck/locked/file")
+        os.chmod(os.path.join(self.root, "a", "stuck", "locked"), 0o555)    # its file cannot be deleted
+        tag(self.root, "b/fine")
+        walk = core.walk_caches(self.root, mode="drop")
+        self.assertEqual(sorted(self.rels(walk)), ["a/stuck", "b/fine"])
+        self.assertTrue([p for p in walk.problems if p[0] == "a/stuck/locked/file"], walk.problems)
+        # The tag is deleted last: the half-deleted folder is still a cache for the next attempt.
+        self.assertTrue(os.path.exists(os.path.join(self.root, "a", "stuck", core.CACHE_TAG)))
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "b", "fine")))
+        os.chmod(os.path.join(self.root, "a", "stuck", "locked"), 0o755)
+        self.assertEqual(self.rels(core.walk_caches(self.root, mode="drop")), ["a/stuck"])
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "a", "stuck")))
+
+    def test_deep_trees(self):
+        deep = os.path.join(*["d"] * 300)
+        tag(self.root, "cache")
+        put(self.root, os.path.join("cache", deep, "f"))
+        tag(self.root, os.path.join("plain", deep))
+        walk = core.walk_caches(self.root, mode="drop")
+        self.assertEqual(sorted(self.rels(walk)), ["cache", os.path.join("plain", deep)])
+        self.assertEqual(walk.problems, [])
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "cache")))
+
+    def test_reading_writes_no_access_time(self):
+        """With relatime a read after a change (or after a day) writes the access
+        time: one metadata write per folder of the snapshot, and a change of
+        the source in a dry run. O_NOATIME avoids it."""
+        tag(self.root, "a/t")
+        put(self.root, "a/t/f")
+        put(self.root, "b/c/x")
+        paths = [self.root] + [os.path.join(self.root, r) for r in ("a", "a/t", "a/t/CACHEDIR.TAG", "b", "b/c")]
+        old = time.time_ns() - 2 * 86400 * 10**9
+        for p in paths:
+            os.utime(p, ns=(old, os.stat(p).st_mtime_ns))
+        self.assertEqual(self.rels(core.walk_caches(self.root, mode="count")), ["a/t"])
+        self.assertEqual([os.stat(p).st_atime_ns for p in paths], [old] * len(paths))
+
+    def test_other_devices_are_never_entered(self):
+        """A nested subvolume or a mount (another st_dev, faked here) is never
+        searched, never counted as a cache even with a tag, and never emptied."""
+        tag(self.root, "nested")                         # like ~/Bulk: a tagged nested subvolume
+        tag(self.root, "nested/inner")
+        tag(self.root, "t")
+        put(self.root, "t/mnt/f")                        # something mounted inside a cache folder
+        real = os.fstat
+
+        def fstat(fd):
+            st = real(fd)
+            if os.readlink(f"/proc/self/fd/{fd}").endswith(("/nested", "/t/mnt")):
+                return os.stat_result((st[0], st[1], st[2] + 1) + tuple(st)[3:])
+            return st
+        with mock.patch.object(core.os, "fstat", fstat):
+            listed = core.walk_caches(self.root, mode="count")
+            dropped = core.walk_caches(self.root, mode="drop")
+        self.assertEqual(self.rels(listed), ["t"])
+        self.assertEqual(listed.folders[0].files, 1)    # only the tag: mnt/f is on the other device
+        self.assertEqual(self.rels(dropped), ["t"])
+        self.assertTrue(os.path.exists(os.path.join(self.root, "nested", "inner", core.CACHE_TAG)))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "t", "mnt", "f")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "t", core.CACHE_TAG)))
+        self.assertEqual([p[0] for p in dropped.problems], ["t/mnt"])
+        self.assertIn("on another device, not entered", dropped.problems[0][1])
+
+
+class ExcludeCachesTests(CliTestCase):
+    """snapshot/prune/finish/list/caches with --exclude-caches and the fake btrfs."""
+
+    def state_list(self, name):
+        try:
+            with open(os.path.join(self.state, name), encoding="utf-8") as f:
+                return f.read().split()
+        except FileNotFoundError:
+            return None
+
+    def unfinished(self):
+        return self.state_list(core.UNFINISHED_FILE)
+
+    def writable(self):
+        return self.state_list(core.WRITABLE_FILE)
+
+    def listed(self, *entries):
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, core.UNFINISHED_FILE), "w") as f:
+            f.write("".join(f"{e}\n" for e in entries))
+
+    def owned(self, host):
+        self.assertEqual(self.cli(host, "list", "--json"), 0)
+        return [s["entry"] for s in json.loads(self.out)["sources"][0]["snapshots"]]
+
+    def test_order_record_snapshot_writable_drop_read_only_check_clear(self):
+        h = self.host("2026-10-13 14:07")
+        seen = []
+        h.on_snapshot = lambda host, dest: seen.append(self.unfinished())
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+        dest = "/top/snapshots/home.20261013T1407"
+        self.assertEqual(seen, [["home.20261013T1407"]])          # recorded before it exists
+        steps = [c for c in h.calls if c[0] == "walk" or c[:3] in (["btrfs", "subvolume", "snapshot"],
+                                                                  ["btrfs", "property", "set"],
+                                                                  ["btrfs", "property", "get"])]
+        self.assertEqual(steps[:4], [["btrfs", "subvolume", "snapshot", "/top/home", dest],
+                                     ["btrfs", "property", "get", "-ts", dest, "ro"],
+                                     ["walk", dest, [], "drop"],
+                                     ["btrfs", "property", "set", "-ts", dest, "ro", "true"]])
+        self.assertEqual(steps[4], ["btrfs", "property", "get", "-ts", dest, "ro"])
+        self.assertTrue(h.subvols[dest]["ro"])
+        self.assertIsNone(self.unfinished())
+        self.assertIsNone(self.writable())
+        self.assertEqual(self.owned(h), ["home.20261013T1407"])
+
+    def test_the_drop_only_ever_touches_the_new_snapshot(self):
+        h = self.host("2026-10-13 14:07")
+        h.add_source("/top/home/u/Workspace", 100)
+        srcs = ["home=/top/home:72h", "Workspace=/top/home/u/Workspace:48h"]
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches", sources=srcs), 0, self.out)
+        drops = [c[1] for c in h.calls if c[0] == "walk" and c[3] == "drop"]
+        self.assertEqual(sorted(drops), ["/top/snapshots/Workspace.20261013T1407",
+                                         "/top/snapshots/home.20261013T1407"])
+
+    def test_logs_folders_files_bytes_and_seconds(self):
+        h = self.host("2026-10-13 14:07")
+        self.cli(h, "snapshot", "--exclude-caches")
+        self.assertIn("<6>btrfs-snapshot: home: dropped u/proj/target (3 files, 1.0 KiB)", self.out)
+        self.assertIn("<5>btrfs-snapshot: home: dropped 1 cache folder(s) from home.20261013T1407: 3 files, "
+                      "1.0 KiB (apparent size), 0.5 s", self.out)
+
+    def test_skips_reach_the_walk(self):
+        h = self.host("2026-10-13 14:07")
+        self.cli(h, "snapshot", "--exclude-caches", "--caches-skip", "home=u/.local/share/containers/",
+                 "--caches-skip", "home=./u/x")
+        (walk,) = [c for c in h.calls if c[0] == "walk"]
+        self.assertEqual(walk[2], ["u/.local/share/containers", "u/x"])
+
+    def test_bad_skips_are_usage_errors(self):
+        h = self.host("2026-10-13 14:07")
+        for bad in ("Workspace=x", "home", "home=", "home=/abs", "home=../up", "home=a/../../up"):
+            self.assertEqual(self.cli(h, "snapshot", "--exclude-caches", "--caches-skip", bad), 2, bad)
+            self.assertIn(f"--caches-skip {bad!r}", self.err)
+        self.assertEqual(h.mutating_calls(), [])
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches", "--caches-skip", "home=u/ok"), 0, self.out)
+
+    def test_a_failed_drop_still_ends_read_only(self):
+        for error in (OSError(5, "Input/output error"), RuntimeError("a bug")):
+            h = self.host("2026-10-13 14:07")
+            h.walk_error = error
+            self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+            self.assertIn("<3>btrfs-snapshot: home: dropping the cache folders from home.20261013T1407 failed",
+                          self.out)
+            self.assertTrue(h.subvols["/top/snapshots/home.20261013T1407"]["ro"])
+            self.assertIsNone(self.unfinished())
+            self.assertEqual(self.owned(h), ["home.20261013T1407"])
+
+    def test_problems_in_the_drop_are_errors_in_the_log_not_in_the_result(self):
+        h = self.host("2026-10-13 14:07")
+        h.walk_result = lambda root, skips, mode: core.CacheWalk(
+            [core.CacheDir("u/t", 2, 10)], [], [], [("u/t/locked/f", "cannot delete: Permission denied")], 0.1)
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+        self.assertIn("<3>btrfs-snapshot: home: home.20261013T1407: u/t/locked/f: cannot delete", self.out)
+        self.assertIn("1 problem(s): what could not be deleted stays in the snapshot", self.out)
+        self.assertIn("result: ok", self.out)
+        self.assertTrue(h.subvols["/top/snapshots/home.20261013T1407"]["ro"])
+
+    def test_read_only_failure_stays_listed_and_the_next_run_finishes_it(self):
+        h = self.host("2026-10-13 14:07")
+        h.set_ro_rc = 1
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 1)
+        self.assertIn("making /top/snapshots/home.20261013T1407 read-only failed", self.out)
+        self.assertEqual(self.unfinished(), ["home.20261013T1407"])
+        self.assertEqual(self.writable(), ["home.20261013T1407"])
+        h.set_ro_rc = 0
+        h.now += 3600
+        h.calls.clear()
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+        self.assertIn("<4>btrfs-snapshot: home: finishing home.20261013T1407, left writable by an interrupted run",
+                      self.out)
+        self.assertTrue(h.subvols["/top/snapshots/home.20261013T1407"]["ro"])
+        self.assertIsNone(self.unfinished())
+        self.assertIsNone(self.writable())
+        # Finished before the scan: it counts for the change detection, so no new snapshot.
+        self.assertEqual(h.snapshots(), ["home.20261013T1407"])
+        self.assertIn("unchanged since home.20261013T1407", self.out)
+
+    def test_without_the_option_the_old_read_only_snapshot(self):
+        h = self.host("2026-10-13 14:07")
+        self.assertEqual(self.cli(h, "snapshot"), 0)
+        self.assertEqual(h.mutating_calls(),
+                         [["btrfs", "subvolume", "snapshot", "-r", "/top/home", "/top/snapshots/home.20261013T1407"]])
+        self.assertIsNone(self.unfinished())
+
+    def test_no_state_folder_falls_back_to_a_read_only_snapshot(self):
+        h = self.host("2026-10-13 14:07")
+        os.makedirs(os.path.join(self.state, core.UNFINISHED_FILE))    # the list cannot be read or written
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+        self.assertIn("this snapshot keeps its cache folders", self.out)
+        self.assertIn(["btrfs", "subvolume", "snapshot", "-r", "/top/home", "/top/snapshots/home.20261013T1407"],
+                      h.calls)
+        self.assertFalse([c for c in h.calls if c[0] == "walk"])
+
+    def test_failed_creation_is_forgotten(self):
+        h = self.host("2026-10-13 14:07")
+        h.dirs.discard("/top/snapshots")
+        h.mkdir = lambda path, mode: None                         # the folder does not appear
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 1)
+        self.assertIn("creating /top/snapshots/home.20261013T1407 failed", self.out)
+        self.assertIsNone(self.unfinished())
+
+    def test_dry_run_shows_the_drop_and_changes_nothing(self):
+        h = self.host("2026-10-13 14:07")
+        self.listed("home.20261013T1300")
+        h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        self.assertEqual(self.cli(h, "snapshot", "--dry-run", "--exclude-caches"), 0, self.out)
+        self.assertEqual(h.mutating_calls(), [])
+        self.assertEqual([c for c in h.calls if c[0] == "walk"], [["walk", "/top/home", [], "count"]])
+        self.assertIn("would create /top/snapshots/home.20261013T1407", self.out)
+        self.assertIn("would drop u/proj/target (3 files, 1.0 KiB)", self.out)
+        self.assertIn("would drop 1 cache folder(s) from the new snapshot: 3 files, 1.0 KiB", self.out)
+        self.assertIn("would finish home.20261013T1300", self.out)
+        self.assertEqual(self.unfinished(), ["home.20261013T1300"])
+        self.assertFalse(h.subvols["/top/snapshots/home.20261013T1300"]["ro"])
+        self.assertIsNone(self.writable())
+
+    def test_recovery_finishes_only_what_is_proven_ours(self):
+        h = self.host("2026-10-13 14:07", gen=10)
+        other = h.add_source("/top/other", 10)
+        ours = h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        done = h.add_snapshot("home.20261013T1200", "/top/home", 40)                 # already read-only
+        foreign = h.add_snapshot("home.20261013T1100", "/top/home", 30, ro=False, parent=other)
+        h.other["/top/snapshots/home.20261013T1000"] = "other"                       # a plain folder
+        self.listed("home.20261013T1300", "home.20261013T1200", "home.20261013T1100", "home.20261013T1000",
+                    "home.20261013T0900",                                            # never created
+                    "Workspace.20261013T1300", "../home.20261013T1300", "home.20261013T1300/x")
+        self.assertEqual(self.cli(h, "snapshot", "--exclude-caches"), 0, self.out)
+        self.assertTrue(h.subvols[ours]["ro"])
+        self.assertIn(["walk", ours, [], "drop"], h.calls)
+        self.assertNotIn(["walk", done, [], "drop"], h.calls)
+        self.assertFalse(h.subvols[foreign]["ro"])
+        touched = [c for c in h.mutating_calls() if foreign in c or "/top/snapshots/home.20261013T1000" in c]
+        self.assertEqual(touched, [])
+        self.assertIn("home.20261013T1100 is listed in", self.out)
+        self.assertIn("a snapshot of another subvolume", self.out)
+        self.assertIn("home.20261013T1000 is listed in", self.out)
+        self.assertIn("home.20261013T0900 (listed in", self.out)
+        self.assertIn("'Workspace.20261013T1300' is listed in", self.out)
+        self.assertEqual(self.unfinished(), ["home.20261013T1100", "home.20261013T1000", "Workspace.20261013T1300",
+                                             "../home.20261013T1300", "home.20261013T1300/x"])
+        self.assertEqual(self.writable(), ["home.20261013T1100"])
+        self.assertEqual(sorted(self.owned(h)), ["home.20261013T1200", "home.20261013T1300"])
+
+    def test_recovery_without_the_option_only_sets_read_only(self):
+        h = self.host("2026-10-13 14:07", gen=10)
+        ours = h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        self.listed("home.20261013T1300")
+        self.assertEqual(self.cli(h, "prune"), 0, self.out)
+        self.assertTrue(h.subvols[ours]["ro"])
+        self.assertFalse([c for c in h.calls if c[0] == "walk"])
+        self.assertIsNone(self.unfinished())
+
+    def test_finish_only_finishes(self):
+        h = self.host("2026-10-13 14:07", gen=10_000)
+        old = self.add_history(h, "2026-06-01 00:00", "2026-06-01 02:00")      # due for deletion
+        ours = h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        self.listed("home.20261013T1300")
+        self.assertEqual(self.cli(h, "finish", "--exclude-caches", "--no-lock", clock_ok=True), 0, self.out)
+        self.assertTrue(h.subvols[ours]["ro"])
+        self.assertEqual([c for c in h.mutating_calls() if c[:3] != ["btrfs", "property", "set"]],
+                         [["walk", ours, [], "drop"]])
+        for e in old:
+            self.assertIn(e, h.snapshots())
+        self.assertIn("finish summary: result: ok", self.out)
+
+    def test_writable_record_follows_what_the_scans_see(self):
+        h = self.host("2026-10-13 14:07", gen=10)
+        h.add_snapshot("home.20261013T1300", "/top/home", 50)
+        stray = h.add_snapshot("home.20261013T1200", "/top/home", 40, ro=False)
+        self.cli(h, "snapshot", "--dry-run")
+        self.assertIsNone(self.writable())                          # a dry run writes nothing
+        self.assertEqual(self.cli(h, "prune"), 0)
+        self.assertEqual(self.writable(), ["home.20261013T1200"])
+        with open(os.path.join(self.state, core.WRITABLE_FILE)) as f:
+            self.assertEqual(os.stat(f.fileno()).st_mode & 0o777, 0o644)   # cst doctor reads it as the user
+        del h.subvols[stray]
+        self.assertEqual(self.cli(h, "prune"), 0)
+        self.assertIsNone(self.writable())
+
+    def test_writable_record_is_world_readable_whatever_the_umask(self):
+        # `sudo cst btrfs snapshots prune` keeps a user's umask 077.
+        h = self.host("2026-10-13 14:07", gen=10)
+        h.add_snapshot("home.20261013T1300", "/top/home", 50)
+        h.add_snapshot("home.20261013T1200", "/top/home", 40, ro=False)
+        old = os.umask(0o077)
+        try:
+            self.assertEqual(self.cli(h, "prune"), 0)
+        finally:
+            os.umask(old)
+        self.assertEqual(os.stat(os.path.join(self.state, core.WRITABLE_FILE)).st_mode & 0o777, 0o644)
+
+    def test_an_unchanged_writable_record_is_not_rewritten(self):
+        # Every hourly run would otherwise write, fsync and rename the same file.
+        h = self.host("2026-10-13 14:07", gen=10)
+        h.add_snapshot("home.20261013T1300", "/top/home", 50)
+        h.add_snapshot("home.20261013T1200", "/top/home", 40, ro=False)
+        self.assertEqual(self.cli(h, "prune"), 0)
+        path = os.path.join(self.state, core.WRITABLE_FILE)
+        first = os.stat(path).st_ino
+        self.assertEqual(self.cli(h, "prune"), 0)
+        self.assertEqual(os.stat(path).st_ino, first)
+        self.assertEqual(self.writable(), ["home.20261013T1200"])
+
+    def test_a_list_line_that_is_not_utf8_is_left_alone(self):
+        h = self.host("2026-10-13 14:07", gen=10)
+        ours = h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, core.UNFINISHED_FILE), "wb") as f:
+            f.write(b"home.2026\xff1013T1200\nhome.20261013T1300\n")
+        self.assertEqual(self.cli(h, "prune", "--exclude-caches"), 0, self.out)
+        self.assertTrue(h.subvols[ours]["ro"])
+        self.assertIn("is no snapshot name of home; left alone", self.out)
+        self.assertEqual(self.unfinished(), ["home.2026\ufffd1013T1200"])
+
+    def test_finishing_takes_the_entry_off_the_writable_record(self):
+        # purge runs `finish` and writes no new record: a stale line would make
+        # cst doctor call the finished snapshot a foreign writable entry.
+        h = self.host("2026-10-13 14:07", gen=10)
+        h.add_snapshot("home.20261013T1300", "/top/home", 50)
+        ours = h.add_snapshot("home.20261013T1200", "/top/home", 40, ro=False)
+        self.listed("home.20261013T1200")
+        with open(os.path.join(self.state, core.WRITABLE_FILE), "w") as f:
+            f.write("home.20261013T1200\nhome.20261013T1100\n")
+        self.assertEqual(self.cli(h, "finish", "--no-lock"), 0, self.out)
+        self.assertTrue(h.subvols[ours]["ro"])
+        self.assertIsNone(self.unfinished())
+        self.assertEqual(self.writable(), ["home.20261013T1100"])
+
+    def test_list_marks_an_unfinished_entry(self):
+        h = self.host("2026-10-13 14:07", gen=10)
+        other = h.add_source("/top/other", 10)
+        h.add_snapshot("home.20261013T1300", "/top/home", 50, ro=False)
+        h.add_snapshot("home.20261013T1200", "/top/home", 40, ro=False, parent=other)
+        self.listed("home.20261013T1300", "home.20261013T1200")
+        self.assertEqual(self.cli(h, "list", "--json"), 0)
+        reasons = {os.path.basename(i["path"]): i["reason"] for i in json.loads(self.out)["sources"][0]["ignored"]}
+        self.assertEqual(reasons["home.20261013T1300"],
+                         "not read-only, left by an interrupted run: the next run finishes it")
+        self.assertIn("listed as left by an interrupted run but a snapshot of another subvolume",
+                      reasons["home.20261013T1200"])
+        self.assertEqual(h.mutating_calls(), [])
+
+    def test_caches_lists_without_changing_anything(self):
+        h = self.host("2026-10-13 14:07")
+        h.walk_result = lambda root, skips, mode: core.CacheWalk(
+            [core.CacheDir("u/proj/target", 45200, 15 << 30), core.CacheDir("u/.npm/_cacache", 10, 2048)],
+            ["u/.local"], list(skips), [("u/odd", "cannot list: Permission denied")], 1.25)
+        rc = self.cli(h, "caches", "--caches-skip", "home=u/.local/share/containers")
+        self.assertEqual(rc, 0, self.err)
+        self.assertEqual(h.mutating_calls(), [])
+        self.assertEqual([c for c in h.calls if c[0] == "walk"],
+                         [["walk", "/top/home", ["u/.local/share/containers"], "count"]])
+        self.assertIn("home: /top/home: 2 cache folder(s), 45210 files, 15.0 GiB (apparent size); walk 1.2 s",
+                      self.out)
+        self.assertRegex(self.out, r"DROP   u/proj/target +45200 files +15\.0 GiB")
+        self.assertIn("KEEP   u/.local  (a cache folder that holds a skipped path)", self.out)
+        self.assertIn("SKIP   u/.local/share/containers  (skip list: kept whole)", self.out)
+        self.assertIn("ERROR  u/odd: cannot list: Permission denied", self.out)
+        self.assertEqual(self.cli(h, "caches", "--json"), 0)
+        data = json.loads(self.out)["sources"][0]
+        self.assertEqual((data["files"], data["bytes"], data["folders"][1]["path"]),
+                         (45210, (15 << 30) + 2048, "u/.npm/_cacache"))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.cli(h, "caches", source="home=/top/nothere:1h"), 1)
+
+
+class RealTreeHost(FakeHost):
+    """FakeHost whose snapshots are real copies in a temporary folder, so the
+    real walk, the real deletion and the real state files run end to end."""
+
+    def __init__(self, now, top):
+        super().__init__(now)
+        self.dirs = {top, os.path.join(top, "snapshots")}
+
+    def run(self, argv):
+        out = super().run(argv)
+        if argv[:3] == ["btrfs", "subvolume", "snapshot"] and out[0] == 0:
+            src, dest = argv[-2:]
+            shutil.copytree(src, dest, symlinks=True)
+        return out
+
+    def walk_caches(self, root, skips, mode):
+        self.calls.append(["walk", root, list(skips), mode])
+        return core.walk_caches(root, skips, mode)
+
+
+class RealTreeTests(CliTestCase):
+    def test_end_to_end_on_real_folders(self):
+        top = os.path.join(self.tmp.name, "top")
+        src = os.path.join(top, "home")
+        os.makedirs(os.path.join(top, "snapshots"))
+        tag(src, "u/proj/target")
+        put(src, "u/proj/target/debug/app", "binary")
+        put(src, "u/proj/src/main.rs")
+        tag(src, "u/.local/share/containers/storage/x")
+        h = RealTreeHost(at("2026-10-13 14:07", BERLIN), top)
+        h.add_source(src, 100)
+        rc = self.cli(h, "snapshot", "--exclude-caches", "--caches-skip", "home=u/.local/share/containers",
+                      source=f"home={src}:72h", snapdir=os.path.join(top, "snapshots"))
+        self.assertEqual(rc, 0, self.out)
+        snap = os.path.join(top, "snapshots", "home.20261013T1407")
+        self.assertFalse(os.path.lexists(os.path.join(snap, "u", "proj", "target")))
+        self.assertTrue(os.path.exists(os.path.join(snap, "u", "proj", "src", "main.rs")))
+        self.assertTrue(os.path.exists(os.path.join(snap, "u", ".local", "share", "containers", "storage", "x",
+                                                    core.CACHE_TAG)))
+        self.assertTrue(os.path.exists(os.path.join(src, "u", "proj", "target", "debug", "app")))   # source intact
+        self.assertTrue(h.subvols[snap]["ro"])
+        self.assertIn("dropped 1 cache folder(s) from home.20261013T1407: 2 files", self.out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, core.UNFINISHED_FILE)))
 
 
 if __name__ == "__main__":

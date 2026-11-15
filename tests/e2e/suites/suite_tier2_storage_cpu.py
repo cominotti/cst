@@ -32,6 +32,18 @@ def exec_bash(container, script, *, check=True):
     return docker_exec(container, ["bash", "-euo", "pipefail", "-c", script], check=check)
 
 
+# A bash function for the scripts that mount the btrfs top level (test_03,
+# test_03a): the options of /var's mount, with subvolid=5 in place of its subvol.
+TOP_LEVEL_OPTS_FN = r"""
+top_level_opts() {
+    local o
+    o="$(findmnt -rn -o OPTIONS -M /var | tr ',' '\n' |
+        grep -vE '^(rw|ro|seclabel|subvol=.*|subvolid=.*)$' | paste -sd, - || true)"
+    echo "subvolid=5${o:+,$o}"
+}
+"""
+
+
 def as_tester_bash(container, script, *, check=True):
     quoted = shlex.quote(script)
     cmd = (
@@ -193,9 +205,8 @@ EOF
             printf 'copy /var/home/tester/Workspace\ncopy /var/home/tester/.cache\n' >/etc/btrfs-setup/convert-plan
 
             uuid="$(cat /run/e2e-loop-uuid)"
-            opts="$(findmnt -rn -o OPTIONS -M /var | tr ',' '\n' |
-                grep -vE '^(rw|ro|seclabel|subvol=.*|subvolid=.*)$' | paste -sd, - || true)"
-            opts="subvolid=5${{opts:+,$opts}}"
+            {TOP_LEVEL_OPTS_FN}
+            opts="$(top_level_opts)"
             unit="$(systemd-escape --path /var/mnt/btrfs-top)"
             mkdir -p /var/mnt/btrfs-top
             sed -e "s/@UUID@/$uuid/g" -e "s|@OPTIONS@|$opts|g" \
@@ -236,6 +247,270 @@ EOF
             systemctl disable "${{unit}}.automount"
             """,
         )
+
+    def test_03a_snapshots_drop_cache_folders(self):
+        """Cache folders (CACHEDIR.TAG) leave each new snapshot: plan, apply, second run, knob off,
+        skip list, recovery of an interrupted snapshot, a foreign writable entry, upgrade, purge."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_03a FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            TOP=/var/mnt/btrfs-top
+            SNAPS=$TOP/snapshots
+            STATE=/var/lib/btrfs-snapshot
+            CONF=/etc/btrfs-setup/snapshots.conf
+            CORE=/usr/local/sbin/btrfs-snapshot-core
+            RT=/usr/local/sbin/btrfs-snapshot
+            H=/var/home/tester
+            WS=$H/Workspace
+            P=$WS/proj
+            WS_SRC=$TOP/home/tester/Workspace
+            HOME_SRC=$TOP/home
+            SIG='Signature: 8a477f597d28d172789f06886806bc55'
+
+            # The top level, mounted as test_03 does (no udev for the automount here).
+            """ + TOP_LEVEL_OPTS_FN + r"""
+            opts="$(top_level_opts)"
+            mkdir -p "$TOP"
+            if ! mountpoint -q "$TOP"; then
+                mount -o "$opts" "$(head -n1 /run/e2e-loop-devs)" "$TOP"
+            fi
+            trap 'umount "$TOP" 2>/dev/null || true' EXIT
+            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot "$RT"
+            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot-core "$CORE"
+            # test_03 made these subvolumes; ~/Workspace is a source of its own.
+            btrfs subvolume show "$WS" >/dev/null
+            btrfs subvolume show "$H/.cache" >/dev/null
+
+            # test_03's settings stay; only the two keys of this feature change (and go at the end).
+            grep -qx 'HOME_DIR=/var/home/tester' "$CONF"
+            grep -qx 'SKIP_AT_OR_BELOW_GIB=0' "$CONF"
+            setkey() {   # setkey KEY [VALUE]: no VALUE = the key removed (the default)
+                sed -i "/^$1=/d" "$CONF"
+                if [[ $# -gt 1 ]]; then echo "$1=$2" >>"$CONF"; fi
+            }
+            knob() { if [[ -n "$1" ]]; then setkey SNAPSHOT_EXCLUDE_CACHES "$1"; else setkey SNAPSHOT_EXCLUDE_CACHES; fi; }
+            setkey SNAPSHOT_EXCLUDE_CACHES
+            setkey SNAPSHOT_CACHES_SKIP
+            mktag() { mkdir -p "$1"; printf '%s\n# a cache directory tag\n' "$SIG" >"$1/CACHEDIR.TAG"; }
+            hourly() {   # the hourly run; its log on stderr (the CI log) and on stdout
+                local o
+                o="$("$RT" hourly 2>&1)" || { printf '%s\n' "$o" >&2; return 1; }
+                printf '%s\n' "$o" >&2
+                printf '%s\n' "$o"
+            }
+            latest() { "$CORE" latest --snapdir "$SNAPS" --name "$1" --source-path "$2"; }
+            count() { find "$SNAPS" -mindepth 1 -maxdepth 1 -name "$1.*" | wc -l; }
+            ro_of() { btrfs property get -ts "$1" ro; }
+            field() {
+                btrfs subvolume show "$1" | awk -F':[[:space:]]*' -v k="$2" '$1 ~ ("^[[:space:]]*" k "$") {print $2}'
+            }
+            write_ws() { date +%s%N >>"$P/src/main.rs"; btrfs filesystem sync "$WS" >/dev/null; }
+            write_home() { date +%s%N >>"$H/notes.txt"; btrfs filesystem sync /var/home >/dev/null; }
+            owned() {   # owned NAME PATH: PATH is one of NAME's snapshots in `list --json`
+                "$RT" list --json | python3 -I -c '
+import json, sys
+src = [s for s in json.load(sys.stdin)["sources"] if s["name"] == sys.argv[1]][0]
+sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1" "$2"
+            }
+            doctor() { runuser -u tester -- env CST_DOCTOR_CONTAINER=0 python3 -I /opt/cst-rw/doctor/cst-doctor || true; }
+
+            # Fixtures: a cargo-like target/, look-alikes that must stay, skipped paths.
+            mkdir -p "$P/src" "$P/target/debug/deps" "$P/untagged" "$P/wrongtag" "$P/tagdir/CACHEDIR.TAG" "$P/symtag"
+            echo 'fn main() {}' >"$P/src/main.rs"
+            mktag "$P/target"
+            for i in $(seq 1 2000); do echo "$i" >"$P/target/debug/deps/f$i"; done
+            dd if=/dev/urandom of="$P/target/debug/app" bs=1M count=8 status=none
+            # A nested subvolume inside a cache folder: an empty placeholder in the snapshot,
+            # which the drop must remove with the folder, while the source keeps the subvolume.
+            btrfs subvolume create "$P/target/nested-sv" >/dev/null
+            echo in-sv >"$P/target/nested-sv/file"
+            echo keep >"$P/untagged/file"
+            echo 'Signature: not the right one' >"$P/wrongtag/CACHEDIR.TAG"
+            ln -s ../target/CACHEDIR.TAG "$P/symtag/CACHEDIR.TAG"
+            ln -s target "$P/link-to-target"
+            mktag "$P/.git/lfs/cache"
+            mktag "$P/node_modules/.cache"
+            mktag "$WS/skipme/target"
+            containers_new=0
+            [[ -e "$H/.local/share/containers" ]] || containers_new=1
+            LAYER=.local/share/containers/e2e-storage/overlay/l1/diff/var/cache/dnf
+            mktag "$H/$LAYER"
+            mktag "$H/.e2e-tool/cache"
+            echo x >"$H/.e2e-tool/cache/index"
+            mktag "$H/.cache"                  # a nested subvolume: an empty placeholder in a snapshot
+            echo notes >"$H/notes.txt"
+            chown -R tester:tester "$WS" "$H/.local" "$H/.e2e-tool" "$H/notes.txt"
+
+            # 0. The default skip list keeps podman's storage whole (and nothing in ~/Workspace).
+            plan="$("$RT" caches)"
+            grep -qF 'SKIP   tester/.local/share/containers' <<<"$plan"
+            grep -qxF skipme/target <<<"$(awk '$1 == "DROP" {print $2}' <<<"$plan")"
+            setkey SNAPSHOT_CACHES_SKIP "'.local/share/containers Workspace/skipme'"
+
+            # 1. Upgrade: snapshots taken the old way (knob off: read-only at once) stay as they are.
+            knob no
+            write_ws
+            write_home
+            hourly >/dev/null
+            old_ws="$(latest Workspace "$WS_SRC")"
+            test -f "$old_ws/proj/target/debug/deps/f1"
+            [[ "$(ro_of "$old_ws")" == ro=true ]]
+            test ! -e "$STATE/core-unfinished"
+
+            # 2. Plan: `caches` lists what would go and changes nothing, not even the
+            #    source's generation (no access times written while reading).
+            knob ""
+            before="$(find "$SNAPS" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
+            btrfs filesystem sync /var >/dev/null
+            gen_before="$(field "$WS_SRC" Generation)"
+            plan="$("$RT" caches)"
+            printf '%s\n' "$plan" >&2
+            drops="$(awk '$1 == "DROP" {print $2}' <<<"$plan")"
+            grep -qxF proj/target <<<"$drops"
+            grep -qxF tester/.e2e-tool/cache <<<"$drops"
+            for bad in proj/untagged proj/wrongtag proj/tagdir proj/symtag proj/.git/lfs/cache \
+                       proj/node_modules/.cache skipme/target tester/.cache tester/Workspace/proj/target \
+                       "tester/$LAYER"; do
+                if grep -qxF "$bad" <<<"$drops"; then echo "the plan drops $bad" >&2; exit 1; fi
+            done
+            grep -qF 'SKIP   skipme' <<<"$plan"
+            grep -qF 'SKIP   tester/.local/share/containers' <<<"$plan"
+            cst_plan="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs snapshots caches)"
+            grep -qF 'DROP   proj/target' <<<"$cst_plan"
+            status_out="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs snapshots status)"
+            grep -qF 'cache folders (CACHEDIR.TAG): dropped from new snapshots' <<<"$status_out"
+            [[ "$(find "$SNAPS" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" == "$before" ]]
+            btrfs filesystem sync /var >/dev/null
+            [[ "$(field "$WS_SRC" Generation)" == "$gen_before" ]]
+            test -f "$P/target/debug/deps/f2000"
+
+            # 3. Apply (the default): the new snapshots lose their cache folders, the sources keep them.
+            write_ws
+            write_home
+            meta_before="$(btrfs filesystem df -b /var | awk -F'used=' '/^Metadata/ {print $2}')"
+            out="$(hourly)"
+            btrfs filesystem sync /var >/dev/null
+            meta_after="$(btrfs filesystem df -b /var | awk -F'used=' '/^Metadata/ {print $2}')"
+            echo "METADATA used before=$meta_before after=$meta_after (bytes, whole filesystem, print only)"
+            grep -m1 'dropped [0-9]* cache folder(s) from Workspace\.' <<<"$out"
+            ws="$(latest Workspace "$WS_SRC")"
+            [[ "$ws" != "$old_ws" ]]
+            test ! -e "$ws/proj/target"
+            test ! -L "$ws/proj/target"
+            test -f "$ws/proj/src/main.rs"
+            test -f "$ws/proj/untagged/file"
+            test -f "$ws/proj/wrongtag/CACHEDIR.TAG"
+            test -d "$ws/proj/tagdir/CACHEDIR.TAG"
+            test -L "$ws/proj/symtag/CACHEDIR.TAG"
+            test -L "$ws/proj/link-to-target"
+            test -f "$ws/proj/.git/lfs/cache/CACHEDIR.TAG"
+            test -f "$ws/proj/node_modules/.cache/CACHEDIR.TAG"
+            test -f "$ws/skipme/target/CACHEDIR.TAG"
+            [[ "$(ro_of "$ws")" == ro=true ]]
+            [[ "$(field "$ws" 'Parent UUID')" == "$(field "$WS_SRC" UUID)" ]]
+            owned Workspace "$ws"
+            test -f "$P/target/debug/deps/f2000"
+            test -f "$P/target/debug/app"
+            test -f "$P/target/nested-sv/file"
+            [[ "$(stat -c %i "$P/target/nested-sv")" == 256 ]]   # still a subvolume in the source
+            home="$(latest home "$HOME_SRC")"
+            test ! -e "$home/tester/.e2e-tool/cache"
+            test -f "$home/tester/$LAYER/CACHEDIR.TAG"
+            test -f "$home/tester/notes.txt"
+            owned home "$home"
+            test -f "$old_ws/proj/target/debug/deps/f1"       # the old snapshot is untouched
+            test ! -s "$STATE/core-unfinished"
+            test ! -e "$STATE/core-writable"
+
+            # 4. Second run: the deletions inside the snapshot are not a change of the source.
+            btrfs filesystem sync /var >/dev/null
+            n="$(count Workspace)"
+            out="$(hourly)"
+            grep -q 'Workspace: unchanged since' <<<"$out"
+            [[ "$(count Workspace)" == "$n" ]]
+            write_ws
+            hourly >/dev/null
+            [[ "$(count Workspace)" == "$((n + 1))" ]]
+            ws2="$(latest Workspace "$WS_SRC")"
+            [[ "$ws2" != "$ws" ]]
+            test ! -e "$ws2/proj/target"
+
+            # 5. Recovery: a listed writable snapshot of ~/Workspace is finished; a listed writable
+            #    subvolume that is not one is left alone; a listed name never created is forgotten.
+            ts_r="$(date -d '-30 min' +%Y%m%dT%H%M)"
+            ts_f="$(date -d '-40 min' +%Y%m%dT%H%M)"
+            rec="$SNAPS/Workspace.$ts_r"
+            foreign="$SNAPS/Workspace.$ts_f"
+            test ! -e "$rec"
+            test ! -e "$foreign"
+            btrfs subvolume snapshot "$WS_SRC" "$rec" >/dev/null   # what a run killed after creating it leaves
+            btrfs subvolume create "$foreign" >/dev/null
+            printf '%s\n' "Workspace.$ts_r" "Workspace.$ts_f" Workspace.20200101T0000 >"$STATE/core-unfinished"
+            out="$(hourly)"
+            grep -qF "finishing Workspace.$ts_r" <<<"$out"
+            grep -qF "Workspace.$ts_f is listed in $STATE/core-unfinished but is a snapshot of another subvolume" \
+                <<<"$out"
+            [[ "$(ro_of "$rec")" == ro=true ]]
+            test ! -e "$rec/proj/target"
+            test -f "$rec/proj/src/main.rs"
+            owned Workspace "$rec"
+            [[ "$(ro_of "$foreign")" == ro=false ]]
+            [[ "$(cat "$STATE/core-unfinished")" == "Workspace.$ts_f" ]]
+            grep -qxF "Workspace.$ts_f" "$STATE/core-writable"
+            # cst doctor runs as the user: it reads the lists, not the root-only snapshot folder.
+            doc="$(doctor)"
+            printf '%s\n' "$doc" >&2
+            grep -qF "WARN   snapshots: Workspace.$ts_f left writable by an interrupted run" <<<"$doc"
+            # The user's fix: delete it and its line; the next run clears the record.
+            btrfs subvolume delete "$foreign" >/dev/null
+            sed -i "/^Workspace\.$ts_f\$/d" "$STATE/core-unfinished"
+            hourly >/dev/null
+            test ! -s "$STATE/core-unfinished"
+            test ! -e "$STATE/core-writable"
+            doc="$(doctor)"
+            grep -qF "ok     snapshots: none left writable" <<<"$doc"
+
+            # 6. Knob off: the old read-only snapshot again, cache folders and all.
+            knob no
+            write_ws
+            hourly >/dev/null
+            ws3="$(latest Workspace "$WS_SRC")"
+            [[ "$ws3" != "$rec" ]]
+            test -f "$ws3/proj/target/debug/deps/f1"
+            status_out="$(SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs snapshots status)"
+            grep -qF 'kept in new snapshots (SNAPSHOT_EXCLUDE_CACHES=no)' <<<"$status_out"
+            knob ""
+
+            # 7. Undo: purge finishes a listed writable snapshot first, so it goes too.
+            rec2="$SNAPS/Workspace.$(date -d '-50 min' +%Y%m%dT%H%M)"
+            test ! -e "$rec2"
+            btrfs subvolume snapshot "$WS_SRC" "$rec2" >/dev/null
+            basename "$rec2" >"$STATE/core-unfinished"
+            "$RT" purge
+            test ! -e "$rec2"
+            if [[ -d "$SNAPS" ]]; then
+                test "$(find "$SNAPS" -mindepth 1 -maxdepth 1 | wc -l)" -eq 0
+            fi
+            test ! -e "$STATE/core-unfinished"
+            test ! -e "$STATE/core-writable"
+            test -f "$P/target/debug/deps/f2000"                # the sources never lose anything
+            test -f "$H/.e2e-tool/cache/index"
+
+            # Leave the home as test_03 left it for the tests after this one.
+            btrfs subvolume delete "$P/target/nested-sv" >/dev/null 2>&1 || true
+            rm -rf "$P" "$WS/skipme" "$H/.local/share/containers/e2e-storage" "$H/.e2e-tool"
+            if (( containers_new )); then rmdir "$H/.local/share/containers"; fi
+            rm -f "$H/.cache/CACHEDIR.TAG" "$H/notes.txt"
+            setkey SNAPSHOT_EXCLUDE_CACHES
+            setkey SNAPSHOT_CACHES_SKIP
+            """,
+        ).stdout
+        for line in out.splitlines():
+            if line.startswith("METADATA"):
+                print(f"\ntest_03a: {line}")
 
     def test_04_btrfs_bulk_real_subvolume_and_nocow(self):
         """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep."""

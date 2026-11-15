@@ -47,6 +47,12 @@ consistent.
 - **Tests never touch the real host.** Unit tests use no sudo, no real systemd
   and no real libvirt, and write only in temporary folders. E2E tests run only
   inside their containers (tier 2 only in CI or on a disposable VM).
+- **btrfs subvolumes only generic and reusable.** A new subvolume must serve
+  many programs and projects, like `~/.cache` or `~/Bulk`. Never create one
+  for a single app or project (for example a cargo `target/`, one IDE, one
+  checkout). Prefer redirecting the data into an existing generic one, or
+  marking it as a cache (`CACHEDIR.TAG`, which the snapshots drop). Each
+  subvolume is one more thing to convert, list, back up and undo.
 - **Never walk `/`** (`find /`, `fd . /`, ...). Inside a toolbox `/run/host`
   is the whole host, including network shares.
 - **No fixed checkout path.** CST works from wherever it is cloned: the

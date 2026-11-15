@@ -206,6 +206,10 @@ It also moves Chrome's (Flatpak) web cache into RAM, with a 512 MiB limit, so
 it stays out of the snapshots; restart Chrome afterwards, then delete the old
 cache as `snapshots status` says
 ([details](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume)).
+Folders marked as caches with a `CACHEDIR.TAG` file (every cargo `target/`,
+in every Rust project) are dropped from each new snapshot, without touching
+your checkouts or making a subvolume
+([details](btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
 
 Then, if you want a backup on the NAS:
 `cst btrfs snapshots nas setup --path /<share>/<folder>`.
@@ -355,6 +359,7 @@ swap and memory, with counters since boot.
 | Snapshots and NAS backup | `cst btrfs snapshots disable` (add `--purge` to delete the snapshots) | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#12-how-to-undo) |
 | One `~/Bulk` link | `cst btrfs bulk keep ID`, then remove the link and move the folder back by hand | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#undo-one-bulk-link) |
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |
+| Cache folders dropped from snapshots | `SNAPSHOT_EXCLUDE_CACHES=no` in `/etc/btrfs-setup/snapshots.conf` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot) |
 | Docker cleanup | `cst btrfs docker-gc disable` | [btrfs/README.md, section 11.3](btrfs/README.md#113-what-changes-on-my-system-and-how-to-undo) |
 | Pruning of old cargo build folders | `cst toolchains auto off` (the cargo and uv settings: by hand) | [toolchains/README.md, section 11](toolchains/README.md#11-how-to-undo) |
 | VM hardware (`cst vm tune apply`) | `sudo virsh -c qemu:///system define` the saved `/var/lib/libvirt/cst-backups/VM/definitions/*.before-tune.xml` (for Windows, before uninstalling the virtio drivers) | [vm/README.md, section 8](vm/README.md#8-cst-vm-tune-the-recommended-virtual-hardware) |

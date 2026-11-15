@@ -56,6 +56,7 @@ cst doctor help
 | `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
+| `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
 The **booted** one is running now; a **staged** one was prepared by an
@@ -204,6 +205,11 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
   never runs a `btrfs` command: those need root.
+- The snapshots check reads `/var/lib/btrfs-snapshot/core-unfinished` and
+  `core-writable` (world-readable, written by the hourly snapshot run) and
+  `TOP`/`SNAP_DIR_NAME` from `/etc/btrfs-setup/snapshots.conf` for the path in
+  its fix line. It never opens the snapshot folder (root-only) and runs no
+  command.
 - Which alerts you have already seen comes from your record in
   `~/.local/state/cst-alerts/delivered` (written by `cst-pending-alerts` at
   login; the older `~/.local/state/f44-alerts` is read when the new one does
@@ -251,6 +257,30 @@ recover: [btrfs/README.md, "When btrfs says 'No space left' but df shows free sp
   from the installed copy in `/usr/local/sbin`, so the two always agree.
 - There is no `fix:` for low unallocated space: the way out is several steps
   (free space first, then a careful balance), not one command.
+
+### 6.1 Snapshots left writable
+
+The hourly snapshot run takes each snapshot writable, drops its cache
+folders (`CACHEDIR.TAG`) and then makes it read-only
+([btrfs/SNAPSHOTS.md, section 3](../btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
+The snapshot folder is root-only, so this check does not open it. It reads
+two lists the run keeps in `/var/lib/btrfs-snapshot` (world-readable):
+
+- `core-unfinished`: snapshots taken and not yet read-only. A name stays
+  there only when a run was stopped in between; the next hourly run
+  finishes it. `WARN` until then, with the command that starts a run now.
+  If the warning stays, the run's journal says why (usually: the listed
+  entry is not a snapshot of that source, and it is left alone).
+- `core-writable`: writable entries named like CST's snapshots that the
+  last run saw. One that is not in `core-unfinished` was not left by a CST
+  run (made by hand, for example). CST never deletes or counts it. `WARN`,
+  with a command that only shows it.
+
+```
+== btrfs
+  WARN   snapshots: Workspace.20261115T0400 left writable by an interrupted run (cache folders perhaps not dropped yet); the next hourly run finishes it (if this stays: journalctl -u btrfs-snapshot)
+         fix: sudo systemctl start btrfs-snapshot.service
+```
 
 ## 7. The vm checks
 
@@ -444,6 +474,7 @@ The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
 built per test, fixture `systemctl show` answers and game profile records,
 a fixture cgroup tree of the user manager and leftover game drop-ins,
+fixture lists of snapshots left writable,
 and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the

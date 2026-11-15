@@ -297,6 +297,96 @@ One more cache is kept out without a subvolume: Chrome's (Flatpak) web cache
 now lives in RAM ([below](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)).
 Earlier versions made `~/.var/app/com.google.Chrome/cache` a subvolume.
 
+### Cache folders (`CACHEDIR.TAG`): dropped from every new snapshot
+
+Many tools mark their cache and build folders with a small file named
+`CACHEDIR.TAG` ([the standard](https://bford.info/cachedir/)). cargo writes
+one into every `target/` folder, of every Rust project, and other tools do
+the same (on this PC, for example, `.flatpak-builder` and the kani and verus
+caches of some projects). Such a folder can be big, changes with every build,
+and the tool can make it again.
+
+Every new snapshot, of `/home` and of `~/Workspace`, is taken **without these
+folders**:
+
+1. the snapshot's name is written to `/var/lib/btrfs-snapshot/core-unfinished`,
+   and the snapshot is taken **writable**;
+2. every cache folder **inside the snapshot** is deleted;
+3. the snapshot is made **read-only**, checked, and its name is taken off that
+   list.
+
+Only the snapshot changes. Your folders are not touched: `target/` stays a
+normal folder, cargo and scripts that use `./target/debug/...` work as
+before, and a build that runs during the snapshot is not disturbed (the
+snapshot is a frozen copy). No subvolume is created for it.
+
+**Why:** a build rewrites `target/` many times a day. Each hourly snapshot
+would keep the old build files until it expires: about 1.2 to 1.7 GiB per
+checkout on this PC. The NAS backup already left these folders out (restic's
+`--exclude-caches`), so now the rule is the same for both: **a folder marked
+as a cache is neither in the snapshots nor in the NAS backup.**
+
+**What counts as a cache folder:** a folder that holds a regular file named
+`CACHEDIR.TAG` whose content starts with
+`Signature: 8a477f597d28d172789f06886806bc55`. This is the test of restic's
+`--exclude-caches`. Below a cache folder nothing more is searched: it goes as
+a whole. These are never dropped:
+
+- the top of the snapshot itself;
+- anything reached through a symlink: symlinks are never followed, and a
+  symlink named `CACHEDIR.TAG` does not count (restic follows it);
+- anything inside folders named `.git` or `node_modules`: they are not
+  searched, which keeps the search short (restic does look inside them);
+- the paths in `SNAPSHOT_CACHES_SKIP`, and a cache folder that holds one of
+  them. The default is `.local/share/containers`: podman's image layers hold
+  the images' own caches, and a hole in a layer would break the image
+  (restic has no such list);
+- nested subvolumes (they are empty in a snapshot anyway).
+
+**See what goes:**
+
+```
+cst btrfs snapshots caches          # the folders the next snapshots drop, with sizes (changes nothing)
+cst btrfs snapshots caches --json
+```
+
+`DROP` lines are the folders, `SKIP` the skipped paths that exist, `KEEP` a
+cache folder kept because it holds a skipped path. Each hourly run logs what
+it dropped: `dropped N cache folder(s) from Workspace.<time>: F files, S
+(apparent size), T s` (`journalctl -u btrfs-snapshot`).
+
+**Cost:** on this PC, dropping 26 cache folders (45,200 files, 15 GiB) from a
+copy of `~/Workspace` took 4.9 seconds and one btrfs commit of 165 ms, with no
+stall. It happens only when a snapshot is taken, at the hourly run's lowest
+CPU and disk priority.
+
+**Settings** in `/etc/btrfs-setup/snapshots.conf`:
+
+- `SNAPSHOT_EXCLUDE_CACHES=no` turns it off: the next snapshots keep their
+  cache folders again (default `yes`);
+- `SNAPSHOT_CACHES_SKIP='.local/share/containers Workspace/some/path'`: paths
+  in your home whose cache folders stay, separated by spaces (a path cannot
+  contain a space). Setting it replaces the default, so keep
+  `.local/share/containers` in the list.
+
+**If something goes wrong:**
+
+- A folder that cannot be deleted stays in the snapshot. The run logs an
+  error and still makes the snapshot read-only: the snapshot is fine, only
+  bigger.
+- If the run is stopped while the snapshot is still writable (power loss, a
+  kill), the next run finds the name in `core-unfinished` and finishes it. It
+  does that only for a listed entry that is a subvolume in the snapshot
+  folder, named like that source's snapshots, and taken from that source
+  (same Parent UUID, [section 15](#15-safety-rules-of-btrfs-snapshot-core)).
+  Anything else stays as it is, with a warning in the journal and in
+  `cst doctor`.
+
+Snapshots taken before this change keep their cache folders until they
+expire (`~/Workspace`: 48 hours of hourly snapshots and 7 daily ones), so the
+space comes back gradually. After an update of the repository,
+`cst btrfs snapshots setup` (safe to run again) installs the new programs.
+
 ### Bulk: one folder for everything you can download again
 
 **The rule is simple: everything in `~/Bulk` can be downloaded (or built)
@@ -861,6 +951,11 @@ user. The next `cargo build` recreates it: the final programs in `target/`,
 the intermediate files in `~/.cache/cargo-build`. This happens **before** the
 conversion, so no time is wasted cloning them.
 
+The `target/` folders cargo makes from then on stay in your checkouts but not
+in the snapshots: cargo marks each one with a `CACHEDIR.TAG`, and every new
+snapshot drops such folders
+([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
+
 It does **not** delete them if a Rust build, rust-analyzer (the Rust helper
 that IDEs use) or RustRover is running. Then it prints
 `Later: cst btrfs snapshots clean-targets --apply`.
@@ -1010,6 +1105,11 @@ Remember: the folders of [section 3](#3-which-folders-are-left-out-of-home-snaps
 are **empty** in `home` snapshots. Files in `~/Workspace` are in the
 `Workspace.*` snapshots (only for the last 48 hours of hourly snapshots and 7
 daily ones).
+
+Cache folders (with a `CACHEDIR.TAG`, such as cargo's `target/`) are not in the
+snapshots ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)):
+a checkout restored from a snapshot has no `target/`, and the next
+`cargo build` makes it again. The NAS backup never had them either.
 
 ### From the NAS backup (commands checked against restic 0.19)
 
@@ -1211,8 +1311,9 @@ Rules the script follows about the password:
    restic recognize unchanged files and skip them.)
 4. `restic backup` of each, with the time of the local snapshot, the host name
    (`NAS_RESTIC_HOST`) and the tags `btrfs-setup` and `home` (or `Workspace`).
-   It skips folders marked as caches (a `CACHEDIR.TAG` file) and does not
-   enter other filesystems or nested subvolumes. A snapshot already uploaded
+   It skips folders marked as caches (a `CACHEDIR.TAG` file; the local
+   snapshots no longer have them anyway, [section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot))
+   and does not enter other filesystems or nested subvolumes. A snapshot already uploaded
    is not sent again.
 5. Unmounts and unpins, also if the run is stopped. After a hard kill, the
    next run cleans up first (and does not start if it cannot); a reboot also
@@ -1275,8 +1376,9 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | Command | What it does |
 |---------|--------------|
 | `snapshots setup [--yes]` | Plan, one confirmation, then everything ([section 2](#2-quick-start)). Safe to re-run. Also turns the hourly snapshots on again after `disable`. |
-| `snapshots` or `snapshots status` | Timer state, number and dates of snapshots, pause/emergency, last successful run, waiting conversions, state of each nested subvolume, NAS state. |
+| `snapshots` or `snapshots status` | Timer state, whether cache folders are dropped, number and dates of snapshots, snapshots left writable by an interrupted run, pause/emergency, last successful run, waiting conversions, state of each nested subvolume, NAS state. |
 | `snapshots list [--json]` | Every snapshot with its decision (`KEEP` / `DELETE`) and the reason, plus `IGNORED` and `UNKNOWN` entries ([section 15](#15-safety-rules-of-btrfs-snapshot-core)). Read-only. |
+| `snapshots caches [--json]` | The cache folders (`CACHEDIR.TAG`) the next snapshot of each source drops, with files and sizes ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)). Read-only; shown also when `SNAPSHOT_EXCLUDE_CACHES=no`. |
 | `snapshots prune [--confirm]` | The normal retention by hand, including what the circuit breaker held back. Without `--confirm` it is a dry run. |
 | `snapshots clean-targets [--apply]` | Old cargo `target/` folders: list, or delete with `--apply`. |
 | `snapshots disable` | Stops the hourly snapshots and the NAS timer, and cancels a pending conversion at boot. Keeps the snapshots. |
@@ -1378,6 +1480,29 @@ boot gave up`, or folders still `pending (busy)` in `status` after two reboots).
   and wait for the next hourly run. Or run `cst btrfs snapshots setup`
   again: if folders are still busy, it plans a new conversion at the next
   boot. Check with `cst btrfs snapshots status`.
+
+**`cst doctor` says a snapshot was `left writable by an interrupted run`.**
+An hourly run stopped (power loss, a kill, a timeout) between taking a
+snapshot and making it read-only. The next hourly run finishes it (drops its
+cache folders, makes it read-only); start one now with
+`sudo systemctl start btrfs-snapshot.service`. If the warning stays, the
+journal (`journalctl -u btrfs-snapshot`) says why: usually the listed entry
+is not a snapshot of that source, and the run leaves it alone. Look at it
+(`sudo btrfs subvolume show /var/mnt/btrfs-top/snapshots/<name>`), delete it
+or move it away if you do not need it, then remove its line from
+`/var/lib/btrfs-snapshot/core-unfinished`.
+
+**`cst doctor` names a writable entry `named like CST's snapshots`.**
+Something other than an interrupted CST run made a writable subvolume with a
+snapshot name in the snapshot folder (for example by hand). CST never deletes
+or counts it. Look at it with the command `cst doctor` shows, then delete or
+rename it.
+
+**A checkout restored from a snapshot has no `target/`.**
+That is expected: cache folders are dropped from snapshots
+([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)). Run
+`cargo build`. To keep them in future snapshots, set
+`SNAPSHOT_EXCLUDE_CACHES=no` in `/etc/btrfs-setup/snapshots.conf`.
 
 **`bulk status` shows `NEEDS A LOOK: ...` for an item.**
 The script found something it does not change by itself, and left it
@@ -1664,7 +1789,7 @@ After `snapshots setup`:
 | `/etc/btrfs-setup/bulk-at-boot` | flag, only while busy `~/Bulk` items wait for the boot (one item name per line) |
 | `/etc/btrfs-setup/bulk-keep` | items you keep in /home on purpose (`bulk keep ID`; one id per line, `#` starts a comment); only if you used it |
 | `/var/lib/btrfs-bulk/` | journal of a move in progress (`journal-<item>.json`, or `journal-steam-<appid>.json` for a Steam game; normally absent), `boot-attempts` |
-| `/var/lib/btrfs-snapshot/` | state: `last-ok`, `core-last-run`, `drop-pending`, `skipped`, `paused`, `emergency`, `alerted-*`, `nas-*` |
+| `/var/lib/btrfs-snapshot/` | state: `last-ok`, `core-last-run`, `core-unfinished` (snapshots still writable: normally absent or empty), `core-writable` (writable entries named like snapshots, for `cst doctor`: normally absent), `drop-pending`, `skipped`, `paused`, `emergency`, `alerted-*`, `nas-*` |
 | your home | the nested subvolumes of [section 3](#3-which-folders-are-left-out-of-home-snapshots-and-why); `~/Bulk` with `CACHEDIR.TAG` and its folders; the usual paths of section 3 now symlinks into it; `~/.cache/uv` deleted; old cargo `target/` folders deleted |
 | `~/.local/share/flatpak/overrides/ai.lmstudio.lm-studio`, `.../com.valvesoftware.Steam` | the `--filesystem` permission for `~/Bulk/models` and `~/Bulk/steam` (only if the app is installed) |
 | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/config/libraryfolders.vdf`, `.../steamapps/libraryfolders.vdf` | after `bulk steam apply`: `~/Bulk/steam` added as a library, the moved games listed under it; the old versions next to them as `libraryfolders.vdf.cst-bak-<date>` (five kept) |
@@ -1695,6 +1820,7 @@ After `snapshots nas setup`, in addition:
 | Stop and delete all local snapshots | `cst btrfs snapshots disable --purge` |
 | Stop only the NAS backup | `cst btrfs snapshots nas disable` |
 | Chrome's cache back on the disk | `cst btrfs snapshots chrome-cache off`, then restart Chrome ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)) |
+| Cache folders back in new snapshots | `SNAPSHOT_EXCLUDE_CACHES=no` in `/etc/btrfs-setup/snapshots.conf` ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)); snapshots taken before keep what they have |
 
 `disable` also cancels a pending conversion at boot: it removes
 `/etc/btrfs-setup/convert-at-boot` and disables `btrfs-subvol-convert.service`.
@@ -1786,6 +1912,9 @@ back: Steam would then believe the games are missing.
 - The deletion of `~/.cache/uv` and of the old `target/` folders during
   `setup`, and of the cargo build folders the hourly pruning removes. They
   are caches and build files: uv and cargo recreate them.
+- The cache folders dropped from snapshots: turning
+  `SNAPSHOT_EXCLUDE_CACHES` off does not put them back into the snapshots
+  taken before.
 
 ### What stays after `disable --purge`
 
@@ -1809,8 +1938,10 @@ No command removes these:
 - the login-time alert part (`cst-pending-alerts`, its user unit and
   `/var/lib/cst-alerts/`). `cst btrfs uninstall` keeps it too, as
   long as the snapshot programs are installed;
-- the state folder `/var/lib/btrfs-snapshot/` (including `core-last-run`) and
-  the empty mount point folder `/var/mnt/btrfs-top`;
+- the state folder `/var/lib/btrfs-snapshot/` (including `core-last-run`;
+  `--purge` first finishes a snapshot left writable, so that it is deleted
+  too, and removes `core-unfinished` and `core-writable`) and the empty
+  mount point folder `/var/mnt/btrfs-top`;
 - for the NAS backup: the restic repository on the NAS,
   `/etc/btrfs-setup/restic-password`, the SSH key
   `/etc/btrfs-setup/ssh/id_ed25519` (+ `.pub`), the `# BEGIN btrfs-setup.sh
@@ -1840,6 +1971,16 @@ snapshots.
   snapshot is not in any snapshot.
 - **Nested subvolumes are empty in snapshots.** Their data cannot be restored
   from snapshots or the NAS backup. This includes everything in `~/Bulk`.
+- **Cache folders are not in snapshots**, nor in the NAS backup: a folder
+  with a `CACHEDIR.TAG` (cargo's `target/`, ...) cannot be restored. A tool
+  that wrongly marks precious data as a cache loses it from the snapshots
+  too. The set differs slightly from restic's
+  ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)):
+  `.git`, `node_modules` and `SNAPSHOT_CACHES_SKIP` are not searched, and a
+  symlinked `CACHEDIR.TAG` does not count.
+- **The cost of dropping cache folders from `/home` was not measured**, only
+  from `~/Workspace` (4.9 s for 15 GiB). The run's journal line gives the
+  seconds for each snapshot.
 - **The emulator disks in `~/Bulk/emulators` have no checksums** (NOCOW):
   scrub cannot check or repair them. After a degraded RAID1 episode (one disk
   missing for a while), wipe the emulators' data instead of trusting it.
@@ -2183,6 +2324,22 @@ It looks only at entries in the snapshot folder that:
 
 Only these are ever deleted.
 
+A new snapshot is writable for a few seconds while its cache folders are
+dropped ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)),
+so it is not "its own" yet. Its name is written to
+`/var/lib/btrfs-snapshot/core-unfinished` before it is taken, and removed
+once it is read-only. A run that stopped in between leaves the name there.
+Every hourly `snapshot` and `prune` run first finishes such a listed entry
+(drops its cache folders, unless `SNAPSHOT_EXCLUDE_CACHES=no`, and sets it
+read-only), but only if it passes all the checks above except "read-only".
+`disable --purge` only sets it read-only, then deletes it with the others. A listed name that was never created is
+forgotten, and anything else is left alone with a warning. Each run also
+writes the writable entries with our names that it saw to
+`/var/lib/btrfs-snapshot/core-writable` (only when that list changed; the
+`finish` run of `disable --purge` takes the entries it made read-only off
+it): the snapshot folder is root-only, and `cst doctor`, which runs as you,
+reads that list instead.
+
 - An entry with a matching name that fails another check is shown as
   `IGNORED` by `snapshots list`.
 - Entries with other names are not shown at all.
@@ -2202,6 +2359,10 @@ home: /var/mnt/btrfs-top/home (generation 812345, changed since the newest snaps
   IGNORED home.20261012T0800               not read-only
   41 snapshot(s), 1 due for deletion
 ```
+
+A writable entry listed in `core-unfinished` shows `not read-only, left by an
+interrupted run: the next run finishes it`, or, if it fails another check,
+`... listed as left by an interrupted run but <why>: left alone`.
 
 ### What it always keeps
 
@@ -2349,7 +2510,9 @@ the ones marked `Managed by btrfs-snapshot`).
   again; a nested subvolume with no snapshots and no NAS backup
   ([section 3](#bulk-one-folder-for-everything-you-can-download-again)).
 - **CACHEDIR.TAG**: a small file that marks a folder as a cache. restic skips
-  such folders. `~/Bulk` has one.
+  such folders, and every new snapshot drops them
+  ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
+  `~/Bulk` has one; cargo writes one into every `target/`.
 - **circuit breaker**: a rule that stops all deletions when too many would
   happen at once.
 - **commit**: the moment btrfs writes a batch of changes to disk (about every
