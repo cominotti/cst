@@ -53,9 +53,15 @@ the CI image, in the E2E images and on the workstation host. ruff and ty
 both take their target Python version from that lower bound, so it is the
 only place to change when the minimum Python moves.
 
+Where to run `test pylint` and `test types`: on the host, or in a Fedora 45
+toolbox. A Fedora 44 toolbox (such as `devbox`) has Python 3.14, which is
+below `requires-python`, so uv stops there with `error: No interpreter
+found for Python >=3.15 in search path`. The unit tests, `test lint` and the E2E tasks do not
+use uv and run anywhere they ran before.
+
 ## What each gate checks
 
-All three lists live in `pyproject.toml`, and `tests/test_python_files.py`
+All four lists live in `pyproject.toml`, and `tests/test_python_files.py`
 (a unit test, standard library only) checks them against the repository:
 
 - **`[tool.ruff] extend-include`**: the extensionless helpers (`btrfs/btrfs-bulk`,
@@ -78,6 +84,12 @@ All three lists live in `pyproject.toml`, and `tests/test_python_files.py`
   nothing on. `error-on-warning` is on, so a warning fails it too. A file
   joins once it is clean; never remove one, or add an ignore comment, to
   get a green run.
+- **`[tool.cst.ty] not-yet-clean`**: the Python files ty is not yet clean
+  on. Only the unit test reads it. Every Python file is in the ty gate or in
+  this list, never both, so a new file cannot slip past ty unnoticed. The
+  list only shrinks: `NOT_YET_CLEAN_MAX` in the test caps its length. When a
+  file becomes clean, move it to the ty gate and lower the cap by one. A new
+  file goes straight into the ty gate.
 
 ## Upgrading a pin
 
