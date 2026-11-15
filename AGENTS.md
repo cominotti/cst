@@ -112,6 +112,13 @@ invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; nee
 - A new Python helper without a `.py` extension has to be added to
   `extend-include` in `pyproject.toml`. Until then ruff does not see it, and
   `tests/test_python_files.py` fails.
+- Every new Python file, tests included, has to be ty-clean and listed in
+  `[tool.ty.src] include` in `pyproject.toml`. `NOT_YET_CLEAN` in
+  `tests/test_python_files.py` names the older files ty is not clean on yet;
+  it only shrinks (remove a file from it when the file joins the ty gate),
+  and nothing new goes into it. No ignore comments (`ty: ignore`,
+  `type: ignore`) and no `[tool.ty]` settings that exclude files or switch
+  rules off: fix what ty reports in the code. The test fails on each.
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
 - A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
