@@ -460,7 +460,8 @@ def migrate():
         return 0
     os.makedirs(os.path.dirname(ATTEMPTS), exist_ok=True)
     try:
-        attempts = int(open(ATTEMPTS).read())
+        with open(ATTEMPTS) as f:
+            attempts = int(f.read())
     except OSError, ValueError:
         attempts = 0
     if attempts >= 2:
@@ -476,7 +477,8 @@ def migrate():
             capture_output=True,
         )
         return 0
-    open(ATTEMPTS, "w").write(str(attempts + 1))
+    with open(ATTEMPTS, "w") as f:
+        f.write(str(attempts + 1))
     set_nocow(VOLUMES, True)
     todo = pending(fix=True)
     log(5, f"rewriting {len(todo)} volume(s) without copy-on-write before Docker starts")

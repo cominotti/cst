@@ -32,6 +32,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 import builtins
 import contextlib
 import fcntl
+import gc
 import importlib.machinery
 import io
 import json
@@ -378,11 +379,6 @@ class Base(unittest.TestCase):
             self.enterContext(mock.patch.object(M, name, value))
         self.enterContext(mock.patch.object(os, "sync", self.fs.sync))
         self.enterContext(mock.patch.object(os, "getxattr", self.fs.getxattr))
-        # The helper opens the attempts file without closing it (bugs.md,
-        # "attempts file left open"); CPython closes it at once, but the
-        # ResourceWarning would fill the test output.
-        self.enterContext(warnings.catch_warnings())
-        warnings.filterwarnings("ignore", r"unclosed file <_io\.TextIOWrapper name='[^']*/attempts'", ResourceWarning)
         # Nothing of the helper may point outside the test folder.
         for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.POSTPONED, M.NOTIFY, M.PROC):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
@@ -1032,6 +1028,20 @@ class MigrateTest(Base):
         self.call(M.migrate)
         self.assertEqual(self.read_attempts(), "1")  # tried, not given up
         self.assertEqual(len(self.fs.commands("cp")), 1)
+
+    def test_attempts_file_is_closed(self) -> None:
+        # The counter is read and written inside `with open(...)`: no file is
+        # left for the garbage collector to close (it warned "unclosed file").
+        self.volume("cow")
+        self.schedule()
+        self.set_attempts("1")
+        self.fs.cp = cp_fails
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            self.call(M.migrate)
+            gc.collect()
+        self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
+        self.assertEqual(self.read_attempts(), "2")
 
     def test_unreadable_counter_counts_as_zero(self) -> None:
         self.volume("cow")
