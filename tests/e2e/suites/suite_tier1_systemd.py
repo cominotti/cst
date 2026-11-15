@@ -649,7 +649,8 @@ EOF
         replaces crates.io) do, also under -vv (--cap-lints warn). What a fake
         cannot prove: that this is cargo's real rule. CARGO_INCREMENTAL=0,
         because cargo compiles local crates of a dev build incrementally, and
-        those skip sccache anyway. Also the setting's cycle: plan changes
+        those skip sccache anyway. sccache runs with TMPDIR=/tmp under a
+        caller's own TMPDIR. Also the setting's cycle: plan changes
         nothing, apply writes it in, a second apply keeps it, a wrapper without
         the setting (the previous version) is rewritten, --no-sccache undoes."""
         self.addCleanup(
@@ -673,8 +674,9 @@ EOF
             rm -rf "$w" "$conf"
             mkdir -p "$w/bin" "$w/pathdep/src" "$w/gitdep/src" "$w/ws/app/src" "$w/ws/.cargo" \
                 "$w/ws/vendor/vendep/src" /home/tester/.config/cst
-            # A fake sccache: log the crate name, then run the compiler.
-            printf '%s\n' '#!/bin/sh' 'prev=' 'for a in "$@"; do' \
+            # A fake sccache: log the crate name and its TMPDIR, then run the compiler.
+            printf '%s\n' '#!/bin/sh' 'echo "${TMPDIR-unset}" >>"$SCCACHE_E2E_LOG.tmpdir"' 'prev=' \
+                'for a in "$@"; do' \
                 '    [ "$prev" = --crate-name ] && echo "$a" >>"$SCCACHE_E2E_LOG"' '    prev=$a' 'done' \
                 'exec "$@"' >"$w/bin/sccache"
             chmod 755 "$w/bin/sccache"
@@ -723,6 +725,12 @@ EOF
             grep -q '^workspace=yes # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
             expect default "$all" cargo build
+            # sccache always runs with TMPDIR=/tmp, whatever the caller's: a server
+            # it starts keeps that TMPDIR, and a caller's private one may be deleted.
+            mkdir -p "$w/caller-tmp"
+            expect tmpdir "$all" TMPDIR="$w/caller-tmp" cargo build
+            got=$(LC_ALL=C sort -u "$w/log-tmpdir.tmpdir" | tr '\n' ' ')
+            [ "$got" = "/tmp " ] || { echo "e2e: sccache ran with TMPDIR '$got', expected '/tmp '" >&2; exit 1; }
             # For one build: only the git and vendored dependencies.
             expect env0 "$deps" CST_SCCACHE_WORKSPACE=0 cargo build
 

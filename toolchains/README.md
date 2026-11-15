@@ -299,6 +299,28 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   `RUST_SCCACHE_CACHE_SIZE`), `SCCACHE_IGNORE_SERVER_IO_ERROR=1` (a server
   that breaks off: compile locally) and `SCCACHE_SERVER_UDS`.
   `SCCACHE_SERVER_UDS` is not set if you set it or `SCCACHE_SERVER_PORT`.
+- **sccache always runs with `TMPDIR=/tmp`**, even when you set `TMPDIR`
+  (`/tmp` is what a build without `TMPDIR` already gets). When no server
+  answers, the sccache client starts one, and that server keeps the client's
+  `TMPDIR` for its own temporary folders until it stops. A build run with a
+  private `TMPDIR` that is deleted afterwards (a temporary scope, a test
+  harness) used to leave a server whose every later compile failed with
+  `sccache: caused by: Failed to create temp dir` (`No such file or
+  directory` under the deleted folder), in every build of that environment,
+  until the server stopped. A `TMPDIR` too long for a unix socket path
+  failed the build at once (`sccache: error: path must be shorter than
+  SUN_LEN`), because the client makes its startup socket there. The cost:
+  sccache hands the client's environment to rustc, so rustc's own temporary
+  files also go to `/tmp` for the compiles that go through sccache. Compiles
+  that go straight to rustc (the cases above, and `CST_SCCACHE=0 cargo
+  build` for a build that needs its own `TMPDIR`) keep yours. Build scripts
+  and tests keep yours as well: cargo runs them itself, only their compiles
+  go through the wrapper.
+  The fix reaches the machine with `cst toolchains config apply`, which
+  copies the new wrapper (`config plan` shows it as outdated until then). A
+  server that is already running keeps the `TMPDIR` it started with until it
+  stops (after 10 minutes without work, or `sccache --stop-server` with that
+  environment's `SCCACHE_SERVER_UDS`).
 
 What is cached and what is not (sccache's own limits):
 

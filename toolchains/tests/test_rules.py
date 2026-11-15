@@ -1270,10 +1270,11 @@ class RustcWrapperTest(unittest.TestCase):
         self.log = os.path.join(self.tmp, "log")
         # Each fake prints who ran and the variables that matter.
         report = (
-            'printf "%s|uds=%s|dir=%s|size=%s|io=%s|inc=%s|binc=%s|allow=%s|args=%s\\n" "{who}" '
+            'printf "%s|uds=%s|dir=%s|size=%s|io=%s|inc=%s|binc=%s|allow=%s|tmp=%s|args=%s\\n" "{who}" '
             '"${{SCCACHE_SERVER_UDS-}}" "${{SCCACHE_DIR-}}" "${{SCCACHE_CACHE_SIZE-}}" '
             '"${{SCCACHE_IGNORE_SERVER_IO_ERROR-}}" "${{CARGO_INCREMENTAL-unset}}" '
-            '"${{CARGO_BUILD_INCREMENTAL-unset}}" "${{SCCACHE_ALLOW_INCREMENTAL-unset}}" "$*" >>"{log}"\n'
+            '"${{CARGO_BUILD_INCREMENTAL-unset}}" "${{SCCACHE_ALLOW_INCREMENTAL-unset}}" "${{TMPDIR-unset}}" '
+            '"$*" >>"{log}"\n'
         )
         for name in ("rustc", "kani-compiler", "clippy-driver"):
             self.fake(os.path.join(self.tools, name), report.format(who=name, log=self.log))
@@ -1409,6 +1410,43 @@ class RustcWrapperTest(unittest.TestCase):
         run = os.path.join(self.home, ".cache/sccache/run")
         self.assertEqual(calls[0]["uds"], os.path.join(run, "cst-sccache-host.sock"))
         self.assertEqual(stat_mode(os.stat(run)), 0o700)
+
+    def test_sccache_runs_with_tmp_as_tmpdir(self):
+        # A server the client starts keeps the client's TMPDIR: a caller's
+        # private one (deleted later, or too long for a socket path) must not
+        # reach it. rustc, run with the client's environment, gets /tmp too.
+        private = os.path.join(self.tmp, "scope-tmp")
+        for caller in (private, "/" + "x" * 120, None):
+            calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", "--cap-lints", "allow", TMPDIR=caller)
+            self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], caller)
+            self.assertEqual([c["tmp"] for c in calls], ["/tmp", "/tmp"], caller)
+        # The defaults that only fill in what is unset still do (TMPDIR is the one exception).
+        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_DIR="/c")
+        self.assertEqual((calls[0]["tmp"], calls[0]["dir"]), ("/tmp", "/c"))
+
+    def test_direct_compiles_keep_the_callers_tmpdir(self):
+        private = os.path.join(self.tmp, "scope-tmp")
+        rustc = self.rustc()
+        cases = [
+            ("CST_SCCACHE=0", [rustc, "x"], {"CST_SCCACHE": "0"}, "rustc"),
+            ("incremental", [rustc, "-C", "incremental=/t/inc"], {}, "rustc"),
+            ("local crate, one-build 0", [rustc, *self.LOCAL], {"CST_SCCACHE_WORKSPACE": "0"}, "rustc"),
+            ("another compiler", [os.path.join(self.tools, "clippy-driver"), rustc, "x"], {}, "clippy-driver"),
+        ]
+        for label, args, env, who in cases:
+            for caller, seen in ((private, private), (None, "unset")):
+                calls = self.run_wrapper(*args, TMPDIR=caller, **env)
+                self.assertEqual([(c["who"], c["tmp"]) for c in calls], [(who, seen)], (label, caller))
+        # The written RUST_SCCACHE_WORKSPACE=no: a local crate runs directly too.
+        self.written("no")
+        calls = self.run_wrapper(rustc, *self.LOCAL, TMPDIR=private)
+        self.assertEqual([(c["who"], c["tmp"]) for c in calls], [("rustc", private)])
+        # No sccache on the PATH, and no HOME: straight to rustc.
+        calls = self.run_wrapper(rustc, "x", TMPDIR=private, HOME=None)
+        self.assertEqual([(c["who"], c["tmp"]) for c in calls], [("rustc", private)])
+        os.unlink(self.sccache)
+        calls = self.run_wrapper(rustc, "x", TMPDIR=private)
+        self.assertEqual([(c["who"], c["tmp"]) for c in calls], [("rustc", private)])
 
     LOCAL = ("--crate-name", "app", "--crate-type", "lib", "src/lib.rs")
     DEPENDENCIES = (["--cap-lints", "allow"], ["--cap-lints", "warn"], ["--cap-lints=allow"])
