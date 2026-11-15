@@ -165,7 +165,9 @@ class Scratch(unittest.TestCase):
             f.write(xml)
 
     def run_tool(self, *args):
-        return subprocess.run(["python3", "-I", TOOL, *args], env=self.env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(
+            ["python3", "-I", TOOL, *args], check=False, env=self.env, capture_output=True, text=True, timeout=60
+        )
 
     def calls(self):
         try:
@@ -469,7 +471,12 @@ class ListStatusTest(Scratch):
         os.unlink(os.path.join(self.bin, "virsh"))
         self.env["PATH"] = f"{self.bin}"
         r = subprocess.run(
-            [sys.executable, "-I", TOOL, "status", "win"], env=self.env, capture_output=True, text=True, timeout=60
+            [sys.executable, "-I", TOOL, "status", "win"],
+            check=False,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("virsh not found", r.stdout)
@@ -1162,7 +1169,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         if not self.m.nocow(src):
             self.skipTest("NOCOW not settable here")
         plain = os.path.join(self.tmp, "plain.qcow2")
-        r = subprocess.run(["cp", "--reflink=always", src, plain], capture_output=True, text=True)
+        r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
         self.m.copy(src, dest, "reflink", True)
@@ -1175,7 +1182,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         with open(cow, "wb") as f:
             f.write(os.urandom(1 << 20))
         self.assertFalse(self.m.nocow(cow))
-        r = subprocess.run(["cp", "--reflink=auto", "-a", cow, src], capture_output=True, text=True)
+        r = subprocess.run(["cp", "--reflink=auto", "-a", cow, src], check=False, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.m.nocow(src))
         with open(src, "rb") as a, open(cow, "rb") as b:
@@ -1186,6 +1193,7 @@ class SetupScriptTest(unittest.TestCase):
     def run_setup(self, *args):
         return subprocess.run(
             ["bash", SETUP, *args],
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
@@ -1203,6 +1211,7 @@ class SetupScriptTest(unittest.TestCase):
         for args in (("tune", "apply", "w"), ("nocow", "apply"), ("nocow", "plan", "--root")):
             r = subprocess.run(
                 ["bash", SETUP, *args],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -1231,6 +1240,7 @@ class SetupScriptTest(unittest.TestCase):
             os.symlink(shutil.which(tool), os.path.join(tmp, tool))
         r = subprocess.run(
             ["bash", SETUP, "status", "win"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
@@ -1251,6 +1261,7 @@ class SetupScriptTest(unittest.TestCase):
     def test_registered_in_cst(self):
         r = subprocess.run(
             ["bash", os.path.join(REPO, "cst"), "help"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,

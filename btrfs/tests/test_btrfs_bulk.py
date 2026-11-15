@@ -817,11 +817,15 @@ class BulkTest(BulkBase):
         )
         self.write("Programs/a", "a")
         before = self.tree()
-        r = subprocess.run([sys.executable, "-I", "-B", TOOL, "plan"], env=env, capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", TOOL, "plan"], check=False, env=env, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("~/Programs -> ~/Bulk/apps", r.stdout)
         self.assertEqual(self.tree(), before)
-        r = subprocess.run([sys.executable, "-I", "-B", TOOL, "bogus"], env=env, capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", TOOL, "bogus"], check=False, env=env, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 2)
 
     # ---- review round 3 ----
@@ -931,7 +935,9 @@ class BulkTest(BulkBase):
             BTRFS_BULK_STATE=self.m.STATE,
             BTRFS_BULK_LOCK=self.m.LOCK,
         )
-        return subprocess.run([sys.executable, "-I", "-B", TOOL, *args], env=env, capture_output=True, text=True)
+        return subprocess.run(
+            [sys.executable, "-I", "-B", TOOL, *args], check=False, env=env, capture_output=True, text=True
+        )
 
     def test_keep_and_unkeep(self):
         self.write(".m2/repository/x.jar", "jar")

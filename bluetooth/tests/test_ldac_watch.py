@@ -129,6 +129,7 @@ class ParseTest(unittest.TestCase):
     def test_snapshot_cli(self):
         r = subprocess.run(
             [sys.executable, "-I", WATCH, "--device", MAC, "--snapshot"],
+            check=False,
             input=json.dumps(pw_dump()),
             capture_output=True,
             text=True,
@@ -136,7 +137,11 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("act: LDAC at 96000 Hz (want 48000)", r.stdout)
         r = subprocess.run(
-            [sys.executable, "-I", WATCH, "--device", "nope", "--snapshot"], input="[]", capture_output=True, text=True
+            [sys.executable, "-I", WATCH, "--device", "nope", "--snapshot"],
+            check=False,
+            input="[]",
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(r.returncode, 2)
 
@@ -612,7 +617,9 @@ systemctl() {
             "REPO": os.path.dirname(os.path.dirname(WATCH)),
             **(extra_env or {}),
         }
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
         calls = []
         if os.path.exists(log):
             with open(log) as f:
@@ -732,6 +739,7 @@ le_plan() {{ :; }}; lw_plan() {{ :; }}
         log = os.path.join(tmp, "log")
         r = subprocess.run(
             ["bash", "-c", script],
+            check=False,
             capture_output=True,
             text=True,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log},

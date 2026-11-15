@@ -22,6 +22,7 @@ def repo_files(repo: str = REPO) -> list[str]:
     """
     out = subprocess.run(
         ["git", "-C", repo, "ls-files", "-co", "--exclude-standard"],
+        check=False,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,

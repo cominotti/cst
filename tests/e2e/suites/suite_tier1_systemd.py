@@ -17,7 +17,7 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
         for k, v in env.items():
             full.extend(["-e", f"{k}={v}"])
     full.extend([container, *cmd])
-    p = subprocess.run(full, input=input_text, capture_output=True, text=True)
+    p = subprocess.run(full, check=False, input=input_text, capture_output=True, text=True)
     if check and p.returncode != 0:
         raise AssertionError(
             f"command failed (rc={p.returncode}): {' '.join(cmd)}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}"
@@ -81,6 +81,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
                     "-c",
                     f"{subcmd}",
                 ],
+                check=False,
                 capture_output=True,
                 text=True,
             )

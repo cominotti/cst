@@ -121,7 +121,9 @@ class Host:
         rc 127 when it cannot be started, 124 on a timeout."""
         full = (["flatpak-spawn", "--host"] + cmd) if self.container else cmd
         try:
-            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            p = subprocess.run(
+                full, check=False, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+            )
         except FileNotFoundError as e:
             return 127, "", f"{full[0]}: not found ({e.strerror})"
         except subprocess.TimeoutExpired:

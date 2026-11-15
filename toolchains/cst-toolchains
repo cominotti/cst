@@ -891,7 +891,9 @@ def ask_cargo(cmd, env, cwd):
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            cmd, check=False, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"cargo metadata: {e}"
     if r.returncode != 0:
@@ -1008,6 +1010,7 @@ def run_idle(cmd, cwd, env, timeout):
     full = ([io, "-c", "3"] if io else []) + list(cmd)
     return subprocess.run(
         full,
+        check=False,
         cwd=cwd,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -1360,6 +1363,7 @@ def remove_tree(path, timeout=None):
     try:
         r = subprocess.run(
             ["rm", "-rf", "--one-file-system", "--", path],
+            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -2166,7 +2170,14 @@ def rustup_default(home, rh):
     env.pop("RUSTUP_TOOLCHAIN", None)
     try:
         r = subprocess.run(
-            [rustup, "default"], cwd=home, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20
+            [rustup, "default"],
+            check=False,
+            cwd=home,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
     except OSError, subprocess.TimeoutExpired:
         return ""
@@ -2411,7 +2422,9 @@ def systemctl_env():
 def systemctl(*args, check=False):
     """Output (stripped) of systemctl --user; '' when it could not run."""
     try:
-        r = subprocess.run(systemctl_cmd(*args), capture_output=True, text=True, env=systemctl_env(), timeout=60)
+        r = subprocess.run(
+            systemctl_cmd(*args), check=False, capture_output=True, text=True, env=systemctl_env(), timeout=60
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {e}") from None
@@ -3370,6 +3383,7 @@ def sccache_status_lines(home):
         try:
             r = subprocess.run(
                 [exe, "--show-stats"],
+                check=False,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

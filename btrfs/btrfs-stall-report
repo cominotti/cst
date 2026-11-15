@@ -295,7 +295,7 @@ def parse_time(s, default):
         return float(s)
     except ValueError:
         pass
-    out = subprocess.run(["date", "-d", s, "+%s"], capture_output=True, text=True)
+    out = subprocess.run(["date", "-d", s, "+%s"], check=False, capture_output=True, text=True)
     if out.returncode != 0:
         sys.exit(f"cannot parse time: {s!r} ({out.stderr.strip()})")
     return float(out.stdout.strip())
@@ -372,6 +372,7 @@ def container_names():
         try:
             out = subprocess.run(
                 [tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -412,7 +413,7 @@ def below_top(since, until, field, top=8):
         str(top),
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        out = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=90)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"below dump failed: {e}"
     if out.returncode != 0:

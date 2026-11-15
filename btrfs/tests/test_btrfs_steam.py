@@ -62,7 +62,10 @@ class SteamTest(tb.BulkBase):
             if self.has_fake_nocow(src):
                 raise RuntimeError(f"cp: failed to clone '{dst}' from '{src}': Invalid argument")
             r = subprocess.run(
-                ["cp", "-a", "--reflink=auto", "--no-target-directory", "--", src, dst], capture_output=True, text=True
+                ["cp", "-a", "--reflink=auto", "--no-target-directory", "--", src, dst],
+                check=False,
+                capture_output=True,
+                text=True,
             )
             if r.returncode:
                 raise RuntimeError(r.stderr)
@@ -1135,12 +1138,18 @@ class SteamTest(tb.BulkBase):
             BTRFS_BULK_LOCK=self.m.LOCK,
         )
         before = self.tree()
-        r = subprocess.run([sys.executable, "-I", "-B", TOOL, "steam", "plan"], env=env, capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", TOOL, "steam", "plan"], check=False, env=env, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Dry run, nothing changed", r.stdout)
         self.assertEqual(self.tree(), before)
         r = subprocess.run(
-            [sys.executable, "-I", "-B", TOOL, "steam", "apply", "--app", "x"], env=env, capture_output=True, text=True
+            [sys.executable, "-I", "-B", TOOL, "steam", "apply", "--app", "x"],
+            check=False,
+            env=env,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(r.returncode, 2)
 

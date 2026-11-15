@@ -57,6 +57,7 @@ class CoreCacheArgsTest(unittest.TestCase):
             open(os.path.join(d, "a-file"), "w").close()
             r = subprocess.run(
                 ["bash", "-c", script, "_", exclude, skips],
+                check=False,
                 cwd=d,
                 capture_output=True,
                 text=True,
@@ -143,6 +144,7 @@ class ListCachesTest(unittest.TestCase):
         )
         r = subprocess.run(
             ["bash", "-c", script],
+            check=False,
             capture_output=True,
             text=True,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
@@ -185,7 +187,11 @@ class SnapStatusCachesTest(unittest.TestCase):
                 ]
             )
             r = subprocess.run(
-                ["bash", "-c", script, "_", BTRFS, conf, d], capture_output=True, text=True, stdin=subprocess.DEVNULL
+                ["bash", "-c", script, "_", BTRFS, conf, d],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
             )
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.splitlines()

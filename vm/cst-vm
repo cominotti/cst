@@ -202,6 +202,7 @@ def run(cmd, timeout=120, extra_env=None, detach=None):
     try:
         p = subprocess.run(
             cmd,
+            check=False,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -2148,7 +2149,7 @@ def mark_system_dir(d):
     steps.append(["chattr", "+C", path])
     for cmd in steps:
         print(f"  sudo {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
-        p = subprocess.run(["sudo", "--", *cmd], env={**os.environ, "LC_ALL": "C"})
+        p = subprocess.run(["sudo", "--", *cmd], check=False, env={**os.environ, "LC_ALL": "C"})
         if p.returncode != 0:
             return f"sudo {cmd[0]} {q}: exit {p.returncode}"
     rc, so, _ = run(["sudo", "--", "lsattr", "-d", path])
