@@ -14,9 +14,39 @@ consistent.
   (`plan`, `status`, or a list mode) that changes nothing. Root commands call
   sudo by themselves and refuse to run inside a toolbox; they print the host
   command instead.
-- **Tests never touch the real host.** No sudo, no real systemd, no real
-  libvirt, no writes outside temporary folders. Use the fakes and stubs the
-  existing tests use.
+- **Every change comes with tests that would catch its regression.** A new
+  command, option or operation, and every change in behaviour, adds or updates
+  tests in the same change:
+  - **Unit tests**, with the fakes and stubs the existing tests use. They cover
+    the normal path, the failure and edge cases, and the bug being fixed. A
+    test for a fix must fail without the fix. Assert on behaviour (output,
+    files written, commands called), not on the source text.
+  - **E2E tests** (`tests/e2e`) for every new command or operation and every
+    behaviour change that touches the machine. Above all, they cover what a
+    fake cannot prove: how the real systemd, cgroups, btrfs, udev, Polkit or
+    another tool merges, orders or applies a setting, for example drop-in
+    order across `daemon-reload`. Use tier 1 when the systemd container can
+    host the check, and tier 2 for disks, btrfs and cgroup controllers. Only
+    pure logic with no effect on the machine (parsing, report wording and
+    numbers) may rely on unit tests alone.
+  - For anything that changes the machine, cover the whole cycle:
+    - `plan` changes nothing;
+    - `apply` does what `status` then shows;
+    - a second run changes nothing more;
+    - undo or `uninstall` restores the previous state;
+    - an upgrade from the previous version (old files, old state formats)
+      works.
+  - The pull request lists the tests for each change and says how "fails
+    without the fix" was checked (for example: run against the old code).
+  - A test that cannot run locally (tier 2 on a workstation, or tier 1 when its
+    container does not start) is still written. Say so in the pull request; CI
+    runs it before the merge. Never skip a test, mark it as an expected failure
+    or loosen it to get a green run.
+  - A change with no behaviour change (docs, comments) needs no new tests; the
+    pull request says so.
+- **Tests never touch the real host.** Unit tests use no sudo, no real systemd
+  and no real libvirt, and write only in temporary folders. E2E tests run only
+  inside their containers (tier 2 only in CI or on a disposable VM).
 - **Never walk `/`** (`find /`, `fd . /`, ...). Inside a toolbox `/run/host`
   is the whole host, including network shares.
 - **No fixed checkout path.** CST works from wherever it is cloned: the
@@ -61,7 +91,9 @@ invowk validate cst.invowkmod && invowk audit cst.invowkmod
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 ```
 
-- Before a pull request, run the first, third and fourth lines.
+- Before a pull request, run the first, third and fourth lines, and the fifth
+  when the change adds or touches a tier 1 E2E test (if its container does not
+  start, say so in the pull request).
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
 - A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.

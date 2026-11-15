@@ -28,7 +28,9 @@ described in [../btrfs/README.md](../btrfs/README.md).
 >   toolboxes, toolboxes on the E-cores only, a GameMode hook, and a watchdog
 >   timer. The files are listed in section 6.1.
 > - **Only while a game runs** (and cleared by a reboot): the VM and Docker
->   move to CPUs 12-23 with a very low priority, the game's memory is
+>   move to CPUs 12-23 with a very low priority, toolboxes and the other
+>   boxes of your session that sit next to the game (GNOME's file indexer,
+>   `systemd-run --user` jobs) get the lowest priority, the game's memory is
 >   protected, desktop apps' swapped pages stay in RAM (zswap) instead of
 >   the swap disk, the P-cores react faster.
 > - **Optional, only if you run them**: `vm-pin` (section 8), `docker-slice`
@@ -79,9 +81,14 @@ This is the tree of boxes that matters here (simplified):
 │   └── user-1000.slice
 │       └── user@1000.service       your user manager
 │           ├── app.slice           desktop apps, Steam and the game,
-│           │                       flatpak-session-helper.service
-│           ├── background.slice    GNOME background tasks
-│           └── user.slice          "inner user.slice": the toolboxes
+│           │                       flatpak-session-helper.service,
+│           │                       `systemd-run --user` jobs (run-*)
+│           ├── session.slice       gnome-shell
+│           ├── background.slice    GNOME background tasks (the file
+│           │                       indexer, localsearch)
+│           ├── user.slice          "inner user.slice": the toolboxes
+│           └── X.slice             any slice a job made for itself
+│                                   (`systemd-run --user --slice=X.slice`)
 ├── machine.slice                   the Windows VM (libvirt)
 ├── system.slice                    system services; Docker containers
 │                                   (docker-*.scope) by default
@@ -456,11 +463,13 @@ game profile: ON (by hand)
   toolboxes       weight=idle
   app.slice       zswap writeback=no
   toolboxes       cpus effective=12-23
+  other boxes     idle: background.slice lushtext.slice run-u7.service
   EPP cpu0 performance, cpu12 balance_performance
   drift: none (every setting the profile made still holds)
 ```
 
-`(by hand)` appears only after `game on`. The last line compares what the
+`(by hand)` appears only after `game on`. `other boxes` lists the boxes of
+your user manager next to the game that the profile made idle (7.1). The last line compares what the
 profile set with what systemd reports now (section 7.5); a setting that
 changed shows as a `DRIFT:` line instead.
 
@@ -491,14 +500,51 @@ are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
 | 1, 2, 3 | Docker, if `builds.slice` is active | `AllowedCPUs=12-23`, `CPUWeight=idle` |
 | 1, 2 | Docker containers **outside** `builds.slice` (`docker-*.scope`) | `AllowedCPUs=12-23` (no weight change) |
 | 3 | Toolboxes (inner `user.slice`) | `CPUWeight=idle` |
+| 3 | The other boxes of your user manager next to the game (see below): `background.slice`, any other slice of its own at the top of the user manager, and `systemd-run --user` jobs straight in `app.slice` (`run-*.scope`, `run-*.service`); a box started after the profile gets it at the next watchdog run, within 30 s | `CPUWeight=idle`; with cpuset delegated (6.3) also `AllowedCPUs=12-23` |
 | 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` |
-| 4 | Memory chain: system `user.slice`, `user-<uid>.slice`, `user@<uid>.service`, then `app.slice` in your user manager, and **every** Steam scope `app-flatpak-com.valvesoftware.Steam-*` (the client has one, and each game gets its own; a game started after the profile gets it at the next watchdog run, within 30 s) | `MemoryLow=16G` |
+| 4 | Memory chain: system `user.slice`, `user-<uid>.slice`, `user@<uid>.service`, then `app.slice` in your user manager, and **every** Steam scope `app-flatpak-com.valvesoftware.Steam-*` (the client has one, and each game gets its own; a game started after the profile gets it at the next watchdog run, within 30 s) | `MemoryLow=16G`; for the first three also a drop-in, `/run/systemd/system/<unit>.d/zz-cst-game.conf`, that wins at every `daemon-reload` (7.5) |
 | 4 | Desktop apps and the game: `app.slice` in your user manager (only if `GAME_ZSWAP_WRITEBACK=no`, and only if systemd knows `MemoryZSwapWriteback`) | `MemoryZSwapWriteback=no` |
 | - | P-cores 0-7 | EPP `performance` (E-cores keep their EPP) |
 
 In short: the game gets the P-cores and E-cores 8-11, the VM and Docker move
-to 12-23 with a low priority, toolboxes get the idle class, and the kernel
-avoids taking the game's memory.
+to 12-23 with a low priority, toolboxes and the other boxes next to the game
+get the idle class, and the kernel avoids taking the game's memory.
+
+**The other boxes next to the game.** Your user manager holds more than
+`app.slice` (the game, desktop apps) and the toolboxes. A fixed list of boxes
+would miss the rest, and what it misses runs at the normal weight (100) on
+all 24 CPUs, right next to the game. An example from this machine: a project
+ran its jobs with `systemd-run --user --slice=lushtext.slice`. That slice sat
+at the top of the user manager, beside `app.slice`, and used 69,000
+CPU-seconds during games. So `on` looks at the user manager's cgroup folder
+and makes idle:
+
+- every top-level slice except `app.slice`, `session.slice` (gnome-shell:
+  the desktop must stay responsive) and `user.slice` (the toolboxes, handled
+  above). That includes `background.slice`: on this machine it holds only
+  GNOME's file indexer (`localsearch-3.service`, often 46 % of a CPU), which
+  serves neither the game nor the desktop's responsiveness;
+- `systemd-run --user` jobs started without `--slice`: they land straight in
+  `app.slice` as `run-*.scope` or `run-*.service`, next to the game.
+
+The watchdog picks up such boxes that appear later. A slice keeps the
+setting even if it goes away (stopped, or unloaded once nothing uses it) and
+a later job makes it again: the runtime override stays in
+`/run/user/<uid>/systemd/user.control/<slice>.d/` until `off`. A box that
+holds a GameMode client (the game itself, started in such a box) is left
+alone. That check runs once, when the box is first picked up: a game started
+later in a box that is already idle stays idle until `off`, and so does a
+game that does not use GameMode (with `game on` by hand). Start such a game
+from the desktop or Steam, or with `--slice=app-NAME.slice`. Apps that GNOME
+or Flatpak start (`app-*.scope`) and `flatpak-session-helper.service` are
+not touched.
+
+To keep a job out of this, give it a slice under one of the boxes CST
+already handles. `systemd-run --user --slice=user-NAME.slice` nests under the
+toolboxes' `user.slice` (weight 30 and the E-cores always, idle during
+games, as the toolboxes). `--slice=app-NAME.slice` nests under `app.slice`,
+next to the game, and is left alone. `cst doctor` warns about top-level
+slices it does not know ([../doctor/README.md](../doctor/README.md)).
 
 **Why zswap writeback is switched off for `app.slice`.** `MemoryLow` keeps the
 game's pages in RAM. When the kernel still takes some (from the game or from
@@ -526,7 +572,10 @@ this script. So the game's 16G protection competes with a large VM protection.
 `low` column of its per-cgroup table.
 
 The profile writes this message to the journal (the system log):
-`on: VM/Docker on 12-23, toolboxes idle, game memory protected (16G), app zswap writeback no, P-cores EPP performance`
+`on: VM/Docker on 12-23, toolboxes and other user boxes idle, game memory protected (16G), app zswap writeback no, P-cores EPP performance`
+
+and, before it, one line per other box it made idle, for example
+`lushtext.slice: idle while the game runs (a box of the user manager next to the game)`.
 
 ### 7.2 How it switches on and off
 
@@ -550,9 +599,13 @@ that has GameMode's library (`libgamemode`) loaded.
   switches on (`GameMode client running but profile off: switching on`). This
   is a fallback if the GameMode hook failed.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
-  and Steam scopes started in the meantime (the game's own) get `MemoryLow`.
-  A setting of the profile that something undid in the meantime is set again
-  (section 7.5).
+  Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
+  other boxes next to the game that appeared in the meantime get the idle
+  class (7.1). A box it already handled is skipped, so `game.state` does not
+  grow at each run. A setting of the profile that something undid in the
+  meantime is set again (section 7.5).
+- Profile off: if the profile's `zz-cst-game.conf` drop-ins (7.5) are still
+  there, it removes them and reloads systemd (logged at level warning).
 
 `on`, `off` and `tick` never run at the same time: they share a lock file,
 `/run/cpu-setup/lock`, and wait up to 60 s for it.
@@ -598,11 +651,24 @@ so if `on` stops halfway, `off` can still undo what was done.
   deleted (`/run/systemd/system.control/<unit>.d/50-<Property>.conf`, or the
   same under `/run/user/<uid>/systemd/user.control/`), then systemd re-reads
   its files (`daemon-reload`). The unit goes back to its defaults or its
-  `/etc` drop-ins. No leftover override stays behind to hide a drop-in later;
+  `/etc` drop-ins. No leftover override stays behind to hide a drop-in later.
+  For a **transient** unit (a scope such as a Docker container or a Steam
+  game, or the `run-*.service` of `systemd-run`) systemd keeps the override
+  next to the unit's own file instead, in its transient folder
+  (`/run/systemd/transient/<unit>.d/`, or `/run/user/<uid>/systemd/transient/`):
+  that is the file `off` deletes for those. (Versions before 2026-11 looked
+  in the control folder for them too, found nothing to delete, and left such
+  a container on 12-23, or a Steam scope protected, until it ended.);
 - property that **had** an override: its old value is set back;
 - EPP: each P-core gets its old value back;
 - a `cpuset.cpus` file written directly (7.1, toolboxes): its old value is
   written back (usually empty, which means "no limit of its own").
+
+A box that is gone by then (a `systemd-run` job that ended) is no problem:
+its override file is deleted if it is still there, and nothing else is done.
+The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
+when `game.state` is missing: a drop-in left behind would keep the game's
+memory protection until the next reboot. Then `off` reloads systemd.
 
 Then it logs `off: previous CPU, weight, memory, zswap writeback and EPP settings restored`
 and deletes `game.state` and `game.intended` (section 7.5).
@@ -622,20 +688,41 @@ effect. Two things cause it:
   `MemoryLow=0`), in `/etc/systemd/system.control`. That
   folder comes before `/run/systemd/system.control` (where the profile's
   overrides are), and a file there with the same name hides the profile's
-  file. So after every `daemon-reload` those three get `MemoryLow=0` back.
-  uresourced also changes these values by itself at times (for example when
-  the active session changes). Since `memory.low` only protects as far as
-  every parent box also protects, one of them at `0` voids the game's
-  16 GiB protection.
+  file. So after every `daemon-reload` those three would get `MemoryLow=0`
+  back. uresourced also changes these values by itself at times (for example
+  at login, or when the active session changes). Since `memory.low` only
+  protects as far as every parent box also protects, one of them at `0`
+  voids the game's 16 GiB protection.
 
-What the profile does about it:
+**The drop-in that always wins.** systemd applies drop-ins with *different*
+names all together, sorted by file name whatever their folder, and the last
+one wins (`systemd.unit(5)`). Only a file with the *same* name in a folder
+that comes first hides another. So `on` also writes, for those three units,
+`/run/systemd/system/<unit>.d/zz-cst-game.conf` with `MemoryLow=16G`
+(`[Slice]` for the two slices, `[Service]` for `user@<uid>.service`). `zz-`
+sorts after `50-MemoryLow.conf`, so after a `daemon-reload` the protection
+holds. `on` needs no reload for it: `set-property` already set the live value.
+(Until the next reload, `systemctl status` of those units may say their
+drop-ins "changed on disk"; that is this file, and harmless.)
+On this machine uresourced set `user-1000.slice` only once, at login, so the
+reloads, not its live calls, were what undid the protection. A live call of
+uresourced during a game is still possible; the drift repair below catches
+it.
+
+`off` and the watchdog (with the profile off) remove these files whatever
+else happened (7.4), and `uninstall` removes any left behind; `cst doctor`
+warns if one is still there while the profile is off.
+
+What else the profile does about it:
 
 - Right after `on` sets a property, it reads it back from systemd
   (`systemctl show`; `16G` reads back as `17179869184` bytes) and writes the
   value to `/run/cpu-setup/game.intended`, one line per property:
   `prop sys user.slice MemoryLow 16G 17179869184`. A `cpuset.cpus` file it
-  wrote directly (7.1) gets a `cgw` line. The transient scopes (Docker
-  containers, Steam) are not recorded: no drop-in can win over theirs.
+  wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
+  of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
+  not recorded: no drop-in can win over theirs. The slices made idle in the
+  user manager (7.1) are recorded, so the repair covers them too.
 - Every watchdog run (`tick`, every 30 s) asks systemd once per unit and
   compares. Each setting that differs is set again with
   `systemctl set-property --runtime` and logged at level notice, for example:
@@ -668,7 +755,26 @@ off when the game ends.)
 `game.intended` writes no intended values. Until the profile is switched off
 and on again, `tick` skips the comparison, and `game state` prints
 `drift: not checked (switched on by an older version ...)`. `off` works as
-before.
+before. A profile switched on by a version before the `zz-cst-game.conf`
+drop-ins has none until it is switched on again; the drift repair still
+covers it. The new watchdog makes the other boxes idle (7.1) at its next run
+either way.
+
+### 7.6 For other projects: is the game profile on?
+
+**Stable interface:** the file `/run/cpu-setup/game.state` **exists** while
+the game profile is on, and does not exist while it is off. Another project
+that wants to hold back its own work during games may test for it:
+
+```bash
+if [[ -e /run/cpu-setup/game.state ]]; then echo "a game runs"; fi
+```
+
+Key on existence only. The contents of `game.state` (and of
+`game.intended`) are internal to `cpu-game-profile` and may change in any
+version. To be covered all the time, not only during games, run such work in
+a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
+(7.1).
 
 ---
 
@@ -836,6 +942,9 @@ does not read that file, so they work together with `docker-slice`.
 | Windows VM | `machine.slice` | weight 50, io 50† (+ 12-23 with `vm-pin`) | weight 10, io 10†, 12-23 |
 | Docker with `docker-slice` | `builds.slice` | weight 20, io 20†, E-cores | idle, io 20†, 12-23 |
 | Docker without `docker-slice` | `system.slice/docker-*.scope` | not covered | 12-23 only |
+| `systemd-run --user` jobs without `--slice` | `app.slice/run-*.scope`, `app.slice/run-*.service` | not covered | idle, 12-23* |
+| `systemd-run --user --slice=X.slice` (X without a dash), and GNOME's `background.slice` | top-level `X.slice` of the user manager | not covered (`background.slice`: GNOME's weight 30) | idle, 12-23* |
+| `systemd-run --user --slice=user-NAME.slice` | under the inner `user.slice` | as the toolboxes | as the toolboxes |
 
 \* the CPU limits need the cpuset delegation (6.3), so they work only after
 the user manager restart.
@@ -852,10 +961,13 @@ a toolbox (section 11).
 
 - Commands in a **host terminal** (not in a toolbox): they run in `app.slice`,
   the same box as the game, with normal weight and on all CPUs.
-- `systemd-run --user` jobs: they go to `app.slice` too. Jobs started with
-  `systemd-run --user --slice=X` land in `X` and are not covered either,
-  unless `X` nests under the toolboxes' `user.slice` (a name of the form
-  `user-*.slice`, such as `user-builds.slice`).
+- `systemd-run --user` jobs **outside games**: without `--slice` they go to
+  `app.slice` too, and with `--slice=X.slice` they land in `X`, at the top of
+  the user manager. Either way they run at the normal weight on all CPUs
+  until a game starts; during games the profile makes them idle (7.1). To
+  cover them all the time, start them with `--slice=user-NAME.slice` (such as
+  `user-builds.slice`): that nests under the toolboxes' `user.slice`.
+  `cst doctor` points at such slices and jobs.
 - IDE builds: an IDE started from the desktop runs in `app.slice`, and so do
   its builds. (An IDE inside a toolbox is covered.)
 - Podman **Quadlets** (containers that run as systemd user services): user
@@ -1014,6 +1126,7 @@ cst cpu uninstall
 - removes the units, the `machine.slice` and `user@.service` drop-ins (also
   `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the
   polkit rule and the three programs;
+- removes any `/run/systemd/system/*.d/zz-cst-game.conf` left behind (7.5);
 - removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
   and `~/.config/gamemode.ini` (only if it is the script's file);
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
@@ -1096,6 +1209,14 @@ Wait 30 s: the watchdog sets it again and logs a `drift:` line
 (`journalctl -b -u cpu-game-watchdog.service`). If the lines stay, check
 `systemctl is-active cpu-game-watchdog.timer`, then switch the profile off
 and on again with the command `game state` prints (section 7.5).
+
+**`cst doctor` warns about a slice of the user manager** (`user manager:
+X.slice is a slice of its own next to app.slice ...`). Something started jobs
+with `systemd-run --user --slice=X.slice`. They run at the normal weight on
+all CPUs whenever no game runs (during games the profile makes them idle,
+7.1). Change that project to use `--slice=user-X.slice`, which nests under
+the toolboxes' box. The `info` line about `systemd-run` jobs straight in
+`app.slice` is the same story for jobs without `--slice`.
 
 **`lock busy` in the journal.** Another `on`/`off`/`tick` ran for more than 60 s.
 Run `game state`, then `game off` if needed.

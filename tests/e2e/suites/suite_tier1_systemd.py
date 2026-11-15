@@ -317,7 +317,10 @@ EOF
     def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self):
         """systemd's real drop-in order: a `set-property --runtime` value (the game
         profile) must survive a daemon-reload next to CST's baseline drop-in,
-        which only works because its name sorts before 50-<Property>.conf."""
+        which only works because its name sorts before 50-<Property>.conf. And a
+        uresourced-style /etc/systemd/system.control/<unit>.d/50-MemoryLow.conf
+        hides the runtime MemoryLow at a reload, but not the game profile's
+        zz- drop-in in /run/systemd/system, which sorts after it."""
         exec_bash(
             self.SYSTEMD_CONTAINER,
             r"""
@@ -348,9 +351,176 @@ EOF
             [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 17179869184 ]]
             systemctl daemon-reload
             [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 0 ]]
+            # The game profile's answer: a drop-in with another name, which sorts
+            # after 50-MemoryLow.conf, is applied after it whatever its folder.
+            zz="$(sed -n 's/^GAME_DROPIN=//p' /opt/cst-rw/cpu/game-profile)"
+            [[ "$zz" == zz-* ]]
+            mkdir -p /run/systemd/system/e2e-order.slice.d
+            printf '[Slice]\nMemoryLow=16G\n' >"/run/systemd/system/e2e-order.slice.d/$zz"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 17179869184 ]]
+            rm -f "/run/systemd/system/e2e-order.slice.d/$zz"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 0 ]]
             systemctl stop e2e-order.slice
             rm -rf /etc/systemd/system/e2e-order.slice "$d" /run/systemd/system.control/e2e-order.slice.d \
-                /etc/systemd/system.control/e2e-order.slice.d
+                /etc/systemd/system.control/e2e-order.slice.d /run/systemd/system/e2e-order.slice.d
             systemctl daemon-reload
             """,
         )
+
+    def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self):
+        """The real game profile (cpu/game-profile on/tick/off) with the real
+        system and user managers: a top-level user slice of its own and a
+        systemd-run job straight in app.slice get CPUWeight=idle; the slice
+        keeps it when it empties and comes back; a tick adds nothing more to
+        game.state; the zz- MemoryLow drop-in beats a uresourced-style file at
+        a daemon-reload; off removes the overrides and the drop-ins, also those
+        systemd keeps in its transient folder (a Docker-style scope) and that of
+        a slice already gone, which then comes back at its normal weight; with
+        the profile off, a tick removes a zz- drop-in left behind. The real
+        cst doctor flags the escaped slice and job and the leftover drop-in,
+        and leaves a user-<x>.slice alone."""
+        ucg = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"
+        try:
+            exec_bash(
+                self.SYSTEMD_CONTAINER,
+                r"""
+                [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-cpu-conf.bak
+                install -d /etc/cpu-setup
+                printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" "VM_WEIGHT=10" \
+                    "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='yes'" >/etc/cpu-setup/cpu-setup.conf
+                # What uresourced keeps for the session's chain.
+                mkdir -p /etc/systemd/system.control/user-1000.slice.d
+                printf '[Slice]\nMemoryLow=0\n' >/etc/systemd/system.control/user-1000.slice.d/50-MemoryLow.conf
+                systemctl daemon-reload
+                [[ "$(systemctl show -P MemoryLow user-1000.slice)" == 0 ]]
+                # A Docker container outside builds.slice, as a scope of the system manager.
+                setsid nohup systemd-run --quiet --scope --unit=docker-e2eprobe.scope sleep 600 >/dev/null 2>&1 &
+                for _ in $(seq 50); do systemctl -q is-active docker-e2eprobe.scope && break; sleep 0.1; done
+                systemctl -q is-active docker-e2eprobe.scope
+                """,
+            )
+            as_tester_bash(
+                self.SYSTEMD_CONTAINER,
+                """
+                systemd-run --user --quiet --slice=e2eprobe.slice --unit=e2e-probe-job sleep 600
+                systemd-run --user --quiet --unit=run-e2eprobe.service sleep 600
+                # Named user-<x>.slice, it nests under user.slice: nothing to flag.
+                systemd-run --user --quiet --slice=user-e2eok.slice --unit=e2e-ok-job sleep 600
+                """,
+            )
+            out = exec_bash(
+                self.SYSTEMD_CONTAINER,
+                rf"""
+                trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+                ucg={ucg}
+                u() {{ systemctl --user -M tester@ "$@"; }}
+                gp() {{ bash /opt/cst-rw/cpu/game-profile "$@"; }}
+                ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
+                doc() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}   # exits non-zero on a WARN
+                test -d "$ucg/e2eprobe.slice" && test -d "$ucg/app.slice/run-e2eprobe.service"
+                test -d "$ucg/user.slice/user-e2eok.slice"
+                # The doctor names the escaped boxes the real systemd made, and not user-<x>.slice.
+                d="$(doc)"
+                grep -qE 'WARN +user manager: e2eprobe\.slice is a slice of its own' <<<"$d"
+                grep -qE 'info +user manager: [0-9]+ systemd-run job\(s\) run straight in app\.slice.*run-e2eprobe\.service' <<<"$d"
+                if grep -q 'user-e2eok' <<<"$d"; then echo "doctor flagged user-e2eok.slice" >&2; exit 1; fi
+                install -d -m 0755 /run/cpu-setup
+                touch /run/cpu-setup/manual      # no GameMode client here: tick must not switch off
+                gp on
+                test -e /run/cpu-setup/game.state
+                [[ "$(systemctl show -P AllowedCPUs docker-e2eprobe.scope)" == 0 ]]
+                dctl=/run/systemd/transient/docker-e2eprobe.scope.d/50-AllowedCPUs.conf
+                test -e "$dctl"
+                [[ "$(u show -P CPUWeight e2eprobe.slice)" == idle ]]
+                [[ "$(u show -P CPUWeight run-e2eprobe.service)" == idle ]]
+                [[ "$(u show -P CPUWeight app.slice)" != idle ]]
+                [[ "$(u show -P CPUWeight session.slice)" != idle ]]
+                if [[ -e "$ucg/e2eprobe.slice/cpu.idle" ]]; then [[ "$(cat "$ucg/e2eprobe.slice/cpu.idle")" == 1 ]]; fi
+                ctl=/run/user/1000/systemd/user.control/e2eprobe.slice.d/50-CPUWeight.conf
+                test -e "$ctl"
+                # A transient unit's override goes to the transient folder.
+                tctl=/run/user/1000/systemd/transient/run-e2eprobe.service.d/50-CPUWeight.conf
+                test -e "$tctl"
+                grep -q 'e2eprobe.slice CPUWeight idle idle' /run/cpu-setup/game.intended
+                if grep -q run-e2eprobe /run/cpu-setup/game.intended; then exit 1; fi
+                # The toolboxes' user.slice is a known box: its children are left alone.
+                [[ "$(u show -P CPUWeight user-e2eok.slice)" != idle ]]
+                # The MemoryLow chain holds across a reload despite the uresourced-style file.
+                test -e /run/systemd/system/user-1000.slice.d/zz-cst-game.conf
+                grep -qx '\[Service\]' /run/systemd/system/user@1000.service.d/zz-cst-game.conf
+                systemctl daemon-reload
+                for unit in user.slice user-1000.slice user@1000.service; do   # [Slice] and [Service]
+                    [[ "$(systemctl show -P MemoryLow "$unit")" == 17179869184 ]]
+                done
+                # The slice empties and goes away (stopped here, as systemd may
+                # do with a slice nothing uses), and the next job makes it again.
+                u stop e2e-probe-job.service
+                u stop e2eprobe.slice
+                for _ in $(seq 50); do [[ -d "$ucg/e2eprobe.slice" ]] || break; sleep 0.1; done
+                test ! -d "$ucg/e2eprobe.slice"
+                ut systemd-run --user --quiet --slice=e2eprobe.slice --unit=e2e-probe-job2 sleep 600
+                [[ "$(u show -P CPUWeight e2eprobe.slice)" == idle ]]
+                if [[ -e "$ucg/e2eprobe.slice/cpu.idle" ]]; then [[ "$(cat "$ucg/e2eprobe.slice/cpu.idle")" == 1 ]]; fi
+                # tick skips what game.state already has.
+                gp tick
+                n1="$(wc -l </run/cpu-setup/game.state)"
+                gp tick
+                n2="$(wc -l </run/cpu-setup/game.state)"
+                [[ "$n1" == "$n2" ]]
+                grep -q 'other boxes .*e2eprobe.slice' <<<"$(gp state)"   # no pipe: grep -q would cut it
+                # The slice is gone again when the game ends: off must still drop its override.
+                u stop e2e-probe-job2.service
+                u stop e2eprobe.slice
+                for _ in $(seq 50); do [[ -d "$ucg/e2eprobe.slice" ]] || break; sleep 0.1; done
+                test ! -d "$ucg/e2eprobe.slice"
+                gp off
+                test ! -e /run/cpu-setup/game.state
+                test ! -e "$ctl"
+                test ! -e "$tctl"
+                test ! -e "$dctl"
+                [[ -z "$(systemctl show -P AllowedCPUs docker-e2eprobe.scope)" ]]
+                # Made again after the game, the slice runs at its normal weight.
+                ut systemd-run --user --quiet --slice=e2eprobe.slice --unit=e2e-probe-job3 sleep 600
+                [[ "$(u show -P CPUWeight e2eprobe.slice)" != idle ]]
+                if [[ -e "$ucg/e2eprobe.slice/cpu.idle" ]]; then [[ "$(cat "$ucg/e2eprobe.slice/cpu.idle")" == 0 ]]; fi
+                [[ "$(u show -P CPUWeight run-e2eprobe.service)" != idle ]]
+                test -z "$(ls /run/systemd/system/*.d/zz-cst-game.conf 2>/dev/null)"
+                # Without the zz- file the uresourced-style one wins again.
+                [[ "$(systemctl show -P MemoryLow user-1000.slice)" == 0 ]]
+                # A drop-in left behind (a crash, no game.state): the watchdog
+                # removes it and reloads, so its protection goes too.
+                mkdir -p /run/systemd/system/user-1000.slice.d
+                printf '[Slice]\nMemoryLow=16G\n' >/run/systemd/system/user-1000.slice.d/zz-cst-game.conf
+                systemctl daemon-reload
+                [[ "$(systemctl show -P MemoryLow user-1000.slice)" == 17179869184 ]]
+                grep -qE 'WARN +game profile: off, but its MemoryLow drop-ins are still there: /run/systemd/system/user-1000\.slice\.d/zz-cst-game\.conf' <<<"$(doc)"
+                gp tick
+                test ! -e /run/systemd/system/user-1000.slice.d/zz-cst-game.conf
+                [[ "$(systemctl show -P MemoryLow user-1000.slice)" == 0 ]]
+                if grep -q 'MemoryLow drop-ins are still there' <<<"$(doc)"; then exit 1; fi
+                echo E2E-OK
+                """,
+            ).stdout
+            self.assertIn("E2E-OK", out)
+        finally:
+            exec_bash(
+                self.SYSTEMD_CONTAINER,
+                """
+                u() { systemctl --user -M tester@ "$@"; }
+                for j in e2e-probe-job.service e2e-probe-job2.service e2e-probe-job3.service run-e2eprobe.service \
+                        e2eprobe.slice e2e-ok-job.service user-e2eok.slice; do
+                    u stop "$j" 2>/dev/null || true
+                done
+                systemctl stop docker-e2eprobe.scope 2>/dev/null || true
+                bash /opt/cst-rw/cpu/game-profile off || true
+                rm -rf /run/cpu-setup /etc/systemd/system.control/user-1000.slice.d
+                rm -f /etc/cpu-setup/cpu-setup.conf
+                if [[ -e /tmp/e2e-cpu-conf.bak ]]; then mv /tmp/e2e-cpu-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+                rmdir /etc/cpu-setup 2>/dev/null || true
+                systemctl daemon-reload
+                """,
+                check=False,
+            )

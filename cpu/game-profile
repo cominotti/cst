@@ -8,25 +8,37 @@
 #
 #   on     while a game runs: VM and Docker containers off the P-cores and the
 #          game's E-cores (CPUs 12-23) with a low weight, toolboxes idle-class,
-#          P-cores at EPP performance, the game's memory protected from reclaim
-#          along the whole cgroup chain, and desktop apps' swapped pages kept
-#          in zswap (no writeback to the NVMe swap).
+#          the other boxes of the user manager that sit next to the game
+#          (its top-level slices other than app/session/user.slice, and
+#          `systemd-run --user` jobs straight in app.slice) idle-class too,
+#          P-cores at EPP performance, the game's memory protected from
+#          reclaim along the whole cgroup chain, and desktop apps' swapped
+#          pages kept in zswap (no writeback to the NVMe swap).
 #   off    exact revert: runtime overrides this script created are deleted
 #          (then daemon-reload), so nothing masks /etc drop-ins afterwards;
-#          ones that existed before get their previous value back.
+#          ones that existed before get their previous value back. The
+#          MemoryLow drop-ins (zz-cst-game.conf) go always, also without a
+#          game.state.
 #   tick   watchdog (every 30 s): 'off' if no GameMode client is left (unless
 #          switched on by hand); 'on' if a client runs and the profile is off
 #          (fallback if the GameMode hook could not start the unit), unless
-#          switched off by hand during that game; new containers get pinned
-#          and new Steam scopes (the game itself) get the memory protection;
+#          switched off by hand during that game; new containers get pinned,
+#          new Steam scopes (the game itself) get the memory protection, and
+#          new boxes of the user manager next to the game get idle-class;
 #          a setting that something undid meanwhile (a daemon-reload, or
-#          uresourced resetting MemoryLow) is set again and logged.
+#          uresourced resetting MemoryLow) is set again and logged. With the
+#          profile off, it removes MemoryLow drop-ins left behind.
 #   state  what is applied now, and which settings drifted from what 'on' set.
 #
 # Everything is runtime-only: a reboot clears it too. A runtime override is
 # not permanent within a boot either: every daemon-reload re-reads the
 # drop-ins, and a drop-in that sorts after it, or a same-named file in
 # /etc/systemd/system.control (uresourced's 50-MemoryLow.conf), wins again.
+# For the MemoryLow chain 'on' therefore also writes a drop-in named
+# zz-cst-game.conf, which sorts after every other one (see write_game_dropins).
+#
+# For other projects: /run/cpu-setup/game.state exists exactly while the
+# profile is on. Key on its existence only; its contents may change.
 # Settings: /etc/cpu-setup/cpu-setup.conf.
 
 set -Euo pipefail
@@ -40,6 +52,11 @@ MANUAL="${RUN}/manual"
 # the format off() reads; a profile switched on by an older version has none.
 INTENDED="${RUN}/game.intended"
 SUPPRESS="${RUN}/suppress"   # 'game off' by hand: no automatic 'on' until the game ends
+CGROOT=/sys/fs/cgroup
+# Runtime unit folder of the system manager, and the name of the MemoryLow
+# drop-ins 'on' writes there (write_game_dropins).
+UNIT_RUNTIME=/run/systemd/system
+GAME_DROPIN=zz-cst-game.conf
 
 # Defaults; cpu-setup.conf overrides.
 TARGET_USER=""
@@ -77,20 +94,31 @@ ctl() {
         systemctl "$@"
     fi
 }
+# Transient units: scopes (Docker containers, Steam, apps) and the
+# run-*.service of systemd-run. systemd made them at run time, from files in
+# its transient folder.
+transient_unit() {
+    case "$1" in *.scope|run-*.service) return 0 ;; esac
+    return 1
+}
 ctl_file() {   # mgr unit prop: where `set-property --runtime` writes
+    # For a transient unit systemd writes the override next to the unit's own
+    # file, in the transient folder, not in the control folder.
+    local base=/run/systemd dir=system.control
     if [[ "$1" == usr ]]; then
-        echo "/run/user/$(uid)/systemd/user.control/$2.d/50-$3.conf"
-    else
-        echo "/run/systemd/system.control/$2.d/50-$3.conf"
+        base="/run/user/$(uid)/systemd"
+        dir=user.control
     fi
+    transient_unit "$2" && dir=transient
+    echo "${base}/${dir}/$2.d/50-$3.conf"
 }
 prop() { ctl "$1" show -P "$3" "$2" 2>/dev/null | sed 's/^\[not set\]$//'; }
 
 # setp MGR UNIT PROP=VALUE...: record, per property, whether a runtime
 # override already existed (and its value), then apply. For fixed units (not
-# the transient scopes, which have no drop-in that could win over the
-# override), also record the value as systemctl show reports it now, in
-# INTENDED: "prop MGR UNIT PROP VALUE SHOWN".
+# the transient ones: scopes and the run-*.service of systemd-run, which have
+# no drop-in that could win over the override), also record the value as
+# systemctl show reports it now, in INTENDED: "prop MGR UNIT PROP VALUE SHOWN".
 setp() {
     local mgr="$1" unit="$2" kv p
     shift 2
@@ -106,7 +134,7 @@ setp() {
         log 4 "${unit}: could not set $*"
         return 0
     fi
-    [[ "${unit}" == *.scope ]] && return 0
+    transient_unit "${unit}" && return 0
     for kv in "$@"; do
         p="${kv%%=*}"
         printf 'prop %q %q %q %q %q\n' "${mgr}" "${unit}" "${p}" "${kv#*=}" "$(prop "${mgr}" "${unit}" "${p}")" >>"${INTENDED}"
@@ -167,6 +195,116 @@ pin_docker() {
     done
 }
 
+# The user manager's own cgroup folder.
+user_cg() {
+    echo "${CGROOT}/user.slice/user-$(uid).slice/user@$(uid).service"
+}
+# cpuset in use by the user manager (cpu-setup install, next login).
+cpuset_delegated() {
+    grep -qsw cpuset "$(user_cg)/cgroup.subtree_control"
+}
+
+# Boxes of the user manager that compete with the game but that no other rule
+# covers, as cgroup folders: its top-level slices other than app.slice (the
+# game and the desktop apps), session.slice (gnome-shell) and user.slice (the
+# toolboxes, handled in 'on'), such as background.slice (GNOME's file
+# indexer) or a slice a job made with `systemd-run --user --slice=NAME.slice`;
+# and the transient units `systemd-run --user` puts straight into app.slice,
+# next to the game. A slice named user-NAME.slice nests under the toolboxes'
+# user.slice, and app-NAME.slice under app.slice: neither is listed here.
+escaped_cgroups() {
+    local cg d u
+    cg="$(user_cg)"
+    for d in "${cg}"/*.slice "${cg}"/app.slice/run-*.scope "${cg}"/app.slice/run-*.service; do
+        [[ -d "${d}" ]] || continue   # also an unmatched pattern
+        # systemd puts a '_' before a cgroup name that could clash with a
+        # controller file (cpu.slice -> _cpu.slice).
+        u="${d##*/}"
+        case "${u#_}" in app.slice|session.slice|user.slice) continue ;; esac
+        echo "${d}"
+    done
+}
+
+gamemode_pid() {
+    grep -qsF libgamemode "/proc/$1/maps"
+}
+# A GameMode client (the game itself) in cgroup folder DIR or below it.
+gamemode_in() {
+    local f pid
+    while IFS= read -r f; do
+        while read -r pid; do
+            gamemode_pid "${pid}" && return 0
+        done <"${f}"
+    done < <(find "$1" -maxdepth 4 -name cgroup.procs -type f 2>/dev/null)
+    return 1
+}
+
+# Idle-class (and off 8-11, with cpuset delegated) for each box of
+# escaped_cgroups that is not handled yet. One already in game.state is
+# skipped, so a tick adds nothing for it; the record is %q-quoted, and so is
+# the name looked for. A box that holds a GameMode client is the game: it is
+# left alone. A slice keeps the setting when it empties and comes back: the
+# runtime override stays in /run/user/UID/systemd/user.control.
+demote_escapes() {
+    local d u q
+    local -a settings=(CPUWeight=idle)
+    cpuset_delegated && settings+=(AllowedCPUs="${BUILD_CPUS}")
+    while IFS= read -r d; do
+        u="${d##*/}"
+        u="${u#_}"
+        printf -v q '%q' "${u}"
+        grep -qF "prop usr ${q} CPUWeight " "${STATE}" 2>/dev/null && continue
+        gamemode_in "${d}" && continue
+        log 5 "${u}: idle while the game runs (a box of the user manager next to the game)"
+        setp usr "${u}" "${settings[@]}"
+    done < <(escaped_cgroups)
+}
+
+# The memory chain on the system side as a drop-in too. uresourced keeps
+# 50-MemoryLow.conf (MemoryLow=0) for these three units in
+# /etc/systemd/system.control, which comes before /run/systemd/system.control:
+# after each daemon-reload that file hides the runtime override of setp (same
+# name), until the next tick repairs it. Drop-ins with different names are all
+# applied, in file-name order whatever their folder, and the last one wins
+# (systemd.unit(5)): zz- sorts after 50-, so this file holds across reloads.
+# No reload is needed now: setp set the live value already.
+game_dropin_units() {
+    echo user.slice "user-$(uid).slice" "user@$(uid).service"
+}
+write_game_dropins() {
+    local u sec d
+    for u in $(game_dropin_units); do
+        sec=Slice
+        [[ "${u}" == *.service ]] && sec=Service
+        d="${UNIT_RUNTIME}/${u}.d"
+        if ! { mkdir -p "${d}" && printf '%s\n' \
+                "# Written by cpu-game-profile (CST) while the game profile is on; 'off' removes it." \
+                "[${sec}]" "MemoryLow=${GAME_MEMORY_LOW}" >"${d}/${GAME_DROPIN}"; } 2>/dev/null; then
+            log 4 "${u}: could not write ${d}/${GAME_DROPIN}"
+        fi
+    done
+}
+# Removes every such drop-in, whatever unit and user it is for: one left
+# behind (a profile whose game.state went missing) would keep the protection
+# until the next reboot. Status 0 when one was removed: a daemon-reload is due.
+remove_game_dropins() {
+    local f rc=1
+    for f in "${UNIT_RUNTIME}"/*.d/"${GAME_DROPIN}"; do
+        [[ -e "${f}" ]] || continue
+        rm -f "${f}"
+        rmdir "${f%/*}" 2>/dev/null || true
+        rc=0
+    done
+    return "${rc}"
+}
+# With the profile off ('off' without a game.state, or a tick): remove such
+# drop-ins left behind and reload, so their MemoryLow goes too.
+remove_leftover_dropins() {
+    remove_game_dropins || return 0
+    systemctl daemon-reload
+    log 4 "profile off, but its MemoryLow drop-ins (${GAME_DROPIN}) were still there: removed them"
+}
+
 on() {
     if [[ -e "${STATE}" ]]; then
         log 6 "already on"; return 0
@@ -194,17 +332,21 @@ on() {
     setp usr user.slice CPUWeight=idle
     # With cpuset delegated (cpu-setup install, next login): toolboxes and
     # their host commands also leave 8-11 to the game's E-core workers.
-    if grep -qw cpuset "/sys/fs/cgroup/user.slice/user-$(uid).slice/user@$(uid).service/cgroup.subtree_control" 2>/dev/null; then
+    if cpuset_delegated; then
         setp usr user.slice AllowedCPUs="${BUILD_CPUS}"
         setp usr flatpak-session-helper.service AllowedCPUs="${BUILD_CPUS}"
         cpus_fallback user.slice
         cpus_fallback flatpak-session-helper.service
     fi
+    #    The other boxes next to the game: background.slice, slices of
+    #    `systemd-run --user --slice=X`, and systemd-run jobs in app.slice.
+    demote_escapes
     # 3. The game's memory: memory.low only counts up to every ancestor's
     #    protection, so the whole chain gets it.
-    for u in user.slice "user-$(uid).slice" "user@$(uid).service"; do
+    for u in $(game_dropin_units); do
         setp sys "${u}" MemoryLow="${GAME_MEMORY_LOW}"
     done
+    write_game_dropins
     setp usr app.slice MemoryLow="${GAME_MEMORY_LOW}"
     protect_steam
     # 4. Desktop apps (game included): pages already reclaimed stay compressed
@@ -221,13 +363,19 @@ on() {
         printf 'epp %q %q\n' "${cpu}" "$(cat "${f}")" >>"${STATE}"
         echo performance >"${f}" 2>/dev/null || true
     done
-    log 5 "on: VM/Docker on ${BUILD_CPUS}, toolboxes idle, game memory protected (${GAME_MEMORY_LOW}), app zswap writeback ${GAME_ZSWAP_WRITEBACK}, P-cores EPP performance"
+    log 5 "on: VM/Docker on ${BUILD_CPUS}, toolboxes and other user boxes idle, game memory protected (${GAME_MEMORY_LOW}), app zswap writeback ${GAME_ZSWAP_WRITEBACK}, P-cores EPP performance"
 }
 
 off() {
-    [[ -e "${STATE}" ]] || { rm -f "${MANUAL}"; return 0; }
     local line kind mgr unit p mode old cpu val f i reload_sys=0 reload_usr=0
     local -a rec lines
+    # The MemoryLow drop-ins go also without a game.state.
+    if [[ ! -e "${STATE}" ]]; then
+        rm -f "${MANUAL}"
+        remove_leftover_dropins
+        return 0
+    fi
+    remove_game_dropins && reload_sys=1
     mapfile -t lines <"${STATE}"
     # Newest first, so a property touched twice ends at its oldest value.
     for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
@@ -339,6 +487,7 @@ repair_drift() {
 
 tick() {
     if [[ ! -e "${STATE}" ]]; then
+        remove_leftover_dropins
         if ! gamemode_client; then
             rm -f "${SUPPRESS}"
         elif [[ ! -e "${SUPPRESS}" ]]; then
@@ -354,6 +503,7 @@ tick() {
     fi
     pin_docker      # containers started meanwhile
     protect_steam   # the game's own scope, started after 'on'
+    demote_escapes  # boxes next to the game that appeared after 'on'
     repair_drift    # settings a daemon-reload or uresourced undid
 }
 
@@ -374,12 +524,27 @@ state() {
         printf '  app.slice       zswap writeback=%s\n' "$(prop usr app.slice MemoryZSwapWriteback)"
         printf '  toolboxes       cpus effective=%s\n' \
             "$(cat "/sys/fs/cgroup$(ctl usr show -P ControlGroup user.slice 2>/dev/null)/cpuset.cpus.effective" 2>/dev/null)"
+        if [[ -e "${STATE}" ]]; then
+            printf '  other boxes     idle: %s\n' "$(escapes_in_state)"
+        fi
     fi
     printf '  EPP cpu0 %s, cpu%s %s\n' \
         "$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)" \
         "${BUILD_CPUS%%-*}" "$(cat "/sys/devices/system/cpu/cpu${BUILD_CPUS%%-*}/cpufreq/energy_performance_preference" 2>/dev/null)"
     [[ -e "${STATE}" ]] && state_drift
     return 0
+}
+
+# The boxes demote_escapes handled, from game.state ("none" if none).
+escapes_in_state() {
+    local line out=()
+    local -a rec
+    while IFS= read -r line; do
+        eval "rec=(${line})"
+        [[ "${rec[0]:-}" == prop && "${rec[1]:-}" == usr && "${rec[3]:-}" == CPUWeight && "${rec[2]:-}" != user.slice ]] &&
+            out+=("${rec[2]}")
+    done <"${STATE}"
+    if (( ${#out[@]} )); then echo "${out[*]}"; else echo none; fi
 }
 
 # The command that switches the profile off and on again in the same mode:

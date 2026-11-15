@@ -2,7 +2,8 @@
 requested by name from ones pinned to a version (tricky names included),
 the one fix command, local packages, overrides, the staged deployment,
 failed units, pending alerts, btrfs chunk allocation (a fixture sysfs
-tree), the exit codes, the toolbox path (commands
+tree), the game profile's drift and leftover drop-ins, the user manager's
+boxes outside CST's rules (a fixture cgroup tree), the exit codes, the toolbox path (commands
 through flatpak-spawn --host, files under the host's root) and the doctor
 section of `cst status`.
 
@@ -848,6 +849,24 @@ class GameProfileTest(Scratch):
         self.assertIsNone(mgr)
         self.assertIn("the profile is for nobody-here", why)
 
+    def test_leftover_memorylow_dropins_while_off_warn(self):
+        rt = os.path.join(self.root, "run", "systemd", "system")
+        for u in ("user.slice", "user@1000.service"):
+            os.makedirs(os.path.join(rt, f"{u}.d"))
+            open(os.path.join(rt, f"{u}.d", "zz-cst-game.conf"), "w").close()
+        os.makedirs(os.path.join(rt, "user-1000.slice.d"))
+        open(os.path.join(rt, "user-1000.slice.d", "10-other.conf"), "w").close()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(D.check_game_profile_drift(D.Host(self.env)))
+        self.assertEqual([r.status for r in res], [D.WARN], res)
+        self.assertIn("/run/systemd/system/user.slice.d/zz-cst-game.conf, "
+                      "/run/systemd/system/user@1000.service.d/zz-cst-game.conf", res[0].message)
+        self.assertNotIn("user-1000.slice", res[0].message)
+        self.assertEqual(res[0].fix, "sudo /usr/local/sbin/cpu-game-profile off")
+        # While the profile is on they belong there: no word about them.
+        self.profile_on()
+        self.assertNotIn("drop-ins", " ".join(r.message for r in self.results()))
+
     def test_old_format_state_is_info(self):
         self.profile_on(intended=False)
         res = self.results()
@@ -855,6 +874,139 @@ class GameProfileTest(Scratch):
         self.assertIn("older cpu-game-profile", res[0].message)
         self.assertIn("sudo systemctl restart cpu-game.service", res[0].message)
         self.assertEqual(self.calls(), [])     # nothing asked
+
+
+class UserManagerBoxesTest(Scratch):
+    """The cpu check of the user manager's cgroup tree: top-level slices CST
+    does not know (WARN), systemd-run jobs straight in app.slice (info). Reads
+    a fixture /sys/fs/cgroup only."""
+
+    def setUp(self):
+        super().setUp()
+        self.ucg = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", "user-1000.slice",
+                                "user@1000.service")
+        for d in ("app.slice/app-gnome-firefox-1.scope", "app.slice/flatpak-session-helper.service",
+                  "session.slice", "background.slice", "user.slice", "init.scope", "uresourced.service"):
+            os.makedirs(os.path.join(self.ucg, d))
+        open(os.path.join(self.ucg, "cgroup.procs"), "w").close()
+
+    def cg(self, rel, usage_usec=None):
+        d = os.path.join(self.ucg, rel)
+        os.makedirs(d, exist_ok=True)
+        if usage_usec is not None:
+            with open(os.path.join(d, "cpu.stat"), "w") as f:
+                f.write(f"usage_usec {usage_usec}\nuser_usec 1\nsystem_usec 1\n")
+
+    def results(self, uid=1000):
+        host = D.Host(self.env)
+        host.uid = uid
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            res = list(D.check_user_manager_boxes(host))
+        self.assertEqual(self.calls(), [])        # files only, no command
+        return res
+
+    def test_only_known_boxes_is_ok(self):
+        res = self.results()
+        self.assertEqual([(r.status, r.message) for r in res],
+                         [(D.OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")])
+
+    def test_unknown_top_level_slice_warns_with_cpu_time_and_the_name_to_use(self):
+        self.cg("lushtext.slice", usage_usec=69_000_123_456)
+        self.cg("_cpu.slice")                    # cgroupfs name of cpu.slice
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.WARN, D.WARN], res)
+        m = {r.message.split()[2]: r for r in res}
+        lush = m["lushtext.slice"]
+        self.assertIn("69,000 CPU-seconds (19.2 CPU-hours) since it was created", lush.message)
+        self.assertIn("Name it user-lushtext.slice so it nests under the toolboxes' user.slice, "
+                      "or start it with --slice=user-lushtext.slice", lush.message)
+        self.assertEqual(lush.fix, "")           # advice, not a command to paste
+        self.assertIn("CPU time unknown", m["cpu.slice"].message)
+        self.assertIn("user-cpu.slice", m["cpu.slice"].message)
+
+    def test_systemd_run_jobs_in_app_slice_are_one_info_line(self):
+        self.cg("app.slice/run-u7.service", usage_usec=2_500_000)
+        self.cg("app.slice/run-r1a2.scope", usage_usec=90_000_000)
+        self.cg("app.slice/app-run-not-transient.scope")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.INFO], res)
+        self.assertIn("2 systemd-run job(s) run straight in app.slice", res[0].message)
+        # Busiest first.
+        self.assertIn("run-r1a2.scope (90 CPU-seconds), run-u7.service (2 CPU-seconds)", res[0].message)
+        self.assertNotIn("app-run-not-transient", res[0].message)
+
+    def test_jobs_are_sorted_by_cpu_time_not_by_name(self):
+        # Name order is the reverse of the CPU order, and one has no cpu.stat.
+        self.cg("app.slice/run-a.service", usage_usec=1_000_000)
+        self.cg("app.slice/run-b.service")
+        self.cg("app.slice/run-c.service", usage_usec=7_000_000)
+        res = self.results()
+        self.assertIn("run-c.service (7 CPU-seconds), run-a.service (1 CPU-seconds), "
+                      "run-b.service (CPU time unknown)", res[0].message)
+
+    def test_many_jobs_are_cut_short(self):
+        for i in range(12):
+            self.cg(f"app.slice/run-u{i}.service", usage_usec=i * 1_000_000)
+        res = self.results()
+        self.assertIn("12 systemd-run job(s)", res[0].message)
+        self.assertIn("and 7 more", res[0].message)
+
+    def test_exactly_the_list_size_is_not_cut(self):
+        for i in range(D.LIST_MAX):
+            self.cg(f"app.slice/run-u{i}.service", usage_usec=1_000_000)
+        res = self.results()
+        self.assertNotIn("more", res[0].message)
+        self.assertIn(f"{D.LIST_MAX} systemd-run job(s)", res[0].message)
+
+    def test_a_short_list_has_no_more_suffix(self):
+        self.cg("app.slice/run-u1.service", usage_usec=1_000_000)
+        res = self.results()
+        self.assertNotIn("more", res[0].message)
+
+    def test_cpu_time_keeps_the_fraction_and_shows_hours_from_one_hour(self):
+        self.cg("app.slice/run-u1.service", usage_usec=2_600_000)    # 2.6 s, not 2
+        self.assertIn("(3 CPU-seconds)", self.results()[0].message)
+        self.assertEqual(D.cpu_time(3600.0), "3,600 CPU-seconds (1.0 CPU-hours)")
+        self.assertEqual(D.cpu_time(3599.5), "3,600 CPU-seconds")      # rounds, but under one hour
+
+    def test_no_app_slice_folder_is_not_an_error(self):
+        shutil.rmtree(os.path.join(self.ucg, "app.slice"))
+        res = self.results()
+        self.assertEqual([r.status for r in res], [D.OK], res)
+
+    def test_no_user_manager_is_silent(self):
+        self.assertEqual(self.results(uid=4242), [])
+        # As root: the user from cpu-setup.conf; none recorded, or unknown: nothing.
+        self.assertEqual(self.results(uid=0), [])
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='no-such-user-here'\n")
+        self.assertEqual(self.results(uid=0), [])
+
+    def test_as_root_it_looks_at_the_target_user(self):
+        import pwd
+        me = pwd.getpwuid(os.getuid())
+        ucg = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{me.pw_uid}.slice",
+                           f"user@{me.pw_uid}.service")
+        os.makedirs(os.path.join(ucg, "builds.slice"))
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write(f"TARGET_USER='{me.pw_name}'\n")
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [D.WARN], res)
+        self.assertIn("builds.slice", res[0].message)
+
+    def test_whole_run_in_a_toolbox_reads_the_host_tree(self):
+        self.cg("lushtext.slice", usage_usec=1_000_000)
+        ucg_real = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{os.getuid()}.slice",
+                                f"user@{os.getuid()}.service")
+        if ucg_real != self.ucg:
+            shutil.move(self.ucg, ucg_real)
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("WARN   user manager: lushtext.slice is a slice of its own", r.stdout)
+        self.assert_read_only()
 
 
 class VmTest(Scratch):

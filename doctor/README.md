@@ -46,7 +46,9 @@ cst doctor help
 | `alerts` | `/var/lib/f44-alerts` (a link or folder left by the versions named f44-tools) | `WARN`, fix: `cst btrfs install` |
 | `btrfs` | How full the chunks are: data and metadata, used of allocated, and metadata as a share of data (see [section 6](#6-the-btrfs-check-chunks-and-unallocated-space)) | `ok` (numbers only) |
 | `btrfs` | Automatic data reclaim (`dynamic_reclaim`, `periodic_reclaim`) on | `WARN` when off on the root filesystem, fix: `cst btrfs install`; `info` on other btrfs filesystems or on kernels without these switches |
-| `cpu` | While the game profile is on (`/run/cpu-setup/game.state` exists): the settings it made that no longer hold ("drift"), compared with what it recorded in `/run/cpu-setup/game.intended` right after `on` (see [section 8](#8-the-cpu-check-game-profile-drift)) | `WARN`, fix: `sudo systemctl restart cpu-game.service` (`cst cpu game off && cst cpu game on` for a profile switched on by hand); `ok` when they all hold, or "game profile: off"; `info` when a profile switched on by an older version recorded nothing, or a unit could not be asked; nothing when the cpu module is not installed |
+| `cpu` | While the game profile is on (`/run/cpu-setup/game.state` exists): the settings it made that no longer hold ("drift"), compared with what it recorded in `/run/cpu-setup/game.intended` right after `on` (see [section 8](#8-the-cpu-checks-game-profile-and-user-manager)) | `WARN`, fix: `sudo systemctl restart cpu-game.service` (`cst cpu game off && cst cpu game on` for a profile switched on by hand); `ok` when they all hold, or "game profile: off"; `info` when a profile switched on by an older version recorded nothing, or a unit could not be asked; nothing when the cpu module is not installed |
+| `cpu` | While the game profile is off: its MemoryLow drop-ins `/run/systemd/system/*.d/zz-cst-game.conf` still there | `WARN`, fix: `sudo /usr/local/sbin/cpu-game-profile off` |
+| `cpu` | Your user manager's cgroup tree (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service`): top-level slices other than `app.slice`, `session.slice`, `background.slice` and `user.slice`, with the CPU time each used (`cpu.stat`); `systemd-run --user` jobs (`run-*.scope`, `run-*.service`) straight in `app.slice` | `WARN` per unknown slice, with the name to use instead (`user-<name>.slice`; no fix line, it is a change in whatever starts the jobs); one `info` line for the jobs, busiest first; `ok` when there are none; nothing when there is no user manager to look at (CI, containers) |
 | `vm` | A libvirt VM with `<cpu mode='host-passthrough'>` that does not disable CET and nested MBEC (`cet-ss`, `cet-ibt`, `vmx-mbec`, `vmx-exit-save-cet`, `vmx-entry-load-cet`) while this QEMU offers them (see [section 7](#7-the-vm-checks)) | `WARN`, fix: `cst cpu vm-pin plan`; `ok` when QEMU does not offer them; `info` when that could not be read |
 | `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no VM backup, local or on the NAS, was made since the booted deployment was built (fix: `cst vm backup --nas` when the NAS backup is set up, else `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
 | `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
@@ -193,7 +195,11 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `systemctl --user -M TARGET_USER@ show`). When the profile is for another
   user than the one running the doctor, the user manager's units are skipped
   (`info`). A `cpuset.cpus` file the profile wrote directly is read under
-  `/sys/fs/cgroup`.
+  `/sys/fs/cgroup`. While the profile is off it lists
+  `/run/systemd/system/*.d/zz-cst-game.conf`. The check of the user
+  manager's boxes reads only files: the folder names and `cpu.stat` under
+  `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service` (your uid,
+  or `TARGET_USER`'s when run as root; under `/run/host` in a toolbox).
 - The `btrfs` check reads `/sys/fs/btrfs` (under `/run/host` in a toolbox),
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
@@ -350,7 +356,9 @@ A folder that is a symbolic link is not checked. With `VM_NOCOW=no` in
 folders are not managed. Details:
 [vm/README.md, section 9](../vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write).
 
-## 8. The cpu check: game profile drift
+## 8. The cpu checks: game profile and user manager
+
+### 8.1 Game profile drift
 
 While a game runs, `cst cpu`'s game profile changes systemd properties with
 `systemctl set-property --runtime` (CPU weights and CPU sets of the VM, the
@@ -380,6 +388,42 @@ A profile switched on by a version of `cpu-game-profile` older than this
 check recorded no values: the check says so (`info`) and compares nothing
 until the profile is switched off and on again.
 
+### 8.2 MemoryLow drop-ins left behind
+
+While it is on, the profile also writes
+`/run/systemd/system/<unit>.d/zz-cst-game.conf` for the system `user.slice`,
+`user-<uid>.slice` and `user@<uid>.service`. Such a file wins over
+uresourced's `50-MemoryLow.conf` at every `daemon-reload`
+([cpu/README.md, section 7.5](../cpu/README.md#75-when-something-undoes-a-setting-drift)).
+`off` and the watchdog remove them. One that is still there while the
+profile is off keeps the game's memory protection until the next reboot, so
+the check says `WARN`. The fix runs `off` once more: it removes the files
+also without a `game.state`, and reloads systemd. (`cst cpu game off` would
+not: with the profile already off, stopping `cpu-game.service` runs nothing.)
+
+### 8.3 Boxes of the user manager outside CST's rules
+
+The game profile handles the boxes it knows: `app.slice` (the game), the
+toolboxes' `user.slice`, and, during games, every other top-level slice and
+the `systemd-run` jobs in `app.slice`
+([cpu/README.md, section 7.1](../cpu/README.md#71-what-it-does-while-a-game-runs)).
+Outside games, a top-level slice of the user manager that CST does not know
+runs at the default weight on all CPUs, beside the desktop. That is usually
+a project that starts its jobs with `systemd-run --user --slice=NAME.slice`.
+The check reads the user manager's cgroup folder (files only, no command):
+
+```
+== cpu
+  WARN   user manager: lushtext.slice is a slice of its own next to app.slice, where the game runs (69,000 CPU-seconds (19.2 CPU-hours) since it was created). ... Name it user-lushtext.slice so it nests under the toolboxes' user.slice, or start it with --slice=user-lushtext.slice
+  info   user manager: 1 systemd-run job(s) run straight in app.slice, next to the game, ...: run-u7.service (12 CPU-seconds). ...
+```
+
+The CPU time counts from when systemd made the box: a slice that emptied
+and came back starts again at zero. `background.slice` (GNOME's file
+indexer) and `session.slice` (gnome-shell) are known and not reported. The
+user manager looked at is your own, or, when the doctor runs as root, the
+`TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
+
 ## 9. Adding a check
 
 Each check is a small function in `cst-doctor`, registered with
@@ -399,6 +443,7 @@ python3 -I -B -m unittest discover -s doctor/tests -t . -v
 The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
 built per test, fixture `systemctl show` answers and game profile records,
+a fixture cgroup tree of the user manager and leftover game drop-ins,
 and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the

@@ -14,6 +14,8 @@
 #         (cpu-game.service; polkit lets your session start/stop only that
 #         unit; a 30 s watchdog switches it off if the game died): VM and
 #         Docker builds to CPUs 12-23 with a low weight, toolboxes idle-class,
+#         and so are the other boxes of your user manager next to the game
+#         (background.slice, `systemd-run --user` jobs and their own slices),
 #         P-cores EPP performance, the game's memory protected along the
 #         whole cgroup chain; runtime-only, exact revert
 #       * baseline weights: VM (machine.slice) 50, toolboxes 30 (like
@@ -24,8 +26,10 @@
 #         parallelism from that set, no per-toolchain config needed. Side
 #         effect: host commands of Flatpak apps with org.freedesktop.Flatpak
 #         access (here OBS, Remmina, RustConn, Resources, TestCenter) also
-#         run on the E-cores. Not covered: `systemd-run --user` jobs (app.slice)
-#         and Docker without docker-slice (dockerd is a system service)
+#         run on the E-cores. Not covered outside games: `systemd-run --user`
+#         jobs (app.slice, or a slice of their own unless it is named
+#         user-NAME.slice) and Docker without docker-slice (dockerd is a
+#         system service)
 #       * GameMode: ~/.config/gamemode.ini (only triggers the profile and
 #         disables the split-lock penalty during games), your user in the
 #         'gamemode' group (copied from /usr/lib/group; next login)
@@ -85,6 +89,9 @@ declare -A BINARIES=(
     [cpu-watch]=/usr/local/bin/cpu-watch
 )
 UNITS=(cpu-game.service cpu-game-watchdog.service cpu-game-watchdog.timer)
+# The game profile's MemoryLow drop-ins (GAME_DROPIN in cpu/game-profile):
+# 'off' removes them; uninstall also removes any left behind.
+GAME_DROPINS_GLOB="/run/systemd/system/*.d/zz-cst-game.conf"
 # Runtime-only memory experiments: name -> "file value".
 declare -A EXPERIMENTS=(
     [thp-defer]="/sys/kernel/mm/transparent_hugepage/defrag defer"
@@ -184,6 +191,14 @@ remove_old_dropins() {
     done
 }
 e_cores() { cat /sys/devices/cpu_atom/cpus 2>/dev/null || true; }
+remove_game_dropins() {
+    local f
+    for f in ${GAME_DROPINS_GLOB}; do
+        [[ -e "${f}" ]] || continue
+        rm -fv "${f}"
+        rmdir "$(dirname "${f}")" 2>/dev/null || true
+    done
+}
 # cpuset in use by the user manager (not just offered to it): it shows in
 # the manager's own subtree_control only once a manager started with the
 # delegation enabled it (next login after install).
@@ -282,6 +297,9 @@ uninstall() {
     local f ini
     systemctl stop cpu-game.service 2>/dev/null || true
     systemctl disable --now cpu-game-watchdog.timer 2>/dev/null || true
+    # Without the watchdog nothing would remove one left behind (the reload
+    # below then drops its MemoryLow).
+    remove_game_dropins
     for f in "${UNITS[@]}"; do rm -fv "${UNIT_DIR}/${f}"; done
     rm -fv "${MACHINE_DROPIN}" "${DELEGATE_DROPIN}" "${POLKIT_RULE}"
     remove_old_dropins

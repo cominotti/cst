@@ -1,7 +1,8 @@
 """Unit tests for the cpu module: vm-pin XML rewriting, cpu-watch frame-time
 and run-summary helpers, game-profile CPU range expansion, on/off, drift
-repair and drift report (with a fake systemd), the baseline drop-in name and
-its migration, and cpu-setup.sh CLI.
+repair and drift report (with a fake systemd), the boxes of the user manager
+it makes idle and its MemoryLow drop-ins (with a fake cgroup tree), the
+baseline drop-in name and its migration, and cpu-setup.sh CLI.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s cpu/tests -t . -v
@@ -282,11 +283,14 @@ RUN={run_dir!r}
 STATE={state_file!r}
 MANUAL={manual_file!r}
 INTENDED={intended_file!r}
+UNIT_RUNTIME={tmp!r}/unit-runtime
+GAME_DROPIN=zz-cst-game.conf
 log() {{ :; }}
 ctl_file() {{ echo {new_dropin!r}; }}
 ctl() {{ echo "ctl $*" >> {log_file!r}; }}
 systemctl() {{ echo "systemctl $*" >> {log_file!r}; }}
 eval "$(sed -n '/^off()/,/^}}/p' {GAME_PROFILE!r})"
+eval "$(sed -n '/^remove_game_dropins()/,/^}}/p' {GAME_PROFILE!r})"
 off
 """
             r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
@@ -306,6 +310,30 @@ off
                     "ctl usr daemon-reload",
                 ],
             )
+
+    def test_override_files_of_fixed_and_transient_units(self):
+        # systemd writes `set-property --runtime` of a transient unit (scopes,
+        # systemd-run's run-*.service) into its transient folder: 'off' must
+        # delete that file, or the unit keeps the setting until it ends.
+        script = f"""
+uid() {{ echo 1000; }}
+for fn in transient_unit ctl_file; do eval "$(sed -n "/^${{fn}}()/,/^}}/p" {GAME_PROFILE!r})"; done
+ctl_file sys machine.slice CPUWeight
+ctl_file sys docker-abc.scope AllowedCPUs
+ctl_file usr lushtext.slice CPUWeight
+ctl_file usr run-u7.service CPUWeight
+ctl_file usr app-flatpak-com.valvesoftware.Steam-1.scope MemoryLow
+ctl_file usr flatpak-session-helper.service AllowedCPUs
+"""
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.stdout.splitlines(), [
+            "/run/systemd/system.control/machine.slice.d/50-CPUWeight.conf",
+            "/run/systemd/transient/docker-abc.scope.d/50-AllowedCPUs.conf",
+            "/run/user/1000/systemd/user.control/lushtext.slice.d/50-CPUWeight.conf",
+            "/run/user/1000/systemd/transient/run-u7.service.d/50-CPUWeight.conf",
+            "/run/user/1000/systemd/transient/app-flatpak-com.valvesoftware.Steam-1.scope.d/50-MemoryLow.conf",
+            "/run/user/1000/systemd/user.control/flatpak-session-helper.service.d/50-AllowedCPUs.conf",
+        ], r.stderr)
 
     def test_machine_slice_dropin_has_cpu_and_io_weight(self):
         dropin = os.path.join(CPU, "units", "machine.slice.d-10-cpu-setup.conf")
@@ -343,6 +371,9 @@ P_CORES=0-7
 VM_WEIGHT={vm_weight!r}
 GAME_MEMORY_LOW=16G
 GAME_ZSWAP_WRITEBACK=yes
+CGROOT={tmp!r}/cgroup
+UNIT_RUNTIME={tmp!r}/unit-runtime
+GAME_DROPIN=zz-cst-game.conf
 log() {{ :; }}
 uid() {{ echo 999999; }}
 expand_cpus() {{ echo ""; }}
@@ -378,7 +409,7 @@ ctl() {{
     fi
 }}
 systemctl() {{ echo "systemctl $*" >> {log_file!r}; }}
-for fn in setp on off; do
+for fn in setp on off {PROFILE_HELPERS}; do
     eval "$(sed -n "/^${{fn}}()/,/^}}/p" {GAME_PROFILE!r})"
 done
 on
@@ -452,6 +483,12 @@ test ! -e {intended_file!r}
         self.assertEqual(r.stdout, "<>")
 
 
+# The helpers of game-profile that on/off/tick call, for the harnesses
+# below (each one is cut out of the script by name).
+PROFILE_HELPERS = ("transient_unit user_cg cpuset_delegated escaped_cgroups gamemode_pid gamemode_in demote_escapes "
+                   "game_dropin_units write_game_dropins remove_game_dropins remove_leftover_dropins escapes_in_state")
+
+
 # A fake systemd for game-profile: STORE/<mgr>/<unit>/<prop> holds what
 # `systemctl show` reports (16G reads back in bytes, as in systemd);
 # set-property also writes the runtime override file, like systemd does.
@@ -493,10 +530,8 @@ systemctl() { echo "systemctl $*" >>"${ACTIONS}"; }
 """
 
 
-class GameProfileDriftTest(unittest.TestCase):
-    """The baseline drop-in name, its migration, and the drift repair of the
-    game profile (a daemon-reload or uresourced undoing a setting while the
-    profile is on)."""
+class GameProfileFake(unittest.TestCase):
+    """game-profile's functions with a fake systemd and a fake cgroup tree."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cst-cpu-test-")
@@ -509,6 +544,11 @@ class GameProfileDriftTest(unittest.TestCase):
         self.store = os.path.join(self.tmp, "store")
         self.ctrl = os.path.join(self.tmp, "ctrl")
         self.actions = os.path.join(self.tmp, "actions.log")
+        self.cgroot = os.path.join(self.tmp, "cgroup")
+        self.unit_runtime = os.path.join(self.tmp, "unit-runtime")
+        # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
+        self.ucg = os.path.join(self.cgroot, "user.slice", "user-999999.slice", "user@999999.service")
+        os.makedirs(self.ucg)
         # The baseline as systemd shows it before the profile.
         self.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
         for u in ("user.slice", "user-999999.slice", "user@999999.service"):
@@ -546,7 +586,10 @@ P_CORES=0-7
 VM_WEIGHT=10
 GAME_MEMORY_LOW=16G
 GAME_ZSWAP_WRITEBACK=yes
-for fn in log prop setp on off drift repair_drift tick again_cmd state_drift; do
+CGROOT={self.cgroot!r}
+UNIT_RUNTIME={self.unit_runtime!r}
+GAME_DROPIN=zz-cst-game.conf
+for fn in log prop setp on off drift repair_drift tick again_cmd state_drift {PROFILE_HELPERS}; do
     eval "$(sed -n "/^${{fn}}()/,/^}}/p" {GAME_PROFILE!r})"
 done
 {FAKE_SYSTEMD}
@@ -557,6 +600,7 @@ pin_docker() {{ :; }}
 protect_steam() {{ :; }}
 cpus_fallback() {{ :; }}
 gamemode_client() {{ return 0; }}
+gamemode_pid() {{ [[ -e {self.tmp!r}/gamemode-pids/"$1" ]]; }}
 {body}
 """
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
@@ -568,6 +612,12 @@ gamemode_client() {{ return 0; }}
     def read(self, path):
         with open(path) as f:
             return f.read()
+
+
+class GameProfileDriftTest(GameProfileFake):
+    """The baseline drop-in name, its migration, and the drift repair of the
+    game profile (a daemon-reload or uresourced undoing a setting while the
+    profile is on)."""
 
     def test_baseline_dropins_sort_before_the_runtime_overrides(self):
         # systemd reads drop-ins in file-name order (byte order) and the last
@@ -638,6 +688,29 @@ remove_old_dropins
         self.assertLess(install.index("remove_old_dropins"), install.index("systemctl daemon-reload"))
         self.assertIn("usys daemon-reload", install)
         self.assertIn("remove_old_dropins", uninstall)
+
+    def test_uninstall_removes_leftover_memorylow_dropins(self):
+        rt = os.path.join(self.tmp, "run-systemd-system")
+        left = [os.path.join(rt, "user.slice.d", "zz-cst-game.conf"),
+                os.path.join(rt, "user@1000.service.d", "zz-cst-game.conf")]
+        keep = os.path.join(rt, "user-1000.slice.d", "10-other.conf")
+        for p in left + [keep]:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").close()
+        script = f"""
+set -Eeuo pipefail
+eval "$(grep -E '^GAME_DROPINS_GLOB=' {SETUP!r})"
+GAME_DROPINS_GLOB="{rt}/${{GAME_DROPINS_GLOB#/run/systemd/system/}}"
+eval "$(sed -n '/^remove_game_dropins()/,/^}}/p' {SETUP!r})"
+remove_game_dropins
+remove_game_dropins   # again: nothing left, no error under set -e
+"""
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for p in left:
+            self.assertFalse(os.path.exists(os.path.dirname(p)), p)
+        self.assertTrue(os.path.exists(keep))
+        self.assertEqual(r.stdout.count("removed"), 2, r.stdout)
 
     def test_on_records_what_systemd_reads_back_and_not_for_scopes(self):
         out, actions = self.run_profile("on\nsetp usr app-flatpak-com.valvesoftware.Steam-1.scope MemoryLow=16G")
@@ -767,6 +840,212 @@ remove_old_dropins
         self.assertIn("the watchdog sets them again within 30 s", out)
         self.assertIn("if they stay: sudo systemctl restart cpu-game.service", out)
         self.assertEqual([a for a in actions if "set-property" in a], [])   # state only reads
+
+
+class GameProfileEscapesTest(GameProfileFake):
+    """The boxes of the user manager that sit next to the game without a rule
+    of their own (top-level slices, systemd-run jobs in app.slice): idle while
+    the profile is on, picked up by tick, reverted by off. And the MemoryLow
+    drop-ins that win over uresourced's at a daemon-reload."""
+
+    def cg(self, *parts, procs=()):
+        d = os.path.join(self.ucg, *parts)
+        os.makedirs(d, exist_ok=True)
+        if procs:
+            with open(os.path.join(d, "cgroup.procs"), "w") as f:
+                f.write("".join(f"{p}\n" for p in procs))
+        return d
+
+    def tree(self, delegated=False):
+        with open(os.path.join(self.ucg, "cgroup.subtree_control"), "w") as f:
+            f.write("cpuset cpu memory pids\n" if delegated else "cpu memory pids\n")
+        for d in ("app.slice/app-gnome-firefox-1.scope", "app.slice/flatpak-session-helper.service",
+                  "app.slice/app-flatpak-com.valvesoftware.Steam-2.scope",
+                  "session.slice/org.gnome.Shell@wayland.service", "user.slice/libpod-1.scope",
+                  "init.scope", "uresourced.service",
+                  "background.slice/localsearch-3.service", "lushtext.slice/run-u5.service",
+                  "_cpu.slice", "app.slice/run-u7.service", "app.slice/run-r1a2.scope"):
+            self.cg(*d.split("/"))
+
+    def sets(self, actions):
+        return [a for a in actions if "set-property" in a]
+
+    def test_on_makes_the_other_boxes_idle_and_records_only_slices(self):
+        self.tree()
+        out, actions = self.run_profile("on")
+        sets = self.sets(actions)
+        for u in ("background.slice", "lushtext.slice", "cpu.slice", "run-u7.service", "run-r1a2.scope"):
+            self.assertIn(f"ctl usr set-property --runtime {u} CPUWeight=idle", sets)
+        for u in ("app.slice CPUWeight", "session.slice", "init.scope", "uresourced.service", "firefox",
+                  "flatpak-session-helper", "Steam", "localsearch", "run-u5.service", "_cpu"):
+            self.assertFalse([a for a in sets if u in a], (u, sets))
+        self.assertFalse([a for a in sets if "ctl usr" in a and "AllowedCPUs" in a], sets)   # not delegated
+        self.assertIn("lushtext.slice: idle while the game runs", out)
+        state, intended = self.read(self.state), self.read(self.intended)
+        for u in ("background.slice", "lushtext.slice", "cpu.slice", "run-u7.service", "run-r1a2.scope"):
+            self.assertIn(f"prop usr {u} CPUWeight new -\n", state)
+        # Drift repair covers the slices; transient units have no drop-in that could win.
+        self.assertIn("prop usr lushtext.slice CPUWeight idle idle\n", intended)
+        self.assertIn("prop usr background.slice CPUWeight idle idle\n", intended)
+        self.assertNotIn("run-", intended)
+        out, _ = self.run_profile("escapes_in_state")
+        # Sorted: the glob order of _cpu.slice depends on the locale.
+        self.assertEqual(sorted(out.split()), ["background.slice", "cpu.slice", "lushtext.slice",
+                                               "run-r1a2.scope", "run-u7.service"])
+
+    def test_with_cpuset_delegated_they_also_leave_the_game_cpus(self):
+        self.tree(delegated=True)
+        _, actions = self.run_profile("on")
+        sets = self.sets(actions)
+        self.assertIn("ctl usr set-property --runtime lushtext.slice CPUWeight=idle AllowedCPUs=12-23", sets)
+        self.assertIn("ctl usr set-property --runtime run-u7.service CPUWeight=idle AllowedCPUs=12-23", sets)
+        self.assertIn("ctl usr set-property --runtime user.slice AllowedCPUs=12-23", sets)
+
+    def test_a_box_with_the_game_in_it_is_left_alone(self):
+        self.tree()
+        self.cg("app.slice", "run-r9.scope", procs=(4242,))
+        self.cg("games.slice", "run-u3.service", procs=(77, 4243))
+        os.makedirs(os.path.join(self.tmp, "gamemode-pids"))
+        for pid in (4242, 4243):
+            open(os.path.join(self.tmp, "gamemode-pids", str(pid)), "w").close()
+        _, actions = self.run_profile("on")
+        sets = self.sets(actions)
+        self.assertFalse([a for a in sets if "run-r9.scope" in a or "games.slice" in a], sets)
+        self.assertIn("ctl usr set-property --runtime lushtext.slice CPUWeight=idle", sets)
+
+    def test_tick_picks_up_new_boxes_once(self):
+        self.tree()
+        self.run_profile("on")
+        open(self.manual, "w").close()
+        state_after_on = self.read(self.state)
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+        self.assertEqual(self.read(self.state), state_after_on)
+        # Appear while the profile is on: one with a name printf %q quotes.
+        self.cg("lush\\x2dbatch.slice")
+        self.cg("app.slice", "run-u8.service")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(sorted(self.sets(actions)), sorted([
+            "ctl usr set-property --runtime lush\\x2dbatch.slice CPUWeight=idle",
+            "ctl usr set-property --runtime run-u8.service CPUWeight=idle",
+        ]))
+        grown = self.read(self.state)
+        self.assertIn("prop usr lush\\\\x2dbatch.slice CPUWeight new -\n", grown)
+        # A second tick adds nothing: game.state does not grow every 30 s.
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+        self.assertEqual(self.read(self.state), grown)
+
+    def test_off_reverts_them_and_tolerates_units_that_are_gone(self):
+        self.tree()
+        self.run_profile("on")
+        ctrl = os.path.join(self.ctrl, "usr")
+        self.assertTrue(os.path.exists(os.path.join(ctrl, "lushtext.slice.d", "50-CPUWeight.conf")))
+        # The job ended: its unit and cgroup are gone (systemd may already
+        # have removed the transient unit's control file too).
+        shutil.rmtree(os.path.join(self.ucg, "app.slice", "run-u7.service"))
+        shutil.rmtree(os.path.join(ctrl, "run-u7.service.d"))
+        out, actions = self.run_profile("off")
+        for u in ("background.slice", "lushtext.slice", "cpu.slice", "run-u7.service", "run-r1a2.scope"):
+            self.assertFalse(os.path.exists(os.path.join(ctrl, f"{u}.d")), u)
+        self.assertIn("ctl usr daemon-reload", actions)
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_upgrade_while_on_from_the_previous_version(self):
+        # Switched on by the previous version: game.state and game.intended
+        # in the same format, but no zz- drop-ins and no other boxes handled.
+        self.run_profile("on")
+        shutil.rmtree(self.unit_runtime)
+        for f in (self.state, self.intended):
+            self.assertNotIn("lushtext", self.read(f))
+        open(self.manual, "w").close()
+        # Installed while the game runs: the next tick picks up the boxes and
+        # leaves the profile on (no drop-ins to remove, no reload).
+        self.tree()
+        _, actions = self.run_profile("tick")
+        self.assertIn("ctl usr set-property --runtime lushtext.slice CPUWeight=idle", self.sets(actions))
+        self.assertFalse([a for a in actions if "daemon-reload" in a], actions)
+        self.assertIn("prop usr lushtext.slice CPUWeight new -\n", self.read(self.state))
+        self.assertTrue(os.path.exists(self.state))
+        # off undoes both what the old version set and what the new tick added.
+        old_set = os.path.join(self.ctrl, "sys", "machine.slice.d")
+        self.assertTrue(os.path.exists(old_set))
+        _, actions = self.run_profile("off")
+        self.assertIn("systemctl daemon-reload", actions)
+        self.assertIn("ctl usr daemon-reload", actions)
+        self.assertFalse(os.path.exists(old_set))
+        self.assertFalse(os.path.exists(os.path.join(self.ctrl, "usr", "lushtext.slice.d")))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(self.unit_runtime))
+
+    def test_a_slice_with_its_own_override_gets_it_back_and_drift_is_repaired(self):
+        self.tree()
+        # Someone had set lushtext.slice to weight 50 at run time before the game.
+        own = os.path.join(self.ctrl, "usr", "lushtext.slice.d", "50-CPUWeight.conf")
+        os.makedirs(os.path.dirname(own))
+        with open(own, "w") as f:
+            f.write("[Slice]\nCPUWeight=50\n")
+        self.set_now("usr", "lushtext.slice", CPUWeight="50")
+        self.run_profile("on")
+        open(self.manual, "w").close()
+        self.assertIn("prop usr lushtext.slice CPUWeight existed 50\n", self.read(self.state))
+        # A daemon-reload put 50 back meanwhile: the tick sets idle again,
+        # without a second record.
+        self.set_now("usr", "lushtext.slice", CPUWeight="50")
+        state = self.read(self.state)
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), ["ctl usr set-property --runtime lushtext.slice CPUWeight=idle"])
+        self.assertIn("drift: lushtext.slice CPUWeight was '50'", out)
+        self.assertEqual(self.read(self.state), state)
+        _, actions = self.run_profile("off")
+        self.assertIn("ctl usr set-property --runtime lushtext.slice CPUWeight=50", actions)
+        self.assertEqual(self.now("usr", "lushtext.slice", "CPUWeight"), "50")
+        self.assertTrue(os.path.exists(own))
+
+    def test_on_writes_the_memorylow_dropins_and_off_removes_them(self):
+        self.run_profile("on")
+        files = {u: os.path.join(self.unit_runtime, f"{u}.d", "zz-cst-game.conf")
+                 for u in ("user.slice", "user-999999.slice", "user@999999.service")}
+        for u, f in files.items():
+            lines = [l for l in self.read(f).splitlines() if not l.startswith("#")]
+            self.assertEqual(lines, ["[Service]" if u.endswith(".service") else "[Slice]", "MemoryLow=16G"], u)
+        _, actions = self.run_profile("off")
+        self.assertIn("systemctl daemon-reload", actions)
+        for f in files.values():
+            self.assertFalse(os.path.exists(os.path.dirname(f)), f)
+
+    def test_on_sets_memorylow_live_without_a_reload(self):
+        _, actions = self.run_profile("on")
+        self.assertIn("ctl sys set-property --runtime user-999999.slice MemoryLow=16G", actions)
+        self.assertFalse([a for a in actions if "daemon-reload" in a], actions)
+
+    def test_off_without_state_still_removes_leftover_dropins(self):
+        d = os.path.join(self.unit_runtime, "user-999999.slice.d")
+        os.makedirs(d)
+        with open(os.path.join(d, "zz-cst-game.conf"), "w") as f:
+            f.write("[Slice]\nMemoryLow=16G\n")
+        other = os.path.join(self.unit_runtime, "user.slice.d", "10-other.conf")
+        os.makedirs(os.path.dirname(other))
+        open(other, "w").close()
+        out, actions = self.run_profile("off")
+        self.assertFalse(os.path.exists(d))
+        self.assertTrue(os.path.exists(other))        # only the profile's own file goes
+        self.assertEqual(actions, ["systemctl daemon-reload"])
+        self.assertIn("were still there: removed them", out)
+        # Nothing left: no reload at all.
+        _, actions = self.run_profile("off")
+        self.assertEqual(actions, [])
+
+    def test_tick_with_the_profile_off_removes_leftover_dropins(self):
+        d = os.path.join(self.unit_runtime, "user@999999.service.d")
+        os.makedirs(d)
+        open(os.path.join(d, "zz-cst-game.conf"), "w").close()
+        out, actions = self.run_profile('gamemode_client() { return 1; }\ntick')
+        self.assertFalse(os.path.exists(d))
+        self.assertEqual(actions, ["systemctl daemon-reload"])
+        self.assertIn("were still there: removed them", out)
+        out, actions = self.run_profile('gamemode_client() { return 1; }\ntick')
+        self.assertEqual((out, actions), ("", []))
 
 
 if __name__ == "__main__":

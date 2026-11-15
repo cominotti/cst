@@ -306,7 +306,11 @@ EOF
             grep -q 'subject.user == "tester"' /etc/polkit-1/rules.d/50-cpu-setup-game.rules
             systemctl start polkit.service
             systemctl is-active polkit.service
-            ! runuser -u tester -- systemctl --no-ask-password start cpu-game.service >/dev/null 2>&1
+            # A bare "! cmd" never fails a set -e script: test the denial explicitly.
+            if runuser -u tester -- systemctl --no-ask-password start cpu-game.service >/dev/null 2>&1; then
+                echo "polkit let a non-seat tester start cpu-game.service" >&2
+                exit 1
+            fi
 
             # Verify cgroup v2 weights when a transient scope sits in machine.slice
             systemd-run --unit=e2e-fake-vm --slice=machine.slice sleep 60
@@ -323,6 +327,8 @@ EOF
             fi
             /usr/local/sbin/cpu-game-profile on
             grep -qx '10' /sys/fs/cgroup/machine.slice/cpu.weight
+            # The MemoryLow drop-in that wins over uresourced's at a reload.
+            grep -qx 'MemoryLow=16G' /run/systemd/system/user.slice.d/zz-cst-game.conf
             grep -q '10' /sys/fs/cgroup/machine.slice/io.weight
             # A daemon-reload must not put the baseline drop-in back over the profile.
             systemctl daemon-reload
@@ -331,6 +337,7 @@ EOF
             grep -q 'game profile: ON' <<<"$gp_state"
             /usr/local/sbin/cpu-game-profile off
             grep -qx '50' /sys/fs/cgroup/machine.slice/cpu.weight
+            test -z "$(ls /run/systemd/system/*.d/zz-cst-game.conf 2>/dev/null)"
             grep -q '50' /sys/fs/cgroup/machine.slice/io.weight
             systemctl stop e2e-fake-vm.service || true
 
@@ -353,7 +360,12 @@ EOF
             rm -f /tmp/dummy-vm.xml
             systemctl stop virtqemud.service virtqemud.socket virtqemud-ro.socket virtqemud-admin.socket || true
 
+            # A drop-in left behind (no game.state): uninstall removes it too.
+            mkdir -p /run/systemd/system/user-1000.slice.d
+            echo '[Slice]' >/run/systemd/system/user-1000.slice.d/zz-cst-game.conf
+            echo 'MemoryLow=16G' >>/run/systemd/system/user-1000.slice.d/zz-cst-game.conf
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall
+            test ! -e /run/systemd/system/user-1000.slice.d/zz-cst-game.conf
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall
             test ! -e /etc/systemd/system/machine.slice.d/10-cpu-setup.conf
             test ! -e /etc/polkit-1/rules.d/50-cpu-setup-game.rules
