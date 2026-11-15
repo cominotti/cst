@@ -14,7 +14,8 @@ it as a module and never let it reach the machine:
   folder, as btrfs does when a file is created;
 - os.sync() is replaced by a counter.
 
-Loading the module only reads /etc/docker/daemon.json (ImportTest checks it).
+Loading the module only reads /etc/docker/daemon.json and does nothing else
+(ImportTest checks both).
 
 A crash (a kill, a timeout or a power loss) is simulated by raising Crash, a
 BaseException, at one step: migrate() catches Exception for each volume, so
@@ -27,6 +28,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import builtins
 import contextlib
+import fcntl
 import importlib.machinery
 import io
 import os
@@ -38,7 +40,7 @@ import sys
 import tempfile
 import unittest
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -75,30 +77,74 @@ DATA = {
 LINKS = {"latest": "db/wal/000001"}
 FIFOS = ("db/pipe",)
 EMPTY_DIRS = ("cache",)
+DATA_BYTES = sum(len(v) for v in DATA.values())
+DATA_ENTRIES = len(DATA) + len(LINKS) + len(FIFOS) + len(EMPTY_DIRS) + 3  # + db, db/base, db/wal
 
 
 class Crash(BaseException):
     """The process dies at this point (kill, timeout, power loss)."""
 
 
-def tree(top: str) -> dict[str, tuple]:
-    """Everything below top (and top's own mode), as comparable values."""
-    out: dict[str, tuple] = {".": ("dir", stat.S_IMODE(os.lstat(top).st_mode))}
+def ino(path: str) -> int:
+    return os.lstat(path).st_ino
+
+
+def entries(top: str) -> Iterator[tuple[str, os.stat_result]]:
+    """(path, lstat) of every entry below top. Like the helper, os.walk lists
+    a symlink to a folder but does not enter it."""
     for root, dirs, files in os.walk(top):
         for name in dirs + files:
             p = os.path.join(root, name)
-            rel = os.path.relpath(p, top)
-            st = os.lstat(p)
-            if stat.S_ISLNK(st.st_mode):
-                out[rel] = ("link", os.readlink(p))
-            elif stat.S_ISDIR(st.st_mode):
-                out[rel] = ("dir", stat.S_IMODE(st.st_mode))
-            elif stat.S_ISREG(st.st_mode):
-                with open(p, "rb") as f:
-                    out[rel] = ("file", stat.S_IMODE(st.st_mode), f.read())
-            else:
-                out[rel] = ("other", stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode))
+            yield p, os.lstat(p)
+
+
+def carries_flags(st: os.stat_result) -> bool:
+    """Folders and regular files: the entries whose NOCOW flag matters."""
+    return stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)
+
+
+def tree(top: str) -> dict[str, tuple]:
+    """Everything below top (and top's own mode), as comparable values."""
+    out: dict[str, tuple] = {".": ("dir", stat.S_IMODE(os.lstat(top).st_mode))}
+    for p, st in entries(top):
+        rel = os.path.relpath(p, top)
+        if stat.S_ISLNK(st.st_mode):
+            out[rel] = ("link", os.readlink(p))
+        elif stat.S_ISDIR(st.st_mode):
+            out[rel] = ("dir", stat.S_IMODE(st.st_mode))
+        elif stat.S_ISREG(st.st_mode):
+            with open(p, "rb") as f:
+                out[rel] = ("file", stat.S_IMODE(st.st_mode), f.read())
+        else:
+            out[rel] = ("other", stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode))
     return out
+
+
+def cp_fails(src: str, dst: str) -> tuple[int, str]:
+    """A cp that fails at once, copying nothing."""
+    return 1, "cp: boom"
+
+
+def check_failed(entries_new: int, bytes_new: int, cow_files: int) -> str:
+    """The helper's message when the copy of the DATA volume does not match."""
+    return (
+        f"copy check failed (entries {DATA_ENTRIES} vs {entries_new}, bytes {DATA_BYTES} vs {bytes_new}, "
+        f"CoW files {cow_files})"
+    )
+
+
+class OtherDevice:
+    """os.lstat() of a mount point: the same folder, on another filesystem."""
+
+    def __init__(self, st: os.stat_result) -> None:
+        self.st = st
+
+    @property
+    def st_dev(self) -> int:
+        return self.st.st_dev + 1
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.st, name)
 
 
 class FakeSystem:
@@ -133,6 +179,10 @@ class FakeSystem:
 
     def nocow(self, path: str) -> bool:
         return bool(self.flags_of(path) & NOCOW)
+
+    def sets_below(self, top: str) -> list[str]:
+        """The paths at or below top whose flags the helper set."""
+        return [p for p in self.sets if p == top or p.startswith(top + os.sep)]
 
     def ioctl(self, fd: int, request: int, arg: bytes | int = 0, mutate_flag: bool = True) -> bytes | int:
         target = os.readlink(f"/proc/self/fd/{fd}")
@@ -215,6 +265,16 @@ class FakeSystem:
         os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
         return 0, ""
 
+    def copy_then(self, change: Callable[[str], object]) -> Callable[[str, str], tuple[int, str]]:
+        """A cp that copies, then spoils the copy with change(dst), and reports success."""
+
+        def cp(src: str, dst: str) -> tuple[int, str]:
+            self.copy(src, dst)
+            change(dst)
+            return 0, ""
+
+        return cp
+
     def copy_into(self, src: str, dst: str, stop_after: int | None = None) -> int:
         """Copy the entries of src into dst; with stop_after, raise Crash after that many."""
         n = 0
@@ -267,31 +327,28 @@ class Base(unittest.TestCase):
             ("fcntl", SimpleNamespace(ioctl=self.fs.ioctl)),
             ("subprocess", SimpleNamespace(run=self.fs.run)),
         ):
-            p = mock.patch.object(M, name, value)
-            p.start()
-            self.addCleanup(p.stop)
-        p = mock.patch.object(os, "sync", self.fs.sync)
-        p.start()
-        self.addCleanup(p.stop)
+            self.enterContext(mock.patch.object(M, name, value))
+        self.enterContext(mock.patch.object(os, "sync", self.fs.sync))
         # The helper opens the attempts file without closing it (bugs.md,
         # "attempts file left open"); CPython closes it at once, but the
         # ResourceWarning would fill the test output.
-        quiet = warnings.catch_warnings()
-        quiet.__enter__()
-        self.addCleanup(quiet.__exit__, None, None, None)
+        self.enterContext(warnings.catch_warnings())
         warnings.filterwarnings("ignore", r"unclosed file <_io\.TextIOWrapper name='[^']*/attempts'", ResourceWarning)
         # Nothing of the helper may point outside the test folder.
         for path in (M.VOLUMES, M.FLAG, M.ATTEMPTS, M.NOTIFY):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
 
+    def fresh(self) -> None:
+        """A new test folder and new fakes, for the next subTest."""
+        self.doCleanups()
+        self.setUp()
+
     # ---- set-up helpers ---------------------------------------------------
 
-    def volume(self, name: str, nocow: bool = False, data: dict[str, bytes] | None = None) -> str:
-        """VOLUMES/NAME/_data with DATA (or data); nocow: every entry has +C."""
-        top = os.path.join(self.vols, name, "_data")
+    def fill(self, top: str, nocow: bool = False, data: dict[str, bytes] | None = None) -> str:
+        """Create folder top with DATA (or data); nocow: every folder and file has +C."""
         os.makedirs(top)
         os.chmod(top, 0o750)
-        self.fs.set(os.path.join(self.vols, name), nocow)
         self.fs.set(top, nocow)
         for rel, content in (DATA if data is None else data).items():
             p = os.path.join(top, rel)
@@ -306,13 +363,16 @@ class Base(unittest.TestCase):
                 os.mkfifo(os.path.join(top, rel))
             for rel in EMPTY_DIRS:
                 os.makedirs(os.path.join(top, rel))
-        for root, dirs, files in os.walk(top):
-            for n in dirs + files:
-                p = os.path.join(root, n)
-                st = os.lstat(p)
-                if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode):
-                    self.fs.set(p, nocow)
+        for p, st in entries(top):
+            if carries_flags(st):
+                self.fs.set(p, nocow)
         return top
+
+    def volume(self, name: str, nocow: bool = False, data: dict[str, bytes] | None = None) -> str:
+        """VOLUMES/NAME/_data, filled by fill(); returns the _data path."""
+        os.mkdir(os.path.join(self.vols, name))
+        self.fs.set(os.path.join(self.vols, name), nocow)
+        return self.fill(os.path.join(self.vols, name, "_data"), nocow, data)
 
     def set_attempts(self, text: str) -> None:
         os.makedirs(os.path.dirname(self.attempts), exist_ok=True)
@@ -350,12 +410,9 @@ class Base(unittest.TestCase):
 
     def assert_all_nocow(self, top: str) -> None:
         self.assertTrue(self.fs.nocow(top), top)
-        for root, dirs, files in os.walk(top):
-            for n in dirs + files:
-                p = os.path.join(root, n)
-                st = os.lstat(p)
-                if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode):
-                    self.assertTrue(self.fs.nocow(p), p)
+        for p, st in entries(top):
+            if carries_flags(st):
+                self.assertTrue(self.fs.nocow(p), p)
 
     def assert_no_leftovers(self, name: str) -> None:
         self.assertEqual(sorted(os.listdir(os.path.join(self.vols, name))), ["_data"])
@@ -369,12 +426,29 @@ class ImportTest(unittest.TestCase):
             opened.append((str(path), mode))
             raise FileNotFoundError(2, "No such file or directory", path)
 
-        with mock.patch.object(builtins, "open", fake_open):
-            mod = load("docker_volumes_nocow_import_check")
+        def trap(name: str) -> Callable[..., object]:
+            def refuse(*a: object, **kw: object) -> object:
+                raise AssertionError(f"loading the module called {name}")
+
+            return refuse
+
+        # Everything the helper uses to change the machine or run a command.
+        changes = (
+            (os, ("open", "mkdir", "makedirs", "remove", "unlink", "rename", "rmdir", "chown", "chmod", "sync")),
+            (shutil, ("rmtree",)),
+            (subprocess, ("run", "Popen")),
+            (fcntl, ("ioctl",)),
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(builtins, "open", fake_open))
+            for module, names in changes:
+                for name in names:
+                    stack.enter_context(mock.patch.object(module, name, trap(f"{module.__name__}.{name}")))
+            loaded = load("docker_volumes_nocow_import_check")
         self.assertEqual(opened, [("/etc/docker/daemon.json", "r")])
-        self.assertEqual(mod.VOLUMES, "/var/lib/docker/volumes")
-        self.assertEqual(mod.FLAG, "/etc/btrfs-setup/docker-nocow-pending")
-        self.assertEqual(mod.ATTEMPTS, "/var/lib/docker-volumes-nocow/attempts")
+        self.assertEqual(loaded.VOLUMES, "/var/lib/docker/volumes")
+        self.assertEqual(loaded.FLAG, "/etc/btrfs-setup/docker-nocow-pending")
+        self.assertEqual(loaded.ATTEMPTS, "/var/lib/docker-volumes-nocow/attempts")
 
     def test_docker_root_reads_data_root(self) -> None:
         for text, want in (
@@ -427,6 +501,50 @@ class StatusTest(Base):
         self.volume("done", nocow=True)
         rc, out = self.call(M.status)
         self.assertEqual(out, f"{self.vols}: new volumes copy-on-write; 1 of 1 volume(s) fully NOCOW\n")
+
+
+class NotVolumeDataTest(Base):
+    """What the helper must neither count nor change: a _data that is a
+    symlink, and a filesystem mounted below a volume."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fs.set(self.vols, True)
+        self.volume("done", nocow=True)
+        self.all_done = f"{self.vols}: new volumes NOCOW; 1 of 1 volume(s) fully NOCOW\n"
+
+    def test_symlinked_data_is_not_a_volume(self) -> None:
+        elsewhere = self.fill(os.path.join(self.tmp, "elsewhere"))  # copy-on-write data
+        os.mkdir(os.path.join(self.vols, "linked"))
+        os.symlink(elsewhere, os.path.join(self.vols, "linked", "_data"))
+        before = tree(elsewhere)
+        self.assertEqual(self.call(M.status), (0, self.all_done))
+        self.schedule()
+        rc, out = self.call(M.migrate)
+        self.assertEqual(rc, 0)
+        self.assertIn(f"<5>{TAG}: rewriting 0 volume(s)", out)
+        self.assertEqual(self.fs.commands("cp"), [])
+        self.assertEqual(self.fs.sets_below(elsewhere), [])
+        self.assertEqual(tree(elsewhere), before)
+        self.assertTrue(os.path.islink(os.path.join(self.vols, "linked", "_data")))
+
+    def test_mount_below_a_volume_is_not_entered(self) -> None:
+        mnt = self.fill(os.path.join(self.vols, "done", "_data", "mnt"))  # copy-on-write data
+        before = tree(mnt)
+        # Seen as part of the volume, the folder holds copy-on-write data.
+        rc, out = self.call(M.status)
+        self.assertIn("0 of 1 volume(s) fully NOCOW\n  1 with copy-on-write data (2 MiB)", out)
+        real_lstat = os.lstat
+
+        def lstat(path: str) -> object:
+            st = real_lstat(path)
+            return OtherDevice(st) if path == mnt else st
+
+        with mock.patch.object(os, "lstat", lstat):
+            self.assertEqual(self.call(M.status), (0, self.all_done))
+            self.assertEqual(self.call(M.mark), (0, ""))
+        self.assertEqual(self.fs.sets_below(mnt), [])
+        self.assertEqual(tree(mnt), before)
 
 
 class MarkUnmarkTest(Base):
@@ -511,18 +629,17 @@ class MigrateTest(Base):
 
     def test_happy_path(self) -> None:
         done = self.volume("done", nocow=True)
-        done_ino = os.lstat(done).st_ino
+        done_ino = ino(done)
         top = self.volume("cow")
-        before = tree(top)
-        old_ino = os.lstat(top).st_ino
+        before, old_ino = tree(top), ino(top)
         self.schedule()
         rc, out = self.call(M.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(tree(top), before)  # same entries, modes, data and link targets
-        self.assertNotEqual(os.lstat(top).st_ino, old_ino)  # a new copy
+        self.assertNotEqual(ino(top), old_ino)  # a new copy
         self.assert_all_nocow(top)
         self.assert_no_leftovers("cow")
-        self.assertEqual(os.lstat(done).st_ino, done_ino)  # a NOCOW volume is not copied
+        self.assertEqual(ino(done), done_ino)  # a NOCOW volume is not copied
         self.assertFalse(os.path.exists(self.flag))
         self.assertIsNone(self.read_attempts())
         new = top + ".nocow-new"
@@ -531,7 +648,7 @@ class MigrateTest(Base):
             self.fs.commands("cp"), [["cp", "-a", "--reflink=never", "--sparse=auto", "--", top + "/.", new + "/"]]
         )
         self.assertEqual(self.fs.commands("btrfs"), [["btrfs", "filesystem", "usage", "-b", self.vols]])
-        self.assertEqual(self.fs.syncs, 1)  # before the names are swapped
+        self.assertEqual(self.fs.syncs, 1)  # before the names are swapped (RecoverTest checks the order)
         lines = out.splitlines()
         self.assertEqual(lines[0], f"<5>{TAG}: rewriting 1 volume(s) without copy-on-write before Docker starts")
         self.assertRegex(lines[1], rf"^<6>{TAG}: cow: 3 file\(s\), 2 MiB in \d+s$")
@@ -603,89 +720,59 @@ class MigrateTest(Base):
         self.assertIsNone(self.read_attempts())
         self.assertIn(f"<5>{TAG}: rewriting 0 volume(s)", out)
 
-    def check_refused(self, top: str, before: dict[str, tuple], ino: int, out: str, why: str) -> None:
+    def migrate_refused(self, cp: Callable[[str, str], tuple[int, str]], why: str) -> None:
+        """Migrate the CoW volume "cow" with this cp: the copy is refused, and
+        the original stays as it was, to be tried again at the next boot."""
+        top = self.volume("cow")
+        before, old_ino = tree(top), ino(top)
+        self.schedule()
+        self.fs.cp = cp
+        rc, out = self.call(M.migrate)
+        self.assertEqual(rc, 0)
         self.assertEqual(tree(top), before)
-        self.assertEqual(os.lstat(top).st_ino, ino)  # the original, untouched
+        self.assertEqual(ino(top), old_ino)  # the original, untouched
         self.assertFalse(self.fs.nocow(os.path.join(top, "README")))
         self.assert_no_leftovers("cow")
-        self.assertTrue(os.path.exists(self.flag))  # tried again at the next boot
+        self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(self.read_attempts(), "1")
         self.assertIn(f"<3>{TAG}: cow: {why}; left as it was\n", out)
         self.assertNotIn("all Docker volumes are NOCOW now", out)
         self.assertEqual(self.fs.syncs, 0)
 
     def test_copy_check_refuses(self) -> None:
-        entries = len(DATA) + len(LINKS) + len(FIFOS) + len(EMPTY_DIRS) + 3  # + db, db/base, db/wal
-        size = sum(len(v) for v in DATA.values())
-
-        def drops_a_file(src: str, dst: str) -> tuple[int, str]:
-            self.fs.copy(src, dst)
-            os.remove(os.path.join(dst, "README"))
-            return 0, ""
-
-        def truncates_a_file(src: str, dst: str) -> tuple[int, str]:
-            self.fs.copy(src, dst)
-            os.truncate(os.path.join(dst, "db/base/1"), 1000)
-            return 0, ""
-
-        def leaves_a_cow_file(src: str, dst: str) -> tuple[int, str]:
-            self.fs.copy(src, dst)
-            self.fs.set(os.path.join(dst, "db/wal/000001"), False)
-            return 0, ""
-
-        def leaves_a_cow_folder(src: str, dst: str) -> tuple[int, str]:
-            self.fs.copy(src, dst)
-            self.fs.set(os.path.join(dst, "cache"), False)
-            return 0, ""
-
-        for cp, why in (
+        for name, change, why in (
             (
-                drops_a_file,
-                f"copy check failed (entries {entries} vs {entries - 1}, bytes {size} vs {size - 13}, CoW files 0)",
+                "drops a file",
+                lambda dst: os.remove(os.path.join(dst, "README")),
+                check_failed(DATA_ENTRIES - 1, DATA_BYTES - 13, 0),
             ),
             (
-                truncates_a_file,
-                f"copy check failed (entries {entries} vs {entries}, bytes {size} vs {size - (1 << 20) + 1000}, "
-                "CoW files 0)",
+                "truncates a file",
+                lambda dst: os.truncate(os.path.join(dst, "db/base/1"), 1000),
+                check_failed(DATA_ENTRIES, DATA_BYTES - (1 << 20) + 1000, 0),
             ),
             (
-                leaves_a_cow_file,
-                f"copy check failed (entries {entries} vs {entries}, bytes {size} vs {size}, CoW files 1)",
+                "leaves a CoW file",
+                lambda dst: self.fs.set(os.path.join(dst, "db/wal/000001"), False),
+                check_failed(DATA_ENTRIES, DATA_BYTES, 1),
             ),
             (
-                leaves_a_cow_folder,
-                f"copy check failed (entries {entries} vs {entries}, bytes {size} vs {size}, CoW files 0)",
+                "leaves a CoW folder",
+                lambda dst: self.fs.set(os.path.join(dst, "cache"), False),
+                check_failed(DATA_ENTRIES, DATA_BYTES, 0),
             ),
         ):
-            with self.subTest(cp=cp.__name__):
-                self.setUp_again()
-                top = self.volume("cow")
-                before, ino = tree(top), os.lstat(top).st_ino
-                self.schedule()
-                self.fs.cp = cp
-                rc, out = self.call(M.migrate)
-                self.assertEqual(rc, 0)
-                self.check_refused(top, before, ino, out, why)
-
-    def setUp_again(self) -> None:
-        """A fresh test folder for the next subTest."""
-        self.doCleanups()
-        self.setUp()
+            with self.subTest(cp=name):
+                self.fresh()
+                self.migrate_refused(self.fs.copy_then(change), why)
 
     def test_copy_fails(self) -> None:
-        top = self.volume("cow")
-        before, ino = tree(top), os.lstat(top).st_ino
-        self.schedule()
-
         def full_disk(src: str, dst: str) -> tuple[int, str]:
             with open(os.path.join(dst, "partial"), "wb") as f:
                 f.write(b"x")
             return 1, "cp: error writing 'db/base/1': No space left on device\n"
 
-        self.fs.cp = full_disk
-        rc, out = self.call(M.migrate)
-        self.assertEqual(rc, 0)
-        self.check_refused(top, before, ino, out, "copy failed: cp: error writing 'db/base/1': No space left on device")
+        self.migrate_refused(full_disk, "copy failed: cp: error writing 'db/base/1': No space left on device")
 
     def test_one_failing_volume_does_not_stop_the_others(self) -> None:
         bad = self.volume("a-bad")
@@ -694,9 +781,7 @@ class MigrateTest(Base):
         self.schedule()
 
         def fails_for_a(src: str, dst: str) -> tuple[int, str]:
-            if "/a-bad/" in src:
-                return 1, "cp: boom"
-            return self.fs.copy(src, dst)
+            return cp_fails(src, dst) if "/a-bad/" in src else self.fs.copy(src, dst)
 
         self.fs.cp = fails_for_a
         rc, out = self.call(M.migrate)
@@ -713,11 +798,10 @@ class MigrateTest(Base):
 
     def test_free_space(self) -> None:
         top = self.volume("cow")
-        size = sum(len(v) for v in DATA.values())
         before = tree(top)
         self.schedule()
         # One byte short of the copy plus the 20 GiB margin: skipped.
-        self.fs.free = size + 20 * GIB - 1
+        self.fs.free = DATA_BYTES + 20 * GIB - 1
         rc, out = self.call(M.migrate)
         self.assertEqual(rc, 0)
         self.assertIn(f"<4>{TAG}: cow: not enough free space for a 2 MiB copy; skipped\n", out)
@@ -726,7 +810,7 @@ class MigrateTest(Base):
         self.assertTrue(os.path.exists(self.flag))
         self.assertEqual(self.read_attempts(), "1")
         # Exactly enough: copied.
-        self.fs.free = size + 20 * GIB
+        self.fs.free = DATA_BYTES + 20 * GIB
         rc, out = self.call(M.migrate)
         self.assert_all_nocow(top)
         self.assertFalse(os.path.exists(self.flag))
@@ -743,7 +827,7 @@ class MigrateTest(Base):
         top = self.volume("cow")
         before = tree(top)
         self.schedule()
-        self.fs.cp = lambda src, dst: (1, "cp: boom")
+        self.fs.cp = cp_fails
         msg = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
         for boot, attempts in ((1, "1"), (2, "2")):
             with self.subTest(boot=boot):
@@ -774,8 +858,8 @@ class MigrateTest(Base):
         self.schedule()
         self.set_attempts("2")
         self.call(M.mark)
-        self.fs.cp = lambda src, dst: (1, "cp: boom")
-        rc, out = self.call(M.migrate)
+        self.fs.cp = cp_fails
+        self.call(M.migrate)
         self.assertEqual(self.read_attempts(), "1")  # tried, not given up
         self.assertEqual(len(self.fs.commands("cp")), 1)
 
@@ -783,7 +867,7 @@ class MigrateTest(Base):
         self.volume("cow")
         self.schedule()
         self.set_attempts("garbage")
-        self.fs.cp = lambda src, dst: (1, "cp: boom")
+        self.fs.cp = cp_fails
         self.call(M.migrate)
         self.assertEqual(self.read_attempts(), "1")
 
@@ -800,6 +884,11 @@ class DockerRunningTest(Base):
         self.before = tree(os.path.join(self.vols, "cow"))
         self.schedule()
         self.set_attempts("1")
+
+    def assert_migrated(self, out: str) -> None:
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(self.top)
+        self.assert_no_leftovers("cow")
 
     def test_running_postpones_without_touching_anything(self) -> None:
         for state in ("active", "activating", "reloading", "deactivating"):
@@ -822,29 +911,20 @@ class DockerRunningTest(Base):
     def test_stopped_migrates(self) -> None:
         for state in ("inactive", "failed"):
             with self.subTest(state=state):
-                self.setUp_again()
+                self.fresh()
                 self.fs.docker_state = state
-                rc, out = self.call(M.migrate)
-                self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
-                self.assert_all_nocow(self.top)
-                self.assert_no_leftovers("cow")
-
-    def setUp_again(self) -> None:
-        self.doCleanups()
-        self.setUp()
+                self.assert_migrated(self.call(M.migrate)[1])
 
     def test_unknown_state_fails_open_today(self) -> None:
         # Today an answer that is not a running state counts as "not running":
         # systemctl failing (no manager on the bus) with empty output, or an
         # unknown word. Hardening in B2 (design triage 2): migrate only on
         # "inactive" or "failed" with exit code 0. This pins today's behaviour.
-        for rc_, state in ((1, ""), (0, "maintenance")):
-            with self.subTest(rc=rc_, state=state):
-                self.setUp_again()
-                self.fs.systemctl_rc, self.fs.docker_state = rc_, state
-                rc, out = self.call(M.migrate)
-                self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
-                self.assert_all_nocow(self.top)
+        for rc, state in ((1, ""), (0, "maintenance")):
+            with self.subTest(rc=rc, state=state):
+                self.fresh()
+                self.fs.systemctl_rc, self.fs.docker_state = rc, state
+                self.assert_migrated(self.call(M.migrate)[1])
 
     def test_no_systemctl_postpones_through_main(self) -> None:
         # subprocess.run raises FileNotFoundError; main() logs it and exits 0
@@ -867,8 +947,19 @@ class RecoverTest(Base):
         self.top = self.volume("cow")
         self.vol = os.path.join(self.vols, "cow")
         self.before = tree(self.top)
-        self.ino = os.lstat(self.top).st_ino
+        self.ino = ino(self.top)
         self.schedule()
+
+    def second_rename_raises(self, exc: BaseException) -> contextlib.AbstractContextManager[object]:
+        """rename(new, data), the second rename of the swap, raises exc; the others run."""
+        real_rename = os.rename
+
+        def rename(src: str, dst: str) -> None:
+            if src.endswith(".nocow-new"):
+                raise exc
+            real_rename(src, dst)
+
+        return mock.patch.object(os, "rename", rename)
 
     def crash(self) -> None:
         with self.assertRaises(Crash):
@@ -890,36 +981,30 @@ class RecoverTest(Base):
         self.fs.cp = lambda src, dst: (self.fs.copy_into(src, dst, stop_after=4), "")
         self.crash()
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data", "_data.nocow-new"])
-        self.assertEqual(os.lstat(self.top).st_ino, self.ino)
+        self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
         self.fs.cp = self.fs.copy
         self.next_boot_finishes(restored=False)
 
     def test_crash_between_the_renames(self) -> None:
-        real_rename = os.rename
-
-        def rename(src: str, dst: str) -> None:
-            if src.endswith(".nocow-new"):
-                raise Crash("power loss between the two renames")
-            real_rename(src, dst)
-
-        with mock.patch.object(os, "rename", rename):
+        with self.second_rename_raises(Crash("power loss between the two renames")):
             self.crash()
+        self.assertEqual(self.fs.syncs, 1)  # the copy was on disk before the first rename
         names = sorted(os.listdir(self.vol))
         self.assertEqual(len(names), 2, names)
         self.assertRegex(names[0], r"^_data\.cow-old-\d+$")
         self.assertEqual(names[1], "_data.nocow-new")
         old = os.path.join(self.vol, names[0])
-        self.assertEqual(os.lstat(old).st_ino, self.ino)
+        self.assertEqual(ino(old), self.ino)
         # recover() alone: the original back under its name, the copy gone.
         rc, out = self.call(M.recover)
         self.assertEqual(out, f"<4>{TAG}: cow: restored the original after an interrupted migration\n")
-        self.assertEqual(os.lstat(self.top).st_ino, self.ino)
+        self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
         self.assert_no_leftovers("cow")
         self.assertFalse(self.fs.nocow(os.path.join(self.top, "README")))
         # The same state again, through the next boot: restored, then migrated.
-        real_rename(self.top, old)
+        os.rename(self.top, old)
         os.mkdir(os.path.join(self.vol, "_data.nocow-new"))
         self.next_boot_finishes(restored=True)
 
@@ -944,18 +1029,12 @@ class RecoverTest(Base):
     def test_failed_second_rename_puts_the_original_back(self) -> None:
         # rename(new, data) fails with an OSError: the original goes back at
         # once; the copy stays until the next boot's recover() removes it.
-        real_rename = os.rename
-
-        def rename(src: str, dst: str) -> None:
-            if src.endswith(".nocow-new"):
-                raise OSError(16, "Device or resource busy")
-            real_rename(src, dst)
-
-        with mock.patch.object(os, "rename", rename):
+        with self.second_rename_raises(OSError(16, "Device or resource busy")):
             rc, out = self.call(M.migrate)
         self.assertEqual(rc, 0)
+        self.assertEqual(self.fs.syncs, 1)  # before the first rename
         self.assertIn(f"<3>{TAG}: cow: [Errno 16] Device or resource busy; left as it was\n", out)
-        self.assertEqual(os.lstat(self.top).st_ino, self.ino)
+        self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data", "_data.nocow-new"])
         self.assertEqual(self.read_attempts(), "1")
@@ -970,12 +1049,12 @@ class RecoverTest(Base):
         rc, out = self.call(M.recover)
         self.assertEqual(out, "")  # removed without a log line
         self.assert_no_leftovers("cow")
-        self.assertEqual(os.lstat(self.top).st_ino, self.ino)
+        self.assertEqual(ino(self.top), self.ino)
         # _data missing, two old copies: the newest (by name) comes back.
         os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1700000100"))
         os.makedirs(os.path.join(self.vol, "_data.cow-old-1700000000"))
         self.call(M.recover)
-        self.assertEqual(os.lstat(self.top).st_ino, self.ino)
+        self.assertEqual(ino(self.top), self.ino)
         self.assert_no_leftovers("cow")
         # _data missing and only the new copy: kept, nothing is deleted.
         os.rename(self.top, os.path.join(self.vol, "_data.nocow-new"))
@@ -983,13 +1062,19 @@ class RecoverTest(Base):
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data.nocow-new"])
 
     def test_recover_skips_files_and_links(self) -> None:
-        # metadata.db (a file) and a symlinked volume folder are not volumes.
-        os.symlink(self.vol, os.path.join(self.vols, "link"))
+        # metadata.db (a file) and a symlinked volume folder are not volumes:
+        # what the link points to keeps its look-alike leftovers.
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        names = ["_data", "_data.cow-old-1700000000", "_data.nocow-new"]
+        for x in names:
+            os.makedirs(os.path.join(elsewhere, x))
+        os.symlink(elsewhere, os.path.join(self.vols, "link"))
         os.mkdir(os.path.join(self.vol, "_data.nocow-new"))
-        self.call(M.recover)
+        self.assertEqual(self.call(M.recover), (None, ""))
         self.assertTrue(os.path.isfile(os.path.join(self.vols, "metadata.db")))
         self.assertTrue(os.path.islink(os.path.join(self.vols, "link")))
-        self.assert_no_leftovers("cow")  # the real folder was cleaned once, by its own name
+        self.assertEqual(sorted(os.listdir(elsewhere)), names)
+        self.assert_no_leftovers("cow")  # the real volume is still cleaned
 
 
 if __name__ == "__main__":
