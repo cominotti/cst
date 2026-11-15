@@ -2,7 +2,8 @@
 # uv-dev: run a developer tool (ruff, ty) from the locked "dev" group of
 # pyproject.toml, through uv.
 #
-#   tests/uv-dev ruff check            # what `invowk cmd test pylint` runs
+#   tests/uv-dev ruff check            # `invowk cmd test pylint` runs this,
+#   tests/uv-dev ruff format --check   # then this
 #   tests/uv-dev ty check              # part of `invowk cmd test types`
 #   tests/uv-dev ruff check --fix      # anything else, by hand
 #

@@ -59,14 +59,18 @@ cmds: [
 	{
 		name:        "test pylint"
 		category:    "test"
-		description: "Run ruff (the rules in pyproject.toml) on every Python file, through uv (tests/uv-dev)"
+		description: "Run ruff's linter (the rules in pyproject.toml), then its format check, on every Python file, through uv (tests/uv-dev)"
 		depends_on: {
 			tools: [{alternatives: ["uv"]}]
 		}
 		implementations: [{
 			platforms: [{name: "linux"}]
 			runtimes: [{name: "native"}]
-			script: {content: "exec tests/uv-dev ruff check"}
+			script: {content: """
+				set -euo pipefail
+				tests/uv-dev ruff check
+				tests/uv-dev ruff format --check
+				"""}
 		}]
 	},
 	{

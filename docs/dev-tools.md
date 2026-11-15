@@ -8,7 +8,7 @@ are not part of CST: nothing installed on the machine uses them.
 | Tool | What it does here | Pinned in |
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
-| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors; missing type annotations in the typed modules | `pyproject.toml`, `uv.lock` |
+| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors; missing type annotations in the typed modules. Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing (its own `mutation` group; CI does not install it) | `pyproject.toml`, `uv.lock` |
 
@@ -19,8 +19,9 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ## Running them
 
 ```
-invowk cmd test pylint        # ruff check (F, B, UP, E9): every Python file
+invowk cmd test pylint        # ruff check (F, B, UP, E9), then ruff format --check: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on the typed list
+tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/swap-status
 ```
@@ -73,6 +74,21 @@ repository:
   is not in the selected rules: `test types` runs it on its own
   (`ruff check --select ANN`), and the typed list below limits it to the
   typed modules.
+- **The format check** (`ruff format --check`, the second half of
+  `test pylint`): every Python file must already look the way `ruff format`
+  writes it. Lines are up to 120 characters (`line-length` in `[tool.ruff]`;
+  ruff does not split long strings or comments), and the rest is ruff's
+  default style: double quotes, four spaces, and a trailing comma keeps a
+  call split over several lines. When the check fails, run
+  `tests/uv-dev ruff format` and commit the result. It changes only the
+  layout, never what the code does. Inside docstrings it can change
+  whitespace (a space after an opening quote, trailing spaces, tabs, the
+  indentation of the lines), so check the diff when a docstring is printed
+  as help text (`print(__doc__)`, argparse). Do not use `# fmt: off` or
+  `# fmt: skip` to get a green run. Markdown files are excluded
+  (`[tool.ruff.format] exclude`): ruff would also format the Python code
+  blocks in them, which are short examples wrapped to read well next to the
+  text around them, not code that runs.
 - **The typed list**: the `"!{...}" = ["ANN"]` entry of
   `[tool.ruff.lint.per-file-ignores]`. ANN is ignored everywhere except the
   files in the braces, whose functions must all have type annotations. Their
@@ -107,7 +123,9 @@ One tool per pull request, so that new findings are clearly the new version's:
 1. Change the version in `[dependency-groups]` of `pyproject.toml`.
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
-   version finds, or explain in the pull request why it is noise.
+   version finds, or explain in the pull request why it is noise. A new ruff
+   can also lay out code differently: when the format check fails, run
+   `tests/uv-dev ruff format` and commit the result in the same pull request.
 
 For uv itself, change `version` and `checksum` of the `Setup uv` step in
 `.github/workflows/ci.yml` together. The checksum is the content of

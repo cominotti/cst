@@ -38,8 +38,12 @@ def test_files():
 def runs_a_shell(call):
     """True for subprocess.X([...bash...], ...) or subprocess.X(..., shell=True)."""
     func = call.func
-    if not (isinstance(func, ast.Attribute) and func.attr in CALLS
-            and isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
+    if not (
+        isinstance(func, ast.Attribute)
+        and func.attr in CALLS
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "subprocess"
+    ):
         return False
     for kw in call.keywords:
         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
@@ -65,17 +69,23 @@ class SubprocessHygieneTest(unittest.TestCase):
         for rel, path in test_files():
             with open(path, encoding="utf-8") as f:
                 bad += offenders(f.read(), rel)
-        self.assertEqual(bad, [], "these calls run bash/sh with an inherited stdin; add "
-                         "stdin=subprocess.DEVNULL (or input=...). Why: see the docstring of "
-                         "tests/test_subprocess_hygiene.py and AGENTS.md")
+        self.assertEqual(
+            bad,
+            [],
+            "these calls run bash/sh with an inherited stdin; add "
+            "stdin=subprocess.DEVNULL (or input=...). Why: see the docstring of "
+            "tests/test_subprocess_hygiene.py and AGENTS.md",
+        )
 
     def test_the_check_finds_the_wrong_form(self):
-        src = ("import subprocess\n"
-               "subprocess.run(['bash', '-c', 'x'], env={})\n"
-               "subprocess.run('x', shell=True)\n"
-               "subprocess.run(['bash', '-c', 'x'], stdin=subprocess.DEVNULL)\n"
-               "subprocess.run(['sh', '-c', 'x'], input='y', text=True)\n"
-               "subprocess.run(['python3', '-c', 'x'])\n")
+        src = (
+            "import subprocess\n"
+            "subprocess.run(['bash', '-c', 'x'], env={})\n"
+            "subprocess.run('x', shell=True)\n"
+            "subprocess.run(['bash', '-c', 'x'], stdin=subprocess.DEVNULL)\n"
+            "subprocess.run(['sh', '-c', 'x'], input='y', text=True)\n"
+            "subprocess.run(['python3', '-c', 'x'])\n"
+        )
         self.assertEqual(offenders(src, "t.py"), ["t.py:2", "t.py:3"])
 
 

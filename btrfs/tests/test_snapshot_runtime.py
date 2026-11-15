@@ -37,31 +37,39 @@ def shell_function(path, name):
 
 class CoreCacheArgsTest(unittest.TestCase):
     def args(self, exclude="yes", skips=".local/share/containers", workspace_subvol=False):
-        script = "\n".join([
-            "set -Eeuo pipefail",
-            'log() { echo "<$1>btrfs-snapshot: $2"; }',
-            'is_subvol() { [[ "${WS_SUBVOL}" == 1 && "$1" == /var/home/u/Workspace ]]; }',
-            shell_function(RUNTIME, "core_sources"),
-            shell_function(RUNTIME, "core_cache_args"),
-            "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top",
-            'SNAPSHOT_EXCLUDE_CACHES="$1" SNAPSHOT_CACHES_SKIP="$2"',
-            'core_sources "72h" "48h"',
-            "core_cache_args",
-            'printf "arg %s\\n" "${CORE_CACHE_ARGS[@]}"',
-            'printf "skip %s\\n" "${CORE_CACHE_SKIPS[@]}"',
-        ])
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                'log() { echo "<$1>btrfs-snapshot: $2"; }',
+                'is_subvol() { [[ "${WS_SUBVOL}" == 1 && "$1" == /var/home/u/Workspace ]]; }',
+                shell_function(RUNTIME, "core_sources"),
+                shell_function(RUNTIME, "core_cache_args"),
+                "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top",
+                'SNAPSHOT_EXCLUDE_CACHES="$1" SNAPSHOT_CACHES_SKIP="$2"',
+                'core_sources "72h" "48h"',
+                "core_cache_args",
+                'printf "arg %s\\n" "${CORE_CACHE_ARGS[@]}"',
+                'printf "skip %s\\n" "${CORE_CACHE_SKIPS[@]}"',
+            ]
+        )
         with tempfile.TemporaryDirectory() as d:
             # Files in the working folder: a '*' in the skip list must stay a '*'.
             open(os.path.join(d, "a-file"), "w").close()
-            r = subprocess.run(["bash", "-c", script, "_", exclude, skips], cwd=d, capture_output=True, text=True,
-                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                                    "WS_SUBVOL": "1" if workspace_subvol else "0"},
-                               stdin=subprocess.DEVNULL)
+            r = subprocess.run(
+                ["bash", "-c", script, "_", exclude, skips],
+                cwd=d,
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "WS_SUBVOL": "1" if workspace_subvol else "0"},
+                stdin=subprocess.DEVNULL,
+            )
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = r.stdout.splitlines()
         self.skips = [ln[5:] for ln in lines if ln.startswith("skip ")]
-        return ([ln[4:] for ln in lines if ln.startswith("arg ")],
-                [ln for ln in lines if not ln.startswith(("arg ", "skip "))])
+        return (
+            [ln[4:] for ln in lines if ln.startswith("arg ")],
+            [ln for ln in lines if not ln.startswith(("arg ", "skip "))],
+        )
 
     def test_default_is_on_with_podman_kept_whole(self):
         args, logs = self.args()
@@ -83,9 +91,20 @@ class CoreCacheArgsTest(unittest.TestCase):
     def test_paths_go_to_the_source_that_holds_them(self):
         skips = "Workspace/big/target Workspace .local/share/containers/ ./notes"
         args, _ = self.args(skips=skips, workspace_subvol=True)
-        self.assertEqual(args, ["--exclude-caches", "--caches-skip", "Workspace=big/target",
-                                "--caches-skip", "Workspace=.", "--caches-skip", "home=u/.local/share/containers",
-                                "--caches-skip", "home=u/notes"])
+        self.assertEqual(
+            args,
+            [
+                "--exclude-caches",
+                "--caches-skip",
+                "Workspace=big/target",
+                "--caches-skip",
+                "Workspace=.",
+                "--caches-skip",
+                "home=u/.local/share/containers",
+                "--caches-skip",
+                "home=u/notes",
+            ],
+        )
         # Until ~/Workspace is a subvolume it is part of the home snapshots.
         args, _ = self.args(skips="Workspace/big/target", workspace_subvol=False)
         self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/Workspace/big/target"])
@@ -106,22 +125,29 @@ class ListCachesTest(unittest.TestCase):
     stdout, also when the settings make core_cache_args warn."""
 
     def test_warnings_go_to_stderr_not_into_the_json(self):
-        script = "\n".join([
-            "set -Eeuo pipefail",
-            'log() { echo "<$1>btrfs-snapshot: $2"; }',
-            "is_subvol() { return 1; }",
-            shell_function(RUNTIME, "core_sources"),
-            shell_function(RUNTIME, "core_cache_args"),
-            shell_function(RUNTIME, "list_caches"),
-            "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top SNAPDIR=/top/snapshots",
-            "HOME_PRESERVE=72h WS_PRESERVE=48h CONF=/etc/btrfs-snapshot/snapshots.conf",
-            "SNAPSHOT_EXCLUDE_CACHES=nope SNAPSHOT_CACHES_SKIP='/etc ok'",
-            "CORE=core",
-            'core() { printf \'{"args": "%s"}\\n\' "$*"; }',
-            "list_caches --json",
-        ])
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, stdin=subprocess.DEVNULL)
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                'log() { echo "<$1>btrfs-snapshot: $2"; }',
+                "is_subvol() { return 1; }",
+                shell_function(RUNTIME, "core_sources"),
+                shell_function(RUNTIME, "core_cache_args"),
+                shell_function(RUNTIME, "list_caches"),
+                "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top SNAPDIR=/top/snapshots",
+                "HOME_PRESERVE=72h WS_PRESERVE=48h CONF=/etc/btrfs-snapshot/snapshots.conf",
+                "SNAPSHOT_EXCLUDE_CACHES=nope SNAPSHOT_CACHES_SKIP='/etc ok'",
+                "CORE=core",
+                'core() { printf \'{"args": "%s"}\\n\' "$*"; }',
+                "list_caches --json",
+            ]
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(r.stdout.splitlines()), 1, r.stdout)
         self.assertTrue(r.stdout.startswith('{"args": "caches --snapdir /top/snapshots'), r.stdout)
@@ -133,13 +159,15 @@ class ListCachesTest(unittest.TestCase):
 class SnapStatusCachesTest(unittest.TestCase):
     """The cache line of snap_status, with stubs for everything that reads the machine."""
 
-    STUBS = "\n".join([
-        'snap_home() { echo /nonexistent/home; }',
-        'systemctl() { return 1; }',
-        'snap_entry_state() { echo -; }',
-        'snap_plan_stale() { :; }',
-        'snap_chrome() { :; }',
-    ])
+    STUBS = "\n".join(
+        [
+            "snap_home() { echo /nonexistent/home; }",
+            "systemctl() { return 1; }",
+            "snap_entry_state() { echo -; }",
+            "snap_plan_stale() { :; }",
+            "snap_chrome() { :; }",
+        ]
+    )
 
     def status(self, text):
         with tempfile.TemporaryDirectory() as d:
@@ -147,15 +175,18 @@ class SnapStatusCachesTest(unittest.TestCase):
             if text is not None:
                 with open(conf, "w") as f:
                     f.write(text)
-            script = "\n".join([
-                'SRC="$1"; . "$1/setup-snapshots.bash"',
-                self.STUBS,
-                'PROG="cst btrfs"; SNAP_CONF="$2"; SNAP_STATE="$3/state"; SNAP_TOP="$3/top"',
-                'SNAP_BOOT_FLAG="$3/boot-flag"; BULK_FLAG="$3/bulk-flag"',
-                'snap_status',
-            ])
-            r = subprocess.run(["bash", "-c", script, "_", BTRFS, conf, d], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL)
+            script = "\n".join(
+                [
+                    'SRC="$1"; . "$1/setup-snapshots.bash"',
+                    self.STUBS,
+                    'PROG="cst btrfs"; SNAP_CONF="$2"; SNAP_STATE="$3/state"; SNAP_TOP="$3/top"',
+                    'SNAP_BOOT_FLAG="$3/boot-flag"; BULK_FLAG="$3/bulk-flag"',
+                    "snap_status",
+                ]
+            )
+            r = subprocess.run(
+                ["bash", "-c", script, "_", BTRFS, conf, d], capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.splitlines()
 
@@ -179,8 +210,11 @@ class SnapStatusCachesTest(unittest.TestCase):
 
     def test_the_nas_part_still_reads_the_same_file(self):
         self.assertIn("NAS backup: off", self.status("NAS_ENABLED=0\n"))
-        on = [ln for ln in self.status("NAS_ENABLED=1\nNAS_HOST=nas\nNAS_PORT=22\nNAS_USER=u\nNAS_PATH=/b\n")
-              if ln.startswith("NAS backup")]
+        on = [
+            ln
+            for ln in self.status("NAS_ENABLED=1\nNAS_HOST=nas\nNAS_PORT=22\nNAS_USER=u\nNAS_PATH=/b\n")
+            if ln.startswith("NAS backup")
+        ]
         self.assertEqual(len(on), 1, on)
         self.assertIn("(u@nas:22)", on[0])
 

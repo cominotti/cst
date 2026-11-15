@@ -412,9 +412,9 @@ everything with `plan`, `status` or `doctor` before changing anything:
   agents such as Claude Code and Codex read it by themselves; there is no
   separate `CLAUDE.md`.
 - `pyproject.toml`, `uv.lock`, `tests/uv-dev`, `docs/dev-tools.md`: the
-  developer tools for the Python code (the ruff linter and the ty type
-  checker), pinned and installed through uv for `invowk cmd test pylint` and
-  `invowk cmd test types`. CST itself installs nothing from them: the helpers
+  developer tools for the Python code (the ruff linter and formatter and the
+  ty type checker), pinned and installed through uv for
+  `invowk cmd test pylint` and `invowk cmd test types`. CST itself installs nothing from them: the helpers
   keep running on the system's `/usr/bin/python3` with the standard library
   only ([docs/dev-tools.md](docs/dev-tools.md)).
 - `tests/e2e/`: Docker end-to-end tests run by CI ([tests/e2e/README.md](tests/e2e/README.md)).

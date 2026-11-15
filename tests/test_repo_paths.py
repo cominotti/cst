@@ -52,13 +52,24 @@ def offending_paths(text, folders, entries):
 class RepoPathTest(unittest.TestCase):
     def test_detector(self):
         folders, entries = {"cst", "f44-tools", "mytools"}, {"cst", "AGENTS.md", "btrfs", "toolchains"}
-        for bad in ("~/Workspace/github/cominotti/cst/cst btrfs install",
-                    "ln -s $HOME/src/cst/cst x", "/var/home/u/Workspace/mytools/btrfs/README.md",
-                    "cd ${HOME}/code/cst", "lived in ~/Workspace/f44-tools;"):
+        for bad in (
+            "~/Workspace/github/cominotti/cst/cst btrfs install",
+            "ln -s $HOME/src/cst/cst x",
+            "/var/home/u/Workspace/mytools/btrfs/README.md",
+            "cd ${HOME}/code/cst",
+            "lived in ~/Workspace/f44-tools;",
+        ):
             self.assertTrue(offending_paths(bad, folders, entries), bad)
-        for good in ("~/.local/bin/cst", "~/.config/cst/toolchains.conf", "~/Workspace 48h 7d",
-                     "-v ~/Workspace/x:/src", "/var/home/u/.var/app/Steam", "./cst btrfs install",
-                     "~/Bulk/toolchains/jvm", "~/Workspace/lush/.github/workflows/ci.yml"):
+        for good in (
+            "~/.local/bin/cst",
+            "~/.config/cst/toolchains.conf",
+            "~/Workspace 48h 7d",
+            "-v ~/Workspace/x:/src",
+            "/var/home/u/.var/app/Steam",
+            "./cst btrfs install",
+            "~/Bulk/toolchains/jvm",
+            "~/Workspace/lush/.github/workflows/ci.yml",
+        ):
             self.assertFalse(offending_paths(good, folders, entries), good)
 
     def test_no_fixed_checkout_path(self):
@@ -67,18 +78,21 @@ class RepoPathTest(unittest.TestCase):
         entries = top_level_entries(files)
         problems = []
         for rel in files:
-            if rel == "tests/test_repo_paths.py":    # its own examples of bad paths
+            if rel == "tests/test_repo_paths.py":  # its own examples of bad paths
                 continue
             try:
                 with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
                     lines = fh.readlines()
-            except (UnicodeDecodeError, OSError):
+            except UnicodeDecodeError, OSError:
                 continue
             for no, line in enumerate(lines, 1):
                 for path in offending_paths(line, folders, entries):
                     problems.append(f"{rel}:{no}: {path}")
-        self.assertEqual(problems, [], "fixed path to the checkout (see AGENTS.md, "
-                         "'No fixed checkout path'):\n" + "\n".join(problems))
+        self.assertEqual(
+            problems,
+            [],
+            "fixed path to the checkout (see AGENTS.md, 'No fixed checkout path'):\n" + "\n".join(problems),
+        )
 
 
 if __name__ == "__main__":

@@ -20,8 +20,7 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
     p = subprocess.run(full, input=input_text, capture_output=True, text=True)
     if check and p.returncode != 0:
         raise AssertionError(
-            f"command failed (rc={p.returncode}): {' '.join(cmd)}\n"
-            f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+            f"command failed (rc={p.returncode}): {' '.join(cmd)}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}"
         )
     return p
 
@@ -68,13 +67,19 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         ):
             p = subprocess.run(
                 [
-                    "docker", "run", "--rm",
+                    "docker",
+                    "run",
+                    "--rm",
                     *extra_flags,
-                    "-e", "E2E_KEEP_DOCKERENV=1",
-                    "-v", f"{repo}:/opt/cst:ro",
-                    "--entrypoint", "bash",
+                    "-e",
+                    "E2E_KEEP_DOCKERENV=1",
+                    "-v",
+                    f"{repo}:/opt/cst:ro",
+                    "--entrypoint",
+                    "bash",
                     self.IMAGE,
-                    "-c", f"{subcmd}",
+                    "-c",
+                    f"{subcmd}",
                 ],
                 capture_output=True,
                 text=True,
@@ -187,7 +192,9 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             "/opt/cst-rw/cst bluetooth plan --device 00:11:22:33:44:55",
             check=False,
         )
-        self.assertEqual(plan_rc.returncode, 10, f"expected plan rc=10, got {plan_rc.returncode}\n{plan_rc.stdout}\n{plan_rc.stderr}")
+        self.assertEqual(
+            plan_rc.returncode, 10, f"expected plan rc=10, got {plan_rc.returncode}\n{plan_rc.stdout}\n{plan_rc.stderr}"
+        )
 
         # apply --no-restart --yes writes /etc/bluetooth/main.conf, WirePlumber drop-ins and
         # enables/starts cst-bt-ldac48.service. Live verify() reports missing HCI adapter/pipewire
@@ -229,12 +236,13 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         reverted_main = exec_bash(self.SYSTEMD_CONTAINER, "cat /etc/bluetooth/main.conf").stdout
         active_lines = [
-            line.strip()
-            for line in reverted_main.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
+            line.strip() for line in reverted_main.splitlines() if line.strip() and not line.lstrip().startswith("#")
         ]
         self.assertFalse(
-            any("6fbaf188-05e0-496a-9885-d6ddfdb4e03e" in line or line.startswith("Experimental") for line in active_lines),
+            any(
+                "6fbaf188-05e0-496a-9885-d6ddfdb4e03e" in line or line.startswith("Experimental")
+                for line in active_lines
+            ),
             f"unexpected active BlueZ config after revert: {active_lines!r}",
         )
         ldac_enabled = as_tester_bash(
@@ -696,7 +704,8 @@ EOF
         """
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            tester_env + r"""
+            tester_env
+            + r"""
             # 1. A plain run: 0 or 1, every test on its own line, no traceback.
             rc=0
             "$cst" cpu quiet --for 2 >"$w/plain" 2>"$w/plain.err" || rc=$?
@@ -740,7 +749,8 @@ EOF
         exec_bash(self.SYSTEMD_CONTAINER, "touch /run/cpu-setup/game.state")
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            tester_env + r"""
+            tester_env
+            + r"""
             rc=0
             "$cst" cpu quiet --for 2 --cpu 100 >"$w/game" || rc=$?
             cat "$w/game"

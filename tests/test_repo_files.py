@@ -24,8 +24,7 @@ class RepoFilesTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def git(self, *args):
-        subprocess.run(["git", "-C", self.tmp, *args], check=True, capture_output=True,
-                       stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "-C", self.tmp, *args], check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
     def test_lists_tracked_and_untracked_files_not_ignored_ones(self):
         self.git("init", "-q")
@@ -46,7 +45,7 @@ class RepoFilesTest(unittest.TestCase):
         os.mkdir(os.path.join(self.tmp, ".git"))
         try:
             repo_files(self.tmp)
-        except unittest.SkipTest as e:     # caught here: it would only mark this test skipped
+        except unittest.SkipTest as e:  # caught here: it would only mark this test skipped
             self.fail(f"skipped instead of failing: {e}")
         except AssertionError as e:
             self.assertIn("git ls-files failed in a git checkout", str(e))

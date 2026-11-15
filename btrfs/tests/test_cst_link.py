@@ -34,15 +34,17 @@ class CstLinkTest(unittest.TestCase):
             'getent() { echo "alice:x:1000:1000::$H:/bin/bash"; }\n'
             # runuser -u USER -- CMD...: run CMD as is.
             'runuser() { shift 3; "$@"; }\n'
-            f'link_cst_command {user}\n')
-        return subprocess.run(["bash", "-c", script, LIB, self.home],
-                              capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)
+            f"link_cst_command {user}\n"
+        )
+        return subprocess.run(
+            ["bash", "-c", script, LIB, self.home], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
+        )
 
     def test_creates_link_once(self):
         r = self.run_link()
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(CST))
         self.assertIn("linked:", r.stdout)
-        r = self.run_link()                       # idempotent, quiet
+        r = self.run_link()  # idempotent, quiet
         self.assertEqual(r.stdout + r.stderr, "")
 
     def test_root_or_empty_user_does_nothing(self):

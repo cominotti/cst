@@ -102,10 +102,15 @@ class MainConfTest(unittest.TestCase):
         new, changed = self.m.edit_general(VENDOR)
         self.assertTrue(changed)
         old_lines, new_lines = VENDOR.splitlines(), new.splitlines()
-        self.assertEqual(len(old_lines), len(new_lines))            # nothing added or lost
+        self.assertEqual(len(old_lines), len(new_lines))  # nothing added or lost
         diff = [(a, b) for a, b in zip(old_lines, new_lines, strict=True) if a != b]
-        self.assertEqual(diff, [("#Experimental = false", "Experimental = true"),
-                                ("#KernelExperimental = false", f"KernelExperimental = {ISO}")])
+        self.assertEqual(
+            diff,
+            [
+                ("#Experimental = false", "Experimental = true"),
+                ("#KernelExperimental = false", f"KernelExperimental = {ISO}"),
+            ],
+        )
         self.assertIn("#Experimental = false", new.split("[LE]")[1])  # other sections untouched
 
     def test_idempotent(self):
@@ -116,18 +121,19 @@ class MainConfTest(unittest.TestCase):
 
     def test_old_true_becomes_the_iso_uuid(self):
         text = VENDOR.replace("#Experimental = false", "Experimental = true").replace(
-            "#KernelExperimental = false", "KernelExperimental = true")
+            "#KernelExperimental = false", "KernelExperimental = true"
+        )
         new, changed = self.m.edit_general(text)
         self.assertTrue(changed)
         self.assertIn(f"KernelExperimental = {ISO}", new)
         self.assertNotIn("KernelExperimental = true", new)
-        self.assertEqual(self.m.current_values(new),
-                         {"Experimental": "true", "KernelExperimental": ISO})
+        self.assertEqual(self.m.current_values(new), {"Experimental": "true", "KernelExperimental": ISO})
 
     def test_uuid_list_with_iso_is_kept(self):
         other = "d4992530-b9ec-469f-ab01-6c481c47da1c"
         text = VENDOR.replace("#Experimental = false", "Experimental = true").replace(
-            "#KernelExperimental = false", f"KernelExperimental = {other},{ISO.upper()}")
+            "#KernelExperimental = false", f"KernelExperimental = {other},{ISO.upper()}"
+        )
         new, changed = self.m.edit_general(text)
         self.assertFalse(changed)
         self.assertEqual(new, text)
@@ -139,7 +145,9 @@ class MainConfTest(unittest.TestCase):
         g = general(new)
         self.assertEqual(g.count("Experimental = true"), 1)
         self.assertIn("#Experimental = false", g)
-        self.assertEqual(g, ["[General]", f"KernelExperimental = {ISO}", "#Experimental = false", "Name = x", "Experimental = true"])
+        self.assertEqual(
+            g, ["[General]", f"KernelExperimental = {ISO}", "#Experimental = false", "Name = x", "Experimental = true"]
+        )
         self.assertIn("Name = x", g)
 
     def test_missing_key_goes_under_general_and_missing_section_on_top(self):
@@ -148,7 +156,9 @@ class MainConfTest(unittest.TestCase):
         self.assertEqual(general(new)[:3], ["[General]", f"KernelExperimental = {ISO}", "Experimental = true"])
         new, changed = self.m.edit_general("# top comment\n[LE]\nFoo = 1\n")
         self.assertTrue(changed)
-        self.assertTrue(new.startswith(f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n\n# top comment\n"))
+        self.assertTrue(
+            new.startswith(f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n\n# top comment\n")
+        )
         self.assertFalse(self.m.edit_general(new)[1])
 
     def test_crlf_kept(self):
@@ -182,14 +192,27 @@ class MainConfTest(unittest.TestCase):
 
     def test_repeated_general_group_counts_as_one(self):
         # GLib merges a second [General] into the first: its later line wins.
-        text = ("[General]\nExperimental = true\nKernelExperimental = " + ISO +
-                "\n[Policy]\nAutoEnable = true\n[General]\nExperimental = false\n")
+        text = (
+            "[General]\nExperimental = true\nKernelExperimental = "
+            + ISO
+            + "\n[Policy]\nAutoEnable = true\n[General]\nExperimental = false\n"
+        )
         self.assertEqual(self.m.current_values(text), {"Experimental": "false", "KernelExperimental": ISO})
         new, changed = self.m.edit_general(text)
         self.assertTrue(changed)
         self.assertEqual(self.m.current_values(new), {"Experimental": "true", "KernelExperimental": ISO})
-        self.assertEqual(new.splitlines(), ["[General]", "#Experimental = true", f"KernelExperimental = {ISO}",
-                                            "[Policy]", "AutoEnable = true", "[General]", "Experimental = true"])
+        self.assertEqual(
+            new.splitlines(),
+            [
+                "[General]",
+                "#Experimental = true",
+                f"KernelExperimental = {ISO}",
+                "[Policy]",
+                "AutoEnable = true",
+                "[General]",
+                "Experimental = true",
+            ],
+        )
         self.assertFalse(self.m.edit_general(new)[1])
         # Revert reads the backup's blocks the same way.
         reverted, changed = self.m.revert_general(new, text)
@@ -204,7 +227,7 @@ class MainConfTest(unittest.TestCase):
         self.assertEqual(self.m.revert_general(bare, bare), (bare, False))
         new, changed = self.m.edit_general(VENDOR.rstrip("\n"))
         self.assertTrue(changed)
-        self.assertFalse(new.endswith("\n"))                       # the file's ending is kept
+        self.assertFalse(new.endswith("\n"))  # the file's ending is kept
         reverted, changed = self.m.revert_general(new, VENDOR)
         self.assertTrue(changed)
         self.assertEqual(reverted, VENDOR.rstrip("\n"))
@@ -266,23 +289,31 @@ class SettingsTest(unittest.TestCase):
     def test_defaults_file(self):
         with open(DEFAULTS) as f:
             s = self.m.merged_settings([f.read()])
-        self.assertEqual(s, {"DEVICE": MAC, "LDAC_QUALITY": "auto", "BEARER": "", "LDAC_RATE": "",
-                             "LE_AUDIO": "off"})
+        self.assertEqual(s, {"DEVICE": MAC, "LDAC_QUALITY": "auto", "BEARER": "", "LDAC_RATE": "", "LE_AUDIO": "off"})
 
     def test_user_file_wins_and_parsing(self):
         user = "# mine\nDEVICE = 'aa:bb:cc:dd:ee:ff'   # other headset\nBEARER=\"le\"\nFOO=1\nnot a line\nLDAC_RATE=48000\n"
         with open(DEFAULTS) as f:
             s = self.m.merged_settings([f.read(), user])
-        self.assertEqual(s, {"DEVICE": "aa:bb:cc:dd:ee:ff", "LDAC_QUALITY": "auto", "BEARER": "le",
-                             "LDAC_RATE": "48000", "LE_AUDIO": "off"})
+        self.assertEqual(
+            s,
+            {
+                "DEVICE": "aa:bb:cc:dd:ee:ff",
+                "LDAC_QUALITY": "auto",
+                "BEARER": "le",
+                "LDAC_RATE": "48000",
+                "LE_AUDIO": "off",
+            },
+        )
         # A line appended by hand: the later line wins.
         s = self.m.merged_settings([user + "LE_AUDIO=off\n", "LE_AUDIO=on\n"])
         self.assertEqual(s["LE_AUDIO"], "on")
         self.assertEqual(self.m.merged_settings(["LE_AUDIO=off\nLE_AUDIO=on\n"])["LE_AUDIO"], "on")
 
     def test_settings_keys(self):
-        self.assertEqual(self.m.set_keys("# c\nLDAC_RATE=48000\nFOO=1\nLE_AUDIO=on\nLDAC_RATE=\n"),
-                         ["LDAC_RATE", "LE_AUDIO"])
+        self.assertEqual(
+            self.m.set_keys("# c\nLDAC_RATE=48000\nFOO=1\nLE_AUDIO=on\nLDAC_RATE=\n"), ["LDAC_RATE", "LE_AUDIO"]
+        )
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         p = os.path.join(tmp, "user.conf")
@@ -290,8 +321,9 @@ class SettingsTest(unittest.TestCase):
             f.write("LDAC_RATE=48000\n")
         r = subprocess.run([sys.executable, "-I", HELPER, "settings-keys", p], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout), (0, "LDAC_RATE\n"))
-        r = subprocess.run([sys.executable, "-I", HELPER, "settings-keys", p + ".missing"],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "settings-keys", p + ".missing"], capture_output=True, text=True
+        )
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
     def test_shell_and_helper_agree(self):
@@ -313,18 +345,30 @@ class LiveParsingTest(unittest.TestCase):
         self.m = load()
 
     def test_adapter_path(self):
-        objs = {"type": "a{oa{sa{sv}}}", "data": [{
-            "/org/bluez": {"org.bluez.AgentManager1": {}},
-            "/org/bluez/hci1": {"org.bluez.Adapter1": {}},
-            "/org/bluez/hci0": {"org.bluez.Adapter1": {}, "org.bluez.Media1": {}},
-            "/org/bluez/hci0/dev_X": {"org.bluez.Device1": {}}}]}
+        objs = {
+            "type": "a{oa{sa{sv}}}",
+            "data": [
+                {
+                    "/org/bluez": {"org.bluez.AgentManager1": {}},
+                    "/org/bluez/hci1": {"org.bluez.Adapter1": {}},
+                    "/org/bluez/hci0": {"org.bluez.Adapter1": {}, "org.bluez.Media1": {}},
+                    "/org/bluez/hci0/dev_X": {"org.bluez.Device1": {}},
+                }
+            ],
+        }
         self.assertEqual(self.m.adapter_path(objs), "/org/bluez/hci0")
         self.assertIsNone(self.m.adapter_path({"data": [{}]}))
 
     def test_card_state(self):
         dev = "0A_1B_2C_3D_4E_5F"
-        cards = [{"name": "alsa_card.x"}, {"name": f"bluez_card.{dev}", "active_profile": "headset-head-unit",
-                                          "profiles": {"a2dp-sink": {"available": True}}}]
+        cards = [
+            {"name": "alsa_card.x"},
+            {
+                "name": f"bluez_card.{dev}",
+                "active_profile": "headset-head-unit",
+                "profiles": {"a2dp-sink": {"available": True}},
+            },
+        ]
         srcs = [{"index": 7, "name": f"bluez_input.{dev}.0"}, {"index": 3, "name": "alsa_input.x"}]
         self.assertEqual(self.m.card_state(dev, cards, srcs, [{"source": 3}]), ("headset-head-unit", True, False))
         self.assertEqual(self.m.card_state(dev, cards, srcs, [{"source": 7}])[2], True)
@@ -333,12 +377,20 @@ class LiveParsingTest(unittest.TestCase):
     def test_pw_state(self):
         dev = "0A_1B_2C_3D_4E_5F"
         objs = [
-            {"type": "PipeWire:Interface:Device", "info": {
-                "props": {"device.name": f"bluez_card.{dev}", "bluez5.a2dp.ldac.quality": "auto"},
-                "params": {"Profile": [{"name": "a2dp-sink"}]}}},
-            {"type": "PipeWire:Interface:Node", "info": {
-                "props": {"node.name": f"bluez_output.{dev}.1", "api.bluez5.codec": "ldac"},
-                "params": {"Props": [{"volume": 1.0}, {"quality": -1}]}}},
+            {
+                "type": "PipeWire:Interface:Device",
+                "info": {
+                    "props": {"device.name": f"bluez_card.{dev}", "bluez5.a2dp.ldac.quality": "auto"},
+                    "params": {"Profile": [{"name": "a2dp-sink"}]},
+                },
+            },
+            {
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {"node.name": f"bluez_output.{dev}.1", "api.bluez5.codec": "ldac"},
+                    "params": {"Props": [{"volume": 1.0}, {"quality": -1}]},
+                },
+            },
             {"type": "PipeWire:Interface:Node", "info": {"props": {"node.name": f"bluez_input.{dev}"}}},
         ]
         self.assertEqual(self.m.pw_state(dev, objs), ("a2dp-sink", "auto", "ldac", "auto", None))
@@ -347,11 +399,13 @@ class LiveParsingTest(unittest.TestCase):
         objs[1]["info"]["params"]["Props"][1]["quality"] = 0
         self.assertEqual(self.m.pw_state(dev, objs)[3], "hq")
         self.assertIsNone(self.m.pw_state("00_00", objs))
-        r = subprocess.run([sys.executable, "-I", HELPER, "pw-parse", "00_00"], input="[]",
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "pw-parse", "00_00"], input="[]", capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 4)
-        r = subprocess.run([sys.executable, "-I", HELPER, "pw-parse", dev], input="not json",
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "pw-parse", dev], input="not json", capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 3)
 
 
@@ -366,14 +420,15 @@ class LeAudioRenderTest(unittest.TestCase):
         # override. on the SECTION, a plain key inside: WirePlumber 0.5.19
         # keeps `override.bluez5.roles` literally (ignored by the bluez5
         # monitor) when no earlier file defines the section.
-        self.assertEqual(eff, ["override.monitor.bluez.properties = {",
-                               "  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag ]",
-                               "}"])
+        self.assertEqual(
+            eff,
+            ["override.monitor.bluez.properties = {", "  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag ]", "}"],
+        )
         self.assertNotIn("override.bluez5", text)
         self.assertNotIn("bap", " ".join(eff))
         self.assertEqual(text.count("{"), text.count("}"))
         self.assertEqual(text.count("["), text.count("]"))
-        self.assertIn("LE_AUDIO=on", text)            # how to turn it on, in the file itself
+        self.assertIn("LE_AUDIO=on", text)  # how to turn it on, in the file itself
         self.assertIn("cst bluetooth le-audio on", text)
         self.assertTrue(self.m.defines_section(text))
 
@@ -421,11 +476,18 @@ class LeAudioEffectTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (5, ""))
 
     def test_defines_section(self):
-        for text in ("monitor.bluez.properties = {\n}\n", "override.monitor.bluez.properties = { }\n",
-                     '"monitor.bluez.properties": {\n', "  monitor.bluez.properties {\n"):
+        for text in (
+            "monitor.bluez.properties = {\n}\n",
+            "override.monitor.bluez.properties = { }\n",
+            '"monitor.bluez.properties": {\n',
+            "  monitor.bluez.properties {\n",
+        ):
             self.assertTrue(self.m.defines_section(text), text)
-        for text in ("# monitor.bluez.properties = {\n", "monitor.bluez.rules = [\n",
-                     "monitor.bluez.properties.x = {\n"):
+        for text in (
+            "# monitor.bluez.properties = {\n",
+            "monitor.bluez.rules = [\n",
+            "monitor.bluez.properties.x = {\n",
+        ):
             self.assertFalse(self.m.defines_section(text), text)
 
     def test_other_fragments(self):
@@ -436,18 +498,21 @@ class LeAudioEffectTest(unittest.TestCase):
             (user, "50-bluez-X.conf"): "monitor.bluez.rules = [ ]\n",
             (user, "51-props.conf"): "monitor.bluez.properties = { bluez5.enable-msbc = true }\n",
             (user, "60-hidden.conf"): "context.properties = { }\n",
-            (etc, "60-hidden.conf"): "monitor.bluez.properties = { }\n",     # hidden by the user's file
+            (etc, "60-hidden.conf"): "monitor.bluez.properties = { }\n",  # hidden by the user's file
             (etc, "95-late.conf"): "monitor.bluez.properties = { bluez5.roles = [ bap_sink ] }\n",
-            (user, "52-off.conf.bak"): "monitor.bluez.properties = { }\n",   # not *.conf: not read
+            (user, "52-off.conf.bak"): "monitor.bluez.properties = { }\n",  # not *.conf: not read
             (user, self.m.LE_CONF_NAME): self.m.render_le_off(),
         }
         for (d, n), t in files.items():
             with open(os.path.join(d, n), "w") as f:
                 f.write(t)
-        self.assertEqual(self.m.other_fragments(self.m.LE_CONF_NAME, [user, etc, os.path.join(self.tmp, "none")]),
-                         [("before", os.path.join(user, "51-props.conf")), ("after", os.path.join(etc, "95-late.conf"))])
-        r = subprocess.run([sys.executable, "-I", HELPER, "wp-others", self.m.LE_CONF_NAME, user, etc],
-                           capture_output=True, text=True)
+        self.assertEqual(
+            self.m.other_fragments(self.m.LE_CONF_NAME, [user, etc, os.path.join(self.tmp, "none")]),
+            [("before", os.path.join(user, "51-props.conf")), ("after", os.path.join(etc, "95-late.conf"))],
+        )
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "wp-others", self.m.LE_CONF_NAME, user, etc], capture_output=True, text=True
+        )
         self.assertEqual(r.stdout.splitlines(), [f"before|{user}/51-props.conf", f"after|{etc}/95-late.conf"])
 
     def test_settings_set(self):
@@ -465,19 +530,22 @@ class LeAudioEffectTest(unittest.TestCase):
         self.assertEqual(f("LE_AUDIO = off  # mine\n", "LE_AUDIO", "off"), ("LE_AUDIO = off  # mine\n", False))
         self.assertEqual(f("A=1\r\n", "LE_AUDIO", "on"), ("A=1\r\nLE_AUDIO=on\r\n", True))
         p = os.path.join(self.tmp, "s.conf")
-        r = subprocess.run([sys.executable, "-I", HELPER, "settings-set", p, "LE_AUDIO", "on"],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "settings-set", p, "LE_AUDIO", "on"], capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 10)
         self.assertIn("LE_AUDIO=on\n", r.stdout)
         for key, val in (("FOO", "on"), ("LE_AUDIO", "on\nDEVICE=x"), ("LE_AUDIO", "a b")):
-            r = subprocess.run([sys.executable, "-I", HELPER, "settings-set", p, key, val],
-                               capture_output=True, text=True)
+            r = subprocess.run(
+                [sys.executable, "-I", HELPER, "settings-set", p, key, val], capture_output=True, text=True
+            )
             self.assertEqual(r.returncode, 2, (key, val))
 
 
 def _libwireplumber():
     try:
         import ctypes
+
         ctypes.CDLL("libwireplumber-0.5.so.0")
         return True
     except OSError:
@@ -505,14 +573,21 @@ class WirePlumberResolveTest(unittest.TestCase):
 
     def test_cst_file_alone(self):
         m = load()
-        self.assertEqual(self.roles({m.LE_CONF_NAME: m.render_le_off()}),
-                         "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]")
+        self.assertEqual(
+            self.roles({m.LE_CONF_NAME: m.render_le_off()}), "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]"
+        )
 
     def test_cst_file_replaces_an_earlier_role_list(self):
         m = load()
-        self.assertEqual(self.roles({"80-u.conf": "monitor.bluez.properties = { bluez5.roles = [ bap_sink ] }\n",
-                                     m.LE_CONF_NAME: m.render_le_off()}),
-                         "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]")
+        self.assertEqual(
+            self.roles(
+                {
+                    "80-u.conf": "monitor.bluez.properties = { bluez5.roles = [ bap_sink ] }\n",
+                    m.LE_CONF_NAME: m.render_le_off(),
+                }
+            ),
+            "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]",
+        )
 
     def test_the_old_key_override_did_nothing(self):
         # What CST wrote before: the key kept its literal name, roles unset.
@@ -541,10 +616,14 @@ class WatcherFailureTest(unittest.TestCase):
         self.m = load()
 
     def test_last_outcome_failed(self):
-        self.assertEqual(self.m.lw_failure(JOURNAL), (
-            "2026-11-11T14:11:58-03:00",
-            "LDAC came back at 96000 Hz again; no further attempt until the headset connects again",
-            "a2dp-sink-sbc did not become active within 6 s"))
+        self.assertEqual(
+            self.m.lw_failure(JOURNAL),
+            (
+                "2026-11-11T14:11:58-03:00",
+                "LDAC came back at 96000 Hz again; no further attempt until the headset connects again",
+                "a2dp-sink-sbc did not become active within 6 s",
+            ),
+        )
 
     def test_fixed_afterwards_or_never_failed(self):
         later = "2026-11-12T09:00:05-03:00 sophia python3[999]: fixed: LDAC now at 48000 Hz\n"
@@ -553,18 +632,18 @@ class WatcherFailureTest(unittest.TestCase):
         self.assertIsNone(self.m.lw_failure(""))
 
     def test_detail_only_from_the_same_attempt(self):
-        text = ("T1 h python3[1]: some error of an older attempt\n"
-                "T2 h python3[1]: act: LDAC at 96000 Hz\n"
-                "T3 h python3[1]: failed: profile switch failed\n")
+        text = (
+            "T1 h python3[1]: some error of an older attempt\n"
+            "T2 h python3[1]: act: LDAC at 96000 Hz\n"
+            "T3 h python3[1]: failed: profile switch failed\n"
+        )
         self.assertEqual(self.m.lw_failure(text), ("T3", "profile switch failed", ""))
 
     def test_cli(self):
-        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input=JOURNAL,
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input=JOURNAL, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip().split("|")[0], "2026-11-11T14:11:58-03:00")
-        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input="",
-                           capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input="", capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout), (1, ""))
 
 
@@ -601,11 +680,18 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         log = os.path.join(tmp, "log")
-        script = (self.STUBS + shell_functions("restart_bluetooth", "restart_wireplumber",
-                                               "confirm_bt_restart", "do_restarts") +
-                  f'NO_RESTART={no_restart}; rc=0; do_restarts {bt} {wp} || rc=$?; echo "rc=$rc"\n')
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log,
-               "SUDO_RC": str(sudo_rc), "WP_RC": str(wp_rc), "LE_OFF": str(le_off)}
+        script = (
+            self.STUBS
+            + shell_functions("restart_bluetooth", "restart_wireplumber", "confirm_bt_restart", "do_restarts")
+            + f'NO_RESTART={no_restart}; rc=0; do_restarts {bt} {wp} || rc=$?; echo "rc=$rc"\n'
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LOG": log,
+            "SUDO_RC": str(sudo_rc),
+            "WP_RC": str(wp_rc),
+            "LE_OFF": str(le_off),
+        }
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         calls = []
         if os.path.exists(log):
@@ -616,8 +702,10 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
     def test_ok(self):
         r, calls = self.run_restarts(0, 0)
         self.assertIn("rc=0", r.stdout)
-        self.assertEqual(calls, ["sudo systemctl restart bluetooth", "systemctl --user restart wireplumber", "wait bap",
-                                 "restore_a2dp"])
+        self.assertEqual(
+            calls,
+            ["sudo systemctl restart bluetooth", "systemctl --user restart wireplumber", "wait bap", "restore_a2dp"],
+        )
 
     def test_no_bap_wait_with_le_audio_off(self):
         r, calls = self.run_restarts(0, 0, bt=0, le_off=1)
@@ -692,10 +780,25 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
 
     def sh(self, body, le="off", home=None, **env):
         home = home or self.home
-        script = (self.STUBS + f'LE_AUDIO="{le}"\n' +
-                  shell_functions("le_plan", "le_report", "le_others_report", "le_roles_check", "le_audio_cmd",
-                                  "files_report", "apply_le", "header", "plan",
-                                  "bearer_check", "revert", "le_off_active") + body)
+        script = (
+            self.STUBS
+            + f'LE_AUDIO="{le}"\n'
+            + shell_functions(
+                "le_plan",
+                "le_report",
+                "le_others_report",
+                "le_roles_check",
+                "le_audio_cmd",
+                "files_report",
+                "apply_le",
+                "header",
+                "plan",
+                "bearer_check",
+                "revert",
+                "le_off_active",
+            )
+            + body
+        )
         e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "REPO": REPO, **env}
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
 
@@ -721,7 +824,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
 
     def test_apply_reads_state_again_before_verify(self):
         body = shell_functions("apply")
-        tail = body[body.rindex("\n    verify\n") - 40:]
+        tail = body[body.rindex("\n    verify\n") - 40 :]
         self.assertRegex(tail, r"le_plan\n\s*lw_plan\n\s*verify\n")
 
     def test_off_on_off(self):
@@ -730,8 +833,9 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("written:", r.stdout)
         with open(self.le_conf) as f:
             text = f.read()
-        self.assertIn("override.monitor.bluez.properties = {\n  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n}",
-                      text)
+        self.assertIn(
+            "override.monitor.bluez.properties = {\n  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n}", text
+        )
         self.assertEqual(self.state(), "st=ok change=0")
         r = self.sh("le_plan; le_off_active && echo active\n")
         self.assertIn("active", r.stdout)
@@ -822,8 +926,9 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         body = 'le_plan; le_roles_check; echo "fails=$FAILS warns=$WARNS"\n'
         classic = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]"
         r = self.sh(body, WP_ROLES=classic)
-        self.assertIn("item ok | WirePlumber bluez5.roles | [ a2dp_sink a2dp_source hfp_hf hfp_ag ] (no LE Audio roles)",
-                      r.stdout)
+        self.assertIn(
+            "item ok | WirePlumber bluez5.roles | [ a2dp_sink a2dp_source hfp_hf hfp_ag ] (no LE Audio roles)", r.stdout
+        )
         self.assertIn("fails=0 warns=0", r.stdout)
         r = self.sh(body, WP_ROLES="le|[a2dp_sink, bap_sink]")
         self.assertIn("item BAD | WirePlumber bluez5.roles", r.stdout)
@@ -839,9 +944,10 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         r = self.sh(body, le="on", WP_ROLES=classic)
         self.assertIn("item warn | WirePlumber bluez5.roles", r.stdout)
         r = self.sh(body, le="on", WP_ROLES="default|")
-        self.assertIn("item ok | WirePlumber bluez5.roles | not set: the PipeWire defaults (LE Audio roles included)",
-                      r.stdout)
-        r = self.sh(body)                       # libwireplumber not found
+        self.assertIn(
+            "item ok | WirePlumber bluez5.roles | not set: the PipeWire defaults (LE Audio roles included)", r.stdout
+        )
+        r = self.sh(body)  # libwireplumber not found
         self.assertIn("item warn | WirePlumber bluez5.roles | could not be read", r.stdout)
         self.assertIn("fails=0 warns=1", r.stdout)
 
@@ -888,7 +994,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         settings = os.path.join(self.home, ".config/cst/bluetooth.conf")
         os.symlink(real, settings)
         self.le_audio("on")
-        self.assertTrue(os.path.islink(settings))      # written through the symlink
+        self.assertTrue(os.path.islink(settings))  # written through the symlink
         with open(real) as f:
             self.assertEqual(f.read(), "# mine\nLDAC_RATE=48000\nLE_AUDIO=on\n")
         self.assertEqual(os.stat(real).st_mode & 0o777, 0o600)
@@ -913,7 +1019,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             f.write("[General]\nExperimental = true\n")
         log = os.path.join(self.home, "calls.log")
         script = (
-            f'MAIN_CONF={shlex.quote(orig)}\n'
+            f"MAIN_CONF={shlex.quote(orig)}\n"
             'sudo() { "$@"; }\n'
             f'cp() {{ printf "cp %s\\n" "$*" >>{shlex.quote(log)}; '
             'local args=(); for a in "$@"; do [[ "$a" == --preserve=context ]] || args+=("$a"); done; '
@@ -922,10 +1028,10 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             'local args=("$@"); local dst="${args[-1]}"; local src="${args[-2]}"; '
             'command cp "$src" "$dst"; }\n'
             'mv() { command mv -f "$2" "$3"; }\n'
-            'selinuxenabled() { return 1; }\n'
-            f'install_main_conf {shlex.quote(new)}\n'
-            'selinuxenabled() { return 0; }\n'
-            f'install_main_conf {shlex.quote(new)}\n'
+            "selinuxenabled() { return 1; }\n"
+            f"install_main_conf {shlex.quote(new)}\n"
+            "selinuxenabled() { return 0; }\n"
+            f"install_main_conf {shlex.quote(new)}\n"
         )
         r = self.sh(shell_functions("install_main_conf") + script)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -940,11 +1046,10 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
     def test_bt_info_uses_timeout_and_null_stdin(self):
         # BT_TIMEOUT > 0: bluetoothctl runs under timeout BT_TIMEOUT with stdin=/dev/null
         script = (
-            shell_functions("bt_info")
-            + 'hostcmd() { "$@"; }\n'
+            shell_functions("bt_info") + 'hostcmd() { "$@"; }\n'
             'timeout() { printf "stdin_target=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*"; }\n'
             'bluetoothctl() { echo "direct call"; }\n'
-            'BT_TIMEOUT=7; bt_info\n'
+            "BT_TIMEOUT=7; bt_info\n"
         )
         r = self.sh(script)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -954,11 +1059,10 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
     def test_bt_info_without_timeout_calls_bluetoothctl_directly(self):
         # BT_TIMEOUT=0 is the test seam: no timeout, so a shell function stub is reached
         script = (
-            shell_functions("bt_info")
-            + 'hostcmd() { "$@"; }\n'
+            shell_functions("bt_info") + 'hostcmd() { "$@"; }\n'
             'timeout() { echo "timeout used"; }\n'
             'bluetoothctl() { printf "fn stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*"; }\n'
-            'BT_TIMEOUT=0; bt_info\n'
+            "BT_TIMEOUT=0; bt_info\n"
         )
         r = self.sh(script)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -981,35 +1085,50 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         with open(SETUP) as f:
             src = f.read()
         start = src.index('BT_TIMEOUT="${BT_TIMEOUT:-5}"')
-        block = src[start:src.index("\n\n", start)]
+        block = src[start : src.index("\n\n", start)]
         for raw, want in (("08", "8"), ("09", "9"), ("007", "7"), ("0", "0"), ("5", "5")):
             r = subprocess.run(
-                ["bash", "-c", 'set -euo pipefail\n' + block + '\n(( BT_TIMEOUT > 0 )) && echo "pos=$BT_TIMEOUT" || echo "zero=$BT_TIMEOUT"\n'],
-                capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": raw},
-                stdin=subprocess.DEVNULL)
+                [
+                    "bash",
+                    "-c",
+                    "set -euo pipefail\n"
+                    + block
+                    + '\n(( BT_TIMEOUT > 0 )) && echo "pos=$BT_TIMEOUT" || echo "zero=$BT_TIMEOUT"\n',
+                ],
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": raw},
+                stdin=subprocess.DEVNULL,
+            )
             self.assertEqual(r.returncode, 0, raw + ": " + r.stderr)
             self.assertEqual(r.stderr, "", raw)
             self.assertIn(("pos=" if want != "0" else "zero=") + want, r.stdout, raw)
         for bad in ("1234567890", "-1", " 5"):
-            r = subprocess.run(["bash", "-c", block], capture_output=True, text=True,
-                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad}, stdin=subprocess.DEVNULL)
+            r = subprocess.run(
+                ["bash", "-c", block],
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad},
+                stdin=subprocess.DEVNULL,
+            )
             self.assertEqual(r.returncode, 2, bad)
 
     def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
         apply_fn = shell_functions("apply")
         stub_plan = (
-            'compute_plan() { MC_CHANGED=0; WP_STATE=ok; LE_STATE=ok; LE_CHANGE=0; LEGACY=0; '
-            'BT_RESTART=0; WP_RESTART=0; LW_CHANGE=0; LW_WANT=0; BEARER_STATE=set; BEARER=bredr; }\n'
+            "compute_plan() { MC_CHANGED=0; WP_STATE=ok; LE_STATE=ok; LE_CHANGE=0; LEGACY=0; "
+            "BT_RESTART=0; WP_RESTART=0; LW_CHANGE=0; LW_WANT=0; BEARER_STATE=set; BEARER=bredr; }\n"
             'lw_plan() { :; }; apply_watcher() { :; }; do_restarts() { return 0; }; bt_info() { printf "\\tPreferredBearer: bredr\\n"; }\n'
-            'verify() { :; }\n'
+            "verify() { :; }\n"
         )
         # 1. BT_TIMEOUT=0 (the test seam): the bluetoothctl shell function is called directly
         fn_log = os.path.join(self.home, "fn.log")
         script_fn = (
             stub_plan
-            + 'BT_TIMEOUT=0\n'
+            + "BT_TIMEOUT=0\n"
             + f'bluetoothctl() {{ printf "fn stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(fn_log)}; }}\n'
-            + apply_fn + "\napply\n"
+            + apply_fn
+            + "\napply\n"
         )
         r1 = self.sh(script_fn)
         self.assertEqual(r1.returncode, 0, r1.stderr)
@@ -1026,14 +1145,17 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         os.chmod(fake_bt, 0o755)
         fake_to = os.path.join(fake_bin, "timeout")
         with open(fake_to, "w") as f:
-            f.write(f'#!/usr/bin/env bash\nprintf "bin_to stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(bin_log)}\n')
+            f.write(
+                f'#!/usr/bin/env bash\nprintf "bin_to stdin=%s args=%s\\n" "$(readlink -f /dev/fd/0)" "$*" >>{shlex.quote(bin_log)}\n'
+            )
         os.chmod(fake_to, 0o755)
         script_bin = (
             f'PATH={shlex.quote(fake_bin)}:"$PATH"\n'
             + stub_plan
-            + 'BT_TIMEOUT=5\n'
-            + f'bluetoothctl() {{ echo fn >>{shlex.quote(fn_log + ".2")}; }}\n'
-            + apply_fn + "\napply\n"
+            + "BT_TIMEOUT=5\n"
+            + f"bluetoothctl() {{ echo fn >>{shlex.quote(fn_log + '.2')}; }}\n"
+            + apply_fn
+            + "\napply\n"
         )
         r2 = self.sh(script_bin)
         self.assertEqual(r2.returncode, 0, r2.stderr)
@@ -1050,12 +1172,23 @@ class OptionsTest(unittest.TestCase):
         return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
 
     def test_bad_options(self):
-        for args in (("plan", "--ldac-quality", "best"), ("plan", "--bearer=usb"), ("plan", "--bogus"),
-                     ("plan", "--device", "nope"), ("status", "--force"), ("apply", "--check"),
-                     ("plan", "--device"), ("plan", "--le-audio", "maybe"), ("apply", "--le-audio"),
-                     ("revert", "--le-audio", "on"), ("plan", "--le-audio=yes"), ("le-audio", "maybe"),
-                     ("le-audio", "on", "--le-audio", "off"), ("le-audio", "on", "--device", MAC),
-                     ("le-audio", "on", "--force")):
+        for args in (
+            ("plan", "--ldac-quality", "best"),
+            ("plan", "--bearer=usb"),
+            ("plan", "--bogus"),
+            ("plan", "--device", "nope"),
+            ("status", "--force"),
+            ("apply", "--check"),
+            ("plan", "--device"),
+            ("plan", "--le-audio", "maybe"),
+            ("apply", "--le-audio"),
+            ("revert", "--le-audio", "on"),
+            ("plan", "--le-audio=yes"),
+            ("le-audio", "maybe"),
+            ("le-audio", "on", "--le-audio", "off"),
+            ("le-audio", "on", "--device", MAC),
+            ("le-audio", "on", "--force"),
+        ):
             r = self.run_setup(*args)
             self.assertEqual(r.returncode, 2, (args, r.stderr))
         self.assertEqual(self.run_setup("nonsense").returncode, 2)

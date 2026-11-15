@@ -33,11 +33,15 @@ OLD_MARKER = "# managed-by: btrfs-setup.sh (CST)"
 
 # What `snapshots setup` wrote before the toolchains module existed (the
 # printf lines of snap_user_configs, verbatim): the module writes the same.
-OLD_CARGO = ('\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n'
-             '# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n'
-             '[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n')
-OLD_UV = ('# Added by btrfs-setup.sh (CST): ~/.cache is its own subvolume and\n'
-          '# hardlinks cannot cross subvolumes; reflink clones can.\nlink-mode = "clone"\n')
+OLD_CARGO = (
+    "\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
+    "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
+    '[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n'
+)
+OLD_UV = (
+    "# Added by btrfs-setup.sh (CST): ~/.cache is its own subvolume and\n"
+    '# hardlinks cannot cross subvolumes; reflink clones can.\nlink-mode = "clone"\n'
+)
 
 FAKE_SYSTEMCTL = """#!/bin/sh
 echo "$*" >>"$SYSTEMCTL_LOG"
@@ -76,6 +80,7 @@ class Scratch(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
         self.addCleanup(restore)
         self.m = load()
         self.m.JOURNAL = False
@@ -84,8 +89,11 @@ class Scratch(unittest.TestCase):
     def calls(self):
         try:
             with open(self.log) as f:
-                return [c for c in f.read().splitlines()
-                        if " is-" not in c and " show " not in c and not c.endswith(" show-environment")]
+                return [
+                    c
+                    for c in f.read().splitlines()
+                    if " is-" not in c and " show " not in c and not c.endswith(" show-environment")
+                ]
         except FileNotFoundError:
             return []
 
@@ -116,15 +124,29 @@ class CliTest(Scratch):
         self.assertEqual(p([])["cmd"], "help")
         self.assertEqual(p(["--help"])["cmd"], "help")
         a = p(["prune", "plan", "rust", "rust:build", "--home", "/h"])
-        self.assertEqual((a["cmd"], a["action"], a["targets"], a["home"]), ("prune", "plan", ["rust", "rust:build"], "/h"))
+        self.assertEqual(
+            (a["cmd"], a["action"], a["targets"], a["home"]), ("prune", "plan", ["rust", "rust:build"], "/h")
+        )
         self.assertEqual(p(["--home=/x", "status", "--brief"])["home"], "/x")
         self.assertTrue(p(["status", "--brief"])["brief"])
         self.assertTrue(p(["auto", "on", "--unless-off"])["unless_off"])
         self.assertEqual(p(["config", "apply"])["action"], "apply")
-        for bad in (["prune"], ["prune", "delete"], ["prune", "apply", "--force"], ["auto"], ["auto", "maybe"],
-                    ["auto", "off", "--unless-off"], ["config"], ["config", "plan", "x"], ["status", "-v"],
-                    ["cargo-gc", "plan"], ["status", "--home"], ["status", "--home="], ["prune", "apply", "--home="],
-                    ["auto", "on", "--home", ""]):
+        for bad in (
+            ["prune"],
+            ["prune", "delete"],
+            ["prune", "apply", "--force"],
+            ["auto"],
+            ["auto", "maybe"],
+            ["auto", "off", "--unless-off"],
+            ["config"],
+            ["config", "plan", "x"],
+            ["status", "-v"],
+            ["cargo-gc", "plan"],
+            ["status", "--home"],
+            ["status", "--home="],
+            ["prune", "apply", "--home="],
+            ["auto", "on", "--home", ""],
+        ):
             with self.assertRaises(self.m.Usage, msg=bad):
                 p(bad)
 
@@ -157,9 +179,14 @@ class SelectTest(Scratch):
         self.assertEqual(self.sel("rust"), [("rust:build", True)])
         self.assertEqual(self.sel("python"), [("python:uv", True)])
         self.assertEqual(self.sel("rust:build", "rust"), [("rust:build", True)])
-        for name, msg in (("go:mod", "not implemented yet"), ("go", "planned: go:build, go:mod"),
-                          ("node", "planned: node:npm"), ("rust:registry", "not implemented yet"),
-                          ("foo", "unknown target"), ("rust:foo", "unknown target")):
+        for name, msg in (
+            ("go:mod", "not implemented yet"),
+            ("go", "planned: go:build, go:mod"),
+            ("node", "planned: node:npm"),
+            ("rust:registry", "not implemented yet"),
+            ("foo", "unknown target"),
+            ("rust:foo", "unknown target"),
+        ):
             with self.assertRaisesRegex(self.m.Usage, msg, msg=name):
                 self.sel(name)
 
@@ -184,12 +211,23 @@ class DefaultsTest(Scratch):
         self.assertIn(self.m.MARKER, text)
         raw = self.m.parse_conf(text, self.m.known_keys())
         self.assertEqual(set(raw), self.m.known_keys())
-        self.assertEqual(raw, {"RUST_BUILD_ENABLED": "yes", "RUST_BUILD_MAX_IDLE": "48h",
-                               "RUST_BUILD_MAX_TOTAL": "150G", "RUST_BUILD_MIN_KEEP": "2h",
-                               "RUST_BUILD_ORPHANS": "yes", "RUST_BUILD_INCREMENTAL_IDLE": "6h",
-                               "PYTHON_UV_ENABLED": "yes", "PYTHON_UV_INTERVAL": "1d",
-                               "RUST_LEAN_DEBUGINFO": "no", "RUST_SCCACHE": "no",
-                               "RUST_SCCACHE_CACHE_SIZE": "25G", "RUST_SCCACHE_WORKSPACE": "yes"})
+        self.assertEqual(
+            raw,
+            {
+                "RUST_BUILD_ENABLED": "yes",
+                "RUST_BUILD_MAX_IDLE": "48h",
+                "RUST_BUILD_MAX_TOTAL": "150G",
+                "RUST_BUILD_MIN_KEEP": "2h",
+                "RUST_BUILD_ORPHANS": "yes",
+                "RUST_BUILD_INCREMENTAL_IDLE": "6h",
+                "PYTHON_UV_ENABLED": "yes",
+                "PYTHON_UV_INTERVAL": "1d",
+                "RUST_LEAN_DEBUGINFO": "no",
+                "RUST_SCCACHE": "no",
+                "RUST_SCCACHE_CACHE_SIZE": "25G",
+                "RUST_SCCACHE_WORKSPACE": "yes",
+            },
+        )
 
     def test_every_target_is_documented(self):
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:
@@ -208,7 +246,7 @@ class ConfigTest(Scratch):
         rc, out = self.run_main("config", "plan")
         self.assertEqual(rc, 0, out)
         self.assertIn("write", out)
-        self.assertFalse(os.path.exists(os.path.join(self.home, ".cargo")))      # plan writes nothing
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".cargo")))  # plan writes nothing
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
@@ -224,7 +262,7 @@ class ConfigTest(Scratch):
         self.assertIn("build-dir = CST's line", out)
 
     def test_existing_settings_are_never_changed(self):
-        cargo = '[net]\ngit-fetch-with-cli = true\n[build]\njobs = 8\n'
+        cargo = "[net]\ngit-fetch-with-cli = true\n[build]\njobs = 8\n"
         uv = 'native-tls = true\n[pip]\nindex-url = "x"\n'
         self.write(".cargo/config.toml", cargo)
         self.write(".config/uv/uv.toml", uv)
@@ -245,13 +283,12 @@ class ConfigTest(Scratch):
         self.assertIn("your own value", out)
 
     def test_appends_after_a_missing_newline(self):
-        self.write(".cargo/config.toml", '[net]\noffline = false')
-        self.write(".config/uv/uv.toml", 'native-tls = true')
+        self.write(".cargo/config.toml", "[net]\noffline = false")
+        self.write(".config/uv/uv.toml", "native-tls = true")
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.read(".cargo/config.toml"), '[net]\noffline = false\n' + OLD_CARGO % self.home)
-        self.assertEqual(self.read(".config/uv/uv.toml"), 'native-tls = true\n' + OLD_UV)
-
+        self.assertEqual(self.read(".cargo/config.toml"), "[net]\noffline = false\n" + OLD_CARGO % self.home)
+        self.assertEqual(self.read(".config/uv/uv.toml"), "native-tls = true\n" + OLD_UV)
 
     @unittest.skipIf(os.getuid() == 0, "root writes into read-only folders")
     def test_write_error_is_reported_and_the_other_setting_still_written(self):
@@ -277,13 +314,20 @@ class SnapshotsSetupTest(Scratch):
     turned on only when the user did not turn it off."""
 
     def run_setup(self, prog="cst btrfs"):
-        script = ('set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-                  'runuser() { shift 3; "$@"; }\n'       # runuser -u USER -- CMD...: CMD as is
-                  'snap_home() { echo "$H"; }\n'
-                  'snap_chrome() { echo "chrome $1"; }\n'
-                  'snap_user_configs "$H"\n')
-        return subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, prog],
-                              capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
+        script = (
+            'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
+            'runuser() { shift 3; "$@"; }\n'  # runuser -u USER -- CMD...: CMD as is
+            'snap_home() { echo "$H"; }\n'
+            'snap_chrome() { echo "chrome $1"; }\n'
+            'snap_user_configs "$H"\n'
+        )
+        return subprocess.run(
+            ["bash", "-c", script, "_", BTRFS, self.home, prog],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+        )
 
     def test_setup_writes_the_same_lines_and_turns_the_timer_on(self):
         r = self.run_setup()
@@ -307,7 +351,7 @@ class SnapshotsSetupTest(Scratch):
         r = self.run_setup()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("left off", r.stdout)
-        self.assertIn("cst toolchains auto on", r.stdout)       # the hint names the module
+        self.assertIn("cst toolchains auto on", r.stdout)  # the hint names the module
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")))
 
@@ -315,29 +359,52 @@ class SnapshotsSetupTest(Scratch):
         # setup applies the settings itself after the confirmation: its
         # preview must not tell the user to run `config apply` by hand.
         rc, out = self.run_main("config", "plan")
-        self.assertIn("Apply with:", out)                 # the plain command still has it
-        script = ('set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-                  'runuser() { shift 3; "$@"; }\n'
-                  'snap_home() { echo "$H"; }\n'
-                  'snap_toolchains_config_preview\n')
-        r = subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
+        self.assertIn("Apply with:", out)  # the plain command still has it
+        script = (
+            'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
+            'runuser() { shift 3; "$@"; }\n'
+            'snap_home() { echo "$H"; }\n'
+            "snap_toolchains_config_preview\n"
+        )
+        r = subprocess.run(
+            ["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("    write", r.stdout)
         self.assertIn(".cargo/config.toml", r.stdout)
         self.assertNotIn("Apply with", r.stdout)
-        self.assertFalse(os.path.exists(os.path.join(self.home, ".cargo")))     # preview writes nothing
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".cargo")))  # preview writes nothing
         # Nothing to write (no hint either): the pipeline still succeeds.
         self.csts_cargo_config()
         self.write(".config/uv/uv.toml", OLD_UV)
-        r = subprocess.run(["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
-                           capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("    ok", r.stdout)
 
     def test_hint_name_without_cst(self):
-        r = subprocess.run(["bash", "-c", 'SRC="$1"; PROG="$2"; . "${SRC}/setup-snapshots.bash"; snap_toolchains_prog',
-                            "_", BTRFS, "./btrfs-setup.sh"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'SRC="$1"; PROG="$2"; . "${SRC}/setup-snapshots.bash"; snap_toolchains_prog',
+                "_",
+                BTRFS,
+                "./btrfs-setup.sh",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.stdout.strip(), os.path.join(REPO, "toolchains-setup.sh"))
 
 
@@ -355,17 +422,34 @@ class AutoTest(Scratch):
             service = f.read()
         for line in ("OnCalendar=hourly", "RandomizedDelaySec=10min", "Persistent=true", "WantedBy=timers.target"):
             self.assertIn(line, timer)
-        for line in ("Type=oneshot", "Nice=19", "IOSchedulingClass=idle", "NoNewPrivileges=yes",
-                     "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply",
-                     "ConditionPathExists=%h/.local/lib/cst/toolchains.conf"):
+        for line in (
+            "Type=oneshot",
+            "Nice=19",
+            "IOSchedulingClass=idle",
+            "NoNewPrivileges=yes",
+            "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply",
+            "ConditionPathExists=%h/.local/lib/cst/toolchains.conf",
+        ):
             self.assertIn(line, service)
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
         self.assertIn(self.m.MARKER, self.read(".local/lib/cst/cst-toolchains"))
         self.assertEqual(self.calls(), ["--user daemon-reload", "--user enable --now cst-toolchains-prune.timer"])
         # The installed copy runs with its own defaults file (as the timer does).
-        r = subprocess.run([sys.executable, "-I", os.path.join(self.home, ".local/lib/cst/cst-toolchains"),
-                            "prune", "plan", "--home", self.home], capture_output=True, text=True, env=self.env)
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                os.path.join(self.home, ".local/lib/cst/cst-toolchains"),
+                "prune",
+                "plan",
+                "--home",
+                self.home,
+            ],
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("MAX_IDLE 48h", r.stdout)
         # auto off: everything gone; the folder too when it is empty, but not
@@ -373,8 +457,12 @@ class AutoTest(Scratch):
         self.write(".local/lib/cst/bt-ldac-watch", "x")
         rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 0, out)
-        for rel in (".local/lib/cst/cst-toolchains", ".local/lib/cst/toolchains.conf",
-                    ".config/systemd/user/cst-toolchains-prune.timer", ".config/systemd/user/cst-toolchains-prune.service"):
+        for rel in (
+            ".local/lib/cst/cst-toolchains",
+            ".local/lib/cst/toolchains.conf",
+            ".config/systemd/user/cst-toolchains-prune.timer",
+            ".config/systemd/user/cst-toolchains-prune.service",
+        ):
             self.assertFalse(os.path.exists(os.path.join(self.home, rel)), rel)
         self.assertTrue(os.path.exists(os.path.join(self.home, ".local/lib/cst/bt-ldac-watch")))
         self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/toolchains-auto.off")))
@@ -395,10 +483,12 @@ class AutoTest(Scratch):
 
     def stale(self, ours=True):
         mark = OLD_MARKER if ours else "# my own"
-        paths = [self.write(".config/systemd/user/cst-cargo-build-gc.timer", f"{mark}: x\n[Timer]\n"),
-                 self.write(".config/systemd/user/cst-cargo-build-gc.service", f"{mark}: x\n[Service]\n"),
-                 self.write(".local/lib/cst/cargo-build-gc", f"#!/usr/bin/python3\nMARKER = \"{mark}\"\n"),
-                 self.write(".config/cst/cargo-gc.disabled", f"{mark}: written by cargo-gc disable\n")]
+        paths = [
+            self.write(".config/systemd/user/cst-cargo-build-gc.timer", f"{mark}: x\n[Timer]\n"),
+            self.write(".config/systemd/user/cst-cargo-build-gc.service", f"{mark}: x\n[Service]\n"),
+            self.write(".local/lib/cst/cargo-build-gc", f'#!/usr/bin/python3\nMARKER = "{mark}"\n'),
+            self.write(".config/cst/cargo-gc.disabled", f"{mark}: written by cargo-gc disable\n"),
+        ]
         if ours:
             paths.append(self.write(".local/state/cst/cargo-build-gc.json", "{}"))
         return paths
@@ -416,7 +506,7 @@ class AutoTest(Scratch):
             self.assertFalse(os.path.exists(p), p)
         self.assertEqual(self.calls()[:2], ["--user disable --now cst-cargo-build-gc.timer", "--user daemon-reload"])
         self.assertIn("left by the earlier `cst btrfs cargo-gc`", out)
-        self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/cargo-gc.conf")))   # the user's
+        self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/cargo-gc.conf")))  # the user's
 
     def test_stale_cargo_gc_is_removed_by_auto_off(self):
         paths = self.stale()
@@ -453,10 +543,18 @@ class StatusTest(Scratch):
         os.symlink(real, os.path.join(self.home, "go/pkg/mod"))
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
-        for text in ("auto: timer cst-toolchains-prune.timer: not installed", "== rust:build:",
-                     "where:    ~/.cache/cargo-build", "policy:   enabled; MAX_IDLE 48h", "last prune: none recorded",
-                     "in 1 folder(s)", "go:mod", "~/go/pkg/mod -> ~/Bulk/toolchains/go/pkg/mod",
-                     "== toolchain settings", "~/.config/uv/uv.toml"):
+        for text in (
+            "auto: timer cst-toolchains-prune.timer: not installed",
+            "== rust:build:",
+            "where:    ~/.cache/cargo-build",
+            "policy:   enabled; MAX_IDLE 48h",
+            "last prune: none recorded",
+            "in 1 folder(s)",
+            "go:mod",
+            "~/go/pkg/mod -> ~/Bulk/toolchains/go/pkg/mod",
+            "== toolchain settings",
+            "~/.config/uv/uv.toml",
+        ):
             self.assertIn(text, out)
         rc, out = self.run_main("status", "--brief")
         self.assertEqual(out.splitlines()[1], "rust:build: last prune: none recorded")
@@ -474,7 +572,9 @@ class StatusTest(Scratch):
 class FrontendTest(Scratch):
     def sh(self, *args, script=SETUP):
         env = dict(self.env, CST_PROG="cst toolchains")
-        return subprocess.run(["bash", script, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            ["bash", script, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
 
     def test_help_and_usage(self):
         r = self.sh("help")
@@ -495,8 +595,9 @@ class FrontendTest(Scratch):
     def test_cst_knows_the_module(self):
         r = subprocess.run([os.path.join(REPO, "cst"), "help"], capture_output=True, text=True, env=self.env)
         self.assertIn("toolchains", r.stdout)
-        r = subprocess.run([os.path.join(REPO, "cst"), "toolchains", "help"], capture_output=True, text=True,
-                           env=self.env)
+        r = subprocess.run(
+            [os.path.join(REPO, "cst"), "toolchains", "help"], capture_output=True, text=True, env=self.env
+        )
         self.assertEqual(r.returncode, 0)
         self.assertIn("toolchains-setup.sh", r.stdout)
 

@@ -115,15 +115,30 @@ class Scratch(unittest.TestCase):
         with open(os.path.join(self.fix, "rpm.txt"), "w") as f:
             f.write("qemu-kvm=qemu-kvm-11.1.3-1.fc45.x86_64\nlibvirt-daemon=libvirt-daemon-12.6.0-2.fc45.x86_64\n")
         with open(os.path.join(self.fix, "status.json"), "w") as f:
-            json.dump({"deployments": [{"booted": False, "checksum": "s" * 64},
-                                       {"booted": True, "checksum": "b" * 64, "version": "45.1",
-                                        "timestamp": NOW - 86400}]}, f)
+            json.dump(
+                {
+                    "deployments": [
+                        {"booted": False, "checksum": "s" * 64},
+                        {"booted": True, "checksum": "b" * 64, "version": "45.1", "timestamp": NOW - 86400},
+                    ]
+                },
+                f,
+            )
         self.log = os.path.join(self.tmp, "stub.log")
         self.env = {
-            "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": self.tmp, "LANG": "C.UTF-8", "TZ": "UTC",
-            "STUB_LOG": self.log, "FIX": self.fix, "CST_VM_NONROOT_OK": "1", "CST_VM_NOW": str(NOW),
-            "CST_VM_BACKUP_DIR": self.backups, "CST_VM_INDEX": self.index, "CST_VM_SWTPM_DIR": self.swtpm,
-            "CST_PROG": "cst vm", "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": self.tmp,
+            "LANG": "C.UTF-8",
+            "TZ": "UTC",
+            "STUB_LOG": self.log,
+            "FIX": self.fix,
+            "CST_VM_NONROOT_OK": "1",
+            "CST_VM_NOW": str(NOW),
+            "CST_VM_BACKUP_DIR": self.backups,
+            "CST_VM_INDEX": self.index,
+            "CST_VM_SWTPM_DIR": self.swtpm,
+            "CST_PROG": "cst vm",
+            "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),
         }
 
     def state(self, s):
@@ -150,8 +165,7 @@ class Scratch(unittest.TestCase):
             f.write(xml)
 
     def run_tool(self, *args):
-        return subprocess.run(["python3", "-I", TOOL, *args], env=self.env, capture_output=True, text=True,
-                              timeout=60)
+        return subprocess.run(["python3", "-I", TOOL, *args], env=self.env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         try:
@@ -198,21 +212,33 @@ class PartsTest(unittest.TestCase):
         def short(argv):
             a = self.m.parse_args(argv)
             return a["cmd"], a["sub"], a["vm"], a["full"], a["guest_virtio"], a["root"]
+
         self.assertEqual(short(["backup", "x", "--full"]), ("backup", None, "x", True, False, False))
         self.assertEqual(short(["list"]), ("list", None, None, False, False, False))
         self.assertEqual(short([]), ("help", None, None, False, False, False))
         self.assertEqual(short(["tune", "plan", "w", "--guest-has-virtio"]), ("tune", "plan", "w", False, True, False))
         self.assertEqual(short(["nocow", "plan", "--root"]), ("nocow", "plan", None, False, False, True))
         self.assertEqual(short(["nocow", "apply"]), ("nocow", "apply", None, False, False, False))
-        for bad in (["status", "--full"], ["backup", "a", "b"], ["prune"], ["backup", "--full", "--full"],
-                    ["tune"], ["tune", "go"], ["tune", "plan", "--full"], ["nocow", "plan", "vm"],
-                    ["nocow", "apply", "--root"], ["backup", "--guest-has-virtio"]):
+        for bad in (
+            ["status", "--full"],
+            ["backup", "a", "b"],
+            ["prune"],
+            ["backup", "--full", "--full"],
+            ["tune"],
+            ["tune", "go"],
+            ["tune", "plan", "--full"],
+            ["nocow", "plan", "vm"],
+            ["nocow", "apply", "--root"],
+            ["backup", "--guest-has-virtio"],
+        ):
             with self.assertRaises(self.m.Usage):
                 self.m.parse_args(bad)
 
     def test_version_changes(self):
-        self.assertEqual(self.m.version_changes({"qemu-kvm": "a", "swtpm": "x"}, {"qemu-kvm": "b", "swtpm": "x"}),
-                         ["qemu-kvm: a -> b"])
+        self.assertEqual(
+            self.m.version_changes({"qemu-kvm": "a", "swtpm": "x"}, {"qemu-kvm": "b", "swtpm": "x"}),
+            ["qemu-kvm: a -> b"],
+        )
 
     def test_cpu_disable_list(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -233,8 +259,9 @@ class BackupTest(Scratch):
         with open(os.path.join(dest, "files", self.disk.lstrip("/")), "rb") as f:
             self.assertTrue(f.read().endswith(b"data"))
         self.assertTrue(os.path.isfile(os.path.join(dest, "files", self.nvram.lstrip("/"))))
-        self.assertTrue(os.path.isfile(os.path.join(dest, "files", self.swtpm.lstrip("/"), UUID, "tpm2",
-                                                    "tpm2-00.permall")))
+        self.assertTrue(
+            os.path.isfile(os.path.join(dest, "files", self.swtpm.lstrip("/"), UUID, "tpm2", "tpm2-00.permall"))
+        )
         xml = os.path.join(dest, "domain.xml")
         self.assertEqual(stat.S_IMODE(os.stat(xml).st_mode), 0o600)
         self.assertIn("s3cret", open(xml).read())
@@ -267,9 +294,15 @@ class BackupTest(Scratch):
         kept = os.path.join(self.tmp, "kept")
         os.makedirs(kept)
         with open(self.index, "w") as f:
-            json.dump({"backups": [{"vm": "win", "path": kept, "epoch": 1, "timestamp": "a"},
-                                   {"vm": "win", "path": os.path.join(self.tmp, "gone"), "epoch": 2,
-                                    "timestamp": "b"}]}, f)
+            json.dump(
+                {
+                    "backups": [
+                        {"vm": "win", "path": kept, "epoch": 1, "timestamp": "a"},
+                        {"vm": "win", "path": os.path.join(self.tmp, "gone"), "epoch": 2, "timestamp": "b"},
+                    ]
+                },
+                f,
+            )
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
         paths = [e["path"] for e in json.load(open(self.index))["backups"]]
@@ -293,8 +326,9 @@ class BackupTest(Scratch):
         self.assertFalse([c for c in self.calls() if "dumpxml" in c])
 
     def test_refuses_block_disks(self):
-        self.domain(self.domain_xml("<disk type='block' device='disk'><source dev='/dev/sdz'/>"
-                                    "<target dev='sdc'/></disk>"))
+        self.domain(
+            self.domain_xml("<disk type='block' device='disk'><source dev='/dev/sdz'/><target dev='sdc'/></disk>")
+        )
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 1)
         self.assertIn("sdc: a block disk (/dev/sdz): only file disks can be copied", r.stderr)
@@ -333,8 +367,10 @@ class BackupTest(Scratch):
         self.assertEqual(open(os.path.join(self.fix, "virsh-locale.txt")).read().strip(), "LC_ALL=C")
 
     def test_vm_started_during_the_copy(self):
-        for state, needle in (("running", "state changed during the copy"),
-                              ("shut off", "changed during the copy (the VM was started?)")):
+        for state, needle in (
+            ("running", "state changed during the copy"),
+            ("shut off", "changed during the copy (the VM was started?)"),
+        ):
             with self.subTest(state=state):
                 self.state("shut off")
                 self.env.update(FIX_CP_STARTS_VM=state, FIX_CP_TOUCH=self.disk)
@@ -358,7 +394,7 @@ class BackupTest(Scratch):
             self.assertTrue(f.read().endswith(b"data"))
         self.assertFalse(os.path.lexists(os.path.join(self.dest(), "files", self.disk.lstrip("/"))))
         self.assertIn(f"disk {self.disk} is a symbolic link", r.stdout)
-        self.assertIn(f"{kept} {real}", r.stdout)       # restored to the file it points to
+        self.assertIn(f"{kept} {real}", r.stdout)  # restored to the file it points to
         man = json.load(open(os.path.join(self.dest(), "manifest.json")))
         self.assertEqual(man["files"][0]["source"], real)
 
@@ -417,16 +453,24 @@ class ListStatusTest(Scratch):
         self.assertNotIn("libvirt-daemon:", r.stdout)
 
     def test_status_with_fixed_cpu_and_without_virsh(self):
-        self.domain(self.domain_xml(cpu="<cpu mode='host-passthrough'>" + "".join(
-            f"<feature policy='disable' name='{n}'/>" for n in
-            ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")) + "</cpu>"))
+        self.domain(
+            self.domain_xml(
+                cpu="<cpu mode='host-passthrough'>"
+                + "".join(
+                    f"<feature policy='disable' name='{n}'/>"
+                    for n in ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
+                )
+                + "</cpu>"
+            )
+        )
         r = self.run_tool("status", "win")
         self.assertIn("cpu mode host-passthrough: disabled cet-ss", r.stdout)
         self.assertNotIn("--security-info", "\n".join(self.calls()))
         os.unlink(os.path.join(self.bin, "virsh"))
         self.env["PATH"] = f"{self.bin}"
-        r = subprocess.run([sys.executable, "-I", TOOL, "status", "win"], env=self.env, capture_output=True,
-                           text=True, timeout=60)
+        r = subprocess.run(
+            [sys.executable, "-I", TOOL, "status", "win"], env=self.env, capture_output=True, text=True, timeout=60
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("virsh not found", r.stdout)
 
@@ -454,21 +498,26 @@ def old_domain(text=None):
     """The same VM before the migration: disk on SATA, plain driver, e1000e,
     no virtio-scsi controller."""
     x = text or real_domain()
-    x = x.replace("<driver name='qemu' type='qcow2' cache='none' io='native' discard='unmap' "
-                  "detect_zeroes='unmap'/>", "<driver name='qemu' type='qcow2'/>")
+    x = x.replace(
+        "<driver name='qemu' type='qcow2' cache='none' io='native' discard='unmap' detect_zeroes='unmap'/>",
+        "<driver name='qemu' type='qcow2'/>",
+    )
     x = x.replace("<target dev='sda' bus='scsi'/>", "<target dev='sda' bus='sata'/>")
     start = x.index("<controller type='scsi'")
     end = x.index("</controller>", start) + len("</controller>")
     x = x[:start] + x[end:]
-    x = x.replace("<model type='virtio'/>\n      <address type='pci' domain='0x0000' bus='0x01'",
-                  "<model type='e1000e'/>\n      <address type='pci' domain='0x0000' bus='0x01'")
+    x = x.replace(
+        "<model type='virtio'/>\n      <address type='pci' domain='0x0000' bus='0x01'",
+        "<model type='e1000e'/>\n      <address type='pci' domain='0x0000' bus='0x01'",
+    )
     assert "bus='sata'/>\n      <address type='drive' controller='0' bus='0' target='0' unit='0'/>" in x
     return x
 
 
 def with_devices(devices, extra=""):
-    return (f"<domain type='kvm'><name>t</name>{extra}<devices>{devices}"
-            "<memballoon model='virtio'/></devices></domain>\n")
+    return (
+        f"<domain type='kvm'><name>t</name>{extra}<devices>{devices}<memballoon model='virtio'/></devices></domain>\n"
+    )
 
 
 class TuneTransformTest(unittest.TestCase):
@@ -480,6 +529,7 @@ class TuneTransformTest(unittest.TestCase):
 
     def disks(self, xml):
         import xml.etree.ElementTree as ET
+
         return ET.fromstring(xml).findall("devices/disk")
 
     def test_hand_migrated_vm_has_no_diff(self):
@@ -487,7 +537,7 @@ class TuneTransformTest(unittest.TestCase):
             after, changes, held, notes = self.tune(real_domain(), allow)
             self.assertEqual((changes, held, notes), ([], [], []))
             self.assertEqual(after, self.m.normalized(real_domain()))
-        self.assertIn("libosinfo:os id=", after)        # prefixes kept, no ns0
+        self.assertIn("libosinfo:os id=", after)  # prefixes kept, no ns0
         self.assertNotIn("ns0", after)
 
     def test_sata_to_virtio_scsi_without_a_controller(self):
@@ -499,17 +549,26 @@ class TuneTransformTest(unittest.TestCase):
         self.assertIn("network card 52:54:00:48:14:b1: e1000e -> virtio (same MAC)", changes)
         disk, cdrom = self.disks(after)
         self.assertEqual(disk.find("target").attrib, {"dev": "sda", "bus": "scsi"})
-        self.assertEqual(disk.find("address").attrib,
-                         {"type": "drive", "controller": "0", "bus": "0", "target": "0", "unit": "0"})
-        self.assertEqual(disk.find("driver").attrib, {"name": "qemu", "type": "qcow2", "cache": "none",
-                                                      "io": "native", "discard": "unmap",
-                                                      "detect_zeroes": "unmap"})
+        self.assertEqual(
+            disk.find("address").attrib, {"type": "drive", "controller": "0", "bus": "0", "target": "0", "unit": "0"}
+        )
+        self.assertEqual(
+            disk.find("driver").attrib,
+            {
+                "name": "qemu",
+                "type": "qcow2",
+                "cache": "none",
+                "io": "native",
+                "discard": "unmap",
+                "detect_zeroes": "unmap",
+            },
+        )
         # The CD-ROM stays on SATA, address and all.
         self.assertEqual(cdrom.find("target").attrib, {"dev": "sdb", "bus": "sata"})
         self.assertEqual(cdrom.find("address").get("unit"), "1")
         self.assertEqual(cdrom.find("driver").attrib, {"name": "qemu", "type": "raw"})
         self.assertIn("<mac address='52:54:00:48:14:b1' />", after.replace('"', "'"))
-        self.assertEqual(after.count("model=\"virtio-scsi\""), 1)
+        self.assertEqual(after.count('model="virtio-scsi"'), 1)
         # Idempotent: a second pass changes nothing.
         again, changes2, _, _ = self.tune(after)
         self.assertEqual(changes2, [])
@@ -517,8 +576,9 @@ class TuneTransformTest(unittest.TestCase):
 
     def test_windows_without_drivers_gets_only_the_driver_attributes(self):
         after, changes, held, _ = self.tune(old_domain(), allow=False)
-        self.assertEqual(held, ["disk sda: bus sata -> scsi (virtio-scsi)",
-                                "network card 52:54:00:48:14:b1: e1000e -> virtio"])
+        self.assertEqual(
+            held, ["disk sda: bus sata -> scsi (virtio-scsi)", "network card 52:54:00:48:14:b1: e1000e -> virtio"]
+        )
         self.assertTrue(all(c.startswith("disk sda: ") and " bus " not in c for c in changes), changes)
         self.assertNotIn("virtio-scsi", after)
         self.assertIn("e1000e", after)
@@ -526,53 +586,83 @@ class TuneTransformTest(unittest.TestCase):
         self.assertEqual(self.disks(after)[0].find("driver").get("cache"), "none")
 
     def test_existing_lsilogic_controller_gets_a_new_virtio_scsi_one(self):
-        xml = with_devices("<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/>"
-                           "<address type='drive' controller='0' bus='0' target='0' unit='0'/></disk>"
-                           "<disk type='file' device='disk'><source file='/b'/><target dev='sdb' bus='scsi'/>"
-                           "<address type='drive' controller='0' bus='0' target='0' unit='0'/></disk>"
-                           "<controller type='scsi' index='0' model='lsilogic'/>")
+        xml = with_devices(
+            "<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/>"
+            "<address type='drive' controller='0' bus='0' target='0' unit='0'/></disk>"
+            "<disk type='file' device='disk'><source file='/b'/><target dev='sdb' bus='scsi'/>"
+            "<address type='drive' controller='0' bus='0' target='0' unit='0'/></disk>"
+            "<controller type='scsi' index='0' model='lsilogic'/>"
+        )
         after, changes, _, _ = self.tune(xml)
         self.assertIn("add a virtio-scsi controller (index 1)", changes)
         a, b = self.disks(after)
         self.assertEqual(a.find("address").get("controller"), "1")
         self.assertEqual(a.find("address").get("unit"), "0")
-        self.assertEqual(b.find("address").get("controller"), "0")   # the lsilogic disk is not moved
+        self.assertEqual(b.find("address").get("controller"), "0")  # the lsilogic disk is not moved
 
     def test_multiple_disks_units_and_ide_rename(self):
-        xml = with_devices("<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/></disk>"
-                           "<disk type='block' device='disk'><source dev='/dev/x'/><target dev='sdb' bus='sata'/></disk>"
-                           "<disk type='file' device='disk'><source file='/c'/><target dev='hda' bus='ide'/></disk>"
-                           "<disk type='network' device='disk'><source protocol='nbd' name='n'/>"
-                           "<target dev='sdd' bus='sata'/></disk>"
-                           "<disk type='file' device='cdrom'><target dev='sde' bus='sata'/></disk>"
-                           "<controller type='scsi' index='0' model='virtio-scsi'/>")
+        xml = with_devices(
+            "<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/></disk>"
+            "<disk type='block' device='disk'><source dev='/dev/x'/><target dev='sdb' bus='sata'/></disk>"
+            "<disk type='file' device='disk'><source file='/c'/><target dev='hda' bus='ide'/></disk>"
+            "<disk type='network' device='disk'><source protocol='nbd' name='n'/>"
+            "<target dev='sdd' bus='sata'/></disk>"
+            "<disk type='file' device='cdrom'><target dev='sde' bus='sata'/></disk>"
+            "<controller type='scsi' index='0' model='virtio-scsi'/>"
+        )
         after, changes, _, notes = self.tune(xml)
-        units = [(d.find("target").get("dev"), d.find("target").get("bus"),
-                  d.find("address").get("unit") if d.find("address") is not None else None)
-                 for d in self.disks(after)]
-        self.assertEqual(units, [("sda", "scsi", "0"), ("sdb", "scsi", "1"), ("sdc", "scsi", "2"),
-                                 ("sdd", "sata", None), ("sde", "sata", None)])
+        units = [
+            (
+                d.find("target").get("dev"),
+                d.find("target").get("bus"),
+                d.find("address").get("unit") if d.find("address") is not None else None,
+            )
+            for d in self.disks(after)
+        ]
+        self.assertEqual(
+            units,
+            [
+                ("sda", "scsi", "0"),
+                ("sdb", "scsi", "1"),
+                ("sdc", "scsi", "2"),
+                ("sdd", "sata", None),
+                ("sde", "sata", None),
+            ],
+        )
         self.assertIn("disk hda: bus ide -> scsi (virtio-scsi controller 0, unit 2), renamed hda -> sdc", changes)
         self.assertNotIn("add a virtio-scsi controller (index 0)", changes)
         self.assertEqual(notes[0], "disk sdd: a network disk: left as it is (only file and block disks are tuned)")
-        self.assertIn("disk sdb: io (default) -> native", changes)          # block disks: tuned too
+        self.assertIn("disk sdb: io (default) -> native", changes)  # block disks: tuned too
 
     def test_driver_attributes_merge_and_missing_driver(self):
-        xml = with_devices("<disk type='file' device='disk'><driver name='qemu' type='raw' cache='writeback' "
-                           "error_policy='stop' discard='unmap'/><source file='/a'/><target dev='vda' bus='virtio'/>"
-                           "</disk><disk type='file' device='disk'><source file='/b'/>"
-                           "<target dev='vdb' bus='virtio'/></disk>")
+        xml = with_devices(
+            "<disk type='file' device='disk'><driver name='qemu' type='raw' cache='writeback' "
+            "error_policy='stop' discard='unmap'/><source file='/a'/><target dev='vda' bus='virtio'/>"
+            "</disk><disk type='file' device='disk'><source file='/b'/>"
+            "<target dev='vdb' bus='virtio'/></disk>"
+        )
         after, changes, _, _ = self.tune(xml)
         a, b = self.disks(after)
-        self.assertEqual(a.find("driver").attrib, {"name": "qemu", "type": "raw", "cache": "none",
-                                                   "error_policy": "stop", "discard": "unmap", "io": "native",
-                                                   "detect_zeroes": "unmap"})
-        self.assertEqual(b.find("driver").attrib, {"name": "qemu", "cache": "none", "io": "native",
-                                                   "discard": "unmap", "detect_zeroes": "unmap"})
+        self.assertEqual(
+            a.find("driver").attrib,
+            {
+                "name": "qemu",
+                "type": "raw",
+                "cache": "none",
+                "error_policy": "stop",
+                "discard": "unmap",
+                "io": "native",
+                "detect_zeroes": "unmap",
+            },
+        )
+        self.assertEqual(
+            b.find("driver").attrib,
+            {"name": "qemu", "cache": "none", "io": "native", "discard": "unmap", "detect_zeroes": "unmap"},
+        )
         self.assertEqual(list(b)[0].tag, "driver")
         self.assertIn("disk vda: cache writeback -> none", changes)
         self.assertNotIn("disk vda: discard", " ".join(changes))
-        self.assertFalse(any(" bus " in c for c in changes))                  # virtio-blk stays
+        self.assertFalse(any(" bus " in c for c in changes))  # virtio-blk stays
 
     def test_knobs_skip_items(self):
         kn = dict(ALL_ON, VM_TUNE_DISK_BUS=False, VM_TUNE_NIC=False)
@@ -584,22 +674,27 @@ class TuneTransformTest(unittest.TestCase):
         self.assertTrue(any(" bus " in c for c in changes))
 
     def test_nic_notes_and_memballoon(self):
-        xml = ("<domain><devices><interface type='network'><mac address='52:54:00:00:00:01'/>"
-               "<model type='rtl8139'/></interface><interface type='bridge'><mac address='52:54:00:00:00:02'/>"
-               "</interface><interface type='hostdev'><mac address='52:54:00:00:00:03'/>"
-               "<model type='e1000e'/></interface></devices></domain>")
+        xml = (
+            "<domain><devices><interface type='network'><mac address='52:54:00:00:00:01'/>"
+            "<model type='rtl8139'/></interface><interface type='bridge'><mac address='52:54:00:00:00:02'/>"
+            "</interface><interface type='hostdev'><mac address='52:54:00:00:00:03'/>"
+            "<model type='e1000e'/></interface></devices></domain>"
+        )
         after, changes, _, notes = self.tune(xml)
         self.assertEqual(changes, ["network card 52:54:00:00:00:01: rtl8139 -> virtio (same MAC)"])
         self.assertIn("network card 52:54:00:00:00:02: no <model>", notes[0])
         self.assertIn("no <memballoon>: not added", notes[1])
         for mac in ("01", "02", "03"):
             self.assertIn(f"52:54:00:00:00:{mac}", after)
-        self.assertIn("e1000e", after)                    # hostdev: not an emulated card
+        self.assertIn("e1000e", after)  # hostdev: not an emulated card
 
     def test_guest_kind_and_disk_names(self):
         import xml.etree.ElementTree as ET
-        osinfo = ("<metadata><libosinfo:libosinfo xmlns:libosinfo='http://libosinfo.org/xmlns/libvirt/domain/1.0'>"
-                  "<libosinfo:os id='{}'/></libosinfo:libosinfo></metadata>")
+
+        osinfo = (
+            "<metadata><libosinfo:libosinfo xmlns:libosinfo='http://libosinfo.org/xmlns/libvirt/domain/1.0'>"
+            "<libosinfo:os id='{}'/></libosinfo:libosinfo></metadata>"
+        )
         kind = lambda extra: self.m.guest_kind(ET.fromstring(f"<domain>{extra}</domain>"))[0]  # noqa: E731
         self.assertEqual(kind(osinfo.format("http://microsoft.com/win/11")), "windows")
         self.assertEqual(kind(osinfo.format("http://fedoraproject.org/fedora/43")), "linux")
@@ -624,13 +719,14 @@ class TuneEdgeCaseTest(unittest.TestCase):
 
     def test_default_namespace_in_metadata_stays_on_its_element(self):
         import xml.etree.ElementTree as ET
+
         x = old_domain()
         x = x.replace("</metadata>", "  <app xmlns='http://example.com/app/1'><v>1</v></app>\n  </metadata>", 1)
         self.assertIn("example.com/app/1", x)
         after, changes, _, _ = self.tune(x)
         self.assertTrue(changes)
         root = ET.fromstring(after)
-        self.assertEqual(root.tag, "domain")                    # libvirt elements keep no namespace
+        self.assertEqual(root.tag, "domain")  # libvirt elements keep no namespace
         self.assertIsNotNone(root.find("devices/disk"))
         self.assertIsNotNone(root.find("metadata/{http://example.com/app/1}app/{http://example.com/app/1}v"))
         self.assertIn("libosinfo:os id=", after)
@@ -640,12 +736,15 @@ class TuneEdgeCaseTest(unittest.TestCase):
 
     def test_a_scsi_hostdev_unit_is_not_reused(self):
         import xml.etree.ElementTree as ET
-        devs = ("<disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='/x.qcow2'/>"
-                "<target dev='sda' bus='sata'/><address type='drive' controller='0' bus='0' target='0' unit='0'/>"
-                "</disk><controller type='scsi' index='0' model='virtio-scsi'/>"
-                "<hostdev mode='subsystem' type='scsi'><source><adapter name='scsi_host0'/>"
-                "<address bus='0' target='0' unit='0'/></source>"
-                "<address type='drive' controller='0' bus='0' target='0' unit='0'/></hostdev>")
+
+        devs = (
+            "<disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='/x.qcow2'/>"
+            "<target dev='sda' bus='sata'/><address type='drive' controller='0' bus='0' target='0' unit='0'/>"
+            "</disk><controller type='scsi' index='0' model='virtio-scsi'/>"
+            "<hostdev mode='subsystem' type='scsi'><source><adapter name='scsi_host0'/>"
+            "<address bus='0' target='0' unit='0'/></source>"
+            "<address type='drive' controller='0' bus='0' target='0' unit='0'/></hostdev>"
+        )
         after, changes, _, _ = self.tune(with_devices(devs))
         self.assertIn("disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 1)", changes)
         disk = ET.fromstring(after).find("devices/disk")
@@ -653,8 +752,10 @@ class TuneEdgeCaseTest(unittest.TestCase):
 
     def test_socket_network_cards_are_tuned(self):
         for kind in ("mcast", "server", "client", "udp", "null"):
-            devs = (f"<interface type='{kind}'><mac address='52:54:00:00:00:01'/><source address='230.0.0.1' "
-                    f"port='5558'/><model type='rtl8139'/></interface>")
+            devs = (
+                f"<interface type='{kind}'><mac address='52:54:00:00:00:01'/><source address='230.0.0.1' "
+                f"port='5558'/><model type='rtl8139'/></interface>"
+            )
             after, changes, held, _ = self.tune(with_devices(devs))
             self.assertEqual(changes, ["network card 52:54:00:00:00:01: rtl8139 -> virtio (same MAC)"], kind)
             self.assertIn("52:54:00:00:00:01", after)
@@ -690,11 +791,15 @@ class TuneCommandTest(unittest.TestCase):
                 self.xml = self.secret = self.defined[-1]
                 return 0, "", ""
             return 1, "", "unsupported"
-        patches = [mock.patch.object(self.m, "virsh", virsh), mock.patch.object(self.m, "BACKUP_DIR", self.tmp),
-                   mock.patch.object(self.m, "knobs", lambda path=None: dict(ALL_ON)),
-                   mock.patch.object(self.m, "CPU_CONF", os.path.join(self.tmp, "none.conf")),
-                   mock.patch.object(self.m, "VM_PIN", os.path.join(self.tmp, "no-vm-pin")),
-                   mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": "1"})]
+
+        patches = [
+            mock.patch.object(self.m, "virsh", virsh),
+            mock.patch.object(self.m, "BACKUP_DIR", self.tmp),
+            mock.patch.object(self.m, "knobs", lambda path=None: dict(ALL_ON)),
+            mock.patch.object(self.m, "CPU_CONF", os.path.join(self.tmp, "none.conf")),
+            mock.patch.object(self.m, "VM_PIN", os.path.join(self.tmp, "no-vm-pin")),
+            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": "1"}),
+        ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -713,7 +818,7 @@ class TuneCommandTest(unittest.TestCase):
         self.assertIn("pnputil /add-driver D:\\vioscsi\\w11\\amd64\\vioscsi.inf /install", out)
         self.assertIn("sc qc vioscsi", out)
         self.assertIn("cst vm tune apply win11-devbox --guest-has-virtio", out)
-        self.assertIn("+      <driver name=\"qemu\" type=\"qcow2\" cache=\"none\"", out)
+        self.assertIn('+      <driver name="qemu" type="qcow2" cache="none"', out)
         self.assertIn("CPU (owned by cst cpu vm-pin, not by tune): CET/MBEC disabled; vCPUs pinned to 12-23", out)
         self.assertEqual(self.defined, [])
         self.assertFalse(any("--security-info" in c for c in self.calls))
@@ -738,7 +843,7 @@ class TuneCommandTest(unittest.TestCase):
         self.assertIn("was saved (managed save), not shut down", str(e.exception))
         self.assertIn("managedsave-remove win11-devbox", str(e.exception))
         self.assertEqual(self.defined, [])
-        rc, out = self.run_cmd(False, True)              # the plan says so instead of failing
+        rc, out = self.run_cmd(False, True)  # the plan says so instead of failing
         self.assertEqual(rc, 0)
         self.assertIn("was saved (managed save)", out)
         # Without the flag only the driver attributes change: no reason to refuse.
@@ -755,8 +860,8 @@ class TuneCommandTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.defined), 1)
         new = self.defined[0]
-        self.assertIn("passwd=\"s3cret\"", new)                   # defined from the --security-info dump
-        self.assertIn("model=\"virtio-scsi\"", new)
+        self.assertIn('passwd="s3cret"', new)  # defined from the --security-info dump
+        self.assertIn('model="virtio-scsi"', new)
         self.assertIn("52:54:00:48:14:b1", new)
         self.assertNotIn("s3cret", out)
         keep = os.path.join(self.tmp, "win11-devbox", "definitions")
@@ -786,8 +891,10 @@ class TuneCommandTest(unittest.TestCase):
         self.assertNotIn("held back", out)
 
     def test_apply_needs_root(self):
-        with mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": ""}), \
-                mock.patch.object(self.m.os, "geteuid", lambda: 1000):
+        with (
+            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": ""}),
+            mock.patch.object(self.m.os, "geteuid", lambda: 1000),
+        ):
             with self.assertRaises(self.m.Refused):
                 self.run_cmd(True, True)
 
@@ -805,12 +912,14 @@ class NocowTest(unittest.TestCase):
         self.boxes = os.path.join(self.home, ".local", "share", "gnome-boxes", "images")
         for d in (self.system, self.boxes):
             os.makedirs(d)
-        self.flags = {}        # path -> flags (None: not readable); missing: 0 (copy-on-write)
-        patches = [mock.patch.object(self.m, "SYSTEM_IMAGES", self.system),
-                   mock.patch.object(self.m, "is_btrfs", lambda p: True),
-                   mock.patch.object(self.m, "inode_flags", lambda p: self.flags.get(p, 0)),
-                   mock.patch.object(self.m, "user_home", lambda: self.home),
-                   mock.patch.object(self.m, "knobs", lambda path=None: dict(ALL_ON))]
+        self.flags = {}  # path -> flags (None: not readable); missing: 0 (copy-on-write)
+        patches = [
+            mock.patch.object(self.m, "SYSTEM_IMAGES", self.system),
+            mock.patch.object(self.m, "is_btrfs", lambda p: True),
+            mock.patch.object(self.m, "inode_flags", lambda p: self.flags.get(p, 0)),
+            mock.patch.object(self.m, "user_home", lambda: self.home),
+            mock.patch.object(self.m, "knobs", lambda path=None: dict(ALL_ON)),
+        ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -875,6 +984,7 @@ class NocowTest(unittest.TestCase):
             if p == self.system:
                 raise PermissionError(13, "Permission denied")
             return real_scandir(p)
+
         with mock.patch.object(self.m.os, "scandir", scandir):
             rc, out = self.out(self.m.cmd_nocow_plan)
         self.assertIn("NOCOW mark (+C): not readable as your user (root-only folder): cst-vm nocow plan --root", out)
@@ -892,9 +1002,9 @@ class NocowTest(unittest.TestCase):
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
         d = self.dirs()[self.system]
-        self.assertTrue(self.m.needs_mark(d))              # /var/lib/libvirt is there: create it
+        self.assertTrue(self.m.needs_mark(d))  # /var/lib/libvirt is there: create it
         os.rmdir(os.path.dirname(self.system))
-        self.assertFalse(self.m.needs_mark(self.dirs()[self.system]))   # libvirt not installed
+        self.assertFalse(self.m.needs_mark(self.dirs()[self.system]))  # libvirt not installed
 
     def test_knob_off(self):
         with mock.patch.object(self.m, "knobs", lambda path=None: dict(ALL_ON, VM_NOCOW=False)):
@@ -915,16 +1025,20 @@ class NocowTest(unittest.TestCase):
         def fake_sub_run(cmd, env=None):
             sudo.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
-        with mock.patch.object(self.m, "set_nocow", set_nocow), \
-                mock.patch.object(self.m.os, "geteuid", lambda: 1000), \
-                mock.patch.object(self.m.subprocess, "run", fake_sub_run), \
-                mock.patch.object(self.m, "run", lambda cmd, timeout=120: (sudo.append(cmd) or 0, "-----C---- x", "")), \
-                mock.patch.object(self.m, "confirm", lambda q: True):
+
+        with (
+            mock.patch.object(self.m, "set_nocow", set_nocow),
+            mock.patch.object(self.m.os, "geteuid", lambda: 1000),
+            mock.patch.object(self.m.subprocess, "run", fake_sub_run),
+            mock.patch.object(self.m, "run", lambda cmd, timeout=120: (sudo.append(cmd) or 0, "-----C---- x", "")),
+            mock.patch.object(self.m, "confirm", lambda q: True),
+        ):
             rc, out = self.out(self.m.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
         self.assertEqual(marked, [self.boxes])
-        self.assertEqual(sudo, [["sudo", "--", "chattr", "+C", self.system],
-                                ["sudo", "--", "lsattr", "-d", self.system]])
+        self.assertEqual(
+            sudo, [["sudo", "--", "chattr", "+C", self.system], ["sudo", "--", "lsattr", "-d", self.system]]
+        )
         self.assertIn(f"done: {self.system}", out)
         self.assertIn("existing images stay as they are", out)
 
@@ -936,15 +1050,23 @@ class NocowTest(unittest.TestCase):
         def fake_sub_run(cmd, env=None):
             sudo.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
-        with mock.patch.object(self.m.os, "geteuid", lambda: 1000), \
-                mock.patch.object(self.m.subprocess, "run", fake_sub_run), \
-                mock.patch.object(self.m, "run", lambda cmd, timeout=120: (0, "-----C---- x", "")), \
-                mock.patch.object(self.m, "confirm", lambda q: True):
+
+        with (
+            mock.patch.object(self.m.os, "geteuid", lambda: 1000),
+            mock.patch.object(self.m.subprocess, "run", fake_sub_run),
+            mock.patch.object(self.m, "run", lambda cmd, timeout=120: (0, "-----C---- x", "")),
+            mock.patch.object(self.m, "confirm", lambda q: True),
+        ):
             rc, out = self.out(self.m.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
-        self.assertEqual(sudo, [["sudo", "--", "install", "-d", "-o", "root", "-g", "root", "-m", "0711", self.system],
-                                ["sudo", "--", "restorecon", self.system],
-                                ["sudo", "--", "chattr", "+C", self.system]])
+        self.assertEqual(
+            sudo,
+            [
+                ["sudo", "--", "install", "-d", "-o", "root", "-g", "root", "-m", "0711", self.system],
+                ["sudo", "--", "restorecon", self.system],
+                ["sudo", "--", "chattr", "+C", self.system],
+            ],
+        )
 
     def test_a_symlinked_folder_is_never_created_or_marked(self):
         real = os.path.join(self.tmp, "elsewhere")
@@ -961,20 +1083,24 @@ class NocowTest(unittest.TestCase):
             self.assertEqual((d[p]["present"], d[p]["link"]), (False, real))
             self.assertFalse(self.m.needs_mark(d[p]))
         rc, out = self.out(self.m.cmd_nocow_plan)
-        self.assertIn(f"{self.system}  [libvirt qemu:///system: virt-manager, virsh]: a symbolic link to {real}: "
-                      "not managed by CST", out)
+        self.assertIn(
+            f"{self.system}  [libvirt qemu:///system: virt-manager, virsh]: a symbolic link to {real}: "
+            "not managed by CST",
+            out,
+        )
         self.assertIn("No folder to mark.", out)
         self.assertNotIn("not created yet", out)
         sudo = []
-        with mock.patch.object(self.m.subprocess, "run", lambda cmd, env=None: sudo.append(cmd)), \
-                mock.patch.object(self.m, "confirm", lambda q: True):
+        with (
+            mock.patch.object(self.m.subprocess, "run", lambda cmd, env=None: sudo.append(cmd)),
+            mock.patch.object(self.m, "confirm", lambda q: True),
+        ):
             rc, out = self.out(self.m.cmd_nocow_apply)
         self.assertEqual((rc, sudo), (0, []))
         self.assertIn("already has the NOCOW mark (+C) (symbolic links are not managed).", out)
-        self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)     # target untouched
+        self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)  # target untouched
         # Even if the folder turns into a link between the probe and the action.
-        probe = {"scope": "system", "path": self.system, "what": "x", "present": False, "link": None,
-                 "nocow": None}
+        probe = {"scope": "system", "path": self.system, "what": "x", "present": False, "link": None, "nocow": None}
         self.assertIn("symbolic link: not touched", self.m.mark_system_dir(probe))
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self):
@@ -988,9 +1114,14 @@ class NocowTest(unittest.TestCase):
 
     def test_status_lists_the_folders(self):
         self.flags[self.system] = self.flags[self.boxes] = self.m.FS_NOCOW_FL
-        with mock.patch.object(self.m, "virsh", lambda *a, timeout=60: (
-                (0, "shut off\n", "") if a[0] == "domstate" else (0, real_domain(), ""))), \
-                mock.patch.object(self.m, "read_index", lambda path=None: []):
+        with (
+            mock.patch.object(
+                self.m,
+                "virsh",
+                lambda *a, timeout=60: (0, "shut off\n", "") if a[0] == "domstate" else (0, real_domain(), ""),
+            ),
+            mock.patch.object(self.m, "read_index", lambda path=None: []),
+        ):
             rc, out = self.out(self.m.cmd_status, "win11-devbox")
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
@@ -1015,6 +1146,7 @@ class BtrfsReflinkTest(unittest.TestCase):
 
     def setflags(self, path, flags, directory=False):
         import fcntl
+
         fd = os.open(path, os.O_RDONLY | (os.O_DIRECTORY if directory else 0))
         try:
             fcntl.ioctl(fd, self.m.FS_IOC_SETFLAGS, struct.pack("l", flags))
@@ -1024,7 +1156,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     def test_reflink_of_a_nocow_image(self):
         src = os.path.join(self.tmp, "img.qcow2")
         open(src, "wb").close()
-        self.setflags(src, self.m.inode_flags(src) | self.m.FS_NOCOW_FL)   # only while empty
+        self.setflags(src, self.m.inode_flags(src) | self.m.FS_NOCOW_FL)  # only while empty
         with open(src, "ab") as f:
             f.write(os.urandom(1 << 20))
         if not self.m.nocow(src):
@@ -1052,8 +1184,14 @@ class BtrfsReflinkTest(unittest.TestCase):
 
 class SetupScriptTest(unittest.TestCase):
     def run_setup(self, *args):
-        return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, timeout=30,
-                              env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm"}, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            ["bash", SETUP, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm"},
+            stdin=subprocess.DEVNULL,
+        )
 
     def test_tune_and_nocow_routing(self):
         r = self.run_setup("tune")
@@ -1063,9 +1201,14 @@ class SetupScriptTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         # Changing commands refuse in a container, before any sudo.
         for args in (("tune", "apply", "w"), ("nocow", "apply"), ("nocow", "plan", "--root")):
-            r = subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, timeout=30,
-                               env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1"},
-                               stdin=subprocess.DEVNULL)
+            r = subprocess.run(
+                ["bash", SETUP, *args],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1"},
+                stdin=subprocess.DEVNULL,
+            )
             self.assertEqual(r.returncode, 1, args)
             self.assertIn("must run on the host", r.stderr)
 
@@ -1086,19 +1229,33 @@ class SetupScriptTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         for tool in ("bash", "python3", "readlink", "dirname", "sed", "env"):
             os.symlink(shutil.which(tool), os.path.join(tmp, tool))
-        r = subprocess.run(["bash", SETUP, "status", "win"], capture_output=True, text=True, timeout=30,
-                           env={"PATH": tmp, "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1",
-                                "CST_VM_INDEX": os.path.join(tmp, "none.json"),
-                                "CST_VM_CPU_CONF": os.path.join(tmp, "none.conf")},
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", SETUP, "status", "win"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={
+                "PATH": tmp,
+                "CST_PROG": "cst vm",
+                "CST_VM_CONTAINER": "1",
+                "CST_VM_INDEX": os.path.join(tmp, "none.json"),
+                "CST_VM_CPU_CONF": os.path.join(tmp, "none.conf"),
+            },
+            stdin=subprocess.DEVNULL,
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("cannot reach the host from this container", r.stdout)
         self.assertIn("win: virsh not found", r.stdout)
         self.assertNotIn("not found", r.stderr)
 
     def test_registered_in_cst(self):
-        r = subprocess.run(["bash", os.path.join(REPO, "cst"), "help"], capture_output=True, text=True, timeout=30,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", os.path.join(REPO, "cst"), "help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
         self.assertIn("vm         the libvirt VM", r.stdout)
         with open(os.path.join(REPO, "cst")) as f:
             text = f.read()

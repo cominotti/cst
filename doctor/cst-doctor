@@ -66,13 +66,13 @@ import time
 NAME = "cst-doctor"
 PROG = os.environ.get("CST_PROG") or NAME
 # The cst command, for hints: "cst" from "cst doctor".
-CST = PROG[:-len(" doctor")] if PROG.endswith(" doctor") else "cst"
+CST = PROG[: -len(" doctor")] if PROG.endswith(" doctor") else "cst"
 
 OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
 SEVERITY = {OK: 0, INFO: 1, WARN: 2, ERROR: 3}
 
-STAGED_OLD_DAYS = 7          # a staged deployment waiting longer gets a note
-ALERT_KEEP_DAYS = 7          # as btrfs-notify and cst-pending-alerts
+STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
+ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
 ALERT_MAX_FILE = 16384
 ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
 
@@ -121,8 +121,7 @@ class Host:
         rc 127 when it cannot be started, 124 on a timeout."""
         full = (["flatpak-spawn", "--host"] + cmd) if self.container else cmd
         try:
-            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout,
-                               stdin=subprocess.DEVNULL)
+            p = subprocess.run(full, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         except FileNotFoundError as e:
             return 127, "", f"{full[0]}: not found ({e.strerror})"
         except subprocess.TimeoutExpired:
@@ -150,6 +149,7 @@ def check(area):
     def register(fn):
         CHECKS.append((area, fn))
         return fn
+
     return register
 
 
@@ -181,8 +181,13 @@ def spellings(pkg):
     name, epoch, ver, rel, arch = pkg
     out = {f"{name}-{ver}-{rel}": False, f"{name}-{ver}-{rel}.{arch}": True, f"{name}-{ver}": False}
     if epoch:
-        out.update({f"{name}-{epoch}:{ver}-{rel}": False, f"{name}-{epoch}:{ver}-{rel}.{arch}": True,
-                    f"{name}-{epoch}:{ver}": False})
+        out.update(
+            {
+                f"{name}-{epoch}:{ver}-{rel}": False,
+                f"{name}-{epoch}:{ver}-{rel}.{arch}": True,
+                f"{name}-{epoch}:{ver}": False,
+            }
+        )
     return out
 
 
@@ -243,7 +248,7 @@ def classify_requests(requests, packages, native=None):
         else:
             m = NVR_FORM.match(r)
             if not m:
-                out.append((r, r, "name"))   # a name, a provide (vim), a path...
+                out.append((r, r, "name"))  # a name, a provide (vim), a path...
             elif packages is None:
                 last = m.group("rel").rsplit(".", 1)[-1]
                 arch = last if last in ARCHES else ""
@@ -288,12 +293,17 @@ def pkg_names(obj):
             for v in o.values():
                 walk(v)
         elif isinstance(o, (list, tuple)):
-            if len(o) >= 2 and isinstance(o[0], str) and isinstance(o[1], str) and \
-                    (o[0] == o[1] or o[0].startswith(o[1] + "-")):
+            if (
+                len(o) >= 2
+                and isinstance(o[0], str)
+                and isinstance(o[1], str)
+                and (o[0] == o[1] or o[0].startswith(o[1] + "-"))
+            ):
                 add(o[1])
             else:
                 for v in o:
                     walk(v)
+
     walk(obj)
     return out
 
@@ -325,7 +335,7 @@ def ostree_deployments(host):
         deps = [d for d in data["deployments"] if isinstance(d, dict)]
     except (ValueError, KeyError, TypeError) as e:
         return None, None, f"rpm-ostree status --json: unreadable output ({e})"
-    host._ostree_list = deps     # every deployment, in the order ostree admin status numbers them
+    host._ostree_list = deps  # every deployment, in the order ostree admin status numbers them
     booted = next((d for d in deps if d.get("booted")), None)
     osname = booted.get("osname") if booted else None
     first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
@@ -378,20 +388,19 @@ def check_pinned_layering(host):
         inactive = [r for r, _, how in pinned if how == "inactive"]
         msg = f"{describe(d)}: {len(pinned)} of {len(reqs)} layered packages are pinned to a version"
         if listed:
-            msg += (" (they never update, and an upgrade fails once that version leaves the repositories): "
-                    + listed)
+            msg += " (they never update, and an upgrade fails once that version leaves the repositories): " + listed
         if any(how == "pinned-form" for _, _, how in pinned):
             msg += " (recognised by their form only: the package list was not readable)"
         if inactive:
-            msg += ("; pinned but matching no installed package (probably inactive requests: the base "
-                    "image may provide them now; the fix drops them without asking them back): "
-                    + ", ".join(inactive))
+            msg += (
+                "; pinned but matching no installed package (probably inactive requests: the base "
+                "image may provide them now; the fix drops them without asking them back): " + ", ".join(inactive)
+            )
         if d is target:
             yield Result(WARN, msg, unpin_command(cls))
         elif not tpinned:
             # Booted pinned, but the next boot's deployment is clean.
-            yield Result(INFO, msg + f"; the {describe(pending)} has no version-pinned requests: "
-                         "reboot to use it")
+            yield Result(INFO, msg + f"; the {describe(pending)} has no version-pinned requests: reboot to use it")
     if not tpinned:
         yield Result(OK, f"{describe(target)}: {len(treqs)} layered packages, all requested by name")
 
@@ -404,17 +413,21 @@ def check_local_packages(host):
     target = pending or booted
     if target is None:
         return
-    local = list(target.get("requested-local-packages") or []) + \
-        list(target.get("requested-local-fileoverride-packages") or [])
+    local = list(target.get("requested-local-packages") or []) + list(
+        target.get("requested-local-fileoverride-packages") or []
+    )
     if not local:
         yield Result(OK, f"{describe(target)}: no local RPM files layered")
         return
     names = pkg_names(local)
     words = ["sudo", "rpm-ostree", "uninstall"] + [str(x) for x in local] + [f"--install={n}" for n in names]
-    yield Result(WARN, f"{describe(target)}: {len(local)} local RPM file(s) layered: "
-                 f"{', '.join(map(str, local))}. rpm-ostree upgrade never updates them. "
-                 "Run the fix only if a repository has the package: it then comes from there",
-                 " ".join(shlex.quote(w) for w in words))
+    yield Result(
+        WARN,
+        f"{describe(target)}: {len(local)} local RPM file(s) layered: "
+        f"{', '.join(map(str, local))}. rpm-ostree upgrade never updates them. "
+        "Run the fix only if a repository has the package: it then comes from there",
+        " ".join(shlex.quote(w) for w in words),
+    )
 
 
 @check("rpm-ostree")
@@ -425,17 +438,27 @@ def check_overrides(host):
     target = pending or booted
     if target is None:
         return
-    replaced = pkg_names([target.get("base-remote-replacements") or {},
-                          target.get("base-local-replacements") or [],
-                          target.get("requested-base-local-replacements") or []])
+    replaced = pkg_names(
+        [
+            target.get("base-remote-replacements") or {},
+            target.get("base-local-replacements") or [],
+            target.get("requested-base-local-replacements") or [],
+        ]
+    )
     removed = pkg_names([target.get("base-removals") or [], target.get("requested-base-removals") or []])
     if replaced:
-        yield Result(WARN, f"{describe(target)}: base packages replaced by another version: "
-                     f"{', '.join(replaced)}. They stay at that version through every upgrade",
-                     " ".join(shlex.quote(w) for w in ["sudo", "rpm-ostree", "override", "reset"] + replaced))
+        yield Result(
+            WARN,
+            f"{describe(target)}: base packages replaced by another version: "
+            f"{', '.join(replaced)}. They stay at that version through every upgrade",
+            " ".join(shlex.quote(w) for w in ["sudo", "rpm-ostree", "override", "reset"] + replaced),
+        )
     if removed:
-        yield Result(INFO, f"{describe(target)}: base packages removed on purpose: {', '.join(removed)} "
-                     f"(to bring them back: sudo rpm-ostree override reset {' '.join(removed)})")
+        yield Result(
+            INFO,
+            f"{describe(target)}: base packages removed on purpose: {', '.join(removed)} "
+            f"(to bring them back: sudo rpm-ostree override reset {' '.join(removed)})",
+        )
     if not replaced and not removed:
         yield Result(OK, f"{describe(target)}: no base package replaced or removed")
 
@@ -449,8 +472,11 @@ def check_staged(host):
         yield Result(OK, "no pending deployment: the next boot is the booted one")
         return
     if not pending.get("staged"):
-        yield Result(INFO, f"{describe(pending)} is not the booted one (for example after "
-                     "rpm-ostree rollback): it becomes the system at the next boot")
+        yield Result(
+            INFO,
+            f"{describe(pending)} is not the booted one (for example after "
+            "rpm-ostree rollback): it becomes the system at the next boot",
+        )
         return
     ts = pending.get("timestamp")
     age = ""
@@ -468,8 +494,11 @@ TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
 
 def failed_units(host, user):
-    cmd = ["systemctl"] + (["--user"] if user else []) + \
-        ["list-units", "--state=failed", "--no-legend", "--plain", "--full", "--no-pager"]
+    cmd = (
+        ["systemctl"]
+        + (["--user"] if user else [])
+        + ["list-units", "--state=failed", "--no-legend", "--plain", "--full", "--no-pager"]
+    )
     rc, out, err = host.run(cmd, timeout=30)
     if rc != 0:
         return None, first_line(err) or f"exit {rc}"
@@ -490,13 +519,19 @@ def unit_results(scope, units):
     if real:
         q = " ".join(shlex.quote(u) for u in real)
         logs = " ".join(f"-u {shlex.quote(u)}" for u in real)
-        yield Result(WARN, f"{scope} units failed: {', '.join(real)}. Read why first: {journal} -b {logs} "
-                     "(the fix only clears the mark, not the cause)",
-                     f"{sysctl} reset-failed {q}")
+        yield Result(
+            WARN,
+            f"{scope} units failed: {', '.join(real)}. Read why first: {journal} -b {logs} "
+            "(the fix only clears the mark, not the cause)",
+            f"{sysctl} reset-failed {q}",
+        )
     if transient:
         q = " ".join(shlex.quote(u) for u in transient)
-        yield Result(INFO, f"{scope}: {len(transient)} transient unit(s) failed (systemd-run, low priority): "
-                     f"{', '.join(transient)}; to clear: {sysctl} reset-failed {q}")
+        yield Result(
+            INFO,
+            f"{scope}: {len(transient)} transient unit(s) failed (systemd-run, low priority): "
+            f"{', '.join(transient)}; to clear: {sysctl} reset-failed {q}",
+        )
     if not units:
         yield Result(OK, f"no failed {scope} units")
 
@@ -602,12 +637,17 @@ def check_pending_alerts(host):
             unseen.append(a)
     for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
         when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
-        yield Result(ERROR if urgency == "critical" else WARN,
-                     f"alert you have not seen yet ({urgency}, {when}): {title} (shown at your next login; "
-                     f"the fix shows it now, as does {CST} btrfs status)", "cst-pending-alerts --list")
+        yield Result(
+            ERROR if urgency == "critical" else WARN,
+            f"alert you have not seen yet ({urgency}, {when}): {title} (shown at your next login; "
+            f"the fix shows it now, as does {CST} btrfs status)",
+            "cst-pending-alerts --list",
+        )
     if seen_n:
-        yield Result(INFO, f"{seen_n} alert(s) of the last {ALERT_KEEP_DAYS} days already shown to you "
-                     "(cst-pending-alerts --list)")
+        yield Result(
+            INFO,
+            f"{seen_n} alert(s) of the last {ALERT_KEEP_DAYS} days already shown to you (cst-pending-alerts --list)",
+        )
     if not unseen and not seen_n:
         yield Result(OK, "no pending alerts")
 
@@ -616,11 +656,18 @@ def check_pending_alerts(host):
 def check_legacy_alerts(host):
     old = host.path("/var/lib/f44-alerts")
     if os.path.islink(old):
-        yield Result(WARN, "/var/lib/f44-alerts: link left by the move from f44-tools to CST "
-                     "(the fix removes it)", f"{CST} btrfs install")
+        yield Result(
+            WARN,
+            "/var/lib/f44-alerts: link left by the move from f44-tools to CST (the fix removes it)",
+            f"{CST} btrfs install",
+        )
     elif os.path.exists(old):
-        yield Result(WARN, "/var/lib/f44-alerts: folder of the versions named f44-tools still there "
-                     "(the fix moves its alerts to /var/lib/cst-alerts and removes it)", f"{CST} btrfs install")
+        yield Result(
+            WARN,
+            "/var/lib/f44-alerts: folder of the versions named f44-tools still there "
+            "(the fix moves its alerts to /var/lib/cst-alerts and removes it)",
+            f"{CST} btrfs install",
+        )
     else:
         yield Result(OK, "no leftovers of f44-tools in /var/lib")
 
@@ -633,21 +680,22 @@ def check_legacy_alerts(host):
 # btrfs-health-check (root) reads the exact per-device numbers.
 BTRFS_SYSFS = "/sys/fs/btrfs"
 RECLAIM_CONF = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
-HEALTH_CHECK_REPO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                 "btrfs", "btrfs-health-check")
+HEALTH_CHECK_REPO = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "btrfs", "btrfs-health-check"
+)
 HEALTH_CHECK_HOST = "/usr/local/sbin/btrfs-health-check"
-UNALLOC_DEFAULTS = (50, 5)        # GiB, as btrfs-health-check (read from it when possible)
+UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of
 # raid1 (2 devices), raid1c3 (3) or raid1c4 (4); single and dup only exist
 # per device on a one-device filesystem. Other layouts: no per-device number.
 MIRROR_COPIES = {"raid1": 2, "raid1c3": 3, "raid1c4": 4}
 ONE_DEVICE_FACTOR = {"single": 1, "dup": 2}
-GIB = 1024 ** 3
+GIB = 1024**3
 # statfs rounds the size down to whole blocks, per device and per copy: a
 # difference up to this much between the btrfs devices and their block
 # devices is rounding, not a shrunk device.
-RESIZE_SLACK = 16 * 2 ** 20
+RESIZE_SLACK = 16 * 2**20
 
 
 def unalloc_thresholds(host):
@@ -684,7 +732,7 @@ def read_text(path, limit=256):
 
 
 def gib(n):
-    return f"{n / GIB:.1f} GiB" if abs(n) >= GIB else f"{n // 2 ** 20} MiB"
+    return f"{n / GIB:.1f} GiB" if abs(n) >= GIB else f"{n // 2**20} MiB"
 
 
 def btrfs_mounts(host):
@@ -790,8 +838,9 @@ def btrfs_devices(base):
 def check_btrfs_allocation(host):
     sysfs = host.path(BTRFS_SYSFS)
     try:
-        uuids = sorted(n for n in os.listdir(sysfs) if FS_UUID.match(n)
-                       and os.path.isdir(os.path.join(sysfs, n, "allocation")))
+        uuids = sorted(
+            n for n in os.listdir(sysfs) if FS_UUID.match(n) and os.path.isdir(os.path.join(sysfs, n, "allocation"))
+        )
     except OSError:
         uuids = []
     if not uuids:
@@ -847,25 +896,34 @@ def check_btrfs_allocation(host):
             errs = read_int(os.path.join(alloc, "data", "reclaim_errors"))
             extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
             if errs:
-                yield Result(INFO, f"{name}: automatic data reclaim on (dynamic, periodic){extra}, "
-                             f"{errs} failed (journalctl -k -g BTRFS)")
+                yield Result(
+                    INFO,
+                    f"{name}: automatic data reclaim on (dynamic, periodic){extra}, "
+                    f"{errs} failed (journalctl -k -g BTRFS)",
+                )
             else:
                 yield Result(OK, f"{name}: automatic data reclaim on (dynamic, periodic){extra}")
         else:
             off = ", ".join(k for k, v in (("dynamic_reclaim", dyn), ("periodic_reclaim", per)) if v != 1)
             if configured or system:
                 why = "configured by CST but switched off" if configured else "not set up"
-                yield Result(WARN, f"{name}: automatic data reclaim is {why} ({off} = 0): btrfs then never "
-                             "compacts half-empty data chunks by itself as unallocated space runs out",
-                             f"{CST} btrfs install")
+                yield Result(
+                    WARN,
+                    f"{name}: automatic data reclaim is {why} ({off} = 0): btrfs then never "
+                    "compacts half-empty data chunks by itself as unallocated space runs out",
+                    f"{CST} btrfs install",
+                )
             else:
-                yield Result(INFO, f"{name}: automatic data reclaim off ({off}); CST sets it up only "
-                             "for the root filesystem")
+                yield Result(
+                    INFO, f"{name}: automatic data reclaim off ({off}); CST sets it up only for the root filesystem"
+                )
 
         # Unallocated space, per device.
         limits = f"warning below {warn_gib} GiB, critical below {crit_gib} GiB"
-        needs_root = (f"per-device unallocated needs root: sudo btrfs filesystem usage -T {where} "
-                      "(the hourly btrfs-health-check watches it)")
+        needs_root = (
+            f"per-device unallocated needs root: sudo btrfs filesystem usage -T {where} "
+            "(the hourly btrfs-health-check watches it)"
+        )
         if not devs:
             yield Result(INFO, f"{name}: {needs_root}; not estimated: {dev_problem}")
             continue
@@ -881,8 +939,10 @@ def check_btrfs_allocation(host):
             if fs_bytes is None:
                 unknown = f"the filesystem size could not be read (stat -f {where})"
             elif block_bytes > fs_bytes:
-                unknown = (f"the btrfs devices use {gib(block_bytes - fs_bytes)} less than their block "
-                           "devices (shrunk with btrfs filesystem resize?)")
+                unknown = (
+                    f"the btrfs devices use {gib(block_bytes - fs_bytes)} less than their block "
+                    "devices (shrunk with btrfs filesystem resize?)"
+                )
             else:
                 unknown = "the filesystem size from statfs does not match its block devices"
             free = [(label, size - each) for _, label, size in devs]
@@ -893,22 +953,34 @@ def check_btrfs_allocation(host):
             meta_free = (fill["metadata"][1] - fill["metadata"][0]) if fill["metadata"] else None
             rsv = read_int(os.path.join(alloc, "global_rsv_size")) or 0
             if low < crit_gib * GIB:
-                yield Result(ERROR, f"{name}: CRITICAL: unallocated per device {listed} ({limits}): "
-                             f"ENOSPC is close. Free space first, then a filtered data balance; never a "
-                             f"metadata or full balance. Steps: {readme}")
+                yield Result(
+                    ERROR,
+                    f"{name}: CRITICAL: unallocated per device {listed} ({limits}): "
+                    f"ENOSPC is close. Free space first, then a filtered data balance; never a "
+                    f"metadata or full balance. Steps: {readme}",
+                )
             elif low < warn_gib * GIB:
-                yield Result(WARN, f"{name}: little unallocated space per device: {listed} ({limits}; "
-                             f"metadata grows only from it). Free space; then, if it stays low, "
-                             f"see {readme}")
+                yield Result(
+                    WARN,
+                    f"{name}: little unallocated space per device: {listed} ({limits}; "
+                    f"metadata grows only from it). Free space; then, if it stays low, "
+                    f"see {readme}",
+                )
             elif exact:
-                yield Result(OK, f"{name}: unallocated per device {listed} ({limits}; from sysfs, "
-                             "each btrfs device fills its block device)")
+                yield Result(
+                    OK,
+                    f"{name}: unallocated per device {listed} ({limits}; from sysfs, "
+                    "each btrfs device fills its block device)",
+                )
             else:
                 yield Result(INFO, f"{name}: {needs_root}; not estimated: {unknown}")
             if meta_free is not None and meta_free < 2 * rsv and low < 2 * GIB:
-                yield Result(ERROR, f"{name}: metadata almost full ({meta_free // 2 ** 20} MiB free in "
-                             f"metadata chunks, global reserve {rsv // 2 ** 20} MiB): writes may fail "
-                             f"with ENOSPC soon. Steps: {readme}")
+                yield Result(
+                    ERROR,
+                    f"{name}: metadata almost full ({meta_free // 2**20} MiB free in "
+                    f"metadata chunks, global reserve {rsv // 2**20} MiB): writes may fail "
+                    f"with ENOSPC soon. Steps: {readme}",
+                )
             continue
         # Mixed or striped layout: only the sum over all devices is exact.
         disk_total = 0
@@ -917,12 +989,17 @@ def check_btrfs_allocation(host):
         total_free = sum(size for _, _, size in devs) - disk_total
         if disk_total and total_free < warn_gib * GIB * len(devs):
             # The average is below the warning, so at least one device is too.
-            yield Result(WARN, f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s), so at least "
-                         f"one device has less than {warn_gib} GiB ({limits}); {needs_root}. "
-                         f"Steps: {readme}")
+            yield Result(
+                WARN,
+                f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s), so at least "
+                f"one device has less than {warn_gib} GiB ({limits}); {needs_root}. "
+                f"Steps: {readme}",
+            )
         elif disk_total:
-            yield Result(INFO, f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s) "
-                         f"(layout {layout}); {needs_root}")
+            yield Result(
+                INFO,
+                f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s) (layout {layout}); {needs_root}",
+            )
         else:
             yield Result(INFO, f"{name}: {needs_root}")
 
@@ -935,7 +1012,7 @@ def check_btrfs_allocation(host):
 SNAP_STATE = "/var/lib/btrfs-snapshot"
 SNAP_UNFINISHED = f"{SNAP_STATE}/core-unfinished"
 SNAP_WRITABLE = f"{SNAP_STATE}/core-writable"
-SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"    # also read by the VM NAS check
+SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"  # also read by the VM NAS check
 
 
 def read_entries(host, path):
@@ -952,24 +1029,33 @@ def read_entries(host, path):
 @check("btrfs")
 def check_snapshots_writable(host):
     if not os.path.isdir(host.path(SNAP_STATE)):
-        return                                   # snapshots never set up
+        return  # snapshots never set up
     unfinished = read_entries(host, SNAP_UNFINISHED)
     writable = read_entries(host, SNAP_WRITABLE)
     if unfinished is None or writable is None:
         yield Result(INFO, f"snapshots: cannot read {SNAP_UNFINISHED} or {SNAP_WRITABLE}")
         return
-    snapdir = os.path.join(conf_value(host, SNAP_CONF, "TOP") or "/var/mnt/btrfs-top",
-                           conf_value(host, SNAP_CONF, "SNAP_DIR_NAME") or "snapshots")
+    snapdir = os.path.join(
+        conf_value(host, SNAP_CONF, "TOP") or "/var/mnt/btrfs-top",
+        conf_value(host, SNAP_CONF, "SNAP_DIR_NAME") or "snapshots",
+    )
     if unfinished:
-        yield Result(WARN, f"snapshots: {name_list(unfinished)} left writable by an interrupted run (cache "
-                     f"folders perhaps not dropped yet); the next hourly run finishes it (if this stays: "
-                     f"journalctl -u btrfs-snapshot)", "sudo systemctl start btrfs-snapshot.service")
+        yield Result(
+            WARN,
+            f"snapshots: {name_list(unfinished)} left writable by an interrupted run (cache "
+            f"folders perhaps not dropped yet); the next hourly run finishes it (if this stays: "
+            f"journalctl -u btrfs-snapshot)",
+            "sudo systemctl start btrfs-snapshot.service",
+        )
     foreign = [e for e in writable if e not in unfinished]
     if foreign:
-        yield Result(WARN, f"snapshots: {name_list(foreign)} in {snapdir}: writable, named like CST's "
-                     f"snapshots, but not left by a CST run; never deleted by the retention and not counted: "
-                     f"look at it, then delete or rename it",
-                     f"sudo btrfs subvolume show {shlex.quote(os.path.join(snapdir, foreign[0]))}")
+        yield Result(
+            WARN,
+            f"snapshots: {name_list(foreign)} in {snapdir}: writable, named like CST's "
+            f"snapshots, but not left by a CST run; never deleted by the retention and not counted: "
+            f"look at it, then delete or rename it",
+            f"sudo btrfs subvolume show {shlex.quote(os.path.join(snapdir, foreign[0]))}",
+        )
     if not unfinished and not foreign:
         yield Result(OK, "snapshots: none left writable")
 
@@ -997,8 +1083,11 @@ def game_dropins_left(host):
         names = sorted(os.listdir(host.path(GAME_DROPIN_DIR)))
     except OSError:
         return []
-    return [f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}" for n in names
-            if n.endswith(".d") and os.path.isfile(host.path(f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"))]
+    return [
+        f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"
+        for n in names
+        if n.endswith(".d") and os.path.isfile(host.path(f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"))
+    ]
 
 
 def game_again(host):
@@ -1081,12 +1170,15 @@ def check_game_profile_drift(host):
     if not os.path.exists(host.path(GAME_STATE)):
         left = game_dropins_left(host)
         if left:
-            yield Result(WARN, f"game profile: off, but its MemoryLow drop-ins are still there: {', '.join(left)}. "
-                         "At every daemon-reload systemd applies them, so the game's memory protection comes "
-                         "back without a game (that memory is then harder to get for the VM and the builds) "
-                         "until the next reboot. The watchdog (cpu-game-watchdog.timer) removes them within "
-                         "30 s; if this stays, 'off' removes them and reloads systemd",
-                         f"sudo {GAME_PROFILE_HOST} off")
+            yield Result(
+                WARN,
+                f"game profile: off, but its MemoryLow drop-ins are still there: {', '.join(left)}. "
+                "At every daemon-reload systemd applies them, so the game's memory protection comes "
+                "back without a game (that memory is then harder to get for the VM and the builds) "
+                "until the next reboot. The watchdog (cpu-game-watchdog.timer) removes them within "
+                "30 s; if this stays, 'off' removes them and reloads systemd",
+                f"sudo {GAME_PROFILE_HOST} off",
+            )
         elif os.path.exists(host.path(CPU_CONF)):
             yield Result(OK, "game profile: off")
         return
@@ -1094,9 +1186,12 @@ def check_game_profile_drift(host):
         with open(host.path(GAME_INTENDED)) as f:
             records = read_intended(f.read(65536))
     except FileNotFoundError:
-        yield Result(INFO, "game profile: ON, but switched on by an older cpu-game-profile that kept no "
-                     "record of the values it set, so drift is not checked. Switching it off and on again "
-                     f"records them: {game_again(host)}")
+        yield Result(
+            INFO,
+            "game profile: ON, but switched on by an older cpu-game-profile that kept no "
+            "record of the values it set, so drift is not checked. Switching it off and on again "
+            f"records them: {game_again(host)}",
+        )
         return
     except OSError as e:
         yield Result(INFO, f"game profile: ON; drift not checked ({GAME_INTENDED}: {e.strerror})")
@@ -1130,15 +1225,19 @@ def check_game_profile_drift(host):
                 with open(host.path(r[1])) as f:
                     now = f.read(256).strip()
             except OSError:
-                continue              # the cgroup is gone: nothing to compare
+                continue  # the cgroup is gone: nothing to compare
             checked += 1
             if now != r[3]:
                 drifted.append(f"{r[1]} is {now or 'empty'} (the profile wrote {r[3]})")
     if drifted:
-        yield Result(WARN, f"game profile: ON, but {len(drifted)} of its settings no longer hold: "
-                     f"{'; '.join(drifted)}. A daemon-reload or uresourced undid them. The watchdog "
-                     "(cpu-game-watchdog.timer) sets them again within 30 s; if this stays, switch the "
-                     "profile off and on again", game_again(host))
+        yield Result(
+            WARN,
+            f"game profile: ON, but {len(drifted)} of its settings no longer hold: "
+            f"{'; '.join(drifted)}. A daemon-reload or uresourced undid them. The watchdog "
+            "(cpu-game-watchdog.timer) sets them again within 30 s; if this stays, switch the "
+            "profile off and on again",
+            game_again(host),
+        )
     elif checked:
         yield Result(OK, f"game profile: ON, the {checked} settings it made still hold")
     if unknown:
@@ -1153,7 +1252,7 @@ def check_game_profile_drift(host):
 # one is a sibling of app.slice that no rule covers outside games. (The game
 # profile's own list differs: it makes background.slice idle too.)
 USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.slice")
-LIST_MAX = 5          # names shown per line, then "and N more"
+LIST_MAX = 5  # names shown per line, then "and N more"
 
 
 def user_manager_cgroup(host):
@@ -1197,8 +1296,11 @@ def cgroup_units(path):
         names = sorted(os.listdir(path))
     except OSError:
         return []
-    return [(n[1:] if n.startswith("_") else n, os.path.join(path, n))
-            for n in names if os.path.isdir(os.path.join(path, n))]
+    return [
+        (n[1:] if n.startswith("_") else n, os.path.join(path, n))
+        for n in names
+        if os.path.isdir(os.path.join(path, n))
+    ]
 
 
 def name_list(items):
@@ -1218,20 +1320,26 @@ def check_user_manager_boxes(host):
     base = host.path(rel)
     loose = [(u, d) for u, d in cgroup_units(base) if u.endswith(".slice") and u not in USER_KNOWN_SLICES]
     for unit, d in loose:
-        name = unit[:-len(".slice")]
-        yield Result(WARN, f"user manager: {unit} is a slice of its own next to app.slice, where the game runs "
-                     f"({cpu_time(cpu_seconds(d))} since it was created). Outside games it runs at the default "
-                     "weight on every CPU, without the toolboxes' limits; the game profile only makes it idle "
-                     f"while a game runs. Name it user-{name}.slice so it nests under the toolboxes' user.slice, or "
-                     f"start it with --slice=user-{name}.slice")
+        name = unit[: -len(".slice")]
+        yield Result(
+            WARN,
+            f"user manager: {unit} is a slice of its own next to app.slice, where the game runs "
+            f"({cpu_time(cpu_seconds(d))} since it was created). Outside games it runs at the default "
+            "weight on every CPU, without the toolboxes' limits; the game profile only makes it idle "
+            f"while a game runs. Name it user-{name}.slice so it nests under the toolboxes' user.slice, or "
+            f"start it with --slice=user-{name}.slice",
+        )
     jobs = [(u, cpu_seconds(d)) for u, d in cgroup_units(os.path.join(base, "app.slice")) if TRANSIENT.match(u)]
     if jobs:
         jobs.sort(key=lambda j: -(j[1] or 0))
-        yield Result(INFO, f"user manager: {len(jobs)} systemd-run job(s) run straight in app.slice, next to the "
-                     f"game, at the default weight on every CPU: "
-                     f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile makes them idle "
-                     "while a game runs; for builds, start them with --slice=user-<name>.slice to get the "
-                     "toolboxes' limits always")
+        yield Result(
+            INFO,
+            f"user manager: {len(jobs)} systemd-run job(s) run straight in app.slice, next to the "
+            f"game, at the default weight on every CPU: "
+            f"{name_list([f'{u} ({cpu_time(s)})' for u, s in jobs])}. The game profile makes them idle "
+            "while a game runs; for builds, start them with --slice=user-<name>.slice to get the "
+            "toolboxes' limits always",
+        )
     if not loose and not jobs:
         yield Result(OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")
 
@@ -1251,9 +1359,9 @@ CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX = "/var/lib/cst/vm-backups.json"
 VM_TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vm", "cst-vm")
 VM_CONF = "/etc/cst/vm.conf"
-VM_OVERLAY_MARK = ".cst-overlay-"           # as OVERLAY_MARK in vm/cst-vm
-VM_LIVE_STATES = ("running", "paused", "pmsuspended")   # QEMU alive: a block job works
-VM_RUN_DIR = "/run/cst-vm"                  # nas-<vm>.lock: the pid of a NAS backup in progress
+VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
+VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works
+VM_RUN_DIR = "/run/cst-vm"  # nas-<vm>.lock: the pid of a NAS backup in progress
 VM_TIMER_WANTS = "/etc/systemd/system/timers.target.wants"
 # Packages that make up the guest's virtual hardware: name prefixes.
 VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
@@ -1297,6 +1405,7 @@ def vm_module():
     if not hasattr(vm_module, "mod"):
         import importlib.machinery
         import importlib.util
+
         try:
             loader = importlib.machinery.SourceFileLoader("cst_vm", VM_TOOL)
             spec = importlib.util.spec_from_loader("cst_vm", loader)
@@ -1331,6 +1440,7 @@ def offered_features(host):
     domcapabilities (libvirt computes it from what this QEMU and KVM offer
     on this CPU). Not allowed on a read-only (-r) connection."""
     import xml.etree.ElementTree as ET
+
     rc, out, err = virsh(host, "domcapabilities", ro=False)
     if rc != 0:
         return None, virsh_problem(rc, err)
@@ -1348,6 +1458,7 @@ def offered_features(host):
 @check("vm")
 def check_vm_cpu_features(host):
     import xml.etree.ElementTree as ET
+
     names, problem = libvirt_domains(host)
     if names is None:
         yield Result(INFO, f"libvirt VMs: not checked ({problem})")
@@ -1357,11 +1468,12 @@ def check_vm_cpu_features(host):
         return
     wanted = cpu_disable_names(host)
     if not wanted:
-        yield Result(INFO, "VM CPU features: not checked (VM_CPU_DISABLE is empty in "
-                     f"{CPU_CONF}: switched off on purpose)")
+        yield Result(
+            INFO, f"VM CPU features: not checked (VM_CPU_DISABLE is empty in {CPU_CONF}: switched off on purpose)"
+        )
         return
-    offered = oproblem = None     # asked only when a VM lacks a disable: domcapabilities needs a
-    for vm in names:              # read-write connection (libvirt group or an equivalent polkit rule)
+    offered = oproblem = None  # asked only when a VM lacks a disable: domcapabilities needs a
+    for vm in names:  # read-write connection (libvirt group or an equivalent polkit rule)
         rc, out, err = domain_xml(host, vm)
         try:
             cpu = ET.fromstring(out).find("cpu") if rc == 0 else None
@@ -1381,18 +1493,26 @@ def check_vm_cpu_features(host):
         if not missing:
             yield Result(OK, f"VM {vm}: host-passthrough with {', '.join(wanted)} disabled")
         elif offered is None:
-            yield Result(INFO, f"VM {vm}: host-passthrough without disabling {', '.join(missing)}; whether "
-                         f"this QEMU passes them was not checked ({oproblem}). If Windows loops in "
-                         f"Automatic Repair: {CST} cpu vm-pin plan ({CET_ISSUE})")
+            yield Result(
+                INFO,
+                f"VM {vm}: host-passthrough without disabling {', '.join(missing)}; whether "
+                f"this QEMU passes them was not checked ({oproblem}). If Windows loops in "
+                f"Automatic Repair: {CST} cpu vm-pin plan ({CET_ISSUE})",
+            )
         elif not [n for n in missing if n in offered]:
-            yield Result(OK, f"VM {vm}: host-passthrough; this QEMU does not offer "
-                         f"{', '.join(missing)} (nothing to disable yet)")
+            yield Result(
+                OK, f"VM {vm}: host-passthrough; this QEMU does not offer {', '.join(missing)} (nothing to disable yet)"
+            )
         else:
             bad = [n for n in missing if n in offered]
-            yield Result(WARN, f"VM {vm}: host-passthrough passes {', '.join(bad)} to the guest (QEMU 11 and "
-                         "later offer them); Windows with Hyper-V/VBS/WSL2 then loops in Automatic Repair. "
-                         f"The fix shows the change to the definition; then {CST} cpu vm-pin apply. "
-                         f"Upstream: {CET_ISSUE}", f"{CST} cpu vm-pin plan")
+            yield Result(
+                WARN,
+                f"VM {vm}: host-passthrough passes {', '.join(bad)} to the guest (QEMU 11 and "
+                "later offer them); Windows with Hyper-V/VBS/WSL2 then loops in Automatic Repair. "
+                f"The fix shows the change to the definition; then {CST} cpu vm-pin apply. "
+                f"Upstream: {CET_ISSUE}",
+                f"{CST} cpu vm-pin plan",
+            )
 
 
 def virt_versions(pkgs):
@@ -1425,11 +1545,13 @@ def newest_vm_backup(host):
     try:
         with open(host.path(VM_INDEX)) as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return 0
     entries = data.get("backups") if isinstance(data, dict) else None
-    return max((e["epoch"] for e in entries or [] if isinstance(e, dict)
-                and isinstance(e.get("epoch"), (int, float))), default=0)
+    return max(
+        (e["epoch"] for e in entries or [] if isinstance(e, dict) and isinstance(e.get("epoch"), (int, float))),
+        default=0,
+    )
 
 
 @check("vm")
@@ -1469,18 +1591,30 @@ def check_virt_stack_change(host):
         yield Result(INFO, f"{what}; rollback pinned and VM backup present")
         return
     if not pinned:
-        yield Result(WARN, f"{what}. The rollback deployment (index {index}) is not pinned: the next upgrade "
-                     "can remove it, and with it the way back if a VM stops booting. Keep it pinned until "
-                     f"the VMs ({', '.join(names)}) work on the new one", f"sudo ostree admin pin {index}")
+        yield Result(
+            WARN,
+            f"{what}. The rollback deployment (index {index}) is not pinned: the next upgrade "
+            "can remove it, and with it the way back if a VM stops booting. Keep it pinned until "
+            f"the VMs ({', '.join(names)}) work on the new one",
+            f"sudo ostree admin pin {index}",
+        )
     if not fresh:
         when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
         last = time.strftime("%Y-%m-%d", time.localtime(backup)) if backup else "never"
         if nas_configured(host):
-            yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
-                         f"backup: {last}). The NAS backup works with the VM running", f"{CST} vm backup --nas")
+            yield Result(
+                WARN,
+                f"{what}. No VM backup since the booted deployment was built ({when}; last "
+                f"backup: {last}). The NAS backup works with the VM running",
+                f"{CST} vm backup --nas",
+            )
         else:
-            yield Result(WARN, f"{what}. No VM backup since the booted deployment was built ({when}; last "
-                         f"backup: {last}). Shut the VM down first", f"{CST} vm backup")
+            yield Result(
+                WARN,
+                f"{what}. No VM backup since the booted deployment was built ({when}; last "
+                f"backup: {last}). Shut the VM down first",
+                f"{CST} vm backup",
+            )
 
 
 def nas_configured(host):
@@ -1533,10 +1667,11 @@ def check_vm_overlays(host):
     it), or it is shut off on the overlay (merge it offline). INFO while the
     backup runs."""
     import xml.etree.ElementTree as ET
+
     names, _ = libvirt_domains(host)
     for vm in names or []:
-        live, defined = {}, {}     # target -> overlay path: what QEMU uses, what the definition names
-        sources = None             # target -> source of the live listing; None: not readable
+        live, defined = {}, {}  # target -> overlay path: what QEMU uses, what the definition names
+        sources = None  # target -> source of the live listing; None: not readable
         rc, out, _ = virsh(host, "domblklist", vm, "--details")
         if rc == 0:
             sources = {}
@@ -1563,58 +1698,81 @@ def check_vm_overlays(host):
         pid = nas_backup_running(host, vm)
         q, v = shlex.quote, f"sudo virsh -c {VIRSH_URI}"
         left = f"an overlay left by `{CST} vm backup --nas` (it could not merge it back)"
-        guide = "(vm/README.md, \"If a backup left an overlay\")"
+        guide = '(vm/README.md, "If a backup left an overlay")'
         for dev in sorted(set(live) | set(defined)):
             path = live.get(dev) or defined[dev]
             base = path.split(VM_OVERLAY_MARK, 1)[0]
             if pid:
-                yield Result(INFO, f"VM {vm}: disk {dev} on {path}: a NAS backup is in progress (pid {pid}); "
-                             "it merges the overlay back when restic is done")
+                yield Result(
+                    INFO,
+                    f"VM {vm}: disk {dev} on {path}: a NAS backup is in progress (pid {pid}); "
+                    "it merges the overlay back when restic is done",
+                )
                 continue
             # "definition" only when the live listing was read and shows the image; "offline"
             # only when the overlay is newer (an image written later may be a merge cut short).
             if state in VM_LIVE_STATES:
-                kind = ("live" if dev in live else
-                        "definition" if sources is not None and sources.get(dev) == base else "unknown")
+                kind = (
+                    "live"
+                    if dev in live
+                    else "definition"
+                    if sources is not None and sources.get(dev) == base
+                    else "unknown"
+                )
             elif state in ("shut off", "crashed"):
                 kind = "offline" if file_newer(host, path, base) else "unknown"
             else:
                 kind = "unknown"
             if kind == "live":
-                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
-                             f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
-                             f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
-                             f"command below. Then check that `virsh domblklist {vm} --details` (also with "
-                             f"--inactive) shows {base}, and remove the overlay file {guide}",
-                             f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose")
+                yield Result(
+                    WARN,
+                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
+                    f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
+                    f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
+                    f"command below. Then check that `virsh domblklist {vm} --details` (also with "
+                    f"--inactive) shows {base}, and remove the overlay file {guide}",
+                    f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
+                )
             elif kind == "definition":
-                yield Result(WARN, f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
-                             f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
-                             f"the image). Point the disk back with the command below (<source file='{base}'/>, "
-                             f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
-                             f"then remove the overlay file {guide}",
-                             f"{v} edit {q(vm)}")
+                yield Result(
+                    WARN,
+                    f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
+                    f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
+                    f"the image). Point the disk back with the command below (<source file='{base}'/>, "
+                    f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
+                    f"then remove the overlay file {guide}",
+                    f"{v} edit {q(vm)}",
+                )
             elif kind == "offline":
-                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
-                             f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
-                             f"command below, then point the disk back with `virsh edit {vm}` (<source "
-                             f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
-                             f"--inactive`, and remove the overlay file {guide}",
-                             f"sudo qemu-img commit -p {q(path)}")
+                yield Result(
+                    WARN,
+                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
+                    f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
+                    f"command below, then point the disk back with `virsh edit {vm}` (<source "
+                    f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
+                    f"--inactive`, and remove the overlay file {guide}",
+                    f"sudo qemu-img commit -p {q(path)}",
+                )
             elif state in ("shut off", "crashed"):
-                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
-                             f"cannot tell whether that overlay still holds the guest's last writes: the image is "
-                             f"newer, or the times are unreadable. The image is newer both after a merge cut short "
-                             f"(the overlay is still needed) and after a merge that left the definition behind "
-                             f"(stale). Do not remove or commit anything yet: look at the times with the command "
-                             f"below and at the backup's own message or alert {guide}",
-                             f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}")
+                yield Result(
+                    WARN,
+                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
+                    f"cannot tell whether that overlay still holds the guest's last writes: the image is "
+                    f"newer, or the times are unreadable. The image is newer both after a merge cut short "
+                    f"(the overlay is still needed) and after a merge that left the definition behind "
+                    f"(stale). Do not remove or commit anything yet: look at the times with the command "
+                    f"below and at the backup's own message or alert {guide}",
+                    f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}",
+                )
             else:
-                yield Result(WARN, f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
-                             f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
-                             f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
-                             f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
-                             f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details")
+                yield Result(
+                    WARN,
+                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
+                    f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
+                    f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
+                    f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
+                    f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details",
+                )
 
 
 @check("vm")
@@ -1629,8 +1787,11 @@ def check_vm_backup_timer(host):
         links = set()
     for vm in names:
         on = f"cst-vm-backup@{vm}.timer" in links
-        yield Result(INFO, f"VM {vm}: weekly NAS backup timer: {'on' if on else 'off'}"
-                     + ("" if on else f" ({CST} vm backup-timer on {vm} turns it on)"))
+        yield Result(
+            INFO,
+            f"VM {vm}: weekly NAS backup timer: {'on' if on else 'off'}"
+            + ("" if on else f" ({CST} vm backup-timer on {vm} turns it on)"),
+        )
 
 
 # ---- running and printing ------------------------------------------------------------------------
@@ -1639,7 +1800,7 @@ def check_vm_hardware(host):
     """INFO for VMs whose disks or network card differ from `cst vm tune`."""
     names, _ = libvirt_domains(host)
     if not names:
-        return                    # no libvirt or no VM: the CPU check already said so
+        return  # no libvirt or no VM: the CPU check already said so
     mod = vm_module()
     if mod is None:
         yield Result(INFO, f"VM hardware: not checked ({VM_TOOL} not loadable)")
@@ -1648,7 +1809,7 @@ def check_vm_hardware(host):
     for vm in names:
         rc, out, err = domain_xml(host, vm)
         if rc != 0:
-            continue              # already reported by the CPU check
+            continue  # already reported by the CPU check
         try:
             _, changes, _, _ = mod.tune_domain(out, kn, True)
             kind, _ = mod.guest_kind(mod.ET.fromstring(out))
@@ -1660,8 +1821,11 @@ def check_vm_hardware(host):
             continue
         first = "; ".join(changes[:3]) + (f"; and {len(changes) - 3} more" if len(changes) > 3 else "")
         extra = " Windows: the virtio drivers go in first (the plan shows how)." if kind != "linux" else ""
-        yield Result(INFO, f"VM {vm}: hardware differs from what {CST} vm tune recommends: {first}.{extra} "
-                     f"See: {CST} vm tune plan {vm}")
+        yield Result(
+            INFO,
+            f"VM {vm}: hardware differs from what {CST} vm tune recommends: {first}.{extra} "
+            f"See: {CST} vm tune plan {vm}",
+        )
 
 
 @check("vm")
@@ -1682,17 +1846,26 @@ def check_vm_image_dirs(host):
             continue
         path = p["path"]
         if p["nocow"] is None and not p["listed"]:
-            yield Result(INFO, f"VM image folder {path}: NOCOW mark not readable as your user (root's "
-                         f"folder); {CST} vm nocow plan --root shows it")
+            yield Result(
+                INFO,
+                f"VM image folder {path}: NOCOW mark not readable as your user (root's "
+                f"folder); {CST} vm nocow plan --root shows it",
+            )
             continue
         cow = [i for i in p["images"] if i["nocow"] is False]
         if p["nocow"] is False:
-            yield Result(INFO, f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
-                         f"copy-on-write; {CST} vm nocow apply sets it")
+            yield Result(
+                INFO,
+                f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
+                f"copy-on-write; {CST} vm nocow apply sets it",
+            )
         if cow:
             listed = ", ".join(f"{i['name']} ({mod.human(i['alloc'])})" for i in cow)
-            yield Result(INFO, f"VM image folder {path}: still copy-on-write: {listed}; "
-                         f"{CST} vm nocow plan prints how to convert (never done automatically)")
+            yield Result(
+                INFO,
+                f"VM image folder {path}: still copy-on-write: {listed}; "
+                f"{CST} vm nocow plan prints how to convert (never done automatically)",
+            )
         if p["nocow"] and not cow:
             yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
 
@@ -1701,7 +1874,7 @@ def run_checks(host, checks=None):
     """[(area, Result)] in registry order. A check that crashes is an ERROR
     line, not a crash of the whole check-up."""
     out = []
-    for area, fn in (CHECKS if checks is None else checks):
+    for area, fn in CHECKS if checks is None else checks:
         try:
             for r in fn(host):
                 out.append((area, r))
@@ -1716,8 +1889,7 @@ def summary(results):
         counts[r.status] += 1
     worst = max((SEVERITY[r.status] for _, r in results), default=0)
     verdict = "all good" if worst < SEVERITY[WARN] else "needs attention"
-    line = (f"doctor: {verdict}: {counts[ERROR]} ERROR, {counts[WARN]} WARN, "
-            f"{counts[INFO]} info, {counts[OK]} ok")
+    line = f"doctor: {verdict}: {counts[ERROR]} ERROR, {counts[WARN]} WARN, {counts[INFO]} info, {counts[OK]} ok"
     return line, (1 if worst >= SEVERITY[WARN] else 0)
 
 
@@ -1731,8 +1903,11 @@ def render(results, brief, out, container=False):
     else:
         print(f"{PROG}: read-only check-up (nothing is changed)", file=out)
         if container:
-            print("Inside a toolbox: run every command shown here on the host (a host terminal, "
-                  "or put flatpak-spawn --host in front of a command without sudo).", file=out)
+            print(
+                "Inside a toolbox: run every command shown here on the host (a host terminal, "
+                "or put flatpak-spawn --host in front of a command without sudo).",
+                file=out,
+            )
     area_now = None
     for area, r in results:
         if brief and SEVERITY[r.status] < SEVERITY[WARN]:
@@ -1747,8 +1922,7 @@ def render(results, brief, out, container=False):
     if not brief:
         print(f"\n{line}", file=out)
         if rc:
-            print("Each fix is a suggestion: read it before you run it. Details: doctor/README.md in CST.",
-                  file=out)
+            print("Each fix is a suggestion: read it before you run it. Details: doctor/README.md in CST.", file=out)
     return rc
 
 

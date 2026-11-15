@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLCHAINS = os.path.dirname(HERE)
 TOOL = os.path.join(TOOLCHAINS, "cst-toolchains")
 H = 3600
-NOW = 2_000_000_000.0          # fixed "now" (2033); every mtime is set relative to it
+NOW = 2_000_000_000.0  # fixed "now" (2033); every mtime is set relative to it
 
 
 def load():
@@ -49,8 +49,16 @@ class Base(unittest.TestCase):
         self.root = os.path.join(self.home, ".cache/cargo-build")
         os.makedirs(self.root)
         self.write_cargo_config(f'[build]\nbuild-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n')
-        self.env = {k: os.environ.get(k) for k in ("CST_TOOLCHAINS_NOW", "CST_TOOLCHAINS_HERE", "CARGO_HOME",
-                                                  "CST_TOOLCHAINS_SYSTEMCTL", "XDG_RUNTIME_DIR")}
+        self.env = {
+            k: os.environ.get(k)
+            for k in (
+                "CST_TOOLCHAINS_NOW",
+                "CST_TOOLCHAINS_HERE",
+                "CARGO_HOME",
+                "CST_TOOLCHAINS_SYSTEMCTL",
+                "XDG_RUNTIME_DIR",
+            )
+        }
         os.environ["CST_TOOLCHAINS_NOW"] = str(NOW)
         os.environ["CST_TOOLCHAINS_HERE"] = "1"
         # Never the real user manager, also if a test misses the fake below.
@@ -76,7 +84,7 @@ class Base(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def fake_systemctl(self, *args, check=False):
-        if args == ("show-environment",):       # read only: the user manager's environment
+        if args == ("show-environment",):  # read only: the user manager's environment
             return self.manager_env
         self.calls.append(args)
         return ""
@@ -166,10 +174,10 @@ class SettingsTest(Base):
 
     def test_conf_parsing(self):
         known = {"MAX_IDLE", "MAX_TOTAL", "MIN_KEEP"}
-        raw = self.m.parse_conf('# comment\n\nMAX_IDLE = "24h"   # a day\nMAX_TOTAL=\'200G\'\n  MIN_KEEP=1h\n', known)
+        raw = self.m.parse_conf("# comment\n\nMAX_IDLE = \"24h\"   # a day\nMAX_TOTAL='200G'\n  MIN_KEEP=1h\n", known)
         self.assertEqual(raw, {"MAX_IDLE": "24h", "MAX_TOTAL": "200G", "MIN_KEEP": "1h"})
         with self.assertRaises(self.m.ConfigError):
-            self.m.parse_conf("MAX_IDEL=24h\n", known)          # a typo is not ignored
+            self.m.parse_conf("MAX_IDEL=24h\n", known)  # a typo is not ignored
         with self.assertRaises(self.m.ConfigError):
             self.m.parse_conf("just words\n", known)
 
@@ -178,15 +186,25 @@ class SettingsTest(Base):
         rb = self.m.RustBuild
         self.assertEqual(s.source_of(rb), "defaults")
         self.assertTrue(s.enabled["rust:build"])
-        self.assertEqual(s.policy["rust:build"], {"max_idle": 48 * H, "max_total": 150 << 30, "min_keep": 2 * H,
-                                                  "orphans": True, "incremental_idle": 6 * H})
+        self.assertEqual(
+            s.policy["rust:build"],
+            {"max_idle": 48 * H, "max_total": 150 << 30, "min_keep": 2 * H, "orphans": True, "incremental_idle": 6 * H},
+        )
         self.write_conf("MAX_TOTAL=off\nMAX_IDLE=3d\n")
         s = self.m.Settings(self.home)
         pol = s.policy["rust:build"]
         self.assertEqual((pol["max_total"], pol["max_idle"]), (0, 72 * H))
         self.assertEqual(s.source_of(rb), "~/.config/cst/toolchains.conf")
-        for text in ("MIN_KEEP=5m\n", "MAX_IDLE=1h\nMIN_KEEP=2h\n", "MAX_TOTAL=lots\n", "MAX_TOTAL=150\n",
-                     "ENABLED=maybe\n", "ORPHANS=maybe\n", "INCREMENTAL_IDLE=1h\n", "INCREMENTAL_IDLE=6\n"):
+        for text in (
+            "MIN_KEEP=5m\n",
+            "MAX_IDLE=1h\nMIN_KEEP=2h\n",
+            "MAX_TOTAL=lots\n",
+            "MAX_TOTAL=150\n",
+            "ENABLED=maybe\n",
+            "ORPHANS=maybe\n",
+            "INCREMENTAL_IDLE=1h\n",
+            "INCREMENTAL_IDLE=6\n",
+        ):
             self.write_conf(text)
             with self.assertRaises(self.m.ConfigError, msg=text):
                 self.m.Settings(self.home)
@@ -211,11 +229,13 @@ class RootTest(Base):
         self.assertEqual(self.m.resolve_root(self.home), self.root)
 
     def test_other_template_is_refused(self):
-        for text in (f'[build]\nbuild-dir = "{self.home}/.cache/cargo-build"\n',
-                     f'[build]\nbuild-dir = "{self.home}/elsewhere/{{workspace-path-hash}}"\n',
-                     '[build]\ntarget-dir = "/tmp/t"\n',
-                     "",
-                     "[build\n"):
+        for text in (
+            f'[build]\nbuild-dir = "{self.home}/.cache/cargo-build"\n',
+            f'[build]\nbuild-dir = "{self.home}/elsewhere/{{workspace-path-hash}}"\n',
+            '[build]\ntarget-dir = "/tmp/t"\n',
+            "",
+            "[build\n",
+        ):
             self.write_cargo_config(text)
             with self.assertRaises(self.m.Refused, msg=text):
                 self.m.resolve_root(self.home)
@@ -259,8 +279,8 @@ class RootTest(Base):
 class ScanTest(Base):
     def test_name_filter_and_symlinks(self):
         self.folder("aa/0123456789abcd", 100)
-        self.folder("AA/0123456789abcd", 100)          # uppercase: not cargo's
-        self.folder("aa/0123456789abc", 100)           # 13 digits
+        self.folder("AA/0123456789abcd", 100)  # uppercase: not cargo's
+        self.folder("aa/0123456789abc", 100)  # 13 digits
         self.folder("aaa/0123456789abcd", 100)
         self.folder("zz/0123456789abcd", 100)
         os.makedirs(os.path.join(self.root, "notes"))
@@ -271,9 +291,9 @@ class ScanTest(Base):
         with open(os.path.join(outside, "data"), "w") as f:
             f.write("keep me")
         self.age(outside, 500)
-        os.symlink(outside, os.path.join(self.root, "bb"))                   # top-level link
+        os.symlink(outside, os.path.join(self.root, "bb"))  # top-level link
         os.makedirs(os.path.join(self.root, "cc"))
-        os.symlink(outside, os.path.join(self.root, "cc/0123456789abcd"))   # leaf link
+        os.symlink(outside, os.path.join(self.root, "cc/0123456789abcd"))  # leaf link
         folders, trash, others = self.m.scan(self.root, NOW)
         self.assertEqual([f.key for f in folders], ["aa/0123456789abcd"])
         why = dict(others)
@@ -329,8 +349,15 @@ class ScanTest(Base):
         open(os.path.join(path, "x86_64-unknown-linux-gnu/debug/.cargo-build-lock"), "w").close()
         open(os.path.join(path, "release/.cargo-lock"), "w").close()
         rel = [os.path.relpath(p, path) for p in self.m.lock_files(path)]
-        self.assertEqual(rel, ["debug/.cargo-build-lock", "release/.cargo-build-lock", "release/.cargo-lock",
-                               "x86_64-unknown-linux-gnu/debug/.cargo-build-lock"])
+        self.assertEqual(
+            rel,
+            [
+                "debug/.cargo-build-lock",
+                "release/.cargo-build-lock",
+                "release/.cargo-lock",
+                "x86_64-unknown-linux-gnu/debug/.cargo-build-lock",
+            ],
+        )
 
 
 class DecideTest(Base):
@@ -347,17 +374,29 @@ class DecideTest(Base):
         return {f.key: a for f, a, _ in plan}
 
     def test_idle(self):
-        plan = self.m.decide([self.f("aa/00000000000001", 49, 1), self.f("aa/00000000000002", 47, 1)],
-                             self.pol(), NOW, {})
+        plan = self.m.decide(
+            [self.f("aa/00000000000001", 49, 1), self.f("aa/00000000000002", 47, 1)], self.pol(), NOW, {}
+        )
         self.assertEqual(self.actions(plan), {"aa/00000000000001": "delete", "aa/00000000000002": "keep"})
 
     def test_cap_least_recent_first(self):
-        fs = [self.f("aa/00000000000001", 10, 50), self.f("aa/00000000000002", 30, 50),
-              self.f("aa/00000000000003", 20, 50), self.f("aa/00000000000004", 5, 50)]
+        fs = [
+            self.f("aa/00000000000001", 10, 50),
+            self.f("aa/00000000000002", 30, 50),
+            self.f("aa/00000000000003", 20, 50),
+            self.f("aa/00000000000004", 5, 50),
+        ]
         plan = self.m.decide(fs, self.pol(total=120), NOW, {})
         # 200 GiB, cap 120: the two least recently active go (30h, then 20h).
-        self.assertEqual(self.actions(plan), {"aa/00000000000002": "delete", "aa/00000000000003": "delete",
-                                              "aa/00000000000001": "keep", "aa/00000000000004": "keep"})
+        self.assertEqual(
+            self.actions(plan),
+            {
+                "aa/00000000000002": "delete",
+                "aa/00000000000003": "delete",
+                "aa/00000000000001": "keep",
+                "aa/00000000000004": "keep",
+            },
+        )
         self.assertEqual([f.key for f, _, _ in plan][0], "aa/00000000000002")
 
     def test_cap_never_touches_min_keep(self):
@@ -398,16 +437,20 @@ class ApplyTest(Base):
         self.folder("bb/0123456789abcd", 1)
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
-        self.assertFalse(os.path.exists(os.path.join(self.root, "aa")))      # empty XX removed too
+        self.assertFalse(os.path.exists(os.path.join(self.root, "aa")))  # empty XX removed too
         self.assertTrue(self.present("bb/0123456789abcd"))
-        self.assertEqual(sorted(os.listdir(self.root)), ["bb"])               # no trash left
+        self.assertEqual(sorted(os.listdir(self.root)), ["bb"])  # no trash left
         self.assertIn("deleted aa/0123456789abcd", out)
         rc, out = self.run_main("status", "--brief")
         self.assertIn("deleted 1 folder(s)", out)
 
     def test_cap_and_min_keep_end_to_end(self):
-        for key, age in (("a1/00000000000001", 30), ("a2/00000000000002", 20), ("a3/00000000000003", 10),
-                         ("a4/00000000000004", 1)):
+        for key, age in (
+            ("a1/00000000000001", 30),
+            ("a2/00000000000002", 20),
+            ("a3/00000000000003", 10),
+            ("a4/00000000000004", 1),
+        ):
             self.folder(key, age, kib=256)
         sizes = {f.key: f.size for f in self.m.scan(self.root, NOW)[0]}
         # Room for two folders: the two least recently active must go.
@@ -427,13 +470,22 @@ class ApplyTest(Base):
         self.folder("bb/0123456789abcd", 90)
         lock = os.path.join(path, "debug/.cargo-build-lock")
         # Another process holds it, as cargo does during a build.
-        holder = subprocess.Popen([sys.executable, "-I", "-c",
-                                   "import fcntl, sys, time\n"
-                                   "f = open(sys.argv[1])\n"
-                                   "fcntl.flock(f, fcntl.LOCK_EX)\n"
-                                   "print('held', flush=True)\n"
-                                   "time.sleep(60)\n", lock],
-                                  stdout=subprocess.PIPE, text=True, cwd=self.tmp)
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import fcntl, sys, time\n"
+                "f = open(sys.argv[1])\n"
+                "fcntl.flock(f, fcntl.LOCK_EX)\n"
+                "print('held', flush=True)\n"
+                "time.sleep(60)\n",
+                lock,
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+            cwd=self.tmp,
+        )
         try:
             self.assertEqual(holder.stdout.readline().strip(), "held")
             rc, out = self.run_main("prune", "apply")
@@ -483,7 +535,7 @@ class ApplyTest(Base):
 
     def test_leftover_trash_is_deleted(self):
         trash = os.path.join(self.root, self.m.TRASH_PREFIX + "aa0123456789abcd-1")
-        other = os.path.join(self.root, self.m.TRASH_PREFIX + "mine")   # not our name format
+        other = os.path.join(self.root, self.m.TRASH_PREFIX + "mine")  # not our name format
         os.makedirs(os.path.join(trash, "debug"))
         os.makedirs(other)
         rc, out = self.run_main("prune", "apply")
@@ -492,8 +544,10 @@ class ApplyTest(Base):
         self.assertTrue(os.path.isdir(other))
 
     def test_prefixes(self):
-        self.assertEqual(self.m.prefixes("/var/home/u/.cache/cargo-build"),
-                         ("/home/u/.cache/cargo-build", "/var/home/u/.cache/cargo-build"))
+        self.assertEqual(
+            self.m.prefixes("/var/home/u/.cache/cargo-build"),
+            ("/home/u/.cache/cargo-build", "/var/home/u/.cache/cargo-build"),
+        )
         self.assertEqual(self.m.prefixes("/srv/x"), ("/srv/x",))
 
 
@@ -536,11 +590,11 @@ class TimerTest(Base):
         self.assertEqual(self.calls, [])
         rc, out = self.run_main("auto", "off")
         with open(self.unit(self.m.TIMER)) as f:
-            self.assertIn("daily", f.read())                  # left alone
+            self.assertIn("daily", f.read())  # left alone
 
     def test_enable_refuses_other_template(self):
         self.write_cargo_config('[build]\nbuild-dir = "/tmp/elsewhere"\n')
-        self.write_conf_raw("PYTHON_UV_ENABLED=no\n")      # rust:build alone: nothing left to run
+        self.write_conf_raw("PYTHON_UV_ENABLED=no\n")  # rust:build alone: nothing left to run
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.unit(self.m.TIMER)))
@@ -573,6 +627,7 @@ class ScanRobustTest(Base):
             if path == gone:
                 raise FileNotFoundError(2, "No such file or directory", path)
             return real(path)
+
         with mock.patch.object(self.m.os, "scandir", scandir):
             folders, _, others = self.m.scan(self.root, NOW)
         self.assertEqual([f.key for f in folders], ["aa/0123456789abcd"])
@@ -599,8 +654,7 @@ class CargoTieTest(Base):
 
     def proc(self, exe, cwd=None, args=None, env=None, pid="4242", comm="cargo"):
         cwd = cwd or self.tmp
-        return {"pid": pid, "comm": comm, "cwd": cwd, "exe": exe,
-                "args": args or ["cargo", "test"], "env": env or {}}
+        return {"pid": pid, "comm": comm, "cwd": cwd, "exe": exe, "args": args or ["cargo", "test"], "env": env or {}}
 
     def answering(self, build_dir):
         return self.fake_cargo(f"""test "$RUSTUP_AUTO_INSTALL" = 0 || exit 3
@@ -675,6 +729,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
             finally:
                 os.close(fd)
             return {}, []
+
         self.m.cargo_users = check
         result, _ = self.m.delete_folder(self.root, self.m.scan(self.root, NOW)[0][0], NOW, self.home, {})
         self.assertEqual(result, "deleted")
@@ -684,9 +739,12 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         exe = self.fake_cargo("exit 0\n")
         ws = os.path.join(self.tmp, "ws")
         os.makedirs(ws)
-        p = self.proc(exe, cwd=ws, args=["cargo", "+nightly", "test", "--manifest-path", "sub/Cargo.toml", "--",
-                                         "--manifest-path=no"],
-                      env={"CARGO_BUILD_BUILD_DIR": "/b/{workspace-path-hash}"})
+        p = self.proc(
+            exe,
+            cwd=ws,
+            args=["cargo", "+nightly", "test", "--manifest-path", "sub/Cargo.toml", "--", "--manifest-path=no"],
+            env={"CARGO_BUILD_BUILD_DIR": "/b/{workspace-path-hash}"},
+        )
         key, (cmd, env, cwd) = self.m.cargo_query(p, self.home)
         self.assertEqual(cmd[:3], [exe, "+nightly", "metadata"])
         self.assertIn("--offline", cmd)
@@ -694,8 +752,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertEqual(cwd, ws)
         self.assertEqual(env["CARGO_BUILD_BUILD_DIR"], "/b/{workspace-path-hash}")
         self.assertEqual(env["RUSTUP_AUTO_INSTALL"], "0")
-        self.assertEqual(self.m.manifest_arg(["cargo", "test", "--manifest-path=a/Cargo.toml"], "/w"),
-                         "/w/a/Cargo.toml")
+        self.assertEqual(
+            self.m.manifest_arg(["cargo", "test", "--manifest-path=a/Cargo.toml"], "/w"), "/w/a/Cargo.toml"
+        )
         # cargo-nextest is not a cargo: the user's cargo is asked.
         cargo_home_bin = os.path.join(self.home, ".cargo/bin")
         os.makedirs(cargo_home_bin)
@@ -706,7 +765,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
 
     def test_cache_asks_once_per_project(self):
         log = os.path.join(self.tmp, "asked")
-        exe = self.fake_cargo(f"echo x >> {log}\necho '{{\"build_directory\": \"{self.root}/aa/0123456789abcd\"}}'\n")
+        exe = self.fake_cargo(f'echo x >> {log}\necho \'{{"build_directory": "{self.root}/aa/0123456789abcd"}}\'\n')
         self.cargo_running = [self.proc(exe, pid="1"), self.proc(exe, pid="2")]
         cache = {}
         for _ in range(3):
@@ -742,8 +801,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         with open(os.path.join(ws, "Cargo.toml"), "w") as f:
             f.write('[package]\nname = "ws"\nversion = "0.1.0"\nedition = "2021"\n')
         open(os.path.join(ws, "src/lib.rs"), "w").close()
-        p = self.proc(shutil.which("cargo"), cwd=ws,
-                      env={"CARGO_BUILD_BUILD_DIR": self.root + "/{workspace-path-hash}"})
+        p = self.proc(
+            shutil.which("cargo"), cwd=ws, env={"CARGO_BUILD_BUILD_DIR": self.root + "/{workspace-path-hash}"}
+        )
         key, q = self.m.cargo_query(p, self.home)
         bd, why = self.m.ask_cargo(*q)
         if why and ("toolchain" in why or "rustup" in why):
@@ -751,7 +811,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertIsNone(why)
         rel = os.path.relpath(bd, self.root)
         self.assertRegex(rel, r"\A[0-9a-f]{2}/[0-9a-f]{14}\Z")
-        self.assertFalse(os.path.exists(bd))                # metadata created nothing
+        self.assertFalse(os.path.exists(bd))  # metadata created nothing
         self.assertEqual(sorted(os.listdir(ws)), ["Cargo.toml", "src"])
 
     def test_rebuild_meanwhile_is_noted(self):
@@ -764,6 +824,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         def remove_and_rebuild(path, timeout=None):
             os.makedirs(os.path.join(f.path, "debug"))
             return real(path, timeout)
+
         self.m.remove_tree = remove_and_rebuild
         result, detail = self.m.delete_folder(self.root, f, NOW, self.home, {})
         self.assertEqual(result, "deleted")
