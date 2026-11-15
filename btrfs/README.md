@@ -572,6 +572,11 @@ docker volume rm <name>         # or one volume by name
   checks that the copy has the same number of entries and bytes, swaps the names
   and deletes the old copy. It skips a volume if free space is less than its size
   plus 20 GiB. One failing volume does not stop the others.
+- It copies only when systemd answers that `docker.service` is stopped
+  (`inactive` or `failed`; at boot Docker's start job waits for this service,
+  so Docker reads `inactive` then). Any other answer, an error, or no
+  `systemctl` at all postpones the migration to the next boot, with the reason
+  in the journal. A postponed boot does not count as an attempt.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. This runs early at boot,
   before anyone has logged in, so the desktop alert is **kept and shown at

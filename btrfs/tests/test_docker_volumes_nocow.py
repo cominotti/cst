@@ -157,6 +157,7 @@ class FakeSystem:
         self.calls: list[list[str]] = []
         self.docker_state = "inactive"
         self.systemctl_rc = 0
+        self.systemctl_out_on_error = False  # a failing systemctl still prints docker_state
         self.systemctl_missing = False
         self.free = 1 << 50
         self.btrfs_out: str | None = None  # None: a normal `btrfs filesystem usage -b` answer
@@ -217,7 +218,8 @@ class FakeSystem:
                 raise AssertionError(f"unexpected systemctl call: {args}")
             if self.systemctl_missing:
                 raise FileNotFoundError(2, "No such file or directory", "systemctl")
-            return done(self.systemctl_rc, self.docker_state + "\n" if self.systemctl_rc == 0 else "")
+            answers = self.systemctl_rc == 0 or self.systemctl_out_on_error
+            return done(self.systemctl_rc, self.docker_state + "\n" if answers else "")
         if args[0] == "chcon":
             return done(self.chcon_rc)
         if args[0] == "btrfs":
@@ -914,7 +916,7 @@ class MigrateTest(Base):
 
 
 class DockerRunningTest(Base):
-    """docker_active() reads ActiveState of docker.service only."""
+    """docker_busy(): the ActiveState of docker.service, failing closed."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -956,27 +958,43 @@ class DockerRunningTest(Base):
                 self.fs.docker_state = state
                 self.assert_migrated(self.call(M.migrate)[1])
 
-    def test_unknown_state_fails_open_today(self) -> None:
-        # Today an answer that is not a running state counts as "not running":
-        # systemctl failing (no manager on the bus) with empty output, or an
-        # unknown word. Hardening in B2 (design triage 2): migrate only on
-        # "inactive" or "failed" with exit code 0. This pins today's behaviour.
-        for rc, state in ((1, ""), (0, "maintenance")):
+    def assert_postponed(self, out: str, why: str) -> None:
+        self.assertEqual(out, f"<4>{TAG}: {why}: migration left for the next boot\n")
+        self.assertEqual(self.fs.sets, [])
+        self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)  # recover() not run either
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(self.read_attempts(), "1")
+
+    def test_unknown_state_postpones(self) -> None:
+        # Fails closed: only exit code 0 with "inactive" or "failed" lets the
+        # migration run. systemctl failing (no manager on the bus) with empty
+        # output, an unknown word, or a stopped state with a failing exit code
+        # all postpone, with a line that is not "Docker is running".
+        for rc, state, shown in (
+            (1, "", "systemctl exit 1, ActiveState ''"),
+            (0, "", "systemctl exit 0, ActiveState ''"),
+            (0, "maintenance", "systemctl exit 0, ActiveState 'maintenance'"),
+            (0, "refreshing", "systemctl exit 0, ActiveState 'refreshing'"),
+            (1, "inactive", "systemctl exit 1, ActiveState 'inactive'"),
+            (4, "active", "systemctl exit 4, ActiveState 'active'"),
+        ):
             with self.subTest(rc=rc, state=state):
                 self.fresh()
                 self.fs.systemctl_rc, self.fs.docker_state = rc, state
-                self.assert_migrated(self.call(M.migrate)[1])
+                self.fs.systemctl_out_on_error = True
+                rc_, out = self.call(M.migrate)
+                self.assertEqual(rc_, 0)
+                self.assert_postponed(out, f"docker.service state unknown ({shown})")
 
-    def test_no_systemctl_postpones_through_main(self) -> None:
-        # subprocess.run raises FileNotFoundError; main() logs it and exits 0
-        # with nothing touched (attempts not counted).
+    def test_no_systemctl_postpones(self) -> None:
+        # subprocess.run raises FileNotFoundError: postponed like an unknown
+        # state, nothing touched, attempts not counted.
         self.fs.systemctl_missing = True
         rc, out, _ = self.main("migrate")
         self.assertEqual(rc, 0)
-        self.assertEqual(out, f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: 'systemctl'\n")
-        self.assertEqual(self.fs.sets, [])
-        self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)
-        self.assertEqual(self.read_attempts(), "1")
+        self.assert_postponed(
+            out, "cannot ask systemd about docker.service ([Errno 2] No such file or directory: 'systemctl')"
+        )
 
 
 class RecoverTest(Base):

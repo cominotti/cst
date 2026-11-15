@@ -18,7 +18,8 @@ RAID1 episode such volumes should be recreated, not trusted.
                                  docker.service) marks the dir; if flagged, rewrites each volume that has
                                  CoW files into a NOCOW copy: +C only applies to
                                  empty files, so the data has to be copied.
-                                 Refuses while Docker runs.
+                                 Waits unless systemd says docker.service is
+                                 stopped.
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
@@ -185,11 +186,23 @@ def free_bytes():
     return 0
 
 
-def docker_active():
-    r = subprocess.run(
-        ["systemctl", "show", "-P", "ActiveState", "docker.service"], check=False, capture_output=True, text=True
-    )
-    return r.stdout.strip() in ("active", "activating", "reloading", "deactivating")
+def docker_busy():
+    """None when docker.service is known to be stopped, else why the migration
+    waits. Fails closed: only a clear "inactive" or "failed" lets it run (at
+    boot docker.service reads "inactive" while its start job waits for this
+    unit). No systemctl, an error or any other answer postpones."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "-P", "ActiveState", "docker.service"], check=False, capture_output=True, text=True
+        )
+    except OSError as e:
+        return f"cannot ask systemd about docker.service ({e})"
+    state = r.stdout.strip()
+    if r.returncode == 0 and state in ("inactive", "failed"):
+        return None
+    if r.returncode == 0 and state in ("active", "activating", "reloading", "deactivating"):
+        return "Docker is running"
+    return f"docker.service state unknown (systemctl exit {r.returncode}, ActiveState {state!r})"
 
 
 def migrate_one(name, data):
@@ -248,8 +261,9 @@ def request_migration():
 def migrate():
     if not os.path.isdir(VOLUMES):
         return 0
-    if docker_active():
-        log(4, "Docker is running: migration left for the next boot")
+    busy = docker_busy()
+    if busy:
+        log(4, f"{busy}: migration left for the next boot")
         return 0
     recover()
     # Every boot: Docker may have been installed after btrfs-setup, creating
