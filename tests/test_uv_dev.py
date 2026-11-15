@@ -60,6 +60,7 @@ class UvDevTest(unittest.TestCase):
         base = {"PATH": f"{self.bin}:{self.tools}", "HOME": self.home}
         return subprocess.run(
             [os.path.join(self.tools, "bash"), script, *args],
+            check=False,
             capture_output=True,
             text=True,
             env={**base, **(env or {})},

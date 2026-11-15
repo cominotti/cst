@@ -214,7 +214,7 @@ def is_subvol(path):
 
 def _fs_magic(path):
     # statfs f_type is not in os.statvfs: ask stat(1).
-    r = subprocess.run(["stat", "-f", "-c", "%t", path], capture_output=True, text=True)
+    r = subprocess.run(["stat", "-f", "-c", "%t", path], check=False, capture_output=True, text=True)
     try:
         return int(r.stdout.strip(), 16)
     except ValueError:
@@ -257,7 +257,7 @@ def busy_paths(paths, home):
         return set()
     try:
         r = subprocess.run(
-            ["bash", SNAPSHOT, "busy", "--home", home, *paths], capture_output=True, text=True, timeout=300
+            ["bash", SNAPSHOT, "busy", "--home", home, *paths], check=False, capture_output=True, text=True, timeout=300
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"  cannot check open files ({e}): treated as busy")
@@ -269,7 +269,7 @@ def busy_paths(paths, home):
 
 
 def du_bytes(path):
-    r = subprocess.run(["du", "-sxb", "--", path], capture_output=True, text=True)
+    r = subprocess.run(["du", "-sxb", "--", path], check=False, capture_output=True, text=True)
     try:
         return int(r.stdout.split()[0])
     except IndexError, ValueError:
@@ -282,12 +282,12 @@ def free_bytes(path):
 
 
 def flatpak_installed(app):
-    r = subprocess.run(["flatpak", "info", app], capture_output=True, text=True)
+    r = subprocess.run(["flatpak", "info", app], check=False, capture_output=True, text=True)
     return r.returncode == 0
 
 
 def flatpak_has_fs(app, path):
-    r = subprocess.run(["flatpak", "override", "--user", "--show", app], capture_output=True, text=True)
+    r = subprocess.run(["flatpak", "override", "--user", "--show", app], check=False, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if line.startswith("filesystems="):
             return path in line.split("=", 1)[1].split(";")
@@ -295,7 +295,9 @@ def flatpak_has_fs(app, path):
 
 
 def flatpak_add_fs(app, path):
-    r = subprocess.run(["flatpak", "override", "--user", f"--filesystem={path}", app], capture_output=True, text=True)
+    r = subprocess.run(
+        ["flatpak", "override", "--user", f"--filesystem={path}", app], check=False, capture_output=True, text=True
+    )
     if r.returncode != 0:
         raise RuntimeError(f"flatpak override failed: {r.stderr.strip()[:200]}")
 
@@ -307,7 +309,7 @@ def copy_tree(src, dst, nocow):
     possible (same filesystem: no data written)."""
     reflink = "--reflink=never" if nocow else "--reflink=auto"
     r = subprocess.run(
-        ["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"], capture_output=True, text=True
+        ["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"], check=False, capture_output=True, text=True
     )
     if r.returncode != 0:
         raise RuntimeError(f"copy failed: {r.stderr.strip()[:300]}")
@@ -677,7 +679,7 @@ def u_relabel(path):
     created in it would inherit that: give it the policy's label (as the
     user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
     try:
-        subprocess.run(["restorecon", path], capture_output=True)
+        subprocess.run(["restorecon", path], check=False, capture_output=True)
     except OSError:
         pass
     return True
@@ -1131,7 +1133,7 @@ def u_set_nocow_dirs(top):
 def convert_bulk_dir(ctx):
     """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
     subvolume (its convert_one: reflink clone + switch, busy -> later)."""
-    r = subprocess.run(["bash", SNAPSHOT, "convert-one", ctx.bulk], capture_output=True, text=True)
+    r = subprocess.run(["bash", SNAPSHOT, "convert-one", ctx.bulk], check=False, capture_output=True, text=True)
     for line in (r.stdout + r.stderr).splitlines():
         log("  " + line)
     return is_subvol(ctx.bulk)
@@ -2366,7 +2368,10 @@ def copy_reflink(src, dst):
     """cp -a with --reflink=always: the data blocks are shared, none is
     written; fails (instead of copying bytes) where a clone is impossible."""
     r = subprocess.run(
-        ["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst], capture_output=True, text=True
+        ["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         raise RuntimeError(f"reflink copy failed: {r.stderr.strip()[:300]}")
@@ -2419,7 +2424,7 @@ def idle_priority():
     except OSError:
         pass
     if shutil.which("ionice"):
-        subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], capture_output=True)
+        subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
 
 
 def idle_cmd(cmd):
@@ -2545,7 +2550,7 @@ def u_verify_content(src, new, label, total):
     the disk first and read back from there; if that write fails (sync or
     fsync reports an error), RuntimeError: the caller drops the copy and the
     original stays."""
-    r = subprocess.run(["sync", "-f", new], capture_output=True, text=True)
+    r = subprocess.run(["sync", "-f", new], check=False, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(
             f"the copy could not be written to the disk (sync: {(r.stderr.strip() or f'exit {r.returncode}')[:300]})"
@@ -3310,7 +3315,7 @@ def user_ctx(args):
 def alert(title, body):
     log(f"<4>btrfs-bulk: {title}: {body}")
     if os.access(NOTIFY, os.X_OK):
-        subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], capture_output=True)
+        subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True)
 
 
 def boot(ctx):

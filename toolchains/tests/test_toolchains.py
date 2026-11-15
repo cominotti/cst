@@ -323,6 +323,7 @@ class SnapshotsSetupTest(Scratch):
         )
         return subprocess.run(
             ["bash", "-c", script, "_", BTRFS, self.home, prog],
+            check=False,
             capture_output=True,
             text=True,
             env=self.env,
@@ -368,6 +369,7 @@ class SnapshotsSetupTest(Scratch):
         )
         r = subprocess.run(
             ["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
+            check=False,
             capture_output=True,
             text=True,
             env=self.env,
@@ -383,6 +385,7 @@ class SnapshotsSetupTest(Scratch):
         self.write(".config/uv/uv.toml", OLD_UV)
         r = subprocess.run(
             ["bash", "-c", script, "_", BTRFS, self.home, "cst btrfs"],
+            check=False,
             capture_output=True,
             text=True,
             env=self.env,
@@ -401,6 +404,7 @@ class SnapshotsSetupTest(Scratch):
                 BTRFS,
                 "./btrfs-setup.sh",
             ],
+            check=False,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -446,6 +450,7 @@ class AutoTest(Scratch):
                 "--home",
                 self.home,
             ],
+            check=False,
             capture_output=True,
             text=True,
             env=self.env,
@@ -573,7 +578,7 @@ class FrontendTest(Scratch):
     def sh(self, *args, script=SETUP):
         env = dict(self.env, CST_PROG="cst toolchains")
         return subprocess.run(
-            ["bash", script, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+            ["bash", script, *args], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
         )
 
     def test_help_and_usage(self):
@@ -593,10 +598,12 @@ class FrontendTest(Scratch):
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
 
     def test_cst_knows_the_module(self):
-        r = subprocess.run([os.path.join(REPO, "cst"), "help"], capture_output=True, text=True, env=self.env)
+        r = subprocess.run(
+            [os.path.join(REPO, "cst"), "help"], check=False, capture_output=True, text=True, env=self.env
+        )
         self.assertIn("toolchains", r.stdout)
         r = subprocess.run(
-            [os.path.join(REPO, "cst"), "toolchains", "help"], capture_output=True, text=True, env=self.env
+            [os.path.join(REPO, "cst"), "toolchains", "help"], check=False, capture_output=True, text=True, env=self.env
         )
         self.assertEqual(r.returncode, 0)
         self.assertIn("toolchains-setup.sh", r.stdout)

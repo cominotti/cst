@@ -844,6 +844,7 @@ class LeanDebugInfoTest(RulesBase):
         self.exe(env["CST_TOOLCHAINS_SYSTEMCTL"], "#!/bin/sh\nexit 0\n")
         r = subprocess.run(
             ["bash", "-c", script, "_", os.path.join(repo, "btrfs"), self.home, "cst btrfs"],
+            check=False,
             capture_output=True,
             text=True,
             env=env,
@@ -1309,7 +1310,12 @@ class RustcWrapperTest(unittest.TestCase):
         base = {k: v for k, v in base.items() if v is not None}
         open(self.log, "w").close()
         r = subprocess.run(
-            [self.sh, self.script, *args], env=base, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [self.sh, self.script, *args],
+            check=False,
+            env=base,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.log) as f:
@@ -1450,8 +1456,8 @@ class RustcWrapperTest(unittest.TestCase):
                 )
 
     def test_shell_lint(self):
-        r = subprocess.run(["sh", "-n", WRAPPER], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(["sh", "-n", WRAPPER], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         if shutil.which("shellcheck"):
-            r = subprocess.run(["shellcheck", "-S", "warning", WRAPPER], capture_output=True, text=True)
+            r = subprocess.run(["shellcheck", "-S", "warning", WRAPPER], check=False, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout)

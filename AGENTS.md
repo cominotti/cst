@@ -168,7 +168,7 @@ or `input=`. Use `stdin=subprocess.DEVNULL` when the command reads nothing:
 
 ```python
 subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True,
-               stdin=subprocess.DEVNULL)
+               stdin=subprocess.DEVNULL, check=False)
 ```
 
 Two gates enforce it:

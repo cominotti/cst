@@ -236,7 +236,9 @@ class MainConfTest(unittest.TestCase):
         p = os.path.join(tmp, "main.conf")
         with open(p, "w") as f:
             f.write(bare)
-        r = subprocess.run([sys.executable, "-I", HELPER, "general-revert", p, p], capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "general-revert", p, p], check=False, capture_output=True, text=True
+        )
         self.assertEqual((r.returncode, r.stdout), (0, bare))
 
     def test_cli_exit_codes(self):
@@ -245,13 +247,19 @@ class MainConfTest(unittest.TestCase):
         p = os.path.join(tmp, "main.conf")
         with open(p, "w") as f:
             f.write(VENDOR)
-        r = subprocess.run([sys.executable, "-I", HELPER, "general-apply", p], capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "general-apply", p], check=False, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 10)
         with open(p, "w") as f:
             f.write(r.stdout)
-        r2 = subprocess.run([sys.executable, "-I", HELPER, "general-apply", p], capture_output=True, text=True)
+        r2 = subprocess.run(
+            [sys.executable, "-I", HELPER, "general-apply", p], check=False, capture_output=True, text=True
+        )
         self.assertEqual((r2.returncode, r2.stdout), (0, r.stdout))
-        show = subprocess.run([sys.executable, "-I", HELPER, "general-show", p], capture_output=True, text=True)
+        show = subprocess.run(
+            [sys.executable, "-I", HELPER, "general-show", p], check=False, capture_output=True, text=True
+        )
         self.assertEqual(show.stdout, f"Experimental\tok\ttrue\nKernelExperimental\tok\t{ISO}\n")
 
 
@@ -319,10 +327,12 @@ class SettingsTest(unittest.TestCase):
         p = os.path.join(tmp, "user.conf")
         with open(p, "w") as f:
             f.write("LDAC_RATE=48000\n")
-        r = subprocess.run([sys.executable, "-I", HELPER, "settings-keys", p], capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "settings-keys", p], check=False, capture_output=True, text=True
+        )
         self.assertEqual((r.returncode, r.stdout), (0, "LDAC_RATE\n"))
         r = subprocess.run(
-            [sys.executable, "-I", HELPER, "settings-keys", p + ".missing"], capture_output=True, text=True
+            [sys.executable, "-I", HELPER, "settings-keys", p + ".missing"], check=False, capture_output=True, text=True
         )
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
@@ -400,11 +410,15 @@ class LiveParsingTest(unittest.TestCase):
         self.assertEqual(self.m.pw_state(dev, objs)[3], "hq")
         self.assertIsNone(self.m.pw_state("00_00", objs))
         r = subprocess.run(
-            [sys.executable, "-I", HELPER, "pw-parse", "00_00"], input="[]", capture_output=True, text=True
+            [sys.executable, "-I", HELPER, "pw-parse", "00_00"], check=False, input="[]", capture_output=True, text=True
         )
         self.assertEqual(r.returncode, 4)
         r = subprocess.run(
-            [sys.executable, "-I", HELPER, "pw-parse", dev], input="not json", capture_output=True, text=True
+            [sys.executable, "-I", HELPER, "pw-parse", dev],
+            check=False,
+            input="not json",
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(r.returncode, 3)
 
@@ -447,12 +461,12 @@ class LeAudioRenderTest(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         p = os.path.join(tmp, self.m.LE_CONF_NAME)
-        r = subprocess.run([sys.executable, "-I", HELPER, "le-state", p], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", HELPER, "le-state", p], check=False, capture_output=True, text=True)
         self.assertEqual(r.stdout, "missing\n")
-        r = subprocess.run([sys.executable, "-I", HELPER, "le-render"], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", HELPER, "le-render"], check=False, capture_output=True, text=True)
         with open(p, "w") as f:
             f.write(r.stdout)
-        r = subprocess.run([sys.executable, "-I", HELPER, "le-state", p], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", HELPER, "le-state", p], check=False, capture_output=True, text=True)
         self.assertEqual(r.stdout, "ok\n")
 
 
@@ -472,7 +486,9 @@ class LeAudioEffectTest(unittest.TestCase):
 
     def test_wp_roles_without_libwireplumber(self):
         env = dict(os.environ, CST_BT_LIBWP=os.path.join(self.tmp, "no-such-lib.so"))
-        r = subprocess.run([sys.executable, "-I", HELPER, "wp-roles"], capture_output=True, text=True, env=env)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "wp-roles"], check=False, capture_output=True, text=True, env=env
+        )
         self.assertEqual((r.returncode, r.stdout), (5, ""))
 
     def test_defines_section(self):
@@ -511,7 +527,10 @@ class LeAudioEffectTest(unittest.TestCase):
             [("before", os.path.join(user, "51-props.conf")), ("after", os.path.join(etc, "95-late.conf"))],
         )
         r = subprocess.run(
-            [sys.executable, "-I", HELPER, "wp-others", self.m.LE_CONF_NAME, user, etc], capture_output=True, text=True
+            [sys.executable, "-I", HELPER, "wp-others", self.m.LE_CONF_NAME, user, etc],
+            check=False,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(r.stdout.splitlines(), [f"before|{user}/51-props.conf", f"after|{etc}/95-late.conf"])
 
@@ -531,13 +550,16 @@ class LeAudioEffectTest(unittest.TestCase):
         self.assertEqual(f("A=1\r\n", "LE_AUDIO", "on"), ("A=1\r\nLE_AUDIO=on\r\n", True))
         p = os.path.join(self.tmp, "s.conf")
         r = subprocess.run(
-            [sys.executable, "-I", HELPER, "settings-set", p, "LE_AUDIO", "on"], capture_output=True, text=True
+            [sys.executable, "-I", HELPER, "settings-set", p, "LE_AUDIO", "on"],
+            check=False,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(r.returncode, 10)
         self.assertIn("LE_AUDIO=on\n", r.stdout)
         for key, val in (("FOO", "on"), ("LE_AUDIO", "on\nDEVICE=x"), ("LE_AUDIO", "a b")):
             r = subprocess.run(
-                [sys.executable, "-I", HELPER, "settings-set", p, key, val], capture_output=True, text=True
+                [sys.executable, "-I", HELPER, "settings-set", p, key, val], check=False, capture_output=True, text=True
             )
             self.assertEqual(r.returncode, 2, (key, val))
 
@@ -567,7 +589,9 @@ class WirePlumberResolveTest(unittest.TestCase):
                 f.write(t)
         env = dict(os.environ, XDG_CONFIG_HOME=xdg)
         env.pop("WIREPLUMBER_CONFIG_DIR", None)
-        r = subprocess.run([sys.executable, "-I", HELPER, "wp-roles"], capture_output=True, text=True, env=env)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "wp-roles"], check=False, capture_output=True, text=True, env=env
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.strip()
 
@@ -640,10 +664,14 @@ class WatcherFailureTest(unittest.TestCase):
         self.assertEqual(self.m.lw_failure(text), ("T3", "profile switch failed", ""))
 
     def test_cli(self):
-        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input=JOURNAL, capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "lw-failure"], check=False, input=JOURNAL, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip().split("|")[0], "2026-11-11T14:11:58-03:00")
-        r = subprocess.run([sys.executable, "-I", HELPER, "lw-failure"], input="", capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "lw-failure"], check=False, input="", capture_output=True, text=True
+        )
         self.assertEqual((r.returncode, r.stdout), (1, ""))
 
 
@@ -692,7 +720,9 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
             "WP_RC": str(wp_rc),
             "LE_OFF": str(le_off),
         }
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
         calls = []
         if os.path.exists(log):
             with open(log) as f:
@@ -800,7 +830,9 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             + body
         )
         e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "REPO": REPO, **env}
-        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL
+        )
 
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="bt-test-")
@@ -1075,7 +1107,9 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn('BT_TIMEOUT="${BT_TIMEOUT:-5}"', src)
         self.assertNotIn("declare -F bluetoothctl", src)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home, "BT_TIMEOUT": "soon"}
-        r = subprocess.run(["bash", SETUP, "plan"], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", SETUP, "plan"], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BT_TIMEOUT must be a whole number", r.stderr)
 
@@ -1095,6 +1129,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
                     + block
                     + '\n(( BT_TIMEOUT > 0 )) && echo "pos=$BT_TIMEOUT" || echo "zero=$BT_TIMEOUT"\n',
                 ],
+                check=False,
                 capture_output=True,
                 text=True,
                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": raw},
@@ -1106,6 +1141,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         for bad in ("1234567890", "-1", " 5"):
             r = subprocess.run(
                 ["bash", "-c", block],
+                check=False,
                 capture_output=True,
                 text=True,
                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BT_TIMEOUT": bad},
@@ -1169,7 +1205,9 @@ class OptionsTest(unittest.TestCase):
 
     def run_setup(self, *args, home=None):
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home or tempfile.gettempdir()}
-        return subprocess.run(["bash", SETUP, *args], capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            ["bash", SETUP, *args], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
 
     def test_bad_options(self):
         for args in (

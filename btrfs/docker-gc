@@ -118,7 +118,7 @@ def log(prio, msg):
 
 def docker(*args, timeout=600, check=True):
     try:
-        r = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(["docker", *args], check=False, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from e
     if check and r.returncode != 0:
@@ -192,7 +192,7 @@ def save_state(st):
 
 
 def recorder_alive(st):
-    active = subprocess.run(["systemctl", "-q", "is-active", "docker-gc-recorder.service"]).returncode == 0
+    active = subprocess.run(["systemctl", "-q", "is-active", "docker-gc-recorder.service"], check=False).returncode == 0
     return active and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
 
 

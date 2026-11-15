@@ -311,6 +311,7 @@ class Nas(unittest.TestCase):
     def run_tool(self, *args):
         return subprocess.run(
             ["python3", "-I", TOOL, *args],
+            check=False,
             env=self.env,
             capture_output=True,
             text=True,
@@ -854,6 +855,7 @@ class ShutOffAndRefusalTest(Nas):
         del env["CST_VM_NONROOT_OK"]
         r = subprocess.run(
             ["python3", "-I", TOOL, "backup", "win", "--nas"],
+            check=False,
             env=env,
             capture_output=True,
             text=True,
@@ -986,6 +988,7 @@ class SetupRoutingTest(unittest.TestCase):
         env = {"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1"}
         r = subprocess.run(
             ["bash", setup, "backup-timer", "go"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
@@ -996,12 +999,24 @@ class SetupRoutingTest(unittest.TestCase):
         self.assertIn("backup-timer on|off|status", r.stderr)
         for args in (("backup-timer", "on", "w"), ("backup", "w", "--nas")):
             r = subprocess.run(
-                ["bash", setup, *args], capture_output=True, text=True, timeout=30, env=env, stdin=subprocess.DEVNULL
+                ["bash", setup, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+                stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 1, args)
             self.assertIn("must run on the host", r.stderr)
         r = subprocess.run(
-            ["bash", setup, "help"], capture_output=True, text=True, timeout=30, env=env, stdin=subprocess.DEVNULL
+            ["bash", setup, "help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+            stdin=subprocess.DEVNULL,
         )
         self.assertIn("backup [VM] --nas [--keep-tag NAME] [--no-quiesce]", r.stdout)
 

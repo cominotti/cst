@@ -50,7 +50,7 @@ def conf():
 
 
 def virsh(*args, check=True):
-    r = subprocess.run(["virsh", "-c", URI, *args], capture_output=True, text=True)
+    r = subprocess.run(["virsh", "-c", URI, *args], check=False, capture_output=True, text=True)
     if check and r.returncode != 0:
         sys.exit(f"virsh {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout

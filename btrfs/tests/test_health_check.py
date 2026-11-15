@@ -78,6 +78,7 @@ class HealthCheckSmartTest(unittest.TestCase):
         env = {"PATH": f"{self.bin}:/usr/bin:/bin", "FAKE": self.tmp}
         r = subprocess.run(
             ["bash", "-c", f'. "$1"; {code}', "health-check-test", SCRIPT],
+            check=False,
             env=env,
             capture_output=True,
             text=True,

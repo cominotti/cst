@@ -171,7 +171,7 @@ class Scratch(unittest.TestCase):
 
     def run_tool(self, *args, cmd=None):
         cmd = cmd or ["python3", "-I", TOOL]
-        return subprocess.run(cmd + list(args), env=self.env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(cmd + list(args), check=False, env=self.env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         try:
@@ -1698,7 +1698,7 @@ class CommandLineTest(Scratch):
         for fx in fixes:
             self.assertNotIn("(", fx)
             self.assertNotIn("   ", fx)
-            r2 = subprocess.run(["bash", "-n", "-c", fx], capture_output=True, stdin=subprocess.DEVNULL)
+            r2 = subprocess.run(["bash", "-n", "-c", fx], check=False, capture_output=True, stdin=subprocess.DEVNULL)
             self.assertEqual(r2.returncode, 0, fx)
 
     def test_registry_order(self):

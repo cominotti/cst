@@ -588,6 +588,7 @@ class QuietTest(unittest.TestCase):
     def test_command_line_dispatch(self):
         r = subprocess.run(
             [sys.executable, "-I", "-B", CPU_WATCH, "quiet", "--for", "0"],
+            check=False,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -630,6 +631,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
     def run_setup(self, *args, env=None):
         r = subprocess.run(
             ["bash", self.script, *args],
+            check=False,
             capture_output=True,
             text=True,
             env={"PATH": os.path.join(self.tmp.name, "bin") + ":/usr/bin:/bin", **(env or {})},
@@ -779,7 +781,9 @@ ctl_file usr run-u7.service CPUWeight
 ctl_file usr app-flatpak-com.valvesoftware.Steam-1.scope MemoryLow
 ctl_file usr flatpak-session-helper.service AllowedCPUs
 """
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(
             r.stdout.splitlines(),
             [
@@ -925,7 +929,9 @@ test ! -e {intended_file!r}
         )
         self.assertIn("Usage: cst cpu <command> [args]", r.stdout)
 
-        bad = subprocess.run(["bash", SETUP, "not-a-command"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        bad = subprocess.run(
+            ["bash", SETUP, "not-a-command"], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(bad.returncode, 2)
 
     def test_e_cores_missing_returns_empty_cleanly(self):
@@ -1066,7 +1072,9 @@ gamemode_client() {{ return 0; }}
 gamemode_pid() {{ [[ -e {self.tmp!r}/gamemode-pids/"$1" ]]; }}
 {body}
 """
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stderr, "")
         with open(self.actions) as f:
@@ -1109,7 +1117,9 @@ for fn in toolbox_dropin helper_dropin; do eval "$(grep "^${{fn}}()" {SETUP!r})"
 user_home() {{ echo /home/u; }}
 toolbox_dropin; helper_dropin; toolbox_dropin 50-cpu-setup.conf
 """
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(
             r.stdout.splitlines(),
             [
@@ -1149,7 +1159,9 @@ remove_old_dropins   # again: nothing left, no error under set -e
 target_user=''
 remove_old_dropins
 """
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for p in old:
             self.assertFalse(os.path.exists(p), p)
@@ -1183,7 +1195,9 @@ eval "$(sed -n '/^remove_game_dropins()/,/^}}/p' {SETUP!r})"
 remove_game_dropins
 remove_game_dropins   # again: nothing left, no error under set -e
 """
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for p in left:
             self.assertFalse(os.path.exists(os.path.dirname(p)), p)
