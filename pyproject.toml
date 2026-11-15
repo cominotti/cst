@@ -97,6 +97,7 @@ include = [
     "btrfs/docker-volumes-nocow",
     "btrfs/tests/__init__.py",
     "btrfs/tests/test_cst_link.py",
+    "btrfs/tests/test_docker_volumes_nocow.py",
     "btrfs/tests/test_health_check.py",
     "btrfs/tests/test_snapshot_runtime.py",
     "cpu/__init__.py",
