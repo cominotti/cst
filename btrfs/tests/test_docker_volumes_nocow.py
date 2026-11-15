@@ -686,28 +686,69 @@ class MigrateTest(Base):
         self.assertFalse(os.path.exists(self.flag))  # created, then removed once done
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
 
-    def test_flag_folder_missing_loses_the_request(self) -> None:
-        # BUG (bugs.md, "FLAG folder missing"): the same case as above on a
-        # machine where /etc/btrfs-setup does not exist (install only creates
-        # it when mark found CoW data, or the snapshots setup did). open(FLAG)
-        # fails, main() logs the OSError and exits 0; the volumes folder has
-        # +C by then, so no later boot schedules the migration again. B2 fixes
-        # it; this test pins today's behaviour.
+    def test_flag_folder_missing_is_created_and_the_volumes_migrated(self) -> None:
+        # The same case as above on a machine where /etc/btrfs-setup does not
+        # exist (install only creates it when mark found CoW data, or the
+        # snapshots setup did). The helper creates the folder: before the fix,
+        # open(FLAG) failed after +C was already set on the volumes folder, so
+        # no later boot scheduled the migration again.
         shutil.rmtree(os.path.dirname(self.flag))
         self.fs.set(self.vols, False)
         top = self.volume("cow")
+        before = tree(top)
         rc, out, _ = self.main("migrate")
         self.assertEqual(rc, 0)
-        self.assertEqual(out, f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: '{self.flag}'\n")
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assertNotIn(f"<3>{TAG}", out)
         self.assertTrue(self.fs.nocow(self.vols))
-        self.assertFalse(os.path.exists(self.flag))
-        # The next boot: nothing scheduled, nothing copied, the data stays CoW.
-        rc, out, _ = self.main("migrate")
-        self.assertEqual((rc, out), (0, ""))
-        self.assertEqual(self.fs.commands("cp"), [])
-        self.assertFalse(self.fs.nocow(os.path.join(top, "README")))
+        self.assertEqual(tree(top), before)
+        self.assert_all_nocow(top)
+        self.assert_no_leftovers("cow")
+        self.assertTrue(os.path.isdir(os.path.dirname(self.flag)))
+        self.assertFalse(os.path.exists(self.flag))  # created, then removed once done
         rc, out, _ = self.main("status")
-        self.assertIn("migration not scheduled", out)
+        self.assertNotIn("with copy-on-write data", out)
+
+    def test_flag_not_written_leaves_the_folder_copy_on_write(self) -> None:
+        # The flag cannot be written (here its folder is a file): nothing is
+        # set, so the volumes folder still has no +C and the next boot sees
+        # the request again.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, False)
+        top = self.volume("cow")
+        before = tree(top)
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} keeps copy-on-write, the next boot tries again\n$",
+        )
+        self.assertEqual(self.fs.sets, [])  # no +C anywhere, the volumes folder included
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertEqual(tree(top), before)
+        self.assertEqual(self.fs.commands("cp"), [])
+        self.assertIsNone(self.read_attempts())
+        # The obstacle goes: the next boot schedules and migrates.
+        os.remove(os.path.dirname(self.flag))
+        rc, out, _ = self.main("migrate")
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+        self.assertTrue(self.fs.nocow(self.vols))
+
+    def test_folder_without_nocow_and_no_cow_data_needs_no_flag(self) -> None:
+        # Only folders and empty files: fixed in place, nothing scheduled, and
+        # no flag folder is created for it.
+        shutil.rmtree(os.path.dirname(self.flag))
+        self.fs.set(self.vols, False)
+        top = self.volume("empty", data={"a/b": b""})
+        rc, out = self.call(M.migrate)
+        self.assertEqual((rc, out), (0, ""))
+        self.assertTrue(self.fs.nocow(self.vols))
+        self.assert_all_nocow(top)
+        self.assertFalse(os.path.exists(os.path.dirname(self.flag)))
 
     def test_scheduled_with_nothing_left_to_copy(self) -> None:
         top = self.volume("empty", data={"a/b": b""})

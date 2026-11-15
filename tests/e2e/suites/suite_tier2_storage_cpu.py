@@ -48,7 +48,9 @@ top_level_opts() {
 # with E2E-NOCOW go to the CI log). Part 3 starts the unit and docker.service
 # through one target, so both jobs are in one transaction, as at boot when
 # multi-user.target pulls in both (`systemctl start A B` asks for each unit in
-# turn, so the order of the names could decide instead).
+# turn, so the order of the names could decide instead). Parts 4 and 5 move
+# /etc/btrfs-setup aside: Docker installed after install on such a machine,
+# and the recovery of a machine an older helper left unscheduled.
 NOCOW_MIGRATE_SCRIPT = r"""
 helper=/usr/local/sbin/docker-volumes-nocow
 vols=/var/lib/docker/volumes
@@ -61,12 +63,20 @@ target=/run/systemd/system/e2e-nocow-boot.target
 # be executed is skipped without a word (the real systemctl answers instead).
 wrap=/usr/local/libexec/e2e-nocow-wrap
 seen=/run/e2e-nocow-seen
+# Parts 4 and 5 need a machine without /etc/btrfs-setup: the real one waits here.
+saved=/etc/btrfs-setup.e2e-saved
 echo "E2E-NOCOW /run mount options: $(findmnt -no OPTIONS /run)"
 
 cleanup() {
     systemctl stop e2e-nocow-boot.target docker.service 2>/dev/null || true
-    rm -rf "$stub" "$dropin" "$target" "$wrap" "$seen" "$vols/e2e-cow" "$vols/e2e-cow2"
+    rm -rf "$stub" "$dropin" "$target" "$wrap" "$seen"
+    rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4"
     rm -f "$flag" "$attempts"
+    if [[ -d "$saved" ]]; then
+        rm -rf /etc/btrfs-setup
+        mv "$saved" /etc/btrfs-setup
+    fi
+    chattr +C "$vols" 2>/dev/null || true   # as install left it
     systemctl daemon-reload
 }
 trap cleanup EXIT
@@ -224,6 +234,54 @@ all_nocow "$d2"
 test ! -e "$flag"
 test ! -e "$attempts"
 journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 5 2>/dev/null | sed 's/^/E2E-NOCOW journal: /' || true
+systemctl stop e2e-nocow-boot.target docker.service
+
+# 4. Docker installed after `cst btrfs install`, on a machine without
+# /etc/btrfs-setup (install creates it only when it finds CoW data): the
+# volumes folder has no +C and holds a CoW volume. The unit, at that boot,
+# writes the flag (creating its folder) before it sets +C, and migrates.
+mv /etc/btrfs-setup "$saved"
+chattr -C "$vols"
+make_volume e2e-cow3
+d3="$vols/e2e-cow3/_data"
+before3="$(manifest "$d3")"
+ino3="$(stat -c %i "$d3")"
+systemctl start docker-volumes-nocow.service
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+journalctl -u docker-volumes-nocow.service -o cat --no-pager -n 3 2>/dev/null | sed 's/^/E2E-NOCOW part 4: /' || true
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]
+[[ "$(manifest "$d3")" == "$before3" ]]
+[[ "$(stat -c %i "$d3")" != "$ino3" ]]
+all_nocow "$d3"
+[[ "$(ls -A "$vols/e2e-cow3")" == _data ]]
+test -d /etc/btrfs-setup
+test ! -e "$flag"
+test ! -e "$attempts"
+
+# 5. A machine an older helper left behind in that case: the volumes folder
+# has +C, a volume still holds CoW data, and nothing is scheduled. Running
+# `cst btrfs install` again schedules it (mark finds the CoW data; install
+# creates /etc/btrfs-setup and the flag), and the next boot migrates it.
+rm -rf /etc/btrfs-setup
+make_volume e2e-cow4
+d4="$vols/e2e-cow4/_data"
+before4="$(manifest "$d4")"
+ino4="$(stat -c %i "$d4")"
+st="$("$helper" status)"
+printf '%s\n' "$st"
+grep -q 'with copy-on-write data (.*), migration not scheduled' <<<"$st"
+SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs install --no-below
+test -f "$flag"
+grep -q 'migration at the next boot' <<<"$("$helper" status)"
+systemctl start docker-volumes-nocow.service
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+[[ "$(manifest "$d4")" == "$before4" ]]
+[[ "$(stat -c %i "$d4")" != "$ino4" ]]
+all_nocow "$d4"
+[[ "$(ls -A "$vols/e2e-cow4")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after install on an affected machine"
 """
 
 
@@ -752,7 +810,8 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
 
     def test_05a_docker_volumes_nocow_migrate_postponed_and_boot_order(self):
         """docker-volumes-nocow migrate on loopback btrfs: postponed while docker.service is active; a CoW volume
-        rewritten NOCOW with the same data; and run when its unit and docker.service start in one transaction."""
+        rewritten NOCOW with the same data; run when its unit and docker.service start in one transaction; Docker
+        installed after install without /etc/btrfs-setup; and install re-scheduling an affected machine."""
         out = exec_bash(self.PRIV_CONTAINER, NOCOW_MIGRATE_SCRIPT).stdout
         for line in out.splitlines():
             if line.startswith("E2E-NOCOW"):

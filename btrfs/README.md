@@ -581,7 +581,18 @@ docker volume rm <name>         # or one volume by name
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,
   its volumes folder is also marked, and its volumes are migrated at that
-  boot.
+  boot. A volumes folder without `+C` is the only sign of those volumes, so
+  the service first writes the flag file (it creates `/etc/btrfs-setup` if
+  needed) and only then sets `+C`. If it cannot write the flag, it leaves the
+  folder without `+C` and logs why, so the next boot tries again.
+- Older copies of the helper set `+C` first. On a machine without
+  `/etc/btrfs-setup` (install creates it only when it finds copy-on-write
+  data; the snapshots setup creates it too), writing the flag then failed,
+  and the request was lost. Such a machine shows `migration not scheduled`
+  and stays that way. Run `cst btrfs install` once: its `mark` finds the
+  copy-on-write data, install creates the folder and the flag, and the next
+  boot migrates the volumes (the same `install` also puts the fixed helper in
+  place).
 
 Note: `cst cpu docker-slice install` also edits
 `/etc/docker/daemon.json` (it adds `cgroup-parent`, see
@@ -1702,7 +1713,9 @@ journalctl -u docker-volumes-nocow
 
 Common causes are low free space or a copy error. The volumes are still usable
 (copy-on-write). Fix the cause and run `install` again; the migration is then
-tried again at the next boot (two more attempts).
+tried again at the next boot (two more attempts). With no "gave up" line in the
+journal, an older helper may have lost the request (section 4.10): `install`
+schedules it again too.
 
 ### No desktop alerts arrive
 

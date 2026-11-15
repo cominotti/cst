@@ -232,6 +232,19 @@ def migrate_one(name, data):
     shutil.rmtree(old)
 
 
+def request_migration():
+    """Write the flag (and its folder, which install creates only when it
+    found CoW data). False, with a log line, when that fails."""
+    try:
+        os.makedirs(os.path.dirname(FLAG), exist_ok=True)
+        with open(FLAG, "a"):
+            pass
+    except OSError as e:
+        log(3, f"cannot schedule the migration ({e}); {VOLUMES} keeps copy-on-write, the next boot tries again")
+        return False
+    return True
+
+
 def migrate():
     if not os.path.isdir(VOLUMES):
         return 0
@@ -241,10 +254,14 @@ def migrate():
     recover()
     # Every boot: Docker may have been installed after btrfs-setup, creating
     # the volumes dir without +C; the volumes made in between are migrated too.
+    # The dir without +C is the only sign of those volumes, so the flag is
+    # written first: if that fails, the dir keeps no +C and the next boot sees
+    # the same sign again (setting +C first would lose the request for good).
     if not flags(VOLUMES) & NOCOW:
+        if pending() and not request_migration():
+            return 0
         set_nocow(VOLUMES, True)
-        if pending(fix=True):
-            open(FLAG, "a").close()
+        pending(fix=True)
     if not os.path.exists(FLAG):
         return 0
     os.makedirs(os.path.dirname(ATTEMPTS), exist_ok=True)
