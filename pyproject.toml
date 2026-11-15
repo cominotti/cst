@@ -48,6 +48,7 @@ extend-include = [
     "cpu/vm-pin",
     "doctor/cst-doctor",
     "swap/swap-status",
+    "tests/mutation/cst-mutation",
     "toolchains/cst-toolchains",
     "vm/cst-vm",
 ]
@@ -73,7 +74,7 @@ select = ["F", "B", "UP", "E9", "PLW1510"]
 # `ruff check --select ANN` in `invowk cmd test types`) is ignored everywhere
 # except the files in the braces; add a module here once it is fully typed
 # (and ty-clean, see [tool.ty.src] below).
-"!{swap/swap-status}" = ["ANN"]
+"!{swap/swap-status,tests/mutation/cst-mutation}" = ["ANN"]
 
 # ---- ty ---------------------------------------------------------------------
 
@@ -108,6 +109,10 @@ include = [
     "tests/e2e/__init__.py",
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
+    "tests/mutation/__init__.py",
+    "tests/mutation/cst-mutation",
+    "tests/mutation/tests/__init__.py",
+    "tests/mutation/tests/test_cst_mutation.py",
     "tests/repo_files.py",
     "tests/run_unit.py",
     "tests/test_python_files.py",

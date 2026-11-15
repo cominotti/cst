@@ -102,6 +102,31 @@ class UvDevTest(unittest.TestCase):
         self.assertEqual(via_link["venv"], direct["venv"])
         self.assertEqual(via_link["cwd"], os.path.realpath(REPO))
 
+    def test_group_option_adds_groups_to_dev(self):
+        self.fake_uv()
+        real = os.path.realpath(REPO)
+        head = ["run", "--locked", "--project", real, "--group", "dev"]
+        got = json.loads(self.run_uv_dev("--group", "mutation", "cosmic-ray", "--version").stdout)
+        self.assertEqual(got["argv"], [*head, "--group", "mutation", "cosmic-ray", "--version"])
+        got = json.loads(self.run_uv_dev("--group", "a", "--group", "b", "tool").stdout)
+        self.assertEqual(got["argv"], [*head, "--group", "a", "--group", "b", "tool"])
+
+    def test_group_after_the_tool_belongs_to_the_tool(self):
+        # Only leading --group options are uv-dev's; the tool's own arguments are left alone.
+        self.fake_uv()
+        real = os.path.realpath(REPO)
+        got = json.loads(self.run_uv_dev("tool", "--group", "x").stdout)
+        self.assertEqual(got["argv"], ["run", "--locked", "--project", real, "--group", "dev", "tool", "--group", "x"])
+
+    def test_group_without_a_name_is_a_usage_error(self):
+        self.fake_uv()
+        for args in (("--group",), ("--group", ""), ("--group", "--group", "x", "tool")):
+            with self.subTest(args=args):
+                r = self.run_uv_dev(*args)
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(r.stdout, "")  # uv never ran
+                self.assertIn("uv-dev: --group needs the name of a dependency group", r.stderr)
+
     def test_exit_code_of_the_tool_is_kept(self):
         self.fake_uv()
         self.assertEqual(self.run_uv_dev("ruff", "check", env={"FAKE_UV_RC": "1"}).returncode, 1)
