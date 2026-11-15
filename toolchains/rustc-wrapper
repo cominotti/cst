@@ -14,7 +14,16 @@
 #   - the compiler is not named rustc (kani-compiler, clippy-driver as
 #     RUSTC_WORKSPACE_WRAPPER, anything else);
 #   - CST_SCCACHE=0 (for one build: CST_SCCACHE=0 cargo build);
+#   - a local crate (a workspace member or a path dependency) when
+#     RUST_SCCACHE_WORKSPACE=no is written in below, or CST_SCCACHE_WORKSPACE=0
+#     is set (1 sends them through again). Cargo passes --cap-lints to every
+#     dependency from a registry or git (vendored ones too) and never to a
+#     path package, so "no --cap-lints" is a local crate. Their sccache keys
+#     hold the worktree's own paths, so other worktrees never hit them;
 #   - an incremental compile (-C incremental=...): sccache cannot cache it.
+#
+# Stable, for build scripts that rely on it: a first argument not named rustc
+# always runs directly (RUSTC_WORKSPACE_WRAPPER as a passthrough keeps working).
 #
 # Set only when unset (yours win): SCCACHE_DIR=~/.cache/sccache,
 # SCCACHE_CACHE_SIZE (RUST_SCCACHE_CACHE_SIZE, written in below),
@@ -25,18 +34,26 @@
 # $XDG_RUNTIME_DIR/cst-sccache-<toolbox name or host>.sock.
 
 cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
+workspace=yes # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
 
 case "${1##*/}" in
     rustc) ;;
     *) exec "$@" ;;
 esac
 [ "${CST_SCCACHE:-}" = 0 ] && exec "$@"
-command -v sccache >/dev/null 2>&1 || exec "$@"
+case "${CST_SCCACHE_WORKSPACE:-}" in
+    0) workspace=no ;;
+    1) workspace=yes ;;
+esac
+local_crate=yes
 for a in "$@"; do
     case "$a" in
         incremental=* | -Cincremental=*) exec "$@" ;;
+        --cap-lints | --cap-lints=*) local_crate=no ;;
     esac
 done
+[ "$workspace" = no ] && [ "$local_crate" = yes ] && exec "$@"
+command -v sccache >/dev/null 2>&1 || exec "$@"
 
 [ -n "${HOME:-}" ] || exec "$@"
 export SCCACHE_DIR="${SCCACHE_DIR:-${HOME}/.cache/sccache}"

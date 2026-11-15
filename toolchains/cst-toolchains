@@ -60,6 +60,9 @@ program (toolchains/toolchains.conf in CST), yours in
                              ~/.local/libexec/cst/rustc-wrapper and names it
                              as [build] rustc-wrapper (rustc through sccache)
   RUST_SCCACHE_CACHE_SIZE=25G  sccache's size cap for ~/.cache/sccache
+  RUST_SCCACHE_WORKSPACE=yes  no: local crates (workspace members, path
+                             dependencies) skip sccache; CST_SCCACHE_WORKSPACE=0
+                             or 1 sets it for one build
 Durations: a number with s, m, h, d or w. Sizes: a number with K, M, G or T
 (binary: G = GiB; "GiB", "GB" and "G" all mean 2^30 bytes); the unit is
 required (a bare 150 is an error, not 150 bytes). An unknown key or a bad
@@ -144,6 +147,7 @@ only the host sees the processes of every container. Exit status: 0 fine
 (also "nothing to do"), 1 refused or failed, 2 usage.
 """
 
+import dataclasses
 import fcntl
 import json
 import os
@@ -346,7 +350,7 @@ def parse_sccache_size(text):
 
 # Settings that belong to no prune target: {KEY: parser}.
 OPTIONS = {"RUST_LEAN_DEBUGINFO": parse_bool, "RUST_SCCACHE": parse_bool,
-           "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size}
+           "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size, "RUST_SCCACHE_WORKSPACE": parse_bool}
 
 
 def parse_off_or_duration(text):
@@ -2784,6 +2788,7 @@ SCCACHE_DEFAULT_SIZE = "25G"
 SCCACHE_HEAD = ("# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through "
                 "sccache (~/.cache/sccache).")
 SCCACHE_SIZE_LINE = re.compile(r"(?m)^cache_size=\S*(?= # cst: RUST_SCCACHE_CACHE_SIZE)")
+SCCACHE_WORKSPACE_LINE = re.compile(r"(?m)^workspace=\S*(?= # cst: RUST_SCCACHE_WORKSPACE)")
 SCCACHE_REBUILD = ("turning it on rebuilds nothing: the cache fills as crates are compiled anew "
                    "(a new worktree, cargo update, a new toolchain)")
 BUILD_HEADER = re.compile(rf"^{_WS}*\[{_WS}*build{_WS}*\]{_WS}*(?:#.*)?$", re.M)
@@ -2797,15 +2802,26 @@ def wrapper_path(home):
     return os.path.join(home, WRAPPER_REL)
 
 
-def wrapper_text(size):
-    """The wrapper as installed (the cache size written in), or None when its
+@dataclasses.dataclass(frozen=True)
+class WrapperValues:
+    """The settings `config apply` writes into the installed wrapper."""
+    size: str = SCCACHE_DEFAULT_SIZE
+    workspace: bool = True          # local crates through sccache too
+
+    def __str__(self):
+        return f"cache size {self.size}" + ("" if self.workspace else "; local crates straight to rustc")
+
+
+def wrapper_text(values):
+    """The wrapper as installed (the settings written in), or None when its
     source is not next to this program (the timer's copy has none)."""
     try:
         text = read_text(os.path.join(os.path.dirname(os.path.realpath(__file__)), WRAPPER_NAME))
     except OSError:
         return None
-    new, n = SCCACHE_SIZE_LINE.subn(f"cache_size={size}", text, count=1)
-    return new if n == 1 else None
+    text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", text, count=1)
+    text, m = SCCACHE_WORKSPACE_LINE.subn(f"workspace={'yes' if values.workspace else 'no'}", text, count=1)
+    return text if n == m == 1 else None
 
 
 def wrapper_state(home, text):
@@ -2821,8 +2837,11 @@ def wrapper_state(home, text):
     return st
 
 
-def sccache_size(settings):
-    return settings.options["RUST_SCCACHE_CACHE_SIZE"] if settings else SCCACHE_DEFAULT_SIZE
+def wrapper_values(settings):
+    """No settings (a bad settings file; only --sccache/--no-sccache counts then): the defaults."""
+    if not settings:
+        return WrapperValues()
+    return WrapperValues(settings.options["RUST_SCCACHE_CACHE_SIZE"], settings.options["RUST_SCCACHE_WORKSPACE"])
 
 
 def plain(data):
@@ -2919,17 +2938,17 @@ def sccache_wanted(settings, flag):
     return settings.options["RUST_SCCACHE"], "RUST_SCCACHE=" + ("yes" if settings.options["RUST_SCCACHE"] else "no")
 
 
-def wrapper_lines(home, verb, text, size):
+def wrapper_lines(home, verb, text, values):
     shown = tilde(wrapper_path(home), home)
     if text is None:
         return [("?", shown, f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
                              f"run {PROG} config apply from CST")]
     st = wrapper_state(home, text)
     if st == "ok":
-        return [("ok", shown, f"sccache wrapper up to date (cache size {size})")]
+        return [("ok", shown, f"sccache wrapper up to date ({values})")]
     if st == "conflict":
         return [("keep", shown, "not CST's file (or a symlink): left alone, so CST writes no rustc-wrapper line")]
-    return [("write", shown, f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; cache size {size})"
+    return [("write", shown, f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; {values})"
              + ("" if verb == "plan" else f" (fix: {PROG} config apply)"))]
 
 
@@ -2937,7 +2956,7 @@ def sccache_lines(home, verb, settings, flag):
     st = sccache_state(home)
     shown = tilde(st["path"], home)
     want, why = sccache_wanted(settings, flag)
-    size = sccache_size(settings)
+    values = wrapper_values(settings)
     off = (f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); "
            f"{SCCACHE_REBUILD}")
     if st["error"]:
@@ -2952,16 +2971,16 @@ def sccache_lines(home, verb, settings, flag):
             return [("BY HAND", shown, f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: "
                                        f"delete it yourself")]
         return [("keep", shown, f"sccache ({why}): {yours}")] if foreign else [("off", shown, "sccache: off")]
-    text = wrapper_text(size)
+    text = wrapper_text(values)
     if not want:
         if st["ours"]:
             out = [("on", shown, f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
                                  f"{PROG} config apply --no-sccache does)")]
-            return out + [ln for ln in wrapper_lines(home, verb, text, size) if ln[0] != "ok"]
+            return out + [ln for ln in wrapper_lines(home, verb, text, values) if ln[0] != "ok"]
         return [("off", shown, off + (f"; {yours}" if foreign else ""))]
     if foreign:
         return [("keep", shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
-    out = wrapper_lines(home, verb, text, size)
+    out = wrapper_lines(home, verb, text, values)
     if st["ours"]:
         out.append(("ok", shown, f"sccache: rustc-wrapper set ({why})"))
     elif st["add"]:
@@ -2987,9 +3006,9 @@ def write_cfg(path, text):
     return ""
 
 
-def install_wrapper(home, size):
+def install_wrapper(home, values):
     """0 when the wrapper is in place (written or unchanged), else 1."""
-    text = wrapper_text(size)
+    text = wrapper_text(values)
     path = wrapper_path(home)
     if text is None:
         say(f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {PROG} config apply from CST",
@@ -3007,7 +3026,7 @@ def install_wrapper(home, size):
     except OSError as e:
         say(f"{NAME}: cannot write {path}: {e.strerror or e}", 3, err=True)
         return 1
-    say(f"written:   {path} (sccache wrapper, cache size {size})")
+    say(f"written:   {path} (sccache wrapper, {values})")
     return 0
 
 
@@ -3036,13 +3055,13 @@ def sccache_apply(home, settings, flag):
     if not want:
         # The line is there (set earlier): keep its wrapper current, so cargo
         # never names a missing program.
-        return install_wrapper(home, sccache_size(settings)) if st["ours"] else 0
+        return install_wrapper(home, wrapper_values(settings)) if st["ours"] else 0
     if st["value"] is not None and not st["ours"]:
         say(f"NOTE: sccache: {path}: rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is "
             f"(sccache not set up)", 5, err=True)
         return 0
     # The wrapper first: the line must never name a missing program.
-    if install_wrapper(home, sccache_size(settings)):
+    if install_wrapper(home, wrapper_values(settings)):
         return 1
     if st["ours"]:
         say(f"kept:      {path} (rustc-wrapper already set)")

@@ -524,3 +524,132 @@ EOF
                 """,
                 check=False,
             )
+
+    def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self):
+        """The real rustc wrapper, installed by `cst toolchains config apply
+        --sccache`, under real cargo (offline: no network in the container), with
+        a fake sccache that logs each crate it is handed. A workspace member and
+        a path dependency get no --cap-lints from cargo; a git dependency (a
+        local file:// repository) and a vendored one (a [source] directory that
+        replaces crates.io) do, also under -vv (--cap-lints warn). What a fake
+        cannot prove: that this is cargo's real rule. CARGO_INCREMENTAL=0,
+        because cargo compiles local crates of a dev build incrementally, and
+        those skip sccache anyway. Also the setting's cycle: plan changes
+        nothing, apply writes it in, a second apply keeps it, a wrapper without
+        the setting (the previous version) is rewritten, --no-sccache undoes."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
+            rm -rf /home/tester/work/knob /home/tester/.config/cst/toolchains.conf /home/tester/.cargo/git
+            """,
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=/home/tester/work/knob
+            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            conf=/home/tester/.config/cst/toolchains.conf
+            rm -rf "$w" "$conf"
+            mkdir -p "$w/bin" "$w/pathdep/src" "$w/gitdep/src" "$w/ws/app/src" "$w/ws/.cargo" \
+                "$w/ws/vendor/vendep/src" /home/tester/.config/cst
+            # A fake sccache: log the crate name, then run the compiler.
+            printf '%s\n' '#!/bin/sh' 'prev=' 'for a in "$@"; do' \
+                '    [ "$prev" = --crate-name ] && echo "$a" >>"$SCCACHE_E2E_LOG"' '    prev=$a' 'done' \
+                'exec "$@"' >"$w/bin/sccache"
+            chmod 755 "$w/bin/sccache"
+            export PATH="$w/bin:$PATH"
+            [ "$(command -v sccache)" = "$w/bin/sccache" ]
+
+            pkg() { printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$1"; }
+            pkg pathdep >"$w/pathdep/Cargo.toml"
+            echo 'pub fn p() -> u32 { 1 }' >"$w/pathdep/src/lib.rs"
+            pkg gitdep >"$w/gitdep/Cargo.toml"
+            echo 'pub fn g() -> u32 { 2 }' >"$w/gitdep/src/lib.rs"
+            git -C "$w/gitdep" init -q
+            git -C "$w/gitdep" add -A
+            git -C "$w/gitdep" -c user.name=e2e -c user.email=e2e@e2e commit -q -m init
+            pkg vendep >"$w/ws/vendor/vendep/Cargo.toml"
+            echo 'pub fn v() -> u32 { 3 }' >"$w/ws/vendor/vendep/src/lib.rs"
+            echo '{"files":{},"package":null}' >"$w/ws/vendor/vendep/.cargo-checksum.json"
+            printf '[source.crates-io]\nreplace-with = "vendored"\n\n[source.vendored]\ndirectory = "vendor"\n' \
+                >"$w/ws/.cargo/config.toml"
+            printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' >"$w/ws/Cargo.toml"
+            { pkg app; printf '\n[dependencies]\npathdep = { path = "../../pathdep" }\n'
+              printf 'gitdep = { git = "file://%s/gitdep" }\nvendep = "0.1.0"\n' "$w"; } >"$w/ws/app/Cargo.toml"
+            echo 'pub fn all() -> u32 { pathdep::p() + gitdep::g() + vendep::v() }' >"$w/ws/app/src/lib.rs"
+
+            # expect LABEL WANTED [VAR=value...] CARGO-ARGS...: a build from scratch
+            # (its own target and build folders), then compare the crates sccache
+            # was handed (cargo's ___ probe left out) with WANTED.
+            expect() {
+                local label=$1 want=$2 got
+                shift 2
+                : >"$w/log-$label"
+                if ! (cd "$w/ws" && env SCCACHE_E2E_LOG="$w/log-$label" CARGO_INCREMENTAL=0 \
+                        CARGO_TARGET_DIR="$w/t-$label" CARGO_BUILD_BUILD_DIR="$w/b-$label" "$@" \
+                        >"$w/cargo-$label.out" 2>&1); then
+                    cat "$w/cargo-$label.out" >&2
+                    exit 1
+                fi
+                got=$({ grep -v '^___$' "$w/log-$label" || true; } | LC_ALL=C sort -u | tr '\n' ' ')
+                [ "$got" = "$want" ] || { echo "e2e: $label: sccache was handed '$got', expected '$want'" >&2; exit 1; }
+            }
+            all="app gitdep pathdep vendep "
+            deps="gitdep vendep "
+
+            # Default (RUST_SCCACHE_WORKSPACE=yes): every crate goes through sccache.
+            "$cst" toolchains config apply --sccache >/dev/null
+            grep -q '^workspace=yes # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
+            grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
+            expect default "$all" cargo build
+            # For one build: only the git and vendored dependencies.
+            expect env0 "$deps" CST_SCCACHE_WORKSPACE=0 cargo build
+
+            # The setting: plan shows the wrapper outdated and changes nothing.
+            printf 'RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=no\n' >"$conf"
+            cp "$wrapper" "$w/wrapper.before"
+            plan=$("$cst" toolchains config plan)
+            grep -q 'sccache wrapper (outdated; cache size 25G; local crates straight to rustc)' <<<"$plan"
+            cmp -s "$wrapper" "$w/wrapper.before"
+            "$cst" toolchains config apply >/dev/null
+            grep -q '^workspace=no # cst: RUST_SCCACHE_WORKSPACE' "$wrapper"
+            st=$("$cst" toolchains status)
+            grep -q 'sccache wrapper up to date (cache size 25G; local crates straight to rustc)' <<<"$st"
+            # A second apply changes nothing.
+            cp "$wrapper" "$w/wrapper.applied"
+            again=$("$cst" toolchains config apply)
+            grep -q "kept:      $wrapper (sccache wrapper)" <<<"$again"
+            cmp -s "$wrapper" "$w/wrapper.applied"
+
+            expect setting-no "$deps" cargo build
+            expect release "$deps" env -u CARGO_INCREMENTAL cargo build --release
+            # -vv: cargo passes --cap-lints warn instead of allow; dependencies still go through.
+            expect vv "$deps" cargo build -vv
+            grep -q -- '--cap-lints warn' "$w/cargo-vv.out"
+            if grep -q -- '--cap-lints allow' "$w/cargo-vv.out"; then exit 1; fi
+            # The one-build override wins over the written no.
+            expect env1 "$all" CST_SCCACHE_WORKSPACE=1 cargo build
+
+            # Upgrade: the previous version's wrapper had no workspace line.
+            sed -i '/^workspace=.*# cst: RUST_SCCACHE_WORKSPACE/d' "$wrapper"
+            if grep -q '^workspace=' "$wrapper"; then exit 1; fi
+            plan=$("$cst" toolchains config plan)
+            grep -q 'sccache wrapper (outdated; cache size 25G; local crates straight to rustc)' <<<"$plan"
+            "$cst" toolchains config apply >/dev/null
+            cmp -s "$wrapper" "$w/wrapper.applied"
+
+            # Undo: --no-sccache removes CST's rustc-wrapper line; cargo runs rustc directly.
+            rm -f "$conf"
+            "$cst" toolchains config apply --no-sccache >/dev/null
+            if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
+            expect undone "" cargo build
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

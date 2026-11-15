@@ -189,7 +189,7 @@ class DefaultsTest(Scratch):
                                "RUST_BUILD_ORPHANS": "yes", "RUST_BUILD_INCREMENTAL_IDLE": "6h",
                                "PYTHON_UV_ENABLED": "yes", "PYTHON_UV_INTERVAL": "1d",
                                "RUST_LEAN_DEBUGINFO": "no", "RUST_SCCACHE": "no",
-                               "RUST_SCCACHE_CACHE_SIZE": "25G"})
+                               "RUST_SCCACHE_CACHE_SIZE": "25G", "RUST_SCCACHE_WORKSPACE": "yes"})
 
     def test_every_target_is_documented(self):
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:

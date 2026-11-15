@@ -147,6 +147,7 @@ RUST_BUILD_MAX_TOTAL=200G
 | `RUST_LEAN_DEBUGINFO` | `no` | `yes`: `config apply` writes lean debug info for dev builds ([section 6](#lean-debug-info-opt-in)). Not a prune setting. |
 | `RUST_SCCACHE` | `no` | `yes`: `config apply` sets up sccache for rustc ([section 6](#sccache-opt-in)). `no` does not remove it; `config apply --no-sccache` does. Not a prune setting. |
 | `RUST_SCCACHE_CACHE_SIZE` | `25G` | The size cap of `~/.cache/sccache`. sccache itself deletes the least recently used entries above it. A whole number with `K`, `M`, `G` or `T`; `0` is an error. |
+| `RUST_SCCACHE_WORKSPACE` | `yes` | `no`: your own crates (workspace members and path dependencies) skip sccache; only dependencies from a registry or git go through it. Matters only for builds without incremental compilation. `CST_SCCACHE_WORKSPACE=0` or `1` sets it for one build ([section 6](#local-crates-rust_sccache_workspace)). |
 
 Every key is `<LANG>_<CACHE>_<SETTING>`. Durations take `s`, `m`, `h`, `d` or
 `w`. Sizes take `K`, `M`, `G` or `T` (`G`, `GB` and `GiB` all mean GiB), and
@@ -245,8 +246,9 @@ in `~/.config/cst/toolchains.conf` or with `cst toolchains config apply
 --sccache` once. `config apply` then:
 
 1. copies `toolchains/rustc-wrapper` to `~/.local/libexec/cst/rustc-wrapper`
-   (mode 0755, the cache size written in; rewritten when it differs, so do
-   not edit the copy), and only then
+   (mode 0755, `RUST_SCCACHE_CACHE_SIZE` and `RUST_SCCACHE_WORKSPACE`
+   written in; rewritten when it differs, so do not edit the copy), and only
+   then
 2. adds one key to the `[build]` table of `~/.cargo/config.toml`, after
    CST's `build-dir` line:
 
@@ -268,11 +270,20 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
 
 - **Only `rustc` goes through sccache.** Any other compiler runs directly:
   Kani's `kani-compiler`, `clippy-driver` (which `cargo clippy` runs for
-  your workspace members), anything else.
+  your workspace members), anything else. **This is a stable interface**,
+  whatever the settings: when the first argument is not named `rustc`, the
+  wrapper runs the call as it is. So a project can set
+  `RUSTC_WORKSPACE_WRAPPER` to a small passthrough script (cargo then runs
+  `rustc-wrapper <passthrough> rustc ...` for its workspace members) to keep
+  them out of sccache, and that keeps working. `RUST_SCCACHE_WORKSPACE=no`
+  (below) does the same for every project without such a script.
 - **No sccache on the PATH: rustc runs directly.** A toolbox without sccache
   builds as before; the wrapper never fails a build by itself.
 - **`CST_SCCACHE=0` skips sccache for one build**: `CST_SCCACHE=0 cargo
   build`.
+- **Local crates follow `RUST_SCCACHE_WORKSPACE`** (default `yes`: through
+  sccache); `CST_SCCACHE_WORKSPACE=0` or `1` overrides it for one build
+  ([below](#local-crates-rust_sccache_workspace)).
 - **One sccache server per environment.** The host and every toolbox share
   `$HOME` and the network, and sccache's client finds its server on
   `127.0.0.1:4226` by default: a server started in one toolbox would compile
@@ -326,6 +337,57 @@ What is cached and what is not (sccache's own limits):
   through the wrapper); registry dependencies are still compiled by `rustc`
   and go through sccache.
 
+#### Local crates (`RUST_SCCACHE_WORKSPACE`)
+
+Your own crates, the workspace members and path dependencies, rarely gain
+from sccache. Built without incremental compilation, their cache keys hold
+the worktree's own absolute paths, so another worktree never hits them. They
+only fill the cache, and push out entries of registry dependencies that
+every worktree would reuse. Mutation testing or agents that build many
+worktrees from scratch make this worse: every build of a local crate is a
+guaranteed miss.
+
+`RUST_SCCACHE_WORKSPACE=no` in `~/.config/cst/toolchains.conf` (then
+`cst toolchains config apply`) hands local crates straight to rustc. Only
+dependencies from a registry or git still go through sccache, in every Rust
+project that uses CST's wrapper.
+
+- **How the wrapper tells them apart.** Cargo passes `--cap-lints` (so that a
+  dependency's warnings never stop your build) to every package that is not
+  a path package, and never to a path package. Checked with cargo 1.96:
+  registry and git dependencies and vendored crates (a `[source]` directory
+  that replaces crates.io) get `--cap-lints allow`, or `--cap-lints warn`
+  under `cargo build -vv`; workspace members and path dependencies get none.
+  So a compile with any `--cap-lints` argument (`--cap-lints X` or
+  `--cap-lints=X`) is a dependency, and one without is a local crate. A
+  `--cap-lints` in your own `RUSTFLAGS` reaches every crate, so then every
+  crate counts as a dependency and goes through sccache, as without the
+  setting. If cargo ever passes a crate's arguments in a file (`@argfile`,
+  for a very long command line), the wrapper cannot see `--cap-lints`, and
+  with the setting `no` that crate is compiled directly: it only misses the
+  cache, the build still works.
+- **When it matters.** In a dev build cargo compiles local crates
+  incrementally, and incremental compiles never go through sccache anyway.
+  The setting changes something only for builds without incremental
+  compilation: `CARGO_INCREMENTAL=0`, `--release`, or a profile with
+  `incremental = false`.
+- **Why the default stays `yes`.** Within one worktree, switching branches
+  back and forth compiles a local crate again with the same path and the
+  same sources, and sccache does hit then. This rests on that reasoning, not
+  on a measurement. With many worktrees built from scratch, `no` is likely
+  the better choice.
+- **For one build:** `CST_SCCACHE_WORKSPACE=0 cargo build --release` keeps
+  local crates out, `CST_SCCACHE_WORKSPACE=1` sends them through, whatever
+  the setting says. Other values are ignored. `CST_SCCACHE=0` still wins
+  over both.
+- **A change takes effect with the next `config apply`** (which rewrites the
+  wrapper) and the next compile: the wrapper reads the setting on every
+  call, so no sccache server has to restart.
+- **Not done: sharing local crates across worktrees.** sccache could hit
+  them in other worktrees if the worktree's path were remapped out of the
+  cache key (`--remap-path-prefix` and support for it in sccache). CST does
+  not do this; it would need checks of what sccache supports.
+
 Things to know:
 
 - **Turning it on rebuilds nothing.** In a test with cargo 1.96 (dev and
@@ -361,8 +423,9 @@ Things to know:
   removes it.
 - **Update the timer copy before setting the keys.** The hourly timer runs a
   copy of the program in `~/.local/lib/cst/`. A copy older than this version
-  does not know `RUST_SCCACHE` and stops at the unknown key (nothing is
-  pruned) until `cst toolchains auto on` copies the new version.
+  does not know `RUST_SCCACHE` (or `RUST_SCCACHE_WORKSPACE`) and stops at the
+  unknown key (nothing is pruned) until `cst toolchains auto on` copies the
+  new version.
 
 ## 7. `rust:build`: old cargo build folders
 

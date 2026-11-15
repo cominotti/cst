@@ -23,6 +23,7 @@ import fcntl
 import hashlib
 import io
 import os
+import re
 import shutil
 import socket
 import stat
@@ -1012,11 +1013,101 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.cfg(), before)
 
     def test_missing_wrapper_source_blocks_the_line(self):
-        self.m.wrapper_text = lambda size: None
+        self.m.wrapper_text = lambda values: None
         before = self.cfg()
         rc, out = self.run_main("config", "apply", "--sccache")
         self.assertEqual(rc, 1, out)
         self.assertEqual(self.cfg(), before)
+
+    def test_wrapper_source_without_a_setting_line_is_not_installed(self):
+        # Each setting must have its line in the source; a source without one
+        # counts as missing, so no wrapper (and no rustc-wrapper line) is written.
+        real_read, source = self.m.read_text, self.m.read_text(WRAPPER)
+        for line in (r"cache_size=\S+ # cst: RUST_SCCACHE_CACHE_SIZE", r"workspace=\S+ # cst: RUST_SCCACHE_WORKSPACE"):
+            broken, n = re.subn(rf"(?m)^{line}.*\n", "", source)
+            self.assertEqual(n, 1, line)
+            self.m.read_text = lambda path, text=broken: (
+                text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path))
+            self.assertIsNone(self.m.wrapper_text(self.m.WrapperValues()), line)
+            before = self.cfg()
+            rc, out = self.run_main("config", "apply", "--sccache")
+            self.assertEqual(rc, 1, out)
+            self.assertEqual(self.cfg(), before)
+            self.assertFalse(os.path.lexists(self.wrapper), line)
+
+    def wrapper_file(self):
+        with open(self.wrapper) as f:
+            return f.read()
+
+    def test_workspace_setting_is_written_into_the_wrapper(self):
+        self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=no\n")
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache wrapper (missing; cache size 25G; local crates straight to rustc)", out)
+        self.assertFalse(os.path.lexists(self.wrapper))            # plan changes nothing
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("(sccache wrapper, cache size 25G; local crates straight to rustc)", out)
+        text = self.wrapper_file()
+        self.assertIn("\nworkspace=no # cst: RUST_SCCACHE_WORKSPACE", text)
+        self.assertNotIn("\nworkspace=yes # cst:", text)
+        self.assertIn("\ncache_size=25G # cst:", text)
+        self.assertEqual(stat_mode(os.stat(self.wrapper)), 0o755)
+        cfg = self.cfg()
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache wrapper up to date (cache size 25G; local crates straight to rustc)", out)
+        self.assertNotIn("Apply with", out)
+        # A second apply changes nothing.
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("kept:      %s (sccache wrapper)" % self.wrapper, out)
+        self.assertEqual((self.wrapper_file(), self.cfg()), (text, cfg))
+        # Back to yes: plan shows the wrapper outdated and changes nothing; apply rewrites it.
+        self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=yes\n")
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache wrapper (outdated; cache size 25G)", out)
+        self.assertIn("Apply with: cst toolchains config apply", out)
+        self.assertEqual((self.wrapper_file(), self.cfg()), (text, cfg))
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("\nworkspace=yes # cst: RUST_SCCACHE_WORKSPACE", self.wrapper_file())
+        self.assertEqual(self.cfg(), cfg)
+        # --no-sccache works as before: the line goes, the wrapper file stays.
+        rc, out = self.run_main("config", "apply", "--no-sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.wrapper_value())
+        self.assertTrue(os.path.isfile(self.wrapper))
+
+    def test_workspace_setting_is_checked(self):
+        self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=maybe\n")
+        rc, out = self.run_main("status")
+        self.assertIn("BAD SETTINGS: ~/.config/cst/toolchains.conf: RUST_SCCACHE_WORKSPACE: 'maybe' is not yes or no",
+                      out)
+        rc, out = self.run_main("config", "apply")
+        self.assertFalse(os.path.lexists(self.wrapper))            # bad settings: sccache treated as off
+
+    def test_upgrade_from_a_wrapper_without_the_workspace_setting(self):
+        # Settings written before the key existed: the default (yes) applies.
+        self.write_conf_raw("RUST_SCCACHE=yes\n")
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        new = self.wrapper_file()
+        self.assertIn("\nworkspace=yes # cst: RUST_SCCACHE_WORKSPACE", new)
+        # The wrapper the previous version installed had no workspace line.
+        old, n = re.subn(r"(?m)^workspace=.*# cst: RUST_SCCACHE_WORKSPACE .*\n", "", new)
+        self.assertEqual(n, 1)
+        with open(self.wrapper, "w") as f:
+            f.write(old)
+        cfg = self.cfg()
+        rc, out = self.run_main("config", "plan")
+        self.assertIn("sccache wrapper (outdated; cache size 25G)", out)
+        self.assertEqual(self.wrapper_file(), old)                 # plan changes nothing
+        rc, out = self.run_main("config", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:   %s (sccache wrapper, cache size 25G)" % self.wrapper, out)
+        self.assertEqual(self.wrapper_file(), new)
+        self.assertEqual(self.cfg(), cfg)
+        rc, out = self.run_main("status")
+        self.assertIn("sccache wrapper up to date (cache size 25G)", out)
 
     def test_sizes(self):
         p = self.m.parse_sccache_size
@@ -1129,6 +1220,18 @@ class RustcWrapperTest(unittest.TestCase):
         for tool in ("mkdir", "chmod"):
             os.symlink(shutil.which(tool), os.path.join(self.sys, tool))
         self.sh = shutil.which("sh")
+        self.script = WRAPPER
+
+    def written(self, workspace):
+        """Run a copy of the wrapper with RUST_SCCACHE_WORKSPACE=WORKSPACE written
+        in, as `config apply` writes it."""
+        with open(WRAPPER) as f:
+            text, n = re.subn(r"(?m)^workspace=yes(?= # cst: RUST_SCCACHE_WORKSPACE )",
+                              f"workspace={workspace}", f.read())
+        self.assertEqual(n, 1, "the wrapper has no workspace=yes line for config apply")
+        self.script = os.path.join(self.tmp, "rustc-wrapper")
+        with open(self.script, "w") as f:
+            f.write(text)
 
     @staticmethod
     def fake(path, body):
@@ -1142,7 +1245,8 @@ class RustcWrapperTest(unittest.TestCase):
         base.update(env)
         base = {k: v for k, v in base.items() if v is not None}
         open(self.log, "w").close()
-        r = subprocess.run([self.sh, WRAPPER, *args], env=base, capture_output=True, text=True)
+        r = subprocess.run([self.sh, self.script, *args], env=base, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.log) as f:
             return [dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
@@ -1218,6 +1322,53 @@ class RustcWrapperTest(unittest.TestCase):
         run = os.path.join(self.home, ".cache/sccache/run")
         self.assertEqual(calls[0]["uds"], os.path.join(run, "cst-sccache-host.sock"))
         self.assertEqual(stat_mode(os.stat(run)), 0o700)
+
+    LOCAL = ("--crate-name", "app", "--crate-type", "lib", "src/lib.rs")
+    DEPENDENCIES = (["--cap-lints", "allow"], ["--cap-lints", "warn"], ["--cap-lints=allow"])
+
+    def who(self, *args, **env):
+        return [c["who"] for c in self.run_wrapper(*args, **env)]
+
+    def test_workspace_no_runs_local_crates_directly(self):
+        # Cargo passes --cap-lints only to dependencies (registry, git,
+        # vendored; `warn` under -vv): those still go through sccache.
+        self.written("no")
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL), ["rustc"])
+        for dep in self.DEPENDENCIES:
+            calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", *dep, "src/lib.rs")
+            self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], dep)
+            self.assertEqual(calls[0]["args"], " ".join([self.rustc(), "--crate-name", "dep", *dep, "src/lib.rs"]))
+        # CST_SCCACHE=0 still skips sccache for everything.
+        self.assertEqual(self.who(self.rustc(), "--cap-lints", "allow", CST_SCCACHE="0"), ["rustc"])
+
+    def test_workspace_yes_sends_local_crates_through(self):
+        self.written("yes")
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL), ["sccache", "rustc"])
+
+    def test_one_build_overrides_the_written_setting(self):
+        # The written yes, CST_SCCACHE_WORKSPACE=0: local crates straight to rustc.
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL, CST_SCCACHE_WORKSPACE="0"), ["rustc"])
+        for dep in self.DEPENDENCIES:
+            self.assertEqual(self.who(self.rustc(), *dep, CST_SCCACHE_WORKSPACE="0"), ["sccache", "rustc"], dep)
+        # The written no, CST_SCCACHE_WORKSPACE=1: through sccache again.
+        self.written("no")
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL, CST_SCCACHE_WORKSPACE="1"), ["sccache", "rustc"])
+        # Only 0 and 1 count; any other value leaves the written setting.
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL, CST_SCCACHE_WORKSPACE="yes"), ["rustc"])
+        self.assertEqual(self.who(self.rustc(), *self.LOCAL, CST_SCCACHE_WORKSPACE=""), ["rustc"])
+
+    def test_passthrough_stays_with_the_knob(self):
+        # The stable interface: a first argument not named rustc runs directly,
+        # whatever the setting (a RUSTC_WORKSPACE_WRAPPER used as a passthrough).
+        passthrough = os.path.join(self.tools, "rustc-passthrough.sh")
+        self.fake(passthrough, 'echo "passthrough|args=$*" >>"%s"\nexec "$@"\n' % self.log)
+        for setting, env in (("yes", {}), ("no", {}), ("no", {"CST_SCCACHE_WORKSPACE": "1"})):
+            self.written(setting)
+            for extra in ([], ["--cap-lints", "allow"]):
+                self.assertEqual(self.who(passthrough, self.rustc(), *self.LOCAL, *extra, **env),
+                                 ["passthrough", "rustc"], (setting, env, extra))
+                self.assertEqual(self.who(os.path.join(self.tools, "clippy-driver"), self.rustc(), *extra, **env),
+                                 ["clippy-driver"], (setting, env, extra))
 
     def test_shell_lint(self):
         r = subprocess.run(["sh", "-n", WRAPPER], capture_output=True, text=True, stdin=subprocess.DEVNULL)
