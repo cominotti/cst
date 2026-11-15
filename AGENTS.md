@@ -84,7 +84,7 @@ before changing that module.
 | The libvirt VM: backups, virtual hardware, NOCOW folders | [vm/README.md](vm/README.md) |
 | `cst doctor` checks | [doctor/README.md](doctor/README.md) |
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
-| Python dev tools: uv, ruff, ty, pinned versions | [docs/dev-tools.md](docs/dev-tools.md) |
+| Python dev tools: uv, ruff, ty, pinned versions, mutation testing | [docs/dev-tools.md](docs/dev-tools.md) |
 
 ## Commands
 
@@ -98,14 +98,21 @@ invowk cmd test pylint                        # ruff check + ruff format --check
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
 invowk validate cst.invowkmod && invowk audit cst.invowkmod
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
+invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share  # optional (see below)
 ```
 
-- Before a pull request, run the first line and the third to sixth, and the
-  last when the change adds or touches a tier 1 E2E test (if its container
-  does not start, say so in the pull request).
+- Before a pull request, run the first line and the third to sixth, and
+  `test e2e tier1` when the change adds or touches a tier 1 E2E test (if its
+  container does not start, say so in the pull request).
+- `test mutation` is optional and slow, and neither `test all` nor CI runs
+  it. It changes a Python helper on purpose, one small change at a time, on
+  a throwaway copy inside a bubblewrap sandbox, and reports the changes no
+  test notices. It needs uv, `bwrap` and git, and refuses to run without
+  `bwrap`. See [docs/dev-tools.md](docs/dev-tools.md), "Mutation testing".
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
-  standard library, like the helpers. Only `test pylint` and `test types`
-  use uv, which installs the pinned ruff and ty from `uv.lock` into a
+  standard library, like the helpers. Only `test pylint`, `test types` and
+  `test mutation` use uv, which installs the pinned ruff and ty (and
+  cosmic-ray, for `test mutation`) from `uv.lock` into a
   virtual environment under `~/.cache`, never inside the checkout. Run a
   tool by hand with `tests/uv-dev`, for example `tests/uv-dev ruff check --fix`,
   or `tests/uv-dev ruff format` when the format check fails.

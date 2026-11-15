@@ -1,4 +1,4 @@
-# Developer tools for the Python code: uv, ruff, ty
+# Developer tools for the Python code: uv, ruff, ty, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -10,7 +10,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
 | [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations in the typed modules. Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
-| [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing (its own `mutation` group; CI does not install it) | `pyproject.toml`, `uv.lock` |
+| [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
 unchanged code. That is why it is pinned exactly and upgraded on purpose (see
@@ -24,6 +24,7 @@ invowk cmd test types         # ty check on the ty gate list, then ruff check --
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/swap-status
+tests/uv-dev --group mutation cosmic-ray --version   # --group NAME adds a group to "dev"
 ```
 
 You need `uv` on `PATH` (for example from Homebrew or
@@ -130,6 +131,135 @@ repository:
   `error-on-warning` is not `true`, and when a ty-gated file has a
   `ty: ignore` or `type: ignore` comment.
 
+## Mutation testing (optional)
+
+A green test suite says the tests pass; it does not say what they check.
+Mutation testing measures that. It makes one small change to a helper at a
+time (a `<` becomes `<=`, an `and` becomes `or`, a number changes, a `return`
+value goes away) and runs the helper's unit tests on each changed copy, a
+"mutant":
+
+- a test fails: the mutant is **killed**, the tests notice that change;
+- every test passes: the mutant **survived**. No test checks what that line
+  does. Some survivors are harmless ("equivalent" mutants, such as a change
+  in a message nobody tests, or one that cannot change the result); the
+  others point at a missing test.
+
+One kind of equivalent mutant is common in the typed helpers: cosmic-ray
+also changes the `|` of a type annotation (`den: float | None` becomes
+`den: float + None`). Python 3.14 and later does not evaluate a function's
+annotations when the function is defined or called (only when code reads
+them, as `typing.get_type_hints` does), so those mutants survive. In
+`survivors.txt` they are the `ReplaceBinaryOperator_BitOr_*` mutants on the
+lines of a `def` (in `share` of `swap/swap-status`, 22 of its 35
+mutants).
+
+Survivors are a report to read, not a gate: the task exits 0 when the run
+finishes, whatever the number of survivors. `test all` and CI do not run it.
+
+```
+invowk cmd test mutation swap/swap-status swap.tests.test_swap                     # lines changed since main
+invowk cmd test mutation swap/swap-status swap.tests.test_swap --base HEAD~3       # lines changed since a ref
+invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share,pct
+invowk cmd test mutation swap/swap-status swap.tests.test_swap --all               # the whole file (slow)
+```
+
+The first argument is the Python file to mutate, relative to the top of the
+checkout; the second is the unittest module that tests it. Only one of
+`--base`, `--functions` and `--all`. `--functions` takes def names: every def
+with that name counts, methods and nested defs too, with their decorators;
+a name with no def is an error. `--base` uses `git diff` against the working
+tree, so uncommitted changes count; a file git does not track yet has no
+diff (use `--all`). `--timeout SEC` (default 60) is the time one mutant's
+tests get before the mutant counts as killed. `--out DIR` chooses the output
+folder (new or empty, outside the checkout); by default it is a new folder
+under `${XDG_CACHE_HOME:-~/.cache}/cst-mutation/`.
+
+It needs uv, bubblewrap (`bwrap`, Fedora package `bubblewrap`) and git. It
+runs `tests/uv-dev --group mutation python3 -I -B tests/mutation/cst-mutation
+...`, which takes cosmic-ray from the `mutation` group of `pyproject.toml`.
+Only Python helpers (a `.py` file or a python shebang): there is no mutation
+tool for the bash scripts.
+
+**What a run does.** It never changes the checkout:
+
+1. It copies the checkout's files (what `git ls-files -co --exclude-standard`
+   lists, with their modes and symlinks; not `.git`) into a temporary folder.
+   cosmic-ray only mutates files named `*.py`, so the copy gets a
+   `HELPER.py` symlink to the helper, and the mutants are written through
+   it, into the copy.
+2. It writes `cosmic-ray.toml` into the output folder: the module, the
+   timeout, the test command (`python3 -B -m unittest TEST_MODULE`, the
+   system Python, like the unit tests) and the chosen lines.
+3. Inside the sandbox, one after the other: a check that `bwrap` can build
+   the sandbox here; `cosmic-ray baseline` (the tests on the unmutated copy);
+   `cosmic-ray init` (find every possible mutation); `cr-filter-lines` (drop
+   those outside the chosen lines); `cr-filter-pragma` (drop lines marked
+   `# pragma: no mutate`); `cosmic-ray exec` (run the tests on each mutant,
+   one at a time); `cr-report` twice.
+4. It prints the numbers and deletes the copy.
+
+The output folder keeps `survivors.txt` (each surviving mutant with its
+diff: start there), `report.txt` (every mutant), `counts.json` (the numbers),
+`session.sqlite` (cosmic-ray's session) and `cosmic-ray.toml`.
+
+Exit status: 0 when the run finished (with or without survivors, and when
+`--base` finds no changed lines: "nothing to mutate"); 1 when a step failed
+or some mutants could not run normally ("incompetent" or "not run" in the
+numbers); 2 for a usage error, a missing tool or a sandbox `bwrap` cannot
+build, and when the baseline fails. A failing baseline stops the run before
+anything is mutated: with tests that already fail, every mutant would count
+as killed.
+
+How long it takes: the tests run once per mutant, serially (there is no
+`--jobs`). A few minutes for the lines of a pull request or a few
+functions; tens of minutes for a whole helper.
+
+**The sandbox.** A mutant can flip exactly the check that keeps a helper
+away from the machine (`if dry_run:` becomes `if not dry_run:`), and some
+helpers delete or move files or talk to systemd, Docker or the host. So
+every cosmic-ray command runs inside bubblewrap, with this profile
+(`sandbox_argv` in `tests/mutation/cst-mutation`):
+
+- the whole system read-only (`--ro-bind / /`), a fresh `/dev` and `/proc`;
+- `/run`, `/tmp` and the home folders (`/var/home`; `/home` too where it is a
+  real folder, not a symlink) replaced by empty folders (tmpfs). That hides
+  every daemon socket: D-Bus, Docker, libvirt, journald, systemd and, in a
+  toolbox, the whole host under `/run/host`;
+- bound back in after those, so that they are not hidden: uv's virtual
+  environment and a folder of stubs, read-only; the copy and the output
+  folder, writable. Nothing else is writable;
+- no network (`--unshare-net`), its own process, IPC and session
+  namespaces, and it dies with its parent;
+- an empty environment (`--clearenv`) except: `HOME` and the `XDG_*_HOME`
+  folders inside the copy (`COPY/.home`), `XDG_RUNTIME_DIR=/tmp/run`,
+  `TMPDIR=/tmp`, `PYTHONDONTWRITEBYTECODE=1`, and `PATH` with the stubs
+  first, then `/usr/bin`;
+- the stubs: `sudo`, `flatpak-spawn`, `systemctl`, `docker`, `podman`,
+  `virsh`, `btrfs`, `restic` and `journalctl` fail with exit status 97 and
+  say that they are not available. A call by absolute path
+  (`/usr/bin/systemctl`) passes the stubs by, but finds no daemon to talk to,
+  since `/run` is empty.
+
+Without `bwrap` the task refuses to run (exit 2); there is no fallback
+without the sandbox.
+
+What the sandbox does **not** contain:
+
+- CPU and memory: a mutant can loop or allocate until its `--timeout`
+  ends it;
+- reading: everything outside `/run`, `/tmp` and the home folders can be
+  read (but not changed), such as `/etc`, `/usr` and `/proc`.
+
+The unit tests in `tests/mutation/tests/` check the profile option by
+option (the binds after the tmpfs mounts, only the copy and the output
+folder writable), the order of the steps with a fake `bwrap` and fake
+cosmic-ray tools, the exit statuses, and that the checkout is unchanged
+after a run. One test uses the real `bwrap` when it can build a sandbox
+(CI's container usually cannot, so it is skipped there): a second temporary
+folder stays empty, the copy is writable, and no Unix socket is visible
+under `/run`, `/tmp` or the home folders.
+
 ## Layout-only commits and `git blame`
 
 `.git-blame-ignore-revs` at the top of the repository lists the commits
@@ -158,6 +288,11 @@ One tool per pull request, so that new findings are clearly the new version's:
    version finds, or explain in the pull request why it is noise. A new ruff
    can also lay out code differently: when the format check fails, run
    `tests/uv-dev ruff format` and commit the result in the same pull request.
+4. For cosmic-ray, the gates above do not run it: run it for real, with
+   `invowk cmd test mutation swap/swap-status swap.tests.test_swap --all`,
+   and put its numbers (mutants, killed, timed out, survived, minutes) in the
+   pull request next to the previous version's. A new version can add or
+   change mutation operators; read the new survivors.
 
 For uv itself, change `version` and `checksum` of the `Setup uv` step in
 `.github/workflows/ci.yml` together. The checksum is the content of

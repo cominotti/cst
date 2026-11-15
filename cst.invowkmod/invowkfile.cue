@@ -91,6 +91,43 @@ cmds: [
 		}]
 	},
 	{
+		// Optional and slow: `test all` and CI do not run it. See docs/dev-tools.md, "Mutation testing".
+		name:        "test mutation"
+		category:    "test"
+		description: "Mutation-test one Python helper with cosmic-ray, on a throwaway copy, inside a bubblewrap sandbox (tests/mutation/cst-mutation, through uv)"
+		args: [
+			{name: "helper", description: "The Python file to mutate, relative to the top of the checkout, e.g. swap/swap-status", required: true},
+			{name: "test_module", description: "The unittest module that tests it, e.g. swap.tests.test_swap", required: true},
+		]
+		flags: [
+			{name: "base", description: "Mutate the lines changed since this git ref (what happens without --all or --functions, with main)"},
+			{name: "all", type: "bool", default_value: "false", description: "Mutate the whole file"},
+			{name: "functions", description: "Mutate only these functions: comma-separated def names (methods and nested defs count)"},
+			{name: "out", description: "A new or empty folder for the session and the reports (default: a new folder under ~/.cache/cst-mutation/)"},
+			{name: "timeout", type: "int", default_value: "60", description: "Seconds per mutant before it counts as killed"},
+		]
+		depends_on: {
+			tools: [
+				{alternatives: ["uv"]},
+				{alternatives: ["bwrap"]},
+				{alternatives: ["git"]},
+			]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=("${INVOWK_ARG_HELPER}" "${INVOWK_ARG_TEST_MODULE}" --timeout "${INVOWK_FLAG_TIMEOUT:-60}")
+				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && args+=(--base "${INVOWK_FLAG_BASE}")
+				[[ "${INVOWK_FLAG_ALL:-false}" == "true" ]] && args+=(--all)
+				[[ -n "${INVOWK_FLAG_FUNCTIONS:-}" ]] && args+=(--functions "${INVOWK_FLAG_FUNCTIONS}")
+				[[ -n "${INVOWK_FLAG_OUT:-}" ]] && args+=(--out "${INVOWK_FLAG_OUT}")
+				exec tests/uv-dev --group mutation python3 -I -B tests/mutation/cst-mutation "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "test e2e tier1"
 		category:    "test"
 		description: "Run Docker Layer 1 E2E suite (systemd PID 1, toolchains, bluetooth/wp, restic+SFTP, alerts, doctor)"
