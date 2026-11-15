@@ -228,7 +228,8 @@ def daemon_volumes(proc, args):
     can open: its --data-root, else data-root in its config file
     (--config-file, default /etc/docker/daemon.json), else /var/lib/docker.
     Paths are read in the daemon's own view, through /proc/PID/root (its
-    mount namespace) and /proc/PID/cwd (a relative path)."""
+    mount namespace) and /proc/PID/cwd (a relative path). An absolute
+    symlink on that path is still followed from our own root."""
 
     def inside(path):
         if path.startswith("/"):

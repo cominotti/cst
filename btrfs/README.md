@@ -587,7 +587,9 @@ docker volume rm <name>         # or one volume by name
   volumes folder by device and inode. So a rootless Docker or a Docker inside
   a container, which keep their data elsewhere, do not count; a container
   that bind-mounts this data root does. A daemon whose data folder cannot be
-  read counts too.
+  read counts too. One limit: an absolute symbolic link on a containerised
+  daemon's data path is followed from this machine's `/`, not the
+  container's, so that one case can be judged wrongly.
 - A postponed boot sends no alert, so it is recorded instead, when there was
   work to do (a scheduled migration, or a volumes folder without `+C`):
   `/var/lib/docker-volumes-nocow/postponed` keeps the latest reason, the time
