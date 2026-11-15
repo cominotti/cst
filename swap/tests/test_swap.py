@@ -63,6 +63,10 @@ def load_status():
     return mod
 
 
+# 1023 KiB of RAM: 20 % of it, and 85 % of that, do not divide evenly.
+ODD_RAM = 1023 * 1024
+
+
 class StatusMathTest(unittest.TestCase):
     def setUp(self):
         self.m = load_status()
@@ -131,6 +135,123 @@ class StatusMathTest(unittest.TestCase):
         self.assertAlmostEqual(r["written_back"], 0.5)
         self.assertAlmostEqual(r["read_back"], 0.2)
         self.assertIsNone(self.m.cgroup_row({}, None)["read_back"])
+
+    def test_summary_full_result_and_types(self):
+        # Sizes are whole bytes (int, rounded down), shares are float.
+        s = self.m.zswap_summary(
+            {"MemTotal": ODD_RAM, "Zswap": 41902, "Zswapped": 146657},
+            {"zswpout": 800, "zswpin": 200, "zswpwb": 300, "pswpout": 500, "pswpin": 125},
+            {"max_pool_percent": "20", "accept_threshold_percent": "85"},
+        )
+        self.assertEqual(
+            s,
+            {
+                "pool": 41902,
+                "stored": 146657,
+                "limit": 209510,  # 209510.4
+                "pool_of_limit": 0.2,
+                "accept_below": 178083,  # 178083.5
+                "ratio": 3.5,
+                "zswpout": 800,
+                "zswpin": 200,
+                "zswpwb": 300,
+                "pswpout": 500,
+                "pswpin": 125,
+                "loaded_back": 0.25,
+                "written_back": 0.375,
+                "bypassed": 200,
+                "read_back": 0.25,
+            },
+        )
+        for key, kind in (("limit", int), ("accept_below", int), ("ratio", float), ("pool_of_limit", float)):
+            self.assertIs(type(s[key]), kind, key)
+
+    def test_summary_empty_pool_and_missing_stored(self):
+        # None where the divisor is 0 or a value is missing (ZswapSummary).
+        params = {"max_pool_percent": "20"}
+        s = self.m.zswap_summary({"MemTotal": ODD_RAM, "Zswap": 0, "Zswapped": 0}, {}, params)
+        self.assertEqual((s["pool"], s["stored"], s["limit"]), (0, 0, 209510))
+        self.assertEqual(s["pool_of_limit"], 0.0)
+        self.assertIs(type(s["pool_of_limit"]), float)
+        self.assertIsNone(s["ratio"])
+        s = self.m.zswap_summary({"MemTotal": ODD_RAM, "Zswap": 41902}, {}, params)
+        self.assertIsNone(s["stored"])
+        self.assertIsNone(s["ratio"])
+        self.assertEqual(s["pool_of_limit"], 0.2)
+
+    def test_summary_bypassed_is_never_negative(self):
+        # bypassed = pswpout - zswpwb, at least 0 (ZswapSummary).
+        s = self.m.zswap_summary({}, {"zswpout": 20, "zswpwb": 12, "pswpout": 10}, {})
+        self.assertEqual(s["bypassed"], 0)
+        self.assertEqual(s["written_back"], 0.6)
+
+    def test_summary_missing_keys(self):
+        """Pins current behaviour: a counter missing from vmstat reads as 0, and a
+        missing MemTotal gives a limit of 0 bytes, not None (neither the
+        docstrings nor swap/README.md say what a missing key means)."""
+        self.assertEqual(
+            self.m.zswap_summary({}, {}, {}),
+            {
+                "pool": None,
+                "stored": None,
+                "limit": None,
+                "pool_of_limit": None,
+                "accept_below": None,
+                "ratio": None,
+                "zswpout": 0,
+                "zswpin": 0,
+                "zswpwb": 0,
+                "pswpout": 0,
+                "pswpin": 0,
+                "loaded_back": None,
+                "written_back": None,
+                "bypassed": 0,
+                "read_back": None,
+            },
+        )
+        # 100 %: a MemTotal that defaulted to anything but 0 would show in the limit.
+        s = self.m.zswap_summary({}, {}, {"max_pool_percent": "100", "accept_threshold_percent": "90"})
+        self.assertEqual((s["limit"], s["accept_below"], s["pool_of_limit"]), (0, 0, None))
+
+    def test_cgroup_row_full_result_and_types(self):
+        page = self.m.PAGE
+        r = self.m.cgroup_row(
+            {"zswpout": 8, "zswpwb": 3, "pswpout": 4, "pswpin": 1, "zswap": 1000, "zswapped": 3000}, 5000
+        )
+        self.assertEqual(
+            r,
+            {
+                "swap": 5000,
+                "zswap": 1000,
+                "zswapped": 3000,
+                "zswpout": 8 * page,
+                "zswpwb": 3 * page,
+                "pswpin": 1 * page,
+                "written_back": 0.375,
+                "read_back": 0.25,
+            },
+        )
+        for key in ("zswpout", "zswpwb", "pswpin"):
+            self.assertIs(type(r[key]), int, key)
+
+    def test_cgroup_row_missing_keys(self):
+        """Pins current behaviour: a counter missing from memory.stat reads as 0,
+        a missing size as None (the docstring does not say)."""
+        self.assertEqual(
+            self.m.cgroup_row({}, None),
+            {
+                "swap": None,
+                "zswap": None,
+                "zswapped": None,
+                "zswpout": 0,
+                "zswpwb": 0,
+                "pswpin": 0,
+                "written_back": None,
+                "read_back": None,
+            },
+        )
+        # pswpout alone: nothing was read back, a share of 0, not None.
+        self.assertEqual(self.m.cgroup_row({"pswpout": 4}, None)["read_back"], 0.0)
 
     def test_desired_files(self):
         with open(self.m.TMPFILES) as f:
