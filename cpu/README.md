@@ -205,6 +205,7 @@ cst cpu help
 | `experiment list\|on NAME\|off NAME` | needs sudo | Runtime-only memory settings for A/B tests. |
 | `watch -l LABEL [...]` | your user | Record game wait, memory stalls, frequencies. |
 | `report [RUN...]` | your user | Compare recorded runs. |
+| `quiet [--for S] [--wait MAX] [--json] [...]` | your user | Is the machine quiet enough for a benchmark? Exit 0 if yes (11.1). |
 | `help` | anyone | Show the help text. |
 
 Rules:
@@ -217,8 +218,8 @@ Rules:
   Later commands find your user in the settings file (`TARGET_USER`).
 - "needs sudo" commands must run **on the host**. Inside a toolbox they stop
   with: `'<command>' must run on the host, not inside a toolbox/container.`
-- `watch` and `report` work on the host and inside a toolbox. Inside a toolbox
-  they run on the host through `flatpak-spawn --host`.
+- `watch`, `report` and `quiet` work on the host and inside a toolbox. Inside
+  a toolbox they run on the host through `flatpak-spawn --host`.
 
 ---
 
@@ -1073,6 +1074,136 @@ cst cpu watch -l profile-build --game dota2 --seconds 300 --mangohud ~/mangohud-
 cst cpu game off
 cst cpu report     # check the 'profile on/off' column of each run
 ```
+
+### 11.1 Is the machine quiet? (`quiet`)
+
+A before/after figure (a benchmark, the disk writes of a build) is only fair
+when nothing else uses the machine at the same time. `quiet` tells you if the
+machine is quiet now, or waits until it is. It only reads: it writes no file
+and leaves nothing running in the background. "Announcing" a quiet window
+simply means that the command returns.
+
+`cst cpu quiet` runs the copy in this folder (`cpu/cpu-watch`), so it works
+at once. The installed `/usr/local/bin/cpu-watch` only has `quiet` after the
+next `cst cpu install`.
+
+```bash
+cst cpu quiet [--for SECONDS] [--wait MAX] [--json]
+              [--cpu PCT] [--cpu-pressure PCT] [--io-pressure PCT]
+              [--memory-pressure PCT] [--write-mbps MB]
+
+# Wait up to 2 hours for 2 quiet minutes, then start the benchmark:
+cst cpu quiet --wait 2h --for 120 && make bench
+```
+
+It takes one reading per second for `SECONDS` seconds in a row (default 60).
+The window is quiet when **all** of these hold:
+
+| Test | Read from | Quiet when | Flag | Environment variable |
+|------|-----------|------------|------|----------------------|
+| CPU busy | `/proc/stat` (all CPUs) | the window's mean is below 10 % | `--cpu` | `QUIET_CPU_PCT` |
+| CPU pressure | `/proc/pressure/cpu` (`some avg10`) | the mean of each second's value is below 5 % | `--cpu-pressure` | `QUIET_CPU_PSI` |
+| IO pressure | `/proc/pressure/io` (`some avg10`) | the same, below 5 % | `--io-pressure` | `QUIET_IO_PSI` |
+| memory pressure | `/proc/pressure/memory` (`some avg10`) | the same, below 1 % | `--memory-pressure` | `QUIET_MEMORY_PSI` |
+| disk writes | `/proc/vmstat` (`pgpgout`) | the window's mean is below 10 MB/s | `--write-mbps` | `QUIET_WRITE_MBPS` |
+| game profile | `/run/cpu-setup/game.state` | off in every reading | - | - |
+
+- **Means, not peaks.** On an idle machine, a btrfs commit or the hourly
+  snapshot writes up to 87 MB/s for a few seconds, and a desktop app can use
+  a few CPUs for a moment. A mean over the window lets such short bursts
+  through; a build or a copy that lasts does not get through.
+- **CPU busy** is the share of CPU time that was not idle. Time waiting for
+  a disk (`iowait`) counts as idle. The VM's CPU time (`guest`) is counted
+  once: the kernel already includes it in `user`.
+- **Disk writes**: `pgpgout` counts the KiB the kernel sends to the devices
+  under the filesystem, once per device. On a btrfs RAID1 like this
+  machine's, every write goes to both mirrors and is counted twice: 10 MB/s
+  here is about 5 MB/s of data. `below`'s "Page Out" shows half of this
+  value (checked over one minute: 293 MiB/s from `pgpgout`, 150 MB/s in
+  `below`), so the baseline below is given in this tool's unit, twice
+  `below`'s figures. Here 1 MB = 1024 KiB. Not `/proc/diskstats`: added up over all
+  devices, it counts each write again for every layer (dm-crypt, the
+  partition and the disk).
+- **Pressure** (PSI, see section 11): the share of the last 10 seconds in
+  which at least one task waited for a CPU, for the disks, or for memory.
+- A limit given as a flag wins over its environment variable, and the
+  variable wins over the default. Inside a toolbox, `quiet` runs on the host
+  (`flatpak-spawn --host`), so it reads the host's files and sees the game
+  profile. `flatpak-spawn` does not pass the environment on, so `cst cpu`
+  hands the `QUIET_*` variables that are set over by itself.
+
+The output has one line per test, with its value beside its limit, then the
+verdict and the window's start and end time (an illustrative run):
+
+```
+  CPU busy         3.08 %       limit < 10 %      ok
+  CPU pressure     0.31 %       limit < 5 %       ok
+  IO pressure      1.42 %       limit < 5 %       ok
+  memory pressure  0.00 %       limit < 1 %       ok
+  disk writes      5.02 MB/s    limit < 10 MB/s   ok
+  game profile     off          limit off         ok
+quiet (60 s, 2026-11-15 04:46:00 to 2026-11-15 04:47:00)
+```
+
+When a test fails, its line ends in `FAIL`, and the last line names it:
+`NOT quiet: CPU busy, disk writes (60 s, ...)`.
+
+- **Exit code**: 0 quiet; 1 not quiet, or `--wait` ran out; 2 usage error (an
+  unknown flag, a value that is not a number above 0, `--wait` shorter than
+  `--for`); 130 after Ctrl-C.
+- `--wait MAX` (`120`, `90s`, `30m`, `2h`; the whole time, at least
+  `--for`): when a window is not quiet, the oldest second drops out and the
+  next one is added, until the window is quiet or `MAX` has passed. Only the
+  last window is printed (on standard output; a "waiting up to ..." line goes
+  to standard error).
+- A file that cannot be read or parsed (for example `/proc/pressure/*` on a
+  kernel booted with `psi=0`) fails its test, with the reason in the line;
+  the other tests are still measured. `--wait` then stops after the first
+  window: waiting longer cannot fix it.
+- `--json` prints one JSON object instead: `quiet`, `seconds`, `start`,
+  `end`, `waited_s`, `tests` (each with `name`, `label`, `unit`, `limit`,
+  `value`, `ok`, `error`) and `failed` (the names of the failed tests).
+
+**Why these defaults.** They come from this machine: a `below` recording of
+3 days (51,839 samples, one every 5 seconds), and `btrfs-stall-report` over
+the quietest part of it. The CPU and write limits pass the machine's quiet
+hours with room to spare, and a build or a long copy goes above them. The
+pressure limits are reasoned from the quietest window (see below).
+
+- CPU busy: median 3.0 %, 25th percentile 2.2 %, 90th percentile 21.8 %. The
+  quietest 10-minute windows have a mean of 2.4 % and peaks of 5.0 to 5.2 %.
+  A limit of 10 % on the mean leaves room above them. There is no limit per
+  second: the recording has one sample every 5 seconds, so a per-second value
+  has nothing to be checked against.
+- Disk writes, in this tool's unit (twice `below`'s "Page Out"): median
+  3.2 MB/s. Over all 3,218 10-minute windows with a CPU mean below 5 %, the
+  window's mean is 4.4 MB/s (10th percentile), 5.1 MB/s (median) and
+  7.2 MB/s (90th percentile). The quietest window (2026-11-12 04:37-04:47)
+  has 5.0 MB/s. Hence 10 MB/s: above the quiet windows, far below a build or
+  a copy (hundreds of MB/s). Single samples in quiet windows reach 170 MB/s
+  (a btrfs commit, the hourly snapshot), which is why the limit is on the
+  mean.
+- Pressure, in that quietest window: IO 1.4 % on average (10-second peak
+  2 %), memory 0.0 %, CPU 0.3 %. From 03:00 to 07:00 the averages are the
+  same, with IO peaks of 8 % over 10 seconds. Hence IO below 5 %, memory below
+  1 % and CPU below 5 %. There is no longer pressure history to check them
+  against, so these three are reasoned defaults.
+- On another machine, take your own idle reading at a quiet hour
+  (`cst cpu quiet --for 600 --json`) and set the limits with the flags or the
+  `QUIET_*` variables.
+
+**What it cannot tell you.**
+
+- Quiet before a run does not mean quiet during it: a timer (the hourly
+  snapshot, a backup, the toolchains prune) can start in the middle of your
+  benchmark. Afterwards, check that nothing else ran:
+  `btrfs-stall-report --since '<start>' --until '<end>'` lists `below`'s top
+  writers and readers for the run
+  ([../btrfs/README.md, section 7](../btrfs/README.md#7-report-was-storage-the-bottleneck)).
+  Only your benchmark should be there.
+- It sees the VM only through the host's CPU and disk figures. For a figure
+  measured on the host, that is what counts.
+- The first reading's `avg10` still covers up to 10 seconds before the window.
 
 ---
 

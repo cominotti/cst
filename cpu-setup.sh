@@ -57,9 +57,16 @@
 #   watch -l LABEL [--game NAME] [--seconds N] [--mangohud DIR] [-- CMD]
 #                          (user) record game wait/memory stalls/frequencies
 #   report [RUN...]        (user) compare recorded runs
+#   quiet [--for SECONDS] [--wait MAX] [--json] [--cpu PCT] [--cpu-pressure PCT]
+#         [--io-pressure PCT] [--memory-pressure PCT] [--write-mbps MB]
+#                          (user) is the machine quiet enough for a benchmark?
+#                          exit 0 quiet, 1 not (each test with its value and
+#                          limit); --wait 2h waits for a quiet window:
+#                          `cst cpu quiet --wait 2h && make bench`
 #   help
 #
-# Root commands must run on the host, not inside toolbox; watch/report work in both.
+# Root commands must run on the host, not inside toolbox; watch/report/quiet
+# work in both (inside a toolbox they run on the host).
 
 set -Eeuo pipefail
 
@@ -115,9 +122,15 @@ orig_args=("${cmd}" "$@")
 
 case "${cmd}" in
     help|-h|--help) usage; exit 0 ;;
-    watch|report)
+    watch|report|quiet)
         if in_container; then
-            exec flatpak-spawn --host python3 -I "${SRC}/cpu-watch" "${cmd}" "$@"
+            # flatpak-spawn --host does not pass the environment on: hand over
+            # quiet's limits (QUIET_*) that are set.
+            fwd=()
+            for v in QUIET_CPU_PCT QUIET_CPU_PSI QUIET_IO_PSI QUIET_MEMORY_PSI QUIET_WRITE_MBPS; do
+                if [[ -n "${!v+set}" ]]; then fwd+=("--env=${v}=${!v}"); fi
+            done
+            exec flatpak-spawn --host "${fwd[@]}" python3 -I "${SRC}/cpu-watch" "${cmd}" "$@"
         fi
         exec python3 -I "${SRC}/cpu-watch" "${cmd}" "$@"
         ;;

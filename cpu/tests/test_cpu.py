@@ -1,5 +1,6 @@
 """Unit tests for the cpu module: vm-pin XML rewriting, cpu-watch frame-time
-and run-summary helpers, game-profile CPU range expansion, on/off, drift
+and run-summary helpers, cpu-watch quiet (fake /proc files and clock) and its
+dispatch from cpu-setup.sh (host and toolbox), game-profile CPU range expansion, on/off, drift
 repair and drift report (with a fake systemd), the boxes of the user manager
 it makes idle and its MemoryLow drop-ins (with a fake cgroup tree), the
 baseline drop-in name and its migration, and cpu-setup.sh CLI.
@@ -12,6 +13,7 @@ import csv
 import difflib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
@@ -187,6 +190,23 @@ class CpuWatchTest(unittest.TestCase):
     def setUp(self):
         self.m = load_module("cpu_watch", CPU_WATCH)
 
+    def test_pressure_fields_watch_and_quiet_read(self):
+        # One parser of the pressure line format: watch's totals and quiet's avg10.
+        text = ("some avg10=1.25 avg60=0.50 avg300=0.10 total=123456\n"
+                "full avg10=0.75 avg60=0.00 avg300=0.00 total=789\n")
+        f = self.m.pressure_field
+        self.assertEqual((f(text, "some", "avg10"), f(text, "full", "avg10")), ("1.25", "0.75"))
+        self.assertEqual((f(text, "some", "total"), f(text, "full", "total")), ("123456", "789"))
+        self.assertIsNone(f("some avg10=x avg60=0.00 total=1\n", "some", "avg10"))
+        self.assertIsNone(f(text, "some", "avg6"))            # a whole key, not a prefix
+        self.assertIsNone(f("some avg10=1.00 total=1\n", "full", "total"))
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu.pressure")
+            with open(p, "w") as fh:
+                fh.write(text)
+            self.assertEqual((self.m.pressure_total(p, "some"), self.m.pressure_total(p, "full")), (123456, 789))
+            self.assertIsNone(self.m.pressure_total(os.path.join(tmp, "missing"), "some"))
+
     def test_frametimes_and_lows(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "mangohud.csv")
@@ -235,6 +255,344 @@ class CpuWatchTest(unittest.TestCase):
             s_nogame = self.m.summarize(run)
             self.assertIn("no game found", s_nogame)
             self.assertIn("profile off", s_nogame)
+
+
+class FakeProc:
+    """A fake /proc with the files `cpu-watch quiet` reads, advanced one second
+    at a time: CPU busy share, MB written, each pressure's avg10, game profile."""
+
+    HZ_CPUS = 2400          # jiffies per second over all CPUs (100 Hz x 24)
+    IDLE = {"cpu": 3.0, "writes": 2.5, "cpu-pressure": 0.3, "io-pressure": 1.4, "memory-pressure": 0.0,
+            "game": False}
+
+    def __init__(self, root):
+        self.root = root
+        self.game_state = os.path.join(root, "run", "game.state")
+        os.makedirs(os.path.join(root, "pressure"))
+        os.makedirs(os.path.dirname(self.game_state))
+        self.jiffies = [5000, 100, 2000, 900000, 3000, 50, 40, 0]   # user..steal
+        self.guest = 4000
+        self.kib = 7_000_000
+        self.set(self.IDLE)
+
+    def set(self, sec):
+        """Write the files as they read after a second like `sec`."""
+        busy = round(self.HZ_CPUS * sec["cpu"] / 100)
+        self.jiffies[0] += busy                       # user, which counts guest too
+        self.guest += busy                            # the VM: in user, and again in guest
+        idle = self.HZ_CPUS - busy
+        self.jiffies[3] += idle - idle // 4
+        self.jiffies[4] += idle // 4                  # iowait: idle CPUs, waiting on a disk
+        self.kib += round(sec["writes"] * 1024)
+        with open(os.path.join(self.root, "stat"), "w") as f:
+            f.write("cpu  " + " ".join(map(str, self.jiffies)) + f" {self.guest} 0\ncpu0 1 2 3 4 5 6 7 8 0 0\n")
+        with open(os.path.join(self.root, "vmstat"), "w") as f:
+            f.write(f"pgpgin 123\npgpgout {self.kib}\npswpout 0\n")
+        for kind in ("cpu", "io", "memory"):
+            with open(os.path.join(self.root, "pressure", kind), "w") as f:
+                f.write(f"some avg10={sec[kind + '-pressure']:.2f} avg60=0.00 avg300=0.00 total=1\n"
+                        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        if sec["game"]:
+            open(self.game_state, "w").close()
+        elif os.path.exists(self.game_state):
+            os.remove(self.game_state)
+
+
+class QuietTest(unittest.TestCase):
+    """`cpu-watch quiet`: fake /proc files, a fake clock and sleep (each sleep
+    is one second: the fake files advance by that second)."""
+
+    def setUp(self):
+        self.m = load_module("cpu_watch", CPU_WATCH)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = FakeProc(self.tmp.name)
+
+    def run_quiet(self, argv, second=lambda i: {}, env=None):
+        """second(i) -> what differs from an idle machine in second i (1, 2, ...).
+        Returns (exit code, output, number of sleeps)."""
+        clock, sleeps = [1000.0], []
+
+        def sleep(d):
+            sleeps.append(d)
+            clock[0] += d
+            self.proc.set({**FakeProc.IDLE, **second(len(sleeps))})
+
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stderr", io.StringIO()):     # "waiting up to ..."
+            rc = self.m.quiet(argv, sample=lambda: self.m.quiet_sample(
+                proc=self.proc.root, game_state=self.proc.game_state, clock=lambda: clock[0]),
+                sleep=sleep, clock=lambda: clock[0], out=out, environ=env or {})
+        return rc, out.getvalue(), len(sleeps)
+
+    def test_idle_window_is_quiet_with_each_value_beside_its_limit(self):
+        rc, out, n = self.run_quiet([])
+        self.assertEqual((rc, n), (0, 60))          # 60 s by default: 61 readings
+        lines = out.splitlines()
+        # The VM's guest time is already in user: counted once, 3 % stays 3 %.
+        self.assertEqual(lines[0], "  CPU busy         3.00 %       limit < 10 %      ok")
+        self.assertEqual(lines[1], "  CPU pressure     0.30 %       limit < 5 %       ok")
+        self.assertEqual(lines[2], "  IO pressure      1.40 %       limit < 5 %       ok")
+        self.assertEqual(lines[3], "  memory pressure  0.00 %       limit < 1 %       ok")
+        self.assertEqual(lines[4], "  disk writes      2.50 MB/s    limit < 10 MB/s   ok")
+        self.assertEqual(lines[5], "  game profile     off          limit off         ok")
+        self.assertRegex(lines[6], r"^quiet \(60 s, \S+ \S+ to \S+ \S+\)$")
+        self.assertEqual(len(lines), 7)
+
+    def test_each_test_fails_alone_with_its_value(self):
+        cases = [
+            ("cpu", 12.0, "CPU busy         12.00 %      limit < 10 %      FAIL"),
+            ("cpu", 10.0, "CPU busy         10.00 %      limit < 10 %      FAIL"),   # "below" is strict
+            ("cpu-pressure", 6.0, "CPU pressure     6.00 %       limit < 5 %       FAIL"),
+            ("io-pressure", 7.5, "IO pressure      7.50 %       limit < 5 %       FAIL"),
+            ("memory-pressure", 1.5, "memory pressure  1.50 %       limit < 1 %       FAIL"),
+            ("writes", 12.0, "disk writes      12.00 MB/s   limit < 10 MB/s   FAIL"),
+            ("writes", 10.0, "disk writes      10.00 MB/s   limit < 10 MB/s   FAIL"),
+            ("game", True, "game profile     on in 10 of 11 readings limit off         FAIL"),
+        ]
+        labels = {"cpu": "CPU busy", "cpu-pressure": "CPU pressure", "io-pressure": "IO pressure",
+                  "memory-pressure": "memory pressure", "writes": "disk writes", "game": "game profile"}
+        for key, value, line in cases:
+            with self.subTest(key=key, value=value):
+                self.proc = FakeProc(tempfile.mkdtemp(dir=self.tmp.name))
+                rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {key: value})
+                self.assertEqual(rc, 1)
+                self.assertIn("  " + line + "\n", out)
+                self.assertEqual(out.count(" ok\n"), 5)
+                self.assertRegex(out.splitlines()[-1], rf"^NOT quiet: {labels[key]} \(10 s, ")
+
+    def test_the_verdict_matches_the_printed_value(self):
+        # 2399 busy jiffies of 24000: 9.996 %, printed as 10.00 %, so it fails "< 10".
+        rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {"cpu": 10.0 if i < 10 else 239 / 24})
+        self.assertEqual(rc, 1)
+        self.assertIn("  CPU busy         10.00 %      limit < 10 %      FAIL\n", out)
+
+    def test_ctrl_c_exits_130_without_a_result(self):
+        def interrupted(d):
+            raise KeyboardInterrupt
+        out, err = io.StringIO(), io.StringIO()
+        with unittest.mock.patch("sys.stderr", err):
+            rc = self.m.quiet(["--for", "5"], sample=lambda: self.m.quiet_sample(
+                proc=self.proc.root, game_state=self.proc.game_state), sleep=interrupted, out=out, environ={})
+        self.assertEqual((rc, out.getvalue(), err.getvalue()), (130, "", "quiet: interrupted\n"))
+
+    def test_window_means_let_a_short_burst_through(self):
+        # One second of a 10 s window at 50 % CPU and 40 MB written: the means
+        # are 5 % and 4 MB/s, below the limits (a commit or a snapshot, not a build).
+        rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {"cpu": 50.0, "writes": 40.0} if i == 4 else
+                                    {"cpu": 0.0, "writes": 0.0})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CPU busy         5.00 %", out)
+        self.assertIn("disk writes      4.00 MB/s", out)
+
+    def test_pressure_is_the_mean_of_each_seconds_avg10(self):
+        # avg10 at 2 % in 5 of 10 seconds: mean 1 %, which fails the memory limit
+        # (< 1 %) and passes the IO one.
+        sec = lambda i: {"memory-pressure": 2.0, "io-pressure": 2.0} if i % 2 else \
+            {"memory-pressure": 0.0, "io-pressure": 0.0}
+        rc, out, _ = self.run_quiet(["--for", "10", "--json"], sec)
+        r = json.loads(out)
+        self.assertEqual(rc, 1)
+        self.assertEqual(r["failed"], ["memory-pressure"])
+        t = {x["name"]: x for x in r["tests"]}
+        self.assertEqual((t["memory-pressure"]["value"], t["io-pressure"]["value"]), (1.0, 1.0))
+
+    def test_wait_slides_the_noisy_seconds_out(self):
+        noisy = lambda i: {"cpu": 90.0} if i <= 3 else {}
+        rc, out, n = self.run_quiet(["--for", "5"], noisy)
+        self.assertEqual((rc, n), (1, 5))                  # without --wait: one window
+        self.proc = FakeProc(tempfile.mkdtemp(dir=self.tmp.name))
+        rc, out, n = self.run_quiet(["--for", "5", "--wait", "1m"], noisy)
+        # The windows ending at seconds 5..7 hold a 90 % second; the one of seconds 4-8 does not.
+        self.assertEqual((rc, n), (0, 8), out)
+        self.assertIn("CPU busy         3.00 %", out)
+        self.assertRegex(out.splitlines()[-1], r"^quiet \(5 s, .*, after waiting 8 s\)$")
+        self.assertEqual(out.count("CPU busy"), 1)          # one result, not one per second
+
+    def test_wait_times_out(self):
+        rc, out, n = self.run_quiet(["--for", "3", "--wait", "10"], lambda i: {"writes": 50.0})
+        self.assertEqual((rc, n), (1, 10))
+        self.assertRegex(out.splitlines()[-1], r"^NOT quiet: disk writes \(3 s, .*, after waiting 10 s\)$")
+        self.assertIn("disk writes      50.00 MB/s   limit < 10 MB/s   FAIL", out)
+
+    def test_game_profile_on_for_one_second_breaks_the_window(self):
+        rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {"game": i == 7})
+        self.assertEqual(rc, 1)
+        self.assertIn("game profile     on in 1 of 11 readings limit off         FAIL", out)
+        self.assertIn("NOT quiet: game profile", out)
+
+    def test_unreadable_file_is_not_quiet_with_the_reason(self):
+        os.remove(os.path.join(self.proc.root, "pressure", "io"))
+        orig = self.proc.set
+        self.proc.set = lambda sec: (orig(sec), os.remove(os.path.join(self.proc.root, "pressure", "io")))
+        path = os.path.join(self.proc.root, "pressure", "io")
+        rc, out, n = self.run_quiet(["--for", "5"])
+        self.assertEqual((rc, n), (1, 5))
+        self.assertIn(f"  IO pressure      unreadable   limit < 5 %       FAIL ({path}: No such file or directory)", out)
+        self.assertIn("  CPU busy         3.00 %       limit < 10 %      ok", out)   # the others still measured
+        self.assertIn("NOT quiet: IO pressure (", out)
+        # It cannot become readable: --wait gives up after the first window.
+        rc, out, n = self.run_quiet(["--for", "5", "--wait", "2h"])
+        self.assertEqual((rc, n), (1, 5))
+
+    def test_unparsable_files_are_not_quiet(self):
+        orig = self.proc.set
+
+        def broken(sec):
+            orig(sec)
+            with open(os.path.join(self.proc.root, "stat"), "w") as f:
+                f.write("intr 1 2 3\n")
+            with open(os.path.join(self.proc.root, "vmstat"), "w") as f:
+                f.write("pgpgin 5\n")
+            with open(os.path.join(self.proc.root, "pressure", "cpu"), "w") as f:
+                f.write("some avg10=x\n")
+        self.proc.set = broken
+        broken(FakeProc.IDLE)
+        rc, out, _ = self.run_quiet(["--for", "2", "--json"])
+        r = json.loads(out)
+        self.assertEqual(rc, 1)
+        self.assertEqual(r["failed"], ["cpu", "cpu-pressure", "writes"])
+        t = {x["name"]: x for x in r["tests"]}
+        self.assertIn("no 'cpu' line with 8 counters first", t["cpu"]["error"])
+        self.assertIn("no 'pgpgout' line", t["writes"]["error"])
+        self.assertIn("no 'some avg10=' line", t["cpu-pressure"]["error"])
+        self.assertIsNone(t["cpu"]["value"])
+        self.assertEqual(t["io-pressure"]["value"], 1.4)
+
+    def test_json(self):
+        rc, out, _ = self.run_quiet(["--for", "4", "--json"], lambda i: {"cpu": 20.0})
+        self.assertEqual(rc, 1)
+        r = json.loads(out)          # only the JSON on stdout
+        self.assertEqual((r["quiet"], r["seconds"], r["waited_s"], r["failed"]), (False, 4, None, ["cpu"]))
+        self.assertEqual([t["name"] for t in r["tests"]],
+                         ["cpu", "cpu-pressure", "io-pressure", "memory-pressure", "writes", "game-profile"])
+        self.assertEqual(r["tests"][0], {"name": "cpu", "label": "CPU busy", "unit": "%", "limit": 10.0,
+                                         "value": 20.0, "ok": False, "error": None})
+        self.assertEqual(r["tests"][4]["value"], 2.5)
+        self.assertRegex(r["start"], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
+
+    def test_limits_from_flags_and_the_environment(self):
+        busy = lambda i: {"cpu": 12.0, "writes": 6.0, "memory-pressure": 1.2, "io-pressure": 5.5,
+                          "cpu-pressure": 5.5}
+        env = {"QUIET_CPU_PCT": "20", "QUIET_WRITE_MBPS": "7", "QUIET_MEMORY_PSI": "1.5",
+               "QUIET_IO_PSI": "6", "QUIET_CPU_PSI": "6"}
+        rc, out, _ = self.run_quiet(["--for", "3"], busy, env=env)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("limit < 20 %", out)
+        self.assertIn("limit < 7 MB/s", out)
+        # A flag wins over the environment.
+        rc, out, _ = self.run_quiet(["--for", "3", "--cpu", "11", "--write-mbps", "6.5", "--json"], busy, env=env)
+        r = json.loads(out)
+        self.assertEqual((rc, r["failed"]), (1, ["cpu"]))
+        self.assertEqual({t["name"]: t["limit"] for t in r["tests"]},
+                         {"cpu": 11.0, "cpu-pressure": 6.0, "io-pressure": 6.0, "memory-pressure": 1.5,
+                          "writes": 6.5, "game-profile": "off"})
+        rc, _, _ = self.run_quiet(["--for", "3", "--cpu-pressure", "5", "--io-pressure", "5",
+                                   "--memory-pressure", "1"], busy, env=env)
+        self.assertEqual(rc, 1)
+
+    def test_usage_errors_exit_2_before_sampling(self):
+        for argv, env in [(["--for", "0"], {}), (["--for", "1.5"], {}), (["--for"], {}),
+                          (["--for", "5", "--wait", "3"], {}), (["--wait", "2x"], {}), (["--wait", "0"], {}),
+                          (["--cpu", "-1"], {}), (["--cpu", "abc"], {}), (["--write-mbps", "inf"], {}),
+                          (["--foo"], {}), (["watch"], {}), ([], {"QUIET_IO_PSI": "zero"}),
+                          ([], {"QUIET_CPU_PCT": "0"})]:
+            with self.subTest(argv=argv, env=env):
+                taken = []
+                err = io.StringIO()
+                with unittest.mock.patch("sys.stderr", err):
+                    rc = self.m.quiet(argv, sample=lambda: taken.append(1), sleep=lambda d: None,
+                                      out=io.StringIO(), environ=env)
+                self.assertEqual((rc, taken), (2, []))
+                self.assertTrue(err.getvalue().startswith("quiet: "), err.getvalue())
+
+    def test_duration(self):
+        self.assertEqual([self.m.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")],
+                         [120, 90, 1800, 7200, 5400])
+
+    def test_command_line_dispatch(self):
+        r = subprocess.run([sys.executable, "-I", "-B", CPU_WATCH, "quiet", "--for", "0"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("quiet: --for: a whole number of seconds", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+
+class SetupQuietDispatchTest(unittest.TestCase):
+    """cpu-setup.sh quiet|watch|report: on the host it runs the checkout's
+    cpu-watch; inside a container it runs it on the host with flatpak-spawn,
+    handing over the QUIET_* limits that are set (flatpak-spawn does not pass
+    the environment on). A copy of the script whose container markers are
+    temporary files, with fake python3 and flatpak-spawn on PATH."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = self.tmp.name
+        os.makedirs(os.path.join(t, "cst", "cpu"))
+        os.makedirs(os.path.join(t, "bin"))
+        self.marker = os.path.join(t, "containerenv")
+        with open(SETUP) as f:
+            src = f.read()
+        line = next(l for l in src.splitlines() if l.startswith("in_container()"))
+        patched = line.replace("/run/.containerenv", self.marker).replace("/.dockerenv", self.marker + "2")
+        self.assertNotEqual(line, patched)
+        self.script = os.path.join(t, "cst", "cpu-setup.sh")
+        with open(self.script, "w") as f:
+            f.write(src.replace(line, patched))
+        open(os.path.join(t, "cst", "cpu", "cpu-watch"), "w").close()
+        self.log = os.path.join(t, "log")
+        for name in ("python3", "flatpak-spawn"):
+            p = os.path.join(t, "bin", name)
+            with open(p, "w") as f:
+                f.write(f'#!/bin/bash\necho "{name} $*" >>"{self.log}"\n')
+            os.chmod(p, 0o755)
+
+    def run_setup(self, *args, env=None):
+        r = subprocess.run(["bash", self.script, *args], capture_output=True, text=True,
+                           env={"PATH": os.path.join(self.tmp.name, "bin") + ":/usr/bin:/bin", **(env or {})},
+                           stdin=subprocess.DEVNULL)
+        log = []
+        if os.path.exists(self.log):
+            with open(self.log) as f:
+                log = f.read().splitlines()
+            os.remove(self.log)
+        return r.returncode, log, r.stderr
+
+    def test_host_runs_the_checkouts_cpu_watch(self):
+        watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
+        rc, log, err = self.run_setup("quiet", "--for", "5", env={"QUIET_CPU_PCT": "20"})
+        self.assertEqual((rc, log), (0, [f"python3 -I {watch} quiet --for 5"]), err)
+
+    def test_container_runs_it_on_the_host_with_the_limits(self):
+        open(self.marker, "w").close()
+        watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
+        rc, log, err = self.run_setup("quiet", "--wait", "2h", "--json",
+                                      env={"QUIET_CPU_PCT": "20", "QUIET_WRITE_MBPS": "8", "QUIET_OTHER": "x"})
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host --env=QUIET_CPU_PCT=20 --env=QUIET_WRITE_MBPS=8 "
+                                         f"python3 -I {watch} quiet --wait 2h --json"]), err)
+        # No limit set: nothing extra (an empty list under set -u).
+        rc, log, err = self.run_setup("quiet")
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} quiet"]), err)
+        rc, log, err = self.run_setup("report")
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} report"]), err)
+
+    def test_container_hands_over_every_limit_cpu_watch_reads(self):
+        # The list in cpu-setup.sh must follow cpu-watch's QUIET_LIMITS: a limit
+        # added there but not here would be dropped inside a toolbox.
+        open(self.marker, "w").close()
+        envs = [lim.env for lim in load_module("cpu_watch", CPU_WATCH).QUIET_LIMITS]
+        self.assertTrue(envs)
+        rc, log, err = self.run_setup("quiet", env={v: str(i + 1) for i, v in enumerate(envs)})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(log), 1, log)
+        for i, v in enumerate(envs):
+            self.assertIn(f" --env={v}={i + 1} ", log[0])
+
+    def test_help_lists_quiet(self):
+        r = subprocess.run(["bash", SETUP, "help"], capture_output=True, text=True, check=True,
+                           stdin=subprocess.DEVNULL)
+        self.assertIn("quiet [--for SECONDS] [--wait MAX] [--json]", r.stdout)
 
 
 class GameProfileAndCliTest(unittest.TestCase):

@@ -17,6 +17,17 @@ as `cst cpu watch|report`.
       Runs: ~/.local/state/cpu-setup/runs/<time>-<label>/
   cpu-watch report [RUN...]   one line per run (default: the last 10), to
       compare labels such as "baseline-build" vs "profile-build".
+  cpu-watch quiet [--for SECONDS] [--wait MAX] [--json] [limits]
+      Is the machine quiet enough for a benchmark? Samples once per second
+      for SECONDS (default 60) and checks the window's means: CPU busy
+      (/proc/stat), CPU/IO/memory pressure (avg10 of /proc/pressure/*),
+      writes to the disks (pgpgout of /proc/vmstat), and the game profile
+      off. With --wait MAX (120, 90s, 30m, 2h), the window slides until it
+      is quiet or MAX passed. Exit 0 quiet, 1 not quiet, 2 usage error.
+      Limits: --cpu PCT (10), --cpu-pressure PCT (5), --io-pressure PCT (5),
+      --memory-pressure PCT (1), --write-mbps MB (5); or the environment
+      variables QUIET_CPU_PCT, QUIET_CPU_PSI, QUIET_IO_PSI, QUIET_MEMORY_PSI,
+      QUIET_WRITE_MBPS (a flag wins).
 """
 
 import csv
@@ -29,10 +40,13 @@ import signal
 import subprocess
 import sys
 import time
+from collections import deque, namedtuple
 from datetime import datetime
+from itertools import islice
 
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
 CG = "/sys/fs/cgroup"
+GAME_STATE = "/run/cpu-setup/game.state"   # cpu/game-profile: the profile is on
 
 
 def read(path, default=""):
@@ -64,10 +78,17 @@ def mean_mhz(cpus):
     return round(sum(vals) / len(vals) / 1000) if vals else 0
 
 
+def pressure_field(text, kind, key):
+    """The KEY= value (as text) on the KIND line ('some' or 'full') of a
+    pressure file's text, or None."""
+    m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.M)
+    return m.group(1) if m else None
+
+
 def pressure_total(path, kind):
     """Cumulative stall microseconds ('some' or 'full') of a pressure file."""
-    m = re.search(rf"^{kind} .*total=(\d+)", read(path), re.M)
-    return int(m.group(1)) if m else None
+    v = pressure_field(read(path), kind, "total")
+    return int(v) if v is not None else None
 
 
 def usage_usec(cg):
@@ -172,7 +193,7 @@ def watch(argv):
             if prev:
                 dt = now - prev["t"]
                 g = cur.get("game"), prev.get("game")
-                row = [round(now - start, 1), int(os.path.exists("/run/cpu-setup/game.state")), pid or "",
+                row = [round(now - start, 1), int(os.path.exists(GAME_STATE)), pid or "",
                        # per second of wall time (samples drift a little past 1 s)
                        round((g[0][0] - g[1][0]) / 1000 / dt, 1) if all(g) else "",
                        round((g[0][1] - g[1][1]) / 1000 / dt, 1) if all(g) else "",
@@ -271,11 +292,238 @@ def report(argv):
     return 0
 
 
+# ---- quiet: is the machine quiet enough for a benchmark? ------------------------
+#
+# The defaults come from a 3-day `below` recording of this machine (cpu/README.md,
+# "Is the machine quiet?"): the CPU and write limits pass the machine's quiet
+# hours with room to spare; the pressure limits are reasoned from its quietest window.
+
+PROC = "/proc"
+
+
+def stat_cpu(text):
+    """(total, idle) jiffies of the 'cpu' line that /proc/stat starts with."""
+    f = text.split("\n", 1)[0].split()
+    # user nice system idle iowait irq softirq steal; guest and guest_nice
+    # (after them) are already counted in user and nice.
+    if f[:1] != ["cpu"] or len(f) < 9:
+        raise ValueError("no 'cpu' line with 8 counters first")
+    v = [int(x) for x in f[1:9]]
+    return sum(v), v[3] + v[4]   # iowait is idle time too
+
+
+def vmstat_pgpgout(text):
+    """KiB written to the disks since boot (/proc/vmstat pgpgout)."""
+    m = re.search(r"^pgpgout (\d+)$", text, re.M)
+    if not m:
+        raise ValueError("no 'pgpgout' line")
+    return int(m.group(1))
+
+
+def some_avg10(text):
+    """The 'some avg10=' share (%) of a pressure file."""
+    v = pressure_field(text, "some", "avg10")
+    if v is None:
+        raise ValueError("no 'some avg10=' line")
+    return float(v)
+
+
+def busy_pct(window, name):
+    """CPU busy (%) from the counters at both ends of the window."""
+    (total0, idle0), (total1, idle1) = window[0]["v"][name], window[-1]["v"][name]
+    if total1 <= total0:
+        raise ValueError("/proc/stat: the CPU counters did not advance")
+    return 100.0 * ((total1 - total0) - (idle1 - idle0)) / (total1 - total0)
+
+
+def write_mbps(window, name):
+    """MB written per second, from the counters at both ends of the window."""
+    elapsed = window[-1]["t"] - window[0]["t"]
+    if elapsed <= 0:
+        raise ValueError("the clock did not advance")
+    # KiB -> MB (1 MB = 1024 KiB)
+    return (window[-1]["v"][name] - window[0]["v"][name]) / 1024 / elapsed
+
+
+def mean_of_seconds(window, name):
+    """Mean of each second's reading (the first reading only starts the window)."""
+    return sum(s["v"][name] for s in islice(window, 1, None)) / (len(window) - 1)
+
+
+# One row per test. file: under /proc; parse: its text -> one reading (or
+# ValueError); value: (window of readings, name) -> the window's value.
+Limit = namedtuple("Limit", "name label unit flag env default file parse value")
+QUIET_LIMITS = (
+    Limit("cpu", "CPU busy", "%", "--cpu", "QUIET_CPU_PCT", 10.0, "stat", stat_cpu, busy_pct),
+    Limit("cpu-pressure", "CPU pressure", "%", "--cpu-pressure", "QUIET_CPU_PSI", 5.0,
+          "pressure/cpu", some_avg10, mean_of_seconds),
+    Limit("io-pressure", "IO pressure", "%", "--io-pressure", "QUIET_IO_PSI", 5.0,
+          "pressure/io", some_avg10, mean_of_seconds),
+    Limit("memory-pressure", "memory pressure", "%", "--memory-pressure", "QUIET_MEMORY_PSI", 1.0,
+          "pressure/memory", some_avg10, mean_of_seconds),
+    Limit("writes", "disk writes", "MB/s", "--write-mbps", "QUIET_WRITE_MBPS", 10.0,
+          "vmstat", vmstat_pgpgout, write_mbps),
+)
+
+
+def quiet_sample(proc=PROC, game_state=GAME_STATE, clock=time.monotonic):
+    """One reading of each test's file (s['v'][test name]) and whether the game
+    profile is on. A file that cannot be read or parsed leaves its reason in
+    s['err'][test name] instead."""
+    s = {"t": clock(), "wall": time.time(), "game": os.path.exists(game_state), "v": {}, "err": {}}
+    for lim in QUIET_LIMITS:
+        path = os.path.join(proc, lim.file)
+        try:
+            with open(path) as f:
+                s["v"][lim.name] = lim.parse(f.read())
+        except OSError as e:
+            s["err"][lim.name] = f"{path}: {e.strerror or e}"
+        except ValueError as e:
+            s["err"][lim.name] = f"{path}: {e}"
+    return s
+
+
+def quiet_tests(window, limits):
+    """The tests of one window (SECONDS + 1 readings, a second apart): CPU busy
+    and writes from the counters at both ends (the window's mean), pressure as
+    the mean of each second's avg10, the game profile off in every reading."""
+    tests = []
+    for lim in QUIET_LIMITS:
+        value, err = None, next((s["err"][lim.name] for s in window if lim.name in s["err"]), None)
+        if err is None:
+            try:
+                # Rounded before the comparison: the verdict matches the printed value.
+                value = round(lim.value(window, lim.name), 2)
+            except ValueError as e:
+                err = str(e)
+        tests.append({"name": lim.name, "label": lim.label, "unit": lim.unit, "limit": limits[lim.name],
+                      "value": value, "ok": err is None and value < limits[lim.name], "error": err})
+    on = sum(1 for s in window if s["game"])
+    tests.append({"name": "game-profile", "label": "game profile", "unit": "", "limit": "off",
+                  "value": "off" if not on else f"on in {on} of {len(window)} readings",
+                  "ok": not on, "error": None})
+    return tests
+
+
+def duration(text):
+    """Seconds from 120, 90s, 30m or 2h."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip())
+    if not m or float(m.group(1)) <= 0:
+        raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)")
+    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
+
+
+def quiet_args(argv, environ):
+    """(seconds, wait or None, json, limits), or ValueError for a usage error."""
+    limits = {lim.name: positive(environ[lim.env], lim.env) if environ.get(lim.env, "") != "" else lim.default
+              for lim in QUIET_LIMITS}
+    seconds, wait, as_json = 60, None, False
+    flags = {lim.flag: lim.name for lim in QUIET_LIMITS}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            as_json = True
+            i += 1
+            continue
+        if a not in flags and a not in ("--for", "--wait"):
+            raise ValueError(f"unknown argument {a}")
+        if i + 1 >= len(argv):
+            raise ValueError(f"{a} needs a value")
+        val = argv[i + 1]
+        if a == "--for":
+            if not re.fullmatch(r"\d+", val) or int(val) < 1:
+                raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
+            seconds = int(val)
+        elif a == "--wait":
+            wait = duration(val)
+        else:
+            limits[flags[a]] = positive(val, a)
+        i += 2
+    if wait is not None and wait < seconds:
+        raise ValueError(f"--wait ({wait:g} s) is shorter than the window (--for {seconds})")
+    return seconds, wait, as_json, limits
+
+
+def positive(text, what):
+    """TEXT as a finite number above 0, or ValueError naming WHAT."""
+    try:
+        v = float(text)
+        if 0 < v < float("inf"):
+            return v
+    except ValueError:
+        pass
+    raise ValueError(f"{what}: a number above 0 (got {text!r})")
+
+
+def quiet_text(result):
+    lines = []
+    for t in result["tests"]:
+        unit = f" {t['unit']}" if t["unit"] else ""
+        if t["error"]:
+            value = "unreadable"
+        elif isinstance(t["value"], float):
+            value = f"{t['value']:.2f}{unit}"
+        else:
+            value = t["value"]
+        limit = f"< {t['limit']:g}{unit}" if t["unit"] else t["limit"]
+        verdict = "ok" if t["ok"] else "FAIL" + (f" ({t['error']})" if t["error"] else "")
+        lines.append(f"  {t['label']:<16} {value:<12} limit {limit:<11} {verdict}")
+    span = f"{result['seconds']} s, {result['start']} to {result['end']}"
+    if result.get("waited_s") is not None:
+        span += f", after waiting {result['waited_s']:.0f} s"
+    labels = {t["name"]: t["label"] for t in result["tests"]}
+    failed = ", ".join(labels[name] for name in result["failed"])
+    lines.append(f"quiet ({span})" if result["quiet"] else f"NOT quiet: {failed} ({span})")
+    return "\n".join(lines)
+
+
+def quiet(argv, sample=None, sleep=time.sleep, clock=time.monotonic, out=None, environ=None):
+    """Exit 0 if a window of SECONDS was quiet, 1 if not (or --wait ran out),
+    2 for a usage error. Reads only; writes nothing but its output."""
+    out = out or sys.stdout
+    try:
+        seconds, wait, as_json, limits = quiet_args(argv, os.environ if environ is None else environ)
+    except ValueError as e:
+        print(f"quiet: {e}", file=sys.stderr)
+        return 2
+    sample = sample or (lambda: quiet_sample(clock=clock))
+    if wait is not None:
+        print(f"waiting up to {wait:g} s for {seconds} quiet seconds in a row", file=sys.stderr)
+    window = deque(maxlen=seconds + 1)
+    try:
+        start = clock()
+        window.append(sample())
+        n = 0
+        while True:
+            n += 1
+            sleep(max(0.0, start + n - clock()))
+            window.append(sample())
+            if len(window) <= seconds:
+                continue
+            tests = quiet_tests(window, limits)
+            ok = all(t["ok"] for t in tests)
+            # A file that cannot be read stays so: waiting longer cannot help.
+            if ok or wait is None or clock() - start >= wait or any(t["error"] for t in tests):
+                break
+    except KeyboardInterrupt:
+        print("quiet: interrupted", file=sys.stderr)
+        return 130
+
+    def stamp(s):
+        return datetime.fromtimestamp(s["wall"]).isoformat(sep=" ", timespec="seconds")
+    result = {"quiet": ok, "seconds": seconds, "start": stamp(window[0]), "end": stamp(window[-1]),
+              "waited_s": None if wait is None else round(clock() - start, 1), "tests": tests,
+              "failed": [t["name"] for t in tests if not t["ok"]]}
+    print(json.dumps(result) if as_json else quiet_text(result), file=out)
+    return 0 if ok else 1
+
+
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("watch", "report"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("watch", "report", "quiet"):
         print(__doc__)
         return 2
-    return watch(sys.argv[2:]) if sys.argv[1] == "watch" else report(sys.argv[2:])
+    return {"watch": watch, "report": report, "quiet": quiet}[sys.argv[1]](sys.argv[2:])
 
 
 if __name__ == "__main__":

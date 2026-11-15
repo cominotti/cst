@@ -653,3 +653,101 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_10_cpu_quiet_reads_the_real_proc_files(self):
+        """`cst cpu quiet` against the real kernel files (/proc/stat, /proc/vmstat,
+        /proc/pressure/*) and the real game profile flag: a plain run exits 0 or
+        1 with one line per test and no crash; busy loops on every CPU must fail
+        the CPU test with its value beside its limit; /run/cpu-setup/game.state
+        fails the game profile test; a usage error exits 2. Here the container
+        markers are gone (host simulation), so `cst cpu quiet` runs the
+        checkout's cpu-watch directly, as on the host; the toolbox path through
+        flatpak-spawn is a unit test."""
+        made = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "if [ -d /run/cpu-setup ]; then echo kept; else mkdir /run/cpu-setup && echo made; fi",
+        ).stdout.strip()
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            "rm -f /run/cpu-setup/game.state" + ("; rmdir /run/cpu-setup" if made == "made" else ""),
+            check=False,
+        )
+        tester_env = r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=$(mktemp -d)
+            pids=()
+            trap 'kill "${pids[@]}" 2>/dev/null || true; rm -rf "$w"' EXIT
+            busy_loops() {
+                local i
+                for i in $(seq "$(nproc)"); do
+                    timeout 60 sh -c 'while :; do :; done' &
+                    pids+=("$!")
+                done
+                sleep 1
+            }
+            stop_loops() {
+                kill "${pids[@]}" 2>/dev/null || true
+                wait "${pids[@]}" 2>/dev/null || true
+                pids=()
+            }
+        """
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            tester_env + r"""
+            # 1. A plain run: 0 or 1, every test on its own line, no traceback.
+            rc=0
+            "$cst" cpu quiet --for 2 >"$w/plain" 2>"$w/plain.err" || rc=$?
+            [ "$rc" = 0 ] || [ "$rc" = 1 ]
+            for label in "CPU busy" "CPU pressure" "IO pressure" "memory pressure" "disk writes" "game profile"; do
+                grep -q "^  $label " "$w/plain"
+            done
+            grep -Eq '^  CPU busy +[0-9]+\.[0-9]{2} % +limit < 10 % +(ok|FAIL)$' "$w/plain"
+            grep -Eq '^  disk writes +[0-9]+\.[0-9]{2} MB/s +limit < 10 MB/s +(ok|FAIL)$' "$w/plain"
+            grep -Eq '^(quiet|NOT quiet: .+) \(2 s, ' "$w/plain"
+            if grep -q Traceback "$w/plain.err"; then cat "$w/plain.err" >&2; exit 1; fi
+            # --json straight from cpu-watch: the exit code matches "quiet".
+            rc=0
+            python3 -I /opt/cst-rw/cpu/cpu-watch quiet --for 1 --json >"$w/json" || rc=$?
+            names='["cpu", "cpu-pressure", "io-pressure", "memory-pressure", "writes", "game-profile"]'
+            python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); assert r["quiet"] == (sys.argv[2] == "0"), r; assert [t["name"] for t in r["tests"]] == json.loads(sys.argv[3]), r' \
+                "$w/json" "$rc" "$names"
+
+            # 2. Busy loops on every CPU: the CPU test fails, with value and limit.
+            busy_loops
+            rc=0
+            "$cst" cpu quiet --for 2 >"$w/busy" || rc=$?
+            stop_loops
+            cat "$w/busy"
+            [ "$rc" = 1 ]
+            grep -Eq '^  CPU busy +[0-9]+\.[0-9]{2} % +limit < 10 % +FAIL$' "$w/busy"
+            grep -Eq '^NOT quiet: CPU busy[ ,]' "$w/busy"
+
+            # 3. A usage error: exit 2, nothing sampled.
+            rc=0
+            "$cst" cpu quiet --for 5 --wait 3 2>"$w/usage" || rc=$?
+            [ "$rc" = 2 ]
+            grep -q 'quiet: --wait (3 s) is shorter than the window' "$w/usage"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        self.assertRegex(out, r"(?m)^  CPU busy +\d+\.\d\d % +limit < 10 % +FAIL$")
+
+        # 4. The game profile's flag (written by root, as cpu-game-profile does).
+        exec_bash(self.SYSTEMD_CONTAINER, "touch /run/cpu-setup/game.state")
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            tester_env + r"""
+            rc=0
+            "$cst" cpu quiet --for 2 --cpu 100 >"$w/game" || rc=$?
+            cat "$w/game"
+            [ "$rc" = 1 ]
+            grep -Eq '^  game profile +on in 3 of 3 readings +limit off +FAIL$' "$w/game"
+            grep -Eq '^NOT quiet: (.+, )?game profile \(' "$w/game"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
