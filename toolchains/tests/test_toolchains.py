@@ -11,6 +11,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 import contextlib
+import fcntl
 import io
 import os
 import shutil
@@ -43,9 +44,21 @@ OLD_UV = (
     '# hardlinks cannot cross subvolumes; reflink clones can.\nlink-mode = "clone"\n'
 )
 
-FAKE_SYSTEMCTL = """#!/bin/sh
+FAKE_LOG = """#!/bin/sh
 echo "$*" >>"$SYSTEMCTL_LOG"
 """
+# is-active answers like systemctl: "inactive" and exit 4 for a unit the
+# manager does not know (the default); SYSTEMCTL_ACTIVE=active: a timer
+# that still runs (exit 0); another state: exit 3.
+FAKE_ANSWERS = """case " $* " in *" is-active "*)
+    case "${SYSTEMCTL_ACTIVE:-unknown}" in
+        active) echo active; exit 0;;
+        unknown) echo inactive; exit 4;;
+        *) echo "$SYSTEMCTL_ACTIVE"; exit 3;;
+    esac;;
+esac
+"""
+FAKE_SYSTEMCTL = FAKE_LOG + FAKE_ANSWERS
 
 
 class Scratch(unittest.TestCase):
@@ -85,6 +98,23 @@ class Scratch(unittest.TestCase):
         self.m = load()
         self.m.JOURNAL = False
         self.m.cargo_procs = lambda uid=None: []
+
+    # The user manager refusing a call (or not answering: the same exit 1
+    # from systemctl). The stub records every call, and fails the ones that
+    # contain `word` with systemctl's own error text.
+    def failing_stub(self, word):
+        stub = os.path.join(self.tmp, "systemctl-failing")
+        with open(stub, "w") as f:
+            f.write(
+                FAKE_LOG
+                + f'case " $* " in *" {word} "*) echo "Failed to connect to bus: No medium found" >&2; exit 1;; esac\n'
+                + FAKE_ANSWERS
+            )
+        os.chmod(stub, 0o755)
+        return stub
+
+    def failing(self, word):
+        return mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.failing_stub(word)})
 
     def calls(self):
         try:
@@ -313,7 +343,7 @@ class SnapshotsSetupTest(Scratch):
     lines are still written (by the toolchains module), and the timer is
     turned on only when the user did not turn it off."""
 
-    def run_setup(self, prog="cst btrfs"):
+    def run_setup(self, prog="cst btrfs", env=None):
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
             'runuser() { shift 3; "$@"; }\n'  # runuser -u USER -- CMD...: CMD as is
@@ -326,7 +356,7 @@ class SnapshotsSetupTest(Scratch):
             check=False,
             capture_output=True,
             text=True,
-            env=self.env,
+            env=env or self.env,
             stdin=subprocess.DEVNULL,
         )
 
@@ -355,6 +385,20 @@ class SnapshotsSetupTest(Scratch):
         self.assertIn("cst toolchains auto on", r.stdout)  # the hint names the module
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")))
+
+    def test_setup_note_when_auto_on_reports_a_problem(self):
+        # After `auto off`, a stale file of the earlier cargo-gc is removed
+        # but the daemon-reload fails: `auto on --unless-off` exits 1 on its
+        # "left off" path. The NOTE must not claim the timer "was not turned
+        # on" nor tell the user to turn it on against their own choice.
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.write(".config/systemd/user/cst-cargo-build-gc.service", f"{OLD_MARKER}: x\n[Service]\n")
+        r = self.run_setup(env=dict(self.env, CST_TOOLCHAINS_SYSTEMCTL=self.failing_stub("daemon-reload")))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("left off", r.stdout)
+        self.assertIn("NOTE: cst toolchains auto on --unless-off reported a problem (see above)", r.stderr)
+        self.assertNotIn("was not turned on", r.stderr)
 
     def test_preview_has_no_apply_hint(self):
         # setup applies the settings itself after the confirmation: its
@@ -536,19 +580,6 @@ class AutoTest(Scratch):
         self.assertIn("not written by CST", out)
         self.assertNotIn("--user disable --now cst-cargo-build-gc.timer", self.calls())
 
-    # The user manager refusing a call (or not answering: the same exit 1
-    # from systemctl). The stub records every call, and fails the ones that
-    # contain `word` with systemctl's own error text.
-    def failing(self, word):
-        stub = os.path.join(self.tmp, "systemctl-failing")
-        with open(stub, "w") as f:
-            f.write(
-                FAKE_SYSTEMCTL + f'case " $* " in *" {word} "*) echo "Failed to connect to bus: No medium found" >&2; '
-                "exit 1;; esac\n"
-            )
-        os.chmod(stub, 0o755)
-        return mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": stub})
-
     INSTALLED = (
         ".config/systemd/user/cst-toolchains-prune.timer",
         ".config/systemd/user/cst-toolchains-prune.service",
@@ -625,6 +656,137 @@ class AutoTest(Scratch):
         self.assertIn("systemctl --user daemon-reload failed", out)
         for p in paths:
             self.assertFalse(os.path.exists(p), p)
+
+    def test_auto_off_stops_both_timers_before_it_removes_stale_files(self):
+        # Only the service of the earlier cargo-gc is left (not its timer),
+        # and the user manager cannot be reached: no file may go before the
+        # manager has said that the timer is stopped.
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        stale = self.write(".config/systemd/user/cst-cargo-build-gc.service", f"{OLD_MARKER}: x\n[Service]\n")
+        with self.failing("--user"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("nothing was removed", out)
+        self.assertNotIn("removed:", out)
+        self.assertTrue(os.path.exists(stale))
+        for rel in self.INSTALLED:
+            self.assertTrue(self.exists(rel), rel)
+        # Also with no timer of ours left to disable: asking whether it
+        # still runs has to work first.
+        for rel in self.INSTALLED:
+            os.unlink(os.path.join(self.home, rel))
+        with self.failing("--user"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user is-active cst-toolchains-prune.timer failed", out)
+        self.assertIn("nothing was removed", out)
+        self.assertTrue(os.path.exists(stale))
+        self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
+
+    def orphan(self):
+        """What `auto off` left before it checked its `disable`: the timer
+        still running (SYSTEMCTL_ACTIVE), its files gone, and the link that
+        enabled it pointing at nothing."""
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        for rel in self.INSTALLED:
+            os.unlink(os.path.join(self.home, rel))
+        link = os.path.join(self.home, ".config/systemd/user/timers.target.wants/cst-toolchains-prune.timer")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer"), link)
+        open(self.log, "w").close()
+        return link
+
+    def test_auto_off_stops_a_timer_left_running_without_its_file(self):
+        link = self.orphan()
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("stopped:   cst-toolchains-prune.timer", out)
+        self.assertEqual(self.calls(), ["--user stop cst-toolchains-prune.timer", "--user daemon-reload"])
+        self.assertFalse(os.path.lexists(link))
+        self.assertIn("removed:   ~/.config/systemd/user/timers.target.wants/cst-toolchains-prune.timer", out)
+        self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
+        # Run again: nothing more to do.
+        open(self.log, "w").close()
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls(), [])
+        self.assertNotIn("stopped:", out)
+
+    def test_status_shows_a_timer_left_running_without_its_file(self):
+        self.orphan()
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            rc, out = self.run_main("status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("still running although its file is gone", out)
+        self.assertIn("cst toolchains auto off stops it", out)
+        # Not running: "not installed", as before.
+        rc, out = self.run_main("status")
+        self.assertIn("cst-toolchains-prune.timer: not installed", out)
+
+    def test_auto_off_removes_the_dangling_link_of_a_timer_that_no_longer_runs(self):
+        # The same leftover after a reboot: the timer is not running (is-active
+        # exits 3), only the link is left. No stop; the link goes.
+        link = self.orphan()
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "inactive"}):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("stopped:", out)
+        self.assertEqual(self.calls(), ["--user daemon-reload"])
+        self.assertFalse(os.path.lexists(link))
+
+    def test_auto_off_leaves_everything_when_an_orphan_timer_cannot_be_stopped(self):
+        link = self.orphan()
+        with self.failing("stop"), mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user stop cst-toolchains-prune.timer failed", out)
+        self.assertIn("nothing was removed", out)
+        self.assertTrue(os.path.islink(link))
+        self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
+
+    def test_auto_off_keeps_a_link_to_a_timer_file_that_is_there(self):
+        # A timer of the same name that is not CST's: its file and its link stay.
+        self.write(".config/systemd/user/cst-toolchains-prune.timer", "[Timer]\nOnCalendar=daily\n")
+        link = os.path.join(self.home, ".config/systemd/user/timers.target.wants/cst-toolchains-prune.timer")
+        os.makedirs(os.path.dirname(link))
+        os.symlink("../cst-toolchains-prune.timer", link)
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("not written by CST", out)
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(self.calls(), [])
+
+    def hold_lock(self):
+        path = os.path.join(self.home, ".local/state/cst/toolchains.lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_auto_on_and_off_fail_while_another_run_holds_the_lock(self):
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        open(self.log, "w").close()
+        self.hold_lock()
+        for args in (("auto", "off"), ("auto", "on"), ("auto", "on", "--unless-off")):
+            rc, out = self.run_main(*args)
+            self.assertEqual(rc, 1, (args, out))
+            self.assertIn("another run is in progress", out)
+            self.assertIn("run this again once it has finished", out)
+        self.assertEqual(self.calls(), [])
+        for rel in self.INSTALLED:
+            self.assertTrue(self.exists(rel), rel)
+        self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
+        # A prune that finds another run going still exits 0 (the timer's run is not a failure).
+        rc, out = self.run_main("prune", "apply")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("another run is in progress: nothing done", out)
 
 
 class StatusTest(Scratch):

@@ -177,6 +177,8 @@ UNIT_DIR_REL = ".config/systemd/user"
 STATE_DIR_REL = ".local/state/cst"
 SERVICE = "cst-toolchains-prune.service"
 TIMER = "cst-toolchains-prune.timer"
+# The link `enable` makes for the timer's WantedBy=timers.target.
+WANTS_REL = f"{UNIT_DIR_REL}/timers.target.wants/{TIMER}"
 # What the first version (`cst btrfs cargo-gc`, never deployed) installed:
 # auto on and auto off remove it when its marker shows it is CST's.
 OLD_MARKER = "# managed-by: btrfs-setup.sh (CST)"
@@ -2420,8 +2422,9 @@ def systemctl_env():
     return env
 
 
-def systemctl(*args, check=False):
-    """Output (stripped) of systemctl --user; '' when it could not run."""
+def systemctl(*args, check=False, ok=(0,)):
+    """Output (stripped) of systemctl --user; '' when it could not run.
+    check: Refused when it could not run or exited with a code not in ok."""
     try:
         r = subprocess.run(
             systemctl_cmd(*args), check=False, capture_output=True, text=True, env=systemctl_env(), timeout=60
@@ -2430,7 +2433,7 @@ def systemctl(*args, check=False):
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {e}") from None
         return ""
-    if check and r.returncode != 0:
+    if check and r.returncode not in ok:
         raise Refused(f"systemctl --user {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")
     return r.stdout.strip()
 
@@ -2560,14 +2563,14 @@ def stale_files(home):
     return out
 
 
-def disable_timer(name):
-    """Stop and disable a timer before any of its files is removed. When the
-    user manager refuses or cannot be reached, nothing has been removed yet:
-    Refused, and a second run (once the manager answers) can finish the job.
-    Removing the files anyway would leave a timer that keeps running with no
-    file left to show it."""
+def before_removal(name, *args, ok=(0,)):
+    """systemctl --user ARGS NAME for a timer, checked, before auto on/off
+    removes any file. When the user manager refuses or cannot be reached,
+    nothing has been removed yet: Refused, and a second run (once the
+    manager answers) can finish the job. Removing the files anyway would
+    leave a timer that keeps running with no file left to show it."""
     try:
-        systemctl("disable", "--now", name, check=True)
+        return systemctl(*args, name, check=True, ok=ok)
     except Refused as e:
         raise Refused(
             f"{e}; nothing was removed and {name} may still be running: run this again once your user "
@@ -2601,7 +2604,7 @@ def remove_stale(home):
         return True
     timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
     if (timer, True) in found:
-        disable_timer(OLD_TIMER)
+        before_removal(OLD_TIMER, "disable", "--now")
     reload = False
     for path, ours in found:
         if not ours:
@@ -2695,12 +2698,28 @@ def cmd_auto_on(home, now, unless_off=False):
     return rc
 
 
+def stop_orphan_timer():
+    """The timer file is gone, but the user manager may still run the
+    timer: what `auto off` left before it checked its `disable` (it removed
+    the files anyway). Stopped when the manager does not say it is stopped;
+    Refused when the manager gives no answer."""
+    # is-active prints the state; it exits 3 when the unit is not active,
+    # and 4 when the manager does not know it (nothing loaded it).
+    if before_removal(TIMER, "is-active", ok=(0, 3, 4)) in ("inactive", "failed"):
+        return
+    before_removal(TIMER, "stop")
+    say(f"stopped:   {TIMER} (it was still running although its file was gone)")
+
+
 def cmd_auto_off(home, now):
-    rc = 0 if remove_stale(home) else 1
     st = unit_states(home)
+    # Both timers are stopped, checked, before anything is removed (see
+    # before_removal); remove_stale stops the earlier one first.
     if st[TIMER] in ("ok", "change"):
-        # Checked, before anything is removed: see disable_timer.
-        disable_timer(TIMER)
+        before_removal(TIMER, "disable", "--now")
+    elif st[TIMER] == "missing":
+        stop_orphan_timer()
+    rc = 0 if remove_stale(home) else 1
     removed = False
     for name in UNITS:
         if st[name] in ("ok", "change"):
@@ -2709,6 +2728,13 @@ def cmd_auto_off(home, now):
             removed = True
         elif st[name] == "conflict":
             say(f"left alone: {label(name)} (not written by CST)", 4, err=True)
+    # `disable` removes the link that enables the timer. One left pointing
+    # at nothing (also left by the earlier unchecked `auto off`) goes too.
+    wants = os.path.join(home, WANTS_REL)
+    if os.path.islink(wants) and not os.path.exists(wants):
+        os.unlink(wants)
+        say(f"removed:   ~/{WANTS_REL} (it pointed at the removed timer file)")
+        removed = True
     if removed and reload_failed():
         rc = 1
     for rel in copies():
@@ -2741,6 +2767,11 @@ def cmd_auto_off(home, now):
 
 def timer_text(home):
     if file_state(os.path.join(home, UNIT_DIR_REL, TIMER), render_timer()) == "missing":
+        if systemctl("is-active", TIMER) == "active":
+            return (
+                f"timer {TIMER}: still running although its file is gone (left by an earlier auto off); "
+                f"{PROG} auto off stops it"
+            )
         if turned_off(home):
             return (
                 f"timer {TIMER}: turned off by you ({PROG} auto off; "
@@ -3613,8 +3644,11 @@ def cmd_status(home, now, brief):
 
 
 # ---- main -----------------------------------------------------------------------------------
-def run_locked(home, fn):
-    """One run at a time (the timer and a manual apply, auto on/off)."""
+def run_locked(home, fn, busy_refused=False):
+    """One run at a time (the timer and a manual apply, auto on/off). When
+    another run holds the lock: nothing done, exit 0 (a prune that finds
+    another prune running), or Refused with busy_refused (auto on/off: what
+    was asked did not happen)."""
     path = os.path.join(home, STATE_DIR_REL, "toolchains.lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
@@ -3622,6 +3656,11 @@ def run_locked(home, fn):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            if busy_refused:
+                raise Refused(
+                    "another run is in progress (the hourly prune, or another auto on/off): nothing done; "
+                    f"run this again once it has finished (journalctl --user -u {SERVICE} shows the prune)"
+                ) from None
             say("another run is in progress: nothing done", 5)
             return 0
         return fn()
@@ -3741,8 +3780,8 @@ def main(argv):
         if cmd == "prune":
             return run_locked(home, lambda: cmd_prune(home, now, "apply", a["targets"]))
         if action == "on":
-            return run_locked(home, lambda: cmd_auto_on(home, now, a["unless_off"]))
-        return run_locked(home, lambda: cmd_auto_off(home, now))
+            return run_locked(home, lambda: cmd_auto_on(home, now, a["unless_off"]), busy_refused=True)
+        return run_locked(home, lambda: cmd_auto_off(home, now), busy_refused=True)
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2

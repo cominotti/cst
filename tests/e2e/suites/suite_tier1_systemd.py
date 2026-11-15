@@ -167,7 +167,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.toolchains_auto_off_without_a_user_manager()
         self.toolchains_auto_off()
-        self.is_enabled_reads_unit_files()
+        self.toolchains_auto_off_stops_an_orphan_timer()
         # Clean up demo workspace for later tests
         as_tester_bash(self.SYSTEMD_CONTAINER, "rm -rf /home/tester/work/demo")
 
@@ -177,6 +177,13 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         "/home/tester/.config/systemd/user/cst-toolchains-prune.service "
         "/home/tester/.local/lib/cst/cst-toolchains "
         "/home/tester/.local/lib/cst/toolchains.conf"
+    )
+
+    # Fails unless the user manager says the timer is inactive (also when
+    # systemctl cannot ask it: is-active then prints no state).
+    TIMER_INACTIVE = (
+        'state="$(systemctl --user is-active cst-toolchains-prune.timer || true)"; '
+        '[ "$state" = inactive ] || { echo "timer state after auto off: [$state]" >&2; exit 1; }'
     )
 
     def toolchains_auto_off_without_a_user_manager(self):
@@ -221,10 +228,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             self.SYSTEMD_CONTAINER,
             f"""
             /opt/cst-rw/cst toolchains auto off
-            if systemctl --user is-active --quiet cst-toolchains-prune.timer; then
-                echo "cst-toolchains-prune.timer is still active after auto off" >&2
-                exit 1
-            fi
+            {self.TIMER_INACTIVE}
             for f in {self.TOOLCHAINS_INSTALLED}; do
                 test ! -e "$f" || {{ echo "still there after auto off: $f" >&2; exit 1; }}
             done
@@ -232,34 +236,45 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             """,
         )
 
-    def is_enabled_reads_unit_files(self):
-        """Why the checks above ask is-active: is-enabled reads the unit files. For a timer that still
-        runs after its file was deleted (what auto off left before it checked `disable`) it says
-        not-found and exits non-zero, as if the timer were off."""
+    def toolchains_auto_off_stops_an_orphan_timer(self):
+        """What auto off left before it checked `disable`: the timer still running, its files gone, and its
+        timers.target.wants link pointing at nothing. is-enabled reads the unit files, so it answers as if
+        the timer were off (why the checks here ask is-active). status shows it; a second auto off stops
+        it and removes the link."""
         res = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            """
+            f"""
             d=/home/tester/.config/systemd/user
-            printf '[Service]\\nType=oneshot\\nExecStart=/bin/true\\n' >"$d/cst-e2e-probe.service"
-            printf '[Timer]\\nOnCalendar=hourly\\n' >"$d/cst-e2e-probe.timer"
-            systemctl --user daemon-reload
-            systemctl --user enable --now cst-e2e-probe.timer >/dev/null 2>&1
-            rm "$d/cst-e2e-probe.timer"
+            link="$d/timers.target.wants/cst-toolchains-prune.timer"
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            test -L "$link"
+            # The removal of the unchecked auto off: no disable, no daemon-reload that worked.
+            rm {self.TOOLCHAINS_INSTALLED}
+            test -L "$link" && test ! -e "$link"
             en_rc=0
-            en="$(systemctl --user is-enabled cst-e2e-probe.timer 2>&1)" || en_rc=$?
+            en="$(systemctl --user is-enabled cst-toolchains-prune.timer 2>&1)" || en_rc=$?
             ac_rc=0
-            ac="$(systemctl --user is-active cst-e2e-probe.timer)" || ac_rc=$?
+            ac="$(systemctl --user is-active cst-toolchains-prune.timer)" || ac_rc=$?
             echo "is-enabled: [$en] exit $en_rc; is-active: [$ac] exit $ac_rc"
-            systemctl --user stop cst-e2e-probe.timer
-            systemctl --user disable cst-e2e-probe.timer >/dev/null 2>&1 || true
-            rm -f "$d/cst-e2e-probe.service" "$d/timers.target.wants/cst-e2e-probe.timer"
-            systemctl --user daemon-reload
+            /opt/cst-rw/cst toolchains status --brief | grep 'still running although its file is gone'
+            /opt/cst-rw/cst toolchains auto off
+            {self.TIMER_INACTIVE}
+            test ! -L "$link" || {{ echo "auto off left $link" >&2; exit 1; }}
+            test -e /home/tester/.config/cst/toolchains-auto.off
+            # Nothing more on a second run.
+            again="$(/opt/cst-rw/cst toolchains auto off)"
+            if grep -q 'stopped:\\|removed:' <<<"$again"; then
+                echo "a second auto off changed something: $again" >&2
+                exit 1
+            fi
             """,
         )
-        # Seen in the Fedora 45 image: "is-enabled: [not-found] exit 4; is-active: [active] exit 0".
-        # So `! systemctl --user is-enabled` passed even when the timer kept running.
+        # Seen in the Fedora 45 image: is-enabled says the timer is not enabled (non-zero exit) while
+        # is-active says it runs. So `! systemctl --user is-enabled` passed even when the timer kept running.
         self.assertRegex(res.stdout, r"is-enabled: \[[^]]*\] exit [1-9]")
         self.assertIn("is-active: [active] exit 0", res.stdout)
+        self.assertIn("stopped:   cst-toolchains-prune.timer", res.stdout)
+        self.assertIn("removed:   ~/.config/systemd/user/timers.target.wants/cst-toolchains-prune.timer", res.stdout)
 
     def test_05_bluetooth_config_wp_roles_and_ldac_unit(self):
         """bluetooth plan, apply --no-restart, real libwireplumber wp-roles validation, and revert."""
