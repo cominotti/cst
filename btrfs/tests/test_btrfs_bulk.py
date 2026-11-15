@@ -243,7 +243,7 @@ class BulkTest(BulkBase):
         self.write("go/pkg/mod/example.com/m@v1/go.mod", "module m")
         self.write("go/bin/tool", "bin")
         # Go makes its module cache read-only.
-        for root, dirs, files in os.walk(self.H("go/pkg/mod"), topdown=False):
+        for root, _dirs, files in os.walk(self.H("go/pkg/mod"), topdown=False):
             for f in files:
                 os.chmod(os.path.join(root, f), 0o444)
             os.chmod(root, 0o555)

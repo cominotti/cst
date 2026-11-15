@@ -24,19 +24,11 @@ home paths, such as ~/Workspace (a snapshotted subvolume) or
 
 import os
 import re
-import subprocess
 import unittest
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests.repo_files import REPO, repo_files
+
 HOME_PATH = re.compile(r"(?:~|\$\{?HOME\}?|/var/home/[\w.-]+|/home/[\w.-]+)/(?!\.)[^\s`'\"()\[\]<>{},;|]+")
-
-
-def tracked_files():
-    out = subprocess.run(["git", "-C", REPO, "ls-files", "-co", "--exclude-standard"],
-                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise unittest.SkipTest("not a git checkout: " + out.stderr.strip())
-    return [rel for rel in out.stdout.splitlines() if os.path.isfile(os.path.join(REPO, rel))]
 
 
 FORMER_NAMES = {"cst", "f44-tools"}
@@ -70,7 +62,7 @@ class RepoPathTest(unittest.TestCase):
             self.assertFalse(offending_paths(good, folders, entries), good)
 
     def test_no_fixed_checkout_path(self):
-        files = tracked_files()
+        files = repo_files()
         folders = FORMER_NAMES | {os.path.basename(REPO)}
         entries = top_level_entries(files)
         problems = []

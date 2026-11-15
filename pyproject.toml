@@ -1,0 +1,110 @@
+# Developer tools for this repository only: the ruff linter and the ty type
+# checker (and, in their own group, the cosmic-ray mutation tester). CST
+# itself is not a Python package and installs nothing from here: its helpers
+# run on the system's /usr/bin/python3 with the standard library only.
+# See docs/dev-tools.md for the pinned versions, where the tools' virtual
+# environment lives (outside the checkout) and how to upgrade a pin.
+
+[project]
+name = "cst-dev"
+version = "0"
+# The oldest Python CST runs on: Fedora 45 ships 3.15 (CI, E2E images, the
+# workstation host). ruff and ty both take their target Python version from
+# this lower bound; neither sets its own.
+requires-python = ">=3.15"
+
+[dependency-groups]
+dev = ["ruff==0.17.5", "ty==0.0.104"]
+mutation = ["cosmic-ray==8.9.0"]
+
+[tool.uv]
+package = false
+required-version = ">=0.12.0"
+# Use the system Python (the one the helpers run on); never download one.
+python-preference = "only-system"
+python-downloads = "never"
+
+# ---- ruff -------------------------------------------------------------------
+
+[tool.ruff]
+# ruff finds *.py files by itself but not the extensionless helpers: each one
+# is named here. tests/test_python_files.py fails when a Python file of the
+# repository is missing from this list.
+extend-include = [
+    "bluetooth/bt-helper",
+    "bluetooth/bt-ldac-watch",
+    "btrfs/btrfs-bulk",
+    "btrfs/btrfs-snapshot-core",
+    "btrfs/btrfs-stall-monitord",
+    "btrfs/btrfs-stall-report",
+    "btrfs/chrome-cache",
+    "btrfs/docker-gc",
+    "btrfs/docker-volumes-nocow",
+    "cpu/cpu-watch",
+    "cpu/vm-pin",
+    "doctor/cst-doctor",
+    "swap/swap-status",
+    "toolchains/cst-toolchains",
+    "vm/cst-vm",
+]
+
+[tool.ruff.lint]
+# F: pyflakes (unused names, undefined names); B: bugbear (likely bugs);
+# UP: pyupgrade (older syntax); E9: syntax errors. The type annotation rules
+# (ANN) are not here: `invowk cmd test types` runs them on their own
+# (`ruff check --select ANN`), only for the typed modules (see
+# per-file-ignores below).
+select = ["F", "B", "UP", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# The typed modules: every function annotated. ANN (selected by
+# `ruff check --select ANN` in `invowk cmd test types`) is ignored everywhere
+# except the files in the braces; add a module here once it is fully typed
+# (and ty-clean, see [tool.ty.src] below).
+"!{swap/swap-status}" = ["ANN"]
+
+# ---- ty ---------------------------------------------------------------------
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.src]
+# The ty gate: every Python file ty reports nothing on. Add a file once ty is
+# clean on it; never remove one to get a green run.
+include = [
+    ".github/scripts/audit_summary.py",
+    "bluetooth/__init__.py",
+    "bluetooth/bt-helper",
+    "bluetooth/bt-ldac-watch",
+    "bluetooth/tests/__init__.py",
+    "btrfs/__init__.py",
+    "btrfs/chrome-cache",
+    "btrfs/docker-volumes-nocow",
+    "btrfs/tests/__init__.py",
+    "btrfs/tests/test_cst_link.py",
+    "btrfs/tests/test_health_check.py",
+    "btrfs/tests/test_snapshot_runtime.py",
+    "cpu/__init__.py",
+    "cpu/tests/__init__.py",
+    "doctor/__init__.py",
+    "doctor/tests/__init__.py",
+    "swap/__init__.py",
+    "swap/swap-status",
+    "swap/tests/__init__.py",
+    "tests/__init__.py",
+    "tests/e2e/__init__.py",
+    "tests/e2e/suites/suite_tier1_systemd.py",
+    "tests/e2e/suites/suite_tier2_storage_cpu.py",
+    "tests/repo_files.py",
+    "tests/run_unit.py",
+    "tests/test_python_files.py",
+    "tests/test_repo_files.py",
+    "tests/test_repo_paths.py",
+    "tests/test_subprocess_hygiene.py",
+    "tests/test_uv_dev.py",
+    "toolchains/__init__.py",
+    "toolchains/tests/__init__.py",
+    "toolchains/tests/test_toolchains.py",
+    "vm/__init__.py",
+    "vm/tests/__init__.py",
+]

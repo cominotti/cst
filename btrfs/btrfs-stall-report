@@ -435,7 +435,7 @@ def analyse(recs, since, until, with_below, verbose):
     pswpout_v7 = 0      # pswpout of the v7+ sample pairs (compared with zswpwb)
     v6_since, v7_since = first_at.get(6), first_at.get(7)
     zswap_ok = False    # some sample pair came from a v7+ daemon (zswap counters usable)
-    for a, b in zip(samples, samples[1:]):
+    for a, b in zip(samples, samples[1:], strict=False):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             gaps += 1
@@ -509,7 +509,7 @@ def analyse(recs, since, until, with_below, verbose):
             va = a.get("cg", {}).get(name)
             if not va:
                 continue
-            dl = [y - x for x, y in zip(va, vb)]
+            dl = [y - x for x, y in zip(va, vb, strict=False)]
             if any(v < 0 for v in dl):
                 continue
             c = cg.setdefault(name, {"io_some": 0, "io_full": 0, "read_bytes": 0, "write_bytes": 0, "wall": 0.0})

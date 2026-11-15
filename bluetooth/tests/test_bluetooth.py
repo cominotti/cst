@@ -103,7 +103,7 @@ class MainConfTest(unittest.TestCase):
         self.assertTrue(changed)
         old_lines, new_lines = VENDOR.splitlines(), new.splitlines()
         self.assertEqual(len(old_lines), len(new_lines))            # nothing added or lost
-        diff = [(a, b) for a, b in zip(old_lines, new_lines) if a != b]
+        diff = [(a, b) for a, b in zip(old_lines, new_lines, strict=True) if a != b]
         self.assertEqual(diff, [("#Experimental = false", "Experimental = true"),
                                 ("#KernelExperimental = false", f"KernelExperimental = {ISO}")])
         self.assertIn("#Experimental = false", new.split("[LE]")[1])  # other sections untouched

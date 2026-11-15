@@ -98,11 +98,33 @@ class StatusMathTest(unittest.TestCase):
         self.assertIsNone(s["ratio"])
         self.assertEqual(self.m.pct(None), "-")
 
+    def test_summary_accept_below_needs_both_values(self):
+        # accept_below = accept_threshold_percent of the pool limit: without
+        # either value there is nothing to show, not a crash or a guess.
+        gib = 2**30
+        meminfo = {"MemTotal": 100 * gib, "Zswap": 2 * gib, "Zswapped": 6 * gib}
+        for params, limit in (({"max_pool_percent": "20"}, 20 * gib),
+                              ({"max_pool_percent": "20", "accept_threshold_percent": "?"}, 20 * gib),
+                              ({"accept_threshold_percent": "90"}, None)):
+            with self.subTest(params=params):
+                s = self.m.zswap_summary(meminfo, {}, params)
+                self.assertEqual(s["limit"], limit)
+                self.assertIsNone(s["accept_below"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.show_pool({"max_pool_percent": "20"},
+                             self.m.zswap_summary(meminfo, {}, {"max_pool_percent": "20"}))
+        self.assertIn("pool in RAM: 2.0 GiB of a 20.0 GiB limit (10.0 %)", out.getvalue())
+        self.assertNotIn("takes new pages again", out.getvalue())
+
     def test_cgroup_row(self):
         r = self.m.cgroup_row({"zswpout": 10, "zswpwb": 5, "pswpout": 5, "pswpin": 1,
                                "zswapped": 4096}, 123)
         self.assertEqual(r["swap"], 123)
         self.assertEqual(r["zswpwb"], 5 * self.m.PAGE)
+        self.assertEqual(r["zswpout"], 10 * self.m.PAGE)          # pages -> bytes, like zswpwb
+        self.assertEqual(r["pswpin"], 1 * self.m.PAGE)
+        self.assertEqual(r["zswapped"], 4096)                     # memory.stat sizes are bytes already
         self.assertAlmostEqual(r["written_back"], 0.5)
         self.assertAlmostEqual(r["read_back"], 0.2)
         self.assertIsNone(self.m.cgroup_row({}, None)["read_back"])

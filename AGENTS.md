@@ -84,6 +84,7 @@ before changing that module.
 | The libvirt VM: backups, virtual hardware, NOCOW folders | [vm/README.md](vm/README.md) |
 | `cst doctor` checks | [doctor/README.md](doctor/README.md) |
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
+| Python dev tools: uv, ruff, ty, pinned versions | [docs/dev-tools.md](docs/dev-tools.md) |
 
 ## Commands
 
@@ -93,13 +94,24 @@ Run from the repository root.
 python3 -I -B tests/run_unit.py -v            # all unit tests, socket as stdin (what CI runs)
 python3 -B -m unittest vm.tests.test_vm -v    # one module; or vm.tests.test_vm.PartsTest.test_disks_nvram_tpm
 invowk cmd test lint                          # bash -n + shellcheck -S warning (falls back to the devbox toolbox)
+invowk cmd test pylint                        # ruff on every Python file (through uv)
+invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
 invowk validate cst.invowkmod && invowk audit cst.invowkmod
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 ```
 
-- Before a pull request, run the first, third and fourth lines, and the fifth
-  when the change adds or touches a tier 1 E2E test (if its container does not
-  start, say so in the pull request).
+- Before a pull request, run the first line and the third to sixth, and the
+  last when the change adds or touches a tier 1 E2E test (if its container
+  does not start, say so in the pull request).
+- The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
+  standard library, like the helpers. Only `test pylint` and `test types`
+  use uv, which installs the pinned ruff and ty from `uv.lock` into a
+  virtual environment under `~/.cache`, never inside the checkout. Run a
+  tool by hand with `tests/uv-dev`, for example `tests/uv-dev ruff check --fix`.
+  See [docs/dev-tools.md](docs/dev-tools.md).
+- A new Python helper without a `.py` extension has to be added to
+  `extend-include` in `pyproject.toml`. Until then ruff does not see it, and
+  `tests/test_python_files.py` fails.
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
 - A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.

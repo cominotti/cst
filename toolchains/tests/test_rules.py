@@ -138,7 +138,7 @@ class OrphanTest(RulesBase):
         self.assertIn("3 folder(s) claimed by a workspace, 2 not claimed", out)
         self.assertRegex(out, r"delete .*ee/0123456789abcd orphan: no workspace claims it")
         self.assertRegex(out, r"keep .*ef/0123456789abcd active .* \(within MIN_KEEP\)")
-        self.assertTrue(all(f"--offline --no-deps" in a for a in self.asked()))
+        self.assertTrue(all("--offline --no-deps" in a for a in self.asked()))
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
         self.assertFalse(self.present("ee/0123456789abcd"))
@@ -846,8 +846,9 @@ class SccacheConfigTest(RulesBase):
         self.assertFalse(os.path.lexists(self.wrapper))
 
     def test_flag_inserts_into_the_existing_build_table(self):
-        self.write_cargo_config('# mine\n[build]\nbuild-dir = "%s/.cache/cargo-build/{workspace-path-hash}"\n\n'
-                                '[profile.dev]\ndebug = 1\n' % self.home)
+        self.write_cargo_config('# mine\n[build]\n'
+                                f'build-dir = "{self.home}/.cache/cargo-build/{{workspace-path-hash}}"\n\n'
+                                '[profile.dev]\ndebug = 1\n')
         before = tomllib.loads(self.cfg())
         rc, out = self.run_main("config", "plan", "--sccache")
         self.assertIn('[build] rustc-wrapper = "~/.local/libexec/cst/rustc-wrapper"', out)
@@ -1059,7 +1060,7 @@ class SccacheConfigTest(RulesBase):
         # A second apply changes nothing.
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
-        self.assertIn("kept:      %s (sccache wrapper)" % self.wrapper, out)
+        self.assertIn(f"kept:      {self.wrapper} (sccache wrapper)", out)
         self.assertEqual((self.wrapper_file(), self.cfg()), (text, cfg))
         # Back to yes: plan shows the wrapper outdated and changes nothing; apply rewrites it.
         self.write_conf_raw("RUST_SCCACHE=yes\nRUST_SCCACHE_WORKSPACE=yes\n")
@@ -1103,7 +1104,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.wrapper_file(), old)                 # plan changes nothing
         rc, out = self.run_main("config", "apply")
         self.assertEqual(rc, 0, out)
-        self.assertIn("written:   %s (sccache wrapper, cache size 25G)" % self.wrapper, out)
+        self.assertIn(f"written:   {self.wrapper} (sccache wrapper, cache size 25G)", out)
         self.assertEqual(self.wrapper_file(), new)
         self.assertEqual(self.cfg(), cfg)
         rc, out = self.run_main("status")
@@ -1168,10 +1169,10 @@ class SccacheConfigTest(RulesBase):
         stale.close()
         log = os.path.join(self.tmp, "sccache.log")
         self.exe(os.path.join(self.bin, "sccache"),
-                 '#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"%s"\n'
+                 f'#!/bin/sh\necho "$SCCACHE_SERVER_UDS $*" >>"{log}"\n'
                  'printf "Compile requests                    12\\nCache hits                           7\\n'
                  'Cache hits (Rust)                    7\\nCache misses                         5\\n'
-                 'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n' % log)
+                 'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n')
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
         self.assertIn("sccache server devbox: compile requests 12, cache hits 7, cache misses 5, "
@@ -1361,7 +1362,7 @@ class RustcWrapperTest(unittest.TestCase):
         # The stable interface: a first argument not named rustc runs directly,
         # whatever the setting (a RUSTC_WORKSPACE_WRAPPER used as a passthrough).
         passthrough = os.path.join(self.tools, "rustc-passthrough.sh")
-        self.fake(passthrough, 'echo "passthrough|args=$*" >>"%s"\nexec "$@"\n' % self.log)
+        self.fake(passthrough, f'echo "passthrough|args=$*" >>"{self.log}"\nexec "$@"\n')
         for setting, env in (("yes", {}), ("no", {}), ("no", {"CST_SCCACHE_WORKSPACE": "1"})):
             self.written(setting)
             for extra in ([], ["--cap-lints", "allow"]):

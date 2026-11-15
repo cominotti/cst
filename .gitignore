@@ -3,3 +3,5 @@ __pycache__/
 .remember/
 .backup-*/
 tests/e2e/.artifacts/
+.venv/
+.ruff_cache/

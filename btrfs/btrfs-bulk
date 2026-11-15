@@ -2435,7 +2435,7 @@ def u_verify_content(src, new, label, total):
         a = os.path.join(src, rel) if rel else src
         b = os.path.join(new, rel) if rel else new
         try:
-            same = same_file(a, b, lambda n: prog.update(done + n))
+            same = same_file(a, b, lambda n, done=done: prog.update(done + n))
         except OSError as e:
             raise RuntimeError(f"{rel or os.path.basename(src)} could not be compared with its copy: {e}") from e
         if not same:
@@ -2491,7 +2491,7 @@ def u_steam_prepare(parts, idle=False):
                 copy_reflink(p["src"], p["new"])
             a, b = listing(p["src"]), listing(p["new"])
             if a != b:
-                diff = next((x for x, y in zip(a, b) if x != y), None) or f"{len(a)} vs {len(b)} entries"
+                diff = next((x for x, y in zip(a, b, strict=False) if x != y), None) or f"{len(a)} vs {len(b)} entries"
                 raise RuntimeError(f"copy check failed for {p['src']} (first difference: {diff})")
             if p.get("mode") == "copy":
                 if n := nocow_entries(p["new"]):
@@ -2617,13 +2617,13 @@ def u_write_vdf_pair(files, expect_b64, expect_mtime, data_b64, ts, backup):
     mtimes."""
     data = base64.b64decode(data_b64)
     olds = []
-    for f, e, m in zip(files, expect_b64, expect_mtime):
+    for f, e, m in zip(files, expect_b64, expect_mtime, strict=False):
         r = u_read(f)
         if r is None or r["b64"] != e or r["mtime"] != m:
             raise Unexpected(f"{f} changed meanwhile (Steam started?): nothing written; close Steam, run again")
         olds.append(r)
     if backup:
-        for f, r in zip(files, olds):
+        for f, r in zip(files, olds, strict=False):
             bak = f"{f}.cst-bak-{ts}"
             if kind(bak) == "absent":
                 u_write_new(bak, base64.b64decode(r["b64"]), r["mode"])
@@ -2633,7 +2633,7 @@ def u_write_vdf_pair(files, expect_b64, expect_mtime, data_b64, ts, backup):
             for n in baks[:-STEAM_BACKUPS]:
                 os.unlink(os.path.join(d, n))
     out = []
-    for f, r in zip(files, olds):
+    for f, r in zip(files, olds, strict=False):
         tmp = f + ".cst-tmp"
         if kind(tmp) != "absent":
             os.unlink(tmp)          # left by a kill

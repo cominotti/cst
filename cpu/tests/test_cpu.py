@@ -355,7 +355,7 @@ class QuietTest(unittest.TestCase):
         for key, value, line in cases:
             with self.subTest(key=key, value=value):
                 self.proc = FakeProc(tempfile.mkdtemp(dir=self.tmp.name))
-                rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {key: value})
+                rc, out, _ = self.run_quiet(["--for", "10"], lambda i, key=key, value=value: {key: value})
                 self.assertEqual(rc, 1)
                 self.assertIn("  " + line + "\n", out)
                 self.assertEqual(out.count(" ok\n"), 5)
@@ -501,7 +501,7 @@ class QuietTest(unittest.TestCase):
                 taken = []
                 err = io.StringIO()
                 with unittest.mock.patch("sys.stderr", err):
-                    rc = self.m.quiet(argv, sample=lambda: taken.append(1), sleep=lambda d: None,
+                    rc = self.m.quiet(argv, sample=lambda taken=taken: taken.append(1), sleep=lambda d: None,
                                       out=io.StringIO(), environ=env)
                 self.assertEqual((rc, taken), (2, []))
                 self.assertTrue(err.getvalue().startswith("quiet: "), err.getvalue())

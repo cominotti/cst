@@ -442,7 +442,7 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
         self.assertIn("DISK NOT MERGED BACK", r.stderr)
-        self.assertIn(f"sudo virsh -c qemu:///system blockcommit win sda --active --pivot --wait --verbose",
+        self.assertIn("sudo virsh -c qemu:///system blockcommit win sda --active --pivot --wait --verbose",
                       r.stderr)
         self.assertIn("sudo virsh -c qemu:///system blockjob win sda --pivot     # only if --info shows the "
                       "commit ready", r.stderr)

@@ -335,6 +335,18 @@ class OpenEpisodeTest(ReportCase):
         self.assertNotIn("Episode still open", " | ".join(verdict))
         self.assertIn("Blocked tasks: up to 20 tasks", " | ".join(verdict))
 
+    def test_three_storage_waits_open_an_episode_two_do_not(self):
+        # The daemon opens an episode at 3 storage waits; the report uses the
+        # same threshold for one it has not written yet: exactly 3 counts,
+        # exactly 2 does not.
+        for d, want in ((3, 3), (2, None)):
+            with self.subTest(d=d):
+                recs = [meta_full(T0)] + [full_sample(T0 + i, i, dt=1.0, d=d, d_mem=0) for i in range(60)]
+                res, verdict, _ = self.run_report(recs)
+                got = res["open_episode"]
+                self.assertEqual(None if got is None else got["d_tasks"], want)
+                self.assertEqual("Episode still open" in " | ".join(verdict), want is not None)
+
     def test_quiet_one_second_samples_are_not_an_episode(self):
         recs = [meta_full(T0)] + [full_sample(T0 + i, i, dt=1.0, d=1, d_mem=0) for i in range(60)]
         res, verdict, _ = self.run_report(recs)

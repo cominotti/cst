@@ -388,8 +388,7 @@ class RetentionBoundaryTests(unittest.TestCase):
         # orders 01:38 before 01:09 and so keeps 01:38 as the first of the year.
         lh = zoneinfo.ZoneInfo("Australia/Lord_Howe")
         e = core.wall_to_epoch(W("2027-04-04 01:38"), lh)
-        self.assertEqual(dt.datetime.fromtimestamp(e, dt.timezone.utc), dt.datetime(2027, 4, 3, 14, 38,
-                                                                                   tzinfo=dt.timezone.utc))
+        self.assertEqual(dt.datetime.fromtimestamp(e, dt.UTC), dt.datetime(2027, 4, 3, 14, 38, tzinfo=dt.UTC))
         self.assertEqual(core.epoch_to_wall(e, lh), W("2027-04-04 01:38"))
         rows = core.plan([snap("2027-04-04 01:09"), snap("2027-04-04 01:38")],
                          core.wall_to_epoch(W("2027-04-05 03:41"), lh), core.parse_policy("72h 7d 4w 3m 2y"), lh)

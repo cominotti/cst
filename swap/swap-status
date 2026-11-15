@@ -16,6 +16,8 @@ import argparse
 import os
 import re
 import sys
+from collections.abc import Mapping, Sequence
+from typing import TypedDict, overload
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMPFILES = os.path.join(HERE, "tmpfiles", "zswap.conf")
@@ -53,11 +55,45 @@ DEBUG_HELP = {
 }
 
 
+# ---- records -----------------------------------------------------------------
+
+class ZswapSummary(TypedDict):
+    """What zswap_summary returns. Sizes in bytes, counters in pages,
+    shares as fractions (None where the divisor is 0 or a value is missing)."""
+    pool: int | None            # compressed size in RAM (meminfo Zswap)
+    stored: int | None          # what the pool holds, uncompressed (Zswapped)
+    limit: int | None           # max_pool_percent of MemTotal
+    pool_of_limit: float | None
+    accept_below: int | None    # accept_threshold_percent of the limit
+    ratio: float | None         # stored / pool
+    zswpout: int
+    zswpin: int
+    zswpwb: int
+    pswpout: int
+    pswpin: int
+    loaded_back: float | None   # zswpin / zswpout
+    written_back: float | None  # zswpwb / zswpout
+    bypassed: int               # pswpout - zswpwb, at least 0
+    read_back: float | None     # pswpin / pswpout
+
+
+class CgroupRow(TypedDict):
+    """What cgroup_row returns for one cgroup. Sizes in bytes."""
+    swap: int | None            # memory.swap.current
+    zswap: int | None
+    zswapped: int | None
+    zswpout: int
+    zswpwb: int
+    pswpin: int
+    written_back: float | None  # zswpwb / zswpout
+    read_back: float | None     # pswpin / pswpout
+
+
 # ---- parsing (pure) ----------------------------------------------------------
 
-def parse_kv(text):
+def parse_kv(text: str) -> dict[str, int]:
     """'name value' lines (vmstat, memory.stat) -> {name: int}."""
-    out = {}
+    out: dict[str, int] = {}
     for line in text.splitlines():
         parts = line.split()
         if len(parts) >= 2:
@@ -68,9 +104,9 @@ def parse_kv(text):
     return out
 
 
-def parse_meminfo(text):
+def parse_meminfo(text: str) -> dict[str, int]:
     """/proc/meminfo -> {name: bytes}."""
-    out = {}
+    out: dict[str, int] = {}
     for line in text.splitlines():
         m = re.match(r"^(\S+):\s+(\d+)(?:\s+kB)?", line)
         if m:
@@ -78,9 +114,9 @@ def parse_meminfo(text):
     return out
 
 
-def parse_tmpfiles_params(text):
+def parse_tmpfiles_params(text: str) -> list[tuple[str, str]]:
     """zswap.conf -> [(param, value)] in file order."""
-    out = []
+    out: list[tuple[str, str]] = []
     for line in text.splitlines():
         m = re.match(r"^w\s+/sys/module/zswap/parameters/(\S+)\s+(?:\S+\s+){4}(\S+)", line)
         if m:
@@ -88,9 +124,9 @@ def parse_tmpfiles_params(text):
     return out
 
 
-def parse_sysctl(text):
+def parse_sysctl(text: str) -> list[tuple[str, str]]:
     """sysctl.d file -> [(key, value)]."""
-    out = []
+    out: list[tuple[str, str]] = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line[0] in "#;":
@@ -101,7 +137,7 @@ def parse_sysctl(text):
     return out
 
 
-def parse_size(spec):
+def parse_size(spec: str | None) -> int | None:
     """systemd size ('48G', '512M', '1024') -> bytes (powers of 1024)."""
     m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
     if not m:
@@ -109,12 +145,12 @@ def parse_size(spec):
     return int(m.group(1)) * 1024 ** " KMGT".index(m.group(2) or " ")
 
 
-def parse_memory_low(text):
+def parse_memory_low(text: str) -> int | None:
     m = re.search(r"^MemoryLow=(\S+)", text, re.M)
     return parse_size(m.group(1)) if m else None
 
 
-def same_param(live, desired):
+def same_param(live: str, desired: str) -> bool:
     """zswap shows booleans as Y/N; tmpfiles writes 1/0."""
     norm = {"1": "Y", "0": "N", "y": "Y", "n": "N"}
     return norm.get(live, live) == norm.get(desired, desired)
@@ -122,16 +158,16 @@ def same_param(live, desired):
 
 # ---- maths (pure) ------------------------------------------------------------
 
-def share(num, den):
+def share(num: float, den: float | None) -> float | None:
     """num/den as a fraction, None when den is 0."""
     return None if not den else num / den
 
 
-def pct(frac):
+def pct(frac: float | None) -> str:
     return "-" if frac is None else f"{frac * 100:.1f} %"
 
 
-def human(n):
+def human(n: int | None) -> str:
     if n is None:
         return "-"
     for unit, size in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
@@ -140,7 +176,8 @@ def human(n):
     return f"{n} B"
 
 
-def zswap_summary(meminfo, vmstat, params):
+def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int],
+                  params: Mapping[str, str]) -> ZswapSummary:
     """The numbers status prints about the pool and the swap traffic.
 
     meminfo in bytes, vmstat in pages, params as read from sysfs."""
@@ -178,7 +215,7 @@ def zswap_summary(meminfo, vmstat, params):
     }
 
 
-def cgroup_row(stat, swap_current):
+def cgroup_row(stat: Mapping[str, int], swap_current: int | None) -> CgroupRow:
     """memory.stat (+ memory.swap.current) of one cgroup -> derived values."""
     zout, zwb = stat.get("zswpout", 0), stat.get("zswpwb", 0)
     pout, pin = stat.get("pswpout", 0), stat.get("pswpin", 0)
@@ -196,7 +233,11 @@ def cgroup_row(stat, swap_current):
 
 # ---- reading -----------------------------------------------------------------
 
-def read(path, default=None):
+@overload
+def read(path: str) -> str | None: ...
+@overload
+def read(path: str, default: str) -> str: ...
+def read(path: str, default: str | None = None) -> str | None:
     try:
         with open(path) as f:
             return f.read()
@@ -204,20 +245,24 @@ def read(path, default=None):
         return default
 
 
-def read1(path, default=None):
+@overload
+def read1(path: str) -> str | None: ...
+@overload
+def read1(path: str, default: str) -> str: ...
+def read1(path: str, default: str | None = None) -> str | None:
     text = read(path)
     return default if text is None else text.strip()
 
 
-def desired_text(path):
+def desired_text(path: str) -> str:
     text = read(path)
     if text is None:
         sys.exit(f"swap-status: {path} is missing (incomplete copy of CST?)")
     return text
 
 
-def zswap_params():
-    out = {}
+def zswap_params() -> dict[str, str]:
+    out: dict[str, str] = {}
     try:
         names = sorted(os.listdir(ZSWAP_PARAMS))
     except OSError:
@@ -227,7 +272,7 @@ def zswap_params():
     return out
 
 
-def psi_line(path, kind="some", key="avg60"):
+def psi_line(path: str, kind: str = "some", key: str = "avg60") -> str | None:
     for line in (read(path) or "").splitlines():
         if line.startswith(kind + " "):
             m = re.search(rf"{key}=(\S+)", line)
@@ -236,7 +281,7 @@ def psi_line(path, kind="some", key="avg60"):
     return None
 
 
-def cgroups():
+def cgroups() -> list[tuple[str, str]]:
     """(label, path) of the cgroups status shows, if they exist."""
     out = [("(whole system)", CGROUP)]
     for name in ("system.slice", "machine.slice", "builds.slice"):
@@ -256,13 +301,13 @@ def cgroups():
 
 # ---- printing ----------------------------------------------------------------
 
-def section(title):
+def section(title: str) -> None:
     print(f"\n== {title}")
 
 
-def show_settings(params):
+def show_settings(params: Mapping[str, str]) -> None:
     section("live settings vs desired (from swap/ in CST)")
-    rows = []
+    rows: list[tuple[str, str, str, str]] = []
     if not params:
         rows.append(("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", ""))
     for name, want in parse_tmpfiles_params(desired_text(TMPFILES)):
@@ -293,7 +338,7 @@ def show_settings(params):
               f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply")
 
 
-def show_pool(params, s):
+def show_pool(params: Mapping[str, str], s: ZswapSummary) -> None:
     section("zswap pool")
     print("  parameters: " + ", ".join(f"{k}={v}" for k, v in params.items()) if params else "  zswap: not available")
     if s["pool"] is None:
@@ -307,7 +352,7 @@ def show_pool(params, s):
     print(f"  holds {human(s['stored'])} of memory compressed into {human(s['pool'])}: ratio {ratio}")
 
 
-def show_traffic(s):
+def show_traffic(s: ZswapSummary) -> None:
     section("swap traffic since boot (/proc/vmstat; pages of 4 KiB shown as sizes)")
     p = lambda n: human(n * PAGE)  # noqa: E731
     print(f"  into the pool    zswpout {p(s['zswpout']):>10}")
@@ -325,7 +370,7 @@ def show_traffic(s):
     print("  NVMe instead of RAM: see swap/README.md, 'Reading the status'.")
 
 
-def show_debug(hint):
+def show_debug(hint: str) -> None:
     section(f"zswap debug counters ({ZSWAP_DEBUG})")
     try:
         names = sorted(os.listdir(ZSWAP_DEBUG))
@@ -342,7 +387,7 @@ def show_debug(hint):
         print(f"  {name:<28} {val:<24} {DEBUG_HELP.get(name, '')}".rstrip())
 
 
-def show_devices():
+def show_devices() -> None:
     section("swap devices (/proc/swaps)")
     lines = (read(os.path.join(PROC, "swaps")) or "").splitlines()[1:]
     if not lines:
@@ -358,7 +403,7 @@ def show_devices():
         print(f"  {label:<24} {f[1]:<10} used {human(used):>10} of {human(size):>10}  priority {f[4]}")
 
 
-def show_cgroups():
+def show_cgroups() -> None:
     section("per cgroup (memory.stat; counters since the cgroup was created)")
     head = (f"  {'cgroup':<32} {'swap':>9} {'zswapped':>9} {'zswap':>9} {'->pool':>9} {'->disk':>9}"
             f" {'disk in':>9} {'wb%':>6} {'rb%':>6} {'zswap.wb':>8} {'low':>8} {'psi60':>6}")
@@ -385,13 +430,13 @@ def show_cgroups():
     print("  pool may write this cgroup's pages to disk); psi60 = memory pressure 'some', avg 60 s.")
 
 
-def show_psi():
+def show_psi() -> None:
     section("memory pressure (/proc/pressure/memory: % of time tasks waited for memory)")
     for line in (read(os.path.join(PROC, "pressure", "memory")) or "  not available\n").splitlines():
         print(f"  {line}")
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="swap-status", description=__doc__.split("\n")[0])
     ap.add_argument("--settings-only", action="store_true")
     ap.add_argument("--hint", default="")
