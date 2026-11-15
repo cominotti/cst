@@ -1449,6 +1449,28 @@ class VmNasBackupTest(VmTest):
         self.assertNotIn("fix: sudo virsh -c qemu:///system edit", r.stdout)
         self.assert_read_only()
 
+    def test_overlay_disk_without_target_dev(self):
+        # libvirt requires <target dev=...>, but a definition without one must not fail the whole check
+        # (on main its None key made sorted() raise a TypeError): it is named "?" beside the normal disk.
+        data = "/var/lib/libvirt/images/data.qcow2.cst-overlay-20261114T033000Z"
+        for target in ("<target bus='scsi'/>", ""):
+            xml = (
+                f"<domain type='kvm'><name>win</name><devices>"
+                f"<disk type='file' device='disk'><source file='{data}'/>{target}</disk>"
+                f"<disk type='file' device='disk'><source file='{self.OVERLAY}'/><target dev='sda' bus='scsi'/></disk>"
+                f"</devices></domain>\n"
+            )
+            self.libvirt(["win"], {"win": xml}, CAPS_QEMU11)
+            with open(os.path.join(self.virsh, "win.blk"), "w") as f:
+                f.write(f" Type   Device   Target   Source\n------\n file   disk     sda      {self.OVERLAY}\n")
+            r = self.run_tool()
+            self.assertNotIn("the check itself failed", r.stdout)
+            self.assertEqual(r.stdout.count("an overlay left by `cst vm backup --nas`"), 2, r.stdout)
+            self.assertIn(f"WARN   VM win: disk sda is on {self.OVERLAY}", r.stdout)
+            self.assertIn(f"WARN   VM win: disk ? is on {data}", r.stdout)
+            self.assertNotIn("disk None is on", r.stdout)
+            self.assert_read_only()
+
     def test_overlay_of_a_shut_off_vm(self):
         self.on_overlay(True, True)
         with open(os.path.join(self.virsh, "win.state"), "w") as f:

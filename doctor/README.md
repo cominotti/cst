@@ -355,6 +355,10 @@ finish: `WARN`. The fix depends on the case, which the doctor works out from
 - **The state or the live listing cannot be read:** the fix only looks
   (`virsh domblklist`); nothing is called stale.
 
+A disk whose definition has no `<target dev=...>` (libvirt refuses such a
+definition, so this is only a safeguard) is shown as disk `?`, with a fix
+that only looks, and does not stop the check for the other disks.
+
 After the fix, check that both `domblklist` listings show the image again,
 and only then remove the overlay file
 ([vm/README.md, section 10.8](../vm/README.md#108-if-a-backup-left-an-overlay)).

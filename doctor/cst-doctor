@@ -1733,7 +1733,9 @@ def check_vm_overlays(host: Host) -> Iterator[Result]:
 
     names, _ = libvirt_domains(host)
     for vm in names or []:
-        live, defined = {}, {}  # target -> overlay path: what QEMU uses, what the definition names
+        # target -> overlay path: what QEMU uses, what the definition names
+        live: dict[str, str] = {}
+        defined: dict[str, str] = {}
         sources: dict[str, str] | None = None  # target -> source of the live listing; None: not readable
         rc, out, _ = virsh(host, "domblklist", vm, "--details")
         if rc == 0:
@@ -1753,7 +1755,10 @@ def check_vm_overlays(host: Host) -> Iterator[Result]:
             src, tgt = disk.find("source"), disk.find("target")
             path = src.get("file") if src is not None else None
             if path and VM_OVERLAY_MARK in path:
-                defined.setdefault(tgt.get("dev") if tgt is not None else "?", path)
+                # libvirt requires <target dev=...>; "?" keeps a disk without one (or without a
+                # <target>) from failing the whole check.
+                target = (tgt.get("dev") if tgt is not None else None) or "?"
+                defined.setdefault(target, path)
         if not live and not defined:
             continue
         rc, out, _ = virsh(host, "domstate", vm)
