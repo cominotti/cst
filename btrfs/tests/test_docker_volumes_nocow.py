@@ -1061,6 +1061,17 @@ class RecoverTest(Base):
         self.assertEqual(self.call(M.recover), (None, ""))
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data.nocow-new"])
 
+    def test_recover_leaves_a_data_that_is_not_a_folder(self) -> None:
+        # Something named _data that is not a folder (here a dangling link):
+        # recover() neither puts the old copy over it nor deletes the copies.
+        os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1700000000"))
+        os.symlink("gone", self.top)
+        os.mkdir(os.path.join(self.vol, "_data.nocow-new"))
+        self.assertEqual(self.call(M.recover), (None, ""))
+        self.assertEqual(os.readlink(self.top), "gone")
+        self.assertEqual(sorted(os.listdir(self.vol)), ["_data", "_data.cow-old-1700000000", "_data.nocow-new"])
+        self.assertEqual(ino(os.path.join(self.vol, "_data.cow-old-1700000000")), self.ino)
+
     def test_recover_skips_files_and_links(self) -> None:
         # metadata.db (a file) and a symlinked volume folder are not volumes:
         # what the link points to keeps its look-alike leftovers.
