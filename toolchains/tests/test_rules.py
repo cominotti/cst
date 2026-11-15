@@ -1420,18 +1420,25 @@ class RustcWrapperTest(unittest.TestCase):
             calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", "--cap-lints", "allow", TMPDIR=caller)
             self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], caller)
             self.assertEqual([c["tmp"] for c in calls], ["/tmp", "/tmp"], caller)
-        # The defaults that only fill in what is unset still do (TMPDIR is the one exception).
-        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_DIR="/c")
-        self.assertEqual((calls[0]["tmp"], calls[0]["dir"]), ("/tmp", "/c"))
+        # The defaults that only fill in what is unset still do (TMPDIR is the one
+        # exception), and a server address of your own does not change it.
+        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_DIR="/c", SCCACHE_SERVER_UDS="/x.sock")
+        self.assertEqual((calls[0]["tmp"], calls[0]["dir"], calls[0]["uds"]), ("/tmp", "/c", "/x.sock"))
+        calls = self.run_wrapper(self.rustc(), "x", TMPDIR=private, SCCACHE_SERVER_PORT="4300")
+        self.assertEqual((calls[0]["who"], calls[0]["tmp"]), ("sccache", "/tmp"))
 
     def test_direct_compiles_keep_the_callers_tmpdir(self):
         private = os.path.join(self.tmp, "scope-tmp")
+        not_a_dir = os.path.join(self.tmp, "a-file")
+        open(not_a_dir, "w").close()
         rustc = self.rustc()
         cases = [
             ("CST_SCCACHE=0", [rustc, "x"], {"CST_SCCACHE": "0"}, "rustc"),
             ("incremental", [rustc, "-C", "incremental=/t/inc"], {}, "rustc"),
             ("local crate, one-build 0", [rustc, *self.LOCAL], {"CST_SCCACHE_WORKSPACE": "0"}, "rustc"),
             ("another compiler", [os.path.join(self.tools, "clippy-driver"), rustc, "x"], {}, "clippy-driver"),
+            # No XDG_RUNTIME_DIR, and the socket folder under SCCACHE_DIR cannot be made.
+            ("no socket folder", [rustc, "x"], {"XDG_RUNTIME_DIR": None, "SCCACHE_DIR": not_a_dir}, "rustc"),
         ]
         for label, args, env, who in cases:
             for caller, seen in ((private, private), (None, "unset")):

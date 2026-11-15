@@ -300,7 +300,8 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   that breaks off: compile locally) and `SCCACHE_SERVER_UDS`.
   `SCCACHE_SERVER_UDS` is not set if you set it or `SCCACHE_SERVER_PORT`.
 - **sccache always runs with `TMPDIR=/tmp`**, even when you set `TMPDIR`
-  (`/tmp` is what a build without `TMPDIR` already gets). When no server
+  or your own server address (`/tmp` is what a build without `TMPDIR`
+  already gets). When no server
   answers, the sccache client starts one, and that server keeps the client's
   `TMPDIR` for its own temporary folders until it stops. A build run with a
   private `TMPDIR` that is deleted afterwards (a temporary scope, a test

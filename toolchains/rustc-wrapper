@@ -40,9 +40,10 @@
 # deleted afterwards (a temporary scope, a test harness) would leave a server
 # whose every later compile fails with "Failed to create temp dir"; a TMPDIR
 # too long for a unix socket path would fail the first compile ("path must be
-# shorter than SUN_LEN"). sccache hands the client's environment to rustc, so
-# rustc's own temporary files go to /tmp too. Compiles that go straight to the
-# compiler (the list above) keep the caller's TMPDIR. A server started by an older copy
+# shorter than SUN_LEN"). This holds with your own SCCACHE_SERVER_UDS or port
+# too. sccache hands the client's environment to rustc, so rustc's own
+# temporary files go to /tmp too. Compiles that go straight to the compiler
+# (the list above) keep the caller's TMPDIR. A server started by an older copy
 # of this wrapper keeps its TMPDIR until it stops (after 10 minutes without
 # work, or `sccache --stop-server` with the same SCCACHE_SERVER_UDS).
 
