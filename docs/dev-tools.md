@@ -82,8 +82,9 @@ repository:
   - `check=False` when the code reads `returncode` itself, or when a failure
     really does not matter (say why in a comment).
 
-  When the rule was turned on, every existing call got `check=False`,
-  which is what it did before (Python's default), so no behaviour changed.
+  When the rule was turned on, every call that had no `check=` got
+  `check=False`, which is what it did before (Python's default), so no
+  behaviour changed.
   Turning one into `check=True` changes behaviour: do it in its own pull
   request, with a test. ruff does not lint the Python examples in Markdown
   files; write `check=` in them by hand.
