@@ -431,22 +431,6 @@ def systemctl(*args: str) -> tuple[int, str, str]:
     return rc, so.strip(), first_line(err)
 
 
-def write_file(path: str, data: bytes, mode: int) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def describe_entry(e: Mapping[str, Any]) -> str:
     dep = e.get("deployment") or {}
     qemu = next(

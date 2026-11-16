@@ -23,6 +23,7 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from cst_core.adapters import write_bytes_atomic
 from cst_core.adapters.files import owned_file_state_at
 from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused, Usage
@@ -84,7 +85,6 @@ from vm.adapters import (
     utc_now,
     virsh,
     wants_links,
-    write_file,
     write_index,
 )
 from vm.domain import (
@@ -1046,7 +1046,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
         nas_settings()
         for p, (text, mode) in files.items():
             if states[p] != "ok":
-                write_file(p, text, mode)
+                write_bytes_atomic(p, text, mode=mode)
                 print(f"  {'updated' if states[p] == 'change' else 'installed'}: {p}")
         for args in (("daemon-reload",), ("enable", "--now", unit)):
             rc, _, err = systemctl(*args)
