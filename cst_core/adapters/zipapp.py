@@ -1,8 +1,8 @@
 """Build the self-contained zipapp that `install` writes for a python-entry.
 
 The archive holds the entry as `__main__.py`, every repository package it
-imports (directly or through another package: the static import closure),
-and the data files the manifest lists as its resources. It is uncompressed
+imports (directly or through another package: the static import closure).
+It is uncompressed
 and every member has a fixed timestamp, so the same sources always give the
 same bytes, whichever Python builds it.
 """
@@ -52,7 +52,7 @@ def import_closure(root: Path, entry_source: str, filename: str = "<entry>") -> 
     return frozenset(seen)
 
 
-def zipapp_members(root: Path, src_rel: str, resources: tuple[str, ...] = ()) -> dict[str, bytes]:
+def zipapp_members(root: Path, src_rel: str) -> dict[str, bytes]:
     """{archive name: bytes} of the zipapp for the entry at `src_rel`."""
     entry_path = root / src_rel
     if not entry_path.is_file():
@@ -62,12 +62,10 @@ def zipapp_members(root: Path, src_rel: str, resources: tuple[str, ...] = ()) ->
     for pkg in sorted(import_closure(root, raw_entry.decode("utf-8"), str(entry_path))):
         for path in package_sources(root, pkg):
             members[path.relative_to(root).as_posix()] = path.read_bytes()
-    for rel in resources:
-        members[rel] = (root / rel).read_bytes()
     return members
 
 
-def build_python_zipapp(repo_root: str | os.PathLike[str], src_rel: str, resources: tuple[str, ...] = ()) -> bytes:
+def build_python_zipapp(repo_root: str | os.PathLike[str], src_rel: str) -> bytes:
     """The deterministic zipapp bytes for one python-entry.
 
     The shebang runs it on the system Python in isolated mode; the entry's
@@ -75,7 +73,7 @@ def build_python_zipapp(repo_root: str | os.PathLike[str], src_rel: str, resourc
     after the shebang, so `grep` still finds who installed the file.
     """
     root = Path(repo_root).resolve()
-    members = zipapp_members(root, src_rel.strip("/"), resources)
+    members = zipapp_members(root, src_rel.strip("/"))
     preamble = ZIPAPP_SHEBANG
     for line in members["__main__.py"].splitlines(keepends=True)[1:4]:
         if line.startswith(b"# managed-by:"):
@@ -95,5 +93,5 @@ def build_python_zipapp(repo_root: str | os.PathLike[str], src_rel: str, resourc
 def entry_payload(repo_root: str | os.PathLike[str], entry: InstallEntry) -> bytes:
     """The bytes `install` writes for a non-template entry: a zipapp, or the file as it is."""
     if entry.kind == "python-entry":
-        return build_python_zipapp(repo_root, entry.src, entry.resources)
+        return build_python_zipapp(repo_root, entry.src)
     return (Path(repo_root) / entry.src).read_bytes()

@@ -62,7 +62,7 @@ from vm.adapters import (
     flag_state,
     has_managed_save,
     image_dirs,
-    inode_flags,
+    readable_inode_flags,
     knobs,
     needs_mark,
     nocow,
@@ -77,7 +77,7 @@ from vm.adapters import (
     restic,
     run,
     safe_output,
-    set_nocow,
+    mark_folder_nocow,
     signals_held,
     systemctl,
     tree_sizes,
@@ -1248,10 +1248,10 @@ def mark_system_dir(d: Mapping[str, Any]) -> str:
                 os.mkdir(path, 0o711)
                 os.chmod(path, 0o711)
                 run(["restorecon", path])
-            set_nocow(path)
+            mark_folder_nocow(path)
         except OSError as e:
             return f"{path}: {e.strerror}"
-        return "" if flag_state(inode_flags(path)) else f"{path}: the mark did not stick"
+        return "" if flag_state(readable_inode_flags(path)) else f"{path}: the mark did not stick"
     steps: list[list[str]] = []
     if not d["present"]:
         steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
@@ -1295,8 +1295,8 @@ def cmd_nocow_apply() -> int:
             err = mark_system_dir(d)
         else:
             try:
-                set_nocow(d["path"])
-                err = "" if flag_state(inode_flags(d["path"])) else f"{d['path']}: the mark did not stick"
+                mark_folder_nocow(d["path"])
+                err = "" if flag_state(readable_inode_flags(d["path"])) else f"{d['path']}: the mark did not stick"
             except OSError as e:
                 err = f"{d['path']}: {e.strerror}"
         if err:

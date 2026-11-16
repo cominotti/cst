@@ -142,21 +142,6 @@ class CstDispatchPort(Protocol):
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int: ...
 
 
-__all__ = [
-    "ClockPort",
-    "CommandFailed",
-    "CommandResult",
-    "CommandRunnerPort",
-    "CstDispatchPort",
-    "ExecutionContextPort",
-    "FileSystemPort",
-    "HostPathPort",
-    "InstallTargetPort",
-    "SystemdPort",
-    "VirshPort",
-]
-
-
 class SystemdPort(Protocol):
     """Manages systemd units and path escaping."""
 

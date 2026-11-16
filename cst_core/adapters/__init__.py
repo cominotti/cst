@@ -36,26 +36,17 @@ class SubprocessCommandRunner:
         cmd = list(argv)
         merged_env = None if env is None else {**os.environ, **env}
         try:
-            if input_text is None:
-                proc = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    stdin=subprocess.DEVNULL,
-                    env=merged_env,
-                )
-            else:
-                proc = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    input=input_text,
-                    env=merged_env,
-                )
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                # No stdin of ours leaks into the command: /dev/null, or input_text.
+                stdin=subprocess.DEVNULL if input_text is None else None,
+                input=input_text,
+                env=merged_env,
+            )
         except FileNotFoundError as exc:
             if check:
                 raise CommandFailed(cmd, 127, "", str(exc)) from None
@@ -343,14 +334,3 @@ class SubprocessVirshAdapter:
         args = ["dumpxml", "--inactive", domain] if inactive else ["dumpxml", domain]
         res = self.call(*args, check=False)
         return res.stdout if res.returncode == 0 else None
-
-
-__all__ = [
-    "HostExecutionContext",
-    "LocalFileSystemAdapter",
-    "SubprocessCommandRunner",
-    "SubprocessVirshAdapter",
-    "SystemClockAdapter",
-    "SystemctlAdapter",
-    "write_bytes_atomic",
-]

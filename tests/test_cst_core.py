@@ -17,24 +17,18 @@ from cst_core.adapters import (
     SystemctlAdapter,
 )
 from cst_core.cli import CstDispatcher
-from cst_core.domain import (
+from cst_core.domain.dispatch import MODULES, format_cst_usage
+from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
+from cst_core.domain.plan import Err, Ok, Outcome, PlanItem
+from cst_core.domain.values import (
     ByteSize,
     CpuSet,
     DomainValidationError,
     Duration,
-    Err,
-    MODULES,
-    MarkedLineSpec,
     OctalMode,
-    Ok,
-    Outcome,
-    PlanItem,
-    effective_lines,
     format_bytes_decimal,
     format_bytes_gib_mib,
     format_bytes_human,
-    format_cst_usage,
-    inspect_managed_file,
 )
 from cst_core.ports import CommandFailed, CommandResult
 

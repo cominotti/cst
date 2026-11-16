@@ -11,6 +11,8 @@ from typing import NoReturn
 import os
 import re
 
+from cst_core.domain.values import format_bytes_gib_mib
+
 NOTIFY = "/usr/local/sbin/btrfs-notify"
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
@@ -104,7 +106,8 @@ KEEP_HEADER = (
 
 
 def gib(n: int) -> str:
-    return f"{n / BIG:.1f} GiB" if n >= BIG / 10 else f"{n >> 20} MiB"
+    """GiB from 0.1 GiB on, else whole MiB (floored)."""
+    return format_bytes_gib_mib(n, gib_threshold=BIG / 10)
 
 
 def kept_text(item: Item, detail: str) -> str:

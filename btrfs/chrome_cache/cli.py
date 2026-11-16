@@ -5,7 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 import sys
-from btrfs.chrome_cache.adapters import RUNTIME_DIR, current, installed, is_subvol, old_cache, tree_bytes, write_flags
+from btrfs.chrome_cache.adapters import (
+    RUNTIME_DIR,
+    current,
+    installed,
+    is_subvol,
+    old_cache,
+    allocated_bytes,
+    write_flags,
+)
 from btrfs.chrome_cache.domain import (
     APP,
     CACHE_SUBVOL_REL,
@@ -94,7 +102,7 @@ def status(home: str) -> int:
         state, rc = "?", 1
     ram = os.path.join(RUNTIME_DIR, ".flatpak", APP, "tmp", "chrome-cache")
     if os.path.isdir(ram):
-        print(f"  in RAM now:            {size_text(tree_bytes(ram))} ({ram})")
+        print(f"  in RAM now:            {size_text(allocated_bytes(ram))} ({ram})")
     http, code, profiles = old_cache(home)
     sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
     where = "" if sub else ", in /home snapshots"

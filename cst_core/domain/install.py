@@ -20,9 +20,6 @@ class InstallEntry:
     owner: Owner
     kind: ArtifactKind
     runner: Owner
-    # Repository files a python-entry reads at run time (through
-    # cst_core.adapters.runtime.read_resource); bundled into its zipapp.
-    resources: tuple[str, ...] = ()
 
     @property
     def module(self) -> str:
@@ -35,457 +32,135 @@ class InstallEntry:
         return self.src.endswith(".in")
 
 
-INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = (
-    # ---- btrfs: Python helpers (self-contained zipapps) ----
-    InstallEntry(
-        src="btrfs/btrfs-bulk",
-        dest="/usr/local/sbin/btrfs-bulk",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/btrfs-snapshot-core",
-        dest="/usr/local/sbin/btrfs-snapshot-core",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/btrfs-stall-monitord",
-        dest="/usr/local/sbin/btrfs-stall-monitord",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/btrfs-stall-report",
-        dest="/usr/local/bin/btrfs-stall-report",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="user",
-    ),
-    InstallEntry(
-        src="btrfs/docker-gc",
-        dest="/usr/local/sbin/docker-gc",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/docker-volumes-nocow",
-        dest="/usr/local/sbin/docker-volumes-nocow",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    # ---- btrfs: standalone shell helpers ----
-    InstallEntry(
-        src="btrfs/btrfs-health-check",
-        dest="/usr/local/sbin/btrfs-health-check",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="shell",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/btrfs-notify",
-        dest="/usr/local/sbin/btrfs-notify",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="shell",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/btrfs-snapshot",
-        dest="/usr/local/sbin/btrfs-snapshot",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="shell",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/cst-pending-alerts",
-        dest="/usr/local/bin/cst-pending-alerts",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="shell",
-        runner="user",
-    ),
-    # ---- btrfs: systemd units and data ----
-    InstallEntry(
-        src="btrfs/units/below.service.d/10-cst.conf",
-        dest="/etc/systemd/system/below.service.d/10-cst.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-bulk-boot.service",
-        dest="/etc/systemd/system/btrfs-bulk-boot.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-health-check.service",
-        dest="/etc/systemd/system/btrfs-health-check.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-health-check.timer",
-        dest="/etc/systemd/system/btrfs-health-check.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-scrub-weekly.service",
-        dest="/etc/systemd/system/btrfs-scrub-weekly.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-scrub-weekly.timer",
-        dest="/etc/systemd/system/btrfs-scrub-weekly.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-snapshot-nas.service",
-        dest="/etc/systemd/system/btrfs-snapshot-nas.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-snapshot-nas.timer",
-        dest="/etc/systemd/system/btrfs-snapshot-nas.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-snapshot.service",
-        dest="/etc/systemd/system/btrfs-snapshot.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-snapshot.timer",
-        dest="/etc/systemd/system/btrfs-snapshot.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-stall-alert.service",
-        dest="/etc/systemd/system/btrfs-stall-alert.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-stall-monitor.service",
-        dest="/etc/systemd/system/btrfs-stall-monitor.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/btrfs-subvol-convert.service",
-        dest="/etc/systemd/system/btrfs-subvol-convert.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/docker-gc-recorder.service",
-        dest="/etc/systemd/system/docker-gc-recorder.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/docker-gc.service",
-        dest="/etc/systemd/system/docker-gc.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/docker-gc.timer",
-        dest="/etc/systemd/system/docker-gc.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/docker-volumes-nocow.service",
-        dest="/etc/systemd/system/docker-volumes-nocow.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/units/user/cst-pending-alerts.service",
-        dest="/etc/systemd/user/cst-pending-alerts.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="user",
-    ),
-    InstallEntry(
-        src="btrfs/snapshots/top.mount.in",
-        dest="/etc/systemd/system/var-mnt-btrfs\\x2dtop.mount",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/snapshots/top.automount.in",
-        dest="/etc/systemd/system/var-mnt-btrfs\\x2dtop.automount",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/sysctl/90-btrfs-writeback.conf",
-        dest="/etc/sysctl.d/90-btrfs-writeback.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="data",
-        runner="root",
-    ),
-    InstallEntry(
-        src="btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in",
-        dest="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="data",
-        runner="root",
-    ),
-    # ---- cpu ----
-    InstallEntry(
-        src="cpu/vm-pin",
-        dest="/usr/local/sbin/cpu-vm-pin",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/cpu-watch",
-        dest="/usr/local/bin/cpu-watch",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="user",
-    ),
-    InstallEntry(
-        src="cpu/game-profile",
-        dest="/usr/local/sbin/cpu-game-profile",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="shell",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/builds.slice",
-        dest="/etc/systemd/system/builds.slice",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/cpu-game.service",
-        dest="/etc/systemd/system/cpu-game.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/cpu-game-watchdog.service",
-        dest="/etc/systemd/system/cpu-game-watchdog.service",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/cpu-game-watchdog.timer",
-        dest="/etc/systemd/system/cpu-game-watchdog.timer",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/machine.slice.d-10-cpu-setup.conf",
-        dest="/etc/systemd/system/machine.slice.d/10-cpu-setup.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/units/user@.service.d-50-cpu-setup-cpuset.conf",
-        dest="/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    InstallEntry(
-        src="cpu/gamemode.ini",
-        dest="~/.config/gamemode.ini",
-        mode=OctalMode(0o644),
-        owner="user",
-        kind="data",
-        runner="user",
-    ),
-    InstallEntry(
-        src="cpu/cpu-game.rules.in",
-        dest="/etc/polkit-1/rules.d/50-cpu-setup-game.rules",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="data",
-        runner="root",
-    ),
-    # ---- bluetooth ----
-    InstallEntry(
-        src="bluetooth/bt-ldac-watch",
-        dest="~/.local/lib/cst/bt-ldac-watch",
-        mode=OctalMode(0o755),
-        owner="user",
-        kind="python-entry",
-        runner="user",
-    ),
-    # ---- swap ----
-    InstallEntry(
-        src="swap/sysctl/99-swap-tuning.conf",
-        dest="/etc/sysctl.d/99-swap-tuning.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="data",
-        runner="root",
-    ),
-    InstallEntry(
-        src="swap/tmpfiles/zswap.conf",
-        dest="/etc/tmpfiles.d/zswap.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="data",
-        runner="root",
-    ),
-    InstallEntry(
-        src="swap/units/machine.slice.d-50-memory-low.conf",
-        dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
-        mode=OctalMode(0o644),
-        owner="root",
-        kind="unit",
-        runner="root",
-    ),
-    # ---- toolchains ----
-    InstallEntry(
-        src="toolchains/cst-toolchains",
-        dest="~/.local/lib/cst/cst-toolchains",
-        mode=OctalMode(0o755),
-        owner="user",
-        kind="python-entry",
-        runner="user",
-    ),
-    InstallEntry(
-        src="toolchains/rustc-wrapper",
-        dest="~/.local/libexec/cst/rustc-wrapper",
-        mode=OctalMode(0o755),
-        owner="user",
-        kind="shell",
-        runner="user",
-    ),
-    InstallEntry(
-        src="toolchains/toolchains.conf",
-        dest="~/.local/lib/cst/toolchains.conf",
-        mode=OctalMode(0o644),
-        owner="user",
-        kind="data",
-        runner="user",
-    ),
-    # ---- vm ----
-    InstallEntry(
-        src="vm/cst-vm",
-        dest="/usr/local/sbin/cst-vm",
-        mode=OctalMode(0o755),
-        owner="root",
-        kind="python-entry",
-        runner="root",
-    ),
+_OWNERS: Final[Mapping[str, Owner]] = {"root": "root", "user": "user"}
+_KINDS: Final[Mapping[str, ArtifactKind]] = {
+    "python-entry": "python-entry",
+    "shell": "shell",
+    "unit": "unit",
+    "data": "data",
+}
+
+
+def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
+    """The entries of a manifest table, in order.
+
+    One row per file: `src dest mode owner kind runner`, separated by blanks;
+    `mode` is octal; `#` starts a comment. A malformed row raises ValueError.
+    """
+    entries: list[InstallEntry] = []
+    for number, raw in enumerate(table.splitlines(), 1):
+        fields = raw.split("#", 1)[0].split()
+        if not fields:
+            continue
+        try:
+            src, dest, mode, owner, kind, runner = fields
+            entries.append(
+                InstallEntry(src, dest, OctalMode(int(mode, 8)), _OWNERS[owner], _KINDS[kind], _OWNERS[runner])
+            )
+        except (ValueError, KeyError) as exc:
+            raise ValueError(f"manifest row {number}: {raw.strip()!r}: {exc}") from None
+    return tuple(entries)
+
+
+# What `install` writes: every installable file of the repository, once.
+# runner: the account that runs or reads the installed file.
+INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = parse_manifest(
+    r"""
+# src                                               dest                                                          mode owner kind          runner
+# btrfs: Python helpers (self-contained zipapps)
+btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root
+btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root
+btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root
+btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user
+btrfs/docker-gc                                     /usr/local/sbin/docker-gc                                     755  root  python-entry  root
+btrfs/docker-volumes-nocow                          /usr/local/sbin/docker-volumes-nocow                          755  root  python-entry  root
+# btrfs: standalone shell helpers
+btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  shell         root
+btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify                                  755  root  shell         root
+btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root
+btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-alerts                             755  root  shell         user
+# btrfs: systemd units and data
+btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root
+btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root
+btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root
+btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root
+btrfs/units/btrfs-scrub-weekly.service              /etc/systemd/system/btrfs-scrub-weekly.service                644  root  unit          root
+btrfs/units/btrfs-scrub-weekly.timer                /etc/systemd/system/btrfs-scrub-weekly.timer                  644  root  unit          root
+btrfs/units/btrfs-snapshot-nas.service              /etc/systemd/system/btrfs-snapshot-nas.service                644  root  unit          root
+btrfs/units/btrfs-snapshot-nas.timer                /etc/systemd/system/btrfs-snapshot-nas.timer                  644  root  unit          root
+btrfs/units/btrfs-snapshot.service                  /etc/systemd/system/btrfs-snapshot.service                    644  root  unit          root
+btrfs/units/btrfs-snapshot.timer                    /etc/systemd/system/btrfs-snapshot.timer                      644  root  unit          root
+btrfs/units/btrfs-stall-alert.service               /etc/systemd/system/btrfs-stall-alert.service                 644  root  unit          root
+btrfs/units/btrfs-stall-monitor.service             /etc/systemd/system/btrfs-stall-monitor.service               644  root  unit          root
+btrfs/units/btrfs-subvol-convert.service            /etc/systemd/system/btrfs-subvol-convert.service              644  root  unit          root
+btrfs/units/docker-gc-recorder.service              /etc/systemd/system/docker-gc-recorder.service                644  root  unit          root
+btrfs/units/docker-gc.service                       /etc/systemd/system/docker-gc.service                         644  root  unit          root
+btrfs/units/docker-gc.timer                         /etc/systemd/system/docker-gc.timer                           644  root  unit          root
+btrfs/units/docker-volumes-nocow.service            /etc/systemd/system/docker-volumes-nocow.service              644  root  unit          root
+btrfs/units/user/cst-pending-alerts.service         /etc/systemd/user/cst-pending-alerts.service                  644  root  unit          user
+btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-btrfs\x2dtop.mount                644  root  unit          root
+btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root
+btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root
+btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root
+# cpu
+cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root
+cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user
+cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  shell         root
+cpu/units/builds.slice                              /etc/systemd/system/builds.slice                              644  root  unit          root
+cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root
+cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root
+cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root
+cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root
+cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root
+cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user
+cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root
+# bluetooth
+bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user
+# swap
+swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root
+swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root
+swap/units/machine.slice.d-50-memory-low.conf       /etc/systemd/system/machine.slice.d/50-memory-low.conf        644  root  unit          root
+# toolchains
+toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user
+toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user
+toolchains/toolchains.conf                          ~/.local/lib/cst/toolchains.conf                              644  user  data          user
+# vm
+vm/cst-vm                                           /usr/local/sbin/cst-vm                                        755  root  python-entry  root
+"""
 )
 
 SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
-    {
-        "cst",
-        "cst-install.bash",
-        "cst-link.bash",
-        "btrfs-setup.sh",
-        "btrfs/setup-bulk.bash",
-        "btrfs/setup-snapshots.bash",
-        "btrfs/btrfs-degraded-boot-setup.sh",
-        "cpu-setup.sh",
-        "bluetooth-setup.sh",
-        "swap-setup.sh",
-        "toolchains-setup.sh",
-        "vm-setup.sh",
-    }
+    """
+bluetooth-setup.sh
+btrfs-setup.sh
+btrfs/btrfs-degraded-boot-setup.sh
+btrfs/setup-bulk.bash
+btrfs/setup-snapshots.bash
+cpu-setup.sh
+cst
+cst-install.bash
+cst-link.bash
+swap-setup.sh
+toolchains-setup.sh
+vm-setup.sh
+""".split()
 )
 
 CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
-    {
-        ".github/scripts/pin_invowk.py",
-        "bluetooth/bt-helper",
-        "btrfs/btrfs-stall-watch",
-        "btrfs/chrome-cache",
-        "btrfs/tests/realbtrfs-snapshot-core.sh",
-        "cst_core/cli.py",
-        "cst_core/installer.py",
-        "doctor/cst-doctor",
-        "fix-anaconda-webui-btrfs-compress.sh",
-        "swap/cli.py",
-        "tests/mutation/cst-mutation",
-        "tests/uv-dev",
-    }
+    """
+.github/scripts/pin_invowk.py
+bluetooth/bt-helper
+btrfs/btrfs-stall-watch
+btrfs/chrome-cache
+btrfs/tests/realbtrfs-snapshot-core.sh
+cst_core/cli.py
+cst_core/installer.py
+doctor/cst-doctor
+fix-anaconda-webui-btrfs-compress.sh
+swap/cli.py
+tests/mutation/cst-mutation
+tests/uv-dev
+""".split()
 )
 
 

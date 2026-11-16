@@ -7,7 +7,6 @@ the same answer in both, so no program computes paths from `__file__` by
 itself.
 """
 
-import importlib.resources
 import os
 from pathlib import Path
 import zipfile
@@ -50,11 +49,6 @@ def sibling_program(src_rel: str, main_file: str, home: str | None = None) -> st
     return expand_dest(manifest_by_src()[src_rel].dest, home or os.path.expanduser("~"))
 
 
-def read_resource(package: str, name: str) -> bytes:
-    """A data file of `package` (listed in the manifest's `resources`), from the checkout or the zipapp."""
-    return importlib.resources.files(package).joinpath(name).read_bytes()
-
-
 def install_payload(src_rel: str, main_file: str) -> bytes:
     """The bytes `install` writes for the python-entry `src_rel`, as seen by the program `main_file`.
 
@@ -67,5 +61,6 @@ def install_payload(src_rel: str, main_file: str) -> bytes:
     root = checkout_root(main_file)
     if root is None:
         raise FileNotFoundError(f"{main_file}: neither in a CST checkout nor in a zipapp")
-    entry = manifest_by_src()[src_rel]
-    return build_python_zipapp(root, src_rel, entry.resources)
+    if src_rel not in manifest_by_src():
+        raise KeyError(f"{src_rel}: not in the install manifest")
+    return build_python_zipapp(root, src_rel)

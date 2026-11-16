@@ -1017,7 +1017,7 @@ class NocowTest(unittest.TestCase):
         patches: list[AbstractContextManager[object]] = [
             patch_vm("SYSTEM_IMAGES", self.system),
             patch_vm("is_btrfs", _is_btrfs),
-            patch_vm("inode_flags", _inode_flags),
+            patch_vm("readable_inode_flags", _inode_flags),
             patch_vm("user_home", _user_home),
             patch_vm("knobs", _knobs),
         ]
@@ -1125,7 +1125,7 @@ class NocowTest(unittest.TestCase):
         marked: list[str] = []
         sudo: list[list[str]] = []
 
-        def set_nocow(p: str) -> None:
+        def mark_folder_nocow(p: str) -> None:
             marked.append(p)
             self.flags[p] = inode_attrs.FS_NOCOW_FL
 
@@ -1146,7 +1146,7 @@ class NocowTest(unittest.TestCase):
             return True
 
         with (
-            patch_vm("set_nocow", set_nocow),
+            patch_vm("mark_folder_nocow", mark_folder_nocow),
             mock.patch.object(os, "geteuid", _uid),
             mock.patch.object(subprocess, "run", fake_sub_run),
             patch_vm("run", fake_run),
@@ -1291,7 +1291,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-reflink-", dir=cache)
         self.addCleanup(shutil.rmtree, self.tmp)
         # The scratch folder itself copy-on-write, whatever ~/.cache has.
-        flags = vm_adapters.inode_flags(self.tmp)
+        flags = vm_adapters.readable_inode_flags(self.tmp)
         assert flags is not None
         self.setflags(self.tmp, flags & ~inode_attrs.FS_NOCOW_FL, directory=True)
 
@@ -1307,7 +1307,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     def test_reflink_of_a_nocow_image(self) -> None:
         src = os.path.join(self.tmp, "img.qcow2")
         open(src, "wb").close()
-        src_flags = vm_adapters.inode_flags(src)
+        src_flags = vm_adapters.readable_inode_flags(src)
         assert src_flags is not None
         self.setflags(src, src_flags | inode_attrs.FS_NOCOW_FL)  # only while empty
         with open(src, "ab") as f:

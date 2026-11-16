@@ -1726,7 +1726,7 @@ class VmHardwareTest(VmTest):
         with (
             mock.patch.dict(os.environ, {"HOME": self.tmp}),
             mock.patch.object(vm_adapters, "is_btrfs", lambda p: btrfs),
-            mock.patch.object(vm_adapters, "inode_flags", lambda p: flags.get(p, 0)),
+            mock.patch.object(vm_adapters, "readable_inode_flags", lambda p: flags.get(p, 0)),
             mock.patch.object(os, "scandir", scandir),
         ):
             return list(

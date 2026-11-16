@@ -50,6 +50,3 @@ class LinuxSwapSystemAdapter:
         """Return `swapon --show` output, or '' if the command fails."""
         res = self._runner.run(["swapon", "--show"], check=False)
         return res.stdout if res.returncode == 0 else ""
-
-
-__all__ = ["LinuxSwapSystemAdapter"]

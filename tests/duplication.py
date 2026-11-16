@@ -14,9 +14,13 @@
   of shared).
 
 The method is the one of the reference scripts the conversion was measured
-with, except for two things that make the numbers a little lower:
+with, except for three things that make the numbers a little lower:
 - function and class docstrings are dropped too (the reference dropped only
   the module's);
+- type 2 skips data rows, lines of literals only (`"rd_ios",`,
+  `"a": 1,`): with every literal replaced, any two lists of eight strings
+  were the same "renamed copy". Type 1 still measures them as written, so
+  a copied table is still found;
 - an import statement is one code line however the formatter wraps it, and
   type 2 keeps the names in it as written. A long `from pkg.mod import (`
   list is one name per line, and type 2 turned those lines, and any run of
@@ -26,11 +30,20 @@ with, except for two things that make the numbers a little lower:
   import names is not a renamed copy: it imports something else. The
   statement is still measured, as one line, and an identical import block
   still counts.
+
+Two kinds of code are the same in several files by design, and another gate
+checks them; the ratchet leaves them out (tests/test_duplication.py,
+`without_declared_copies`):
+- the entry-point bootstrap, which tests/test_entrypoints.py requires to be
+  byte for byte the same in every entry point;
+- the body of a `Protocol` class (a port): its method stubs restate the
+  signatures its adapters implement, and the type checker compares the two.
+  The adapter's code still counts.
 """
 
 import ast
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import io
 import keyword
@@ -51,6 +64,8 @@ _SKIP_TOKENS: Final = frozenset(
     }
 )
 _TRIVIAL_LINES: Final = frozenset({")", "]", "}", "),", "],", "},", "else :", "try :", "return", "pass"})
+# Type 2: what a data row (a line of literals only, `"rd_ios",`) becomes.
+_DATA_TOKENS: Final = frozenset({"S", "0", "True", "False", "None", ",", ":", "(", ")", "[", "]", "{", "}", "-"})
 _SHELL_TRIVIAL: Final = frozenset({"fi", "done", "esac", "}", "{", ";;", "else", "then", "do"})
 
 
@@ -114,9 +129,26 @@ def normalized_python(source: str, *, type2: bool) -> list[str]:
     out = []
     for ln in sorted(lines):
         s = " ".join(lines[ln])
-        if s not in _TRIVIAL_LINES:
+        if s not in _TRIVIAL_LINES and not (type2 and set(s.split()) <= _DATA_TOKENS):
             out.append(s)
     return out
+
+
+def without_protocol_bodies(source: str) -> str:
+    """`source` with the body of every `Protocol` class blanked (line numbers kept)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+            (isinstance(b, ast.Name) and b.id == "Protocol") or (isinstance(b, ast.Attribute) and b.attr == "Protocol")
+            for b in node.bases
+        ):
+            for i in range(node.body[0].lineno - 1, (node.end_lineno or node.lineno)):
+                lines[i] = "\n"
+    return "".join(lines)
 
 
 def normalized_shell(source: str) -> list[str]:
@@ -155,12 +187,19 @@ def clones(norm: Mapping[str, list[str]], window: int) -> CloneReport:
     )
 
 
-def python_clones(repo: str, files: Iterable[str], window: int, *, type2: bool) -> CloneReport:
-    """Clone report of the given Python files."""
+def python_clones(
+    repo: str,
+    files: Iterable[str],
+    window: int,
+    *,
+    type2: bool,
+    prepare: Callable[[str], str] = lambda source: source,
+) -> CloneReport:
+    """Clone report of the given Python files (`prepare` edits each source first)."""
     norm: dict[str, list[str]] = {}
     for rel in files:
         with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
-            norm[rel] = normalized_python(fh.read(), type2=type2)
+            norm[rel] = normalized_python(prepare(fh.read()), type2=type2)
     return clones(norm, window)
 
 

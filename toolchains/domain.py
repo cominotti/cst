@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
-from cst_core.domain.values import GIB
+from cst_core.domain.values import format_bytes_gib_mib
 
 MARKER = "# managed-by: toolchains-setup.sh (CST)"
 NAME = "cst-toolchains"
@@ -68,7 +68,8 @@ class ConfigError(Exception):
 
 
 def gib(n: int | float) -> str:
-    return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / (1 << 20):.0f} MiB"
+    """GiB from 1 GiB on, else rounded MiB."""
+    return format_bytes_gib_mib(n, mib_floor=False)
 
 
 def ago(seconds: int | float) -> str:

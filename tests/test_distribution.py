@@ -159,7 +159,7 @@ class DistributionGateTest(unittest.TestCase):
     def test_every_python_entry_zipapp_is_self_contained(self) -> None:
         problems: list[str] = []
         for e in python_entry_srcs():
-            problems.extend(zipapp_import_problems(e.src, build_python_zipapp(REPO, e.src, e.resources)))
+            problems.extend(zipapp_import_problems(e.src, build_python_zipapp(REPO, e.src)))
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_import_checker_sees_function_level_and_path_loads(self) -> None:
@@ -193,7 +193,7 @@ class DistributionGateTest(unittest.TestCase):
                 continue
             argv, rc = HELP_MODES[e.src]
             dest = os.path.join(stage, e.src.replace("/", "_"))
-            Path(dest).write_bytes(build_python_zipapp(REPO, e.src, e.resources))
+            Path(dest).write_bytes(build_python_zipapp(REPO, e.src))
             os.chmod(dest, e.mode.bits)
             with self.subTest(src=e.src):
                 r = subprocess.run(

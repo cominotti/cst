@@ -17,6 +17,3 @@ class SwapSystemPort(Protocol):
     def reset_zram0(self) -> None: ...
 
     def swapon_show(self) -> str: ...
-
-
-__all__ = ["SwapSystemPort"]

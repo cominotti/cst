@@ -21,7 +21,6 @@ from cst_core.adapters.runtime import (
     checkout_root,
     install_payload,
     program_argv,
-    read_resource,
     running_archive,
     sibling_program,
 )
@@ -34,6 +33,7 @@ from cst_core.domain.install import (
     Owner,
     expand_dest,
     manifest_by_src,
+    parse_manifest,
     render_template,
     select_entries,
 )
@@ -83,6 +83,27 @@ class DomainTest(unittest.TestCase):
         self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-watch"})
         self.assertTrue(all(e.module == "cpu" for e in select_entries(INSTALL_MANIFEST, module="cpu")))
 
+    def test_parse_manifest_reads_rows_and_skips_comments(self) -> None:
+        table = "# header\n\na/b  /usr/local/bin/b  755 root python-entry user  # why\nc/d ~/.x 644 user data user\n"
+        self.assertEqual(
+            parse_manifest(table),
+            (
+                InstallEntry("a/b", "/usr/local/bin/b", OctalMode(0o755), "root", "python-entry", "user"),
+                InstallEntry("c/d", "~/.x", OctalMode(0o644), "user", "data", "user"),
+            ),
+        )
+
+    def test_parse_manifest_rejects_a_malformed_row(self) -> None:
+        for row in (
+            "a/b /x 755 root python-entry",
+            "a/b /x 9z root data root",
+            "a/b /x 644 admin data root",
+            "a/b /x 644 root binary root",
+            "a/b /x 644 root data root extra",
+        ):
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, "manifest row 2"):
+                parse_manifest("# header\n" + row)
+
     def test_manifest_is_consistent(self) -> None:
         srcs = [e.src for e in INSTALL_MANIFEST]
         dests = [e.dest for e in INSTALL_MANIFEST]
@@ -94,7 +115,6 @@ class DomainTest(unittest.TestCase):
                 self.assertEqual(e.owner == "user", e.dest.startswith("~/"))
                 executable = e.kind in ("python-entry", "shell")
                 self.assertEqual(bool(e.mode.bits & 0o111), executable)
-                self.assertFalse(e.resources and e.kind != "python-entry")
 
 
 class InstallServiceTest(unittest.TestCase):
@@ -162,12 +182,10 @@ class ZipappTest(unittest.TestCase):
             "demo/demo-tool": (
                 "#!/usr/bin/python3 -I\n"
                 "# managed-by: demo-setup.sh (CST)\n"
-                "import importlib.resources\n"
                 "def main() -> None:\n"
                 "    from cst_core import CORE_VAL\n"
                 "    from demo.domain import Item\n"
-                "    data = importlib.resources.files('demo').joinpath('data.conf').read_text()\n"
-                "    print(Item(CORE_VAL).v, data.strip())\n"
+                "    print(Item(CORE_VAL).v)\n"
                 "if __name__ == '__main__':\n"
                 "    main()\n"
             ),
@@ -181,8 +199,8 @@ class ZipappTest(unittest.TestCase):
         self.assertEqual(import_closure(self.root, src), {"cst_core", "demo", "other"})
 
     def test_zipapp_is_deterministic_self_contained_and_runs_from_root(self) -> None:
-        b1 = build_python_zipapp(self.root, "demo/demo-tool", ("demo/data.conf",))
-        b2 = build_python_zipapp(str(self.root), "/demo/demo-tool", ("demo/data.conf",))
+        b1 = build_python_zipapp(self.root, "demo/demo-tool")
+        b2 = build_python_zipapp(str(self.root), "/demo/demo-tool")
         self.assertEqual(b1, b2)
         self.assertTrue(b1.startswith(b"#!/usr/bin/python3 -I\n# managed-by: demo-setup.sh (CST)\n"))
         out = Path(self.tmp, "bin", "demo-tool")
@@ -197,6 +215,7 @@ class ZipappTest(unittest.TestCase):
         self.assertIn("other/__init__.py", names)
         self.assertNotIn("unused/__init__.py", names)
         self.assertFalse([n for n in names if "/tests/" in n])
+        self.assertNotIn("demo/data.conf", names)  # only Python sources ship
         os.chmod(out, 0o755)
         shutil.rmtree(self.root)  # the zipapp must not need the sources
         res = subprocess.run(
@@ -208,7 +227,7 @@ class ZipappTest(unittest.TestCase):
             env={"PATH": "/usr/bin:/bin"},
             stdin=subprocess.DEVNULL,
         )
-        self.assertEqual((res.returncode, res.stdout.strip(), res.stderr), (0, "7 KEY=1", ""))
+        self.assertEqual((res.returncode, res.stdout.strip(), res.stderr), (0, "7", ""))
 
     def test_entry_payload_copies_other_kinds(self) -> None:
         e = entry("demo/data.conf", "/etc/x")
@@ -400,7 +419,6 @@ class RuntimeResolverTest(unittest.TestCase):
         self.assertEqual(program_argv(main), ["/usr/bin/python3", "-I", main])
         self.assertEqual(sibling_program("cpu/vm-pin", main), os.path.join(REPO, "cpu", "vm-pin"))
         self.assertEqual(install_payload("cpu/vm-pin", main), entry_payload(REPO, manifest_by_src()["cpu/vm-pin"]))
-        self.assertEqual(read_resource("cst_core", "__init__.py"), Path(REPO, "cst_core/__init__.py").read_bytes())
 
     def test_installed_zipapp(self) -> None:
         archive = os.path.join(self.tmp, "cpu-vm-pin")

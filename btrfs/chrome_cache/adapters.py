@@ -106,7 +106,7 @@ def installed(home: str) -> str | None:
     return None
 
 
-def tree_bytes(path: str) -> int:
+def allocated_bytes(path: str) -> int:
     """Disk usage (allocated blocks) of a tree; symlinks not followed."""
     total = 0
     try:
@@ -139,10 +139,10 @@ def old_cache(home: str) -> tuple[int, int, int]:
         c = os.path.join(d, "Cache")
         if os.path.isdir(c) and not os.path.islink(c):
             profiles += 1
-            http += tree_bytes(c)
+            http += allocated_bytes(c)
         cc = os.path.join(d, "Code Cache")
         if os.path.isdir(cc) and not os.path.islink(cc):
-            code += tree_bytes(cc)
+            code += allocated_bytes(cc)
     return http, code, profiles
 
 

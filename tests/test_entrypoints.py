@@ -12,10 +12,11 @@
   docstring, the bootstrap, imports, one `main()` and the `__main__` guard:
   its logic lives once, in its package, where tests import it. Rule chosen
   over a size cap: a cap lets logic creep back a few lines at a time.
-- **No re-export facades.** `from m import a as a` (the explicit re-export
-  idiom) is not used in production code: tests import the package that
-  defines a name and inject fakes through ports; a patch on a re-exported
-  name changes a copy that nothing calls.
+- **No re-export facades.** Neither `from m import a as a` (the explicit
+  re-export idiom), nor an `__all__` list, nor a package `__init__.py` that
+  imports from its own submodules: tests import the module that defines a
+  name and inject fakes through ports; a patch on a re-exported name
+  changes a copy that nothing calls.
 """
 
 import ast
@@ -143,13 +144,25 @@ def file_path_problems(source: str, rel: str) -> list[str]:
 
 
 def reexport_problems(source: str, rel: str) -> list[str]:
-    """`import a as a` / `from m import a as a`: the explicit re-export idiom."""
+    """Re-export facades: `import a as a`, `from m import a as a`, `__all__`, and an
+    `__init__.py` that imports from its own package's submodules."""
     problems: list[str] = []
+    package = rel.rsplit("/", 1)[0].replace("/", ".") if rel.endswith("/__init__.py") else None
     for node in ast.walk(ast.parse(source, filename=rel)):
         if isinstance(node, ast.Import | ast.ImportFrom):
             for alias in node.names:
                 if alias.asname is not None and alias.asname == alias.name.rsplit(".", 1)[-1]:
                     problems.append(f"{rel}:{node.lineno}: re-exports {alias.name} (import it where it is defined)")
+        if (
+            package is not None
+            and isinstance(node, ast.ImportFrom)
+            and (node.level > 0 or (node.module or "").startswith(f"{package}."))
+        ):
+            problems.append(f"{rel}:{node.lineno}: a package __init__ re-exports its submodules (import them directly)")
+        if isinstance(node, ast.Name) and node.id == "__all__" and isinstance(node.ctx, ast.Store):
+            problems.append(
+                f"{rel}:{node.lineno}: __all__ lists names to re-export (import them where they are defined)"
+            )
     return problems
 
 
@@ -205,6 +218,11 @@ class EntryPointGateTest(unittest.TestCase):
             reexport_problems("from m import a as a\nimport b as c\n", "x"),
             ["x:1: re-exports a (import it where it is defined)"],
         )
+        self.assertEqual(len(reexport_problems("__all__ = ['a']\n", "p/m.py")), 1)
+        self.assertEqual(len(reexport_problems("__all__: list[str] = []\n__all__ += ['b']\n", "p/m.py")), 2)
+        facade = "from p.sub import a\nfrom .sub import b\nfrom q.sub import c\n"
+        self.assertEqual([x.split(":")[1] for x in reexport_problems(facade, "p/__init__.py")], ["1", "2"])
+        self.assertEqual(reexport_problems(facade, "p/mod.py"), [])
         thin = (
             '"""doc"""\n'
             + BOOTSTRAP

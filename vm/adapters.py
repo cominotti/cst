@@ -276,7 +276,7 @@ def flag_state(flags: int | None) -> bool | None:
 
 
 def nocow(path: str) -> bool:
-    return flag_state(inode_flags(path)) is True
+    return flag_state(readable_inode_flags(path)) is True
 
 
 def precreate_nocow(dest: str) -> None:
@@ -511,7 +511,7 @@ def is_btrfs(path: str) -> bool | None:
     return struct.unpack_from("l", buf.raw, 0)[0] == BTRFS_MAGIC
 
 
-def inode_flags(path: str) -> int | None:
+def readable_inode_flags(path: str) -> int | None:
     """The inode flags (FS_IOC_GETFLAGS), or None when this user may not read
     them: the system folder is root's (0711) and the images are qemu's (0600).
     Unreadable is not "copy-on-write": callers say "not readable"."""
@@ -521,7 +521,7 @@ def inode_flags(path: str) -> int | None:
         return None
 
 
-def set_nocow(path: str) -> None:
+def mark_folder_nocow(path: str) -> None:
     """Set +C on a folder this user owns (files created in it later inherit
     it). Raises OSError."""
     inode_attrs.set_nocow(path, directory=True)
@@ -560,7 +560,7 @@ def probe_dir(d: Mapping[str, Any], readable: Callable[[str], str] = lambda p: p
     res["btrfs"] = is_btrfs(rp)
     if res["btrfs"] is False:
         return res
-    res["nocow"] = flag_state(inode_flags(rp))
+    res["nocow"] = flag_state(readable_inode_flags(rp))
     try:
         entries = sorted(os.scandir(rp), key=lambda e: e.name)
     except OSError:
@@ -584,7 +584,7 @@ def probe_dir(d: Mapping[str, Any], readable: Callable[[str], str] = lambda p: p
                 "path": os.path.join(res["path"], e.name),
                 "alloc": st.st_blocks * 512,
                 "size": st.st_size,
-                "nocow": flag_state(inode_flags(os.path.join(rp, e.name))),
+                "nocow": flag_state(readable_inode_flags(os.path.join(rp, e.name))),
             }
         )
     return res

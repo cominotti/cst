@@ -113,12 +113,3 @@ def format_cst_usage(present_modules: Mapping[str, bool]) -> str:
         state = "" if present_modules.get(spec.name, False) else " (not in this copy)"
         lines.append(f"  {spec.name:<10} {spec.about}{state}")
     return "\n".join(lines)
-
-
-__all__ = [
-    "MODULES",
-    "MODULE_BY_NAME",
-    "ModuleSpec",
-    "USAGE_HEADER",
-    "format_cst_usage",
-]
