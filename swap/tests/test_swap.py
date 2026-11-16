@@ -344,8 +344,12 @@ class StatusMathTest(unittest.TestCase):
 
     def test_cpu_run_folder_in_a_toolbox(self) -> None:
         # Inside a container /run is its own; the host's records are under /run/host.
-        want = "/run/host/run/cpu-setup" if os.path.exists("/run/.containerenv") else "/run/cpu-setup"
-        self.assertEqual(HostExecutionContext().host_run_dir("cpu-setup"), want)
+        # The marker files are faked so the result does not depend on where the test runs
+        # (CI runs inside Docker, developers often inside a podman toolbox).
+        for marker in ("/run/.containerenv", "/.dockerenv"):
+            ctx = HostExecutionContext(exists=lambda p, m=marker: p == m)
+            self.assertEqual(ctx.host_run_dir("cpu-setup"), "/run/host/run/cpu-setup", marker)
+        self.assertEqual(HostExecutionContext(exists=lambda _p: False).host_run_dir("cpu-setup"), "/run/cpu-setup")
 
     def test_debug_reject_labels(self) -> None:
         help_ = DEBUG_HELP
