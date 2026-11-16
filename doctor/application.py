@@ -7,7 +7,6 @@ import pwd
 import re
 import shlex
 import time
-from types import ModuleType
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.text import first_line
@@ -76,14 +75,13 @@ from doctor.domain import (
     virt_changes,
     virt_versions,
 )
-from doctor.ports import CheckFn, DoctorHostPort
+from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from vm.domain import guest_kind, tune_domain
 
 # The checkout's copies the doctor reads (host.repo_path gives where they are).
 HEALTH_CHECK_SRC = "btrfs/btrfs-health-check"
-VM_TOOL_SRC = "vm/cst-vm"
 
 type DomainsFn = Callable[[DoctorHostPort], tuple[list[str] | None, str]]
-type VmModFn = Callable[[], ModuleType | None]
 
 CHECKS: list[tuple[str, CheckFn]] = []
 
@@ -1351,7 +1349,7 @@ def check_vm_backup_timer(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
 def check_vm_hardware(
     host: DoctorHostPort,
     *,
-    vm_mod_fn: VmModFn | None = None,
+    vm_tools: VmToolsPort | None = None,
     domains_fn: DomainsFn | None = None,
 ) -> Iterator[Result]:
     """INFO for VMs whose disks or network card differ from `cst vm tune`."""
@@ -1359,18 +1357,17 @@ def check_vm_hardware(
     names, _ = dom_fn(host)
     if not names:
         return
-    mod = vm_mod_fn() if vm_mod_fn is not None else None
-    if mod is None:
-        yield Result(INFO, f"VM hardware: not checked ({host.repo_path(VM_TOOL_SRC)} not loadable)")
+    if vm_tools is None:
+        yield Result(INFO, "VM hardware: not checked (the vm package is not wired in)")
         return
-    kn = mod.knobs(host.path(VM_CONF))
+    kn = vm_tools.knobs(host.path(VM_CONF))
     for vm in names:
         rc, out, _ = domain_xml(host, vm)
         if rc != 0:
             continue
         try:
-            _, changes, _, _ = mod.tune_domain(out, kn, True)
-            kind, _ = mod.guest_kind(mod.ET.fromstring(out))
+            _, changes, _, _ = tune_domain(out, kn, True)
+            kind, _ = guest_kind(ET.fromstring(out))
         except Exception as e:  # noqa: BLE001 - an odd definition is an info line
             yield Result(INFO, f"VM {vm}: hardware not checked ({type(e).__name__}: {e})")
             continue
@@ -1387,18 +1384,17 @@ def check_vm_hardware(
 
 
 @check("vm")
-def check_vm_image_dirs(host: DoctorHostPort, *, vm_mod_fn: VmModFn | None = None) -> Iterator[Result]:
+def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = None) -> Iterator[Result]:
     """INFO for a VM image folder on btrfs without +C, or with images that
     are still copy-on-write."""
-    mod = vm_mod_fn() if vm_mod_fn is not None else None
-    if mod is None:
+    if vm_tools is None:
         return
-    if not mod.knobs(host.path(VM_CONF))["VM_NOCOW"]:
+    if not vm_tools.knobs(host.path(VM_CONF))["VM_NOCOW"]:
         yield Result(INFO, f"VM image folders: NOCOW not managed (VM_NOCOW=no in {VM_CONF})")
         return
-    system = mod.SYSTEM_IMAGES
-    for d in mod.image_dirs():
-        p = mod.probe_dir(d, host.path if d["path"] == system else (lambda x: x))
+    system = vm_tools.system_images
+    for d in vm_tools.image_dirs():
+        p = vm_tools.probe_dir(d, host.path if d["path"] == system else (lambda x: x))
         if not p["present"] or p["btrfs"] is False:
             continue
         path = p["path"]
@@ -1417,7 +1413,7 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_mod_fn: VmModFn | None = Non
                 f"copy-on-write; {host.cst} vm nocow apply sets it",
             )
         if cow:
-            listed = ", ".join(f"{i['name']} ({mod.human(i['alloc'])})" for i in cow)
+            listed = ", ".join(f"{i['name']} ({format_bytes_gib_mib(i['alloc'], mib_decimals=1)})" for i in cow)
             yield Result(
                 INFO,
                 f"VM image folder {path}: still copy-on-write: {listed}; "

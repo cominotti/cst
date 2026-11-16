@@ -690,9 +690,12 @@ cst vm backup-timer off [VM]      # (root) stops it; removes the files when no V
 
 `on` installs:
 
-- `/usr/local/sbin/cst-vm`: a copy of this program, as the other modules
-  install theirs. After updating CST, run `backup-timer on` again;
-  `backup-timer status` says when the copy is older;
+- `/usr/local/sbin/cst-vm`: this program, as `install` writes every CST
+  Python program: one file (a zipapp) holding `vm/cst-vm` and the `vm`,
+  `cpu` and `cst_core` packages it imports, so it runs without the CST
+  folder. After updating CST, run `backup-timer on` again;
+  `backup-timer status` says when the copy is older (also a plain-script
+  copy installed by an older CST: `on` replaces it);
 - `/etc/systemd/system/cst-vm-backup@.service`: runs
   `cst-vm backup <VM> --nas` with low priority (`Nice=19`,
   `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`);
@@ -933,24 +936,28 @@ printed). For `nocow`: the probe with fake inode flags (unreadable is never
 "copy-on-write"), the conversion commands, `apply` with sudo for the system
 folder (creation like libvirt), and, on a real btrfs under `~/.cache`
 (skipped elsewhere), that a reflink backup of a NOCOW image works and that
-the clone fails without the pre-created NOCOW destination. `HexagonalArchitectureTest`
-in `vm/tests/test_vm.py` covers `vm.domain`, `vm.adapters` (with mocked
-`subprocess.run` and a temporary tool script), and `vm.application`.
+the clone fails without the pre-created NOCOW destination. `PackageTest`
+in `vm/tests/test_vm.py` covers the settings, the parsing, the dispatch, the
+virsh wrapper and the timer units in-process.
 
 ## 13. Python module layout
 
-The Python code inside `vm/` is split into typed layers (all stdlib-only at run
-time):
+The Python code inside `vm/` (standard library only at run time):
 
-- `vm/domain.py`: pure value objects (`VmKnobs`, `DomainParts`, `TuneResult`,
-  `VmCliCommand`), libvirt domain XML inspection and `tune` rules
-  (`extract_domain_parts`, `tune_domain_xml`), CLI parsing (`parse_vm_args`),
-  and pure NAS backup helpers (`valid_keep`, `overlay_kind`, `forget_args`,
-  `version_changes`).
-- `vm/ports.py`: typed boundary protocols (`VirshPort`, `VmRuntimePort`).
-- `vm/adapters.py`: `SubprocessVirshAdapter` (runs `virsh` with `LC_ALL=C`) and
-  `CstVmRuntimeAdapter` (loads and delegates to `vm/cst-vm`).
-- `vm/application.py`: `VmService`, coordinating domain inspection, `tune`
-  planning diffs, and runtime delegation.
-- `vm/cst-vm`: standalone CLI program installed as `/usr/local/sbin/cst-vm` and
-  reused by `cst doctor` for read-only domain and NOCOW checks.
+- `vm/cst-vm`: the entry point (its docstring is the help); it only hands
+  argv to `vm/cli.py`. Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
+  `backup-timer on`).
+- `vm/domain.py`: the rules, no I/O: what a domain definition is made of
+  (`domain_parts`), the hardware `tune` recommends (`tune_domain`,
+  `guest_kind`), the NAS backup's names and retention (`valid_keep`,
+  `overlay_kind`, `forget_args`), the timer units (`render_service`,
+  `render_timer`), the command line (`parse_args`).
+- `vm/adapters.py`: what reaches the host: `virsh`, `rpm`, `rpm-ostree`,
+  `systemctl`, `restic` (with `LC_ALL=C`), the backup index, the NOCOW flag
+  and the image folders (`probe_dir`), the per-VM lock, the paths
+  (`CST_VM_*` moves them, for the tests only).
+- `vm/cli.py`: the commands (`backup`, the NAS backup, `backup-timer`,
+  `list`, `status`, `tune`, `nocow`) and `main`.
+
+`cst doctor` imports `vm.domain` (tune rules) and `vm.adapters` (knobs,
+image folder probe) from the same CST copy.

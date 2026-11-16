@@ -1,15 +1,13 @@
 """Adapters implementing the `doctor` ports against Linux/toolbox hosts."""
 
-from collections.abc import Mapping
-import importlib.machinery
+from collections.abc import Callable, Mapping
 import os
 import subprocess
-import sys
 import time
-from types import ModuleType
-from typing import BinaryIO, TextIO
+from typing import Any, BinaryIO, TextIO
 
 from doctor.domain import NAME, Deployment, OstreeAnswer
+from vm import adapters as vm_adapters
 
 
 class Host:
@@ -104,14 +102,23 @@ class Host:
         return p.returncode, p.stdout, p.stderr
 
 
-def load_vm_module(vm_tool_path: str) -> ModuleType | None:
-    """Load `vm/cst-vm` as a module so doctor reuses its tune and NOCOW logic, or None."""
-    try:
-        loader = importlib.machinery.SourceFileLoader("cst_vm", vm_tool_path)
-        mod = ModuleType("cst_vm")
-        mod.__file__ = vm_tool_path
-        sys.modules["cst_vm"] = mod  # registered first: @dataclass looks the module up
-        loader.exec_module(mod)
-        return mod
-    except Exception:  # noqa: BLE001 - a missing or broken copy is an info line, not an ERROR
-        return None
+class VmTools:
+    """VmToolsPort over the checkout's vm package (looked up at each call, so
+    a test that patches vm.adapters reaches it)."""
+
+    @property
+    def system_images(self) -> str:
+        """vm.adapters.SYSTEM_IMAGES."""
+        return vm_adapters.SYSTEM_IMAGES
+
+    def knobs(self, path: str) -> dict[str, bool]:
+        """vm.adapters.knobs."""
+        return vm_adapters.knobs(path)
+
+    def image_dirs(self) -> list[dict[str, str]]:
+        """vm.adapters.image_dirs."""
+        return vm_adapters.image_dirs()
+
+    def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
+        """vm.adapters.probe_dir."""
+        return vm_adapters.probe_dir(d, readable)

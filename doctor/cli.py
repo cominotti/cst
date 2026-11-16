@@ -1,34 +1,32 @@
 """The `cst doctor` command line: argv to the checks, the report to a stream.
 
 A driving adapter: it builds the Host (the machine, or the host seen from a
-toolbox), wires the checks that need the checkout's vm/cst-vm, runs them
+toolbox), wires the checks that reuse the vm package (VmTools), runs them
 all and prints the report.
 """
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
-import functools
+from collections.abc import Iterator, Mapping, Sequence
 import os
 import sys
-from types import ModuleType
 from typing import TextIO
 
 from cst_core.adapters.runtime import checkout_root
 from doctor import application as app
-from doctor.adapters import Host, load_vm_module
+from doctor.adapters import Host, VmTools
 from cst_core.domain.errors import Usage
 from doctor.domain import NAME, Result, parse_args
-from doctor.ports import CheckFn, DoctorHostPort
+from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from doctor.presenter import render
 
 
-def wired_checks(vm_mod_fn: Callable[[], ModuleType | None]) -> list[tuple[str, CheckFn]]:
-    """The registered checks, in order; the VM hardware and image-folder checks get vm_mod_fn."""
+def wired_checks(vm: VmToolsPort) -> list[tuple[str, CheckFn]]:
+    """The registered checks, in order; the VM hardware and image-folder checks get vm."""
 
     def check_vm_hardware(host: DoctorHostPort) -> Iterator[Result]:
-        return app.check_vm_hardware(host, vm_mod_fn=vm_mod_fn)
+        return app.check_vm_hardware(host, vm_tools=vm)
 
     def check_vm_image_dirs(host: DoctorHostPort) -> Iterator[Result]:
-        return app.check_vm_image_dirs(host, vm_mod_fn=vm_mod_fn)
+        return app.check_vm_image_dirs(host, vm_tools=vm)
 
     wired: dict[CheckFn, CheckFn] = {
         app.check_vm_hardware: check_vm_hardware,
@@ -58,5 +56,4 @@ def main(
         print(doc.replace("doctor [--brief]", f"{prog} [--brief]", 1), file=stdout)
         return 0
     host = Host(env, repo=checkout_root(entry_file) or "")
-    vm_mod = functools.cache(lambda: load_vm_module(host.repo_path(app.VM_TOOL_SRC)))
-    return render(app.run_checks(host, wired_checks(vm_mod)), brief, stdout, host.container, prog)
+    return render(app.run_checks(host, wired_checks(VmTools())), brief, stdout, host.container, prog)

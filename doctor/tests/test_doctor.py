@@ -24,9 +24,8 @@ import pwd
 import shutil
 import subprocess
 import sys
-from types import ModuleType
 import tempfile
-from typing import Protocol, cast
+from typing import Protocol
 import unittest
 from unittest import mock
 
@@ -51,14 +50,11 @@ from doctor import (
     domain as doc_domain,
     presenter as doc_presenter,
 )
+from cst_core.adapters import nocow as inode_attrs
 from cst_core.domain.errors import Usage
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
-
-
-class _VmModule(Protocol):
-    os: ModuleType
-    FS_NOCOW_FL: int
+from vm import adapters as vm_adapters
 
 
 class _ScandirIter(Protocol):
@@ -1719,9 +1715,6 @@ class VmHardwareTest(VmTest):
         scandir_denied: tuple[str, ...] = (),
     ) -> list[Result]:
         """The image folder check in-process, with fake inode flags."""
-        raw_mod = doc_adapters.load_vm_module(os.path.join(REPO, "vm", "cst-vm"))
-        assert raw_mod is not None
-        mod = cast("_VmModule", raw_mod)
         real_scandir = os.scandir
 
         def scandir(p: str) -> _ScandirIter:
@@ -1729,18 +1722,18 @@ class VmHardwareTest(VmTest):
                 raise PermissionError(13, "Permission denied")
             return real_scandir(p)
 
+        # The probe lives in vm.adapters (VmTools calls it there).
         with (
             mock.patch.dict(os.environ, {"HOME": self.tmp}),
-            mock.patch.object(mod, "is_btrfs", lambda p: btrfs),
-            mock.patch.object(mod, "inode_flags", lambda p: flags.get(p, 0)),
-            mock.patch.object(mod.os, "scandir", scandir),
+            mock.patch.object(vm_adapters, "is_btrfs", lambda p: btrfs),
+            mock.patch.object(vm_adapters, "inode_flags", lambda p: flags.get(p, 0)),
+            mock.patch.object(os, "scandir", scandir),
         ):
-            return list(doc_app.check_vm_image_dirs(doc_adapters.Host(self.env, repo=REPO), vm_mod_fn=lambda: raw_mod))
+            return list(
+                doc_app.check_vm_image_dirs(doc_adapters.Host(self.env, repo=REPO), vm_tools=doc_adapters.VmTools())
+            )
 
     def test_image_folders(self) -> None:
-        raw_mod = doc_adapters.load_vm_module(os.path.join(REPO, "vm", "cst-vm"))
-        assert raw_mod is not None
-        mod = cast("_VmModule", raw_mod)
         system = os.path.join(self.root, "var", "lib", "libvirt", "images")
         boxes = os.path.join(self.tmp, ".local", "share", "gnome-boxes", "images")
         for d in (system, boxes):
@@ -1759,7 +1752,7 @@ class VmHardwareTest(VmTest):
         self.assertIn("still copy-on-write: fedora", res[2].message)
         self.assertTrue(all(r.status in (doc_domain.OK, doc_domain.INFO) for r in res))
         # All marked: ok lines only.
-        nocow: int = mod.FS_NOCOW_FL
+        nocow: int = inode_attrs.FS_NOCOW_FL
         res = self.folders({system: nocow, boxes: nocow, os.path.join(boxes, "fedora"): nocow})
         self.assertEqual([r.status for r in res], [doc_domain.OK, doc_domain.OK])
         # Not btrfs, or no folders at all (CI): silent.
@@ -1778,12 +1771,12 @@ class VmHardwareTest(VmTest):
             [(doc_domain.INFO, "VM image folders: NOCOW not managed (VM_NOCOW=no in /etc/cst/vm.conf)")],
         )
 
-    def test_unloadable_vm_tool_is_info(self) -> None:
+    def test_unwired_vm_tools_is_info(self) -> None:
         host = doc_adapters.Host(self.env, repo=REPO)
-        res = list(doc_app.check_vm_hardware(host, vm_mod_fn=lambda: None, domains_fn=lambda host: (["win"], "")))
+        res = list(doc_app.check_vm_hardware(host, vm_tools=None, domains_fn=lambda host: (["win"], "")))
         self.assertEqual(res[0].status, doc_domain.INFO)
-        self.assertIn("vm/cst-vm not loadable", res[0].message)
-        self.assertEqual(list(doc_app.check_vm_image_dirs(host, vm_mod_fn=lambda: None)), [])
+        self.assertIn("VM hardware: not checked (the vm package is not wired in)", res[0].message)
+        self.assertEqual(list(doc_app.check_vm_image_dirs(host, vm_tools=None)), [])
 
 
 class CommandLineTest(Scratch):
@@ -1839,17 +1832,21 @@ class CommandLineTest(Scratch):
             r2 = subprocess.run(["bash", "-n", "-c", fx], check=False, capture_output=True, stdin=subprocess.DEVNULL)
             self.assertEqual(r2.returncode, 0, fx)
 
-    def test_wired_checks_hand_the_vm_checks_the_checkout_module(self) -> None:
-        calls: list[int] = []
+    def test_wired_checks_hand_the_vm_checks_the_vm_tools(self) -> None:
+        calls: list[str] = []
 
-        def no_vm_module() -> None:
-            calls.append(1)
+        class Tools(doc_adapters.VmTools):
+            def knobs(self, path: str) -> dict[str, bool]:
+                calls.append(path)
+                return {"VM_NOCOW": False}
 
-        wired = doc_cli.wired_checks(no_vm_module)
+        wired = doc_cli.wired_checks(Tools())
         self.assertEqual([(a, fn.__name__) for a, fn in wired], [(a, fn.__name__) for a, fn in doc_app.CHECKS])
         by_name = {fn.__name__: fn for _, fn in wired}
-        self.assertEqual(list(by_name["check_vm_image_dirs"](doc_adapters.Host(self.env, repo=REPO))), [])
-        self.assertEqual(calls, [1])
+        host = doc_adapters.Host(self.env, repo=REPO)
+        res = list(by_name["check_vm_image_dirs"](host))
+        self.assertIn("NOCOW not managed", res[0].message)
+        self.assertEqual(calls, [host.path("/etc/cst/vm.conf")])
         unwired = {fn.__name__: fn for _, fn in doc_app.CHECKS}
         self.assertIs(by_name["check_staged"], unwired["check_staged"])
 
@@ -1921,7 +1918,7 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("cst_core", "cpu"):  # doctor imports these packages
+        for pkg in ("cst_core", "cpu", "vm"):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )

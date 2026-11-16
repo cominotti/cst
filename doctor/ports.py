@@ -1,8 +1,8 @@
 """Ports (interfaces) for the `doctor` bounded context."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 import os
-from typing import BinaryIO, Protocol, TextIO
+from typing import Any, BinaryIO, Protocol, TextIO
 
 from doctor.domain import Deployment, OstreeAnswer, Result
 
@@ -83,4 +83,26 @@ class CheckFn(Protocol):
 
     def __call__(self, host: DoctorHostPort, /) -> Iterable[Result]:
         """Run one check against the given host adapter."""
+        ...
+
+
+class VmToolsPort(Protocol):
+    """The host side of the vm package the VM checks reuse (vm.adapters):
+    the knobs of /etc/cst/vm.conf and the probe of the VM image folders."""
+
+    @property
+    def system_images(self) -> str:
+        """libvirt's system image folder (vm.adapters.SYSTEM_IMAGES)."""
+        ...
+
+    def knobs(self, path: str) -> dict[str, bool]:
+        """{knob: on} from a vm.conf (missing file or knob: on)."""
+        ...
+
+    def image_dirs(self) -> list[dict[str, str]]:
+        """[{scope, path, what}] of every known VM image folder."""
+        ...
+
+    def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
+        """What an image folder looks like (readable maps a path to where this process reads it)."""
         ...

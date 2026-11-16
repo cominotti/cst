@@ -187,8 +187,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `libvirt` group, or an equivalent polkit rule. `domcapabilities` is asked
   only when a VM lacks one of the disables. No `virsh`, no permission,
   libvirt not running, no VM: `info` or `ok`, never `WARN`. The hardware
-  and image folder checks load `vm/cst-vm` of the same CST copy (no second
-  copy of its rules) and read the folders' inode flags with an ioctl; they
+  and image folder checks import the `vm` package of the same CST copy (no
+  second copy of its rules) and read the folders' inode flags with an ioctl; they
   run no extra command.
 - The `cpu` check reads `/run/cpu-setup/game.state`, `game.intended` and
   `manual` (the by-hand mark, which picks the fix command), and `TARGET_USER` in `/etc/cpu-setup/cpu-setup.conf` (all world-readable),

@@ -16,7 +16,6 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
 import fcntl
 import json
 import os
@@ -30,7 +29,7 @@ import sys
 import tempfile
 import termios
 import time
-from typing import Any, Protocol, cast
+from typing import Any
 import unittest
 
 # Run directly (python3 -I -B vm/tests/test_vm_nas.py): the checkout root holds the tests package.
@@ -38,7 +37,9 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from cst_core.adapters.zipapp import build_python_zipapp
+from cst_core.domain.errors import Usage
+from vm import adapters as vm_adapters, domain as vm_domain
 
 sys.dont_write_bytecode = True
 
@@ -50,31 +51,6 @@ UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
 STAMP = "20261108T010640Z"
 SNAP_ID = "a1b2c3d4" + "e" * 56
-
-
-class _VmModule(Protocol):
-    Usage: type[Exception]
-    NAS_SSH_ALIAS: str
-    SNAPSHOT_TIMEOUT: int
-    SNAPSHOT_SETTLE: int
-    COMMIT_TIMEOUT: int
-
-    def read_index(self, path: str | None = None) -> list[dict[str, Any]]: ...
-
-    def overlay_recovery(
-        self, vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, str]
-    ) -> list[str]: ...
-
-    def overlay_kind(self, state: str | None, live_src: str | None, base: str) -> str: ...
-
-    def parse_args(self, argv: Sequence[str]) -> dict[str, Any]: ...
-
-    def forget_args(self, vm: str, host: str, weekly: int, monthly: int) -> list[str]: ...
-
-
-def load() -> _VmModule:
-    mod = load_script(TOOL, "cst_vm")
-    return cast("_VmModule", cast("object", mod))
 
 
 # The VM, as JSON in $FIX/vm.json: state, agent, live and persistent disk
@@ -655,8 +631,7 @@ class LiveBackupTest(Nas):
 
     def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        m = load()
-        entries = [e for e in m.read_index(self.index)]
+        entries = [e for e in vm_adapters.read_index(self.index)]
         self.assertEqual(entries[0]["mode"], "nas")
 
 
@@ -807,9 +782,8 @@ class RobustnessTest(Nas):
         self.assertIn(f"note: {self.nvram} changed while restic read it", r.stdout)
 
     def test_recovery_kinds(self) -> None:
-        mod = load()
         # State unreadable: only commands that look.
-        lines = mod.overlay_recovery("win", [("sda", (self.disk, self.overlay))], {})
+        lines = vm_domain.overlay_recovery("win", [("sda", (self.disk, self.overlay))], {})
         self.assertFalse(
             [
                 ln
@@ -817,12 +791,12 @@ class RobustnessTest(Nas):
                 if "qemu-img" in ln or "blockcommit" in ln or " edit " in ln or ln.startswith("sudo rm")
             ]
         )
-        self.assertEqual(mod.overlay_kind(None, None, self.disk), "unknown")
-        self.assertEqual(mod.overlay_kind("pmsuspended", self.overlay, self.disk), "live")
-        self.assertEqual(mod.overlay_kind("paused", None, self.disk), "live")
-        self.assertEqual(mod.overlay_kind("running", self.disk, self.disk), "definition")
+        self.assertEqual(vm_domain.overlay_kind(None, None, self.disk), "unknown")
+        self.assertEqual(vm_domain.overlay_kind("pmsuspended", self.overlay, self.disk), "live")
+        self.assertEqual(vm_domain.overlay_kind("paused", None, self.disk), "live")
+        self.assertEqual(vm_domain.overlay_kind("running", self.disk, self.disk), "definition")
         # Shut off in the run: no merge happened, the overlay holds the last writes.
-        self.assertEqual(mod.overlay_kind("shut off", self.overlay, self.disk), "offline")
+        self.assertEqual(vm_domain.overlay_kind("shut off", self.overlay, self.disk), "offline")
 
 
 class ShutOffAndRefusalTest(Nas):
@@ -917,10 +891,9 @@ class ShutOffAndRefusalTest(Nas):
         if os.geteuid() != 0:
             self.assertEqual(r.returncode, 1)
             self.assertIn("needs root", r.stderr)
-        m = load()
-        a = m.parse_args(["backup", "--keep-tag", "pre-f46", "--nas", "w"])
+        a = vm_domain.parse_args(["backup", "--keep-tag", "pre-f46", "--nas", "w"])
         self.assertEqual((a["vm"], a["keep"], a["nas"]), ("w", "pre-f46", True))
-        self.assertEqual(m.parse_args(["backup", "--nas", "--keep-tag=x1"])["keep"], "x1")
+        self.assertEqual(vm_domain.parse_args(["backup", "--nas", "--keep-tag=x1"])["keep"], "x1")
         for bad in (
             ["backup", "--nas", "--full"],
             ["backup", "--keep-tag", "x"],
@@ -931,8 +904,8 @@ class ShutOffAndRefusalTest(Nas):
             ["backup-timer"],
             ["backup-timer", "go"],
         ):
-            with self.assertRaises(m.Usage, msg=bad):
-                m.parse_args(bad)
+            with self.assertRaises(Usage, msg=bad):
+                vm_domain.parse_args(bad)
 
     def test_scheduled_failure_alerts(self) -> None:
         self.restic_cfg(cat_rc=12)
@@ -946,14 +919,13 @@ class ConstantsTest(unittest.TestCase):
     def test_nas_constants_match_btrfs_snapshot(self) -> None:
         with open(os.path.join(REPO, "btrfs", "btrfs-snapshot")) as f:
             text = f.read()
-        m = load()
 
         def shell(name: str) -> str:
             m_re = re.search(rf"^{name}=(\S+)", text, re.M)
             assert m_re is not None
             return m_re.group(1)
 
-        self.assertEqual(shell("NAS_SSH_ALIAS"), m.NAS_SSH_ALIAS)
+        self.assertEqual(shell("NAS_SSH_ALIAS"), vm_domain.NAS_SSH_ALIAS)
         self.assertEqual(shell("RESTIC_PASSWORD"), "/etc/btrfs-setup/restic-password")
         self.assertEqual(shell("RESTIC_CACHE"), "/var/cache/btrfs-snapshot-restic")
         self.assertEqual(shell("CONF"), "/etc/btrfs-setup/snapshots.conf")
@@ -961,8 +933,7 @@ class ConstantsTest(unittest.TestCase):
         self.assertIn("--tag btrfs-setup --keep-daily", text)
 
     def test_forget_args_are_scoped(self) -> None:
-        m = load()
-        a = m.forget_args("win", "sophia", 4, 3)
+        a = vm_domain.forget_args("win", "sophia", 4, 3)
         self.assertEqual(a[a.index("--host") + 1], "sophia")
         self.assertEqual(a[a.index("--tag") + 1], "cst-vm,vm:win")
         self.assertNotIn("--prune", a)
@@ -995,9 +966,9 @@ class TimerTest(Nas):
         stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.M)
         self.assertTrue(stop, service)
         assert stop is not None
-        mod = load()
         self.assertGreaterEqual(
-            int(stop.group(1)) * 60, mod.SNAPSHOT_TIMEOUT + mod.SNAPSHOT_SETTLE + mod.COMMIT_TIMEOUT + 300 + 15 * 60
+            int(stop.group(1)) * 60,
+            vm_adapters.SNAPSHOT_TIMEOUT + vm_adapters.SNAPSHOT_SETTLE + vm_adapters.COMMIT_TIMEOUT + 300 + 15 * 60,
         )
         for line in (
             "OnCalendar=Sat *-*-* 04:30:00",
@@ -1006,12 +977,27 @@ class TimerTest(Nas):
             "WantedBy=timers.target",
         ):
             self.assertIn(line + "\n", timer)
-        self.assertEqual(read(copy), read(TOOL))
+        # The program as `install` writes it: the zipapp built from this checkout.
+        with open(copy, "rb") as f:
+            self.assertEqual(f.read(), build_python_zipapp(REPO, "vm/cst-vm"))
         self.assertEqual(stat.S_IMODE(os.stat(copy).st_mode), 0o755)
         r = self.run_tool("backup-timer", "status", "win")
         self.assertIn("weekly NAS backup of win: on", r.stdout)
         self.assertIn("installed, up to date", r.stdout)
         self.assertIn("next run: Sat 2026-11-21", r.stdout)
+        # The installed copy runs on its own, from /, and sees itself as up to date.
+        r = subprocess.run(
+            ["/usr/bin/python3", "-I", copy, "backup-timer", "status", "win"],
+            check=False,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd="/",
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"  {copy}: installed, up to date", r.stdout)
         with open(copy, "a") as f:
             f.write("# old\n")
         r = self.run_tool("backup-timer", "status", "win")
@@ -1023,6 +1009,28 @@ class TimerTest(Nas):
         self.assertIn("systemctl disable --now cst-vm-backup@win.timer", self.calls())
         self.assertFalse(os.path.exists(copy))
         self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.service")))
+
+    def test_on_upgrades_a_plain_script_copy_and_refuses_a_foreign_program(self) -> None:
+        copy = self.env["CST_VM_SBIN_COPY"]
+        os.makedirs(os.path.dirname(copy))
+        # What CST installed before the zipapps: the script itself, as text.
+        with open(copy, "w") as f:
+            f.write('#!/usr/bin/python3 -I\n"""cst-vm: copies of a libvirt VM (an older CST)."""\n')
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn(f"  {copy}: installed, OLDER than this copy of CST", r.stdout)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  updated: {copy}", r.stdout)
+        with open(copy, "rb") as f:
+            self.assertEqual(f.read(), build_python_zipapp(REPO, "vm/cst-vm"))
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertNotIn("installed:", r.stdout)
+        self.assertNotIn("updated:", r.stdout)
+        with open(copy, "w") as f:
+            f.write("#!/usr/bin/python3 -I\nprint('someone else')\n")
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"not CST's files, left as they are: {copy}", r.stderr)
 
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:

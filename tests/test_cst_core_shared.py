@@ -25,6 +25,7 @@ from cst_core.domain.text import first_line
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from tests.script_loader import load_script
+from vm import domain as vm_domain
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -67,14 +68,24 @@ class DomainTest(unittest.TestCase):
         )
 
     def test_render_timer_matches_the_vm_backup_timer(self) -> None:
-        vm: Any = load_script(os.path.join(REPO, "vm", "cst-vm"), "cst_vm_units")
-        header = [
-            f"{vm.UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.",
-            "# Saturday morning: the /home NAS job starts between 00:00 and 01:00 every",
-            "# day, the btrfs scrub runs on Sunday at 02:00.",
-        ]
-        text = render_timer(header, "CST: weekly backup of the VM %i to the NAS", vm.ON_CALENDAR, "30min")
-        self.assertEqual(text, vm.render_timer())
+        # vm renders its timer with render_timer; the bytes stay those of the
+        # text cst-vm wrote before (a change would rewrite every installed timer).
+        before = (
+            "# Managed by cst vm (CST): installed by `cst vm backup-timer on`; not edited by hand.\n"
+            "# Saturday morning: the /home NAS job starts between 00:00 and 01:00 every\n"
+            "# day, the btrfs scrub runs on Sunday at 02:00.\n"
+            "[Unit]\n"
+            "Description=CST: weekly backup of the VM %i to the NAS\n"
+            "\n"
+            "[Timer]\n"
+            "OnCalendar=Sat *-*-* 04:30:00\n"
+            "RandomizedDelaySec=30min\n"
+            "Persistent=true\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        )
+        self.assertEqual(vm_domain.render_timer(), before)
 
 
 class AdaptersTest(unittest.TestCase):

@@ -948,3 +948,54 @@ EOF
                     )
                     self.assertNotRegex(p.stderr, r"ImportError|ModuleNotFoundError|Traceback", p.stderr)
                     self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+
+    def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
+        """`cst vm backup-timer on` with the real systemd: it installs cst-vm
+        as the zipapp `install` builds (replacing the plain-script copy an
+        older CST left), the service and the timer, and enables the timer;
+        the installed copy runs from / without the checkout; a second `on`
+        writes nothing; `off` disables and removes everything. The NAS
+        settings and the program's path are scratch files (CST_VM_*)."""
+        w = "/var/tmp/e2e-vm-timer"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"systemctl disable --now cst-vm-backup@e2evm.timer; rm -rf {w} "
+            "/etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -euo pipefail
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/sbin"
+            printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
+            printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_SBIN_COPY="$w/sbin/cst-vm" CST_VM_INDEX="$w/index.json"
+            tool=/opt/cst-rw/vm/cst-vm
+            # The copy an older CST installed: the script itself, as text.
+            printf '#!/usr/bin/python3 -I\n\"\"\"cst-vm: an older CST\n' >"$w/sbin/cst-vm"
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm | grep -q "$w/sbin/cst-vm: installed, OLDER"
+            /usr/bin/python3 -I "$tool" backup-timer on e2evm | grep -q "updated: $w/sbin/cst-vm"
+            systemctl is-enabled cst-vm-backup@e2evm.timer
+            systemctl cat cst-vm-backup@.service | grep -qF "ExecStart=/usr/bin/python3 -I $w/sbin/cst-vm backup %i --nas"
+            head -c 22 "$w/sbin/cst-vm" | grep -q '^#!/usr/bin/python3 -I$'
+            python3 -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$w/sbin/cst-vm"
+            # The installed copy runs on its own, from /, as root and as tester.
+            (cd / && env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) | grep -q 'backup-timer on'
+            (cd / && runuser -u tester -- env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) \
+                | grep -q 'backup-timer on'
+            again="$(/usr/bin/python3 -I "$tool" backup-timer on e2evm)"
+            if grep -E 'installed:|updated:' <<<"$again"; then echo "second on wrote files" >&2; exit 1; fi
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm | grep -q "$w/sbin/cst-vm: installed, up to date"
+            /usr/bin/python3 -I "$tool" backup-timer off e2evm
+            if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
+            [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

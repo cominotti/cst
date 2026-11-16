@@ -1,195 +1,75 @@
-"""Pure domain model, value objects, and transformations for the `vm` bounded context."""
+"""The vm module's rules: what a libvirt domain definition is made of, the
+hardware `cst vm tune` recommends, the NAS backup's names and retention,
+the weekly timer unit, the command line. Pure: text in, text or values out.
+"""
 
-from __future__ import annotations
-
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-import io
+from collections.abc import Iterable, Mapping, Sequence
+import os.path
 import re
+import shlex
+from typing import Any
 import xml.etree.ElementTree as ET
 
+from cpu.domain import keep_prefixes
+from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
+from cst_core.domain.values import GIB
+
 URI = "qemu:///system"
+
 DEFAULT_VM = "win11-devbox"
-VIRT_PACKAGES = (
-    "qemu-kvm",
-    "qemu-kvm-core",
-    "qemu-system-x86-core",
-    "libvirt-daemon",
-    "edk2-ovmf",
-    "swtpm",
-    "libtpms",
-)
+
+# Packages whose version decides how the guest sees its virtual hardware.
+# Fedora names QEMU's x86 emulator qemu-system-x86-core (qemu-kvm-core on
+# some releases): every name is queried, the missing ones are recorded as such.
+VIRT_PACKAGES = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
+
 NOT_INSTALLED = "not installed"
+
+FULL_MARGIN = (GIB, 0.05)  # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
+
 KNOBS = ("VM_NOCOW", "VM_TUNE_DISK_BUS", "VM_TUNE_DISK_DRIVER", "VM_TUNE_NIC")
-NAS_DEFAULTS = {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3, "VM_NAS_TIMEOUT_HOURS": 6}
-LIVE_STATES = ("running", "paused", "pmsuspended")
-OVERLAY_MARK = ".cst-overlay-"
-TAG = "cst-vm"
-KEEP_TAG = "cst-keep"
-RETRY_LOCK = "30m"
-ON_CALENDAR = "Sat *-*-* 04:30:00"
-UNIT_MARKER = "# Managed by cst vm (CST)"
-DRIVER_WANTED = (("cache", "none"), ("io", "native"), ("discard", "unmap"), ("detect_zeroes", "unmap"))
-OLD_NICS = ("e1000", "e1000e", "rtl8139")
-NIC_TYPES = ("network", "bridge", "direct", "user", "ethernet", "mcast", "server", "client", "udp", "null", "vds")
-LINUX_OS = (
-    "fedoraproject.org",
-    "redhat.com",
-    "centos.org",
-    "almalinux.org",
-    "rockylinux.org",
-    "debian.org",
-    "ubuntu.com",
-    "archlinux.org",
-    "opensuse.org",
-    "suse.com",
-    "alpinelinux.org",
-    "gentoo.org",
-    "nixos.org",
-    "linuxmint.com",
-    "manjaro.org",
-    "kali.org",
-    "endlessos.com",
-    "silverblue",
-    "popos",
-    "elementary.io",
+
+USER_IMAGES = (
+    (".local/share/libvirt/images", "libvirt qemu:///session: virt-manager, virsh as your user"),
+    (".local/share/gnome-boxes/images", "GNOME Boxes (RPM)"),
+    (".var/app/org.gnome.Boxes/data/gnome-boxes/images", "GNOME Boxes (Flatpak)"),
 )
-CPU_DISABLE_FALLBACK = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
+
+BTRFS_MAGIC = 0x9123683E
+
+NAS_SSH_ALIAS = "btrfs-setup-nas"
+
+OVERLAY_MARK = ".cst-overlay-"  # in the name of the snapshot overlay: <image>.cst-overlay-<UTC>
+
+TAG = "cst-vm"  # every VM backup; plus vm:<name>
+
+KEEP_TAG = "cst-keep"  # --keep-tag: never forgotten by the retention
+
+RETRY_LOCK = "30m"  # the /home NAS job may hold the repository's lock
+
+NAS_DEFAULTS = {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3, "VM_NAS_TIMEOUT_HOURS": 6}
+
+LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU is alive: a block job works
+
+SERVICE = "cst-vm-backup@.service"
+
+TIMER = "cst-vm-backup@.timer"
+
+UNIT_MARKER = "# Managed by cst vm (CST)"
+
+ON_CALENDAR = "Sat *-*-* 04:30:00"
 
 
-class Usage(Exception):
-    """Invalid CLI usage for a `cst vm` command."""
-
-
-class Refused(Exception):
-    """Precondition refused a `cst vm` operation safely."""
-
-
-@dataclass(frozen=True, slots=True)
-class VmKnobs:
-    """Typed `/etc/cst/vm.conf` settings with repository defaults."""
-
-    vm_nocow: bool = True
-    vm_tune_disk_bus: bool = True
-    vm_tune_disk_driver: bool = True
-    vm_tune_nic: bool = True
-    keep_weekly: int = 4
-    keep_monthly: int = 3
-    timeout_hours: int = 6
-
-    @classmethod
-    def from_text(cls, text: str) -> VmKnobs:
-        """Parse key=value configuration text into immutable `VmKnobs`."""
-        conf = parse_conf_text(text)
-
-        def _bool(key: str) -> bool:
-            return conf.get(key, "yes").strip().lower() not in ("no", "0", "false", "off")
-
-        def _num(key: str) -> int:
-            raw = conf.get(key, "")
-            return int(raw) if raw.isascii() and raw.isdigit() else NAS_DEFAULTS[key]
-
-        return cls(
-            vm_nocow=_bool("VM_NOCOW"),
-            vm_tune_disk_bus=_bool("VM_TUNE_DISK_BUS"),
-            vm_tune_disk_driver=_bool("VM_TUNE_DISK_DRIVER"),
-            vm_tune_nic=_bool("VM_TUNE_NIC"),
-            keep_weekly=_num("VM_NAS_KEEP_WEEKLY"),
-            keep_monthly=_num("VM_NAS_KEEP_MONTHLY"),
-            timeout_hours=_num("VM_NAS_TIMEOUT_HOURS"),
-        )
-
-    def as_dict(self) -> dict[str, bool]:
-        """Return boolean tuning knobs keyed by config name."""
-        return {
-            "VM_NOCOW": self.vm_nocow,
-            "VM_TUNE_DISK_BUS": self.vm_tune_disk_bus,
-            "VM_TUNE_DISK_DRIVER": self.vm_tune_disk_driver,
-            "VM_TUNE_NIC": self.vm_tune_nic,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class DomainParts:
-    """Extracted storage, firmware, and validation items from inactive domain XML."""
-
-    uuid: str
-    disks: tuple[str, ...]
-    nvram: str
-    tpm: bool
-    skipped: tuple[str, ...]
-    problems: tuple[str, ...]
-
-    def as_dict(self) -> dict[str, object]:
-        """Return legacy dict view for callers expecting list fields."""
-        return {
-            "uuid": self.uuid,
-            "disks": list(self.disks),
-            "nvram": self.nvram,
-            "tpm": self.tpm,
-            "skipped": list(self.skipped),
-            "problems": list(self.problems),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class TuneResult:
-    """Outcome of planning/applying safe virtio-scsi and NIC tuning on domain XML."""
-
-    after_xml: str | None
-    changes: tuple[str, ...]
-    held: tuple[str, ...]
-    notes: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class VmCliCommand:
-    """Parsed `cst vm` command invocation."""
-
-    cmd: str
-    sub: str | None = None
-    vm: str | None = None
-    full: bool = False
-    guest_virtio: bool = False
-    root: bool = False
-    nas: bool = False
-    keep: str | None = None
-    no_quiesce: bool = False
-
-    def as_dict(self) -> dict[str, object]:
-        """Return legacy dict representation for compatibility with CLI handlers."""
-        return {
-            "cmd": self.cmd,
-            "sub": self.sub,
-            "vm": self.vm,
-            "full": self.full,
-            "guest_virtio": self.guest_virtio,
-            "root": self.root,
-            "nas": self.nas,
-            "keep": self.keep,
-            "no_quiesce": self.no_quiesce,
-        }
-
-
-def parse_conf_text(text: str) -> dict[str, str]:
-    """Parse `KEY=VALUE` lines from a CST config string."""
-    vals: dict[str, str] = {}
-    for line in text.splitlines():
-        if "=" in line and not line.lstrip().startswith("#"):
-            k, v = line.strip().split("=", 1)
-            vals[k.strip()] = v.strip().strip("'\"")
-    return vals
-
-
-def extract_domain_parts(xml_text: str) -> DomainParts:
-    """Extract UUID, file-backed disks, NVRAM, emulated TPM, and non-file disk issues."""
+def domain_parts(xml_text: str) -> dict[str, Any]:
+    """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
+    problems}. problems are disks a file copy cannot back up (block, network,
+    pool volumes): the backup refuses then, rather than leaving one out."""
     root = ET.fromstring(xml_text)
-    uuid = (root.findtext("uuid") or "").strip()
     disks: list[str] = []
     skipped: list[str] = []
     problems: list[str] = []
     nvram = ""
-
     for disk in root.findall("devices/disk"):
         device = disk.get("device", "disk")
         kind = disk.get("type", "file")
@@ -214,7 +94,6 @@ def extract_domain_parts(xml_text: str) -> DomainParts:
             continue
         if path not in disks:
             disks.append(path)
-
     nv = root.find("os/nvram")
     if nv is not None:
         path = (nv.text or "").strip()
@@ -223,33 +102,309 @@ def extract_domain_parts(xml_text: str) -> DomainParts:
             path = s.get("file") or ""
         nvram = path
     tpm = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
-    return DomainParts(
-        uuid=uuid,
-        disks=tuple(disks),
-        nvram=nvram,
-        tpm=tpm,
-        skipped=tuple(skipped),
-        problems=tuple(problems),
+    return {
+        "uuid": (root.findtext("uuid") or "").strip(),
+        "disks": disks,
+        "nvram": nvram,
+        "tpm": tpm,
+        "skipped": skipped,
+        "problems": problems,
+    }
+
+
+def index_entry(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
+    return {
+        "vm": manifest["vm"],
+        "timestamp": manifest["timestamp"],
+        "epoch": manifest["epoch"],
+        "path": path,
+        "mode": manifest["mode"],
+        "versions": manifest["versions"],
+        "deployment": manifest["deployment"],
+    }
+
+
+def stored(dest_dir: str, src: str) -> str:
+    """Where a source path is kept inside the backup: its absolute path
+    under files/, so names never collide and restoring is one cp each."""
+    return os.path.join(dest_dir, "files", src.lstrip("/"))
+
+
+def restore_lines(vm: str, dest_dir: str, copied: Sequence[tuple[str, bool]], tpm_dir: str) -> list[str]:
+    q = shlex.quote
+    lines = [
+        f"# 1. the VM must be shut off: virsh -c {URI} domstate {q(vm)}",
+        "# 2. the files back (each line replaces the current file):",
+    ]
+    for src, _ in copied:
+        if src == tpm_dir:
+            lines.append(f"sudo rm -rf {q(src)} && sudo cp -a {q(stored(dest_dir, src))} {q(os.path.dirname(src))}/")
+        else:
+            lines.append(f"sudo cp --reflink=auto -a {q(stored(dest_dir, src))} {q(src)}")
+    lines += [
+        "# 3. the definition (CPU, pinning, devices) as it was:",
+        f"sudo virsh -c {URI} define {q(os.path.join(dest_dir, 'domain.xml'))}",
+    ]
+    return lines
+
+
+def live_disks(xml_text: str) -> list[dict[str, Any]]:
+    """[{target, device, type, source, backing}] of a definition's disks;
+    backing: the live definition shows a backing chain (an overlay)."""
+    out: list[dict[str, Any]] = []
+    for disk in ET.fromstring(xml_text).findall("devices/disk"):
+        t, s, bs = disk.find("target"), disk.find("source"), disk.find("backingStore")
+        src = ""
+        if s is not None:
+            src = s.get("file") or s.get("dev") or s.get("name") or s.get("volume") or ""
+        out.append(
+            {
+                "target": t.get("dev") if t is not None else "",
+                "device": disk.get("device", "disk"),
+                "type": disk.get("type", "file"),
+                "source": src,
+                "backing": bs is not None and bs.find("source") is not None,
+            }
+        )
+    return out
+
+
+def agent_state(xml_text: str) -> str:
+    """ "connected", "disconnected" or "none": the guest agent channel
+    (org.qemu.guest_agent.0) of the live definition."""
+    for ch in ET.fromstring(xml_text).findall("devices/channel"):
+        t = ch.find("target")
+        if t is not None and t.get("name") == "org.qemu.guest_agent.0":
+            return "connected" if t.get("state") == "connected" else "disconnected"
+    return "none"
+
+
+def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
+    """How a disk left on an overlay is put back by hand:
+    live: QEMU still runs on the overlay (running, paused, pmsuspended);
+    definition: the running VM is back on the image, only its persistent
+    definition names the overlay, which is now stale: never commit it;
+    offline: shut off before any merge (this run knows none happened), so
+    the overlay holds the guest's last writes;
+    unknown: the state could not be read."""
+    if state in LIVE_STATES:
+        return "definition" if live_src == base else "live"
+    if state in ("shut off", "crashed"):
+        return "offline"
+    return "unknown"
+
+
+def overlay_recovery(vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, str]) -> list[str]:
+    """The commands that put a disk back on its image by hand."""
+    q = shlex.quote
+    v = f"sudo virsh -c {URI}"
+    lines: list[str] = []
+    for t, (base, overlay) in items:
+        kind = how.get(t, "unknown")
+        if kind == "live":
+            lines += [
+                f"# {t}: the VM still runs on {overlay}",
+                f"{v} blockjob {q(vm)} {t} --info     # a commit still running? let it finish",
+                f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
+                "and nothing waits on it",
+                f"{v} blockcommit {q(vm)} {t} --active --pivot --wait --verbose     # only if no block job is listed",
+                f"{v} domblklist {q(vm)} --details     # {t} must show {base}",
+                f"{v} domblklist {q(vm)} --details --inactive     # here too",
+                f"sudo rm {q(overlay)}     # only once both show {base}",
+            ]
+        elif kind == "definition":
+            lines += [
+                f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
+                "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)",
+                f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
+                f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                f"sudo rm {q(overlay)}     # only once it shows {base}",
+            ]
+        elif kind == "offline":
+            lines += [
+                f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
+                "offline, then point the definition back",
+                f"sudo qemu-img commit -p {q(overlay)}     # writes its changes into {base}",
+                f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
+                f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                f"sudo rm {q(overlay)}",
+            ]
+        else:
+            lines += [
+                f"# {t}: the VM's state or the files could not be read: look first, then follow "
+                'vm/README.md in CST, "If a backup left an overlay"',
+                f"{v} domstate {q(vm)}",
+                f"{v} domblklist {q(vm)} --details",
+                f"{v} domblklist {q(vm)} --details --inactive",
+                f"sudo ls -l --time-style=full-iso {q(base)} {q(overlay)}",
+            ]
+    return lines
+
+
+def valid_keep(name: str | None) -> bool:
+    if not name:
+        return False
+    return (
+        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name))
+        and not name.startswith(("cst-", "vm:"))
+        and name not in ("btrfs-setup", "home", "Workspace")
     )
 
 
-def keep_prefixes(xml_text: str) -> None:
-    """Register non-default XML namespace prefixes before re-serializing domain XML."""
-    for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
-        if prefix and not re.fullmatch(r"ns\d+", prefix):
-            ET.register_namespace(prefix, uri)
+def forget_args(vm: str, host: str, weekly: int, monthly: int) -> list[str]:
+    """restic forget for this VM only: --host and both tags, so the /home
+    backup's snapshots (tag btrfs-setup) and hand-made ones (without the
+    cst-vm tag) are never considered; --group-by host: one group per VM even
+    when its disks change. Never --prune (the /home NAS job prunes)."""
+    return [
+        "forget",
+        "--host",
+        host,
+        "--tag",
+        f"{TAG},vm:{vm}",
+        "--group-by",
+        "host",
+        "--keep-weekly",
+        str(weekly),
+        "--keep-monthly",
+        str(monthly),
+        "--keep-tag",
+        KEEP_TAG,
+        "--retry-lock",
+        RETRY_LOCK,
+    ]
 
 
-def normalized_xml(xml_text: str) -> str:
-    """Normalize libvirt domain XML formatting while preserving namespace prefixes."""
-    keep_prefixes(xml_text)
-    root = ET.fromstring(xml_text)
-    ET.indent(root, space="  ")
-    return ET.tostring(root, encoding="unicode") + "\n"
+def render_timer() -> str:
+    return render_timer_unit(
+        [
+            f"{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.",
+            "# Saturday morning: the /home NAS job starts between 00:00 and 01:00 every",
+            "# day, the btrfs scrub runs on Sunday at 02:00.",
+        ],
+        "CST: weekly backup of the VM %i to the NAS",
+        ON_CALENDAR,
+        "30min",
+    )
+
+
+def render_service(program: str, stop_timeout: str) -> str:
+    """The service the timer starts: `program` (the installed cst-vm) backs up
+    the VM %i to the NAS; stop_timeout is TimeoutStopSec."""
+    return render_unit_file(
+        [
+            f"{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.",
+            "# The weekly backup of the libvirt VM %i to the NAS (restic): a live",
+            "# snapshot while restic reads the disks, then merged back. Why and how:",
+            "# vm/README.md in CST.",
+        ],
+        [
+            (
+                "Unit",
+                [
+                    "Description=CST: backup of the VM %i to the NAS (cst vm backup --nas)",
+                    "Wants=network-online.target",
+                    "After=network-online.target virtqemud.service libvirtd.service",
+                    f"ConditionPathExists={program}",
+                ],
+            ),
+            (
+                "Service",
+                [
+                    "Type=oneshot",
+                    'Environment="CST_PROG=cst vm"',
+                    f"ExecStart=/usr/bin/python3 -I {program} backup %i --nas",
+                    "Nice=19",
+                    "IOSchedulingClass=idle",
+                    "CPUWeight=20",
+                    "IOWeight=20",
+                    "# On stop, SIGTERM reaches the program only: it stops restic and merges the",
+                    "# snapshot back before it ends (KillMode=mixed). TimeoutStopSec covers a held",
+                    "# snapshot call plus the merge's own limit (virsh blockcommit --timeout) plus",
+                    "# a margin, so systemd never kills a merge half done. No start limit: every step has its own (restic:",
+                    "# VM_NAS_TIMEOUT_HOURS in /etc/cst/vm.conf).",
+                    "KillMode=mixed",
+                    "TimeoutStartSec=infinity",
+                    f"TimeoutStopSec={stop_timeout}",
+                ],
+            ),
+        ],
+    )
+
+
+def is_cst_vm_program(data: bytes) -> bool:
+    """True for an installed copy of cst-vm from any CST version: the plain
+    script older versions installed, or the zipapp (stored uncompressed, so
+    its __main__.py, which starts with the program's docstring, is in the bytes)."""
+    return data.startswith(b"#!/usr/bin/python3 -I\n") and b'"""cst-vm:' in data
+
+
+def instance(vm: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", vm) or vm.startswith("-"):
+        raise Refused(f"VM name {vm!r}: the timer takes names of letters, digits and _ . : - only")
+    return f"cst-vm-backup@{vm}.timer"
+
+
+def version_changes(old: Mapping[str, str] | None, new: Mapping[str, str] | None) -> list[str]:
+    """['pkg: old -> new'] for every virtualization package that differs."""
+    out: list[str] = []
+    for p in VIRT_PACKAGES:
+        a, b = (old or {}).get(p), (new or {}).get(p)
+        if a is not None and b is not None and a != b:
+            out.append(f"{p}: {a} -> {b}")
+    return out
+
+
+def convert_lines(img: Mapping[str, Any], system: bool) -> list[str]:
+    """The commands that make an existing image NOCOW (never run by CST)."""
+    q = shlex.quote
+    s = "sudo " if system else ""
+    f, old = q(img["path"]), q(img["path"] + ".cow-old")
+    return [
+        f"{s}mv {f} {old}",
+        f"{s}install -m 0600 /dev/null {f}      # new empty file, private until cp -a sets the mode",
+        f"{s}chattr +C {f}",
+        f"{s}cp -a --reflink=never --sparse=auto {old} {f}",
+        f"{s}cmp {old} {f} && echo same",
+        f"# start the VM; after a good boot: {s}rm {old}",
+    ]
+
+
+DRIVER_WANTED = (("cache", "none"), ("io", "native"), ("discard", "unmap"), ("detect_zeroes", "unmap"))
+
+OLD_NICS = ("e1000", "e1000e", "rtl8139")
+
+# Interface types with an emulated card (a <model>); hostdev, vhostuser and vdpa are not.
+NIC_TYPES = ("network", "bridge", "direct", "user", "ethernet", "mcast", "server", "client", "udp", "null", "vds")
+
+LINUX_OS = (
+    "fedoraproject.org",
+    "redhat.com",
+    "centos.org",
+    "almalinux.org",
+    "rockylinux.org",
+    "debian.org",
+    "ubuntu.com",
+    "archlinux.org",
+    "opensuse.org",
+    "suse.com",
+    "alpinelinux.org",
+    "gentoo.org",
+    "nixos.org",
+    "linuxmint.com",
+    "manjaro.org",
+    "kali.org",
+    "endlessos.com",
+    "silverblue",
+    "popos",
+    "elementary.io",
+)
 
 
 def guest_kind(root: ET.Element) -> tuple[str, str]:
-    """Classify guest OS as ('windows' | 'linux' | 'unknown', reason)."""
+    """("windows" | "linux" | "unknown", why). From the libosinfo id that
+    virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
+    enlightenments (only Windows guests use them)."""
     for el in root.iter():
         if el.tag.endswith("}os") and el.get("id"):
             osid = el.get("id") or ""
@@ -264,7 +419,7 @@ def guest_kind(root: ET.Element) -> tuple[str, str]:
 
 
 def disk_index(name: str | None) -> int | None:
-    """Convert target device name (`sda`, `sdaa`, `vdb`) to zero-based index."""
+    """sda -> 0, sdz -> 25, sdaa -> 26 (libvirt's numbering); None if not sdX/hdX/vdX."""
     m = re.fullmatch(r"[shv]d([a-z]+)", name or "")
     if not m:
         return None
@@ -275,7 +430,6 @@ def disk_index(name: str | None) -> int | None:
 
 
 def disk_name(idx: int) -> str:
-    """Convert zero-based SCSI disk index to target device name (`sda`, `sdab`)."""
     s = ""
     idx += 1
     while idx:
@@ -284,14 +438,14 @@ def disk_name(idx: int) -> str:
     return "sd" + s
 
 
-def tune_domain_xml(
-    xml_text: str,
-    knobs: Mapping[str, bool] | None = None,
-    *,
-    allow_bus: bool = True,
-) -> TuneResult:
-    """Compute tuned domain XML plus recorded changes, held bus/NIC items, and notes."""
-    kn: Mapping[str, bool] = VmKnobs().as_dict() if knobs is None else knobs
+def tune_domain(
+    xml_text: str, kn: Mapping[str, bool], allow_bus: bool = True
+) -> tuple[str | None, list[str], list[str], list[str]]:
+    """(after_xml, changes, held, notes) for a definition: changes are what
+    the new definition differs in, held the bus and network card changes
+    left out because allow_bus is False (a guest without virtio drivers),
+    notes things reported but not changed. Only elements that differ from
+    the desired state are touched."""
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
     changes: list[str] = []
@@ -299,20 +453,20 @@ def tune_domain_xml(
     notes: list[str] = []
     devices = root.find("devices")
     if devices is None:
-        return TuneResult(after_xml=None, changes=(), held=(), notes=("no <devices> in the definition",))
+        return None, changes, held, ["no <devices> in the definition"]
     disks = devices.findall("disk")
     names: set[str | None] = {(t.get("dev") if (t := d.find("target")) is not None else None) for d in disks}
-    ctrl: int | None = None
+    ctrl_idx: int | None = None
 
     def virtio_scsi_index() -> int:
-        nonlocal ctrl
-        if ctrl is not None:
-            return ctrl
+        nonlocal ctrl_idx
+        if ctrl_idx is not None:
+            return ctrl_idx
         scsi = [c for c in devices.findall("controller") if c.get("type") == "scsi"]
         found = next((c for c in scsi if c.get("model") == "virtio-scsi"), None)
         if found is not None:
-            ctrl = int(found.get("index", "0"))
-            return ctrl
+            ctrl_idx = int(found.get("index", "0"))
+            return ctrl_idx
         idx = max((int(c.get("index", "0")) for c in scsi), default=-1) + 1
         el = ET.Element("controller", {"type": "scsi", "index": str(idx), "model": "virtio-scsi"})
         kids = list(devices)
@@ -321,10 +475,12 @@ def tune_domain_xml(
             last = max((i for i, c in enumerate(kids) if c.tag == "disk"), default=len(kids) - 1)
         devices.insert(last + 1, el)
         changes.append(f"add a virtio-scsi controller (index {idx})")
-        ctrl = idx
+        ctrl_idx = idx
         return idx
 
     def used_units(idx: int) -> set[int]:
+        """Units taken on controller idx (bus 0, target 0): SCSI disks and
+        CD-ROMs, and SCSI host devices (<hostdev type='scsi'>)."""
         out: set[int] = set()
         on_scsi = [d for d in disks if (t := d.find("target")) is not None and t.get("bus") == "scsi"]
         on_scsi += [h for h in devices.findall("hostdev") if h.get("type") == "scsi"]
@@ -342,7 +498,7 @@ def tune_domain_xml(
 
     for disk in disks:
         if disk.get("device", "disk") != "disk":
-            continue
+            continue  # cdrom, floppy, lun: left as they are
         target = disk.find("target")
         dev = (target.get("dev") or "?") if target is not None else "?"
         kind = disk.get("type", "file")
@@ -391,12 +547,11 @@ def tune_domain_xml(
             f"disk {dev}: bus {bus} -> scsi (virtio-scsi controller {idx}, unit {unit})"
             + (f", renamed {dev} -> {new}" if new != dev else "")
         )
-
     for nic in devices.findall("interface"):
         mac = nic.find("mac")
         label = f"network card {mac.get('address') if mac is not None else '(no MAC)'}"
         if nic.get("type") not in NIC_TYPES:
-            continue
+            continue  # hostdev, vhostuser, vdpa: not an emulated card
         model = nic.find("model")
         m = model.get("type") if model is not None else None
         if m is None:
@@ -410,153 +565,94 @@ def tune_domain_xml(
         assert model is not None
         model.set("type", "virtio")
         changes.append(f"{label}: {m} -> virtio (same MAC)")
-
     bal = devices.find("memballoon")
     if bal is None:
         notes.append("no <memballoon>: not added (libvirt adds one by default; it was removed on purpose?)")
     elif bal.get("model") == "none":
         notes.append("memballoon model='none': left as it is")
-
     ET.indent(root, space="  ")
-    return TuneResult(
-        after_xml=ET.tostring(root, encoding="unicode") + "\n",
-        changes=tuple(changes),
-        held=tuple(held),
-        notes=tuple(notes),
-    )
+    return ET.tostring(root, encoding="unicode") + "\n", changes, held, notes
 
 
-def version_changes(old: Mapping[str, str] | None, new: Mapping[str, str] | None) -> list[str]:
-    """Return `['pkg: old -> new']` for every virtualization package that changed."""
-    out: list[str] = []
-    for p in VIRT_PACKAGES:
-        a, b = (old or {}).get(p), (new or {}).get(p)
-        if a is not None and b is not None and a != b:
-            out.append(f"{p}: {a} -> {b}")
-    return out
+def normalized(xml_text: str) -> str:
+    keep_prefixes(xml_text)
+    root = ET.fromstring(xml_text)
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n"
 
 
-def valid_keep(name: str | None) -> bool:
-    """Validate a `--keep-tag` value so it cannot collide with managed/restic tags."""
-    if not name:
-        return False
-    return (
-        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name))
-        and not name.startswith(("cst-", "vm:"))
-        and name not in ("btrfs-setup", "home", "Workspace")
-    )
+WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves to virtio-scsi
+(else: INACCESSIBLE_BOOT_DEVICE). With the guest running:
+  1. attach the virtio-win ISO (fedorapeople.org virtio-win, check its sha256) as a CD-ROM;
+  2. in an admin PowerShell (D: = the ISO; the .msi is unsigned, the .inf files are WHQL-signed):
+       Get-AuthenticodeSignature D:\\vioscsi\\w11\\amd64\\vioscsi.cat
+       pnputil /add-driver D:\\vioscsi\\w11\\amd64\\vioscsi.inf /install
+       pnputil /add-driver D:\\NetKVM\\w11\\amd64\\netkvm.inf /install
+       pnputil /add-driver D:\\Balloon\\w11\\amd64\\balloon.inf /install
+  3. hot-add a virtio-scsi controller so Windows binds vioscsi as a boot driver:
+       virsh -c qemu:///system attach-device {vm} ctrl.xml --live
+     (ctrl.xml: <controller type='scsi' model='virtio-scsi'/>; it needs a free PCIe root port); then in Windows
+       sc qc vioscsi        -> START_TYPE must be 0 (BOOT_START)
+  4. shut Windows down fully (Fast Startup makes the Start menu's Shut down a hibernation, and
+     resuming it on a changed boot controller can fail): in an admin prompt `shutdown /s /t 0`,
+     or Shift + Shut down; then: {cst} vm tune apply {vm} --guest-has-virtio
+Details: vm/README.md in CST, section "Windows guests"."""
 
 
-def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
-    """Classify how an interrupted snapshot overlay relates to domain state."""
-    if state in LIVE_STATES:
-        return "definition" if live_src == base else "live"
-    if state in ("shut off", "crashed"):
-        return "offline"
-    return "unknown"
-
-
-def forget_args(vm: str, host: str, weekly: int, monthly: int) -> list[str]:
-    """Build `restic forget` arguments scoped strictly to one VM and host."""
-    return [
-        "forget",
-        "--host",
-        host,
-        "--tag",
-        f"{TAG},vm:{vm}",
-        "--group-by",
-        "host",
-        "--keep-weekly",
-        str(weekly),
-        "--keep-monthly",
-        str(monthly),
-        "--keep-tag",
-        KEEP_TAG,
-        "--retry-lock",
-        RETRY_LOCK,
-    ]
-
-
-def parse_vm_args(argv: Sequence[str]) -> VmCliCommand:
-    """Parse `cst vm` command-line arguments into an immutable `VmCliCommand`."""
+def parse_args(argv: Sequence[str]) -> dict[str, Any]:
+    """{cmd, sub, vm, full, guest_virtio, root, nas, keep, no_quiesce}."""
+    a: dict[str, Any] = {
+        "cmd": "help",
+        "sub": None,
+        "vm": None,
+        "full": False,
+        "guest_virtio": False,
+        "root": False,
+        "nas": False,
+        "keep": None,
+        "no_quiesce": False,
+    }
     if not argv or argv[0] in ("help", "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
-        return VmCliCommand(cmd="help")
-
-    cmd, rest = argv[0], list(argv[1:])
-    if cmd not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
-        raise Usage(f"unknown command '{cmd}'")
-
+        return a
+    a["cmd"], rest = argv[0], list(argv[1:])
+    if a["cmd"] not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
+        raise Usage(f"unknown command '{a['cmd']}'")
     subs: dict[str, tuple[str, ...]] = {
         "tune": ("plan", "apply"),
         "nocow": ("plan", "apply"),
         "backup-timer": ("on", "off", "status"),
     }
-    sub: str | None = None
-    if cmd in subs:
-        if not rest or rest[0] not in subs[cmd]:
-            raise Usage(f"{cmd}: {' or '.join(subs[cmd])}")
-        sub, rest = rest[0], rest[1:]
-
-    flags: dict[str, str] = {
+    if a["cmd"] in subs:
+        if not rest or rest[0] not in subs[a["cmd"]]:
+            raise Usage(f"{a['cmd']}: {' or '.join(subs[a['cmd']])}")
+        a["sub"], rest = rest[0], rest[1:]
+    flags = {
         "backup": {"--full": "full", "--nas": "nas", "--no-quiesce": "no_quiesce"},
         "tune": {"--guest-has-virtio": "guest_virtio"},
-        "nocow": {"--root": "root"} if sub == "plan" else {},
-    }.get(cmd, {})
-    takes_vm = cmd != "nocow"
-    where = " ".join(filter(None, (cmd, sub)))
-
-    vm: str | None = None
-    full = False
-    guest_virtio = False
-    root = False
-    nas = False
-    keep: str | None = None
-    no_quiesce = False
-    seen_flags: set[str] = set()
-
+        "nocow": {"--root": "root"} if a["sub"] == "plan" else {},
+    }.get(a["cmd"], {})
+    takes_vm = a["cmd"] != "nocow"
+    where = " ".join(filter(None, (a["cmd"], a["sub"])))
     while rest:
         x = rest.pop(0)
-        if cmd == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
+        if a["cmd"] == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and a["keep"] is None:
             value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
             if not valid_keep(value):
                 raise Usage(
                     f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
                     "starting with cst- or vm:), e.g. pre-f46"
                 )
-            keep = value
-        elif x in flags and flags[x] not in seen_flags:
-            field = flags[x]
-            seen_flags.add(field)
-            if field == "full":
-                full = True
-            elif field == "nas":
-                nas = True
-            elif field == "no_quiesce":
-                no_quiesce = True
-            elif field == "guest_virtio":
-                guest_virtio = True
-            elif field == "root":
-                root = True
-        elif takes_vm and not x.startswith("-") and vm is None:
-            vm = x
+            a["keep"] = value
+        elif x in flags and not a[flags[x]]:
+            a[flags[x]] = True
+        elif takes_vm and not x.startswith("-") and a["vm"] is None:
+            a["vm"] = x
         else:
             raise Usage(f"{where}: unexpected argument '{x}'")
-
-    if full and nas:
+    if a["full"] and a["nas"]:
         raise Usage("backup: --full is for the local copy, --nas for the NAS: one of them")
-    if (keep is not None or no_quiesce) and not nas:
+    if (a["keep"] is not None or a["no_quiesce"]) and not a["nas"]:
         raise Usage("backup: --keep-tag and --no-quiesce go with --nas")
-
-    return VmCliCommand(
-        cmd=cmd,
-        sub=sub,
-        vm=vm,
-        full=full,
-        guest_virtio=guest_virtio,
-        root=root,
-        nas=nas,
-        keep=keep,
-        no_quiesce=no_quiesce,
-    )
+    return a

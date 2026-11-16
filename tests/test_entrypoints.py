@@ -51,7 +51,6 @@ NOT_YET_THIN: Final[frozenset[str]] = frozenset(
         "btrfs/docker-gc",
         "btrfs/docker-volumes-nocow",
         "toolchains/cst-toolchains",
-        "vm/cst-vm",
     }
 )
 
@@ -139,8 +138,6 @@ FILE_PATHS_NOT_YET: Final[frozenset[str]] = frozenset(
         "btrfs/adapters.py",
         "toolchains/adapters.py",
         "toolchains/cst-toolchains",
-        "vm/adapters.py",
-        "vm/cst-vm",
     }
 )
 
