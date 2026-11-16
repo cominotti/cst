@@ -16,13 +16,14 @@ the same rule is tests/test_subprocess_hygiene.py; the reason is written
 down in AGENTS.md.
 """
 
+from collections.abc import Sequence
 import os
 import socket
 import sys
 import unittest
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> int:
     verbosity = 2 if "-v" in argv else 1
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(repo)

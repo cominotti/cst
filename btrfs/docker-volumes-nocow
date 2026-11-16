@@ -25,6 +25,8 @@ RAID1 episode such volumes should be recreated, not trusted.
   docker-volumes-nocow unmark    clear +C on the volumes dir (uninstall).
 """
 
+from __future__ import annotations
+
 import errno
 import fcntl
 import json
@@ -35,6 +37,8 @@ import struct
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
+from typing import Any
 
 GET, SET, NOCOW = 0x80086601, 0x40086602, 0x00800000
 FLAG = "/etc/btrfs-setup/docker-nocow-pending"
@@ -47,11 +51,11 @@ PROC = "/proc"  # where running dockerd processes are looked for (tests point it
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
 
 
-def log(prio, msg):
+def log(prio: int, msg: str) -> None:
     print(f"<{prio}>docker-volumes-nocow: {msg}", flush=True)
 
 
-def configured_root(path):
+def configured_root(path: str) -> str | None:
     """data-root in the dockerd config file at path; None when there is no
     such file, it is not a JSON object, or it names no data root (dockerd's
     default then). Any other error reading it is raised."""
@@ -63,7 +67,7 @@ def configured_root(path):
     return root if isinstance(root, str) and root else None
 
 
-def docker_root():
+def docker_root() -> str:
     try:
         root = configured_root("/etc/docker/daemon.json")
     except OSError:
@@ -74,7 +78,7 @@ def docker_root():
 VOLUMES = docker_root()
 
 
-def flags(path):
+def flags(path: str) -> int:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         return struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
@@ -82,7 +86,7 @@ def flags(path):
         os.close(fd)
 
 
-def set_nocow(path, on):
+def set_nocow(path: str, on: bool) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         cur = struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
@@ -93,7 +97,7 @@ def set_nocow(path, on):
         os.close(fd)
 
 
-def real_dirs(root, names, dev):
+def real_dirs(root: str, names: Sequence[str], dev: int) -> list[str]:
     """Subdirectories to descend into: real directories on the same filesystem
     (os.walk lists symlinks to directories among them; those are entries,
     and NOCOW flags are never read or set through a link)."""
@@ -105,7 +109,7 @@ def real_dirs(root, names, dev):
     return out
 
 
-def cow_files(top, fix=False):
+def cow_files(top: str, fix: bool = False) -> tuple[int, int, int, int]:
     """(regular files with data and without NOCOW, their apparent bytes, all
     entries, total apparent bytes) below top. fix=True also sets +C in place
     where that works: on directories (affects what is created later) and on
@@ -136,7 +140,7 @@ def cow_files(top, fix=False):
     return n, size, entries, total
 
 
-def dirs_cow(top):
+def dirs_cow(top: str) -> bool:
     """True if top or a directory below it lacks +C (new files there: CoW)."""
     if not flags(top) & NOCOW:
         return True
@@ -149,7 +153,7 @@ def dirs_cow(top):
     return False
 
 
-def volumes():
+def volumes() -> list[tuple[str, str]]:
     """(name, path of _data) for every volume of the local driver."""
     if not os.path.isdir(VOLUMES):
         return []
@@ -161,7 +165,7 @@ def volumes():
     return out
 
 
-def pending(fix=False):
+def pending(fix: bool = False) -> list[tuple[str, str, int, int]]:
     """Volumes that still have CoW data: [(name, data, files, bytes)].
     fix=True first sets +C in place on directories and empty files."""
     out = []
@@ -172,12 +176,12 @@ def pending(fix=False):
     return out
 
 
-def not_fully_nocow():
+def not_fully_nocow() -> list[str]:
     """Volumes with CoW data or a CoW directory (status)."""
     return [name for name, data in volumes() if cow_files(data)[0] or dirs_cow(data)]
 
 
-def recover():
+def recover() -> None:
     """Leftovers of an interrupted migration (kill, timeout, power loss)."""
     if not os.path.isdir(VOLUMES):
         return
@@ -197,7 +201,7 @@ def recover():
                 shutil.rmtree(os.path.join(d, x), ignore_errors=True)
 
 
-def free_bytes():
+def free_bytes() -> int:
     r = subprocess.run(["btrfs", "filesystem", "usage", "-b", VOLUMES], check=False, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if "Free (estimated)" in line:
@@ -205,7 +209,7 @@ def free_bytes():
     return 0
 
 
-def docker_busy():
+def docker_busy() -> str | None:
     """None when docker.service is known to be stopped, else why the migration
     waits. Fails closed: only a clear "inactive" or "failed" lets it run (at
     boot docker.service reads "inactive" while its start job waits for this
@@ -224,7 +228,7 @@ def docker_busy():
     return f"docker.service state unknown (systemctl exit {r.returncode}, ActiveState {state!r})"
 
 
-def is_dockerd(proc):
+def is_dockerd(proc: str) -> bool:
     """The process in /proc/PID is a dockerd (its name or its program file)."""
     with open(os.path.join(proc, "comm"), "rb") as f:
         names = {f.read().strip()}
@@ -236,7 +240,7 @@ def is_dockerd(proc):
     return b"dockerd" in names
 
 
-def runs_as_root(proc):
+def runs_as_root(proc: str) -> bool:
     """False when the process in /proc/PID has an effective uid other than 0
     (as this process sees it); True when it is 0 or cannot be told."""
     with open(os.path.join(proc, "status"), "rb") as f:
@@ -247,7 +251,7 @@ def runs_as_root(proc):
     return True
 
 
-def daemon_volumes(proc, args):
+def daemon_volumes(proc: str, args: Sequence[str]) -> str:
     """The volumes folder of the dockerd in /proc/PID, as a path this process
     can open: its --data-root, else data-root in its config file
     (--config-file, default /etc/docker/daemon.json), else /var/lib/docker.
@@ -255,7 +259,7 @@ def daemon_volumes(proc, args):
     mount namespace) and /proc/PID/cwd (a relative path). An absolute
     symlink on that path is still followed from our own root."""
 
-    def inside(path):
+    def inside(path: str) -> str:
         if path.startswith("/"):
             return os.path.join(proc, "root", path.lstrip("/"))
         return os.path.join(proc, "cwd", path)
@@ -277,7 +281,7 @@ def daemon_volumes(proc, args):
     return os.path.join(inside(root), "volumes")
 
 
-def dockerd_busy():
+def dockerd_busy() -> str | None:
     """None when no dockerd uses VOLUMES, else why the migration waits.
 
     A dockerd started by hand or by another unit is not docker.service. It
@@ -310,7 +314,7 @@ def dockerd_busy():
     return None
 
 
-def read_postponed():
+def read_postponed() -> dict[str, Any] | None:
     """The record of postponed boots (a dict), or None."""
     try:
         with open(POSTPONED) as f:
@@ -320,7 +324,7 @@ def read_postponed():
     return rec if isinstance(rec, dict) else None
 
 
-def note_postponed(why):
+def note_postponed(why: str) -> None:
     """Count this boot as postponed (once per boot, by the kernel's boot id)
     and keep the latest reason."""
     try:
@@ -344,14 +348,14 @@ def note_postponed(why):
     os.replace(tmp, POSTPONED)
 
 
-def clear_postponed():
+def clear_postponed() -> None:
     try:
         os.remove(POSTPONED)
     except FileNotFoundError:
         pass
 
 
-def postponed_line():
+def postponed_line() -> str:
     """The status line of a postponed migration, or ""."""
     rec = read_postponed()
     if not rec:
@@ -361,7 +365,7 @@ def postponed_line():
     return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"
 
 
-def label(path):
+def label(path: str) -> bytes | None:
     """The SELinux label of path itself (a link is not followed), without the
     trailing NUL the kernel may keep; None when it has none or the
     filesystem keeps no labels."""
@@ -374,7 +378,7 @@ def label(path):
     return value.rstrip(b"\0")
 
 
-def labels(top):
+def labels(top: str) -> dict[str, bytes | None]:
     """{path relative to top: label} for top and every entry below it, walked
     like cow_files (a link is an entry; another filesystem is not entered)."""
     out = {".": label(top)}
@@ -387,7 +391,7 @@ def labels(top):
     return out
 
 
-def migrate_one(name, data):
+def migrate_one(name: str, data: str) -> None:
     """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
     new, old = data + ".nocow-new", data + f".cow-old-{int(time.time())}"
     if os.path.lexists(new):
@@ -424,7 +428,7 @@ def migrate_one(name, data):
     if differ:
         rel = differ[0]
 
-        def shown(v):
+        def shown(v: bytes | None) -> str:
             return "none" if v is None else v.decode(errors="replace")
 
         shutil.rmtree(new, ignore_errors=True)
@@ -441,7 +445,7 @@ def migrate_one(name, data):
     shutil.rmtree(old)
 
 
-def request_migration():
+def request_migration() -> bool:
     """Write the flag (and its folder, which install creates only when it
     found CoW data), and make it durable before +C is set: the data root may
     be on another filesystem than /etc, and after a power loss +C must not
@@ -463,7 +467,7 @@ def request_migration():
     return True
 
 
-def migrate():
+def migrate() -> int:
     if not os.path.isdir(VOLUMES):
         clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
         return 0
@@ -536,7 +540,7 @@ def migrate():
     return 0
 
 
-def mark():
+def mark() -> int:
     if not os.path.isdir(VOLUMES):
         print(f"{VOLUMES}: absent (Docker not set up yet): nothing to mark")
         return 0
@@ -555,14 +559,14 @@ def mark():
     return 1
 
 
-def unmark():
+def unmark() -> int:
     clear_postponed()
     if os.path.isdir(VOLUMES):
         set_nocow(VOLUMES, False)
     return 0
 
 
-def status():
+def status() -> int:
     if not os.path.isdir(VOLUMES):
         print(f"{VOLUMES}: absent")
         return 0
@@ -581,7 +585,7 @@ def status():
     return 0
 
 
-def main():
+def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     fn = {"status": status, "mark": mark, "migrate": migrate, "unmark": unmark}.get(cmd)
     if not fn:

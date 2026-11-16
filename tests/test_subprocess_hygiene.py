@@ -19,6 +19,7 @@ in a variable).
 """
 
 import ast
+from collections.abc import Iterator
 import os
 import unittest
 
@@ -28,14 +29,14 @@ CALLS = {"run", "Popen", "call", "check_call", "check_output"}
 SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
 
 
-def test_files():
+def test_files() -> Iterator[tuple[str, str]]:
     for rel in repo_files():
         parts = rel.split("/")
         if rel.endswith(".py") and "tests" in parts[:-1]:
             yield rel, os.path.join(REPO, rel)
 
 
-def runs_a_shell(call):
+def runs_a_shell(call: ast.Call) -> bool:
     """True for subprocess.X([...bash...], ...) or subprocess.X(..., shell=True)."""
     func = call.func
     if not (
@@ -54,8 +55,8 @@ def runs_a_shell(call):
     return False
 
 
-def offenders(source, rel):
-    found = []
+def offenders(source: str, rel: str) -> list[str]:
+    found: list[str] = []
     for node in ast.walk(ast.parse(source, rel)):
         if isinstance(node, ast.Call) and runs_a_shell(node):
             if not any(kw.arg in ("stdin", "input") for kw in node.keywords):
@@ -64,8 +65,8 @@ def offenders(source, rel):
 
 
 class SubprocessHygieneTest(unittest.TestCase):
-    def test_shell_calls_in_tests_set_stdin(self):
-        bad = []
+    def test_shell_calls_in_tests_set_stdin(self) -> None:
+        bad: list[str] = []
         for rel, path in test_files():
             with open(path, encoding="utf-8") as f:
                 bad += offenders(f.read(), rel)
@@ -77,7 +78,7 @@ class SubprocessHygieneTest(unittest.TestCase):
             "tests/test_subprocess_hygiene.py and AGENTS.md",
         )
 
-    def test_the_check_finds_the_wrong_form(self):
+    def test_the_check_finds_the_wrong_form(self) -> None:
         src = (
             "import subprocess\n"
             "subprocess.run(['bash', '-c', 'x'], env={})\n"

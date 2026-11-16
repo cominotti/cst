@@ -1,5 +1,8 @@
 """Docker Layer 1 E2E suite: unprivileged systemd PID 1 + user manager + SFTP sidecar."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 import os
 import shlex
 import subprocess
@@ -7,7 +10,15 @@ import time
 import unittest
 
 
-def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text=None):
+def docker_exec(
+    container: str,
+    cmd: Sequence[str],
+    *,
+    check: bool = True,
+    user: str = "root",
+    env: Mapping[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     full = ["docker", "exec"]
     if input_text is not None:
         full.append("-i")
@@ -25,11 +36,17 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
     return p
 
 
-def exec_bash(container, script, *, check=True, env=None):
+def exec_bash(
+    container: str,
+    script: str,
+    *,
+    check: bool = True,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return docker_exec(container, ["bash", "-euo", "pipefail", "-c", script], check=check, env=env)
 
 
-def as_tester_bash(container, script, *, check=True):
+def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
         "runuser -u tester -- env "
@@ -48,7 +65,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
     CST_ROOT_MOUNT = os.environ["CST_E2E_REPO_ROOT"]
 
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         # Provide a working writable copy of CST inside the container so symlink tests
         # and user-owned operations do not rely on mutating the read-only host repo.
         exec_bash(
@@ -56,7 +73,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             "rm -rf /opt/cst-rw && cp -a /opt/cst /opt/cst-rw && chmod -R a+rX /opt/cst-rw",
         )
 
-    def test_01_in_container_guardrail_blocks_mutations(self):
+    def test_01_in_container_guardrail_blocks_mutations(self) -> None:
         """When /.dockerenv is present, install/apply commands must refuse cleanly."""
         repo = self.CST_ROOT_MOUNT
         for extra_flags, subcmd in (
@@ -93,7 +110,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
                 f"expected container refusal message for {subcmd}, got: {combined}",
             )
 
-    def test_02_systemd_and_user_dbus_healthy(self):
+    def test_02_systemd_and_user_dbus_healthy(self) -> None:
         """systemd PID 1, system dbus-broker and user@1000.service run without --privileged."""
         st = exec_bash(self.SYSTEMD_CONTAINER, "systemctl is-system-running").stdout.strip()
         self.assertEqual(st, "running")
@@ -105,7 +122,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(docker_env_check, "OK")
 
-    def test_03_cst_root_link_status_and_doctor(self):
+    def test_03_cst_root_link_status_and_doctor(self) -> None:
         """cst dispatch, ~/.local/bin/cst symlink, cst status and cst doctor work live."""
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -141,7 +158,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         # Reset any hardwareless bluetooth.service D-Bus activation failure inside the container
         exec_bash(self.SYSTEMD_CONTAINER, "systemctl reset-failed bluetooth.service 2>/dev/null || true")
 
-    def test_04_toolchains_e2e_timer_config_and_prune(self):
+    def test_04_toolchains_e2e_timer_config_and_prune(self) -> None:
         """toolchains config apply, hourly systemd --user timer, service run, and auto off."""
         # Configure cargo/uv settings & create stale cache under ~/.cache/cargo-build (cst-toolchains layout)
         as_tester_bash(
@@ -186,7 +203,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         '[ "$state" = inactive ] || { echo "timer state after auto off: [$state]" >&2; exit 1; }'
     )
 
-    def toolchains_auto_off_without_a_user_manager(self):
+    def toolchains_auto_off_without_a_user_manager(self) -> None:
         """auto off when the user manager cannot be reached: exit 1, nothing removed, timer still running."""
         res = as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -222,7 +239,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertIn("nothing was removed", res.stdout)
 
-    def toolchains_auto_off(self):
+    def toolchains_auto_off(self) -> None:
         """A normal auto off (after the refusal above): the timer stops and the files go."""
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -236,7 +253,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             """,
         )
 
-    def toolchains_auto_off_stops_an_orphan_timer(self):
+    def toolchains_auto_off_stops_an_orphan_timer(self) -> None:
         """What auto off left before it checked `disable`: the timer still running, its files gone, and its
         timers.target.wants link pointing at nothing. is-enabled reads the unit files, so it answers as if
         the timer were off (why the checks here ask is-active). status shows it; a second auto off stops
@@ -276,7 +293,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         self.assertIn("stopped:   cst-toolchains-prune.timer", res.stdout)
         self.assertIn("removed:   ~/.config/systemd/user/timers.target.wants/cst-toolchains-prune.timer", res.stdout)
 
-    def test_05_bluetooth_config_wp_roles_and_ldac_unit(self):
+    def test_05_bluetooth_config_wp_roles_and_ldac_unit(self) -> None:
         """bluetooth plan, apply --no-restart, real libwireplumber wp-roles validation, and revert."""
         exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -359,7 +376,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertNotEqual(ldac_enabled.returncode, 0, "cst-bt-ldac48.service still enabled after revert")
 
-    def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self):
+    def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self) -> None:
         """btrfs-notify queue -> cst-pending-alerts delivery + doctor detection + real restic over SFTP."""
         # 1. Queue pending alert, detect via cst doctor, deliver via cst-pending-alerts
         exec_bash(
@@ -429,7 +446,7 @@ EOF
             """,
         )
 
-    def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self):
+    def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self) -> None:
         """systemd's real drop-in order: a `set-property --runtime` value (the game
         profile) must survive a daemon-reload next to CST's baseline drop-in,
         which only works because its name sorts before 50-<Property>.conf. And a
@@ -484,7 +501,7 @@ EOF
             """,
         )
 
-    def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self):
+    def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
         system and user managers: a top-level user slice of its own and a
         systemd-run job straight in app.slice get CPUWeight=idle; the slice
@@ -640,7 +657,7 @@ EOF
                 check=False,
             )
 
-    def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self):
+    def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self) -> None:
         """The real rustc wrapper, installed by `cst toolchains config apply
         --sccache`, under real cargo (offline: no network in the container), with
         a fake sccache that logs each crate it is handed. A workspace member and
@@ -777,7 +794,7 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_10_cpu_quiet_reads_the_real_proc_files(self):
+    def test_10_cpu_quiet_reads_the_real_proc_files(self) -> None:
         """`cst cpu quiet` against the real kernel files (/proc/stat, /proc/vmstat,
         /proc/pressure/*) and the real game profile flag: a plain run exits 0 or
         1 with one line per test and no crash; busy loops on every CPU must fail

@@ -13,6 +13,9 @@ Installed as /usr/local/sbin/cpu-vm-pin; run by `cst cpu vm-pin plan|apply|statu
   status  current vCPU count and pinning (live and persistent)
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 import difflib
 import os
 import re
@@ -36,7 +39,7 @@ CONF = "/etc/cpu-setup/cpu-setup.conf"
 CPU_DISABLE_DEFAULT = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
 
 
-def conf():
+def conf() -> dict[str, str]:
     vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
     try:
         with open(CONF) as f:
@@ -49,14 +52,14 @@ def conf():
     return vals
 
 
-def virsh(*args, check=True):
+def virsh(*args: str, check: bool = True) -> str:
     r = subprocess.run(["virsh", "-c", URI, *args], check=False, capture_output=True, text=True)
     if check and r.returncode != 0:
         sys.exit(f"virsh {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout
 
 
-def keep_prefixes(xml_text):
+def keep_prefixes(xml_text: str) -> None:
     """Register the document's own namespace prefixes (libosinfo metadata etc.),
     so serializing does not rename them to ns0. A default namespace
     (xmlns='...' on a <metadata> child) is not registered: as "" ElementTree
@@ -68,7 +71,7 @@ def keep_prefixes(xml_text):
             ET.register_namespace(prefix, uri)
 
 
-def disable_features(root, names):
+def disable_features(root: ET.Element, names: Sequence[str]) -> None:
     """With <cpu mode='host-passthrough'>, every feature in names present as
     <feature policy='disable' name=.../>: an existing one keeps its place
     (only its policy changes), missing ones are appended. Other modes, or no
@@ -76,7 +79,7 @@ def disable_features(root, names):
     cpu = root.find("cpu")
     if not names or cpu is None or cpu.get("mode") != "host-passthrough":
         return
-    have = {f.get("name"): f for f in cpu.findall("feature")}
+    have: dict[str, ET.Element] = {name: f for f in cpu.findall("feature") if (name := f.get("name")) is not None}
     for n in names:
         if n in have:
             have[n].set("policy", "disable")
@@ -84,10 +87,11 @@ def disable_features(root, names):
             ET.SubElement(cpu, "feature", {"policy": "disable", "name": n})
 
 
-def pinned(xml_text, vcpus, cpus, disable=()):
+def pinned(xml_text: str, vcpus: int, cpus: str, disable: Sequence[str] = ()) -> str:
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
     vcpu = root.find("vcpu")
+    assert vcpu is not None
     vcpu.text = str(vcpus)
     vcpu.attrib.pop("current", None)
     vcpu.set("placement", "static")
@@ -112,7 +116,7 @@ def pinned(xml_text, vcpus, cpus, disable=()):
     return ET.tostring(root, encoding="unicode") + "\n"
 
 
-def features_note(root, disable, planned=False):
+def features_note(root: ET.Element, disable: Sequence[str], planned: bool = False) -> str:
     """How the CPU features stand (or will stand, planned) for the messages."""
     cpu = root.find("cpu")
     mode = cpu.get("mode") if cpu is not None else None
@@ -123,7 +127,7 @@ def features_note(root, disable, planned=False):
     return f"CPU features {'to be ' if planned else ''}disabled: {' '.join(disable)}"
 
 
-def cpu_line(xml_text, disable):
+def cpu_line(xml_text: str, disable: Sequence[str]) -> str:
     """One status line: the cpu mode and which managed features are off."""
     try:
         root = ET.fromstring(xml_text)
@@ -140,7 +144,7 @@ def cpu_line(xml_text, disable):
     return f"cpu mode: {mode}; disabled: {' '.join(disable)}"
 
 
-def main():
+def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else "status"
     c = conf()
     name = sys.argv[2] if len(sys.argv) > 2 else c["VM_NAME"]

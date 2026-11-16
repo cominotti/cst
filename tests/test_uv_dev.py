@@ -8,6 +8,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest tests.test_uv_dev -v
 """
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -28,12 +29,12 @@ sys.exit(int(os.environ.get("FAKE_UV_RC", "0")))
 """
 
 
-def key(path):
+def key(path: str) -> str:
     return hashlib.sha1(os.path.realpath(path).encode()).hexdigest()[:12]
 
 
 class UvDevTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="cst-uv-dev-")
         self.addCleanup(self.tmp.cleanup)
         self.bin = os.path.join(self.tmp.name, "bin")
@@ -50,13 +51,19 @@ class UvDevTest(unittest.TestCase):
                 self.fail(f"{prog} is not on PATH")
             os.symlink(found, os.path.join(self.tools, prog))
 
-    def fake_uv(self):
+    def fake_uv(self) -> None:
         path = os.path.join(self.bin, "uv")
         with open(path, "w") as fh:
             fh.write(FAKE_UV)
         os.chmod(path, 0o755)
 
-    def run_uv_dev(self, *args, script=UV_DEV, env=None, cwd=None):
+    def run_uv_dev(
+        self,
+        *args: str,
+        script: str = UV_DEV,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         base = {"PATH": f"{self.bin}:{self.tools}", "HOME": self.home}
         return subprocess.run(
             [os.path.join(self.tools, "bash"), script, *args],
@@ -68,7 +75,7 @@ class UvDevTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
 
-    def test_runs_the_locked_dev_group_from_the_repository(self):
+    def test_runs_the_locked_dev_group_from_the_repository(self) -> None:
         self.fake_uv()
         r = self.run_uv_dev("ruff", "check", "--select", "ANN")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -79,7 +86,7 @@ class UvDevTest(unittest.TestCase):
         )
         self.assertEqual(got["cwd"], real)  # started elsewhere, runs at the top of the checkout
 
-    def test_environment_is_outside_the_checkout_one_per_checkout(self):
+    def test_environment_is_outside_the_checkout_one_per_checkout(self) -> None:
         self.fake_uv()
         got = json.loads(self.run_uv_dev("ty", "check").stdout)
         cache = os.path.join(self.home, ".cache")
@@ -92,7 +99,7 @@ class UvDevTest(unittest.TestCase):
         self.assertEqual(got["venv"], os.path.join(xdg, "cst-dev-venv", key(REPO)))
         self.assertEqual(got["ruff_cache"], os.path.join(xdg, "cst-dev-ruff", key(REPO)))
 
-    def test_a_symlinked_path_to_the_checkout_gets_the_same_environment(self):
+    def test_a_symlinked_path_to_the_checkout_gets_the_same_environment(self) -> None:
         # /home and /var/home name the same folder on Silverblue: one venv, not two.
         self.fake_uv()
         link = os.path.join(self.tmp.name, "link")
@@ -102,7 +109,7 @@ class UvDevTest(unittest.TestCase):
         self.assertEqual(via_link["venv"], direct["venv"])
         self.assertEqual(via_link["cwd"], os.path.realpath(REPO))
 
-    def test_group_option_adds_groups_to_dev(self):
+    def test_group_option_adds_groups_to_dev(self) -> None:
         self.fake_uv()
         real = os.path.realpath(REPO)
         head = ["run", "--locked", "--project", real, "--group", "dev"]
@@ -111,14 +118,14 @@ class UvDevTest(unittest.TestCase):
         got = json.loads(self.run_uv_dev("--group", "a", "--group", "b", "tool").stdout)
         self.assertEqual(got["argv"], [*head, "--group", "a", "--group", "b", "tool"])
 
-    def test_group_after_the_tool_belongs_to_the_tool(self):
+    def test_group_after_the_tool_belongs_to_the_tool(self) -> None:
         # Only leading --group options are uv-dev's; the tool's own arguments are left alone.
         self.fake_uv()
         real = os.path.realpath(REPO)
         got = json.loads(self.run_uv_dev("tool", "--group", "x").stdout)
         self.assertEqual(got["argv"], ["run", "--locked", "--project", real, "--group", "dev", "tool", "--group", "x"])
 
-    def test_group_without_a_name_is_a_usage_error(self):
+    def test_group_without_a_name_is_a_usage_error(self) -> None:
         self.fake_uv()
         for args in (("--group",), ("--group", ""), ("--group", "--group", "x", "tool")):
             with self.subTest(args=args):
@@ -127,11 +134,11 @@ class UvDevTest(unittest.TestCase):
                 self.assertEqual(r.stdout, "")  # uv never ran
                 self.assertIn("uv-dev: --group needs the name of a dependency group", r.stderr)
 
-    def test_exit_code_of_the_tool_is_kept(self):
+    def test_exit_code_of_the_tool_is_kept(self) -> None:
         self.fake_uv()
         self.assertEqual(self.run_uv_dev("ruff", "check", env={"FAKE_UV_RC": "1"}).returncode, 1)
 
-    def test_without_uv_it_says_so(self):
+    def test_without_uv_it_says_so(self) -> None:
         r = self.run_uv_dev("ruff", "check")  # no fake uv this time
         self.assertEqual(r.returncode, 127)
         self.assertIn("uv-dev: uv is not installed", r.stderr)

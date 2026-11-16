@@ -16,7 +16,7 @@ or by hand, from the checkout:
 
     tests/uv-dev --group mutation python3 -I -B tests/mutation/cst-mutation HELPER TEST_MODULE ...
 
-HELPER is a Python file of the checkout, relative to its top (swap/swap-status);
+HELPER is a Python file of the checkout, relative to its top (swap/domain.py);
 TEST_MODULE is the unittest module that tests it (swap.tests.test_swap).
 Which lines are mutated:
     --base REF        the lines changed since REF (git diff REF; the default, REF=main;

@@ -28,6 +28,7 @@ switch back to LDAC is done.
 """
 
 import argparse
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import json
 import os
 import re
@@ -36,32 +37,35 @@ import signal
 import subprocess
 import sys
 import time
+from types import FrameType
+from typing import IO, Any, Final, Protocol
 
 # Seconds. SETTLE: how long the wrong rate must last before acting (the
 # headset and WirePlumber are often still busy just after a connection).
-SETTLE = 5.0
-COOLDOWN = 600.0
-DEBOUNCE = 1.0  # events come in bursts: one look after the burst
-FALLBACK = 120.0  # a look now and then, should an event be missed
-BACKOFF_MAX = 60.0  # pactl subscribe restarted after 1, 2, 4 ... 60 s
-SBC_WAIT = 6.0  # how long the SBC profile may take to come up
-SBC_HOLD = 2.0  # then kept this long, so the stream really closes
-LDAC_WAIT = 10.0  # how long LDAC may take to come back with a rate
-RELAPSE = 300.0  # wrong rate again this soon after a fix: the fix did not hold
-MAX_TRIES = 2  # attempts per connection, whatever happens
+SETTLE: Final[float] = 5.0
+COOLDOWN: Final[float] = 600.0
+DEBOUNCE: float = 1.0  # events come in bursts: one look after the burst
+FALLBACK: Final[float] = 120.0  # a look now and then, should an event be missed
+BACKOFF_MAX: Final[float] = 60.0  # pactl subscribe restarted after 1, 2, 4 ... 60 s
+SBC_WAIT: Final[float] = 6.0  # how long the SBC profile may take to come up
+SBC_HOLD: float = 2.0  # then kept this long, so the stream really closes
+LDAC_WAIT: Final[float] = 10.0  # how long LDAC may take to come back with a rate
+RELAPSE: Final[float] = 300.0  # wrong rate again this soon after a fix: the fix did not hold
+MAX_TRIES: Final[int] = 2  # attempts per connection, whatever happens
 
 
-def log(msg, level=6):
+def log(msg: str, level: int = 6) -> None:
     """One journal line; LEVEL as a syslog priority prefix (4 warning, 3 error)."""
     print(f"<{level}>{msg}", flush=True)
 
 
-def device_id(mac):
+def device_id(mac: str) -> str:
+    """Convert MAC address to PipeWire's uppercase underscore card identifier suffix."""
     return mac.upper().replace(":", "_")
 
 
 # ---- what pw-dump shows -----------------------------------------------------------------
-def node_rate(info):
+def node_rate(info: Mapping[str, Any]) -> int | None:
     """The sample rate of a node: its negotiated Format, else the rate its
     EnumFormat offers (a Bluetooth node offers exactly the transport's rate;
     a suspended node has an empty Format). None when neither has one."""
@@ -74,27 +78,39 @@ def node_rate(info):
     return None
 
 
-def serial(props):
+def serial(props: Mapping[str, Any]) -> int | None:
+    """Parse PipeWire `object.serial` into an int, or None if unavailable."""
     s = props.get("object.serial")
+    if s is None:
+        return None
     try:
         return int(s)
     except TypeError, ValueError:
         return None
 
 
-def snapshot(dev, objs):
+def snapshot(dev: str, objs: Iterable[Any]) -> dict[str, Any]:
     """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
     dict: card (object serial, None = not in PipeWire), profile (active card
     profile), out (output node serial), codec, rate, mic (the headset's input
     node is running). Missing parts are None."""
     mac = dev.replace("_", ":")
-    snap = {"card": None, "profile": None, "out": None, "codec": None, "rate": None, "inputs": [], "mic": False}
+    inputs: list[int | None] = []
+    snap: dict[str, Any] = {
+        "card": None,
+        "profile": None,
+        "out": None,
+        "codec": None,
+        "rate": None,
+        "inputs": inputs,
+        "mic": False,
+    }
     for o in objs:
         if not isinstance(o, dict):
             continue
         info = o.get("info") or {}
         p = info.get("props") or {}
-        kind = o.get("type", "")
+        kind = str(o.get("type", ""))
         if kind.endswith("Device") and p.get("device.name") == "bluez_card." + dev:
             snap["card"] = serial(p)
             prof = (info.get("params") or {}).get("Profile") or []
@@ -108,13 +124,13 @@ def snapshot(dev, objs):
             snap["codec"] = p["api.bluez5.codec"]
             snap["rate"] = node_rate(info)
         elif name.startswith(("bluez_input." + dev, "bluez_input." + mac)):
-            snap["inputs"].append(serial(p))
+            inputs.append(serial(p))
             if info.get("state") == "running":
                 snap["mic"] = True
     return snap
 
 
-def decide(snap, rate):
+def decide(snap: Mapping[str, Any] | None, rate: int) -> tuple[str, str]:
     """(what, why) for one snapshot: what is "none" (nothing wrong),
     "skip" (wrong rate, but not now) or "act" (wrong rate, may be fixed)."""
     if snap is None or snap["card"] is None:
@@ -142,27 +158,39 @@ class Tracker:
       ("done", why)          wrong rate, but this connection had its attempt(s)
       ("cooldown", seconds)  wrong rate, the last attempt was too recent"""
 
-    def __init__(self, rate, settle=SETTLE, cooldown=COOLDOWN, relapse=RELAPSE, max_tries=MAX_TRIES):
-        self.rate, self.settle, self.cooldown = rate, settle, cooldown
-        self.relapse, self.max_tries = relapse, max_tries
-        self.card = self.out = None
-        self.tried = False
-        self.failed = None  # why this connection gets no more attempts
-        self.tries = 0  # attempts on this connection
-        self.fixed = None  # time of the last attempt that worked, this connection
-        self.last = None  # time of the last attempt (any connection)
-        self.since = None  # wrong rate seen first at
+    def __init__(
+        self,
+        rate: int,
+        settle: float = SETTLE,
+        cooldown: float = COOLDOWN,
+        relapse: float = RELAPSE,
+        max_tries: int = MAX_TRIES,
+    ) -> None:
+        self.rate = rate
+        self.settle = settle
+        self.cooldown = cooldown
+        self.relapse = relapse
+        self.max_tries = max_tries
+        self.card: int | None = None
+        self.out: int | None = None
+        self.tried: bool = False
+        self.failed: str | None = None  # why this connection gets no more attempts
+        self.tries: int = 0  # attempts on this connection
+        self.fixed: float | None = None  # time of the last attempt that worked, this connection
+        self.last: float | None = None  # time of the last attempt (any connection)
+        self.since: float | None = None  # wrong rate seen first at
 
-    def _new_connection(self):
+    def _new_connection(self) -> None:
         self.tried = False
         self.failed = None
         self.tries = 0
         self.fixed = None
         self.since = None
 
-    def observe(self, snap, now):
-        card = snap["card"] if snap else None
-        out = snap["out"] if snap else None
+    def observe(self, snap: Mapping[str, Any] | None, now: float) -> tuple[str, str | float]:
+        """Evaluate a PipeWire snapshot at monotonic timestamp `now`."""
+        card: int | None = snap["card"] if snap else None
+        out: int | None = snap["out"] if snap else None
         if card != self.card:
             # Gone, or connected again (a new card object): a new connection.
             self._new_connection()
@@ -177,6 +205,7 @@ class Tracker:
         if what != "act":
             self.since = None
             return what, why
+        assert snap is not None
         if not self.failed and self.fixed is not None and now - self.fixed < self.relapse:
             # The wrong rate is back soon after a fix, on the same connection:
             # the headset set the stream up again by itself. Another bounce
@@ -196,18 +225,20 @@ class Tracker:
             return "wait", self.settle - (now - self.since)
         return "act", why
 
-    def attempted(self, now):
+    def attempted(self, now: float) -> None:
+        """Record that a bounce attempt started at monotonic timestamp `now`."""
         self.tried = True
         self.tries += 1
         self.last = now
         self.since = None
 
-    def own_node(self, snap):
+    def own_node(self, snap: Mapping[str, Any] | None) -> None:
         """After our own bounce: its new output node is not a reason to try again."""
         if snap and snap["card"] == self.card:
             self.out = snap["out"]
 
-    def result(self, ok):
+    def result(self, ok: bool) -> None:
+        """Record whether the latest bounce attempt succeeded."""
         if ok:
             self.fixed = self.last
         else:
@@ -215,10 +246,10 @@ class Tracker:
 
 
 # ---- pactl ------------------------------------------------------------------------------
-EVENT = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
+EVENT: Final[re.Pattern[str]] = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
 
 
-def relevant(line, known):
+def relevant(line: str, known: set[int]) -> bool:
     """Whether a `pactl subscribe` line can matter: a card or sink that comes
     or goes, or a change of one of the headset's objects (KNOWN: their
     indexes, which are the PipeWire object serials)."""
@@ -231,10 +262,10 @@ def relevant(line, known):
     return idx in known
 
 
-A2DP_DESC = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
+A2DP_DESC: Final[re.Pattern[str]] = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
 
 
-def profiles(dev, cards):
+def profiles(dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, str | None, str | None]:
     """(card's active profile, LDAC profile, profile to bounce through) from
     `pactl -f json list cards`. Found by the codec in each profile's
     description, else by PipeWire's usual names. The bounce profile is SBC,
@@ -243,23 +274,24 @@ def profiles(dev, cards):
     card = next((c for c in cards if c.get("name") == "bluez_card." + dev), None)
     if card is None:
         return None, None, None
-    by_codec = {}
+    by_codec: dict[str, str] = {}
     for name, p in (card.get("profiles") or {}).items():
         if not p.get("available", False):
             continue
         m = A2DP_DESC.search(str(p.get("description", "")))
         if m:
-            by_codec[m.group(1).strip().upper()] = name
-    have = {n for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
+            by_codec[m.group(1).strip().upper()] = str(name)
+    have = {str(n) for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
     ldac = by_codec.get("LDAC") or ("a2dp-sink" if "a2dp-sink" in have else None)
     alt = by_codec.get("SBC") or ("a2dp-sink-sbc" if "a2dp-sink-sbc" in have else None)
     if alt is None:
         others = sorted(n for c, n in by_codec.items() if c != "LDAC" and n != ldac)
         alt = others[0] if others else None
-    return card.get("active_profile"), ldac, alt
+    active = card.get("active_profile")
+    return None if active is None else str(active), ldac, alt
 
 
-def run(cmd, timeout=15):
+def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
     """(exit status, stdout) of CMD; 127 when it cannot be started, 124 on timeout."""
     try:
         r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
@@ -270,13 +302,29 @@ def run(cmd, timeout=15):
         return 124, ""
 
 
+class _LivePort(Protocol):
+    dev: str
+
+    def snap(self) -> dict[str, Any] | None: ...
+
+    def cards(self) -> list[dict[str, Any]] | None: ...
+
+    def set_profile(self, prof: str) -> bool: ...
+
+
+class _EventProc(Protocol):
+    @property
+    def stdout(self) -> IO[bytes] | None: ...
+
+
 class Live:
     """The real system: pw-dump and pactl."""
 
-    def __init__(self, dev):
+    def __init__(self, dev: str) -> None:
         self.dev = dev
 
-    def snap(self):
+    def snap(self) -> dict[str, Any] | None:
+        """Query `pw-dump` and return this device's parsed snapshot, or None."""
         rc, out = run(["pw-dump"], timeout=10)
         if rc != 0:
             return None
@@ -285,20 +333,23 @@ class Live:
         except ValueError:
             return None
 
-    def cards(self):
+    def cards(self) -> list[dict[str, Any]] | None:
+        """Query `pactl -f json list cards`, or return None on failure."""
         rc, out = run(["pactl", "-f", "json", "list", "cards"])
         if rc != 0:
             return None
         try:
-            return json.loads(out)
+            data = json.loads(out)
         except ValueError:
             return None
+        return data if isinstance(data, list) else None
 
-    def set_profile(self, prof):
+    def set_profile(self, prof: str) -> bool:
+        """Switch `bluez_card.<dev>` to profile `prof` via `pactl`."""
         return run(["pactl", "set-card-profile", "bluez_card." + self.dev, prof])[0] == 0
 
 
-def wait_until(test, seconds, step=0.5):
+def wait_until[T](test: Callable[[], T], seconds: float, step: float = 0.5) -> T | None:
     """Calls TEST until it returns something true, at most SECONDS; returns that or None."""
     end = time.monotonic() + seconds
     while True:
@@ -310,12 +361,12 @@ def wait_until(test, seconds, step=0.5):
         time.sleep(step)
 
 
-def bounce(live, ldac, alt, rate):
+def bounce(live: _LivePort, ldac: str, alt: str, rate: int) -> tuple[bool, str, dict[str, Any] | None]:
     """LDAC -> ALT -> LDAC. (ok, message, last snapshot)."""
     if not live.set_profile(alt):
         return False, f"pactl could not switch to {alt}", live.snap()
 
-    def on_alt():
+    def on_alt() -> bool:
         c = live.cards()
         return c is not None and profiles(live.dev, c)[0] == alt
 
@@ -345,7 +396,7 @@ def bounce(live, ldac, alt, rate):
                 live.snap(),
             )
 
-    def ldac_back():
+    def ldac_back() -> dict[str, Any] | None:
         s = live.snap()
         return s if s and s["codec"] == "ldac" and s["rate"] else None
 
@@ -364,18 +415,20 @@ class Stop:
     headset's chosen profile; so the bounce first finishes (at most about
     20 s; systemd waits 90 s) and the program exits right after it."""
 
-    busy = False
-    asked = False
+    busy: bool = False
+    asked: bool = False
 
     @classmethod
-    def handler(cls, signum, frame):
+    def handler(cls, signum: int, frame: FrameType | None) -> None:
+        """Handle SIGTERM/SIGINT: defer exit while a profile bounce is active."""
         if cls.busy:
             cls.asked = True  # the sleeps and pactl calls carry on (PEP 475)
             return
         raise SystemExit(0)
 
     @classmethod
-    def check(cls):
+    def check(cls) -> None:
+        """Exit if a stop signal arrived while busy."""
         if cls.asked:
             log("stop asked during the profile switch: done switching, stopping now")
             raise SystemExit(0)
@@ -383,28 +436,33 @@ class Stop:
 
 # ---- the loop -----------------------------------------------------------------------------
 class Watcher:
-    def __init__(self, dev, rate, dry_run=False):
-        self.dev, self.rate, self.dry = dev, rate, dry_run
-        self.live = Live(dev)
-        self.tracker = Tracker(rate)
-        self.known = set()
-        self.said = None
+    """Watch PulseAudio/PipeWire events and bounce LDAC back to the target rate."""
 
-    def say(self, what, why, level=6):
+    def __init__(self, dev: str, rate: int, dry_run: bool = False) -> None:
+        self.dev = dev
+        self.rate = rate
+        self.dry = dry_run
+        self.live: _LivePort = Live(dev)
+        self.tracker = Tracker(rate)
+        self.known: set[int] = set()
+        self.said: tuple[str, str | float | None] | None = None
+
+    def say(self, what: str, why: str | float, level: int = 6) -> None:
         """Logs a verdict only when it differs from the last one (no line
         every fallback look)."""
-        key = (what, why if what not in ("wait", "cooldown") else None)
+        key: tuple[str, str | float | None] = (what, why if what not in ("wait", "cooldown") else None)
         if key != self.said:
             self.said = key
             text = why if isinstance(why, str) else f"{why:.0f} s"
             log(f"{what}: {text}", level)
 
-    def remember(self, snap):
+    def remember(self, snap: Mapping[str, Any] | None) -> None:
+        """Remember known PipeWire object serials for event filtering."""
         self.known = set()
         if snap:
-            self.known = {x for x in [snap["card"], snap["out"], *snap["inputs"]] if x is not None}
+            self.known = {int(x) for x in [snap["card"], snap["out"], *snap["inputs"]] if x is not None}
 
-    def look(self):
+    def look(self) -> float | None:
         """One evaluation; returns seconds until the next forced look, or None."""
         snap = self.live.snap()
         if snap is None:
@@ -413,9 +471,9 @@ class Watcher:
             return None
         self.remember(snap)
         what, why = self.tracker.observe(snap, time.monotonic())
-        if what in ("wait", "cooldown"):
+        if what in ("wait", "cooldown") and not isinstance(why, str):
             self.say(what, why)
-            return why
+            return float(why)
         if what != "act":
             self.say(what, why, 4 if what == "done" else 6)
             return None
@@ -451,7 +509,8 @@ class Watcher:
         Stop.check()
         return None
 
-    def run(self):
+    def run(self) -> None:
+        """Subscribe to `pactl` events forever with exponential backoff on restarts."""
         log(f"watching bluez_card.{self.dev}: LDAC wanted at {self.rate} Hz{' (dry run)' if self.dry else ''}")
         backoff = 1.0
         while True:
@@ -474,12 +533,13 @@ class Watcher:
             time.sleep(backoff)
             backoff = min(backoff * 2, BACKOFF_MAX)
 
-    def listen(self, proc):
+    def listen(self, proc: _EventProc) -> None:
         """Reads events until pactl ends. A look right away (also after a
         reconnection), DEBOUNCE after a relevant event, and every FALLBACK."""
         now = time.monotonic()
-        due = now  # next look
+        due: float | None = now  # next look
         fallback = now + FALLBACK
+        assert proc.stdout is not None
         fd = proc.stdout.fileno()
         buf = b""  # read by hand: select() cannot see Python's buffer
         while True:
@@ -494,7 +554,8 @@ class Watcher:
             if now >= fallback:
                 due = now
                 continue
-            timeout = min(x for x in (due, fallback) if x is not None) - now
+            wait_until_ts = fallback if due is None else min(due, fallback)
+            timeout = wait_until_ts - now
             r, _, _ = select.select([fd], [], [], max(timeout, 0))
             if not r:
                 continue
@@ -506,8 +567,10 @@ class Watcher:
                 due = time.monotonic() + DEBOUNCE
 
 
-def main(argv):
-    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=__doc__.split("\n\n")[0])
+def main(argv: Sequence[str]) -> int:
+    """CLI entrypoint for `bt-ldac-watch`."""
+    doc = __doc__ or ""
+    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=doc.split("\n\n")[0])
     ap.add_argument("--device", required=True)
     ap.add_argument("--rate", type=int, default=48000)
     ap.add_argument("--dry-run", action="store_true")

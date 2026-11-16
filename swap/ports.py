@@ -1,0 +1,22 @@
+"""Port interfaces (typing.Protocol) specific to the swap module."""
+
+from typing import Protocol
+
+
+class SwapSystemPort(Protocol):
+    """Low-level Linux system probes and actuators required by the swap module."""
+
+    def blockdev_size_bytes(self, dev_path: str) -> int | None: ...
+
+    def blkid_type(self, dev_path: str) -> str: ...
+
+    def modprobe(self, module: str) -> None: ...
+
+    def apply_sysctl_file(self, sysctl_conf: str, *, exclude_key: str | None = None) -> None: ...
+
+    def reset_zram0(self) -> None: ...
+
+    def swapon_show(self) -> str: ...
+
+
+__all__ = ["SwapSystemPort"]

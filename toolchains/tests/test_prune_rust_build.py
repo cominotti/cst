@@ -9,10 +9,11 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s toolchains/tests -t . -v
 """
 
+from __future__ import annotations
+
 import contextlib
 import fcntl
 import importlib.machinery
-import importlib.util
 import io
 import os
 import re
@@ -20,7 +21,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Any, Protocol, cast
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -32,16 +36,124 @@ H = 3600
 NOW = 2_000_000_000.0  # fixed "now" (2033); every mtime is set relative to it
 
 
-def load():
+class _FolderProto(Protocol):
+    key: str
+    path: str
+    size: int
+    activity: float
+    future: int
+    problem: str | None
+    inc: list[Any]
+    inc_size: int
+
+
+class _ClaimedProto(Protocol):
+    incomplete: str
+    claimed: dict[str, list[str]]
+
+
+class _PythonUvProto(Protocol):
+    deadline: float | None
+    run_uv: Callable[..., subprocess.CompletedProcess[str]]
+
+    def apply(self) -> int: ...
+
+
+class _WrapperValuesProto(Protocol):
+    size: str
+    workspace: bool
+
+
+class _SettingsProto(Protocol):
+    source: str
+    enabled: dict[str, bool]
+    policy: dict[str, dict[str, Any]]
+    options: dict[str, Any]
+
+    def source_of(self, cls: object) -> str: ...
+
+
+type _CargoQueryResult = (
+    tuple[None, str]
+    | tuple[
+        tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]],
+        tuple[list[str], dict[str, str], str],
+    ]
+)
+
+
+class _TargetProto(Protocol):
+    ID: str
+
+
+class _ToolchainsModule(Protocol):
+    JOURNAL: bool
+    TRASH_PREFIX: str
+    SERVICE: str
+    TIMER: str
+    MARKER: str
+    CMD_TIMEOUT: float
+    TOOL_FILES_MAX: int
+    RUN_BUDGET: float
+    TRASH_NAME: re.Pattern[str]
+    TARGETS: dict[str, _TargetProto]
+    PLANNED: dict[str, tuple[str, str]]
+    os: types.ModuleType
+    subprocess: types.ModuleType
+    ConfigError: type[Exception]
+    Refused: type[Exception]
+    Usage: type[Exception]
+    RustBuild: Any
+    Settings: Callable[[str], _SettingsProto]
+    Folder: Callable[[str, str, str], _FolderProto]
+    PythonUv: Callable[[str, float, Mapping[str, Any]], _PythonUvProto]
+    WrapperValues: Callable[..., _WrapperValuesProto]
+    systemctl: Callable[..., str]
+    cargo_procs: Callable[..., list[dict[str, Any]]]
+    parse_duration: Callable[[str], float]
+    parse_size: Callable[[str], int]
+    parse_sccache_size: Callable[[str], str]
+    parse_conf: Callable[..., dict[str, str]]
+    parse_args: Callable[[Sequence[str]], Mapping[str, Any]]
+    known_keys: Callable[[], set[str]]
+    defaults_path: Callable[[], str]
+    state_path: Callable[[str, str], str]
+    select_targets: Callable[[Sequence[str], _SettingsProto], list[tuple[_TargetProto, bool]]]
+    resolve_root: Callable[[str], str | None]
+    scan: Callable[[str, float], tuple[list[_FolderProto], list[str], list[tuple[str, str]]]]
+    lock_files: Callable[[str], list[str]]
+    decide: Callable[..., list[tuple[_FolderProto, str, str]]]
+    proc_users: Callable[..., tuple[dict[str, list[tuple[Any, str]]], int]]
+    delete_folder: Callable[..., tuple[str, str]]
+    prefixes: Callable[[str], tuple[str, ...]]
+    cargo_users: Callable[..., tuple[dict[str, list[tuple[Any, str]]], list[str]]]
+    cargo_query: Callable[[Mapping[str, Any], str], _CargoQueryResult]
+    manifest_arg: Callable[[Sequence[str], str], str | None]
+    ask_cargo: Callable[[list[str], dict[str, str], str], tuple[str | None, str | None]]
+    remove_tree: Callable[[str, float | None], tuple[bool, str]]
+    claimed_folders: Callable[[str, str], _ClaimedProto]
+    read_state: Callable[[str, str], dict[str, Any] | None]
+    manager_path: Callable[[], str | None]
+    toolchain_lines: Callable[[str], list[str]]
+    named_in: Callable[[Sequence[str], Sequence[str]], tuple[dict[str, str], bool]]
+    toolchain_pattern: Callable[[str], re.Pattern[bytes]]
+    pinned_channel: Callable[[str], str]
+    sccache_apply: Callable[[str, _SettingsProto | None, bool | None], int]
+    wrapper_text: Callable[[_WrapperValuesProto], str | None]
+    read_text: Callable[[str], str]
+    main: Callable[[Sequence[str]], int]
+
+
+def load() -> _ToolchainsModule:
     loader = importlib.machinery.SourceFileLoader("cst_toolchains", TOOL)
-    spec = importlib.util.spec_from_loader("cst_toolchains", loader)
-    mod = importlib.util.module_from_spec(spec)
+    mod = types.ModuleType("cst_toolchains")
+    mod.__file__ = TOOL
     loader.exec_module(mod)
-    return mod
+    return cast("_ToolchainsModule", cast("object", mod))
 
 
 class Base(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.m = load()
         self.m.JOURNAL = False
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
@@ -66,16 +178,16 @@ class Base(unittest.TestCase):
         os.environ.pop("CARGO_HOME", None)
         # status must never reach a real sccache server (their sockets live there).
         os.environ["XDG_RUNTIME_DIR"] = os.path.join(self.tmp, "no-runtime-dir")
-        self.calls = []
+        self.calls: list[tuple[str, ...]] = []
         self.manager_env = ""
         self.m.systemctl = self.fake_systemctl
         # No real cargo process of the user may change a test's result:
         # tests that need some set self.cargo_running.
         self.real_cargo_procs = self.m.cargo_procs
-        self.cargo_running = []
+        self.cargo_running: list[dict[str, Any]] = []
         self.m.cargo_procs = lambda uid=None: list(self.cargo_running)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         for k, v in self.env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -83,7 +195,7 @@ class Base(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.tmp)
 
-    def fake_systemctl(self, *args, check=False, ok=(0,)):
+    def fake_systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
         if args == ("show-environment",):  # read only: the user manager's environment
             return self.manager_env
         if args[:1] == ("is-active",):  # read only: what systemctl says of a timer that is not running
@@ -92,12 +204,12 @@ class Base(unittest.TestCase):
         return ""
 
     # helpers
-    def write_cargo_config(self, text):
+    def write_cargo_config(self, text: str) -> None:
         os.makedirs(os.path.join(self.home, ".cargo"), exist_ok=True)
         with open(os.path.join(self.home, ".cargo/config.toml"), "w") as f:
             f.write(text)
 
-    def write_conf(self, text):
+    def write_conf(self, text: str) -> None:
         """~/.config/cst/toolchains.conf; MAX_IDLE etc. get the RUST_BUILD_ prefix."""
         text = re.sub(r"(?m)^(MAX_IDLE|MAX_TOTAL|MIN_KEEP|ENABLED|ORPHANS|INCREMENTAL_IDLE)=", r"RUST_BUILD_\1=", text)
         path = os.path.join(self.home, ".config/cst/toolchains.conf")
@@ -105,13 +217,13 @@ class Base(unittest.TestCase):
         with open(path, "w") as f:
             f.write(text)
 
-    def write_conf_raw(self, text):
+    def write_conf_raw(self, text: str) -> None:
         path = os.path.join(self.home, ".config/cst/toolchains.conf")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(text)
 
-    def folder(self, key, age_h, kib=64, profile="debug"):
+    def folder(self, key: str, age_h: float, kib: int = 64, profile: str = "debug") -> str:
         """A cargo-like build folder whose newest mtime is AGE_H hours before NOW."""
         path = os.path.join(self.root, key)
         files = [
@@ -129,25 +241,25 @@ class Base(unittest.TestCase):
         return path
 
     @staticmethod
-    def age(path, age_h):
+    def age(path: str, age_h: float) -> None:
         t = NOW - age_h * H
         for d, dirs, files in os.walk(path):
             for n in files + dirs:
                 os.utime(os.path.join(d, n), (t, t), follow_symlinks=False)
             os.utime(d, (t, t))
 
-    def run_main(self, *args):
+    def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = self.m.main([*args, "--home", self.home])
         return rc, out.getvalue() + err.getvalue()
 
-    def present(self, key):
+    def present(self, key: str) -> bool:
         return os.path.isdir(os.path.join(self.root, key))
 
 
 class SettingsTest(Base):
-    def test_durations(self):
+    def test_durations(self) -> None:
         p = self.m.parse_duration
         self.assertEqual(p("48h"), 48 * H)
         self.assertEqual(p("2d"), 48 * H)
@@ -158,7 +270,7 @@ class SettingsTest(Base):
             with self.assertRaises(self.m.ConfigError, msg=bad):
                 p(bad)
 
-    def test_sizes(self):
+    def test_sizes(self) -> None:
         p = self.m.parse_size
         self.assertEqual(p("150G"), 150 << 30)
         self.assertEqual(p("150GiB"), 150 << 30)
@@ -174,7 +286,7 @@ class SettingsTest(Base):
             with self.assertRaises(self.m.ConfigError, msg=bad):
                 p(bad)
 
-    def test_conf_parsing(self):
+    def test_conf_parsing(self) -> None:
         known = {"MAX_IDLE", "MAX_TOTAL", "MIN_KEEP"}
         raw = self.m.parse_conf("# comment\n\nMAX_IDLE = \"24h\"   # a day\nMAX_TOTAL='200G'\n  MIN_KEEP=1h\n", known)
         self.assertEqual(raw, {"MAX_IDLE": "24h", "MAX_TOTAL": "200G", "MIN_KEEP": "1h"})
@@ -183,7 +295,7 @@ class SettingsTest(Base):
         with self.assertRaises(self.m.ConfigError):
             self.m.parse_conf("just words\n", known)
 
-    def test_policy_defaults_and_limits(self):
+    def test_policy_defaults_and_limits(self) -> None:
         s = self.m.Settings(self.home)
         rb = self.m.RustBuild
         self.assertEqual(s.source_of(rb), "defaults")
@@ -217,7 +329,7 @@ class SettingsTest(Base):
             with self.assertRaisesRegex(self.m.ConfigError, "unknown setting", msg=text):
                 self.m.Settings(self.home)
 
-    def test_bad_settings_delete_nothing(self):
+    def test_bad_settings_delete_nothing(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.write_conf("MAX_IDLE=1h\nMIN_KEEP=2h\n")
         rc, out = self.run_main("prune", "apply")
@@ -227,10 +339,10 @@ class SettingsTest(Base):
 
 
 class RootTest(Base):
-    def test_cst_template(self):
+    def test_cst_template(self) -> None:
         self.assertEqual(self.m.resolve_root(self.home), self.root)
 
-    def test_other_template_is_refused(self):
+    def test_other_template_is_refused(self) -> None:
         for text in (
             f'[build]\nbuild-dir = "{self.home}/.cache/cargo-build"\n',
             f'[build]\nbuild-dir = "{self.home}/elsewhere/{{workspace-path-hash}}"\n',
@@ -242,7 +354,7 @@ class RootTest(Base):
             with self.assertRaises(self.m.Refused, msg=text):
                 self.m.resolve_root(self.home)
 
-    def test_other_template_deletes_nothing(self):
+    def test_other_template_deletes_nothing(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.write_cargo_config('[build]\nbuild-dir = "{workspace-root}/target-build"\n')
         rc, out = self.run_main("prune", "apply")
@@ -250,19 +362,19 @@ class RootTest(Base):
         self.assertIn("not the one CST writes", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
-    def test_no_config(self):
+    def test_no_config(self) -> None:
         os.unlink(os.path.join(self.home, ".cargo/config.toml"))
         with self.assertRaises(self.m.Refused):
             self.m.resolve_root(self.home)
 
-    def test_missing_root_is_nothing_to_do(self):
+    def test_missing_root_is_nothing_to_do(self) -> None:
         shutil.rmtree(self.root)
         self.assertIsNone(self.m.resolve_root(self.home))
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0)
         self.assertIn("nothing to do", out)
 
-    def test_symlinked_root_is_refused(self):
+    def test_symlinked_root_is_refused(self) -> None:
         real = os.path.join(self.tmp, "real-root")
         os.rename(self.root, real)
         os.symlink(real, self.root)
@@ -279,7 +391,7 @@ class RootTest(Base):
 
 
 class ScanTest(Base):
-    def test_name_filter_and_symlinks(self):
+    def test_name_filter_and_symlinks(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.folder("AA/0123456789abcd", 100)  # uppercase: not cargo's
         self.folder("aa/0123456789abc", 100)  # 13 digits
@@ -296,7 +408,7 @@ class ScanTest(Base):
         os.symlink(outside, os.path.join(self.root, "bb"))  # top-level link
         os.makedirs(os.path.join(self.root, "cc"))
         os.symlink(outside, os.path.join(self.root, "cc/0123456789abcd"))  # leaf link
-        folders, trash, others = self.m.scan(self.root, NOW)
+        folders, _trash, others = self.m.scan(self.root, NOW)
         self.assertEqual([f.key for f in folders], ["aa/0123456789abcd"])
         why = dict(others)
         self.assertIn("symlink", why["bb"])
@@ -314,7 +426,7 @@ class ScanTest(Base):
         self.assertTrue(os.path.exists(os.path.join(outside, "data")))
         self.assertIn("left alone: bb", out)
 
-    def test_activity_is_newest_mtime_anywhere(self):
+    def test_activity_is_newest_mtime_anywhere(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         deep = os.path.join(path, "debug/incremental/foo-1/s-abc/query-cache.bin")
         os.makedirs(os.path.dirname(deep))
@@ -326,7 +438,7 @@ class ScanTest(Base):
         f = self.m.scan(self.root, NOW)[0][0]
         self.assertAlmostEqual(f.activity, NOW - 3 * H, delta=1)
 
-    def test_future_mtimes_are_ignored(self):
+    def test_future_mtimes_are_ignored(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         lock = os.path.join(path, "debug/.cargo-build-lock")
         os.utime(lock, (NOW + 1000 * H, NOW + 1000 * H))
@@ -334,7 +446,7 @@ class ScanTest(Base):
         self.assertAlmostEqual(f.activity, NOW - 100 * H, delta=1)
         self.assertEqual(f.future, 1)
 
-    def test_size_does_not_follow_symlinks(self):
+    def test_size_does_not_follow_symlinks(self) -> None:
         path = self.folder("aa/0123456789abcd", 100, kib=64)
         big = os.path.join(self.tmp, "big")
         with open(big, "wb") as f:
@@ -344,7 +456,7 @@ class ScanTest(Base):
         self.assertLess(f.size, 1 << 20)
         self.assertGreaterEqual(f.size, 64 * 1024)
 
-    def test_lock_files(self):
+    def test_lock_files(self) -> None:
         path = self.folder("aa/0123456789abcd", 1)
         self.folder("aa/0123456789abcd", 1, profile="release")
         os.makedirs(os.path.join(path, "x86_64-unknown-linux-gnu/debug"))
@@ -363,25 +475,25 @@ class ScanTest(Base):
 
 
 class DecideTest(Base):
-    def f(self, key, age_h, gib_):
+    def f(self, key: str, age_h: float, gib_: float) -> _FolderProto:
         x = self.m.Folder(self.root, *key.split("/"))
         x.size = int(gib_ * (1 << 30))
         x.activity = NOW - age_h * H
         return x
 
-    def pol(self, idle=48, total=150, keep=2):
+    def pol(self, idle: float = 48, total: float = 150, keep: float = 2) -> dict[str, int | float]:
         return {"max_idle": idle * H, "max_total": int(total * (1 << 30)), "min_keep": keep * H}
 
-    def actions(self, plan):
+    def actions(self, plan: Sequence[tuple[_FolderProto, str, str]]) -> dict[str, str]:
         return {f.key: a for f, a, _ in plan}
 
-    def test_idle(self):
+    def test_idle(self) -> None:
         plan = self.m.decide(
             [self.f("aa/00000000000001", 49, 1), self.f("aa/00000000000002", 47, 1)], self.pol(), NOW, {}
         )
         self.assertEqual(self.actions(plan), {"aa/00000000000001": "delete", "aa/00000000000002": "keep"})
 
-    def test_cap_least_recent_first(self):
+    def test_cap_least_recent_first(self) -> None:
         fs = [
             self.f("aa/00000000000001", 10, 50),
             self.f("aa/00000000000002", 30, 50),
@@ -399,19 +511,19 @@ class DecideTest(Base):
                 "aa/00000000000004": "keep",
             },
         )
-        self.assertEqual([f.key for f, _, _ in plan][0], "aa/00000000000002")
+        self.assertEqual(next(f.key for f, _, _ in plan), "aa/00000000000002")
 
-    def test_cap_never_touches_min_keep(self):
+    def test_cap_never_touches_min_keep(self) -> None:
         fs = [self.f("aa/00000000000001", 1, 100), self.f("aa/00000000000002", 0.5, 100)]
         plan = self.m.decide(fs, self.pol(total=50), NOW, {})
         self.assertEqual(set(self.actions(plan).values()), {"keep"})
         self.assertTrue(all("MIN_KEEP" in why for _, _, why in plan))
 
-    def test_cap_off(self):
+    def test_cap_off(self) -> None:
         fs = [self.f("aa/00000000000001", 10, 500)]
         self.assertEqual(self.actions(self.m.decide(fs, self.pol(total=0), NOW, {})), {"aa/00000000000001": "keep"})
 
-    def test_in_use_and_problem_are_kept(self):
+    def test_in_use_and_problem_are_kept(self) -> None:
         a, b = self.f("aa/00000000000001", 100, 1), self.f("aa/00000000000002", 100, 1)
         b.problem = "1 entry on another filesystem"
         plan = self.m.decide([a, b], self.pol(), NOW, {"aa/00000000000001": [(42, "cargo")]})
@@ -420,21 +532,21 @@ class DecideTest(Base):
         self.assertIn("cargo (pid 42)", why["aa/00000000000001"])
         self.assertIn("another filesystem", why["aa/00000000000002"])
 
-    def test_cap_skips_busy_and_takes_next(self):
+    def test_cap_skips_busy_and_takes_next(self) -> None:
         fs = [self.f("aa/00000000000001", 30, 100), self.f("aa/00000000000002", 20, 100)]
         plan = self.m.decide(fs, self.pol(total=150), NOW, {"aa/00000000000001": [(1, "rustc")]})
         self.assertEqual(self.actions(plan), {"aa/00000000000001": "keep", "aa/00000000000002": "delete"})
 
 
 class ApplyTest(Base):
-    def test_plan_deletes_nothing(self):
+    def test_plan_deletes_nothing(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         rc, out = self.run_main("prune", "plan")
         self.assertEqual(rc, 0)
         self.assertIn("apply would delete 1 folder(s)", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
-    def test_idle_and_parent_cleanup(self):
+    def test_idle_and_parent_cleanup(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 1)
         rc, out = self.run_main("prune", "apply")
@@ -446,7 +558,7 @@ class ApplyTest(Base):
         rc, out = self.run_main("status", "--brief")
         self.assertIn("deleted 1 folder(s)", out)
 
-    def test_cap_and_min_keep_end_to_end(self):
+    def test_cap_and_min_keep_end_to_end(self) -> None:
         for key, age in (
             ("a1/00000000000001", 30),
             ("a2/00000000000002", 20),
@@ -467,7 +579,7 @@ class ApplyTest(Base):
         self.assertEqual([k for k in sizes if self.present(k)], ["a4/00000000000004"])
         self.assertIn("still above MAX_TOTAL", out)
 
-    def test_held_cargo_lock_is_skipped(self):
+    def test_held_cargo_lock_is_skipped(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 90)
         lock = os.path.join(path, "debug/.cargo-build-lock")
@@ -488,6 +600,7 @@ class ApplyTest(Base):
             text=True,
             cwd=self.tmp,
         )
+        assert holder.stdout is not None
         try:
             self.assertEqual(holder.stdout.readline().strip(), "held")
             rc, out = self.run_main("prune", "apply")
@@ -505,7 +618,7 @@ class ApplyTest(Base):
         rc, out = self.run_main("prune", "apply")
         self.assertFalse(self.present("aa/0123456789abcd"))
 
-    def test_lock_held_in_this_process_without_proc(self):
+    def test_lock_held_in_this_process_without_proc(self) -> None:
         """The flock alone (no /proc hit) keeps a folder."""
         path = self.folder("aa/0123456789abcd", 100)
         self.m.proc_users = lambda root, uid=None: ({}, 0)
@@ -521,21 +634,21 @@ class ApplyTest(Base):
         self.assertIn("debug/.cargo-build-lock", detail)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
-    def test_cwd_in_folder_is_in_use(self):
+    def test_cwd_in_folder_is_in_use(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         p = subprocess.Popen(["sleep", "60"], cwd=os.path.join(path, "debug"))
         try:
             users, _ = self.m.proc_users(self.root)
             self.assertIn("aa/0123456789abcd", users)
             self.assertEqual(users["aa/0123456789abcd"][0][1], "sleep")
-            rc, out = self.run_main("prune", "apply")
+            _rc, out = self.run_main("prune", "apply")
         finally:
             p.kill()
             p.wait()
         self.assertTrue(self.present("aa/0123456789abcd"))
         self.assertIn("in use", out)
 
-    def test_leftover_trash_is_deleted(self):
+    def test_leftover_trash_is_deleted(self) -> None:
         trash = os.path.join(self.root, self.m.TRASH_PREFIX + "aa0123456789abcd-1")
         other = os.path.join(self.root, self.m.TRASH_PREFIX + "mine")  # not our name format
         os.makedirs(os.path.join(trash, "debug"))
@@ -545,7 +658,7 @@ class ApplyTest(Base):
         self.assertFalse(os.path.exists(trash))
         self.assertTrue(os.path.isdir(other))
 
-    def test_prefixes(self):
+    def test_prefixes(self) -> None:
         self.assertEqual(
             self.m.prefixes("/var/home/u/.cache/cargo-build"),
             ("/home/u/.cache/cargo-build", "/var/home/u/.cache/cargo-build"),
@@ -554,10 +667,10 @@ class ApplyTest(Base):
 
 
 class TimerTest(Base):
-    def unit(self, name):
+    def unit(self, name: str) -> str:
         return os.path.join(self.home, ".config/systemd/user", name)
 
-    def test_enable_disable(self):
+    def test_enable_disable(self) -> None:
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         prog = os.path.join(self.home, ".local/lib/cst/cst-toolchains")
@@ -582,7 +695,7 @@ class TimerTest(Base):
         for p in (prog, self.unit(self.m.SERVICE), self.unit(self.m.TIMER)):
             self.assertFalse(os.path.exists(p), p)
 
-    def test_enable_refuses_foreign_files(self):
+    def test_enable_refuses_foreign_files(self) -> None:
         os.makedirs(os.path.dirname(self.unit(self.m.TIMER)))
         with open(self.unit(self.m.TIMER), "w") as f:
             f.write("[Timer]\nOnCalendar=daily\n")
@@ -594,17 +707,23 @@ class TimerTest(Base):
         with open(self.unit(self.m.TIMER)) as f:
             self.assertIn("daily", f.read())  # left alone
 
-    def test_enable_refuses_other_template(self):
+    def test_enable_refuses_other_template(self) -> None:
         self.write_cargo_config('[build]\nbuild-dir = "/tmp/elsewhere"\n')
         self.write_conf_raw("PYTHON_UV_ENABLED=no\n")  # rust:build alone: nothing left to run
-        rc, out = self.run_main("auto", "on")
+        rc, _out = self.run_main("auto", "on")
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.unit(self.m.TIMER)))
         self.assertEqual(self.calls, [])
 
 
+class _ScandirIter(Protocol):
+    def __enter__(self) -> Iterator[os.DirEntry[str]]: ...
+    def __exit__(self, *args: object) -> None: ...
+    def __iter__(self) -> Iterator[os.DirEntry[str]]: ...
+
+
 class ScanRobustTest(Base):
-    def test_unreadable_top_folder_is_reported(self):
+    def test_unreadable_top_folder_is_reported(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 100)
         bb = os.path.join(self.root, "bb")
@@ -618,14 +737,14 @@ class ScanRobustTest(Base):
         self.assertEqual([f.key for f in folders], ["aa/0123456789abcd"])
         self.assertIn("cannot read", dict(others)["bb"])
 
-    def test_top_folder_removed_meanwhile(self):
+    def test_top_folder_removed_meanwhile(self) -> None:
         """A concurrent apply removes an emptied XX/ after scan listed the root."""
         self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 100)
         real = os.scandir
         gone = os.path.join(self.root, "bb")
 
-        def scandir(path="."):
+        def scandir(path: str = ".") -> _ScandirIter:
             if path == gone:
                 raise FileNotFoundError(2, "No such file or directory", path)
             return real(path)
@@ -644,7 +763,7 @@ class CargoTieTest(Base):
     """cargo test holds no lock while the test programs run: a running cargo
     keeps the folder it builds in (found out with cargo metadata)."""
 
-    def fake_cargo(self, body):
+    def fake_cargo(self, body: str) -> str:
         """An executable named cargo in its own folder."""
         d = os.path.join(self.tmp, "bin")
         os.makedirs(d, exist_ok=True)
@@ -654,16 +773,24 @@ class CargoTieTest(Base):
         os.chmod(path, 0o755)
         return path
 
-    def proc(self, exe, cwd=None, args=None, env=None, pid="4242", comm="cargo"):
+    def proc(
+        self,
+        exe: str,
+        cwd: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        pid: str = "4242",
+        comm: str = "cargo",
+    ) -> dict[str, Any]:
         cwd = cwd or self.tmp
         return {"pid": pid, "comm": comm, "cwd": cwd, "exe": exe, "args": args or ["cargo", "test"], "env": env or {}}
 
-    def answering(self, build_dir):
+    def answering(self, build_dir: str) -> str:
         return self.fake_cargo(f"""test "$RUSTUP_AUTO_INSTALL" = 0 || exit 3
 echo '{{"packages": [], "build_directory": "{build_dir}"}}'
 """)
 
-    def test_folder_of_running_cargo_test_is_kept(self):
+    def test_folder_of_running_cargo_test_is_kept(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 100)
         self.cargo_running = [self.proc(self.answering(os.path.join(self.root, "aa/0123456789abcd")))]
@@ -676,7 +803,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertFalse(self.present("bb/0123456789abcd"))
         self.assertIn("skipped aa/0123456789abcd: in use: cargo (pid 4242)", out)
 
-    def test_cargo_starting_during_the_run_is_seen(self):
+    def test_cargo_starting_during_the_run_is_seen(self) -> None:
         """The check before each deletion asks again (not only at the start)."""
         self.folder("aa/0123456789abcd", 100)
         f = self.m.scan(self.root, NOW)[0][0]
@@ -686,14 +813,14 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertIn("cargo runs on it", detail)
         self.assertTrue(self.present("aa/0123456789abcd"))
 
-    def test_other_build_dir_does_not_count(self):
+    def test_other_build_dir_does_not_count(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.cargo_running = [self.proc(self.answering(os.path.join(self.tmp, "elsewhere/aa/0123456789abcd")))]
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
         self.assertFalse(self.present("aa/0123456789abcd"))
 
-    def test_unknown_build_folder_stops_deleting(self):
+    def test_unknown_build_folder_stops_deleting(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         self.folder("bb/0123456789abcd", 90)
         bad = self.fake_cargo("echo 'error: could not find `Cargo.toml`' >&2\nexit 101\n")
@@ -716,12 +843,12 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         rc, out = self.run_main("prune", "apply")
         self.assertFalse(self.present("aa/0123456789abcd"))
 
-    def test_users_are_checked_while_the_lock_is_held(self):
+    def test_users_are_checked_while_the_lock_is_held(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         lock = os.path.join(path, "debug/.cargo-build-lock")
-        seen = []
+        seen: list[str] = []
 
-        def check(root, home, cache):
+        def check(root: str, home: str, cache: dict[Any, Any]) -> tuple[dict[str, list[tuple[Any, str]]], list[str]]:
             fd = os.open(lock, os.O_RDONLY)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -737,7 +864,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertEqual(result, "deleted")
         self.assertEqual(seen, ["held"])
 
-    def test_query_uses_the_process_settings(self):
+    def test_query_uses_the_process_settings(self) -> None:
         exe = self.fake_cargo("exit 0\n")
         ws = os.path.join(self.tmp, "ws")
         os.makedirs(ws)
@@ -747,7 +874,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
             args=["cargo", "+nightly", "test", "--manifest-path", "sub/Cargo.toml", "--", "--manifest-path=no"],
             env={"CARGO_BUILD_BUILD_DIR": "/b/{workspace-path-hash}"},
         )
-        key, (cmd, env, cwd) = self.m.cargo_query(p, self.home)
+        _, query = self.m.cargo_query(p, self.home)
+        assert not isinstance(query, str)
+        cmd, env, cwd = query
         self.assertEqual(cmd[:3], [exe, "+nightly", "metadata"])
         self.assertIn("--offline", cmd)
         self.assertEqual(cmd[-2:], ["--manifest-path", os.path.join(ws, "sub/Cargo.toml")])
@@ -762,14 +891,18 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         os.makedirs(cargo_home_bin)
         shutil.copy(exe, cargo_home_bin)
         p2 = self.proc("/usr/bin/cargo-nextest", cwd=ws, comm="cargo-nextest")
-        _, (cmd2, _, _) = self.m.cargo_query(p2, self.home)
+        _, query2 = self.m.cargo_query(p2, self.home)
+        assert not isinstance(query2, str)
+        cmd2, _, _ = query2
         self.assertEqual(cmd2[0], os.path.join(cargo_home_bin, "cargo"))
 
-    def test_cache_asks_once_per_project(self):
+    def test_cache_asks_once_per_project(self) -> None:
         log = os.path.join(self.tmp, "asked")
         exe = self.fake_cargo(f'echo x >> {log}\necho \'{{"build_directory": "{self.root}/aa/0123456789abcd"}}\'\n')
         self.cargo_running = [self.proc(exe, pid="1"), self.proc(exe, pid="2")]
-        cache = {}
+        cache: dict[Any, Any] = {}
+        found: dict[str, list[tuple[Any, str]]] = {}
+        unknown: list[str] = []
         for _ in range(3):
             found, unknown = self.m.cargo_users(self.root, self.home, cache)
         self.assertEqual(unknown, [])
@@ -777,7 +910,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         with open(log) as f:
             self.assertEqual(len(f.readlines()), 1)
 
-    def test_cargo_procs_reads_a_real_process(self):
+    def test_cargo_procs_reads_a_real_process(self) -> None:
         ws = os.path.join(self.tmp, "ws")
         os.makedirs(ws)
         # A script named cargo: its process is named cargo too.
@@ -796,34 +929,36 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.assertEqual(self.m.manifest_arg(x["args"], x["cwd"]), os.path.join(ws, "sub/Cargo.toml"))
 
     @unittest.skipUnless(shutil.which("cargo"), "cargo not installed")
-    def test_real_cargo_metadata(self):
+    def test_real_cargo_metadata(self) -> None:
         """The real cargo names the folder of a project (reads only)."""
         ws = os.path.join(self.tmp, "ws")
         os.makedirs(os.path.join(ws, "src"))
         with open(os.path.join(ws, "Cargo.toml"), "w") as f:
             f.write('[package]\nname = "ws"\nversion = "0.1.0"\nedition = "2021"\n')
         open(os.path.join(ws, "src/lib.rs"), "w").close()
-        p = self.proc(
-            shutil.which("cargo"), cwd=ws, env={"CARGO_BUILD_BUILD_DIR": self.root + "/{workspace-path-hash}"}
-        )
-        key, q = self.m.cargo_query(p, self.home)
+        cargo_bin = shutil.which("cargo")
+        assert cargo_bin is not None
+        p = self.proc(cargo_bin, cwd=ws, env={"CARGO_BUILD_BUILD_DIR": self.root + "/{workspace-path-hash}"})
+        _, q = self.m.cargo_query(p, self.home)
+        assert not isinstance(q, str)
         bd, why = self.m.ask_cargo(*q)
         if why and ("toolchain" in why or "rustup" in why):
             self.skipTest(why)
         self.assertIsNone(why)
+        assert bd is not None
         rel = os.path.relpath(bd, self.root)
         self.assertRegex(rel, r"\A[0-9a-f]{2}/[0-9a-f]{14}\Z")
         self.assertFalse(os.path.exists(bd))  # metadata created nothing
         self.assertEqual(sorted(os.listdir(ws)), ["Cargo.toml", "src"])
 
-    def test_rebuild_meanwhile_is_noted(self):
+    def test_rebuild_meanwhile_is_noted(self) -> None:
         """A cargo that waited for the lock rebuilds into a new folder at the
         same path: deleted, with a note (not a failure)."""
         self.folder("aa/0123456789abcd", 100)
         f = self.m.scan(self.root, NOW)[0][0]
         real = self.m.remove_tree
 
-        def remove_and_rebuild(path, timeout=None):
+        def remove_and_rebuild(path: str, timeout: float | None = None) -> tuple[bool, str]:
             os.makedirs(os.path.join(f.path, "debug"))
             return real(path, timeout)
 
@@ -834,10 +969,10 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
 
 
 class TurnedOffTest(Base):
-    def unit(self, name):
+    def unit(self, name: str) -> str:
         return os.path.join(self.home, ".config/systemd/user", name)
 
-    def test_disable_is_remembered_by_setup(self):
+    def test_disable_is_remembered_by_setup(self) -> None:
         off = os.path.join(self.home, ".config/cst/toolchains-auto.off")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
@@ -866,13 +1001,13 @@ class TurnedOffTest(Base):
         self.assertEqual(rc, 0, out)
         self.assertIn(("enable", "--now", self.m.TIMER), self.calls)
 
-    def test_unless_off_without_marker_enables(self):
+    def test_unless_off_without_marker_enables(self) -> None:
         rc, out = self.run_main("auto", "on", "--unless-off")
         self.assertEqual(rc, 0, out)
         self.assertTrue(os.path.exists(self.unit(self.m.TIMER)))
 
-    def test_flag_only_for_auto_on(self):
-        rc, out = self.run_main("prune", "apply", "--unless-off")
+    def test_flag_only_for_auto_on(self) -> None:
+        rc, _out = self.run_main("prune", "apply", "--unless-off")
         self.assertEqual(rc, 2)
 
 

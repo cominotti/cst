@@ -148,6 +148,8 @@ only the host sees the processes of every container. Exit status: 0 fine
 (also "nothing to do"), 1 refused or failed, 2 usage.
 """
 
+from __future__ import annotations
+
 import dataclasses
 import fcntl
 import json
@@ -162,6 +164,11 @@ import sys
 import tempfile
 import time
 import tomllib
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
 MARKER = "# managed-by: toolchains-setup.sh (CST)"
 NAME = "cst-toolchains"
@@ -207,7 +214,7 @@ PROG = os.environ.get("CST_PROG") or "cst toolchains"
 RUST_TOOLS = re.compile(r"(cargo|rustc|rustdoc|clippy-driver|rust-analyzer|build-script|build_script).*")
 
 
-def journal_stdout():
+def journal_stdout() -> bool:
     """stdout is connected to the journal (systemd's documented check:
     JOURNAL_STREAM is "dev:inode" of that very stream; a variable inherited
     from elsewhere does not match)."""
@@ -235,26 +242,26 @@ class Usage(Exception):
 
 
 # ---- output -------------------------------------------------------------------------------
-def say(msg, prio=6, err=False):
+def say(msg: str, prio: int = 6, err: bool = False) -> None:
     """One line; with the journal priority prefix when run by systemd."""
     line = f"<{prio}>{msg}" if JOURNAL else msg
     print(line, file=sys.stderr if err and not JOURNAL else sys.stdout, flush=True)
 
 
-def gib(n):
+def gib(n: int | float) -> str:
     return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / (1 << 20):.0f} MiB"
 
 
-def ago(seconds):
-    seconds = max(0, int(seconds))
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    if seconds < 4 * 86400:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 86400:.1f}d"
+def ago(seconds: int | float) -> str:
+    secs = max(0, int(seconds))
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 4 * 86400:
+        return f"{secs / 3600:.1f}h"
+    return f"{secs / 86400:.1f}d"
 
 
-def span(seconds):
+def span(seconds: int) -> str:
     """A setting's duration, short: 48h, 2h, 90m, 14d."""
     if seconds % 3600 == 0 and seconds < 7 * 86400:
         return f"{seconds // 3600}h"
@@ -265,15 +272,15 @@ def span(seconds):
     return f"{seconds}s"
 
 
-def when(ts):
+def when(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
-def tilde(path, home):
+def tilde(path: str, home: str) -> str:
     return "~" + path[len(home) :] if path == home or path.startswith(home + "/") else path
 
 
-def where_text(path, home):
+def where_text(path: str, home: str) -> str:
     """PATH (with ~), and where it really is when a symlink on the way leads
     elsewhere (the ~/Bulk links of `cst btrfs bulk`)."""
     real = os.path.realpath(path)
@@ -288,14 +295,14 @@ DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
 SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
 
 
-def parse_duration(text):
+def parse_duration(text: str) -> int:
     m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*", text, re.I)
     if not m:
         raise ConfigError(f"'{text}' is not a duration (a number with s, m, h, d or w, e.g. 48h)")
     return int(float(m.group(1)) * DURATION_UNITS[m.group(2).lower()])
 
 
-def parse_size(text):
+def parse_size(text: str) -> int:
     """Bytes. The unit is required (only 0 may go without): MAX_TOTAL=150
     meant as 150G would otherwise be 150 bytes, a cap that deletes
     everything older than MIN_KEEP."""
@@ -308,7 +315,7 @@ def parse_size(text):
     return int(float(m.group(1)) * SIZE_UNITS[m.group(2)])
 
 
-def parse_bool(text):
+def parse_bool(text: str) -> bool:
     t = text.strip().lower()
     if t in ("yes", "true", "on", "1"):
         return True
@@ -317,11 +324,11 @@ def parse_bool(text):
     raise ConfigError(f"'{text}' is not yes or no")
 
 
-def parse_conf(text, known):
+def parse_conf(text: str, known: AbstractSet[str]) -> dict[str, str]:
     """{KEY: raw value} from KEY=value lines; '#' starts a comment (also after
     a value, behind a blank); quotes around the value are dropped. Keys not in
     KNOWN are an error (a typo must not silently fall back to a default)."""
-    out = {}
+    out: dict[str, str] = {}
     for n, line in enumerate(text.splitlines(), 1):
         s = line.strip()
         if not s or s.startswith("#"):
@@ -338,7 +345,7 @@ def parse_conf(text, known):
     return out
 
 
-def parse_sccache_size(text):
+def parse_sccache_size(text: str) -> str:
     """A size for SCCACHE_CACHE_SIZE, in sccache's own spelling: a whole
     number with K, M, G or T (sccache counts them in 1024s and knows no
     fractions); 0 is refused (sccache needs a cap)."""
@@ -352,7 +359,7 @@ def parse_sccache_size(text):
 
 
 # Settings that belong to no prune target: {KEY: parser}.
-OPTIONS = {
+OPTIONS: dict[str, Callable[[str], bool | str]] = {
     "RUST_LEAN_DEBUGINFO": parse_bool,
     "RUST_SCCACHE": parse_bool,
     "RUST_SCCACHE_CACHE_SIZE": parse_sccache_size,
@@ -360,14 +367,14 @@ OPTIONS = {
 }
 
 
-def parse_off_or_duration(text):
+def parse_off_or_duration(text: str) -> int:
     """Seconds, or 0 for 0/off/no (the rule is off)."""
     if text.strip().lower() in ("0", "off", "no", "none"):
         return 0
     return parse_duration(text)
 
 
-def known_keys():
+def known_keys() -> set[str]:
     keys = set(OPTIONS)
     for cls in TARGETS.values():
         keys.add(f"{cls.PREFIX}_ENABLED")
@@ -375,7 +382,7 @@ def known_keys():
     return keys
 
 
-def defaults_path():
+def defaults_path() -> str:
     """toolchains.conf next to this program: toolchains/toolchains.conf in
     CST, ~/.local/lib/cst/toolchains.conf for the timer's copy."""
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), DEFAULTS_NAME)
@@ -385,7 +392,7 @@ class Settings:
     """The checked settings of every target: defaults, then the user's file.
     Raises ConfigError on any bad line or value (nothing runs then)."""
 
-    def __init__(self, home):
+    def __init__(self, home: str) -> None:
         known = known_keys()
         path = defaults_path()
         try:
@@ -398,8 +405,8 @@ class Settings:
         lacking = sorted(known - set(defaults))
         if lacking:
             raise ConfigError(f"{path} lacks {', '.join(lacking)}")
-        self.user_path = os.path.join(home, CONF_REL)
-        self.source = tilde(self.user_path, home)
+        self.user_path: str = os.path.join(home, CONF_REL)
+        self.source: str = tilde(self.user_path, home)
         try:
             with open(self.user_path, encoding="utf-8") as f:
                 text = f.read()
@@ -409,11 +416,11 @@ class Settings:
             user = parse_conf(text, known)
         except ConfigError as e:
             raise ConfigError(f"{self.source}: {e}") from None
-        self.user_keys = set(user)
-        self.raw = {**defaults, **user}
-        self.enabled = {}
-        self.policy = {}
-        self.options = {}
+        self.user_keys: set[str] = set(user)
+        self.raw: dict[str, str] = {**defaults, **user}
+        self.enabled: dict[str, bool] = {}
+        self.policy: dict[str, dict[str, Any]] = {}
+        self.options: dict[str, Any] = {}
         for key, parse in OPTIONS.items():
             try:
                 self.options[key] = parse(self.raw[key])
@@ -431,26 +438,26 @@ class Settings:
             except ConfigError as e:
                 raise ConfigError(f"{self.where(*(f'{cls.PREFIX}_{k}' for k in cls.SETTINGS))}: {e}") from None
 
-    def where(self, *keys):
+    def where(self, *keys: str) -> str:
         return self.source if any(k in self.user_keys for k in keys) else "defaults"
 
-    def source_of(self, cls):
+    def source_of(self, cls: type[Target]) -> str:
         keys = [f"{cls.PREFIX}_{k}" for k in ("ENABLED", *cls.SETTINGS)]
         return self.where(*keys)
 
 
 # ---- rust:build: the root ------------------------------------------------------------------
-def expected_template(home):
+def expected_template(home: str) -> str:
     return f"{home}/{ROOT_REL}/{HASH_VAR}"
 
 
-def cargo_config_path(home):
+def cargo_config_path(home: str) -> str:
     ch = os.environ.get("CARGO_HOME", "")
     base = ch if os.path.isabs(ch) else os.path.join(home, ".cargo")
     return os.path.join(base, "config.toml")
 
 
-def resolve_root(home):
+def resolve_root(home: str) -> str | None:
     """The root folder, from build-dir in the user's cargo config. Raises
     Refused when the setting is not the one CST writes, or the folder is odd.
     Returns None when the folder does not exist yet (nothing to do)."""
@@ -487,34 +494,34 @@ def resolve_root(home):
 
 # ---- scanning -------------------------------------------------------------------------------
 class Folder:
-    def __init__(self, root, top, leaf):
-        self.key = f"{top}/{leaf}"
-        self.path = os.path.join(root, top, leaf)
-        self.size = 0
-        self.activity = 0.0
-        self.entries = 0
-        self.problem = ""
-        self.future = 0
-        self.foreign = 0
+    def __init__(self, root: str, top: str, leaf: str) -> None:
+        self.key: str = f"{top}/{leaf}"
+        self.path: str = os.path.join(root, top, leaf)
+        self.size: int = 0
+        self.activity: float = 0.0
+        self.entries: int = 0
+        self.problem: str = ""
+        self.future: int = 0
+        self.foreign: int = 0
         # Cargo's incremental folders inside: [[path, size]], <profile>/incremental
         # and <triple>/<profile>/incremental.
-        self.inc = []
+        self.inc: list[Any] = []
 
     @property
-    def inc_size(self):
-        return sum(n for _, n in self.inc)
+    def inc_size(self) -> int:
+        return sum(int(n) for _, n in self.inc)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Folder({self.key}, {self.size}, {self.activity})"
 
 
-def measure(folder, dev, now):
+def measure(folder: Folder, dev: int, now: float) -> Folder:
     """Size (st_blocks, hardlinks once), newest mtime and entry count of a
     folder; never follows symlinks, never leaves the filesystem. On btrfs,
     st_blocks is the size before compression (what du shows), not the
     compressed extents actually on disk. Also sizes the incremental
     folders (folder.inc) on the way."""
-    seen = set()
+    seen: set[int] = set()
     newest = 0.0
     try:
         st = os.lstat(folder.path)
@@ -571,10 +578,12 @@ def measure(folder, dev, now):
     return folder
 
 
-def scan(root, now):
+def scan(root: str, now: float) -> tuple[list[Folder], list[Folder], list[tuple[str, str]]]:
     """(folders, trash, others): the hash folders (measured), leftovers of an
     interrupted run, and anything else in the root (name, why left alone)."""
-    folders, trash, others = [], [], []
+    folders: list[Folder] = []
+    trash: list[Folder] = []
+    others: list[tuple[str, str]] = []
     rst = os.lstat(root)
     dev = rst.st_dev
     try:
@@ -607,20 +616,20 @@ def scan(root, now):
         except OSError as err:
             others.append((e.name, f"cannot read: {err.strerror}"))
             continue
-        for l in leaves:
+        for leaf in leaves:
             try:
-                ls = l.stat(follow_symlinks=False)
+                ls = leaf.stat(follow_symlinks=False)
             except OSError:
                 continue
-            why = classify(l.name, ls, dev, HASH_LEAF)
+            why = classify(leaf.name, ls, dev, HASH_LEAF)
             if why:
-                others.append((f"{e.name}/{l.name}", why))
+                others.append((f"{e.name}/{leaf.name}", why))
                 continue
-            folders.append(measure(Folder(root, e.name, l.name), dev, now))
+            folders.append(measure(Folder(root, e.name, leaf.name), dev, now))
     return folders, trash, others
 
 
-def classify(name, st, dev, pattern):
+def classify(name: str, st: os.stat_result, dev: int, pattern: re.Pattern[str]) -> str:
     """Why an entry is not a hash folder, or "" if it is one."""
     if not pattern.match(name):
         return "not a cargo hash name"
@@ -634,7 +643,7 @@ def classify(name, st, dev, pattern):
 
 
 # ---- in use ---------------------------------------------------------------------------------
-def prefixes(root):
+def prefixes(root: str) -> tuple[str, ...]:
     """The root as a process may see it: /home is a symlink to /var/home on
     Silverblue and in toolbox containers."""
     out = {root}
@@ -645,7 +654,7 @@ def prefixes(root):
     return tuple(sorted(out))
 
 
-def proc_users(root, uid=None):
+def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[str, str]]], int]:
     """({folder key: [(pid, comm), ...]}, unreadable): the processes of the
     user that have their cwd, executable, an open file or a mapped file
     under ROOT. Keys are 'XX/YYYY' or a trash name. Processes of other users
@@ -653,13 +662,13 @@ def proc_users(root, uid=None):
     inspected (from inside a container: those in other containers' user
     namespaces; the host sees them all) and that are Rust tools (cargo,
     rustc, clippy-driver, rust-analyzer, build scripts: by their name)."""
-    uid = os.getuid() if uid is None else uid
+    target_uid = os.getuid() if uid is None else uid
     pre = prefixes(root)
     me = os.getpid()
-    found = {}
+    found: dict[str, list[tuple[str, str]]] = {}
     unreadable = 0
 
-    def note(pid, comm, path):
+    def note(pid: str, comm: str, path: str) -> None:
         if path.endswith(" (deleted)"):
             path = path[: -len(" (deleted)")]
         for p in pre:
@@ -680,7 +689,7 @@ def proc_users(root, uid=None):
             continue
         base = os.path.join(PROC, pid)
         try:
-            if os.stat(base).st_uid != uid:
+            if os.stat(base).st_uid != target_uid:
                 continue
             with open(os.path.join(base, "comm")) as f:
                 comm = f.read().strip()
@@ -718,10 +727,10 @@ def proc_users(root, uid=None):
     return found, unreadable
 
 
-def lock_files(path):
+def lock_files(path: str) -> list[str]:
     """Cargo's lock files in a build folder: <profile>/<lock> and
     <triple>/<profile>/<lock> (regular files only)."""
-    out = []
+    out: list[str] = []
     try:
         with os.scandir(path) as it:
             level1 = [e for e in it if e.is_dir(follow_symlinks=False)]
@@ -745,10 +754,10 @@ def lock_files(path):
     return sorted(out)
 
 
-def take_locks(path):
+def take_locks(path: str) -> tuple[list[int], str | None]:
     """Exclusive non-blocking flocks on every cargo lock in PATH:
     (fds, None) or ([], busy lock path) with nothing held."""
-    fds = []
+    fds: list[int] = []
     for p in lock_files(path):
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -767,7 +776,7 @@ def take_locks(path):
     return fds, None
 
 
-def release(fds):
+def release(fds: Sequence[int]) -> None:
     for fd in fds:
         try:
             os.close(fd)
@@ -786,13 +795,13 @@ CARGO_COMM = re.compile(r"cargo(-.+)?")
 CARGO_ENV = ("CARGO_HOME", "CARGO_BUILD_BUILD_DIR", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
 
 
-def cargo_procs(uid=None):
+def cargo_procs(uid: int | None = None) -> list[dict[str, Any]]:
     """The user's processes named cargo or cargo-* (cargo-nextest,
     cargo-clippy, ...): [{pid, comm, cwd, exe, args, env}]. cwd is None when
     it cannot be read."""
-    uid = os.getuid() if uid is None else uid
+    target_uid = os.getuid() if uid is None else uid
     me = os.getpid()
-    out = []
+    out: list[dict[str, Any]] = []
     try:
         pids = [p for p in os.listdir(PROC) if p.isdigit()]
     except OSError:
@@ -802,7 +811,7 @@ def cargo_procs(uid=None):
             continue
         base = os.path.join(PROC, pid)
         try:
-            if os.stat(base).st_uid != uid:
+            if os.stat(base).st_uid != target_uid:
                 continue
             with open(os.path.join(base, "comm")) as f:
                 comm = f.read().strip()
@@ -810,7 +819,7 @@ def cargo_procs(uid=None):
             continue
         if not CARGO_COMM.fullmatch(comm):
             continue
-        p = {"pid": pid, "comm": comm, "cwd": None, "exe": "", "args": [], "env": {}}
+        p: dict[str, Any] = {"pid": pid, "comm": comm, "cwd": None, "exe": "", "args": [], "env": {}}
         try:
             p["cwd"] = os.readlink(os.path.join(base, "cwd"))
         except OSError:
@@ -835,7 +844,7 @@ def cargo_procs(uid=None):
     return out
 
 
-def manifest_arg(args, cwd):
+def manifest_arg(args: Sequence[str], cwd: str) -> str:
     """--manifest-path of a cargo command line (absolute), or ''."""
     for i, a in enumerate(args):
         if a == "--":
@@ -850,13 +859,13 @@ def manifest_arg(args, cwd):
     return ""
 
 
-def cargo_binary(p, home):
+def cargo_binary(p: Mapping[str, Any], home: str) -> str:
     """The cargo to ask: the process's own program when it is a cargo (the
     same version computes the same folder name), else the user's."""
-    exe = p["exe"]
+    exe = str(p["exe"])
     if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == "cargo" and os.access(exe, os.X_OK):
         return exe
-    ch = p["env"].get("CARGO_HOME") or os.environ.get("CARGO_HOME", "")
+    ch = str(p["env"].get("CARGO_HOME") or os.environ.get("CARGO_HOME", ""))
     for c in (
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
@@ -866,11 +875,19 @@ def cargo_binary(p, home):
     return ""
 
 
-def cargo_query(p, home):
+def cargo_query(
+    p: Mapping[str, Any], home: str
+) -> (
+    tuple[None, str]
+    | tuple[
+        tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]],
+        tuple[list[str], dict[str, str], str],
+    ]
+):
     """(cache key, command, env, cwd) of the `cargo metadata` that tells the
     build folder of process P; or (None, why) when it cannot be asked."""
     cwd = p["cwd"]
-    if not cwd or cwd.endswith(" (deleted)") or not os.path.isdir(cwd):
+    if not isinstance(cwd, str) or not cwd or cwd.endswith(" (deleted)") or not os.path.isdir(cwd):
         return None, f"its working folder {cwd or '(unreadable)'} is not reachable"
     cargo = cargo_binary(p, home)
     if not cargo:
@@ -890,7 +907,7 @@ def cargo_query(p, home):
     return key, (cmd, env, cwd)
 
 
-def ask_cargo(cmd, env, cwd):
+def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str | None, str | None]:
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
     try:
@@ -910,22 +927,27 @@ def ask_cargo(cmd, env, cwd):
     return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
 
 
-def cargo_users(root, home, cache):
+def cargo_users(
+    root: str,
+    home: str,
+    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str | None, str]]]:
     """({folder key: [(pid, comm)]}, [(pid, comm, cwd, why)]): the folders
     running cargo processes build in, and the cargo processes whose folder
     could not be found out. CACHE (a dict) keeps the answers for one run."""
     pre = prefixes(root)
-    found, unknown = {}, []
+    found: dict[str, list[tuple[str, str]]] = {}
+    unknown: list[tuple[str, str, str | None, str]] = []
     for p in cargo_procs():
         key, q = cargo_query(p, home)
-        if key is None:
-            unknown.append((p["pid"], p["comm"], p["cwd"], q))
+        if key is None or isinstance(q, str):
+            unknown.append((p["pid"], p["comm"], p["cwd"], cast(str, q)))
             continue
         if key not in cache:
             cache[key] = ask_cargo(*q)
         bd, why = cache[key]
-        if why:
-            unknown.append((p["pid"], p["comm"], p["cwd"], why))
+        if why or bd is None:
+            unknown.append((p["pid"], p["comm"], p["cwd"], why or "unknown"))
             continue
         for pr in pre:
             if bd.startswith(pr + "/"):
@@ -937,14 +959,14 @@ def cargo_users(root, home, cache):
     return found, unknown
 
 
-def unknown_text(unknown):
+def unknown_text(unknown: Sequence[tuple[int | str, str, str | None, str]]) -> str:
     pid, comm, cwd, why = unknown[0]
     more = f" (and {len(unknown) - 1} more)" if len(unknown) > 1 else ""
     return f"{comm} (pid {pid}) in {cwd or '?'}: its build folder is unknown ({why}){more}"
 
 
-def merge_users(*maps):
-    out = {}
+def merge_users(*maps: Mapping[str, Sequence[tuple[int | str, str]]]) -> dict[str, list[tuple[int | str, str]]]:
+    out: dict[str, list[tuple[int | str, str]]] = {}
     for m in maps:
         for k, v in m.items():
             lst = out.setdefault(k, [])
@@ -998,7 +1020,7 @@ class Incomplete(Exception):
     pass
 
 
-def lower_priority():
+def lower_priority() -> None:
     """In the child, before exec: the lowest CPU priority (the timer runs at
     Nice=19 anyway; a manual run should not slow builds either)."""
     try:
@@ -1007,7 +1029,7 @@ def lower_priority():
         pass
 
 
-def run_idle(cmd, cwd, env, timeout):
+def run_idle(cmd: Sequence[str], cwd: str, env: Mapping[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
     """subprocess.run at idle CPU and IO priority (ionice -c 3 when present)."""
     io = shutil.which("ionice")
     full = ([io, "-c", "3"] if io else []) + list(cmd)
@@ -1024,7 +1046,9 @@ def run_idle(cmd, cwd, env, timeout):
     )
 
 
-def walk_dirs(top, depth_max, deadline, stop=None):
+def walk_dirs(
+    top: str, depth_max: int, deadline: float, stop: Callable[[str, set[str]], bool] | None = None
+) -> Iterator[tuple[str, set[str]]]:
     """Yield (dir, names) for TOP and the folders below it, at most DEPTH_MAX
     levels down; never follows symlinks; skips SCAN_SKIP and hidden folders;
     does not descend into a folder for which STOP(dir, names) is true (it is
@@ -1057,7 +1081,7 @@ def walk_dirs(top, depth_max, deadline, stop=None):
                 pass
 
 
-def git_common_dir(wt):
+def git_common_dir(wt: str) -> str | None:
     """The repository a worktree belongs to (its common git folder), or None
     when its .git is broken (a linked worktree whose repository is gone)."""
     g = os.path.join(wt, ".git")
@@ -1088,7 +1112,7 @@ def git_common_dir(wt):
         return None
 
 
-def git_worktrees(wt, deadline):
+def git_worktrees(wt: str, deadline: float) -> list[str]:
     """The worktree paths `git worktree list --porcelain` names for the
     repository of WT. Raises Incomplete when git fails."""
     git = shutil.which("git")
@@ -1107,8 +1131,10 @@ def git_worktrees(wt, deadline):
     if r.returncode != 0:
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         raise Incomplete(f"git worktree list in {wt}: {last}")
-    out, cur, bare = [], None, False
-    for line in r.stdout.splitlines() + [""]:
+    out: list[str] = []
+    cur: str | None = None
+    bare = False
+    for line in [*r.stdout.splitlines(), ""]:
         if line.startswith("worktree "):
             cur, bare = line[len("worktree ") :], False
         elif line == "bare":
@@ -1124,31 +1150,32 @@ class Workspaces:
     """What the search found. claimed: {folder key: [workspace root, ...]};
     incomplete: why the orphan rule must not run ('' when complete)."""
 
-    def __init__(self):
-        self.repos = 0
-        self.worktrees = []
-        self.manifests = 0
-        self.asked = 0
-        self.claimed = {}
-        self.pins = []  # rust-toolchain(.toml) files
-        self.tool_files = []  # files that may name a toolchain (TOOL_FILE_NAMES, ...)
-        self.failures = []  # [(manifest, why)]
-        self.incomplete = ""
-        self.seconds = 0.0
+    def __init__(self) -> None:
+        self.repos: int = 0
+        self.worktrees: list[str] = []
+        self.manifests: int = 0
+        self.asked: int = 0
+        self.claimed: dict[str, list[str]] = {}
+        self.pins: list[str] = []  # rust-toolchain(.toml) files
+        self.tool_files: list[str] = []  # files that may name a toolchain (TOOL_FILE_NAMES, ...)
+        self.failures: list[tuple[str, str]] = []  # [(manifest, why)]
+        self.incomplete: str = ""
+        self.seconds: float = 0.0
 
 
-def find_worktrees(home, deadline, ws):
+def find_worktrees(home: str, deadline: float, ws: Workspaces) -> list[str]:
     """Every git worktree of the repositories under ~/Workspace (and those
     the repositories list elsewhere)."""
     top = os.path.join(home, WORKSPACE_REL)
     if not os.path.isdir(top):
         raise Incomplete(f"~/{WORKSPACE_REL} not found")
-    found = []
+    found: list[str] = []
     for d, names in walk_dirs(top, REPO_DEPTH, deadline):
         if ".git" in names:
             found.append(d)
     ws.repos = len(found)
-    roots, groups = set(), {}
+    roots: set[str] = set()
+    groups: dict[str, str] = {}
     for d in found:
         common = git_common_dir(d)
         roots.add(os.path.realpath(d))
@@ -1161,17 +1188,19 @@ def find_worktrees(home, deadline, ws):
     return sorted(roots)
 
 
-def is_tool_file(name):
+def is_tool_file(name: str) -> bool:
     return name in TOOL_FILE_NAMES or name.endswith(TOOL_FILE_SUFFIXES)
 
 
-def find_manifests(wt, deadline):
+def find_manifests(wt: str, deadline: float) -> tuple[list[str], list[str], list[str]]:
     """(Cargo.toml files, rust-toolchain files, files that may name a
     toolchain) in worktree WT; folders that are themselves a worktree or
     repository (they have .git) are left to their own walk."""
-    manifests, pins, tools = [], [], []
+    manifests: list[str] = []
+    pins: list[str] = []
+    tools: list[str] = []
 
-    def other_repo(d, names):
+    def other_repo(d: str, names: set[str]) -> bool:
         return d != wt and ".git" in names
 
     for d, names in walk_dirs(wt, CRATE_DEPTH, deadline, stop=other_repo):
@@ -1191,14 +1220,14 @@ def find_manifests(wt, deadline):
     return manifests, pins, tools
 
 
-def metadata_env(home):
+def metadata_env(home: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ("RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR")}
     # Never download a toolchain or anything else; plain output; the home asked about.
     env.update(HOME=home, RUSTUP_AUTO_INSTALL="0", CARGO_NET_OFFLINE="true", CARGO_TERM_COLOR="never")
     return env
 
 
-def user_cargo(home):
+def user_cargo(home: str) -> str:
     ch = os.environ.get("CARGO_HOME", "")
     for c in (
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
@@ -1209,7 +1238,9 @@ def user_cargo(home):
     return ""
 
 
-def workspace_metadata(cargo, manifest, env, deadline):
+def workspace_metadata(
+    cargo: str, manifest: str, env: Mapping[str, str], deadline: float
+) -> tuple[dict[str, Any] | None, str | None]:
     """cargo metadata of one Cargo.toml: (data, None) or (None, why)."""
     left = deadline - time.monotonic()
     if left <= 0:
@@ -1242,7 +1273,7 @@ def workspace_metadata(cargo, manifest, env, deadline):
     return data, None
 
 
-def claimed_folders(root, home, with_cargo=True):
+def claimed_folders(root: str | None, home: str, with_cargo: bool = True) -> Workspaces:
     """Workspaces: which folders of ROOT a workspace on disk still claims.
     WITH_CARGO=False only lists worktrees and rust-toolchain files (status)."""
     ws = Workspaces()
@@ -1262,20 +1293,21 @@ def claimed_folders(root, home, with_cargo=True):
             ws.manifests += len(manifests)
             if not with_cargo:
                 continue
-            covered = set()
+            covered: set[str] = set()
             # The shallowest first: a workspace's root answers for its members.
             for m in sorted(manifests, key=lambda p: (p.count("/"), p)):
                 if m in covered:
                     continue
                 data, why = workspace_metadata(cargo, m, env, deadline)
                 ws.asked += 1
-                if why:
-                    ws.failures.append((m, why))
+                if why or data is None:
+                    ws.failures.append((m, why or "unknown"))
                     continue
                 covered.add(m)
                 for p in data.get("packages") or []:
-                    if isinstance(p, dict) and isinstance(p.get("manifest_path"), str):
-                        covered.add(os.path.normpath(p["manifest_path"]))
+                    mp = p.get("manifest_path") if isinstance(p, dict) else None
+                    if isinstance(mp, str):
+                        covered.add(os.path.normpath(mp))
                 wr = data.get("workspace_root")
                 if isinstance(wr, str):
                     covered.add(os.path.join(os.path.normpath(wr), "Cargo.toml"))
@@ -1302,13 +1334,19 @@ def claimed_folders(root, home, with_cargo=True):
 
 
 # ---- the plan -------------------------------------------------------------------------------
-def decide(folders, pol, now, in_use, claimed=None):
+def decide(
+    folders: Sequence[Folder],
+    pol: Mapping[str, Any],
+    now: float,
+    in_use: Mapping[str, Sequence[tuple[int | str, str]]],
+    claimed: Mapping[str, Sequence[str]] | None = None,
+) -> list[tuple[Folder, str, str]]:
     """[(folder, action, reason)] sorted least recently active first.
     action: 'delete', 'trim' (delete only its incremental folders) or
     'keep'. CLAIMED: {folder key: ...} of a complete workspace search, or
     None (no orphan rule). Pure: no file access."""
     order = sorted(folders, key=lambda f: (f.activity, f.key))
-    act = {}
+    act: dict[str, tuple[str, str]] = {}
     total = sum(f.size for f in folders)
     inc_idle = pol.get("incremental_idle", 0)
     for f in order:
@@ -1337,32 +1375,33 @@ def decide(folders, pol, now, in_use, claimed=None):
                 continue
             act[f.key] = ("delete", f"over MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}), least recently active")
             total -= f.size - (f.inc_size if a == "trim" else 0)
-    out = []
+    out: list[tuple[Folder, str, str]] = []
     for f in order:
         a, why = act.get(f.key, ("keep", f"active {ago(now - f.activity)} ago"))
         out.append((f, a, why))
     return out
 
 
-def users_text(users):
+def users_text(users: Sequence[tuple[int | str, str]]) -> str:
     shown = ", ".join(f"{comm} (pid {pid})" for pid, comm in users[:3])
     return shown + (f" and {len(users) - 3} more" if len(users) > 3 else "")
 
 
-def after_total(plan):
+def after_total(plan: Sequence[tuple[Folder, str, str]]) -> int:
     return sum(f.size - (f.inc_size if a == "trim" else 0) for f, a, _ in plan if a != "delete")
 
 
 # ---- deleting -------------------------------------------------------------------------------
-def time_left(deadline):
+def time_left(deadline: float | None) -> float | None:
     """Seconds until DEADLINE (time.monotonic()), or None without one."""
     return None if deadline is None else deadline - time.monotonic()
 
 
-def remove_tree(path, timeout=None):
+def remove_tree(path: str, timeout: float | None = None) -> tuple[bool, str]:
     """rm -rf --one-file-system (never follows symlinks). TIMEOUT (seconds,
     None: none): rm is stopped then; what is left of PATH (an already
     renamed-away folder) is a leftover that the next run deletes."""
+    effective_timeout = None if timeout is None else max(1.0, float(timeout))
     try:
         r = subprocess.run(
             ["rm", "-rf", "--one-file-system", "--", path],
@@ -1370,14 +1409,22 @@ def remove_tree(path, timeout=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=None if timeout is None else max(1, timeout),
+            timeout=effective_timeout,
         )
     except subprocess.TimeoutExpired:
-        return False, f"stopped after {int(max(1, timeout))}s (the run's time budget); the next run deletes the rest"
+        secs = int(effective_timeout) if effective_timeout is not None else 0
+        return False, f"stopped after {secs}s (the run's time budget); the next run deletes the rest"
     return r.returncode == 0, r.stdout.strip()
 
 
-def guarded(root, folder, home, cache, step, recheck=None):
+def guarded(
+    root: str,
+    folder: Folder,
+    home: str,
+    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    step: Callable[[], tuple[str, str]],
+    recheck: Callable[[], str] | None = None,
+) -> tuple[str, str]:
     """Run STEP() while holding every cargo lock of FOLDER, after checking
     that no process uses it and, with RECHECK, that the rule that chose the
     action still holds (RECHECK() measures the folder again and returns ''
@@ -1386,7 +1433,7 @@ def guarded(root, folder, home, cache, step, recheck=None):
     process whose build folder is unknown runs; nothing more is deleted in
     this run."""
     fds, busy = take_locks(folder.path)
-    if busy:
+    if busy is not None:
         return "busy", f"cargo lock held: {os.path.relpath(busy, folder.path)}"
     # The users are checked while the locks are held: a cargo that starts
     # after this check must first compile, and that waits for the lock.
@@ -1411,7 +1458,15 @@ def guarded(root, folder, home, cache, step, recheck=None):
         release(fds)
 
 
-def delete_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
+def delete_folder(
+    root: str,
+    folder: Folder,
+    now: float,
+    home: str,
+    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    recheck: Callable[[], str] | None = None,
+    rm_deadline: float | None = None,
+) -> tuple[str, str]:
     """Lock, check for users (and RECHECK, see guarded), rename away,
     unlock, delete. ('deleted'|'busy'|'changed'|'stop'|'failed', detail)."""
     try:
@@ -1423,7 +1478,7 @@ def delete_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None
     top = os.path.dirname(folder.path)
     trash = os.path.join(root, f"{TRASH_PREFIX}{folder.key.replace('/', '')}-{int(now)}")
 
-    def step():
+    def step() -> tuple[str, str]:
         try:
             os.rename(folder.path, trash)
         except OSError as e:
@@ -1447,16 +1502,24 @@ def delete_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None
     return "deleted", ""
 
 
-def trim_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
+def trim_folder(
+    root: str,
+    folder: Folder,
+    now: float,
+    home: str,
+    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    recheck: Callable[[], str] | None = None,
+    rm_deadline: float | None = None,
+) -> tuple[str, str]:
     """Delete only the incremental folders of FOLDER, with the same locks and
     checks as delete_folder (RECHECK may update folder.inc). Each is renamed away while the locks are held;
     the modification time of its parent is put back afterwards, so that the
     folder's last activity (MAX_IDLE) does not move. ('trimmed'|'busy'|
     'stop'|'failed', detail)."""
-    moved = []
+    moved: list[str] = []
     base = folder.key.replace("/", "")
 
-    def step():
+    def step() -> tuple[str, str]:
         for i, (path, _size) in enumerate(folder.inc):
             parent = os.path.dirname(path)
             try:
@@ -1481,7 +1544,7 @@ def trim_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
     result, detail = guarded(root, folder, home, cache, step, recheck)
     # What was renamed away is deleted also after a later failure (else the
     # next run deletes it as a leftover).
-    errors = []
+    errors: list[str] = []
     for t in moved:
         ok, msg = remove_tree(t, time_left(rm_deadline))
         if not ok:
@@ -1494,11 +1557,11 @@ def trim_folder(root, folder, now, home, cache, recheck=None, rm_deadline=None):
 
 
 # ---- targets --------------------------------------------------------------------------------
-def state_path(home, tid):
+def state_path(home: str, tid: str) -> str:
     return os.path.join(home, STATE_DIR_REL, f"toolchains-{tid.replace(':', '-')}.json")
 
 
-def write_state(home, tid, data):
+def write_state(home: str, tid: str, data: Mapping[str, Any]) -> None:
     path = state_path(home, tid)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1510,10 +1573,11 @@ def write_state(home, tid, data):
         say(f"{tid}: could not save the run summary: {e}", 4)
 
 
-def read_state(home, tid):
+def read_state(home: str, tid: str) -> dict[str, Any] | None:
     try:
         with open(state_path(home, tid)) as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, dict) else None
     except OSError, ValueError:
         return None
 
@@ -1533,32 +1597,64 @@ class Target:
       status_lines()             [line] for status (size, oldest, ...)
       last_run_text(state)       one line from the saved summary"""
 
-    ID = PREFIX = WHAT = ""
-    SETTINGS = ()
+    ID: str = ""
+    PREFIX: str = ""
+    WHAT: str = ""
+    SETTINGS: tuple[str, ...] = ()
     # time.monotonic() by which an apply must be done (None: no limit);
     # cmd_prune sets it from RUN_BUDGET.
-    deadline = None
+    deadline: float | None = None
     # PATH to look for programs in (None: this process's PATH).
-    path = None
+    path: str | None = None
     # The most seconds one apply can take (None: no fixed bound, only the
     # run's budget). prune apply runs the bounded targets first.
-    MAX_SECONDS = None
+    MAX_SECONDS: int | None = None
     # check() looks for a program on PATH (auto on then checks the user
     # manager's PATH, which the timer runs with).
-    USES_PATH = False
+    USES_PATH: bool = False
+    named: bool = False
 
-    def __init__(self, home, now, policy):
-        self.home, self.now, self.policy = home, now, policy
-        self.started = time.monotonic()
+    def __init__(self, home: str, now: float, policy: dict[str, Any] | None) -> None:
+        self.home: str = home
+        self.now: float = now
+        self.policy: dict[str, Any] = {} if policy is None else policy
+        self.started: float = time.monotonic()
 
-    def tsay(self, msg, prio=6):
+    @staticmethod
+    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @staticmethod
+    def policy_text(pol: Mapping[str, Any]) -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    def last_run_text(s: Mapping[str, Any]) -> str:
+        raise NotImplementedError
+
+    def location(self) -> str:
+        raise NotImplementedError
+
+    def check(self) -> None:
+        raise NotImplementedError
+
+    def plan(self) -> int:
+        raise NotImplementedError
+
+    def apply(self) -> int:
+        raise NotImplementedError
+
+    def status_lines(self) -> list[str]:
+        raise NotImplementedError
+
+    def tsay(self, msg: str, prio: int = 6) -> None:
         say(f"{self.ID}: {msg}", prio)
 
-    def clock(self):
+    def clock(self) -> float:
         """Now, on the run's clock: NOW plus the time since the start."""
         return self.now + (time.monotonic() - self.started)
 
-    def time_left(self):
+    def time_left(self) -> float | None:
         """Seconds left of the run's time budget (None: no limit)."""
         return time_left(self.deadline)
 
@@ -1570,8 +1666,8 @@ class RustBuild(Target):
     SETTINGS = ("MAX_IDLE", "MAX_TOTAL", "MIN_KEEP", "ORPHANS", "INCREMENTAL_IDLE")
 
     @staticmethod
-    def make_policy(vals, prefix):
-        pol = {
+    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, Any]:
+        pol: dict[str, Any] = {
             "max_idle": parse_duration(vals["MAX_IDLE"]),
             "max_total": parse_size(vals["MAX_TOTAL"]),
             "min_keep": parse_duration(vals["MIN_KEEP"]),
@@ -1592,7 +1688,7 @@ class RustBuild(Target):
         return pol
 
     @staticmethod
-    def policy_text(pol):
+    def policy_text(pol: Mapping[str, Any]) -> str:
         cap = gib(pol["max_total"]) if pol["max_total"] else "off"
         inc = span(pol["incremental_idle"]) if pol.get("incremental_idle") else "off"
         orph = "on" if pol.get("orphans", True) else "off"
@@ -1601,20 +1697,20 @@ class RustBuild(Target):
             f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}"
         )
 
-    def location(self):
+    def location(self) -> str:
         return os.path.join(self.home, ROOT_REL)
 
-    def check(self):
+    def check(self) -> None:
         resolve_root(self.home)
 
-    def gather(self):
+    def gather(self) -> tuple[str | None, list[Folder], list[Folder], list[tuple[str, str]]]:
         root = resolve_root(self.home)
         if root is None:
             return None, [], [], []
         folders, trash, others = scan(root, self.now)
         return root, folders, trash, others
 
-    def workspaces(self, root):
+    def workspaces(self, root: str) -> tuple[dict[str, list[str]] | None, Workspaces | None]:
         """(claimed or None, Workspaces or None): the folders claimed by a
         workspace; None when the orphan rule is off or the search is
         incomplete (then nothing is an orphan)."""
@@ -1628,7 +1724,9 @@ class RustBuild(Target):
             return None, ws
         return ws.claimed, ws
 
-    def workspace_lines(self, ws, claimed, folders):
+    def workspace_lines(
+        self, ws: Workspaces | None, claimed: Mapping[str, Sequence[str]] | None, folders: Sequence[Folder]
+    ) -> list[str]:
         if ws is None:
             return ["orphans: the rule is off (RUST_BUILD_ORPHANS=no)"]
         out = [
@@ -1646,7 +1744,7 @@ class RustBuild(Target):
             )
         return out
 
-    def plan(self):
+    def plan(self) -> int:
         home, now, pol = self.home, self.now, self.policy
         root, folders, trash, others = self.gather()
         if root is None:
@@ -1660,9 +1758,9 @@ class RustBuild(Target):
         claimed, ws = self.workspaces(root)
         for line in self.workspace_lines(ws, claimed, folders):
             say(f"  {line}")
-        users, unreadable = proc_users(root)
+        users_map, unreadable = proc_users(root)
         ties, unknown = cargo_users(root, home, {})
-        users = merge_users(users, ties)
+        users = merge_users(users_map, ties)
         plan = decide(folders, pol, now, users, claimed)
         if plan:
             say(f"  {'ACTION':<7} {'SIZE':>10}  {'LAST ACTIVE':<16}  FOLDER            WHY")
@@ -1691,7 +1789,7 @@ class RustBuild(Target):
             say(f"  note: {unknown_text(unknown)}; apply deletes nothing while it runs")
         return 0
 
-    def apply(self):
+    def apply(self) -> int:
         home, now, pol = self.home, self.now, self.policy
         root, folders, trash, others = self.gather()
         if root is None:
@@ -1720,9 +1818,9 @@ class RustBuild(Target):
         for line in self.workspace_lines(ws, claimed, folders):
             self.tsay(line, 5 if claimed is None and ws is not None else 6)
         rc = 0
-        cache = {}
-        users, unreadable = proc_users(root)
-        users = merge_users(users, cargo_users(root, home, cache)[0])
+        cache: dict[tuple[Any, ...], tuple[str | None, str | None]] = {}
+        users_map, unreadable = proc_users(root)
+        users: dict[str, list[tuple[int | str, str]]] = merge_users(users_map, cargo_users(root, home, cache)[0])
         if unreadable:
             self.tsay(
                 f"{unreadable} Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", 5
@@ -1736,7 +1834,8 @@ class RustBuild(Target):
                 f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
                 6 if ok else 3,
             )
-        deleted, trimmed = {}, {}
+        deleted: dict[str, Folder] = {}
+        trimmed: dict[str, int] = {}
         nbusy = failed = 0
         left = list(folders)
         # Said once: what the policy alone would delete but a process uses now.
@@ -1745,18 +1844,19 @@ class RustBuild(Target):
                 nbusy += 1
                 self.tsay(f"skipped {f.key}: in use: {users_text(users[f.key])}", 5)
         dev = os.lstat(root).st_dev
-        rechecked = {}
+        rechecked: dict[str, int] = {}
         stopped_by_budget = False
+        root_dir = root
 
-        def recheck(f, a):
+        def recheck(f: Folder, a: str) -> Callable[[], str]:
             """Measure F again (the locks are held) and plan again with it:
             '' when the rule still gives action A (or a delete when A is a
             trim), else why not. F takes the fresh measurement either way."""
 
-            def check():
+            def check() -> str:
                 cur = self.clock()
                 top, leaf = f.key.split("/")
-                fresh = measure(Folder(root, top, leaf), dev, cur)
+                fresh = measure(Folder(root_dir, top, leaf), dev, cur)
                 got, gwhy = next(
                     (x, w)
                     for g, x, w in decide([fresh if g is f else g for g in left], pol, cur, users, claimed)
@@ -1789,9 +1889,9 @@ class RustBuild(Target):
                 )
                 break
             if a == "delete":
-                result, detail = delete_folder(root, f, now, home, cache, recheck(f, a), self.deadline)
+                result, detail = delete_folder(root_dir, f, now, home, cache, recheck(f, a), self.deadline)
             else:
-                result, detail = trim_folder(root, f, now, home, cache, recheck(f, a), self.deadline)
+                result, detail = trim_folder(root_dir, f, now, home, cache, recheck(f, a), self.deadline)
             if result == "changed":
                 # Planned again with the fresh measurement; a folder that keeps
                 # changing is left for the next run.
@@ -1867,7 +1967,7 @@ class RustBuild(Target):
         return rc
 
     @staticmethod
-    def last_run_text(s):
+    def last_run_text(s: Mapping[str, Any]) -> str:
         extra = f", {s['busy']} busy" if s.get("busy") else ""
         extra += f", {s['failed']} failed" if s.get("failed") else ""
         trim = f", incremental of {s['trimmed']} folder(s) ({gib(s.get('trim_freed', 0))})" if s.get("trimmed") else ""
@@ -1876,7 +1976,7 @@ class RustBuild(Target):
             f"left {gib(s['total'])} in {s['folders']} folder(s)"
         )
 
-    def status_lines(self):
+    def status_lines(self) -> list[str]:
         """Size and age of the folders, or why they are not looked at."""
         try:
             root = resolve_root(self.home)
@@ -1903,7 +2003,7 @@ class RustBuild(Target):
         return out
 
 
-def print_others(others, trash):
+def print_others(others: Sequence[tuple[str, str]], trash: Sequence[Folder]) -> None:
     for name, why in others:
         say(f"  left alone: {name} ({why})")
     for t in trash:
@@ -1933,7 +2033,7 @@ UV_UNITS = {
 }
 
 
-def tree_size(path):
+def tree_size(path: str) -> int:
     """Size of a tree as du shows it (st_blocks, hardlinks once); symlinks
     not followed, other filesystems not entered."""
     try:
@@ -1945,13 +2045,13 @@ def tree_size(path):
     return measure(f, dev, time.time()).size
 
 
-def uv_env():
+def uv_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ("UV_CACHE_DIR", "UV_NO_CACHE", "UV_LOCK_TIMEOUT")}
     env.update(UV_LOCK_TIMEOUT=str(UV_LOCK_WAIT), NO_COLOR="1")
     return env
 
 
-def uv_lock_busy(cache):
+def uv_lock_busy(cache: str) -> bool:
     """True while another uv holds its cache lock (<cache>/.lock: every uv
     command holds it shared; `uv cache prune` needs it alone). The test lock
     is let go at once."""
@@ -1978,30 +2078,31 @@ class PythonUv(Target):
     USES_PATH = True
 
     @staticmethod
-    def make_policy(vals, prefix):
+    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, int]:
+        _ = prefix
         return {"interval": parse_off_or_duration(vals["INTERVAL"])}
 
     @staticmethod
-    def policy_text(pol):
+    def policy_text(pol: Mapping[str, Any]) -> str:
         every = span(pol["interval"]) if pol["interval"] else "every run"
         return f"uv cache prune, at most once per INTERVAL ({every})"
 
-    def location(self):
+    def location(self) -> str:
         return os.path.join(self.home, UV_CACHE_REL)
 
-    def uv(self):
+    def uv(self) -> str:
         uv = shutil.which("uv", path=self.path)
         if not uv:
             raise Refused("uv not found on PATH: nothing is done (install uv, or PYTHON_UV_ENABLED=no)")
         return uv
 
-    def check(self):
+    def check(self) -> None:
         self.uv()
 
-    def run_uv(self, uv, args, timeout):
+    def run_uv(self, uv: str, args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
         return run_idle([uv, *args], self.home, uv_env(), timeout)
 
-    def uv_facts(self, uv):
+    def uv_facts(self, uv: str) -> tuple[str, bool]:
         """(version text, has --dry-run): read only, from uv's own help."""
         try:
             v = self.run_uv(uv, ["--version"], 20).stdout.strip()
@@ -2010,7 +2111,7 @@ class PythonUv(Target):
             return "?", False
         return v or "?", "--dry-run" in h
 
-    def cache(self):
+    def cache(self) -> str | None:
         """The cache folder, or None when it does not exist (nothing to do)."""
         c = self.location()
         try:
@@ -2021,7 +2122,7 @@ class PythonUv(Target):
             raise Refused(f"{tilde(c, self.home)} is not a folder: refused")
         return c
 
-    def due(self):
+    def due(self) -> str:
         """'' when an automatic run is due, else why not."""
         last = read_state(self.home, self.ID)
         iv = self.policy["interval"]
@@ -2031,7 +2132,7 @@ class PythonUv(Target):
             return f"last run {ago(self.now - last['time'])} ago (INTERVAL {span(iv)})"
         return ""
 
-    def plan(self):
+    def plan(self) -> int:
         c = self.cache()
         if c is None:
             say(f"  ~/{UV_CACHE_REL} does not exist: nothing to do")
@@ -2059,7 +2160,7 @@ class PythonUv(Target):
             )
         return 0
 
-    def apply(self):
+    def apply(self) -> int:
         c = self.cache()
         if c is None:
             self.tsay(f"~/{UV_CACHE_REL} does not exist: nothing to do")
@@ -2072,7 +2173,7 @@ class PythonUv(Target):
         if uv_lock_busy(c):
             self.tsay("skipped: a uv command is using the cache (its lock is held); the next run tries again", 5)
             return 0
-        timeout = UV_TIMEOUT
+        timeout: float = UV_TIMEOUT
         left = self.time_left()
         if left is not None:
             if left < 2 * UV_LOCK_WAIT:
@@ -2113,10 +2214,10 @@ class PythonUv(Target):
         return 0
 
     @staticmethod
-    def last_run_text(s):
+    def last_run_text(s: Mapping[str, Any]) -> str:
         return f"{when(s['time'])}, removed {s.get('removed', 0)} file(s) ({gib(s.get('freed', 0))})"
 
-    def status_lines(self):
+    def status_lines(self) -> list[str]:
         c = self.location()
         if not os.path.isdir(c):
             return [f"size:     ~/{UV_CACHE_REL} does not exist"]
@@ -2132,12 +2233,12 @@ class PythonUv(Target):
 HOST_SUFFIX = re.compile(r"-(?:x86_64|aarch64|i686|armv7|riscv64gc|powerpc64le|s390x|loongarch64)-[\w.-]+\Z")
 
 
-def rustup_home(home):
+def rustup_home(home: str) -> str:
     rh = os.environ.get("RUSTUP_HOME", "")
     return rh if os.path.isabs(rh) else os.path.join(home, ".rustup")
 
 
-def pinned_channel(path):
+def pinned_channel(path: str) -> str:
     """The toolchain a rust-toolchain(.toml) file pins, or ''."""
     try:
         with open(path, "rb") as f:
@@ -2156,7 +2257,7 @@ def pinned_channel(path):
     return lines[0] if len(lines) == 1 else ""
 
 
-def rustup_default(home, rh):
+def rustup_default(home: str, rh: str) -> str:
     """The default toolchain's name, or ''. settings.toml first; else asks
     rustup (read only)."""
     try:
@@ -2188,24 +2289,24 @@ def rustup_default(home, rh):
     return words[0] if words else ""
 
 
-def short_toolchain(name):
+def short_toolchain(name: str) -> str:
     return HOST_SUFFIX.sub("", name)
 
 
-def toolchain_pattern(name):
+def toolchain_pattern(name: str) -> re.Pattern[bytes]:
     """A toolchain name as a word (bytes): `+nightly`, `?= nightly-2026-06-01`,
     `toolchain: 1.98.0`; not `nightly` inside `nightly-2026-06-01`, not
     `1.98.0` inside `1.98.0.1`."""
     return re.compile(rb"(?<![\w.+-])\+?" + re.escape(name.encode()) + rb"(?![\w.]|-\d)")
 
 
-def named_in(files, names):
+def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str], bool]:
     """({name: first file that names it}, complete) for NAMES, read from
     FILES (TOOL_FILE_MAX bytes each; unreadable ones skipped). COMPLETE is
     False when there were more than TOOL_FILES_MAX files to read."""
     pats = {n: (n.encode(), toolchain_pattern(n)) for n in names}
-    found = {}
-    seen = set()
+    found: dict[str, str] = {}
+    seen: set[str] = set()
     for path in files:
         if len(found) == len(pats):
             break
@@ -2226,7 +2327,7 @@ def named_in(files, names):
     return found, True
 
 
-def toolchain_lines(home):
+def toolchain_lines(home: str) -> list[str]:
     """The report of `status`: installed rustup toolchains, their size, and
     which rust-toolchain files under ~/Workspace pin them."""
     rh = rustup_home(home)
@@ -2236,7 +2337,7 @@ def toolchain_lines(home):
     except OSError:
         return [f"{where_text(tdir, home)}: none installed (or not readable)"]
     ws = claimed_folders(None, home, with_cargo=False)
-    pins = {}
+    pins: dict[str, list[str]] = {}
     for p in ws.pins:
         ch = pinned_channel(p)
         if ch:
@@ -2253,7 +2354,9 @@ def toolchain_lines(home):
     out = [f"where:    {where_text(tdir, home)}", f"default:  {short_toolchain(default) if default else 'unknown'}"]
     if ws.incomplete:
         out.append(f"note:     the search for rust-toolchain files was incomplete ({ws.incomplete})")
-    rows, total, unused = [], 0, []
+    rows: list[str] = []
+    total = 0
+    unused: list[str] = []
     is_default = {n: bool(default) and short_toolchain(n) == short_toolchain(default) for n in names}
     loose = [
         short_toolchain(n) for n in names if not is_default[n] and not pins.get(short_toolchain(n)) and not pins.get(n)
@@ -2311,7 +2414,7 @@ def toolchain_lines(home):
 
 # The registry. Adding a target: a Target subclass here, its keys in
 # toolchains/toolchains.conf, a line in toolchains/README.md.
-TARGETS = {cls.ID: cls for cls in (RustBuild, PythonUv)}
+TARGETS: dict[str, type[Target]] = {cls.ID: cls for cls in (RustBuild, PythonUv)}
 # Planned, not implemented yet: (where, how).
 PLANNED = {
     "rust:registry": (
@@ -2325,13 +2428,13 @@ PLANNED = {
 }
 
 
-def select_targets(names, settings):
+def select_targets(names: Sequence[str], settings: Settings) -> list[tuple[type[Target], bool]]:
     """[(Target class, named)]: the named targets (LANG:CACHE or LANG), or,
     without names, every enabled one. Raises Usage for an unknown or a
     planned target."""
     if not names:
         return [(cls, False) for tid, cls in TARGETS.items() if settings.enabled[tid]]
-    out = []
+    out: list[tuple[type[Target], bool]] = []
     for name in names:
         if ":" in name:
             if name in TARGETS:
@@ -2364,7 +2467,7 @@ RUN_BUDGET = 25 * 60
 RM_MARGIN = 2 * 60
 
 
-def cmd_prune(home, now, action, names):
+def cmd_prune(home: str, now: float, action: str, names: Sequence[str]) -> int:
     settings = Settings(home)
     chosen = select_targets(names, settings)
     if not chosen:
@@ -2400,20 +2503,20 @@ def cmd_prune(home, now, action, names):
 
 
 # ---- the timer ------------------------------------------------------------------------------
-def in_container():
+def in_container() -> bool:
     return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
 
 
-def systemctl_cmd(*args):
+def systemctl_cmd(*args: str) -> list[str]:
     # Tests point this at a stub: no test may reach the real user manager.
     stub = os.environ.get("CST_TOOLCHAINS_SYSTEMCTL")
     if stub:
         return [stub, "--user", *args]
     cmd = ["systemctl", "--user", *args]
-    return (["flatpak-spawn", "--host"] + cmd) if in_container() else cmd
+    return ["flatpak-spawn", "--host", *cmd] if in_container() else cmd
 
 
-def systemctl_env():
+def systemctl_env() -> dict[str, str]:
     env = dict(os.environ)
     # Run by root through runuser (snapshots setup): no session variables.
     rt = f"/run/user/{os.getuid()}"
@@ -2422,7 +2525,7 @@ def systemctl_env():
     return env
 
 
-def systemctl(*args, check=False, ok=(0,)):
+def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user; '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
     try:
@@ -2438,7 +2541,7 @@ def systemctl(*args, check=False, ok=(0,)):
     return r.stdout.strip()
 
 
-def manager_path():
+def manager_path() -> str | None:
     """PATH of the user manager (what the service runs with), or None when
     it cannot be read."""
     for line in systemctl("show-environment").splitlines():
@@ -2449,7 +2552,7 @@ def manager_path():
     return None
 
 
-def render_service():
+def render_service() -> str:
     return f"""\
 {MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.
 # Prunes the toolchain caches enabled in ~/.config/cst/toolchains.conf
@@ -2470,7 +2573,7 @@ NoNewPrivileges=yes
 """
 
 
-def render_timer():
+def render_timer() -> str:
     return f"""\
 {MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand.
 [Unit]
@@ -2486,10 +2589,10 @@ WantedBy=timers.target
 """
 
 
-UNITS = {SERVICE: render_service, TIMER: render_timer}
+UNITS: dict[str, Callable[[], str]] = {SERVICE: render_service, TIMER: render_timer}
 
 
-def file_state(path, wanted, marker=MARKER):
+def file_state(path: str, wanted: str | None, marker: str = MARKER) -> str:
     """ok | change (ours, differs) | conflict (not ours, or a symlink) | missing."""
     try:
         if stat.S_ISLNK(os.lstat(path).st_mode):
@@ -2505,29 +2608,29 @@ def file_state(path, wanted, marker=MARKER):
     return "change" if marker in text else "conflict"
 
 
-def read_text(path):
+def read_text(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read()
 
 
-def copies():
+def copies() -> dict[str, str]:
     """{installed path (relative to home): source text}: this program and
     its defaults, as the timer runs them."""
     return {PROG_REL: read_text(os.path.realpath(__file__)), DEFAULTS_REL: read_text(defaults_path())}
 
 
-def unit_states(home):
+def unit_states(home: str) -> dict[str, str]:
     out = {rel: file_state(os.path.join(home, rel), text) for rel, text in copies().items()}
     for name, render in UNITS.items():
         out[name] = file_state(os.path.join(home, UNIT_DIR_REL, name), render())
     return out
 
 
-def label(key):
+def label(key: str) -> str:
     return f"~/{key}" if "/" in key else f"~/{UNIT_DIR_REL}/{key}"
 
 
-def write_atomic(path, text, mode):
+def write_atomic(path: str, text: str, mode: int) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
     try:
@@ -2543,14 +2646,14 @@ def write_atomic(path, text, mode):
         raise
 
 
-def turned_off(home):
+def turned_off(home: str) -> bool:
     return os.path.lexists(os.path.join(home, OFF_REL))
 
 
-def stale_files(home):
+def stale_files(home: str) -> list[tuple[str, bool]]:
     """[(path, ours)] of what `cst btrfs cargo-gc enable|disable` left
     (the first version of this cleanup)."""
-    out = []
+    out: list[tuple[str, bool]] = []
     for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
         path = os.path.join(home, rel)
         st = file_state(path, None, OLD_MARKER)
@@ -2563,7 +2666,7 @@ def stale_files(home):
     return out
 
 
-def before_removal(name, *args, ok=(0,)):
+def before_removal(name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
     """systemctl --user ARGS NAME for a timer, checked, before auto on/off
     removes any file. When the user manager refuses or cannot be reached,
     nothing has been removed yet: Refused, and a second run (once the
@@ -2578,7 +2681,7 @@ def before_removal(name, *args, ok=(0,)):
         ) from None
 
 
-def reload_failed():
+def reload_failed() -> bool:
     """daemon-reload after unit files were removed: True (and an error line)
     when it failed. The removal is not undone: the timer is already stopped,
     and the manager forgets the files at its next reload or restart."""
@@ -2595,7 +2698,7 @@ def reload_failed():
     return False
 
 
-def remove_stale(home):
+def remove_stale(home: str) -> bool:
     """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
     well; False when the daemon-reload after the removal failed (reported).
     Refused (nothing removed) when its timer could not be stopped."""
@@ -2616,7 +2719,7 @@ def remove_stale(home):
     return not (reload and reload_failed())
 
 
-def old_conf_note(home):
+def old_conf_note(home: str) -> None:
     if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
         say(
             f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
@@ -2626,7 +2729,7 @@ def old_conf_note(home):
         )
 
 
-def cmd_auto_on(home, now, unless_off=False):
+def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
     rc = 0 if remove_stale(home) else 1
     if unless_off and turned_off(home):
         say(
@@ -2642,8 +2745,9 @@ def cmd_auto_on(home, now, unless_off=False):
     # the user manager (the service's PATH), not in this command's (run by
     # snapshots setup through runuser, it is root's). If no target would run,
     # no timer.
-    mpath, asked = None, False
-    refused = []
+    mpath: str | None = None
+    asked = False
+    refused: list[str] = []
     for cls in enabled:
         t = cls(home, now, settings.policy[cls.ID])
         if cls.USES_PATH:
@@ -2698,7 +2802,7 @@ def cmd_auto_on(home, now, unless_off=False):
     return rc
 
 
-def stop_orphan_timer():
+def stop_orphan_timer() -> None:
     """The timer file is gone, but the user manager may still run the
     timer: what `auto off` left before it checked its `disable` (it removed
     the files anyway). Stopped when the manager does not say it is stopped;
@@ -2711,7 +2815,7 @@ def stop_orphan_timer():
     say(f"stopped:   {TIMER} (it was still running although its file was gone)")
 
 
-def cmd_auto_off(home, now):
+def cmd_auto_off(home: str, now: float) -> int:
     st = unit_states(home)
     # Both timers are stopped, checked, before anything is removed (see
     # before_removal); remove_stale stops the earlier one first.
@@ -2765,7 +2869,7 @@ def cmd_auto_off(home, now):
     return rc
 
 
-def timer_text(home):
+def timer_text(home: str) -> str:
     if file_state(os.path.join(home, UNIT_DIR_REL, TIMER), render_timer()) == "missing":
         if systemctl("is-active", TIMER) == "active":
             return (
@@ -2800,7 +2904,7 @@ UV_HAS_LINK_MODE = re.compile(rf"^{_WS}*link-mode{_WS}*=", re.M)
 UV_HAS_TABLE = re.compile(rf"^{_WS}*\[", re.M)
 
 
-def cargo_text(home):
+def cargo_text(home: str) -> str:
     return (
         "\n# Added by btrfs-setup.sh (CST): intermediate build artifacts live in\n"
         "# ~/.cache (a subvolume excluded from /home snapshots); final ones stay in target/.\n"
@@ -2815,7 +2919,7 @@ UV_TEXT = (
 )
 
 
-def read_cfg(path):
+def read_cfg(path: str) -> str | None:
     """Text of a config file; '' when missing; None when it cannot be read."""
     try:
         with open(path, "rb") as f:
@@ -2826,10 +2930,10 @@ def read_cfg(path):
         return None
 
 
-def config_items(home):
+def config_items(home: str) -> list[tuple[str, str, str, str]]:
     """[(name, path, state, text to append)]; state: set | by-hand | write |
     unreadable."""
-    out = []
+    out: list[tuple[str, str, str, str]] = []
     path = os.path.join(home, CARGO_CFG_REL)
     text = read_cfg(path)
     if text is None:
@@ -2855,7 +2959,7 @@ def config_items(home):
     return out
 
 
-def cargo_build_dir_is_csts(home):
+def cargo_build_dir_is_csts(home: str) -> bool:
     try:
         with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
             build = tomllib.load(f).get("build")
@@ -2889,7 +2993,16 @@ LEAN_REBUILD = (
 )
 
 
-def dig(data, path):
+class _LeanState(TypedDict):
+    path: str
+    add: list[tuple[str, str]]
+    have: list[str]
+    conflicts: list[str]
+    append: str
+    error: str
+
+
+def dig(data: object, path: Sequence[str]) -> object:
     for k in path:
         if not isinstance(data, dict) or k not in data:
             return None
@@ -2897,17 +3010,17 @@ def dig(data, path):
     return data
 
 
-def same_debug(value, want):
+def same_debug(value: object, want: object) -> bool:
     if want is False:
         return value is False or value == "none" or (type(value) is int and value == 0)
     return value == want
 
 
-def lean_state(home):
-    """{path, text, add: [(label, block)], have: [label], conflicts: [text],
+def lean_state(home: str) -> _LeanState:
+    """{path, add: [(label, block)], have: [label], conflicts: [text],
     append: text or '' (when appending is safe), error: ''}."""
     path = os.path.join(home, CARGO_CFG_REL)
-    st = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
+    st: _LeanState = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
     text = read_cfg(path)
     if text is None:
         st["error"] = "cannot be read"
@@ -2947,17 +3060,16 @@ def lean_state(home):
     return st
 
 
-def lean_wanted(settings, lean):
+def lean_wanted(settings: Settings | None, lean: bool | None) -> tuple[bool, str]:
     if lean is not None:
         return lean, ("--lean-debuginfo" if lean else "--no-lean-debuginfo")
     if settings is None:
         return False, "bad settings"
-    return settings.options["RUST_LEAN_DEBUGINFO"], "RUST_LEAN_DEBUGINFO=" + (
-        "yes" if settings.options["RUST_LEAN_DEBUGINFO"] else "no"
-    )
+    val = bool(settings.options["RUST_LEAN_DEBUGINFO"])
+    return val, "RUST_LEAN_DEBUGINFO=" + ("yes" if val else "no")
 
 
-def lean_lines(home, verb, settings, lean):
+def lean_lines(home: str, verb: str, settings: Settings | None, lean: bool | None) -> list[tuple[str, str, str]]:
     st = lean_state(home)
     shown = tilde(st["path"], home)
     want, why = lean_wanted(settings, lean)
@@ -2975,7 +3087,7 @@ def lean_lines(home, verb, settings, lean):
                 + f", or config apply --lean-debuginfo); {LEAN_REBUILD}",
             )
         ]
-    out = [("keep", shown, c) for c in st["conflicts"]]
+    out: list[tuple[str, str, str]] = [("keep", shown, c) for c in st["conflicts"]]
     if not st["add"]:
         if not st["conflicts"]:
             out.append(("ok", shown, f"lean debug info set ({why})"))
@@ -2997,7 +3109,7 @@ def lean_lines(home, verb, settings, lean):
     return out
 
 
-def lean_apply(home, settings, lean):
+def lean_apply(home: str, settings: Settings | None, lean: bool | None) -> int:
     want, why = lean_wanted(settings, lean)
     if not want:
         return 0
@@ -3053,22 +3165,22 @@ SCCACHE_STATS = re.compile(
 )
 
 
-def wrapper_path(home):
+def wrapper_path(home: str) -> str:
     return os.path.join(home, WRAPPER_REL)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class WrapperValues:
     """The settings `config apply` writes into the installed wrapper."""
 
     size: str = SCCACHE_DEFAULT_SIZE
     workspace: bool = True  # local crates through sccache too
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"cache size {self.size}" + ("" if self.workspace else "; local crates straight to rustc")
 
 
-def wrapper_text(values):
+def wrapper_text(values: WrapperValues) -> str | None:
     """The wrapper as installed (the settings written in), or None when its
     source is not next to this program (the timer's copy has none)."""
     try:
@@ -3080,7 +3192,7 @@ def wrapper_text(values):
     return text if n == m == 1 else None
 
 
-def wrapper_state(home, text):
+def wrapper_state(home: str, text: str) -> str:
     """ok | change | missing | conflict (not CST's, or a symlink)."""
     path = wrapper_path(home)
     st = file_state(path, text)
@@ -3093,31 +3205,42 @@ def wrapper_state(home, text):
     return st
 
 
-def wrapper_values(settings):
+def wrapper_values(settings: Settings | None) -> WrapperValues:
     """No settings (a bad settings file; only --sccache/--no-sccache counts then): the defaults."""
     if not settings:
         return WrapperValues()
-    return WrapperValues(settings.options["RUST_SCCACHE_CACHE_SIZE"], settings.options["RUST_SCCACHE_WORKSPACE"])
+    return WrapperValues(
+        str(settings.options["RUST_SCCACHE_CACHE_SIZE"]), bool(settings.options["RUST_SCCACHE_WORKSPACE"])
+    )
 
 
-def plain(data):
-    return json.loads(json.dumps(data))
+def plain(data: Mapping[str, object]) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads(json.dumps(data)))
 
 
-def parses_as(text, expect):
+def parses_as(text: str, expect: Mapping[str, object]) -> bool:
     try:
         return plain(tomllib.loads(text)) == expect
     except tomllib.TOMLDecodeError:
         return False
 
 
-def sccache_state(home):
+class _SccacheState(TypedDict):
+    path: str
+    error: str
+    value: object
+    ours: bool
+    add: str
+    remove: str
+
+
+def sccache_state(home: str) -> _SccacheState:
     """{path, error, value (build.rustc-wrapper now, or None), ours, add,
     remove}: add / remove are the whole new file text, '' when CST cannot
     make that change safely (each candidate is parsed again and must equal
     the file with only that one key added or removed)."""
     path = os.path.join(home, CARGO_CFG_REL)
-    st = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
+    st: _SccacheState = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
     text = read_cfg(path)
     if text is None:
         st["error"] = "cannot be read"
@@ -3138,7 +3261,7 @@ def sccache_state(home):
         expect = plain(data)
         expect.setdefault("build", {})["rustc-wrapper"] = want
         headers = list(BUILD_HEADER.finditer(text))
-        cands = []
+        cands: list[str] = []
         if len(headers) == 1:
             h = headers[0]
             nxt = ANY_HEADER.search(text, h.end())
@@ -3167,7 +3290,7 @@ def sccache_state(home):
                 drop.add(i - 1)
             # CST's own appended block (a [build] header whose own section
             # holds only this key; [build.x] subtables may follow): all of it.
-            after = []
+            after: list[str] = []
             for ln in lines[i + 1 :]:
                 if ANY_HEADER.match(ln):
                     break
@@ -3190,15 +3313,16 @@ def sccache_state(home):
     return st
 
 
-def sccache_wanted(settings, flag):
+def sccache_wanted(settings: Settings | None, flag: bool | None) -> tuple[bool, str]:
     if flag is not None:
         return flag, ("--sccache" if flag else "--no-sccache")
     if settings is None:
         return False, "bad settings"
-    return settings.options["RUST_SCCACHE"], "RUST_SCCACHE=" + ("yes" if settings.options["RUST_SCCACHE"] else "no")
+    val = bool(settings.options["RUST_SCCACHE"])
+    return val, "RUST_SCCACHE=" + ("yes" if val else "no")
 
 
-def wrapper_lines(home, verb, text, values):
+def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues) -> list[tuple[str, str, str]]:
     shown = tilde(wrapper_path(home), home)
     if text is None:
         return [
@@ -3224,7 +3348,7 @@ def wrapper_lines(home, verb, text, values):
     ]
 
 
-def sccache_lines(home, verb, settings, flag):
+def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | None) -> list[tuple[str, str, str]]:
     st = sccache_state(home)
     shown = tilde(st["path"], home)
     want, why = sccache_wanted(settings, flag)
@@ -3292,7 +3416,7 @@ def sccache_lines(home, verb, settings, flag):
     return out
 
 
-def write_cfg(path, text):
+def write_cfg(path: str, text: str) -> str:
     """Replace a config file's text (atomic, same mode). '' or the error."""
     real = os.path.realpath(path)
     try:
@@ -3306,7 +3430,7 @@ def write_cfg(path, text):
     return ""
 
 
-def install_wrapper(home, values):
+def install_wrapper(home: str, values: WrapperValues) -> int:
     """0 when the wrapper is in place (written or unchanged), else 1."""
     text = wrapper_text(values)
     path = wrapper_path(home)
@@ -3333,7 +3457,7 @@ def install_wrapper(home, values):
     return 0
 
 
-def sccache_apply(home, settings, flag):
+def sccache_apply(home: str, settings: Settings | None, flag: bool | None) -> int:
     want, why = sccache_wanted(settings, flag)
     st = sccache_state(home)
     path = st["path"]
@@ -3388,15 +3512,15 @@ def sccache_apply(home, settings, flag):
     return 0
 
 
-def sccache_sockets(home):
+def sccache_sockets(home: str) -> list[str]:
     """The per-environment server sockets the wrapper names (all
     environments share $XDG_RUNTIME_DIR, or the fallback folder)."""
-    dirs = []
+    dirs: list[str] = []
     xdg = os.environ.get("XDG_RUNTIME_DIR", "")
     if xdg and os.path.isdir(xdg):
         dirs.append(xdg)
     dirs.append(os.path.join(home, SCCACHE_DIR_REL, "run"))
-    out = []
+    out: list[str] = []
     for d in dirs:
         try:
             names = sorted(os.listdir(d))
@@ -3406,7 +3530,7 @@ def sccache_sockets(home):
     return out
 
 
-def socket_answers(path):
+def socket_answers(path: str) -> bool:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(1)
     try:
@@ -3418,11 +3542,11 @@ def socket_answers(path):
         s.close()
 
 
-def sccache_status_lines(home):
+def sccache_status_lines(home: str) -> list[str]:
     """The cache's size and, with sccache on this PATH, one line of stats
     per running server (status runs on the host: its PATH)."""
     cache = os.path.join(home, SCCACHE_DIR_REL)
-    out = []
+    out: list[str] = []
     if os.path.isdir(cache):
         out.append(
             f"sccache cache: {where_text(cache, home)} {gib(tree_size(cache))} (sccache keeps it under "
@@ -3475,10 +3599,16 @@ def sccache_status_lines(home):
     return out
 
 
-def config_lines(home, verb, settings=None, lean=None, sccache=None):
+def config_lines(
+    home: str,
+    verb: str,
+    settings: Settings | None = None,
+    lean: bool | None = None,
+    sccache: bool | None = None,
+) -> list[tuple[str, str, str]]:
     """The plan or status lines of the settings (lean, sccache: the explicit
     flags)."""
-    out = []
+    out: list[tuple[str, str, str]] = []
     for name, path, st, _ in config_items(home):
         shown = tilde(path, home)
         if name == "cargo":
@@ -3533,7 +3663,7 @@ def config_lines(home, verb, settings=None, lean=None, sccache=None):
     return out
 
 
-def append_text(path, text):
+def append_text(path: str, text: str) -> str:
     """Append TEXT to PATH (made if missing); a file not ending in a newline
     gets one first. Returns '' or the error."""
     try:
@@ -3551,7 +3681,8 @@ def append_text(path, text):
     return ""
 
 
-def cmd_config(home, action, lean=None, sccache=None):
+def cmd_config(home: str, action: str, lean: bool | None = None, sccache: bool | None = None) -> int:
+    settings: Settings | None
     try:
         settings = Settings(home)
     except ConfigError as e:
@@ -3596,8 +3727,9 @@ def cmd_config(home, action, lean=None, sccache=None):
 
 
 # ---- status ---------------------------------------------------------------------------------
-def cmd_status(home, now, brief):
+def cmd_status(home: str, now: float, brief: bool) -> int:
     say(f"auto: {timer_text(home)}")
+    settings: Settings | None
     try:
         settings = Settings(home)
     except ConfigError as e:
@@ -3646,7 +3778,7 @@ def cmd_status(home, now, brief):
 
 
 # ---- main -----------------------------------------------------------------------------------
-def run_locked(home, fn, busy_refused=False):
+def run_locked(home: str, fn: Callable[[], int], busy_refused: bool = False) -> int:
     """One run at a time (the timer and a manual apply, auto on/off). When
     another run holds the lock: nothing done, exit 0 (a prune that finds
     another prune running), or Refused with busy_refused (auto on/off: what
@@ -3678,9 +3810,21 @@ usage: cst-toolchains status [--brief]
        (each also takes --home DIR; help: cst-toolchains help)"""
 
 
-def parse_args(argv):
+class _ParsedArgs(TypedDict):
+    cmd: str
+    action: str | None
+    targets: list[str]
+    brief: bool
+    unless_off: bool
+    home: str | None
+    lean: bool | None
+    sccache: bool | None
+
+
+def parse_args(argv: Sequence[str]) -> _ParsedArgs:
     """{cmd, action, targets, brief, unless_off, home}; raises Usage."""
-    args, home = [], None
+    args: list[str] = []
+    home: str | None = None
     it = iter(argv)
     for a in it:
         if a == "--home":
@@ -3693,7 +3837,7 @@ def parse_args(argv):
                 raise Usage("--home needs a folder")
         else:
             args.append(a)
-    out = {
+    out: _ParsedArgs = {
         "cmd": "help",
         "action": None,
         "targets": [],
@@ -3745,7 +3889,7 @@ def parse_args(argv):
     return out
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> int:
     try:
         a = parse_args(argv)
     except Usage as e:
@@ -3775,6 +3919,7 @@ def main(argv):
     try:
         if cmd == "status":
             return cmd_status(home, now, a["brief"])
+        assert action is not None
         if cmd == "config":
             return cmd_config(home, action, a["lean"], a["sccache"])
         if cmd == "prune" and action == "plan":

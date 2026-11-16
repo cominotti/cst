@@ -11,15 +11,21 @@ Run from the repository root:
     python3 -I -B btrfs/tests/test_btrfs_steam.py -v
 """
 
+from __future__ import annotations
+
 import contextlib
 import importlib.machinery
-import importlib.util
 import io
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import types
 import unittest
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, cast
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -27,35 +33,34 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "steam")
 REAL_ROOT = "/var/home/danilo/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 
+if TYPE_CHECKING:
+    from btrfs.tests import test_btrfs_bulk as tb
+else:
+    _loader = importlib.machinery.SourceFileLoader("btrfs_bulk_test_base", os.path.join(HERE, "test_btrfs_bulk.py"))
+    _mod = types.ModuleType("btrfs_bulk_test_base")
+    _mod.__file__ = os.path.join(HERE, "test_btrfs_bulk.py")
+    _loader.exec_module(_mod)
+    tb = _mod
 
-def _load_base():
-    loader = importlib.machinery.SourceFileLoader("btrfs_bulk_test_base", os.path.join(HERE, "test_btrfs_bulk.py"))
-    spec = importlib.util.spec_from_loader("btrfs_bulk_test_base", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
-tb = _load_base()
 Crash = tb.Crash
 TOOL = tb.TOOL
 
 
-def fixture(name):
+def fixture(name: str) -> bytes:
     with open(os.path.join(FIX, name), "rb") as f:
         return f.read()
 
 
 class SteamTest(tb.BulkBase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         m = self.m
         self.real_steam_running = m.steam_running
-        self.steam_procs = []
+        self.steam_procs: list[str] = []
         self.no_reflink = False
         m.steam_running = lambda ctx: list(self.steam_procs)
 
-        def copy_reflink(src, dst):
+        def copy_reflink(src: str, dst: str) -> None:
             if self.no_reflink:
                 raise RuntimeError("cp: failed to clone: Operation not supported")
             # btrfs: no clone between a NOCOW (+C) file and a copy-on-write one.
@@ -79,16 +84,16 @@ class SteamTest(tb.BulkBase):
             self.assertEqual(m.apply(self.ctx), ([], []))  # ~/Bulk/steam and the Flatpak permission
 
     # ---- scratch library ----
-    def key(self, p):
+    def key(self, p: str) -> tuple[int, int]:
         st = os.lstat(p)
         return st.st_dev, st.st_ino
 
-    def has_fake_nocow(self, top):
+    def has_fake_nocow(self, top: str) -> bool:
         if not os.path.isdir(top) or os.path.islink(top):
             return os.path.isfile(top) and self.key(top) in self.nocow
         return any(self.key(os.path.join(r, n)) in self.nocow for r, _, f in os.walk(top) for n in f)
 
-    def make_nocow(self, *rels):
+    def make_nocow(self, *rels: str) -> None:
         """+C on these parts of the main library and everything in them (as
         on the host, where the whole Steam folder was made NOCOW)."""
         for rel in rels:
@@ -98,26 +103,26 @@ class SteamTest(tb.BulkBase):
                 for n in d + f:
                     self.nocow.add(self.key(os.path.join(r, n)))
 
-    def S(self, rel):
+    def S(self, rel: str) -> str:
         return os.path.join(self.root, "steamapps", rel)
 
-    def D(self, rel):
+    def D(self, rel: str) -> str:
         return os.path.join(self.T, "steamapps", rel)
 
-    def put(self, path, data, mode=0o644):
+    def put(self, path: str, data: bytes | str, mode: int = 0o644) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data if isinstance(data, bytes) else data.encode())
         os.chmod(path, mode)
 
-    def lf_text(self):
+    def lf_text(self) -> bytes:
         return fixture("libraryfolders.vdf").replace(REAL_ROOT.encode(), self.root.encode())
 
-    def put_lf(self, data, which=(0, 1)):
+    def put_lf(self, data: bytes | str, which: Sequence[int] = (0, 1)) -> None:
         for i in which:
             self.put(self.m.lf_files(self.root)[i], data, 0o755)
 
-    def make_library(self):
+    def make_library(self) -> None:
         r = self.root
         self.put_lf(self.lf_text())
         self.put(os.path.join(r, "libraryfolder.vdf"), fixture("libraryfolder.vdf"), 0o755)
@@ -137,29 +142,29 @@ class SteamTest(tb.BulkBase):
         self.put(self.S("shadercache/570/fozpipelinesv6/cache.foz"), "cache")
 
     # ---- running ----
-    def run_out(self, fn, *a):
+    def run_out[R](self, fn: Callable[..., R], *a: object) -> R:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             r = fn(*a)
         self.out = out.getvalue()
         return r
 
-    def sapply(self, *ids, copy=False):
+    def sapply(self, *ids: str, copy: bool = False) -> int:
         return self.run_out(self.m.steam_apply, self.ctx, list(ids), copy)
 
-    def splan(self, *ids, copy=False):
-        def plan():
+    def splan(self, *ids: str, copy: bool = False) -> dict[str, Any]:
+        def plan() -> dict[str, Any]:
             sv = self.m.steam_survey(self.ctx, list(ids), copy)
             self.m.steam_print(self.ctx, sv)
             return sv
 
         return self.run_out(plan)
 
-    def lf(self, i=0):
+    def lf(self, i: int = 0) -> dict[str, Any]:
         with open(self.m.lf_files(self.root)[i], "rb") as f:
             return self.m.vdf_parse(f.read())["libraryfolders"]
 
-    def assertMoved(self):
+    def assertMoved(self) -> None:
         self.assertTrue(os.path.isfile(self.D("common/dota 2 beta/game/dota/pak01_dir.vpk")))
         self.assertEqual(os.readlink(self.D("common/dota 2 beta/game/link")), "bin")
         self.assertTrue(os.path.isdir(self.D("common/dota 2 beta/game/empty")))
@@ -177,30 +182,36 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(lf["0"]["apps"], {"1628350": "810335462"})
         self.assertNoLeftovers()
 
-    def assertInMain(self):
+    def assertInMain(self) -> None:
         self.assertTrue(os.path.isfile(self.S("common/dota 2 beta/game/dota/pak01_dir.vpk")))
         self.assertTrue(os.path.isfile(self.S("appmanifest_570.acf")))
         self.assertFalse(os.path.lexists(self.D("appmanifest_570.acf")))
         self.assertFalse(os.path.lexists(self.D("common/dota 2 beta")))
         self.assertIn("570", self.lf()["0"]["apps"])
 
-    def assertNoLeftovers(self):
+    def assertNoLeftovers(self) -> None:
         self.assertEqual([n for r, d, f in os.walk(self.home) for n in d + f if ".bulk-" in n or ".cst-tmp" in n], [])
         self.assertEqual(self.journals(), [])
 
-    def assertUnchanged(self, before, rc, want_rc, text=None):
+    def assertUnchanged(
+        self,
+        before: list[tuple[str, str, str | bytes | int]],
+        rc: int,
+        want_rc: int,
+        text: str | None = None,
+    ) -> None:
         self.assertEqual(rc, want_rc, self.out)
         self.assertEqual(self.tree(), before)
         if text:
             self.assertIn(text, self.out)
 
     # ---- VDF parser ----
-    def test_fixtures_round_trip(self):
+    def test_fixtures_round_trip(self) -> None:
         for n in sorted(os.listdir(FIX)):
             data = fixture(n)
             self.assertEqual(self.m.vdf_dump(self.m.vdf_load(data)), data, n)
 
-    def test_parser_refuses_anything_unexpected(self):
+    def test_parser_refuses_anything_unexpected(self) -> None:
         bad = {
             b'"a"\n{\n\tk\t\t"v"\n}\n': "unquoted",
             b'"a"\n{\n\t// c\n}\n': "comment",
@@ -223,18 +234,18 @@ class SteamTest(tb.BulkBase):
                 self.m.vdf_parse(data)
             self.assertIn(why, str(cm.exception), data)
 
-    def test_parser_accepts_the_two_escapes_and_round_trips_them(self):
+    def test_parser_accepts_the_two_escapes_and_round_trips_them(self) -> None:
         data = b'"a"\n{\n\t"k"\t\t"x\\\\y\\"z"\n\t"e"\n\t{\n\t}\n}\n'
         t = self.m.vdf_load(data)
         self.assertEqual(t, {"a": {"k": 'x\\y"z', "e": {}}})
 
-    def test_round_trip_guard_refuses_other_layouts(self):
+    def test_round_trip_guard_refuses_other_layouts(self) -> None:
         with self.assertRaises(self.m.Unexpected) as cm:
             self.m.vdf_load(b'"a" { "k" "v" }\n')
         self.assertIn("format not as expected", str(cm.exception))
 
     # ---- schema ----
-    def test_schema_refusals(self):
+    def test_schema_refusals(self) -> None:
         m = self.m
         base = m.vdf_load(self.lf_text())
         m.lf_validate(base)
@@ -261,7 +272,7 @@ class SteamTest(tb.BulkBase):
                 m.lf_validate(t)
             self.assertIn(why, str(cm.exception))
 
-    def test_library_and_placement_are_idempotent_and_keep_the_rest(self):
+    def test_library_and_placement_are_idempotent_and_keep_the_rest(self) -> None:
         m = self.m
         base = m.vdf_load(self.lf_text())
         one = m.lf_with_library(base, self.T, "42")
@@ -293,7 +304,7 @@ class SteamTest(tb.BulkBase):
         m.lf_validate(placed)
 
     # ---- ~/Bulk/steam listed under another spelling ----
-    def listed_by_hand(self):
+    def listed_by_hand(self) -> str:
         """~/Bulk/steam added in Steam by hand, under a path through a
         symlink (like /home/u/... where /home -> /var/home)."""
         m = self.m
@@ -305,7 +316,7 @@ class SteamTest(tb.BulkBase):
         m.u_write_marker(os.path.join(self.T, "libraryfolder.vdf"), "111")
         return path
 
-    def test_library_listed_through_a_symlink_is_the_same_library(self):
+    def test_library_listed_through_a_symlink_is_the_same_library(self) -> None:
         m = self.m
         path = self.listed_by_hand()
         self.assertEqual(m.lf_index(m.vdf_load(self.lf_text()), self.root), "0")
@@ -326,13 +337,13 @@ class SteamTest(tb.BulkBase):
         self.splan()
         self.assertIn("ok (library 1)", self.out)
 
-    def test_a_pair_that_fails_the_checks_is_never_written(self):
+    def test_a_pair_that_fails_the_checks_is_never_written(self) -> None:
         m = self.m
         self.listed_by_hand()
         files = m.lf_files(self.root)
 
-        def raw():
-            out = []
+        def raw() -> list[bytes]:
+            out: list[bytes] = []
             for f in files:
                 with open(f, "rb") as fh:
                     out.append(fh.read())
@@ -345,12 +356,14 @@ class SteamTest(tb.BulkBase):
         with self.assertRaisesRegex(m.Unexpected, "refused to write.*same folder"):
             m.write_vdf_pair(self.ctx, S, dup)
         self.assertEqual(raw(), before)
+
         # The old lookup (by spelling only) would add a second entry: the
         # check before writing stops it, with nothing written.
-        self.patch(
-            "lf_index",
-            lambda real: (
-                lambda tree, path: next(
+        def _lf_index(
+            _real: Callable[[dict[str, Any], str], str | None],
+        ) -> Callable[[dict[str, Any], str], str | None]:
+            def find(tree: dict[str, Any], path: str) -> str | None:
+                return next(
                     (
                         i
                         for i, e in tree["libraryfolders"].items()
@@ -358,8 +371,10 @@ class SteamTest(tb.BulkBase):
                     ),
                     None,
                 )
-            ),
-        )
+
+            return find
+
+        self.patch("lf_index", _lf_index)
         self.assertEqual(self.sapply(), 1, self.out)
         self.assertIn("refused to write", self.out)
         self.assertEqual(raw(), before)
@@ -367,7 +382,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.journals(), [])
 
     # ---- selection and plan ----
-    def test_plan_default_moves_the_game_skips_the_tool_and_changes_nothing(self):
+    def test_plan_default_moves_the_game_skips_the_tool_and_changes_nothing(self) -> None:
         before = self.tree()
         sv = self.splan()
         self.assertEqual(self.tree(), before)
@@ -379,7 +394,7 @@ class SteamTest(tb.BulkBase):
         self.assertIn("shader cache of 570", self.out)
         self.assertEqual(self.journals(), [])
 
-    def test_explicit_app_moves_a_tool(self):
+    def test_explicit_app_moves_a_tool(self) -> None:
         sv = self.splan("1628350")
         self.assertEqual([(a["id"], a["state"]) for a in sv["apps"]], [("1628350", "move")])
         self.assertEqual(self.sapply("1628350"), 0, self.out)
@@ -387,7 +402,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.lf()["1"]["apps"], {"1628350": "810335462"})
         self.assertTrue(os.path.isfile(self.S("appmanifest_570.acf")))
 
-    def test_only_tools_selects_nothing(self):
+    def test_only_tools_selects_nothing(self) -> None:
         shutil.rmtree(self.S("common/dota 2 beta"))
         os.remove(self.S("appmanifest_570.acf"))
         self.put_lf(self.lf_text().replace(b'\t\t\t"570"\t\t"77185439508"\n', b""))
@@ -398,7 +413,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.tree(), before)
         self.assertFalse(os.path.lexists(os.path.join(self.T, "libraryfolder.vdf")))
 
-    def test_bad_arguments_are_usage_errors(self):
+    def test_bad_arguments_are_usage_errors(self) -> None:
         for args in (
             [],
             ["move"],
@@ -412,7 +427,7 @@ class SteamTest(tb.BulkBase):
                 self.assertEqual(self.m.steam_cmd(args), 2, args)
 
     # ---- happy path ----
-    def test_apply_moves_the_game_and_is_idempotent(self):
+    def test_apply_moves_the_game_and_is_idempotent(self) -> None:
         lf_mode = os.stat(self.m.lf_files(self.root)[0]).st_mode
         self.assertEqual(self.sapply(), 0, self.out)
         self.assertMoved()
@@ -445,7 +460,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual({a["id"]: a["state"] for a in sv["apps"]}, {"570": "ok", "1628350": "skip"})
         self.assertIn("ok (library 1)", self.out)
 
-    def test_backups_are_pruned_to_five(self):
+    def test_backups_are_pruned_to_five(self) -> None:
         d = os.path.dirname(self.m.lf_files(self.root)[0])
         for i in range(7):
             self.put(os.path.join(d, f"libraryfolders.vdf.cst-bak-2020010{i}T000000"), "old")
@@ -455,34 +470,34 @@ class SteamTest(tb.BulkBase):
         self.assertNotIn("libraryfolders.vdf.cst-bak-20200101T000000", baks)
 
     # ---- guards: nothing changes ----
-    def test_g1_steam_running(self):
+    def test_g1_steam_running(self) -> None:
         self.steam_procs = ["process 42 (steamwebhelper)"]
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 5, "Steam is running: nothing done")
         self.splan()
         self.assertIn("YES (process 42 (steamwebhelper))", self.out)
 
-    def test_g2_flatpak_permission_missing(self):
+    def test_g2_flatpak_permission_missing(self) -> None:
         self.flatpaks["com.valvesoftware.Steam"] = set()
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "run 'cst btrfs bulk apply' first")
 
-    def test_g2_steam_flatpak_not_installed(self):
+    def test_g2_steam_flatpak_not_installed(self) -> None:
         del self.flatpaks["com.valvesoftware.Steam"]
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "not installed")
 
-    def test_g3_unexpected_vdf(self):
+    def test_g3_unexpected_vdf(self) -> None:
         self.put_lf(self.lf_text().replace(b'"label"', b"label"))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "unquoted text")
 
-    def test_g3_copies_differ(self):
+    def test_g3_copies_differ(self) -> None:
         self.put_lf(self.lf_text().replace(b"1147491265", b"1"), which=(1,))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "differ")
 
-    def test_g4_marker_does_not_match(self):
+    def test_g4_marker_does_not_match(self) -> None:
         self.assertEqual(self.sapply("1628350"), 0, self.out)
         self.put(
             os.path.join(self.T, "libraryfolder.vdf"), b'"libraryfolder"\n{\n\t"contentid"\t\t"7"\n\t"label"\t\t""\n}\n'
@@ -490,13 +505,13 @@ class SteamTest(tb.BulkBase):
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "contentid")
 
-    def test_g4_steamapps_is_a_symlink(self):
+    def test_g4_steamapps_is_a_symlink(self) -> None:
         os.makedirs(os.path.join(self.tmp, "elsewhere"))
         os.symlink(os.path.join(self.tmp, "elsewhere"), os.path.join(self.T, "steamapps"))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "is a symlink or a file")
 
-    def test_g5_mid_update(self):
+    def test_g5_mid_update(self) -> None:
         self.put(
             self.S("appmanifest_570.acf"),
             fixture("appmanifest_570.acf").replace(b'"StateFlags"\t\t"4"', b'"StateFlags"\t\t"1026"'),
@@ -509,65 +524,61 @@ class SteamTest(tb.BulkBase):
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "steamapps/downloading/570 is not empty")
 
-    def test_g6_not_in_the_apps_map(self):
+    def test_g6_not_in_the_apps_map(self) -> None:
         self.put_lf(self.lf_text().replace(b'\t\t\t"570"\t\t"77185439508"\n', b""))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "lists it under no library")
 
-    def test_g6_manifest_in_both_libraries(self):
+    def test_g6_manifest_in_both_libraries(self) -> None:
         self.put(self.D("appmanifest_570.acf"), fixture("appmanifest_570.acf"))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "a manifest in both libraries")
 
-    def test_g7_target_exists_is_never_merged(self):
+    def test_g7_target_exists_is_never_merged(self) -> None:
         os.makedirs(self.D("common/dota 2 beta"))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "exists already: remove it or move it back")
 
-    def test_g7_leftover_new_copy(self):
+    def test_g7_leftover_new_copy(self) -> None:
         os.makedirs(self.D("workshop/content/570.bulk-new"))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "570.bulk-new exists already")
 
-    def test_g8_proton_prefix_with_data_even_with_explicit_app(self):
+    def test_g8_proton_prefix_with_data_even_with_explicit_app(self) -> None:
         self.put(self.S("compatdata/570/pfx/user.reg"), "x")
         before = self.tree()
         self.assertUnchanged(before, self.sapply("570"), 1, "Move install folder")
 
-    def test_g9_game_folder_is_a_symlink(self):
+    def test_g9_game_folder_is_a_symlink(self) -> None:
         g = self.S("common/dota 2 beta")
         os.rename(g, g + "-real")
         os.symlink(g + "-real", g)
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "is a link, not a dir")
 
-    def test_g9_entries_not_owned(self):
+    def test_g9_entries_not_owned(self) -> None:
         before = self.tree()
-        real = os.getuid
-        os.getuid = lambda: 0
-        try:
+        with mock.patch.object(os, "getuid", return_value=0):
             rc = self.sapply()
-        finally:
-            os.getuid = real
         self.assertUnchanged(before, rc, 1)
 
-    def test_g9_contains_a_subvolume(self):
+    def test_g9_contains_a_subvolume(self) -> None:
         st = os.lstat(self.S("common/dota 2 beta/game/dota"))
         self.subvols.add((st.st_dev, st.st_ino))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "contains another subvolume or a mount")
 
-    def test_g10_no_reflink(self):
+    def test_g10_no_reflink(self) -> None:
         self.no_reflink = True
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "is ~/Bulk on another filesystem?")
 
-    def test_g11_low_space(self):
+    def test_g11_low_space(self) -> None:
         self.m.free_bytes = lambda path: 1
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "not enough free space")
 
-    def test_g12_busy(self):
+    def test_g12_busy(self) -> None:
         self.busy.add(self.S("common/dota 2 beta/game"))
         rc = self.sapply()
         self.assertEqual(rc, 5, self.out)
@@ -578,12 +589,12 @@ class SteamTest(tb.BulkBase):
     # ---- NOCOW (+C) sources: a real copy, only with --copy ----
     NOCOW_PARTS = ("common/dota 2 beta", "appmanifest_570.acf", "workshop/content/570", "workshop/appworkshop_570.acf")
 
-    def assertCow(self):
+    def assertCow(self) -> None:
         for r, d, f in os.walk(os.path.join(self.T, "steamapps")):
             for n in d + f:
                 self.assertNotIn(self.key(os.path.join(r, n)), self.nocow, os.path.join(r, n))
 
-    def test_nocow_source_plan_says_copy(self):
+    def test_nocow_source_plan_says_copy(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         before = self.tree()
         sv = self.splan()
@@ -605,7 +616,7 @@ class SteamTest(tb.BulkBase):
         self.splan(copy=True)
         self.assertNotIn("add --copy", self.out)
 
-    def test_mixed_parts_plan(self):
+    def test_mixed_parts_plan(self) -> None:
         self.make_nocow("common/dota 2 beta")
         sv = self.splan()
         modes = {p["name"]: p["mode"] for p in sv["apps"][0]["parts"]}
@@ -617,13 +628,13 @@ class SteamTest(tb.BulkBase):
             r"move \S+ MiB \(reflink, no data written\) and\n.*copy \S+ MiB byte by byte: 2 files in it have \+C",
         )
 
-    def test_nocow_without_copy_is_refused(self):
+    def test_nocow_without_copy_is_refused(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "run again with --copy to allow it")
         self.assertEqual(self.journals(), [])
 
-    def test_nocow_without_copy_others_still_move(self):
+    def test_nocow_without_copy_others_still_move(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.assertEqual(self.sapply("570", "1628350"), 1, self.out)
         self.assertIn(
@@ -634,7 +645,7 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_nocow_with_copy_copies_and_second_apply_does_nothing(self):
+    def test_nocow_with_copy_copies_and_second_apply_does_nothing(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.m.PROGRESS_EVERY = 0  # a progress line per file compared
         self.assertEqual(self.sapply(copy=True), 0, self.out)
@@ -651,15 +662,15 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.sapply(), 0, self.out)  # without --copy too: nothing left to copy
         self.assertEqual(self.tree(), before)
 
-    def test_mixed_parts_apply(self):
+    def test_mixed_parts_apply(self) -> None:
         self.make_nocow("common/dota 2 beta")
         self.assertEqual(self.sapply(copy=True), 0, self.out)
         self.assertMoved()
         self.assertCow()
 
-    def corrupt_copy(self, rel, data):
-        def make(real):
-            def copy(src, dst, label, total):
+    def corrupt_copy(self, rel: str, data: bytes) -> None:
+        def make(real: Callable[[str, str, str, int], None]) -> Callable[[str, str, str, int], None]:
+            def copy(src: str, dst: str, label: str, total: int) -> None:
                 real(src, dst, label, total)
                 p = os.path.join(dst, rel)
                 if os.path.exists(p):
@@ -672,7 +683,7 @@ class SteamTest(tb.BulkBase):
 
         self.patch("copy_bytes", make)
 
-    def test_copy_with_other_content_is_dropped(self):
+    def test_copy_with_other_content_is_dropped(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.corrupt_copy("game/dota/pak01_dir.vpk", b"VPK")  # same size and time stamp, other bytes
         self.assertEqual(self.sapply(copy=True), 1, self.out)
@@ -682,7 +693,7 @@ class SteamTest(tb.BulkBase):
             self.assertEqual(f.read(), "vpk")
         self.assertNoLeftovers()
 
-    def test_copy_with_another_tree_is_dropped(self):
+    def test_copy_with_another_tree_is_dropped(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.corrupt_copy("game/dota/pak01_dir.vpk", b"vpk-longer")
         self.assertEqual(self.sapply(copy=True), 1, self.out)
@@ -690,11 +701,11 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_copy_that_got_nocow_is_dropped(self):
+    def test_copy_that_got_nocow_is_dropped(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
 
-        def make(real):
-            def copy(src, dst, label, total):
+        def make(real: Callable[[str, str, str, int], None]) -> Callable[[str, str, str, int], None]:
+            def copy(src: str, dst: str, label: str, total: int) -> None:
                 real(src, dst, label, total)
                 self.nocow.add(self.key(dst))
 
@@ -706,11 +717,11 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_kill_during_a_real_copy_is_undone(self):
+    def test_kill_during_a_real_copy_is_undone(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
 
-        def make(real):
-            def copy(src, dst, label, total):
+        def make(real: Callable[[str, str, str, int], None]) -> Callable[[str, str, str, int], None]:
+            def copy(src: str, dst: str, label: str, total: int) -> None:
                 os.makedirs(os.path.join(dst, "game"))  # half done
                 shutil.copy(os.path.join(src, "game/dota/pak01_dir.vpk"), os.path.join(dst, "game/x"))
                 raise Crash()
@@ -718,8 +729,12 @@ class SteamTest(tb.BulkBase):
             return copy
 
         real = self.patch("copy_bytes", make)
+
         # A kill gives no chance to clean up: the half copy stays.
-        real_drop = self.patch("u_steam_drop_news", lambda real: lambda j: True)
+        def _drop_news(_real: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
+            return lambda _j: True
+
+        real_drop = self.patch("u_steam_drop_news", _drop_news)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
             self.m.steam_apply(self.ctx, [], True)
         self.m.copy_bytes, self.m.u_steam_drop_news = real, real_drop
@@ -732,7 +747,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.sapply(copy=True), 0, self.out)
         self.assertMoved()
 
-    def test_real_copy_needs_its_full_size_free(self):
+    def test_real_copy_needs_its_full_size_free(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.m.free_bytes = lambda path: self.m.MARGIN  # > STEAM_MARGIN, < copy + MARGIN
         sv = self.splan(copy=True)
@@ -746,7 +761,7 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertTrue(before)
 
-    def test_one_empty_nocow_file_is_named_not_the_whole_size(self):
+    def test_one_empty_nocow_file_is_named_not_the_whole_size(self) -> None:
         g = self.S("common/dota 2 beta")
         self.put(os.path.join(g, "game/dota/pak02_dir.vpk"), "x" * 5000)
         self.put(os.path.join(g, "game/empty/new.cfg"), "")
@@ -765,13 +780,17 @@ class SteamTest(tb.BulkBase):
         self.assertIn("recreating them without +C lets the game move by reflink", self.out)
         self.assertInMain()
 
-    def test_snapshot_guard_is_read_from_btrfs_snapshot(self):
+    def test_snapshot_guard_is_read_from_btrfs_snapshot(self) -> None:
         m = self.m
         self.assertEqual(m.snapshot_guard(), {"pause": 250 * m.BIG, "resume": 270 * m.BIG, "emergency": 150 * m.BIG})
         fake = os.path.join(self.tmp, "btrfs-snapshot")
         with open(fake, "w") as f:
             f.write("X=1\nSKIP_AT_OR_BELOW_GIB=40\nRESUME_ABOVE_GIB=45\nEMERGENCY_AT_OR_BELOW_GIB=30\n")
-        self.patch("SNAPSHOT", lambda real: fake)
+
+        def _use_fake(_real: str) -> str:
+            return fake
+
+        self.patch("SNAPSHOT", _use_fake)
         self.assertEqual(m.snapshot_guard(), {"pause": 40 * m.BIG, "resume": 45 * m.BIG, "emergency": 30 * m.BIG})
         self.assertEqual(m.steam_copy_floor(), 30 * m.BIG + m.MARGIN)
         # snapshots.conf overrides the defaults in btrfs-snapshot, as there.
@@ -782,7 +801,7 @@ class SteamTest(tb.BulkBase):
         m.SNAPSHOT = os.path.join(self.tmp, "absent")
         self.assertEqual(m.snapshot_guard()["emergency"], 150 * m.BIG)
 
-    def test_real_copy_keeps_the_snapshot_emergency_limit_free(self):
+    def test_real_copy_keeps_the_snapshot_emergency_limit_free(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         sv = self.splan(copy=True)
         c = sv["copy_bytes"]
@@ -797,7 +816,7 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertEqual(self.journals(), [])
 
-    def test_real_copy_that_pauses_snapshots_is_pointed_out(self):
+    def test_real_copy_that_pauses_snapshots_is_pointed_out(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         self.m.free_bytes = lambda path: 200 * self.m.BIG  # above the floor, below the pause limit
         self.splan(copy=True)
@@ -811,27 +830,31 @@ class SteamTest(tb.BulkBase):
         self.splan("1628350", copy=True)
         self.assertNotIn("NOTE:", self.out)
 
-    def test_failed_sync_keeps_the_original(self):
+    def test_failed_sync_keeps_the_original(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
-        real_run = subprocess.run
+        real_run = cast(
+            "Callable[..., subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]]",
+            subprocess.run,
+        )
 
-        def run(cmd, *a, **kw):
+        def run(
+            cmd: Sequence[str], *a: object, **kw: object
+        ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
             if list(cmd[:2]) == ["sync", "-f"]:
                 return subprocess.CompletedProcess(cmd, 1, "", "sync: error syncing 'x': Input/output error")
             return real_run(cmd, *a, **kw)
 
-        subprocess.run = run
-        self.addCleanup(setattr, subprocess, "run", real_run)
-        self.assertEqual(self.sapply(copy=True), 1, self.out)
+        with mock.patch.object(subprocess, "run", new=run):
+            self.assertEqual(self.sapply(copy=True), 1, self.out)
         self.assertIn("could not be written to the disk (sync: sync: error syncing 'x': Input/output error)", self.out)
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_failed_fsync_or_read_back_keeps_the_original(self):
+    def test_failed_fsync_or_read_back_keeps_the_original(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
 
-        def make(real):
-            def same(a, b, on_chunk=None):
+        def make(real: Callable[..., bool]) -> Callable[..., bool]:
+            def same(a: str, b: str, on_chunk: object = None) -> bool:
                 raise OSError(5, "Input/output error")
 
             return same
@@ -842,24 +865,32 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_progress_inside_one_large_file(self):
+    def test_progress_inside_one_large_file(self) -> None:
         m = self.m
         src, new = os.path.join(self.tmp, "a"), os.path.join(self.tmp, "b")
         for d in (src, new):
             self.put(os.path.join(d, "big.pak"), b"z" * 100)
         for name, val in (("CHUNK", 10), ("PROGRESS_BYTES", 30), ("PROGRESS_EVERY", 10**6)):
-            self.patch(name, lambda real, v=val: v)
+
+            def _override(_real: int, v: int = val) -> int:
+                return v
+
+            self.patch(name, _override)
         self.assertEqual(self.run_out(m.u_verify_content, src, new, "game", 100), "")
         self.assertEqual(self.out.count("comparing game:"), 3, self.out)  # at 30, 60 and 90 bytes
 
-    def test_target_with_nocow_is_refused(self):
+    def test_target_with_nocow_is_refused(self) -> None:
         self.nocow.add(self.key(self.T))
         before = self.tree()
         self.assertUnchanged(before, self.sapply(copy=True), 1, "must stay copy-on-write")
 
-    def test_cli_copy_flag(self):
+    def test_cli_copy_flag(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
-        self.patch("user_ctx", lambda real: lambda args: self.ctx)  # never the real home
+
+        def _user_ctx(_real: Callable[[Sequence[str]], tb.CtxProto]) -> Callable[[Sequence[str]], tb.CtxProto]:
+            return lambda _args: self.ctx
+
+        self.patch("user_ctx", _user_ctx)  # never the real home
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(self.m.steam_cmd(["plan", "--app", "570"]), 0)
@@ -869,36 +900,36 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.run_out(self.m.steam_cmd, ["apply", "--copy"]), 0)
         self.assertMoved()
 
-    def test_kept_steam_refuses(self):
+    def test_kept_steam_refuses(self) -> None:
         self.m.edit_keep(["steam"], set())
         before = self.tree()
         self.assertUnchanged(before, self.sapply(), 1, "bulk unkeep steam")
 
     # ---- interruptions ----
-    def patch(self, name, fn):
-        real = getattr(self.m, name)
+    def patch[T](self, name: str, fn: Callable[[T], T]) -> T:
+        real = cast("T", getattr(self.m, name))
         setattr(self.m, name, fn(real))
         self.addCleanup(setattr, self.m, name, real)
         return real
 
-    def crash_apply(self, *ids):
+    def crash_apply(self, *ids: str) -> None:
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
             self.m.steam_apply(self.ctx, list(ids))
 
-    def crash_os_in(self, fn_name, os_name, after, nth=1):
+    def crash_os_in(self, fn_name: str, os_name: str, after: int, nth: int = 1) -> None:
         """os.<os_name> raises Crash after `after` calls, inside the nth call
         of the module's fn_name."""
         calls = {"fn": 0, "os": 0}
-        real_os = getattr(os, os_name)
+        real_os = cast("Callable[..., object]", getattr(os, os_name))
 
-        def wrapped_os(*a, **k):
+        def wrapped_os(*a: object, **k: object) -> object:
             if calls["os"] >= after:
                 raise Crash()
             calls["os"] += 1
             return real_os(*a, **k)
 
-        def make(real_fn):
-            def patched(*a):
+        def make(real_fn: Callable[..., object]) -> Callable[..., object]:
+            def patched(*a: object) -> object:
                 calls["fn"] += 1
                 if calls["fn"] != nth:
                     return real_fn(*a)
@@ -914,15 +945,15 @@ class SteamTest(tb.BulkBase):
         self.crash_apply()
         setattr(self.m, fn_name, real)
 
-    def recovered_then_moved(self):
+    def recovered_then_moved(self) -> None:
         self.assertEqual(self.run_out(self.m.recover, self.ctx), [], self.out)
         self.assertEqual(self.journals(), [])
         self.assertEqual(self.sapply(), 0, self.out)
         self.assertMoved()
 
-    def test_steam_started_during_the_copy_is_undone(self):
-        def make(real):
-            def copy(src, dst):
+    def test_steam_started_during_the_copy_is_undone(self) -> None:
+        def make(real: Callable[[str, str], None]) -> Callable[[str, str], None]:
+            def copy(src: str, dst: str) -> None:
                 real(src, dst)
                 self.steam_procs = ["process 7 (steam)"]
 
@@ -934,11 +965,11 @@ class SteamTest(tb.BulkBase):
         self.assertInMain()
         self.assertNoLeftovers()
 
-    def test_kill_during_the_copy_deletes_the_copies(self):
+    def test_kill_during_the_copy_deletes_the_copies(self) -> None:
         n = {"calls": 0}
 
-        def make(real):
-            def clock(near):
+        def make(real: Callable[[str], object]) -> Callable[[str], object]:
+            def clock(near: str) -> object:
                 n["calls"] += 1
                 if n["calls"] == 2:  # the copy is done, stamp2 not taken
                     raise Crash()
@@ -956,7 +987,7 @@ class SteamTest(tb.BulkBase):
         self.assertNoLeftovers()
         self.recovered_then_moved()
 
-    def test_kill_after_the_game_folder_moved_is_rolled_back(self):
+    def test_kill_after_the_game_folder_moved_is_rolled_back(self) -> None:
         for after in (1, 2, 7):  # src->old only; the game switched; all but the manifest
             with self.subTest(after=after):
                 self.crash_os_in("u_steam_switch", "rename", after)
@@ -967,7 +998,7 @@ class SteamTest(tb.BulkBase):
                 self.assertNoLeftovers()
         self.recovered_then_moved()
 
-    def test_kill_after_all_renames_before_the_vdf_is_rolled_forward(self):
+    def test_kill_after_all_renames_before_the_vdf_is_rolled_forward(self) -> None:
         self.crash_os_in("write_vdf_pair", "rename", 0, nth=2)  # 1st: the library entry
         self.assertTrue(os.path.isfile(self.D("appmanifest_570.acf")))
         self.assertIn("570", self.lf()["0"]["apps"])
@@ -975,9 +1006,9 @@ class SteamTest(tb.BulkBase):
         self.assertIn("finished an interrupted move", self.out)
         self.assertMoved()
 
-    def test_kill_in_the_switching_phase_with_all_renames_done(self):
-        def make(real):
-            def late(j):
+    def test_kill_in_the_switching_phase_with_all_renames_done(self) -> None:
+        def make(real: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
+            def late(j: dict[str, Any]) -> bool:
                 raise Crash()
 
             return late
@@ -989,7 +1020,7 @@ class SteamTest(tb.BulkBase):
         self.run_out(self.m.recover, self.ctx)
         self.assertMoved()
 
-    def test_kill_between_the_two_vdf_writes(self):
+    def test_kill_between_the_two_vdf_writes(self) -> None:
         self.crash_os_in("u_write_vdf_pair", "rename", 1, nth=2)
         files = self.m.lf_files(self.root)
         with open(files[0], "rb") as a, open(files[1], "rb") as b:
@@ -997,7 +1028,7 @@ class SteamTest(tb.BulkBase):
         self.run_out(self.m.recover, self.ctx)
         self.assertMoved()
 
-    def test_kill_between_the_two_vdf_writes_of_the_library_entry(self):
+    def test_kill_between_the_two_vdf_writes_of_the_library_entry(self) -> None:
         self.crash_os_in("u_write_vdf_pair", "rename", 1, nth=1)
         self.assertEqual(self.journals(), [])
         sv = self.splan()
@@ -1006,15 +1037,15 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.sapply(), 0, self.out)
         self.assertMoved()
 
-    def test_kill_while_deleting_the_old_copies_is_finished(self):
+    def test_kill_while_deleting_the_old_copies_is_finished(self) -> None:
         self.crash_os_in("u_steam_finish", "unlink", 1)
         self.assertEqual(self.m.jread("steam-570")["phase"], "finishing")
         self.run_out(self.m.recover, self.ctx)
         self.assertMoved()
 
-    def write_late(self, also_new=False):
-        def make(real):
-            def late(j):
+    def write_late(self, also_new: bool = False) -> None:
+        def make(real: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
+            def late(j: dict[str, Any]) -> bool:
                 p = j["parts"][0]
                 with open(os.path.join(p["old"], "game/dota/pak01_dir.vpk"), "w") as f:
                     f.write("late")
@@ -1027,7 +1058,7 @@ class SteamTest(tb.BulkBase):
 
         self.patch("u_steam_late", make)
 
-    def test_late_write_into_the_old_copy_is_undone(self):
+    def test_late_write_into_the_old_copy_is_undone(self) -> None:
         self.write_late()
         self.assertEqual(self.sapply(), 1, self.out)
         self.assertIn("written to during the move: undone", self.out)
@@ -1036,7 +1067,7 @@ class SteamTest(tb.BulkBase):
             self.assertEqual(f.read(), "late")
         self.assertNoLeftovers()
 
-    def test_writes_on_both_sides_keep_both(self):
+    def test_writes_on_both_sides_keep_both(self) -> None:
         self.write_late(also_new=True)
         self.assertEqual(self.sapply(), 1, self.out)
         self.assertIn("written to on both sides", self.out)
@@ -1060,7 +1091,7 @@ class SteamTest(tb.BulkBase):
         self.assertIn("the move is complete", self.out)
         self.assertMoved()
 
-    def test_source_created_again_is_not_deleted(self):
+    def test_source_created_again_is_not_deleted(self) -> None:
         self.crash_os_in("u_steam_switch", "rename", 1)
         os.makedirs(self.S("common/dota 2 beta/new"))
         stuck = self.run_out(self.m.recover, self.ctx)
@@ -1072,9 +1103,9 @@ class SteamTest(tb.BulkBase):
         shutil.rmtree(self.S("common/dota 2 beta"))
         self.recovered_then_moved()
 
-    def test_vdf_changed_meanwhile_stops_the_other_apps(self):
-        def make(real):
-            def switch(j):
+    def test_vdf_changed_meanwhile_stops_the_other_apps(self) -> None:
+        def make(real: Callable[[dict[str, Any]], object]) -> Callable[[dict[str, Any]], object]:
+            def switch(j: dict[str, Any]) -> object:
                 r = real(j)
                 os.utime(self.m.lf_files(self.root)[0], ns=(1, 1))
                 return r
@@ -1091,7 +1122,7 @@ class SteamTest(tb.BulkBase):
         self.assertMoved()
 
     # ---- integration ----
-    def test_boot_recovers_a_steam_journal_without_the_flag(self):
+    def test_boot_recovers_a_steam_journal_without_the_flag(self) -> None:
         self.crash_os_in("write_vdf_pair", "rename", 0, nth=2)
         self.assertFalse(os.path.exists(self.m.FLAG))
         _, text = self.report()
@@ -1101,12 +1132,12 @@ class SteamTest(tb.BulkBase):
             self.assertEqual(self.m.boot(self.ctx), 0)
         self.assertMoved()
 
-    def test_bulk_status_points_to_bulk_steam(self):
+    def test_bulk_status_points_to_bulk_steam(self) -> None:
         self.m.BIG = 1
         _, text = self.report()
         self.assertIn("'cst btrfs bulk steam plan'", text)
 
-    def test_steam_running_detection(self):
+    def test_steam_running_detection(self) -> None:
         m = self.m
         proc, run = os.path.join(self.tmp, "proc"), os.path.join(self.tmp, "run-user")
         m.PROC, m.RUN_USER = proc, run
@@ -1129,7 +1160,7 @@ class SteamTest(tb.BulkBase):
             ),
         )
 
-    def test_cli_plan_as_user_changes_nothing(self):
+    def test_cli_plan_as_user_changes_nothing(self) -> None:
         env = dict(
             os.environ,
             BTRFS_BULK_HOME=self.home,
@@ -1164,9 +1195,7 @@ class RealBtrfsSteamTest(SteamTest):
     fakes. BTRFS_BULK_REAL_SCRATCH=~/Workspace/.e2e-x (must exist, on btrfs;
     /tmp is often tmpfs) python3 -I -B btrfs/tests/test_btrfs_steam.py RealBtrfsSteamTest"""
 
-    def setUp(self):
-        import tempfile
-
+    def setUp(self) -> None:
         scratch = os.environ["BTRFS_BULK_REAL_SCRATCH"]
         old, tempfile.tempdir = tempfile.tempdir, scratch
         try:
@@ -1178,7 +1207,7 @@ class RealBtrfsSteamTest(SteamTest):
         for name in ("is_nocow", "set_nocow", "copy_reflink"):
             setattr(m, name, getattr(fresh, name))
 
-    def put_nocow(self, path, data):
+    def put_nocow(self, path: str, data: bytes) -> None:
         """A file with +C from its first byte (+C only takes on empty files)."""
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "wb").close()
@@ -1186,7 +1215,7 @@ class RealBtrfsSteamTest(SteamTest):
         with open(path, "ab") as f:
             f.write(data)
 
-    def test_real_nocow_source(self):
+    def test_real_nocow_source(self) -> None:
         m = self.m
         for rel in self.NOCOW_PARTS:
             p = self.S(rel)
@@ -1236,7 +1265,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
     """`cst btrfs bulk steam` in setup-bulk.bash (sourced the way the frontend
     does; the root-only steps are stubs that only record their call)."""
 
-    def calls(self, *args):
+    def calls(self, *args: str) -> list[str]:
         stubs = (
             "exec 3>&1; snap_home() { echo snap_home >&3; }; snap_install_runtime() { echo install_runtime >&3; }; "
             'install_text() { cat >/dev/null; echo "install_text $1" >&3; }; '
@@ -1260,7 +1289,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
         )
         return r.stdout.splitlines()
 
-    def test_steam_apply_installs_the_boot_runtime_first(self):
+    def test_steam_apply_installs_the_boot_runtime_first(self) -> None:
         self.assertEqual(
             self.calls("steam", "apply", "--app", "570"),
             [
@@ -1273,7 +1302,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
             ],
         )
 
-    def test_steam_plan_installs_nothing(self):
+    def test_steam_plan_installs_nothing(self) -> None:
         self.assertEqual(self.calls("steam", "plan"), ["snap_home", "bulk_run steam plan", "rc 5"])
 
 

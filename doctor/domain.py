@@ -1,0 +1,497 @@
+"""Pure domain model, constants, parsers, and rules for `cst doctor`.
+
+Standard library only (no filesystem I/O, no subprocess calls, no outer
+layers).
+"""
+
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+import os
+import re
+import shlex
+from typing import Any, Self
+import xml.etree.ElementTree as ET
+
+NAME = "cst-doctor"
+
+OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
+SEVERITY: dict[str, int] = {OK: 0, INFO: 1, WARN: 2, ERROR: 3}
+
+STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
+ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
+ALERT_MAX_FILE = 16384
+ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
+
+# The machine's own architecture: a bare name installs this one (or noarch).
+NATIVE_ARCH = os.uname().machine
+ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64", "src"})
+
+# name-[epoch:]version-release with a distribution tag in the release
+# (.fc44, .el9, .eln140), and an optional .arch: only the form gives it away
+# when the deployment's package list cannot be read.
+NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d[^-]*\.(?:fc|el|eln)\d+[^-]*)$")
+
+TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
+
+BTRFS_SYSFS = "/sys/fs/btrfs"
+RECLAIM_CONF = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+HEALTH_CHECK_HOST = "/usr/local/sbin/btrfs-health-check"
+UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
+FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Copies of each chunk per profile: a device holds one copy of every chunk of
+# raid1 (2 devices), raid1c3 (3) or raid1c4 (4); single and dup only exist
+# per device on a one-device filesystem. Other layouts: no per-device number.
+MIRROR_COPIES: dict[str, int] = {"raid1": 2, "raid1c3": 3, "raid1c4": 4}
+ONE_DEVICE_FACTOR: dict[str, int] = {"single": 1, "dup": 2}
+GIB = 1024**3
+# statfs rounds the size down to whole blocks, per device and per copy: a
+# difference up to this much between the btrfs devices and their block
+# devices is rounding, not a shrunk device.
+RESIZE_SLACK = 16 * 2**20
+
+SNAP_STATE = "/var/lib/btrfs-snapshot"
+SNAP_UNFINISHED = f"{SNAP_STATE}/core-unfinished"
+SNAP_WRITABLE = f"{SNAP_STATE}/core-writable"
+SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"  # also read by the VM NAS check
+
+NOCOW_POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
+NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
+
+GAME_RUN = "/run/cpu-setup"
+GAME_STATE = f"{GAME_RUN}/game.state"
+GAME_INTENDED = f"{GAME_RUN}/game.intended"
+GAME_MANUAL = f"{GAME_RUN}/manual"
+GAME_DROPIN_DIR = "/run/systemd/system"
+GAME_DROPIN = "zz-cst-game.conf"
+GAME_PROFILE_HOST = "/usr/local/sbin/cpu-game-profile"
+
+# The top-level slices of the user manager that CST knows: app.slice (desktop
+# apps and the game), session.slice (gnome-shell), background.slice (GNOME's
+# background tasks: the file indexer) and user.slice (the toolboxes). Any other
+# one is a sibling of app.slice that no rule covers outside games. (The game
+# profile's own list differs: it makes background.slice idle too.)
+USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.slice")
+LIST_MAX = 5  # names shown per line, then "and N more"
+
+VIRSH_URI = "qemu:///system"
+CPU_CONF = "/etc/cpu-setup/cpu-setup.conf"
+VM_PIN_HOST = "/usr/local/sbin/cpu-vm-pin"
+# As CPU_DISABLE_DEFAULT in cpu/vm-pin (read from there when possible).
+CPU_DISABLE_FALLBACK = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
+CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
+VM_INDEX = "/var/lib/cst/vm-backups.json"
+VM_CONF = "/etc/cst/vm.conf"
+VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
+VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works
+VM_RUN_DIR = "/run/cst-vm"  # nas-<vm>.lock: the pid of a NAS backup in progress
+VM_TIMER_WANTS = "/etc/systemd/system/timers.target.wants"
+# Packages that make up the guest's virtual hardware: name prefixes.
+VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
+# The ones named in the message (the others are only counted).
+VIRT_MAIN = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
+
+
+class Usage(Exception):
+    """Raised when command-line arguments to `cst doctor` are invalid."""
+
+
+class Result(tuple):
+    """(status, message, fix): fix is the command to run, or ""."""
+
+    def __new__(cls, status: str, message: str, fix: str = "") -> Self:
+        return super().__new__(cls, (status, message, fix))
+
+    @property
+    def status(self) -> str:
+        return str(self[0])
+
+    @property
+    def message(self) -> str:
+        return str(self[1])
+
+    @property
+    def fix(self) -> str:
+        return str(self[2])
+
+
+# A deployment of `rpm-ostree status --json`: JSON with many keys of many
+# types (str, bool, int, lists, dicts), read with .get and checked where it
+# matters. CST does not build it, so it is not a TypedDict.
+type Deployment = dict[str, Any]
+# (booted, pending, error) of ostree_deployments.
+type OstreeAnswer = tuple[Deployment | None, Deployment | None, str]
+# (name, epoch, version, release, arch) of a package, from parse_nevra.
+type Nevra = tuple[str, str, str, str, str]
+# (request, spec, how) of one requested package, from classify_requests.
+type Request = tuple[str, str, str]
+
+
+def first_line(text: str | None) -> str:
+    """Return the first non-empty stripped line of text, or empty string."""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def parse_nevra(s: str) -> Nevra | None:
+    """'name-[epoch:]version-release.arch' -> (name, epoch, version, release,
+    arch), or None. The arch is the part after the last dot; version and
+    release never contain a dash, so the name is everything before them."""
+    if "." not in s:
+        return None
+    nvr, arch = s.rsplit(".", 1)
+    parts = nvr.rsplit("-", 2)
+    if len(parts) != 3 or not all(parts):
+        return None
+    name, ev, rel = parts
+    epoch = ""
+    if ":" in ev:
+        epoch, ev = ev.split(":", 1)
+        if not epoch.isdigit():
+            return None
+    if not ev or not rel:
+        return None
+    return name, epoch, ev, rel, arch
+
+
+def spellings(pkg: Nevra) -> dict[str, bool]:
+    """Every way a request can name this exact package with a version:
+    {spelling: True if it names the architecture}."""
+    name, epoch, ver, rel, arch = pkg
+    out = {f"{name}-{ver}-{rel}": False, f"{name}-{ver}-{rel}.{arch}": True, f"{name}-{ver}": False}
+    if epoch:
+        out.update(
+            {
+                f"{name}-{epoch}:{ver}-{rel}": False,
+                f"{name}-{epoch}:{ver}-{rel}.{arch}": True,
+                f"{name}-{epoch}:{ver}": False,
+            }
+        )
+    return out
+
+
+def install_spec(name: str, arch: str, named: bool, native: str) -> str:
+    """What to pass to --install= so that the same package comes back:
+    name.arch when the request named the architecture, or when the package
+    is of a foreign one (wine-core.i686 on x86_64); else the bare name."""
+    if arch and (named or arch not in (native, "noarch")):
+        return f"{name}.{arch}"
+    return name
+
+
+def classify_requests(
+    requests: Iterable[str], packages: Iterable[str] | None, native: str | None = None
+) -> list[Request]:
+    """Split requested-packages into by name and pinned to a version.
+    packages: the deployment's installed NEVRAs, or None if unknown.
+    Returns a list of (request, spec, how). how is:
+      "name"          fine; spec is the request itself;
+      "pinned"        the request is the name-version of an installed
+                      package; spec is what --install= needs to bring that
+                      same package back (name, or name.arch);
+      "pinned-form"   the package list is unknown, but the request looks
+                      like name-version-release.fcNN[.arch]; spec is read
+                      off the string;
+      "inactive"      looks like a pin, but no installed package matches
+                      (an inactive request, for example one the base image
+                      now provides): spec is "", nothing to install back."""
+    native = native or NATIVE_ARCH
+    names: set[str]
+    versioned: dict[str, list[tuple[str, str, bool]]]
+    names, versioned = set(), {}
+    for p in packages or ():
+        parsed = parse_nevra(p)
+        if not parsed:
+            continue
+        names.add(parsed[0])
+        for s, named in spellings(parsed).items():
+            versioned.setdefault(s, []).append((parsed[0], parsed[4], named))
+    out: list[Request] = []
+    for r in requests:
+        if r in names:
+            out.append((r, r, "name"))
+        elif r in versioned:
+            hits = versioned[r]
+            name, _, named = hits[0]
+            arches = [a for _, a, _ in hits]
+            # Without an arch in the request and several installed (multilib),
+            # the bare name is what installed the native one.
+            arch = "" if (not named and (native in arches or "noarch" in arches)) else arches[0]
+            out.append((r, install_spec(name, arch, named, native), "pinned"))
+        else:
+            m = NVR_FORM.match(r)
+            if not m:
+                out.append((r, r, "name"))  # a name, a provide (vim), a path...
+            elif packages is None:
+                last = m.group("rel").rsplit(".", 1)[-1]
+                arch = last if last in ARCHES else ""
+                out.append((r, install_spec(m.group("name"), arch, bool(arch), native), "pinned-form"))
+            else:
+                out.append((r, "", "inactive"))
+    return out
+
+
+def unpin_command(classified: Iterable[Request]) -> str:
+    """One command that swaps every pinned request for its bare name (a name
+    already requested on its own is not requested twice). Inactive pins are
+    only dropped: nothing installed matches them, so nothing is asked back."""
+    pinned = [(r, n) for r, n, how in classified if how != "name"]
+    if not pinned:
+        return ""
+    by_name = {r for r, _, how in classified if how == "name"}
+    install: list[str] = []
+    for _, n in pinned:
+        if n and n not in by_name and n not in install:
+            install.append(n)
+    words = ["sudo", "rpm-ostree", "uninstall"] + [r for r, _ in pinned]
+    words += [f"--install={n}" for n in install]
+    return " ".join(shlex.quote(w) for w in words)
+
+
+def pkg_names(obj: object) -> list[str]:
+    """Package names in the JSON of replacements and removals. rpm-ostree
+    writes packages there as [nevra, name, epoch, version, release, arch]
+    or as plain NEVRA strings, inside lists (pairs new/old) or dicts."""
+    out: list[str] = []
+
+    def add(n: str) -> None:
+        if n and n not in out:
+            out.append(n)
+
+    def walk(o: object) -> None:
+        if isinstance(o, str):
+            parsed = parse_nevra(o)
+            add(parsed[0] if parsed else o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            if (
+                len(o) >= 2
+                and isinstance(o[0], str)
+                and isinstance(o[1], str)
+                and (o[0] == o[1] or o[0].startswith(o[1] + "-"))
+            ):
+                add(o[1])
+            else:
+                for v in o:
+                    walk(v)
+
+    walk(obj)
+    return out
+
+
+def describe(d: Deployment) -> str:
+    """'booted deployment 44.x', 'staged deployment 44.x', or 'pending
+    deployment 44.x (next boot)' for the next boot that was not staged (after
+    rpm-ostree rollback, or a deploy finished at once)."""
+    ver = d.get("version") or (d.get("checksum") or "?")[:10]
+    if d.get("booted"):
+        return f"booted deployment {ver}"
+    if d.get("staged"):
+        return f"staged deployment {ver}"
+    return f"pending deployment {ver} (next boot)"
+
+
+def unit_results(scope: str, units: list[str]) -> Iterator[Result]:
+    """Yield ok/WARN/info Results for failed systemd units in system or user scope."""
+    user = scope == "user"
+    sysctl = "systemctl --user" if user else "sudo systemctl"
+    journal = "journalctl --user" if user else "journalctl"
+    real = [u for u in units if not TRANSIENT.match(u)]
+    transient = [u for u in units if TRANSIENT.match(u)]
+    if real:
+        q = " ".join(shlex.quote(u) for u in real)
+        logs = " ".join(f"-u {shlex.quote(u)}" for u in real)
+        yield Result(
+            WARN,
+            f"{scope} units failed: {', '.join(real)}. Read why first: {journal} -b {logs} "
+            "(the fix only clears the mark, not the cause)",
+            f"{sysctl} reset-failed {q}",
+        )
+    if transient:
+        q = " ".join(shlex.quote(u) for u in transient)
+        yield Result(
+            INFO,
+            f"{scope}: {len(transient)} transient unit(s) failed (systemd-run, low priority): "
+            f"{', '.join(transient)}; to clear: {sysctl} reset-failed {q}",
+        )
+    if not units:
+        yield Result(OK, f"no failed {scope} units")
+
+
+def parse_alert_text(data: str) -> tuple[str, str, int] | None:
+    """Parse decoded alert file text into (urgency, title, last), or None."""
+    lines = data.split("\n")
+    if not lines or lines[0] not in ("cst-alert 1", "f44-alert 1"):
+        return None
+    head: dict[str, str] = {}
+    for line in lines[1:]:
+        if not line:
+            break
+        k, _, v = line.partition("=")
+        head[k] = v
+    if head.get("urgency") not in ("critical", "normal") or not head.get("title"):
+        return None
+    last = int(head["last"]) if head.get("last", "").isdigit() else 0
+    return head["urgency"], head["title"][:200], last
+
+
+def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
+    """As cst-pending-alerts: compare recorded mtime string against nanoseconds."""
+    sec, ns = divmod(mtime_ns, 1_000_000_000)
+    whole, _, frac = recorded.partition(".")
+    if whole != str(sec):
+        return False
+    return not frac or frac[:9].ljust(9, "0") == f"{ns:09d}"
+
+
+def parse_unalloc_thresholds_text(text: str) -> tuple[int, int] | None:
+    """Extract (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB) from btrfs-health-check source."""
+    w = re.search(r"^UNALLOC_MIN_GIB=(\d+)\b", text, re.M)
+    c = re.search(r"^UNALLOC_CRIT_GIB=(\d+)\b", text, re.M)
+    if w and c:
+        return int(w.group(1)), int(c.group(1))
+    return None
+
+
+def gib(n: int) -> str:
+    """Format byte count n as GiB (>= 1 GiB) or MiB."""
+    return f"{n / GIB:.1f} GiB" if abs(n) >= GIB else f"{n // 2**20} MiB"
+
+
+def pick_mount(targets: Sequence[str]) -> str:
+    """The mount point to name a filesystem by: / or /var first (as
+    btrfs-health-check), then /sysroot, then the shortest."""
+    for p in ("/", "/var", "/sysroot"):
+        if p in targets:
+            return p
+    return min(targets, key=len) if targets else ""
+
+
+def per_device_allocated(profiles: Mapping[str, Mapping[str, int]], ndev: int) -> int | None:
+    """Bytes allocated on each device, the same on all of them, when the
+    layout makes that exact; else None."""
+    used = {p for prof in profiles.values() for p in prof}
+    if not used:
+        return None
+    if ndev == 1 and used <= set(ONE_DEVICE_FACTOR):
+        return sum(t * ONE_DEVICE_FACTOR[p] for prof in profiles.values() for p, t in prof.items())
+    if all(MIRROR_COPIES.get(p) == ndev for p in used):
+        return sum(t for prof in profiles.values() for t in prof.values())
+    return None
+
+
+def read_intended(text: str) -> list[tuple[str, ...]]:
+    """Records of game.intended (fields written with bash printf %q):
+    ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
+    A line that does not parse, or of another kind, is skipped."""
+    out: list[tuple[str, ...]] = []
+    for line in text.splitlines():
+        try:
+            f = shlex.split(line)
+        except ValueError:
+            continue
+        if len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr"):
+            out.append(tuple(f))
+        elif len(f) == 4 and f[0] == "cgw":
+            out.append(tuple(f))
+    return out
+
+
+def parse_conf_value_text(text: str, key: str) -> str | None:
+    """Return the last KEY= assignment value (quotes stripped) from shell config text."""
+    value: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{key}="):
+            value = stripped.split("=", 1)[1].strip().strip("'\"")
+    return value
+
+
+def parse_cpu_stat_seconds(text: str) -> float | None:
+    """Parse cgroup cpu.stat text and return usage_usec in seconds, or None."""
+    for line in text.splitlines():
+        k, _, v = line.partition(" ")
+        if k == "usage_usec" and v.strip().isdigit():
+            return int(v) / 1e6
+    return None
+
+
+def cpu_time(secs: float | None) -> str:
+    """Human-readable CPU-seconds (and CPU-hours above 1 hour)."""
+    if secs is None:
+        return "CPU time unknown"
+    if secs >= 3600:
+        return f"{secs:,.0f} CPU-seconds ({secs / 3600:.1f} CPU-hours)"
+    return f"{secs:,.0f} CPU-seconds"
+
+
+def name_list(items: Sequence[str]) -> str:
+    """Format up to LIST_MAX items followed by 'and N more' if truncated."""
+    shown = ", ".join(items[:LIST_MAX])
+    return shown + (f" and {len(items) - LIST_MAX} more" if len(items) > LIST_MAX else "")
+
+
+def virt_versions(pkgs: Iterable[str]) -> dict[str, str]:
+    """{name: version-release} of the virtualization packages in a NEVRA list."""
+    out: dict[str, str] = {}
+    for p in pkgs:
+        parsed = parse_nevra(p)
+        if parsed and parsed[0].startswith(VIRT_PREFIXES):
+            name, epoch, ver, rel, _ = parsed
+            out[name] = f"{epoch + ':' if epoch else ''}{ver}-{rel}"
+    return out
+
+
+def virt_changes(old: Mapping[str, str], new: Mapping[str, str]) -> str:
+    """'qemu-kvm 10.2.2-1.fc44 -> 11.1.3-1.fc45, ...' (the main packages
+    named, the rest counted), or "" when nothing changed."""
+    changed = sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+    if not changed:
+        return ""
+    main = [n for n in changed if n in VIRT_MAIN] or changed[:3]
+    parts = [f"{n} {old.get(n, 'none')} -> {new.get(n, 'none')}" for n in main]
+    rest = len(changed) - len(main)
+    if rest:
+        parts.append(f"and {rest} more virtualization package(s)")
+    return ", ".join(parts)
+
+
+def parse_offered_features_xml(xml_text: str) -> tuple[set[str | None] | None, str]:
+    """Parse `virsh domcapabilities` XML for host-model offered CPU features."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        return None, f"domcapabilities: unreadable ({e})"
+    names: set[str | None] = set()
+    for mode in root.findall("cpu/mode"):
+        if mode.get("name") == "host-model":
+            names |= {f.get("name") for f in mode.findall("feature") if f.get("policy") != "disable"}
+    return names, ""
+
+
+def summary(results: Sequence[tuple[str, Result]]) -> tuple[str, int]:
+    """Format the doctor summary line and return (line, exit_code)."""
+    counts = {s: 0 for s in SEVERITY}
+    for _, r in results:
+        counts[r.status] += 1
+    worst = max((SEVERITY[r.status] for _, r in results), default=0)
+    verdict = "all good" if worst < SEVERITY[WARN] else "needs attention"
+    line = f"doctor: {verdict}: {counts[ERROR]} ERROR, {counts[WARN]} WARN, {counts[INFO]} info, {counts[OK]} ok"
+    return line, (1 if worst >= SEVERITY[WARN] else 0)
+
+
+def parse_args(argv: Sequence[str]) -> tuple[str, bool]:
+    """Parse `cst doctor` CLI flags into ('help'|'run', brief)."""
+    if argv and argv[0] in ("help", "-h", "--help"):
+        if len(argv) > 1:
+            raise Usage("help takes no arguments")
+        return "help", False
+    brief = False
+    for a in argv:
+        if a == "--brief" and not brief:
+            brief = True
+        else:
+            raise Usage(f"unknown argument '{a}'")
+    return "run", brief

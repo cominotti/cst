@@ -777,7 +777,11 @@ hand if you want them gone.
 
 | File | What it is |
 |---|---|
-| `cst-toolchains` | The program (Python): `status`, `prune`, `auto`, `config`, the targets and the toolchains report. Its `help` explains the details. |
+| `cst-toolchains` | The standalone Python program (`status`, `prune`, `auto`, `config`, target runners, and report). Copied to `~/.local/lib/cst/cst-toolchains` for the user timer, so it uses only the Python standard library. Its `help` explains the details. |
+| `domain.py` | Pure domain model, configuration parsers, TOML snippet helpers, unit templates, and pruning decision rules. |
+| `ports.py` | Protocol interfaces (`SystemctlUserPort`, `ToolchainsRuntimePort`) separating use cases from host execution. |
+| `adapters.py` | Concrete adapters wrapping `systemctl --user` (`SubprocessSystemctlUserAdapter`) and delegating runtime calls to `cst-toolchains` (`CstToolchainsRuntimeAdapter`). |
+| `application.py` | Application service (`ToolchainsService`) coordinating validation, domain decision evaluation, and runtime dispatch. |
 | `toolchains.conf` | The default settings. |
 | `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
 | `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v`, or all of CST with `python3 -I -B -m unittest` from the repository folder. |

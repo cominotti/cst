@@ -77,6 +77,9 @@ backup VM_NAS_KEEP_WEEKLY (4), VM_NAS_KEEP_MONTHLY (3), VM_NAS_TIMEOUT_HOURS (6)
 Exit status: 0 fine, 1 refused or failed, 2 usage.
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import ctypes
 import datetime
 import difflib
@@ -96,6 +99,8 @@ import sys
 import tempfile
 import threading
 import time
+from types import FrameType
+from typing import Any, TextIO
 import xml.etree.ElementTree as ET
 
 NAME = "cst-vm"
@@ -118,7 +123,7 @@ NOT_INSTALLED = "not installed"
 
 # Same list as cpu/vm-pin (read from there when this copy has it).
 VM_PIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cpu", "vm-pin")
-CPU_DISABLE_FALLBACK = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
+CPU_DISABLE_FALLBACK: str = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
 
 GIB = 1024**3
 FULL_MARGIN = (GIB, 0.05)  # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
@@ -195,7 +200,12 @@ class Refused(Exception):
 DETACH = {"on": False}
 
 
-def run(cmd, timeout=120, extra_env=None, detach=None):
+def run(
+    cmd: Sequence[str],
+    timeout: int = 120,
+    extra_env: Mapping[str, str] | None = None,
+    detach: bool | None = None,
+) -> tuple[int, str, str]:
     """(rc, stdout, stderr); rc 127 when the command does not exist."""
     # LC_ALL=C: virsh translates its answers ("shut off" is "desligado" in pt_BR).
     env = {**os.environ, "LC_ALL": "C", **(extra_env or {})}
@@ -217,16 +227,16 @@ def run(cmd, timeout=120, extra_env=None, detach=None):
     return p.returncode, p.stdout, p.stderr
 
 
-def virsh(*args, timeout=60, detach=None):
+def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
     return run(["virsh", "-c", URI, *args], timeout=timeout, detach=detach)
 
 
-def first_line(text):
+def first_line(text: str | None) -> str:
     return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
 
 
-def read_conf(path):
-    vals = {}
+def read_conf(path: str) -> dict[str, str]:
+    vals: dict[str, str] = {}
     try:
         with open(path) as f:
             for line in f:
@@ -238,11 +248,11 @@ def read_conf(path):
     return vals
 
 
-def default_vm():
+def default_vm() -> str:
     return read_conf(CPU_CONF).get("VM_NAME") or DEFAULT_VM
 
 
-def cpu_disable_list(conf_path=None, vm_pin=VM_PIN):
+def cpu_disable_list(conf_path: str | None = None, vm_pin: str = VM_PIN) -> list[str]:
     """The features vm-pin keeps disabled: VM_CPU_DISABLE from cpu-setup.conf
     when set there (also empty), else cpu/vm-pin's default."""
     conf = read_conf(conf_path or CPU_CONF)
@@ -258,29 +268,25 @@ def cpu_disable_list(conf_path=None, vm_pin=VM_PIN):
     return CPU_DISABLE_FALLBACK.split()
 
 
-def human(n):
+def human(n: float) -> str:
     return f"{n / GIB:.1f} GiB" if n >= GIB else f"{n / 2**20:.1f} MiB"
 
 
-def utc_now():
+def utc_now() -> tuple[float, str]:
     now = float(os.environ.get("CST_VM_NOW") or time.time())
     return now, datetime.datetime.fromtimestamp(now, datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 # ---- what the domain is made of -----------------------------------------------------------------
-def domain_parts(xml_text):
+def domain_parts(xml_text: str) -> dict[str, Any]:
     """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
     problems}. problems are disks a file copy cannot back up (block, network,
     pool volumes): the backup refuses then, rather than leaving one out."""
     root = ET.fromstring(xml_text)
-    out = {
-        "uuid": (root.findtext("uuid") or "").strip(),
-        "disks": [],
-        "nvram": "",
-        "tpm": False,
-        "skipped": [],
-        "problems": [],
-    }
+    disks: list[str] = []
+    skipped: list[str] = []
+    problems: list[str] = []
+    nvram = ""
     for disk in root.findall("devices/disk"):
         device = disk.get("device", "disk")
         kind = disk.get("type", "file")
@@ -288,35 +294,42 @@ def domain_parts(xml_text):
         dev = target.get("dev") if target is not None else "?"
         src = disk.find("source")
         if device in ("cdrom", "floppy"):
-            out["skipped"].append(f"{dev} ({device}, not copied)")
+            skipped.append(f"{dev} ({device}, not copied)")
             continue
         if kind != "file":
             where = ""
             if src is not None:
                 where = src.get("dev") or src.get("name") or src.get("volume") or src.get("dir") or ""
-            out["problems"].append(
+            problems.append(
                 f"{dev}: a {kind} disk{f' ({where})' if where else ''}: only file disks "
                 "can be copied; back it up by hand"
             )
             continue
         path = src.get("file") if src is not None else None
         if not path:
-            out["skipped"].append(f"{dev} (no source file)")
+            skipped.append(f"{dev} (no source file)")
             continue
-        if path not in out["disks"]:
-            out["disks"].append(path)
+        if path not in disks:
+            disks.append(path)
     nv = root.find("os/nvram")
     if nv is not None:
         path = (nv.text or "").strip()
         s = nv.find("source")
         if not path and s is not None:
             path = s.get("file") or ""
-        out["nvram"] = path
-    out["tpm"] = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
-    return out
+        nvram = path
+    tpm = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
+    return {
+        "uuid": (root.findtext("uuid") or "").strip(),
+        "disks": disks,
+        "nvram": nvram,
+        "tpm": tpm,
+        "skipped": skipped,
+        "problems": problems,
+    }
 
 
-def qcow2_backing_file(path):
+def qcow2_backing_file(path: str) -> bool:
     """True when path is a qcow2 image with a backing file (an overlay: the
     copy would be useless without the base), False otherwise."""
     try:
@@ -327,16 +340,16 @@ def qcow2_backing_file(path):
     return len(head) == 16 and head[:4] == b"QFI\xfb" and struct.unpack(">Q", head[8:16])[0] != 0
 
 
-def fingerprint(path):
+def fingerprint(path: str) -> tuple[Any, ...]:
     """What changes when something writes to a file or a folder tree, or when
     libvirt relabels it on start (ctime): compared before and after the copy."""
 
-    def one(p):
+    def one(p: str) -> tuple[int, int, int, int]:
         st = os.lstat(p)
         return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
     if os.path.isdir(path) and not os.path.islink(path):
-        out = [("", one(path))]
+        out: list[tuple[str, tuple[int, int, int, int] | None]] = [("", one(path))]
         for d, dirs, files in os.walk(path):
             dirs.sort()
             for n in sorted(dirs + files):
@@ -349,7 +362,7 @@ def fingerprint(path):
     return one(path)
 
 
-def tree_sizes(path):
+def tree_sizes(path: str) -> tuple[int, int]:
     """(allocated, apparent) bytes of a file or a folder tree."""
     alloc = apparent = 0
     if os.path.isdir(path) and not os.path.islink(path):
@@ -366,17 +379,17 @@ def tree_sizes(path):
     return st.st_blocks * 512, st.st_size
 
 
-def package_versions():
+def package_versions() -> dict[str, str]:
     """{package: name-version-release.arch or "not installed"}, one rpm -q each
     (its exit code tells whether it is installed)."""
-    out = {}
+    out: dict[str, str] = {}
     for p in VIRT_PACKAGES:
         rc, so, _ = run(["rpm", "-q", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n", p], timeout=30)
         out[p] = first_line(so) if rc == 0 and first_line(so) else NOT_INSTALLED
     return out
 
 
-def booted_deployment():
+def booted_deployment() -> dict[str, Any] | None:
     """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None."""
     rc, so, _ = run(["rpm-ostree", "status", "--json"], timeout=60)
     if rc != 0:
@@ -390,7 +403,7 @@ def booted_deployment():
 
 
 # ---- the index (world-readable, no secrets) ------------------------------------------------------
-def read_index(path=None):
+def read_index(path: str | None = None) -> list[dict[str, Any]]:
     path = path or INDEX
     try:
         with open(path) as f:
@@ -405,7 +418,7 @@ def read_index(path=None):
     ]
 
 
-def write_index(entries, path=None):
+def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -> None:
     """Atomically (temporary file + rename), mode 0644, folder 0755."""
     path = path or INDEX
     d = os.path.dirname(path)
@@ -414,7 +427,7 @@ def write_index(entries, path=None):
     fd, tmp = tempfile.mkstemp(prefix=".vm-backups.", suffix=".tmp", dir=d)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump({"version": 1, "backups": entries}, f, indent=2, sort_keys=True)
+            json.dump({"version": 1, "backups": list(entries)}, f, indent=2, sort_keys=True)
             f.write("\n")
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
@@ -426,7 +439,7 @@ def write_index(entries, path=None):
         raise
 
 
-def index_entry(manifest, path):
+def index_entry(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
     return {
         "vm": manifest["vm"],
         "timestamp": manifest["timestamp"],
@@ -439,7 +452,7 @@ def index_entry(manifest, path):
 
 
 # ---- backup ----------------------------------------------------------------------------------
-def nocow(path):
+def nocow(path: str) -> bool:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
@@ -453,7 +466,7 @@ def nocow(path):
         os.close(fd)
 
 
-def precreate_nocow(dest):
+def precreate_nocow(dest: str) -> None:
     """btrfs clones only between files with the same NOCOW flag: an empty
     destination with the flag set, which cp then fills. Best effort."""
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -467,7 +480,7 @@ def precreate_nocow(dest):
         os.close(fd)
 
 
-def copy(src, dest, mode, big):
+def copy(src: str, dest: str, mode: str, big: bool) -> None:
     """Copy src (a file or a folder) to dest with cp -a. Disks (big) follow
     the mode; the small parts (UEFI variables, TPM state) are plain copies."""
     os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
@@ -496,13 +509,13 @@ def copy(src, dest, mode, big):
         )
 
 
-def stored(dest_dir, src):
+def stored(dest_dir: str, src: str) -> str:
     """Where a source path is kept inside the backup: its absolute path
     under files/, so names never collide and restoring is one cp each."""
     return os.path.join(dest_dir, "files", src.lstrip("/"))
 
 
-def restore_lines(vm, dest_dir, copied, tpm_dir):
+def restore_lines(vm: str, dest_dir: str, copied: Sequence[tuple[str, bool]], tpm_dir: str) -> list[str]:
     q = shlex.quote
     lines = [
         f"# 1. the VM must be shut off: virsh -c {URI} domstate {q(vm)}",
@@ -520,7 +533,7 @@ def restore_lines(vm, dest_dir, copied, tpm_dir):
     return lines
 
 
-def check_shut_off(vm):
+def check_shut_off(vm: str) -> None:
     """Refused unless the VM is shut off AND has no managed-save image: after
     `virsh managedsave` (virt-manager's Save) domstate also says "shut off",
     but the guest's disks are only consistent with the saved RAM."""
@@ -541,7 +554,7 @@ def check_shut_off(vm):
         )
 
 
-def cmd_backup(vm, full):
+def cmd_backup(vm: str, full: bool) -> int:
     if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused("backup needs root: run it as `cst vm backup` (it calls sudo by itself)")
     check_shut_off(vm)
@@ -555,7 +568,7 @@ def cmd_backup(vm, full):
         raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
     notes = list(parts["skipped"])
 
-    def real(path, what):
+    def real(path: str, what: str) -> str:
         # cp -a copies a symbolic link as a link (no data): the file it points
         # to is what gets copied, and restored, instead.
         r = os.path.realpath(path)
@@ -563,7 +576,7 @@ def cmd_backup(vm, full):
             notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
         return r
 
-    sources = []
+    sources: list[tuple[str, bool]] = []
     for p in parts["disks"]:
         if not os.path.isfile(p):
             raise Refused(f"{vm}: disk {p} not found")
@@ -616,7 +629,7 @@ def cmd_backup(vm, full):
         os.chmod(d, 0o700)
     os.mkdir(dest_dir, 0o700)
     print(f"{vm}: {mode} backup to {dest_dir}")
-    copied = []
+    copied: list[tuple[str, bool]] = []
     try:
         before = {p: fingerprint(p) for p, _ in sources}
         for src, big in sources:
@@ -631,7 +644,7 @@ def cmd_backup(vm, full):
         except Refused as e:
             raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}") from e
 
-        def now_fp(p):
+        def now_fp(p: str) -> tuple[Any, ...] | None:
             try:
                 return fingerprint(p)
             except OSError:
@@ -717,7 +730,7 @@ class Uncertain(Refused):
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 
-def on_signal(signum, _frame):
+def on_signal(signum: int, _frame: FrameType | None) -> None:
     # A second signal must not cut the cleanup short: ignored from here on.
     for s in STOP_SIGNALS:
         signal.signal(s, signal.SIG_IGN)
@@ -729,11 +742,11 @@ class signals_held:
     stop never kills `virsh snapshot-create-as` while libvirt goes on making
     the snapshot: the run then always knows what the VM runs on."""
 
-    def __enter__(self):
+    def __enter__(self) -> signals_held:
         self.old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
 
 
@@ -742,27 +755,27 @@ class SafeStream:
     that went away (EPIPE: `| head`) must never cut the merge back or the
     alert short. On the first failed write both fds go to /dev/null."""
 
-    def __init__(self, inner):
+    def __init__(self, inner: TextIO) -> None:
         self.inner = inner
 
-    def write(self, text):
+    def write(self, text: str) -> int:
         try:
             return self.inner.write(text)
         except OSError, ValueError:
             mute()
             return len(text)
 
-    def flush(self):
+    def flush(self) -> None:
         try:
             self.inner.flush()
         except OSError, ValueError:
             mute()
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> object:
         return getattr(self.inner, name)
 
 
-def mute():
+def mute() -> None:
     try:
         fd = os.open(os.devnull, os.O_WRONLY)
     except OSError:
@@ -775,18 +788,18 @@ def mute():
     os.close(fd)
 
 
-def safe_output():
+def safe_output() -> None:
     if not isinstance(sys.stdout, SafeStream):
         sys.stdout, sys.stderr = SafeStream(sys.stdout), SafeStream(sys.stderr)
 
 
-def conf_number(key, path=None):
+def conf_number(key: str, path: str | None = None) -> int:
     """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
     v = read_conf(path or VM_CONF).get(key, "")
     return int(v) if v.isdigit() else NAS_DEFAULTS[key]
 
 
-def nas_settings():
+def nas_settings() -> dict[str, Any]:
     """{host, env, repo} for restic, from the /home NAS backup's settings.
     Refused when that backup is not set up: its setup creates the
     repository, the SSH key and the password file this one reuses."""
@@ -813,11 +826,11 @@ def nas_settings():
     }
 
 
-def restic(nas, *args, timeout=1800):
+def restic(nas: Mapping[str, Any], *args: str, timeout: int = 1800) -> tuple[int, str, str]:
     return run(["restic", *args], timeout=timeout, extra_env=nas["env"])
 
 
-def restic_ready(nas):
+def restic_ready(nas: Mapping[str, Any]) -> None:
     """Refused unless the repository opens (NAS reachable, password right):
     checked before any snapshot, so an unreachable NAS never leaves the VM
     on an overlay."""
@@ -836,7 +849,7 @@ def restic_ready(nas):
     raise Refused(f"NAS repository not usable: {why}. Nothing was changed (no snapshot taken)")
 
 
-def restic_backup(nas, args, timeout):
+def restic_backup(nas: Mapping[str, Any], args: Sequence[str], timeout: int) -> tuple[int, dict[str, Any]]:
     """restic backup --json: stderr goes through, the status lines become a
     progress line every minute, the summary is kept. (rc, summary or {})."""
     env = {**os.environ, "LC_ALL": "C", **nas["env"]}
@@ -846,8 +859,10 @@ def restic_backup(nas, args, timeout):
         return 127, {}
     timer = threading.Timer(timeout, p.kill)
     timer.start()
-    summary, shown = {}, 0.0
+    summary: dict[str, Any] = {}
+    shown = 0.0
     try:
+        assert p.stdout is not None
         for line in p.stdout:
             try:
                 msg = json.loads(line)
@@ -886,10 +901,10 @@ def restic_backup(nas, args, timeout):
     return rc, summary
 
 
-def live_disks(xml_text):
+def live_disks(xml_text: str) -> list[dict[str, Any]]:
     """[{target, device, type, source, backing}] of a definition's disks;
     backing: the live definition shows a backing chain (an overlay)."""
-    out = []
+    out: list[dict[str, Any]] = []
     for disk in ET.fromstring(xml_text).findall("devices/disk"):
         t, s, bs = disk.find("target"), disk.find("source"), disk.find("backingStore")
         src = ""
@@ -907,7 +922,7 @@ def live_disks(xml_text):
     return out
 
 
-def agent_state(xml_text):
+def agent_state(xml_text: str) -> str:
     """ "connected", "disconnected" or "none": the guest agent channel
     (org.qemu.guest_agent.0) of the live definition."""
     for ch in ET.fromstring(xml_text).findall("devices/channel"):
@@ -917,12 +932,12 @@ def agent_state(xml_text):
     return "none"
 
 
-def blklist(vm, inactive=False):
+def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str]:
     """({target: source}, problem) from virsh domblklist --details."""
     rc, so, err = virsh("domblklist", vm, "--details", *(["--inactive"] if inactive else []))
     if rc != 0:
         return None, first_line(err) or f"exit {rc}"
-    out = {}
+    out: dict[str, str] = {}
     for ln in so.splitlines():
         parts = ln.split(None, 3)
         if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
@@ -930,7 +945,7 @@ def blklist(vm, inactive=False):
     return out, ""
 
 
-def overlay_kind(state, live_src, base):
+def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
     """How a disk left on an overlay is put back by hand:
     live: QEMU still runs on the overlay (running, paused, pmsuspended);
     definition: the running VM is back on the image, only its persistent
@@ -945,11 +960,11 @@ def overlay_kind(state, live_src, base):
     return "unknown"
 
 
-def overlay_recovery(vm, items, how):
+def overlay_recovery(vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, str]) -> list[str]:
     """The commands that put a disk back on its image by hand."""
     q = shlex.quote
     v = f"sudo virsh -c {URI}"
-    lines = []
+    lines: list[str] = []
     for t, (base, overlay) in items:
         kind = how.get(t, "unknown")
         if kind == "live":
@@ -992,7 +1007,7 @@ def overlay_recovery(vm, items, how):
     return lines
 
 
-def notify(urgency, title, body):
+def notify(urgency: str, title: str, body: str) -> None:
     """A CST desktop alert (btrfs-notify keeps it for the next login when no
     session shows it). Sent first, then printed (best effort)."""
     if os.access(NOTIFY, os.X_OK):
@@ -1000,12 +1015,13 @@ def notify(urgency, title, body):
     print(f"{title}: {body}", file=sys.stderr)
 
 
-def commit_back(vm, overlaid):
+def commit_back(vm: str, overlaid: Mapping[str, tuple[str, str]]) -> tuple[list[str], dict[str, str]]:
     """virsh blockcommit --active --pivot for each overlay (also on a paused
     VM), then a check of the live and the persistent definition, then the
     overlay file removed. Returns (problems, {target: how to recover}); no
     problems: every disk is back on its image."""
-    problems, how = [], {}
+    problems: list[str] = []
+    how: dict[str, str] = {}
     state = domain_state_or_none(vm)
     if state not in LIVE_STATES:
         problems.append(
@@ -1068,12 +1084,12 @@ def commit_back(vm, overlaid):
     return problems, how
 
 
-def find_overlays(vm, specs):
+def find_overlays(vm: str, specs: Mapping[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
     """{target: (image, overlay)} of this run's overlays that the running VM
     or its definition names, or whose file exists when neither is readable."""
     live, _ = blklist(vm)
     persistent, _ = blklist(vm, inactive=True)
-    out = {}
+    out: dict[str, tuple[str, str]] = {}
     for t, (base, overlay) in specs.items():
         named = [m.get(t) == overlay for m in (live, persistent) if m is not None]
         if any(named) or not named and os.path.exists(overlay):
@@ -1081,7 +1097,7 @@ def find_overlays(vm, specs):
     return out
 
 
-def domain_state_or_none(vm):
+def domain_state_or_none(vm: str) -> str | None:
     rc, so, _ = virsh("domstate", vm)
     return first_line(so) if rc == 0 else None
 
@@ -1091,28 +1107,31 @@ class VmLock:
     lock file holds the pid: cst doctor reads it to tell a backup in
     progress from an overlay left behind."""
 
-    def __init__(self, vm):
+    def __init__(self, vm: str) -> None:
         self.path = os.path.join(RUN_DIR, f"nas-{vm}.lock")
-        self.fd = None
+        self.fd: int | None = None
 
-    def __enter__(self):
+    def __enter__(self) -> VmLock:
         os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
-        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            os.close(self.fd)
+            os.close(fd)
             raise Refused(f"another NAS backup of this VM is running ({self.path})") from None
-        os.ftruncate(self.fd, 0)
-        os.write(self.fd, f"{os.getpid()}\n".encode())
+        self.fd = fd
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
         return self
 
-    def __exit__(self, *_):
-        os.ftruncate(self.fd, 0)
-        os.close(self.fd)
+    def __exit__(self, *_: object) -> None:
+        if self.fd is not None:
+            os.ftruncate(self.fd, 0)
+            os.close(self.fd)
+            self.fd = None
 
 
-def stage_files(vm, xml_text, manifest):
+def stage_files(vm: str, xml_text: str, manifest: Mapping[str, Any]) -> str:
     """domain.xml (with --security-info: graphics passwords; restic stores it
     encrypted) and manifest.json, 0600 in a 0700 folder. Returns the folder."""
     d = os.path.join(NAS_STAGE, vm)
@@ -1133,7 +1152,7 @@ def stage_files(vm, xml_text, manifest):
     return d
 
 
-def unstage(d):
+def unstage(d: str) -> None:
     for name in ("domain.xml", "manifest.json"):
         try:
             os.unlink(os.path.join(d, name))
@@ -1141,9 +1160,9 @@ def unstage(d):
             pass
 
 
-def nas_sources(vm, parts, notes):
+def nas_sources(vm: str, parts: Mapping[str, Any], notes: list[str]) -> list[tuple[str, str]]:
     """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder."""
-    out = []
+    out: list[tuple[str, str]] = []
     for p in parts["disks"]:
         if not os.path.isfile(p):
             raise Refused(f"{vm}: disk {p} not found")
@@ -1178,15 +1197,17 @@ def nas_sources(vm, parts, notes):
     return out
 
 
-def valid_keep(name):
+def valid_keep(name: str | None) -> bool:
+    if not name:
+        return False
     return (
-        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name or ""))
+        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name))
         and not name.startswith(("cst-", "vm:"))
         and name not in ("btrfs-setup", "home", "Workspace")
     )
 
 
-def cmd_backup_nas(vm, keep, quiesce):
+def cmd_backup_nas(vm: str, keep: str | None, quiesce: bool) -> int:
     if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused("backup --nas needs root: run it as `cst vm backup --nas` (it calls sudo by itself)")
     if "," in vm or not vm.strip():
@@ -1206,7 +1227,7 @@ def cmd_backup_nas(vm, keep, quiesce):
         return nas_run(vm, keep, quiesce, nas, state == "running")
 
 
-def nas_run(vm, keep, quiesce, nas, live):
+def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], live: bool) -> int:
     rc, xml_text, err = virsh("dumpxml", "--inactive", "--security-info", vm)
     if rc != 0:
         raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
@@ -1218,7 +1239,9 @@ def nas_run(vm, keep, quiesce, nas, live):
     notes = list(parts["skipped"])
     sources = nas_sources(vm, parts, notes)
     epoch, stamp = utc_now()
-    specs, others = {}, []  # target -> (image, overlay); targets left out of the snapshot
+    specs: dict[str, tuple[str, str]] = {}
+    others: list[str] = []  # target -> (image, overlay); targets left out of the snapshot
+    agent = "none"
     if live:
         rc, live_xml, err = virsh("dumpxml", vm)
         if rc != 0:
@@ -1250,8 +1273,12 @@ def nas_run(vm, keep, quiesce, nas, live):
     versions, deployment = package_versions(), booted_deployment()
     restic_ready(nas)
     print(f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True)
-    overlaid, consistency, failure = {}, "shut-off", None
-    before = {}
+    overlaid: dict[str, tuple[str, str]] = {}
+    consistency = "shut-off"
+    failure: BaseException | None = None
+    before: dict[str, tuple[Any, ...]] = {}
+    snap = ""
+    summary: dict[str, Any] = {}
     try:
         if live:
             # The UEFI variables and the TPM state have no snapshot: read live, checked after.
@@ -1301,7 +1328,7 @@ def nas_run(vm, keep, quiesce, nas, live):
             )
         finally:
             unstage(stage)
-        snap = summary.get("snapshot_id") or ""
+        snap = str(summary.get("snapshot_id") or "")
         if rc != 0 or not snap:
             if snap:
                 restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)  # incomplete (rc 3): not a backup
@@ -1333,7 +1360,7 @@ def nas_run(vm, keep, quiesce, nas, live):
                     f"(restic snapshot {snap[:8]} forgotten): {e}"
                 ) from None
 
-            def now_fp(p):
+            def now_fp(p: str) -> tuple[Any, ...] | None:
                 try:
                     return fingerprint(p)
                 except OSError:
@@ -1351,7 +1378,8 @@ def nas_run(vm, keep, quiesce, nas, live):
     # From here on no signal may cut the cleanup short, and no child may get one.
     old = {s: signal.signal(s, signal.SIG_IGN) for s in STOP_SIGNALS}
     DETACH["on"] = True
-    problems, how = [], {}
+    problems: list[str] = []
+    how: dict[str, str] = {}
     try:
         if live:
             # What the VM really runs on, not only what take_snapshot saw.
@@ -1368,7 +1396,8 @@ def nas_run(vm, keep, quiesce, nas, live):
     finally:
         DETACH["on"] = False
         for s, h in old.items():
-            signal.signal(s, h)
+            if h is not None:
+                signal.signal(s, h)
     if isinstance(failure, Uncertain) and not problems:
         problems.append(str(failure))
         overlaid.update({t: spec for t, spec in specs.items() if os.path.lexists(spec[1])})
@@ -1442,13 +1471,22 @@ def nas_run(vm, keep, quiesce, nas, live):
     return 0
 
 
-def take_snapshot(vm, stamp, specs, others, quiesce, agent, overlaid, notes):
+def take_snapshot(
+    vm: str,
+    stamp: str,
+    specs: Mapping[str, tuple[str, str]],
+    others: Sequence[str],
+    quiesce: bool,
+    agent: str,
+    overlaid: dict[str, tuple[str, str]],
+    notes: list[str],
+) -> str:
     """The external disk-only snapshot; fills overlaid {target: (image,
     overlay)} from what domblklist shows, also after a failure. Returns the
     consistency: quiesced or crash-consistent. Raises Uncertain when virsh
     did not answer and libvirt's result stayed unclear."""
 
-    def attempt(with_quiesce):
+    def attempt(with_quiesce: bool) -> tuple[int, str, bool]:
         args = ["snapshot-create-as", vm, "--name", f"cst-nas-{stamp}", "--disk-only", "--atomic", "--no-metadata"]
         if with_quiesce:
             args.append("--quiesce")
@@ -1488,7 +1526,7 @@ def take_snapshot(vm, stamp, specs, others, quiesce, agent, overlaid, notes):
             return 0, "", True
         return rc, first_line(err) or first_line(so) or f"exit {rc}", False
 
-    def drop_strays():
+    def drop_strays() -> None:
         # Only after a definite error from libvirt: those files are not in use.
         for t, (_, overlay) in specs.items():
             if t not in overlaid:
@@ -1529,7 +1567,7 @@ def take_snapshot(vm, stamp, specs, others, quiesce, agent, overlaid, notes):
     return "crash-consistent"
 
 
-def nas_snapshot_ids(vm, nas):
+def nas_snapshot_ids(vm: str, nas: Mapping[str, Any]) -> set[str] | None:
     """The ids of the VM's restic snapshots, or None when not readable."""
     rc, so, _ = restic(
         nas, "snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}", timeout=300
@@ -1540,7 +1578,7 @@ def nas_snapshot_ids(vm, nas):
         return None
 
 
-def forget_args(vm, host, weekly, monthly):
+def forget_args(vm: str, host: str, weekly: int, monthly: int) -> list[str]:
     """restic forget for this VM only: --host and both tags, so the /home
     backup's snapshots (tag btrfs-setup) and hand-made ones (without the
     cst-vm tag) are never considered; --group-by host: one group per VM even
@@ -1564,7 +1602,7 @@ def forget_args(vm, host, weekly, monthly):
     ]
 
 
-def retention(vm, nas):
+def retention(vm: str, nas: Mapping[str, Any]) -> None:
     weekly, monthly = conf_number("VM_NAS_KEEP_WEEKLY"), conf_number("VM_NAS_KEEP_MONTHLY")
     if weekly + monthly == 0:
         print(f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {VM_CONF}: nothing forgotten")
@@ -1584,7 +1622,7 @@ def retention(vm, nas):
 
 
 # ---- the weekly timer ------------------------------------------------------------------------------
-def render_service():
+def render_service() -> str:
     return f"""{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.
 # The weekly backup of the libvirt VM %i to the NAS (restic): a live
 # snapshot while restic reads the disks, then merged back. Why and how:
@@ -1614,14 +1652,14 @@ TimeoutStopSec={stop_timeout()}
 """
 
 
-def stop_timeout():
+def stop_timeout() -> str:
     """A stop may arrive while the snapshot call is held (SNAPSHOT_TIMEOUT +
     SNAPSHOT_SETTLE), then the merge runs (COMMIT_TIMEOUT, plus virsh's own
     300 s), then the checks and the alert: 30 minutes of margin."""
     return f"{(SNAPSHOT_TIMEOUT + SNAPSHOT_SETTLE + COMMIT_TIMEOUT + 300 + 1800 + 59) // 60}min"
 
 
-def render_timer():
+def render_timer() -> str:
     return f"""{UNIT_MARKER}: installed by `cst vm backup-timer on`; not edited by hand.
 # Saturday morning: the /home NAS job starts between 00:00 and 01:00 every
 # day, the btrfs scrub runs on Sunday at 02:00.
@@ -1638,12 +1676,12 @@ WantedBy=timers.target
 """
 
 
-def program_text():
+def program_text() -> str:
     with open(os.path.realpath(__file__)) as f:
         return f.read()
 
 
-def timer_files():
+def timer_files() -> dict[str, tuple[str, int]]:
     """{path: (wanted text, mode)}."""
     return {
         SBIN_COPY: (program_text(), 0o755),
@@ -1652,7 +1690,7 @@ def timer_files():
     }
 
 
-def file_state(path, wanted):
+def file_state(path: str, wanted: str) -> str:
     """ok | stale (ours, differs) | foreign (not ours, or a link) | missing."""
     try:
         if os.path.islink(path):
@@ -1669,13 +1707,13 @@ def file_state(path, wanted):
     return "stale" if ours else "foreign"
 
 
-def instance(vm):
+def instance(vm: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.:-]+", vm) or vm.startswith("-"):
         raise Refused(f"VM name {vm!r}: the timer takes names of letters, digits and _ . : - only")
     return f"cst-vm-backup@{vm}.timer"
 
 
-def wants_links():
+def wants_links() -> list[str]:
     d = os.path.join(UNIT_DIR, "timers.target.wants")
     try:
         return sorted(n for n in os.listdir(d) if n.startswith("cst-vm-backup@") and n.endswith(".timer"))
@@ -1683,12 +1721,12 @@ def wants_links():
         return []
 
 
-def systemctl(*args):
+def systemctl(*args: str) -> tuple[int, str, str]:
     rc, so, err = run(["systemctl", *args], timeout=120)
     return rc, so.strip(), first_line(err)
 
 
-def write_file(path, text, mode):
+def write_file(path: str, text: str, mode: int) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
     try:
@@ -1704,7 +1742,7 @@ def write_file(path, text, mode):
         raise
 
 
-def cmd_timer(sub, vm):
+def cmd_timer(sub: str, vm: str) -> int:
     unit = instance(vm)
     if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
@@ -1769,7 +1807,7 @@ def cmd_timer(sub, vm):
 
 
 # ---- list and status ---------------------------------------------------------------------------
-def describe_entry(e):
+def describe_entry(e: Mapping[str, Any]) -> str:
     dep = e.get("deployment") or {}
     qemu = next(
         (
@@ -1798,7 +1836,7 @@ def describe_entry(e):
     )
 
 
-def cmd_list(vm):
+def cmd_list(vm: str | None) -> int:
     entries = [e for e in read_index() if vm is None or e["vm"] == vm]
     if not entries:
         print(f"no VM backups{f' of {vm}' if vm else ''} in {INDEX} (make one: {CST} vm backup)")
@@ -1808,9 +1846,9 @@ def cmd_list(vm):
     return 0
 
 
-def version_changes(old, new):
+def version_changes(old: Mapping[str, str] | None, new: Mapping[str, str] | None) -> list[str]:
     """['pkg: old -> new'] for every virtualization package that differs."""
-    out = []
+    out: list[str] = []
     for p in VIRT_PACKAGES:
         a, b = (old or {}).get(p), (new or {}).get(p)
         if a is not None and b is not None and a != b:
@@ -1818,7 +1856,7 @@ def version_changes(old, new):
     return out
 
 
-def cmd_status(vm):
+def cmd_status(vm: str) -> int:
     rc, so, err = virsh("domstate", vm)
     if rc == 127:
         print(f"{vm}: virsh not found (libvirt not installed here)")
@@ -1886,13 +1924,13 @@ def cmd_status(vm):
 
 
 # ---- settings ------------------------------------------------------------------------------------
-def knobs(path=None):
+def knobs(path: str | None = None) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
     conf = read_conf(path or VM_CONF)
     return {k: conf.get(k, "yes").strip().lower() not in ("no", "0", "false", "off") for k in KNOBS}
 
 
-def user_home():
+def user_home() -> str:
     """The home of the user who runs CST: under sudo, SUDO_USER's (sudo may
     set HOME to /root), else HOME."""
     if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
@@ -1904,7 +1942,7 @@ def user_home():
 
 
 # ---- NOCOW of the VM image folders -----------------------------------------------------------------
-def is_btrfs(path):
+def is_btrfs(path: str) -> bool | None:
     """True/False, or None when statfs fails (statfs needs only search
     permission, so a root folder of mode 0711 still answers)."""
     buf = ctypes.create_string_buffer(256)
@@ -1917,7 +1955,7 @@ def is_btrfs(path):
     return struct.unpack_from("l", buf.raw, 0)[0] == BTRFS_MAGIC
 
 
-def inode_flags(path):
+def inode_flags(path: str) -> int | None:
     """The inode flags (FS_IOC_GETFLAGS), or None when this user may not read
     them: the system folder is root's (0711) and the images are qemu's (0600).
     Unreadable is not "copy-on-write": callers say "not readable"."""
@@ -1934,7 +1972,7 @@ def inode_flags(path):
         os.close(fd)
 
 
-def set_nocow(path):
+def set_nocow(path: str) -> None:
     """Set +C on a folder this user owns (files created in it later inherit
     it). Raises OSError."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
@@ -1946,7 +1984,7 @@ def set_nocow(path):
         os.close(fd)
 
 
-def image_dirs(home=None):
+def image_dirs(home: str | None = None) -> list[dict[str, str]]:
     """[{scope, path, what}] of every known VM image folder."""
     home = home or user_home()
     out = [{"scope": "system", "path": SYSTEM_IMAGES, "what": "libvirt qemu:///system: virt-manager, virsh"}]
@@ -1954,11 +1992,11 @@ def image_dirs(home=None):
     return out
 
 
-def flag_state(flags):
+def flag_state(flags: int | None) -> bool | None:
     return None if flags is None else bool(flags & FS_NOCOW_FL)
 
 
-def probe_dir(d, readable=lambda p: p):
+def probe_dir(d: Mapping[str, Any], readable: Callable[[str], str] = lambda p: p) -> dict[str, Any]:
     """What a VM image folder looks like. readable maps a path to where this
     process reads it (the doctor in a toolbox: under /run/host). Adds:
     present, link (the target when the path is a symbolic link: never
@@ -1966,10 +2004,10 @@ def probe_dir(d, readable=lambda p: p):
     listed (False: the folder cannot be listed by this user), images
     [{name, path, alloc, size, nocow}] (regular files, not .iso, not the
     *.cow-old leftovers of a conversion) and leftovers [names]."""
-    d = dict(d)
-    rp = readable(d["path"])
+    res: dict[str, Any] = dict(d)
+    rp = readable(res["path"])
     link = os.readlink(rp) if os.path.islink(rp) else None
-    d.update(
+    res.update(
         present=link is None and os.path.isdir(rp),
         link=link,
         btrfs=None,
@@ -1978,17 +2016,17 @@ def probe_dir(d, readable=lambda p: p):
         images=[],
         leftovers=[],
     )
-    if not d["present"]:
-        return d
-    d["btrfs"] = is_btrfs(rp)
-    if d["btrfs"] is False:
-        return d
-    d["nocow"] = flag_state(inode_flags(rp))
+    if not res["present"]:
+        return res
+    res["btrfs"] = is_btrfs(rp)
+    if res["btrfs"] is False:
+        return res
+    res["nocow"] = flag_state(inode_flags(rp))
     try:
         entries = sorted(os.scandir(rp), key=lambda e: e.name)
     except OSError:
-        return d
-    d["listed"] = True
+        return res
+    res["listed"] = True
     for e in entries:
         try:
             if not e.is_file(follow_symlinks=False):
@@ -1997,23 +2035,23 @@ def probe_dir(d, readable=lambda p: p):
         except OSError:
             continue
         if e.name.endswith(".cow-old"):
-            d["leftovers"].append(e.name)
+            res["leftovers"].append(e.name)
             continue
         if e.name.lower().endswith(".iso"):
             continue  # read-only installers: nothing to gain
-        d["images"].append(
+        res["images"].append(
             {
                 "name": e.name,
-                "path": os.path.join(d["path"], e.name),
+                "path": os.path.join(res["path"], e.name),
                 "alloc": st.st_blocks * 512,
                 "size": st.st_size,
                 "nocow": flag_state(inode_flags(os.path.join(rp, e.name))),
             }
         )
-    return d
+    return res
 
 
-def convert_lines(img, system):
+def convert_lines(img: Mapping[str, Any], system: bool) -> list[str]:
     """The commands that make an existing image NOCOW (never run by CST)."""
     q = shlex.quote
     s = "sudo " if system else ""
@@ -2028,7 +2066,7 @@ def convert_lines(img, system):
     ]
 
 
-def nocow_lines(d, verbose=True):
+def nocow_lines(d: Mapping[str, Any], verbose: bool = True) -> list[str]:
     """Lines describing one probed folder (plan and status)."""
     head = f"{d['path']}  [{d['what']}]"
     if d.get("link") is not None:
@@ -2074,7 +2112,7 @@ def nocow_lines(d, verbose=True):
     return out
 
 
-def cmd_nocow_plan(as_root=False):
+def cmd_nocow_plan(as_root: bool = False) -> int:
     if as_root and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(
             f"--root reads the system folder as root: run it as `{PROG} nocow plan --root` (it calls sudo by itself)"
@@ -2110,7 +2148,7 @@ def cmd_nocow_plan(as_root=False):
     return 0
 
 
-def needs_mark(d):
+def needs_mark(d: Mapping[str, Any]) -> bool:
     """True when nocow apply would act on the folder (also: unknown state of
     the system folder, or the system folder missing while libvirt is there).
     A symbolic link is never acted on (install -d and chattr would follow it)."""
@@ -2121,13 +2159,13 @@ def needs_mark(d):
     return d["present"] and d["btrfs"] is not False and d["nocow"] is not True
 
 
-def confirm(question):
+def confirm(question: str) -> bool:
     if not sys.stdin.isatty():
         raise Refused("apply asks for confirmation: run it in a terminal")
     return input(f"{question} [y/N] ").strip()[:1] in ("y", "Y", "s", "S")
 
 
-def mark_system_dir(d):
+def mark_system_dir(d: Mapping[str, Any]) -> str:
     """Create (root:root 0711, as libvirt does) and mark the system folder:
     directly as root, else with sudo. Returns an error text or ""."""
     path, q = d["path"], shlex.quote(d["path"])
@@ -2143,7 +2181,7 @@ def mark_system_dir(d):
         except OSError as e:
             return f"{path}: {e.strerror}"
         return "" if flag_state(inode_flags(path)) else f"{path}: the mark did not stick"
-    steps = []
+    steps: list[list[str]] = []
     if not d["present"]:
         steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
     steps.append(["chattr", "+C", path])
@@ -2157,7 +2195,7 @@ def mark_system_dir(d):
     return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"
 
 
-def cmd_nocow_apply():
+def cmd_nocow_apply() -> int:
     if not knobs()["VM_NOCOW"]:
         print(f"VM_NOCOW=no in {VM_CONF}: nothing to do.")
         return 0
@@ -2180,7 +2218,7 @@ def cmd_nocow_apply():
     if not confirm("Set the NOCOW mark on these folders?"):
         print("Nothing changed.")
         return 0
-    errors = []
+    errors: list[str] = []
     for d in todo:
         if d["scope"] == "system":
             err = mark_system_dir(d)
@@ -2228,7 +2266,7 @@ LINUX_OS = (
 )
 
 
-def keep_prefixes(xml_text):
+def keep_prefixes(xml_text: str) -> None:
     """Register the document's own namespace prefixes (libosinfo metadata),
     so serializing does not rename them to ns0 (as cpu/vm-pin). A default
     namespace (xmlns='...' on a <metadata> child) is not registered: as ""
@@ -2239,13 +2277,13 @@ def keep_prefixes(xml_text):
             ET.register_namespace(prefix, uri)
 
 
-def guest_kind(root):
+def guest_kind(root: ET.Element) -> tuple[str, str]:
     """("windows" | "linux" | "unknown", why). From the libosinfo id that
     virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
     enlightenments (only Windows guests use them)."""
     for el in root.iter():
         if el.tag.endswith("}os") and el.get("id"):
-            osid = el.get("id")
+            osid = el.get("id") or ""
             if "microsoft.com/win" in osid:
                 return "windows", f"libosinfo {osid}"
             if any(k in osid for k in LINUX_OS):
@@ -2256,7 +2294,7 @@ def guest_kind(root):
     return "unknown", "no libosinfo id in the definition"
 
 
-def disk_index(name):
+def disk_index(name: str | None) -> int | None:
     """sda -> 0, sdz -> 25, sdaa -> 26 (libvirt's numbering); None if not sdX/hdX/vdX."""
     m = re.fullmatch(r"[shv]d([a-z]+)", name or "")
     if not m:
@@ -2267,7 +2305,7 @@ def disk_index(name):
     return n - 1
 
 
-def disk_name(idx):
+def disk_name(idx: int) -> str:
     s = ""
     idx += 1
     while idx:
@@ -2276,7 +2314,9 @@ def disk_name(idx):
     return "sd" + s
 
 
-def tune_domain(xml_text, kn=None, allow_bus=True):
+def tune_domain(
+    xml_text: str, kn: Mapping[str, bool] | None = None, allow_bus: bool = True
+) -> tuple[str | None, list[str], list[str], list[str]]:
     """(after_xml, changes, held, notes) for a definition: changes are what
     the new definition differs in, held the bus and network card changes
     left out because allow_bus is False (a guest without virtio drivers),
@@ -2285,22 +2325,25 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
     kn = kn or knobs()
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
-    changes, held, notes = [], [], []
+    changes: list[str] = []
+    held: list[str] = []
+    notes: list[str] = []
     devices = root.find("devices")
     if devices is None:
         return None, changes, held, ["no <devices> in the definition"]
     disks = devices.findall("disk")
-    names = {(d.find("target").get("dev") if d.find("target") is not None else None) for d in disks}
-    ctrl = {"idx": None}
+    names: set[str | None] = {(t.get("dev") if (t := d.find("target")) is not None else None) for d in disks}
+    ctrl_idx: int | None = None
 
-    def virtio_scsi_index():
-        if ctrl["idx"] is not None:
-            return ctrl["idx"]
+    def virtio_scsi_index() -> int:
+        nonlocal ctrl_idx
+        if ctrl_idx is not None:
+            return ctrl_idx
         scsi = [c for c in devices.findall("controller") if c.get("type") == "scsi"]
         found = next((c for c in scsi if c.get("model") == "virtio-scsi"), None)
         if found is not None:
-            ctrl["idx"] = int(found.get("index", "0"))
-            return ctrl["idx"]
+            ctrl_idx = int(found.get("index", "0"))
+            return ctrl_idx
         idx = max((int(c.get("index", "0")) for c in scsi), default=-1) + 1
         el = ET.Element("controller", {"type": "scsi", "index": str(idx), "model": "virtio-scsi"})
         kids = list(devices)
@@ -2309,14 +2352,14 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
             last = max((i for i, c in enumerate(kids) if c.tag == "disk"), default=len(kids) - 1)
         devices.insert(last + 1, el)
         changes.append(f"add a virtio-scsi controller (index {idx})")
-        ctrl["idx"] = idx
+        ctrl_idx = idx
         return idx
 
-    def used_units(idx):
+    def used_units(idx: int) -> set[int]:
         """Units taken on controller idx (bus 0, target 0): SCSI disks and
         CD-ROMs, and SCSI host devices (<hostdev type='scsi'>)."""
-        out = set()
-        on_scsi = [d for d in disks if d.find("target") is not None and d.find("target").get("bus") == "scsi"]
+        out: set[int] = set()
+        on_scsi = [d for d in disks if (t := d.find("target")) is not None and t.get("bus") == "scsi"]
         on_scsi += [h for h in devices.findall("hostdev") if h.get("type") == "scsi"]
         for d in on_scsi:
             a = d.find("address")
@@ -2334,7 +2377,7 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
         if disk.get("device", "disk") != "disk":
             continue  # cdrom, floppy, lun: left as they are
         target = disk.find("target")
-        dev = target.get("dev") if target is not None else "?"
+        dev = (target.get("dev") or "?") if target is not None else "?"
         kind = disk.get("type", "file")
         if kind not in ("file", "block"):
             notes.append(f"disk {dev}: a {kind} disk: left as it is (only file and block disks are tuned)")
@@ -2357,6 +2400,7 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
         if not allow_bus:
             held.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi)")
             continue
+        assert target is not None
         idx = virtio_scsi_index()
         new = dev
         if not dev.startswith("sd"):
@@ -2395,6 +2439,7 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
         if not allow_bus:
             held.append(f"{label}: {m} -> virtio")
             continue
+        assert model is not None
         model.set("type", "virtio")
         changes.append(f"{label}: {m} -> virtio (same MAC)")
     bal = devices.find("memballoon")
@@ -2406,21 +2451,21 @@ def tune_domain(xml_text, kn=None, allow_bus=True):
     return ET.tostring(root, encoding="unicode") + "\n", changes, held, notes
 
 
-def normalized(xml_text):
+def normalized(xml_text: str) -> str:
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode") + "\n"
 
 
-def cpu_owner_line(root):
+def cpu_owner_line(root: ET.Element) -> str:
     """How cst cpu vm-pin's part of the definition stands (reported, never changed here)."""
     cpu = root.find("cpu")
     mode = cpu.get("mode", "custom") if cpu is not None else "not set"
     names = cpu_disable_list()
     off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"} if cpu is not None else set()
     missing = [n for n in names if n not in off]
-    pins = {p.get("cpuset") for p in root.findall("cputune/vcpupin")}
+    pins = {c for p in root.findall("cputune/vcpupin") if (c := p.get("cpuset")) is not None}
     pin = f"vCPUs pinned to {', '.join(sorted(pins))}" if pins else "vCPUs not pinned"
     feat = (
         f"NOT disabled: {' '.join(missing)}"
@@ -2450,21 +2495,21 @@ WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves t
 Details: vm/README.md in CST, section "Windows guests"."""
 
 
-def domain_state(vm):
+def domain_state(vm: str) -> str:
     rc, so, err = virsh("domstate", vm)
     if rc != 0:
         raise Refused(f"virsh domstate {vm}: {first_line(err) or f'exit {rc}'}")
     return first_line(so)
 
 
-def has_managed_save(vm):
+def has_managed_save(vm: str) -> bool:
     rc, so, err = virsh("list", "--all", "--with-managed-save", "--name")
     if rc != 0:
         raise Refused(f"virsh list --with-managed-save: {first_line(err) or f'exit {rc}'}")
     return vm in (ln.strip() for ln in so.splitlines())
 
 
-def cmd_tune(vm, apply, guest_virtio):
+def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
     if apply and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"tune apply needs root: run it as `{PROG} tune apply` (it calls sudo by itself)")
     state = domain_state(vm)
@@ -2535,7 +2580,7 @@ def cmd_tune(vm, apply, guest_virtio):
     if rc != 0:
         raise Refused(f"virsh dumpxml --security-info {vm}: {first_line(err) or f'exit {rc}'}")
     s_after, s_changes, _, _ = tune_domain(secret, kn, allow_bus)
-    if s_changes != changes:
+    if s_after is None or s_changes != changes:
         raise Refused(f"{vm}: the definition changed while planning: run it again")
     if not confirm(f"\nDefine {vm} with these changes (effective at its next start)?"):
         print("Nothing changed.")
@@ -2571,7 +2616,7 @@ def cmd_tune(vm, apply, guest_virtio):
     return 0
 
 
-def tune_line(xml_text):
+def tune_line(xml_text: str) -> str:
     """One status line: whether the hardware matches tune (all changes, as if
     the drivers were there; Windows gets the hint to read the plan)."""
     try:
@@ -2586,9 +2631,9 @@ def tune_line(xml_text):
 
 
 # ---- command line --------------------------------------------------------------------------------
-def parse_args(argv):
+def parse_args(argv: Sequence[str]) -> dict[str, Any]:
     """{cmd, sub, vm, full, guest_virtio, root, nas, keep, no_quiesce}."""
-    a = {
+    a: dict[str, Any] = {
         "cmd": "help",
         "sub": None,
         "vm": None,
@@ -2603,10 +2648,14 @@ def parse_args(argv):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
         return a
-    a["cmd"], rest = argv[0], argv[1:]
+    a["cmd"], rest = argv[0], list(argv[1:])
     if a["cmd"] not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
         raise Usage(f"unknown command '{a['cmd']}'")
-    subs = {"tune": ("plan", "apply"), "nocow": ("plan", "apply"), "backup-timer": ("on", "off", "status")}
+    subs: dict[str, tuple[str, ...]] = {
+        "tune": ("plan", "apply"),
+        "nocow": ("plan", "apply"),
+        "backup-timer": ("on", "off", "status"),
+    }
     if a["cmd"] in subs:
         if not rest or rest[0] not in subs[a["cmd"]]:
             raise Usage(f"{a['cmd']}: {' or '.join(subs[a['cmd']])}")
@@ -2618,7 +2667,6 @@ def parse_args(argv):
     }.get(a["cmd"], {})
     takes_vm = a["cmd"] != "nocow"
     where = " ".join(filter(None, (a["cmd"], a["sub"])))
-    rest = list(rest)
     while rest:
         x = rest.pop(0)
         if a["cmd"] == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and a["keep"] is None:
@@ -2642,7 +2690,7 @@ def parse_args(argv):
     return a
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> int:
     try:
         a = parse_args(argv)
     except Usage as e:

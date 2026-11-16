@@ -98,7 +98,7 @@ invowk cmd test pylint                        # ruff check + ruff format --check
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
 invowk validate cst.invowkmod && invowk audit cst.invowkmod
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
-invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share  # optional (see below)
+invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
 
 - Before a pull request, run the first line and the third to sixth, and
@@ -120,13 +120,18 @@ invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share
 - A new Python helper without a `.py` extension has to be added to
   `extend-include` in `pyproject.toml`. Until then ruff does not see it, and
   `tests/test_python_files.py` fails.
-- Every new Python file, tests included, has to be ty-clean and listed in
-  `[tool.ty.src] include` in `pyproject.toml`. `NOT_YET_CLEAN` in
-  `tests/test_python_files.py` names the older files ty is not clean on yet;
-  it only shrinks (remove a file from it when the file joins the ty gate),
-  and nothing new goes into it. No ignore comments (`ty: ignore`,
-  `type: ignore`) and no `[tool.ty]` settings that exclude files or switch
-  rules off: fix what ty reports in the code. The test fails on each.
+- Every Python file in the repository, tests included, must be ty-clean and
+  strictly annotated, listed in both `[tool.ty.src] include` and the
+  `!{...} = ["ANN"]` typed entry in `pyproject.toml`. `NOT_YET_CLEAN` in
+  `tests/test_python_files.py` is now empty (`frozenset()`), and nothing may be
+  added back to it. No ignore comments (`ty: ignore`, `type: ignore`) and no
+  `[tool.ty]` settings that exclude files or switch rules off: fix what ty
+  reports in the code. The test fails on each.
+- Python packages follow the Hexagonal Architecture + DDD layout
+  (`domain.py` / `domain/` for pure rules and frozen `slots=True` dataclasses,
+  `ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
+  cases, `adapters.py` / `adapters/` for host I/O and subprocesses).
+  `tests/test_architecture.py` enforces those import and dataclass invariants.
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
 - A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
@@ -134,9 +139,10 @@ invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share
 
 ## How the code fits together
 
-- **`cst` only dispatches.** `cst MODULE ...` runs `<module>-setup.sh`.
-  - The module list is in the `MODULES` and `SCRIPT` arrays at the top of `cst`.
-  - It sets `CST_PROG` so that help text reads `cst MODULE`.
+- **`cst` only dispatches.** `cst` delegates to `cst_core/cli.py`
+  (`CstDispatcher`, backed by `cst_core/domain/dispatch.py` and `CstDispatchPort`).
+  - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
+  - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives in `cst_core/domain/dispatch.py` (with `MODULES` and `SCRIPT` kept in `cst` for compatibility checks).
   - `cst doctor` runs `doctor/cst-doctor`. `cst status` loops over every module.
 - **Each module has two parts.**
   - The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status.

@@ -6,29 +6,51 @@ Run from the repository root:
     python3 -I -B -m unittest discover -s btrfs/tests -t . -v
 """
 
+from __future__ import annotations
+
+import contextlib
+import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
 
 sys.dont_write_bytecode = True
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+from btrfs.adapters import BtrfsHelperRuntimeAdapter  # noqa: E402
+from btrfs.application import BtrfsService  # noqa: E402
+from btrfs.domain import (  # noqa: E402
+    BulkItemState,
+    SnapshotRetentionSpec,
+    Usage,
+    parse_btrfs_conf_text,
+)
+from btrfs.ports import BtrfsHelperRuntimePort  # noqa: E402
+
 LIB = os.path.join(REPO, "cst-link.bash")
 CST = os.path.join(REPO, "cst")
 
 
 class CstLinkTest(unittest.TestCase):
-    def setUp(self):
+    home: str
+    link: str
+
+    def setUp(self) -> None:
         self.home = tempfile.mkdtemp(prefix="cst-link-test-")
         self.link = os.path.join(self.home, ".local", "bin", "cst")
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         shutil.rmtree(self.home)
 
-    def run_link(self, user="alice"):
+    def run_link(self, user: str = "alice") -> subprocess.CompletedProcess[str]:
         script = (
             'set -euo pipefail; source "$0"; H="$1"\n'
             'getent() { echo "alice:x:1000:1000::$H:/bin/bash"; }\n'
@@ -40,19 +62,19 @@ class CstLinkTest(unittest.TestCase):
             ["bash", "-c", script, LIB, self.home], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
         )
 
-    def test_creates_link_once(self):
+    def test_creates_link_once(self) -> None:
         r = self.run_link()
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(CST))
         self.assertIn("linked:", r.stdout)
         r = self.run_link()  # idempotent, quiet
         self.assertEqual(r.stdout + r.stderr, "")
 
-    def test_root_or_empty_user_does_nothing(self):
+    def test_root_or_empty_user_does_nothing(self) -> None:
         self.run_link(user="root")
         self.run_link(user="''")
         self.assertFalse(os.path.lexists(self.link))
 
-    def test_own_file_is_left_alone(self):
+    def test_own_file_is_left_alone(self) -> None:
         os.makedirs(os.path.dirname(self.link))
         with open(self.link, "w") as f:
             f.write("#!/bin/sh\n")
@@ -60,11 +82,77 @@ class CstLinkTest(unittest.TestCase):
         self.assertIn("left alone", r.stderr)
         self.assertFalse(os.path.islink(self.link))
 
-    def test_dangling_link_is_replaced(self):
+    def test_dangling_link_is_replaced(self) -> None:
         os.makedirs(os.path.dirname(self.link))
         os.symlink(os.path.join(self.home, "moved-away", "cst"), self.link)
         self.run_link()
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(CST))
+
+
+class _FakeHelperRuntime:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def run_helper(self, helper_name: str, argv: Sequence[str]) -> int:
+        self.calls.append((helper_name, list(argv)))
+        return 0
+
+
+class HexagonalArchitectureTest(unittest.TestCase):
+    """Tests directly exercising btrfs.{domain,ports,adapters,application}."""
+
+    def test_domain_policies_and_parsers(self) -> None:
+        runtime: BtrfsHelperRuntimePort = _FakeHelperRuntime()
+        service = BtrfsService(runtime)
+
+        spec = service.parse_retention("48h 14d 8w 12m 2y")
+        self.assertEqual((spec.hourly, spec.daily, spec.weekly, spec.monthly, spec.yearly), (48, 14, 8, 12, 2))
+        self.assertFalse(spec.keep_all)
+        self.assertTrue(SnapshotRetentionSpec.parse("*").keep_all)
+        with self.assertRaises(Usage):
+            SnapshotRetentionSpec.parse("")
+
+        self.assertTrue(service.evaluate_stall(12.0, 1200, 4))
+        self.assertFalse(service.evaluate_stall(2.0, 100, 0))
+        self.assertEqual(
+            service.chrome_cache_flags(),
+            ("--disk-cache-dir=/tmp/chrome-cache", "--disk-cache-size=536870912"),
+        )
+        self.assertTrue(service.is_protected_image("registry.example.com/org/app:1"))
+        self.assertFalse(service.is_protected_image("alpine:latest"))
+
+        conf = parse_btrfs_conf_text("# comment\nNAS_ENABLED=1\nNAS_HOST='nas.local'\n")
+        self.assertEqual(conf, {"NAS_ENABLED": "1", "NAS_HOST": "nas.local"})
+
+        state = BulkItemState(item_id="media", rel_path="Bulk/media", status="present")
+        self.assertEqual(state.detail, "")
+
+        rc = service.run_helper("chrome-cache", ["plan"])
+        self.assertEqual(rc, 0)
+        assert isinstance(runtime, _FakeHelperRuntime)
+        self.assertEqual(runtime.calls, [("chrome-cache", ["plan"])])
+
+    def test_runtime_adapter_passes_prog_when_helper_slices_argv(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btrfs-adapter-test-") as tmp:
+            stub = os.path.join(tmp, "chrome-cache")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(
+                    "import json, sys\n"
+                    "seen = []\n"
+                    "def main(argv):\n"
+                    "    seen.append(list(argv))\n"
+                    "    print(json.dumps(seen))\n"
+                    "    return 0\n"
+                )
+            adapter = BtrfsHelperRuntimeAdapter(btrfs_dir=tmp)
+            service = BtrfsService(adapter)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = service.run_helper("chrome-cache", ["plan", "--home", tmp])
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(out.getvalue()), [[stub, "plan", "--home", tmp]])
+            with self.assertRaises(ValueError):
+                adapter.run_helper("nonexistent-helper", [])
 
 
 if __name__ == "__main__":

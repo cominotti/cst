@@ -933,4 +933,24 @@ printed). For `nocow`: the probe with fake inode flags (unreadable is never
 "copy-on-write"), the conversion commands, `apply` with sudo for the system
 folder (creation like libvirt), and, on a real btrfs under `~/.cache`
 (skipped elsewhere), that a reflink backup of a NOCOW image works and that
-the clone fails without the pre-created NOCOW destination.
+the clone fails without the pre-created NOCOW destination. `HexagonalArchitectureTest`
+in `vm/tests/test_vm.py` covers `vm.domain`, `vm.adapters` (with mocked
+`subprocess.run` and a temporary tool script), and `vm.application`.
+
+## 13. Python module layout
+
+The Python code inside `vm/` is split into typed layers (all stdlib-only at run
+time):
+
+- `vm/domain.py`: pure value objects (`VmKnobs`, `DomainParts`, `TuneResult`,
+  `VmCliCommand`), libvirt domain XML inspection and `tune` rules
+  (`extract_domain_parts`, `tune_domain_xml`), CLI parsing (`parse_vm_args`),
+  and pure NAS backup helpers (`valid_keep`, `overlay_kind`, `forget_args`,
+  `version_changes`).
+- `vm/ports.py`: typed boundary protocols (`VirshPort`, `VmRuntimePort`).
+- `vm/adapters.py`: `SubprocessVirshAdapter` (runs `virsh` with `LC_ALL=C`) and
+  `CstVmRuntimeAdapter` (loads and delegates to `vm/cst-vm`).
+- `vm/application.py`: `VmService`, coordinating domain inspection, `tune`
+  planning diffs, and runtime delegation.
+- `vm/cst-vm`: standalone CLI program installed as `/usr/local/sbin/cst-vm` and
+  reused by `cst doctor` for read-only domain and NOCOW checks.

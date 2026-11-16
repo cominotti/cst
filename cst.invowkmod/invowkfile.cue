@@ -96,7 +96,7 @@ cmds: [
 		category:    "test"
 		description: "Mutation-test one Python helper with cosmic-ray, on a throwaway copy, inside a bubblewrap sandbox (tests/mutation/cst-mutation, through uv)"
 		args: [
-			{name: "helper", description: "The Python file to mutate, relative to the top of the checkout, e.g. swap/swap-status", required: true},
+			{name: "helper", description: "The Python file to mutate, relative to the top of the checkout, e.g. swap/domain.py", required: true},
 			{name: "test_module", description: "The unittest module that tests it, e.g. swap.tests.test_swap", required: true},
 		]
 		flags: [

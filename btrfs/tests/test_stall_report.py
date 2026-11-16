@@ -11,13 +11,17 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_stall_report -v
 """
 
+from __future__ import annotations
+
 import contextlib
 import importlib.machinery
-import importlib.util
 import io
 import os
 import sys
+import types
 import unittest
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, Protocol, cast
 
 sys.dont_write_bytecode = True
 
@@ -28,19 +32,53 @@ T0 = 1_700_000_000.0
 BOOT_ZSWPWB = 6_837_407  # pages: the real counter since boot on the test machine
 
 
-def load():
+class _PatternProto(Protocol):
+    pattern: str
+
+
+class _StallMonitordModule(Protocol):
+    SWAP_FRAME: _PatternProto
+    MMAP_LOCK_FRAME: _PatternProto
+
+
+class _StallReportModule(Protocol):
+    PAGE: int
+    UNITS: Mapping[str, str] | Sequence[str]
+    STACK_RULES: Sequence[tuple[str, _PatternProto]]
+    CATEGORIES: Sequence[tuple[str, str, str]]
+
+    def analyse(
+        self,
+        recs: Sequence[Mapping[str, Any]],
+        since: float,
+        until: float,
+        *,
+        with_below: bool,
+        verbose: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any]]: ...
+
+    def print_report(self, res: Mapping[str, Any], meta: Mapping[str, Any], *, verbose: bool) -> None: ...
+
+    def verdict(self, res: Mapping[str, Any], meta: Mapping[str, Any]) -> list[str]: ...
+
+    def open_episode(
+        self, samples: Sequence[Mapping[str, Any]], episodes: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any] | None: ...
+
+
+def load() -> _StallReportModule:
     loader = importlib.machinery.SourceFileLoader("btrfs_stall_report", TOOL)
-    spec = importlib.util.spec_from_loader("btrfs_stall_report", loader)
-    mod = importlib.util.module_from_spec(spec)
+    mod = types.ModuleType("btrfs_stall_report")
+    mod.__file__ = TOOL
     loader.exec_module(mod)
-    return mod
+    return cast("_StallReportModule", cast("object", mod))
 
 
-def meta(ts, v):
+def meta(ts: float, v: int) -> dict[str, Any]:
     return {"t": "meta", "ts": ts, "v": v, "vm_keys": VM_KEYS, "base_interval": 5.0, "kernel": "7.2.0", "disks": {}}
 
 
-def sample(ts, pswpout, zswpwb):
+def sample(ts: float, pswpout: int, zswpwb: int) -> dict[str, Any]:
     zswpin = zswpout = zswpwb
     return {
         "t": "s",
@@ -58,21 +96,23 @@ def sample(ts, pswpout, zswpwb):
     }
 
 
-def old_run(n=10):
+def old_run(n: int = 10) -> list[dict[str, Any]]:
     """A v6 daemon: zswap counters always 0, pswpout grows 10 pages per sample."""
     return [meta(T0, 6)] + [sample(T0 + 5 * i, 1000 + 10 * i, 0) for i in range(n)]
 
 
-def new_run(start, n=10, first=BOOT_ZSWPWB):
+def new_run(start: float, n: int = 10, first: int = BOOT_ZSWPWB) -> list[dict[str, Any]]:
     """A v7 daemon: real zswpwb, 5 pages written back per sample."""
     return [meta(start, 7)] + [sample(start + 1 + 5 * i, 2000 + 10 * i, first + 5 * i) for i in range(n)]
 
 
 class ZswapAcrossUpgradeTest(unittest.TestCase):
-    def setUp(self):
+    m: _StallReportModule
+
+    def setUp(self) -> None:
         self.m = load()
 
-    def analyse(self, recs):
+    def analyse(self, recs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], str]:
         """(res, meta) of analyse() and the printed report, from one analysis."""
         res, meta_ = self.m.analyse(recs, T0, max(r["ts"] for r in recs), with_below=False, verbose=False)
         out = io.StringIO()
@@ -80,7 +120,7 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
             self.m.print_report(res, meta_, verbose=False)
         return res, out.getvalue()
 
-    def test_only_old_daemon_shows_na(self):
+    def test_only_old_daemon_shows_na(self) -> None:
         res, text = self.analyse(old_run())
         self.assertIsNone(res["vm"]["zswap_writeback_bytes"])
         self.assertIsNone(res["vm"]["zswap_in_bytes"])
@@ -89,7 +129,7 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         self.assertEqual(res["vm"]["swap_out_bytes"], 90 * self.m.PAGE)  # other counters still count
         self.assertIn("zswap in/out n/a (daemon < v7)   disk swap in/out 0 MiB / 0 MiB", text)
 
-    def test_window_across_upgrade_counts_only_v7_pairs(self):
+    def test_window_across_upgrade_counts_only_v7_pairs(self) -> None:
         old = old_run()
         recs = old + new_run(old[-1]["ts"] + 3)  # restart: 3 s gap, under GAP_MAX
         res, text = self.analyse(recs)
@@ -103,7 +143,7 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         self.assertRegex(text, r"zswap in/out 0 MiB / 0 MiB \(from \d\d:\d\d:\d\d\)   disk swap in/out")
         self.assertNotIn("GiB", text)
 
-    def test_only_new_daemon_counts_normally(self):
+    def test_only_new_daemon_counts_normally(self) -> None:
         recs = new_run(T0)
         res, text = self.analyse(recs)
         self.assertEqual(res["vm"]["zswap_writeback_bytes"], 45 * self.m.PAGE)
@@ -112,7 +152,7 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         self.assertIn("zswap in/out 0 MiB / 0 MiB   disk swap in/out", line)
         self.assertNotIn("from", line)
 
-    def test_new_daemon_counts_large_writeback(self):
+    def test_new_daemon_counts_large_writeback(self) -> None:
         recs = [meta(T0, 7), sample(T0 + 1, 0, BOOT_ZSWPWB), sample(T0 + 6, 0, BOOT_ZSWPWB + 2560)]
         res, text = self.analyse(recs)
         self.assertEqual(res["vm"]["zswap_writeback_bytes"], 2560 * self.m.PAGE)  # 10 MiB
@@ -132,11 +172,11 @@ ROLES = {
 DISK_N = 17  # fields per device in a sample, as in /proc/diskstats after the name
 
 
-def meta_full(ts, v=8):
+def meta_full(ts: float, v: int = 8) -> dict[str, Any]:
     return {"t": "meta", "ts": ts, "v": v, "vm_keys": VM_KEYS, "base_interval": 5.0, "kernel": "7.2.15", "disks": ROLES}
 
 
-def disk_counters(i, rate):
+def disk_counters(i: int, rate: Mapping[str, int]) -> list[int]:
     """Cumulative diskstats fields after i intervals; rate = per-interval deltas by field name."""
     d = [0] * DISK_N
     for k, v in rate.items():
@@ -164,10 +204,21 @@ def disk_counters(i, rate):
     return d
 
 
-def full_sample(ts, i, *, io_pct=0.0, dt=5.0, disks=None, d=0, d_mem=None, d_maint=0, vm=None):
+def full_sample(
+    ts: float,
+    i: int,
+    *,
+    io_pct: float = 0.0,
+    dt: float = 5.0,
+    disks: Mapping[str, Mapping[str, int]] | None = None,
+    d: int = 0,
+    d_mem: int | None = None,
+    d_maint: int = 0,
+    vm: Sequence[int] | None = None,
+) -> dict[str, Any]:
     """One sample record. io_pct: IO "some" pressure of each interval; disks:
     {name: per-interval deltas}; d_mem None = a daemon before v8 (no "d_mem")."""
-    rec = {
+    rec: dict[str, Any] = {
         "t": "s",
         "ts": ts,
         "mono": ts - T0 + 100,
@@ -186,9 +237,15 @@ def full_sample(ts, i, *, io_pct=0.0, dt=5.0, disks=None, d=0, d_mem=None, d_mai
     return rec
 
 
-def episode(start, end, max_d, sigs, max_d_mem=None):
+def episode(
+    start: float,
+    end: float,
+    max_d: int,
+    sigs: Sequence[tuple[str, int, str]],
+    max_d_mem: int | None = None,
+) -> dict[str, Any]:
     """sigs: [(sig, n, kind)]. max_d_mem None = a daemon before v8."""
-    ep = {
+    ep: dict[str, Any] = {
         "t": "ep",
         "ts": start,
         "start": start,
@@ -217,10 +274,14 @@ def episode(start, end, max_d, sigs, max_d_mem=None):
 
 
 class ReportCase(unittest.TestCase):
-    def setUp(self):
+    m: _StallReportModule
+
+    def setUp(self) -> None:
         self.m = load()
 
-    def run_report(self, recs, until=None):
+    def run_report(
+        self, recs: Sequence[Mapping[str, Any]], until: float | None = None
+    ) -> tuple[dict[str, Any], list[str], str]:
         until = until or max(r.get("ts", 0) for r in recs)
         res, meta_ = self.m.analyse(recs, T0, until, with_below=False, verbose=False)
         out = io.StringIO()
@@ -241,14 +302,14 @@ BUSY_DM = {"rd_ios": 10, "rd_ticks": 150, "wr_ios": 100, "wr_ticks": 1500, "io_t
 class SaturationTest(ReportCase):
     """storage-saturated-verdict: judged at the dm-crypt layer, not at the NVMe."""
 
-    def recs(self, nvme, dm):
+    def recs(self, nvme: Mapping[str, int], dm: Mapping[str, int]) -> list[dict[str, Any]]:
         disks = {"nvme0n1": nvme, "nvme2n1": nvme, "dm-0": dm, "dm-1": dm}
         recs = [meta_full(T0)] + [full_sample(T0 + 5 * i, i, io_pct=1.3, disks=disks, d_mem=0) for i in range(13)]
         # A fsync-heavy episode with 3 tasks, so the report reaches the disk verdict.
         recs.append(episode(T0 + 10, T0 + 30, 3, [("btrfs_sync_log", 30, "storage")], max_d_mem=0))
         return recs
 
-    def test_quiet_hour_numbers_are_not_saturated(self):
+    def test_quiet_hour_numbers_are_not_saturated(self) -> None:
         res, verdict, text = self.run_report(self.recs(QUIET_NVME, QUIET_DM))
         self.assertAlmostEqual(res["pressure"]["io_some_pct"], 1.3, places=1)
         line = next(l for l in verdict if l.startswith("btrfs disks"))
@@ -260,14 +321,14 @@ class SaturationTest(ReportCase):
         self.assertNotIn("encryption queueing", line)
         self.assertIn("(r 0.2 / w 7.5)", text)  # the disks section splits read and write too
 
-    def test_saturated_dm_layer(self):
+    def test_saturated_dm_layer(self) -> None:
         _, verdict, _ = self.run_report(self.recs(QUIET_NVME, BUSY_DM))
         line = next(l for l in verdict if l.startswith("btrfs disks"))
         self.assertIn("look SATURATED", line)
         self.assertIn("await 15.0 ms (read 15.0, write 15.0)", line)
         self.assertIn("encryption queueing adds latency", line)
 
-    def test_without_dm_crypt_uses_the_member_disks(self):
+    def test_without_dm_crypt_uses_the_member_disks(self) -> None:
         recs = [meta_full(T0)] + [full_sample(T0 + 5 * i, i, disks={"nvme0n1": BUSY_DM}, d_mem=0) for i in range(13)]
         recs[0]["disks"] = {"nvme0n1": "btrfs:fedora"}
         recs.append(episode(T0 + 10, T0 + 30, 3, [("btrfs_sync_log", 30, "storage")], max_d_mem=0))
@@ -280,7 +341,7 @@ class SaturationTest(ReportCase):
 class MemoryWaitsTest(ReportCase):
     """storage-memory-waits-as-storage: reclaim/zswap waits are not storage."""
 
-    def test_v7_memory_episode_is_not_storage(self):
+    def test_v7_memory_episode_is_not_storage(self) -> None:
         # A JVM GC event recorded by daemon v7: 74 tasks in zswap and the mmap
         # lock, all tagged "storage" by that daemon, in samples and episode.
         recs = [meta_full(T0, 7)]
@@ -321,7 +382,7 @@ class MemoryWaitsTest(ReportCase):
         self.assertEqual(res["non_storage_waits"], {"reclaim": 1480})
         self.assertIn("[reclaim] zswap_compress", text)
 
-    def test_v7_mixed_episode_keeps_the_storage_part(self):
+    def test_v7_mixed_episode_keeps_the_storage_part(self) -> None:
         # The episode opens at the first sample with 3+ tasks (here the first sample).
         recs = [meta_full(T0, 7)] + [full_sample(T0 + i, i, dt=1.0, d=8) for i in range(30)]
         recs.append(episode(T0, T0 + 29, 8, [("btrfs_sync_log", 150, "storage"), ("zswap_compress", 50, "storage")]))
@@ -332,7 +393,7 @@ class MemoryWaitsTest(ReportCase):
         self.assertFalse(any(l.startswith("Memory") for l in verdict))
         self.assertEqual([c["category"] for c in res["categories"]], ["log-sync"])
 
-    def test_v7_storage_episode_unchanged(self):
+    def test_v7_storage_episode_unchanged(self) -> None:
         recs = [meta_full(T0, 7)] + [full_sample(T0 + i, i, dt=1.0, d=5) for i in range(30)]
         recs.append(episode(T0 + 2, T0 + 29, 5, [("btrfs_sync_log", 100, "storage")]))
         res, verdict, _ = self.run_report(recs)
@@ -341,7 +402,7 @@ class MemoryWaitsTest(ReportCase):
         self.assertEqual(res["peak"]["d_tasks"], 5)
         self.assertTrue(any(l.startswith("Blocked tasks: up to 5 tasks") for l in verdict))
 
-    def test_v8_memory_waits_from_samples(self):
+    def test_v8_memory_waits_from_samples(self) -> None:
         # Daemon v8: memory waits counted in d_mem; they open no episode.
         recs = [meta_full(T0)] + [
             full_sample(T0 + 5 * i, i, io_pct=1.0, d=1, d_mem=40 if 5 <= i <= 7 else 0) for i in range(13)
@@ -356,7 +417,7 @@ class MemoryWaitsTest(ReportCase):
         )
         self.assertIn("tasks waiting on storage 1  on memory 40", text)
 
-    def test_v8_episode_memory_sigs_are_not_storage(self):
+    def test_v8_episode_memory_sigs_are_not_storage(self) -> None:
         recs = [meta_full(T0)] + [full_sample(T0 + i, i, dt=1.0, d=4, d_mem=10) for i in range(30)]
         recs.append(
             episode(
@@ -376,7 +437,7 @@ class MemoryWaitsTest(ReportCase):
         self.assertIn("Blocked tasks: also up to 4 tasks waiting on storage", joined)
         self.assertNotIn("btrfs commit/log/lock waits", joined)
 
-    def test_v8_hung_memory_event_is_not_a_disk_problem(self):
+    def test_v8_hung_memory_event_is_not_a_disk_problem(self) -> None:
         recs = [meta_full(T0)] + [full_sample(T0 + 5 * i, i, d_mem=1) for i in range(13)]
         recs.append(
             {
@@ -397,12 +458,12 @@ class MemoryWaitsTest(ReportCase):
 class OpenEpisodeTest(ReportCase):
     """storage-open-episode-verdict: an episode without a record yet."""
 
-    def recs(self, v8=True):
+    def recs(self, v8: bool = True) -> list[dict[str, Any]]:
         recs = [meta_full(T0, 8 if v8 else 7)]
         recs += [full_sample(T0 + i, i, io_pct=1.0, dt=1.0, d=20, d_mem=0 if v8 else None) for i in range(195)]
         return recs
 
-    def check_open(self, recs):
+    def check_open(self, recs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         res, verdict, _ = self.run_report(recs)
         joined = " | ".join(verdict)
         self.assertNotIn("Storage was NOT a bottleneck", joined)
@@ -411,13 +472,13 @@ class OpenEpisodeTest(ReportCase):
         self.assertEqual(res["open_episode"]["d_tasks"], 20)
         return res
 
-    def test_v8_open_episode(self):
+    def test_v8_open_episode(self) -> None:
         self.check_open(self.recs())
 
-    def test_v7_open_episode(self):
+    def test_v7_open_episode(self) -> None:
         self.check_open(self.recs(v8=False))
 
-    def test_closed_episode_is_not_open(self):
+    def test_closed_episode_is_not_open(self) -> None:
         recs = self.recs()
         recs.append(episode(T0, T0 + 194, 20, [("btrfs_sync_log", 3900, "storage")], max_d_mem=0))
         res, verdict, _ = self.run_report(recs)
@@ -425,7 +486,7 @@ class OpenEpisodeTest(ReportCase):
         self.assertNotIn("Episode still open", " | ".join(verdict))
         self.assertIn("Blocked tasks: up to 20 tasks", " | ".join(verdict))
 
-    def test_three_storage_waits_open_an_episode_two_do_not(self):
+    def test_three_storage_waits_open_an_episode_two_do_not(self) -> None:
         # The daemon opens an episode at 3 storage waits; the report uses the
         # same threshold for one it has not written yet: exactly 3 counts,
         # exactly 2 does not.
@@ -437,14 +498,14 @@ class OpenEpisodeTest(ReportCase):
                 self.assertEqual(None if got is None else got["d_tasks"], want)
                 self.assertEqual("Episode still open" in " | ".join(verdict), want is not None)
 
-    def test_quiet_one_second_samples_are_not_an_episode(self):
+    def test_quiet_one_second_samples_are_not_an_episode(self) -> None:
         recs = [meta_full(T0)] + [full_sample(T0 + i, i, dt=1.0, d=1, d_mem=0) for i in range(60)]
         res, verdict, _ = self.run_report(recs)
         self.assertIsNone(res["open_episode"])
         self.assertTrue(verdict[0].startswith("Storage was NOT a bottleneck"))
 
 
-def waits(ts, d, v5=True):
+def waits(ts: float, d: int, v5: bool = True) -> dict[str, Any]:
     """A sample as open_episode reads it: its time, its storage waits and,
     from a daemon >= v5, d_maint."""
     return {"ts": ts, "d": d, "d_maint": 0} if v5 else {"ts": ts, "d": d}
@@ -456,22 +517,26 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
     Every timestamp is T0 plus a multiple of 0.5 s, so the gaps and the
     window edges below are exact in floating point."""
 
+    m: ClassVar[_StallReportModule]
+
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.m = load()
 
-    def open_episode(self, samples, episodes=()):
+    def open_episode(
+        self, samples: Sequence[Mapping[str, Any]], episodes: Sequence[Mapping[str, Any]] = ()
+    ) -> dict[str, Any] | None:
         return self.m.open_episode(samples, list(episodes))
 
-    def test_two_samples_one_second_apart_are_an_open_episode(self):
+    def test_two_samples_one_second_apart_are_an_open_episode(self) -> None:
         got = self.open_episode([waits(T0, 3), waits(T0 + 1, 5)])
         self.assertEqual(got, {"since": T0, "last": T0 + 1, "d_tasks": 5})
 
-    def test_fewer_than_two_samples_are_not_an_episode(self):
+    def test_fewer_than_two_samples_are_not_an_episode(self) -> None:
         self.assertIsNone(self.open_episode([]))
         self.assertIsNone(self.open_episode([waits(T0, 9)]))
 
-    def test_since_last_and_peak_come_from_the_whole_run(self):
+    def test_since_last_and_peak_come_from_the_whole_run(self) -> None:
         # since = the oldest sample of the run, last = the newest one, d_tasks =
         # the most storage waits in any sample of the run, wherever it is.
         for where, ds in (("newest", (4, 3, 5, 7)), ("middle", (4, 7, 5, 3))):
@@ -479,17 +544,17 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
                 samples = [waits(T0 + i, d) for i, d in enumerate(ds)]
                 self.assertEqual(self.open_episode(samples), {"since": T0, "last": T0 + 3, "d_tasks": 7})
 
-    def test_newest_sample_without_d_maint_is_not_an_episode(self):
+    def test_newest_sample_without_d_maint_is_not_an_episode(self) -> None:
         # A sample of a daemon < v5 (no d_maint) does not count storage waits
         # apart, even when the older samples before it do.
         samples = [waits(T0, 9), waits(T0 + 1, 9), waits(T0 + 2, 9, v5=False)]
         self.assertIsNone(self.open_episode(samples))
 
-    def test_newest_sample_alone_after_a_gap_is_not_an_episode(self):
+    def test_newest_sample_alone_after_a_gap_is_not_an_episode(self) -> None:
         samples = [waits(T0, 9), waits(T0 + 1, 9), waits(T0 + 3, 9)]
         self.assertIsNone(self.open_episode(samples))
 
-    def test_gap_of_more_than_1_5_s_ends_the_run(self):
+    def test_gap_of_more_than_1_5_s_ends_the_run(self) -> None:
         """Pins current behaviour: a gap of exactly 1.5 s keeps the samples in one
         run, 2 s splits it (neither the docstring nor btrfs/README.md states the
         1.5 s limit). A busy sample before the gap does not count."""
@@ -498,7 +563,7 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
         past_edge = [waits(T0, 9), waits(T0 + 2, 4), waits(T0 + 3, 4)]
         self.assertEqual(self.open_episode(past_edge), {"since": T0 + 2, "last": T0 + 3, "d_tasks": 4})
 
-    def test_episode_record_covers_the_newest_sample_within_one_second(self):
+    def test_episode_record_covers_the_newest_sample_within_one_second(self) -> None:
         """Pins current behaviour: an episode record from start - 1 s to end + 1 s
         (both edges included) covers the newest sample; 1.5 s outside it does not
         (the docstring says "no episode record covers them" without a margin)."""
@@ -520,11 +585,11 @@ class ZswapTrafficTest(ReportCase):
     """memory-1: zswap pool traffic, and disk swap-out shown once."""
 
     @staticmethod
-    def vm(i, zin, zout, pout, zwb):
+    def vm(i: int, zin: int, zout: int, pout: int, zwb: int) -> list[int]:
         # VM_KEYS: nr_dirty, nr_writeback, pswpin, pswpout, zswpin, zswpout, zswpwb
         return [0, 0, 0, pout * i, zin * i, zout * i, zwb * i]
 
-    def test_pool_traffic_and_disk_swap(self):
+    def test_pool_traffic_and_disk_swap(self) -> None:
         # Per 5 s: 50 MiB decompressed, 100 MiB compressed, 10 MiB written to
         # the swap disk, all of it zswap writeback (pswpout == zswpwb here).
         recs = [meta_full(T0)] + [
@@ -540,7 +605,7 @@ class ZswapTrafficTest(ReportCase):
         self.assertNotIn("not through zswap", line)
         self.assertNotIn("writeback", line)  # the old duplicate figure is gone
 
-    def test_swap_out_that_bypassed_zswap(self):
+    def test_swap_out_that_bypassed_zswap(self) -> None:
         recs = [meta_full(T0)] + [
             full_sample(T0 + 5 * i, i, d_mem=0, vm=self.vm(i, 0, 2560, 5120, 2560)) for i in range(2)
         ]
@@ -548,7 +613,7 @@ class ZswapTrafficTest(ReportCase):
         self.assertEqual(res["vm"]["swap_out_bypass_bytes"], 10 * 2**20)
         self.assertIn("disk swap in/out 0 MiB / 20 MiB (10 MiB of it not through zswap)", text)
 
-    def test_json_units_document_the_new_keys(self):
+    def test_json_units_document_the_new_keys(self) -> None:
         units = " ".join(self.m.UNITS)
         for key in (
             "zswap_in_bytes",
@@ -569,13 +634,14 @@ class FrameListsTest(unittest.TestCase):
     """The report re-classifies old logs with the daemon's memory frames: the
     two copies of each list must stay the same."""
 
-    def test_report_and_daemon_agree(self):
+    def test_report_and_daemon_agree(self) -> None:
         report = load()
         daemon_path = os.path.join(os.path.dirname(HERE), "btrfs-stall-monitord")
         loader = importlib.machinery.SourceFileLoader("btrfs_stall_monitord", daemon_path)
-        spec = importlib.util.spec_from_loader("btrfs_stall_monitord", loader)
-        daemon = importlib.util.module_from_spec(spec)
-        loader.exec_module(daemon)
+        daemon_mod = types.ModuleType("btrfs_stall_monitord")
+        daemon_mod.__file__ = daemon_path
+        loader.exec_module(daemon_mod)
+        daemon = cast("_StallMonitordModule", cast("object", daemon_mod))
         self.assertEqual(dict(report.STACK_RULES)["reclaim"].pattern, daemon.SWAP_FRAME.pattern)
         reclaim = next(rx for k, rx, _ in report.CATEGORIES if k == "reclaim")
         self.assertTrue(reclaim.endswith("|" + daemon.MMAP_LOCK_FRAME.pattern), reclaim)

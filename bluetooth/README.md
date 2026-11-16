@@ -470,8 +470,12 @@ replaces it with a backup of the current rule.
 | File | What it is |
 |---|---|
 | `../bluetooth-setup.sh` | The module: commands, sudo calls, restarts, checks. |
-| `bt-helper` | Python, no root: edits the `main.conf` text, renders and compares the WirePlumber rule and the LE Audio file, finds other WirePlumber files that set `monitor.bluez.properties`, asks `libwireplumber` for the role list it resolves, reads the settings (and prints the settings file with a changed `LE_AUDIO` line), parses `busctl`, `pactl` and `pw-dump` output and the watcher's log. It never writes a file. |
-| `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7). `apply` copies it to `~/.local/lib/cst/` for the user service `cst-bt-ldac48.service`. |
+| `domain.py` | Pure domain model: `main.conf` [General] rules, WirePlumber/systemd rendering and state classification, settings parsing/merging, journal failure parsing, and live state JSON parsing. No I/O or subprocesses. |
+| `ports.py` | Ports (`Protocol` interfaces): `BluetoothHostPort` for files, WirePlumber resolution, and stdin; `LiveAudioPort` for live PipeWire/PulseAudio state and profile switching. |
+| `adapters.py` | Local host adapter reading config files, scanning WirePlumber `.conf` directories, and resolving `bluez5.roles` through `libwireplumber`. |
+| `application.py` | Use cases and CLI command dispatch for `bt-helper` against `BluetoothHostPort`. |
+| `bt-helper` | Python CLI entrypoint and thin facade over `domain.py`, `adapters.py`, and `application.py`. It never writes a file. |
+| `bt-ldac-watch` | Python, self-contained (stdlib only), no root: the LDAC rate watcher (section 7). `apply` copies it to `~/.local/lib/cst/` for the user service `cst-bt-ldac48.service`. |
 | `bluetooth.conf` | The default settings. |
 | `tests/test_bluetooth.py` | Unit tests (`python3 -I -B -m unittest`, from the repository root, runs them with all others), among them the LE Audio file: its text, off/on/off in a scratch home, `plan`, `revert`, `le-audio on\|off` (a fresh home without `~/.config/cst`, a settings file without a final newline, a symlinked one), the role check, other WirePlumber files, the bearer warning, and reading the watcher's last failure from its log. Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
 | `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a profile change by WirePlumber during it, the profile switch against a fake system, the install and removal steps with `systemctl` as a stub, and `apply` when the Bluetooth restart is declined. |

@@ -410,12 +410,14 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `tmpfiles/zswap.conf` | `/etc/tmpfiles.d/zswap.conf` |
 | `sysctl/99-swap-tuning.conf` | `/etc/sysctl.d/99-swap-tuning.conf` |
 | `units/machine.slice.d-50-memory-low.conf` | `/etc/systemd/system/machine.slice.d/50-memory-low.conf` |
-| `swap-lib.bash` | sourced by `swap-setup.sh`: markers, file comparison, atomic writes |
-| `swap-status` | the live part of `status` and `plan` (Python, read-only) |
+| `domain.py` | pure swap domain model, hardware identity (`SwapHardwareSpec`), parsing, and metrics |
+| `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
+| `application.py` / `presenter.py` / `cli.py` | pure `plan`, `status`, and `apply` use cases, structured report renderer, and CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder |
 
-The crypttab and fstab lines, the partition's PARTUUID and its size are set
-at the top of `swap-setup.sh`.
+The swap partition's PARTUUID (`partuuid`), device name (`name`), and expected
+size (`expected_size_bytes`) are set on `SwapHardwareSpec` in `swap/domain.py`.
+Shared file/marker helpers and system ports live in `../cst_core/`.
 
 ---
 

@@ -23,7 +23,7 @@ invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), then ruff fo
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on the typed list
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
-tests/uv-dev ty check swap/swap-status
+tests/uv-dev ty check swap/domain.py
 tests/uv-dev --group mutation cosmic-ray --version   # --group NAME adds a group to "dev"
 ```
 
@@ -109,23 +109,21 @@ repository:
   files in the braces, whose functions must all have type annotations. Their
   record dicts are `TypedDict` classes, so ty can check the keys read with
   `[]` and the value types (not the keys read with `.get()`, nor whether a
-  key read with `[]` is `NotRequired`). Today: `swap/swap-status`,
-  `tests/mutation/cst-mutation`, `doctor/cst-doctor` and
-  `btrfs/btrfs-stall-report`. Every typed file must also be in the ty gate.
-  Add a file inside the braces of that one entry: no other per-file-ignores
+  key read with `[]` is `NotRequired`). Every Python file in the repository is
+  now in both the typed list and the ty gate.
+  Add a new file inside the braces of that one entry: no other per-file-ignores
   entry may ignore ANN, since ruff would then skip ANN for the typed files
   too and still report "All checks passed".
 - **The ty gate, `[tool.ty.src] include`**: every Python file ty reports
-  nothing on. `error-on-warning` is on, so a warning fails it too. A file
-  joins once it is clean; never remove one, or add an ignore comment, to
+  nothing on. `error-on-warning` is on, so a warning fails it too. Every
+  Python file joins it; never remove one, or add an ignore comment, to
   get a green run.
-- **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the Python files ty
-  is not yet clean on. Every Python file is in the ty gate or in this set,
-  never both, so a new file has to join the ty gate. The set only shrinks:
-  when a file becomes clean, move it to the ty gate and delete it from the
-  set (the test says to). A renamed file keeps its entry under the new
-  name. The set sits in the test, not in `pyproject.toml`, so that adding
-  a file to it is an edit of the test that review sees. Never add one.
+- **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the historical exclusion set,
+  now empty (`frozenset()`). Every Python file in the repository is in the ty
+  gate (`[tool.ty.src] include`), so every new file has to join both the ty
+  gate and the typed list directly. The set sits in the test, not in
+  `pyproject.toml`, so that adding a file to it would be a visible edit of the
+  test. Never add one.
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`
   exists at the top of the repository (ty would read it instead of
   `pyproject.toml`), when `[tool.ty]` sets anything but `src.include` and
@@ -154,17 +152,17 @@ also changes the `|` of a type annotation (`den: float | None` becomes
 annotations when the function is defined or called (only when code reads
 them, as `typing.get_type_hints` does), so those mutants survive. In
 `survivors.txt` they are the `ReplaceBinaryOperator_BitOr_*` mutants on the
-lines of a `def` (in `share` of `swap/swap-status`, 22 of its 35
+lines of a `def` (in `share` of `swap/domain.py`, 22 of its 35
 mutants).
 
 Survivors are a report to read, not a gate: the task exits 0 when the run
 finishes, whatever the number of survivors. `test all` and CI do not run it.
 
 ```
-invowk cmd test mutation swap/swap-status swap.tests.test_swap                     # lines changed since main
-invowk cmd test mutation swap/swap-status swap.tests.test_swap --base HEAD~3       # lines changed since a ref
-invowk cmd test mutation swap/swap-status swap.tests.test_swap --functions share,pct
-invowk cmd test mutation swap/swap-status swap.tests.test_swap --all               # the whole file (slow)
+invowk cmd test mutation swap/domain.py swap.tests.test_swap                     # lines changed since main
+invowk cmd test mutation swap/domain.py swap.tests.test_swap --base HEAD~3       # lines changed since a ref
+invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share,pct
+invowk cmd test mutation swap/domain.py swap.tests.test_swap --all               # the whole file (slow)
 ```
 
 The first argument is the Python file to mutate, relative to the top of the
@@ -313,7 +311,7 @@ One tool per pull request, so that new findings are clearly the new version's:
    can also lay out code differently: when the format check fails, run
    `tests/uv-dev ruff format` and commit the result in the same pull request.
 4. For cosmic-ray, the gates above do not run it: run it for real, with
-   `invowk cmd test mutation swap/swap-status swap.tests.test_swap --all`,
+   `invowk cmd test mutation swap/domain.py swap.tests.test_swap --all`,
    and put its numbers (mutants, killed, timed out, survived, minutes) in the
    pull request next to the previous version's. A new version can add or
    change mutation operators; read the new survivors.

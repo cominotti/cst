@@ -30,6 +30,8 @@ as `cst cpu watch|report`.
       QUIET_WRITE_MBPS (a flag wins).
 """
 
+from __future__ import annotations
+
 import csv
 import glob
 import json
@@ -40,16 +42,18 @@ import signal
 import subprocess
 import sys
 import time
-from collections import deque, namedtuple
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from itertools import islice
+from typing import Any, NamedTuple, TextIO
 
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
 CG = "/sys/fs/cgroup"
 GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
 
 
-def read(path, default=""):
+def read(path: str, default: str = "") -> str:
     try:
         with open(path) as f:
             return f.read()
@@ -57,9 +61,9 @@ def read(path, default=""):
         return default
 
 
-def cpus_of(kind):
+def cpus_of(kind: str) -> list[int]:
     """CPU numbers of core type kind ('cpu_core' or 'cpu_atom')."""
-    out = []
+    out: list[int] = []
     for part in read(f"/sys/devices/{kind}/cpus").strip().split(","):
         if "-" in part:
             a, b = part.split("-")
@@ -72,31 +76,31 @@ def cpus_of(kind):
 P_CPUS, E_CPUS = cpus_of("cpu_core"), cpus_of("cpu_atom")
 
 
-def mean_mhz(cpus):
+def mean_mhz(cpus: Sequence[int]) -> int:
     vals = [int(read(f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq", "0") or 0) for c in cpus]
     vals = [v for v in vals if v]
     return round(sum(vals) / len(vals) / 1000) if vals else 0
 
 
-def pressure_field(text, kind, key):
+def pressure_field(text: str, kind: str, key: str) -> str | None:
     """The KEY= value (as text) on the KIND line ('some' or 'full') of a
     pressure file's text, or None."""
     m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.M)
     return m.group(1) if m else None
 
 
-def pressure_total(path, kind):
+def pressure_total(path: str, kind: str) -> int | None:
     """Cumulative stall microseconds ('some' or 'full') of a pressure file."""
     v = pressure_field(read(path), kind, "total")
     return int(v) if v is not None else None
 
 
-def usage_usec(cg):
+def usage_usec(cg: str) -> int:
     m = re.search(r"^usage_usec (\d+)", read(os.path.join(CG, cg, "cpu.stat")), re.M)
     return int(m.group(1)) if m else 0
 
 
-def find_game(name):
+def find_game(name: str | None) -> int | None:
     """PID of the game: NAME if given, else a process with GameMode's client
     library loaded."""
     if name:
@@ -104,7 +108,8 @@ def find_game(name):
         return int(r.stdout.split()[0]) if r.stdout.split() else None
     # Several processes of the launch chain (reaper, pressure-vessel) map it:
     # the game is the one with the most threads.
-    best, nthreads = None, 0
+    best: int | None = None
+    nthreads = 0
     for maps in glob.glob("/proc/[0-9]*/maps"):
         if "libgamemode" in read(maps):
             pid = int(maps.split("/")[2])
@@ -114,12 +119,12 @@ def find_game(name):
     return best
 
 
-def game_cgroup(pid):
+def game_cgroup(pid: int) -> str:
     line = read(f"/proc/{pid}/cgroup").strip()
     return line.split("::", 1)[1].lstrip("/") if "::" in line else ""
 
 
-def invol(pid):
+def invol(pid: int) -> int:
     total = 0
     for st in glob.glob(f"/proc/{pid}/task/*/status"):
         m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read(st), re.M)
@@ -127,19 +132,23 @@ def invol(pid):
     return total
 
 
-def build_cgroups():
+def build_cgroups() -> list[str]:
     out = ["builds.slice"] if os.path.isdir(os.path.join(CG, "builds.slice")) else []
     out += [os.path.relpath(p, CG) for p in glob.glob(os.path.join(CG, "system.slice", "docker-*.scope"))]
     return out
 
 
-def watch(argv):
-    label, game, seconds, mangohud, cmd = "run", None, None, None, []
+def watch(argv: Sequence[str]) -> int:
+    label = "run"
+    game: str | None = None
+    seconds: int | None = None
+    mangohud: str | None = None
+    cmd: list[str] = []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--":
-            cmd = argv[i + 1 :]
+            cmd = list(argv[i + 1 :])
             break
         if a in ("-l", "--label"):
             label = argv[i + 1]
@@ -161,14 +170,15 @@ def watch(argv):
     run_dir = os.path.join(RUNS, datetime.fromtimestamp(start).strftime("%Y%m%dT%H%M%S") + "-" + label)
     os.makedirs(run_dir)
     proc = subprocess.Popen(cmd) if cmd else None
-    stop = []
+    stop: list[int] = []
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
     print(f"recording into {run_dir} (Ctrl-C to stop)", file=sys.stderr)
 
-    prev = {}
-    rows = []
-    pid, cg = None, ""
+    prev: dict[str, Any] = {}
+    rows: list[list[object]] = []
+    pid: int | None = None
+    cg = ""
     fields = [
         "t",
         "profile_on",
@@ -195,7 +205,7 @@ def watch(argv):
                 cg = game_cgroup(pid) if pid else ""
                 prev.pop("game", None)
             now = time.time()
-            cur = {
+            cur: dict[str, Any] = {
                 "t": now,
                 "sys": pressure_total("/proc/pressure/cpu", "some") or 0,
                 "vm": usage_usec("machine.slice"),
@@ -209,15 +219,17 @@ def watch(argv):
                 )
             if prev:
                 dt = now - prev["t"]
-                g = cur.get("game"), prev.get("game")
-                row = [
+                g_cur: tuple[int, int, int] | None = cur.get("game")
+                g_prev: tuple[int, int, int] | None = prev.get("game")
+                has_game = g_cur is not None and g_prev is not None
+                row: list[object] = [
                     round(now - start, 1),
                     int(os.path.exists(GAME_STATE)),
                     pid or "",
                     # per second of wall time (samples drift a little past 1 s)
-                    round((g[0][0] - g[1][0]) / 1000 / dt, 1) if all(g) else "",
-                    round((g[0][1] - g[1][1]) / 1000 / dt, 1) if all(g) else "",
-                    round((g[0][2] - g[1][2]) / dt) if all(g) else "",
+                    round((g_cur[0] - g_prev[0]) / 1000 / dt, 1) if g_cur is not None and g_prev is not None else "",
+                    round((g_cur[1] - g_prev[1]) / 1000 / dt, 1) if g_cur is not None and g_prev is not None else "",
+                    round((g_cur[2] - g_prev[2]) / dt) if has_game and g_cur is not None and g_prev is not None else "",
                     round((cur["sys"] - prev["sys"]) / 1000 / dt, 1),
                     mean_mhz(P_CPUS),
                     mean_mhz(E_CPUS),
@@ -232,7 +244,7 @@ def watch(argv):
     end = time.time()
     if proc and proc.poll() is None:
         proc.terminate()
-    meta = {
+    meta: dict[str, object] = {
         "label": label,
         "start": start,
         "end": end,
@@ -252,12 +264,12 @@ def watch(argv):
     return proc.returncode if proc and proc.returncode else 0
 
 
-def frametimes(path):
+def frametimes(path: str) -> list[float]:
     """Frame times (ms) from a MangoHud CSV (header row with 'frametime')."""
-    out = []
+    out: list[float] = []
     with open(path, newline="") as f:
         rd = csv.reader(f)
-        col = None
+        col: int | None = None
         for row in rd:
             if col is None:
                 low = [c.strip().lower() for c in row]
@@ -271,30 +283,35 @@ def frametimes(path):
     return out
 
 
-def lows(ft):
+def lows(ft: Sequence[float]) -> tuple[float, float, float] | None:
     """avg fps, 1% low and 0.1% low (fps of the mean of the worst frames)."""
     if not ft:
         return None
     s = sorted(ft, reverse=True)
 
-    def low(frac):
+    def low(frac: float) -> float:
         worst = s[: max(1, int(len(s) * frac))]
         return 1000 / (sum(worst) / len(worst))
 
     return 1000 / (sum(ft) / len(ft)), low(0.01), low(0.001)
 
 
-def summarize(run_dir):
+def summarize(run_dir: str) -> str:
     # The value is not used; the line stays so that a corrupt meta.json
     # still stops the report here, as before.
     json.loads(read(os.path.join(run_dir, "meta.json"), "{}") or "{}")
     with open(os.path.join(run_dir, "samples.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
 
-    def col(name):
-        return [float(r[name]) for r in rows if r.get(name) not in ("", None)]
+    def col(name: str) -> list[float]:
+        out_col: list[float] = []
+        for r in rows:
+            val = r.get(name)
+            if val is not None and val != "":
+                out_col.append(float(val))
+        return out_col
 
-    def avg(v):
+    def avg(v: Sequence[float]) -> float:
         return sum(v) / len(v) if v else float("nan")
 
     wait, mem, inv = col("game_cpu_wait_ms"), col("game_mem_stall_ms"), col("game_invol_switches")
@@ -320,7 +337,7 @@ def summarize(run_dir):
     return out
 
 
-def report(argv):
+def report(argv: Sequence[str]) -> int:
     runs = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in argv] or sorted(
         glob.glob(os.path.join(RUNS, "*"))
     )[-10:]
@@ -342,7 +359,7 @@ def report(argv):
 PROC = "/proc"
 
 
-def stat_cpu(text):
+def stat_cpu(text: str) -> tuple[int, int]:
     """(total, idle) jiffies of the 'cpu' line that /proc/stat starts with."""
     f = text.split("\n", 1)[0].split()
     # user nice system idle iowait irq softirq steal; guest and guest_nice
@@ -353,7 +370,7 @@ def stat_cpu(text):
     return sum(v), v[3] + v[4]  # iowait is idle time too
 
 
-def vmstat_pgpgout(text):
+def vmstat_pgpgout(text: str) -> int:
     """KiB written to the disks since boot (/proc/vmstat pgpgout)."""
     m = re.search(r"^pgpgout (\d+)$", text, re.M)
     if not m:
@@ -361,7 +378,7 @@ def vmstat_pgpgout(text):
     return int(m.group(1))
 
 
-def some_avg10(text):
+def some_avg10(text: str) -> float:
     """The 'some avg10=' share (%) of a pressure file."""
     v = pressure_field(text, "some", "avg10")
     if v is None:
@@ -369,7 +386,7 @@ def some_avg10(text):
     return float(v)
 
 
-def busy_pct(window, name):
+def busy_pct(window: Sequence[Mapping[str, Any]], name: str) -> float:
     """CPU busy (%) from the counters at both ends of the window."""
     (total0, idle0), (total1, idle1) = window[0]["v"][name], window[-1]["v"][name]
     if total1 <= total0:
@@ -377,7 +394,7 @@ def busy_pct(window, name):
     return 100.0 * ((total1 - total0) - (idle1 - idle0)) / (total1 - total0)
 
 
-def write_mbps(window, name):
+def write_mbps(window: Sequence[Mapping[str, Any]], name: str) -> float:
     """MB written per second, from the counters at both ends of the window."""
     elapsed = window[-1]["t"] - window[0]["t"]
     if elapsed <= 0:
@@ -386,14 +403,25 @@ def write_mbps(window, name):
     return (window[-1]["v"][name] - window[0]["v"][name]) / 1024 / elapsed
 
 
-def mean_of_seconds(window, name):
+def mean_of_seconds(window: Sequence[Mapping[str, Any]], name: str) -> float:
     """Mean of each second's reading (the first reading only starts the window)."""
     return sum(s["v"][name] for s in islice(window, 1, None)) / (len(window) - 1)
 
 
 # One row per test. file: under /proc; parse: its text -> one reading (or
 # ValueError); value: (window of readings, name) -> the window's value.
-Limit = namedtuple("Limit", "name label unit flag env default file parse value")
+class Limit(NamedTuple):
+    name: str
+    label: str
+    unit: str
+    flag: str
+    env: str
+    default: float
+    file: str
+    parse: Callable[[str], Any]
+    value: Callable[[Sequence[Mapping[str, Any]], str], float]
+
+
 QUIET_LIMITS = (
     Limit("cpu", "CPU busy", "%", "--cpu", "QUIET_CPU_PCT", 10.0, "stat", stat_cpu, busy_pct),
     Limit(
@@ -435,11 +463,13 @@ QUIET_LIMITS = (
 )
 
 
-def quiet_sample(proc=PROC, game_state=GAME_STATE, clock=time.monotonic):
+def quiet_sample(
+    proc: str = PROC, game_state: str = GAME_STATE, clock: Callable[[], float] = time.monotonic
+) -> dict[str, Any]:
     """One reading of each test's file (s['v'][test name]) and whether the game
     profile is on. A file that cannot be read or parsed leaves its reason in
     s['err'][test name] instead."""
-    s = {"t": clock(), "wall": time.time(), "game": os.path.exists(game_state), "v": {}, "err": {}}
+    s: dict[str, Any] = {"t": clock(), "wall": time.time(), "game": os.path.exists(game_state), "v": {}, "err": {}}
     for lim in QUIET_LIMITS:
         path = os.path.join(proc, lim.file)
         try:
@@ -452,13 +482,14 @@ def quiet_sample(proc=PROC, game_state=GAME_STATE, clock=time.monotonic):
     return s
 
 
-def quiet_tests(window, limits):
+def quiet_tests(window: Sequence[Mapping[str, Any]], limits: Mapping[str, float]) -> list[dict[str, Any]]:
     """The tests of one window (SECONDS + 1 readings, a second apart): CPU busy
     and writes from the counters at both ends (the window's mean), pressure as
     the mean of each second's avg10, the game profile off in every reading."""
-    tests = []
+    tests: list[dict[str, Any]] = []
     for lim in QUIET_LIMITS:
-        value, err = None, next((s["err"][lim.name] for s in window if lim.name in s["err"]), None)
+        value: float | None = None
+        err = next((s["err"][lim.name] for s in window if lim.name in s["err"]), None)
         if err is None:
             try:
                 # Rounded before the comparison: the verdict matches the printed value.
@@ -472,7 +503,7 @@ def quiet_tests(window, limits):
                 "unit": lim.unit,
                 "limit": limits[lim.name],
                 "value": value,
-                "ok": err is None and value < limits[lim.name],
+                "ok": err is None and value is not None and value < limits[lim.name],
                 "error": err,
             }
         )
@@ -491,7 +522,7 @@ def quiet_tests(window, limits):
     return tests
 
 
-def duration(text):
+def duration(text: str) -> float:
     """Seconds from 120, 90s, 30m or 2h."""
     m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip())
     if not m or float(m.group(1)) <= 0:
@@ -499,13 +530,15 @@ def duration(text):
     return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
 
 
-def quiet_args(argv, environ):
+def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, float | None, bool, dict[str, float]]:
     """(seconds, wait or None, json, limits), or ValueError for a usage error."""
     limits = {
         lim.name: positive(environ[lim.env], lim.env) if environ.get(lim.env, "") != "" else lim.default
         for lim in QUIET_LIMITS
     }
-    seconds, wait, as_json = 60, None, False
+    seconds = 60
+    wait: float | None = None
+    as_json = False
     flags = {lim.flag: lim.name for lim in QUIET_LIMITS}
     i = 0
     while i < len(argv):
@@ -533,7 +566,7 @@ def quiet_args(argv, environ):
     return seconds, wait, as_json, limits
 
 
-def positive(text, what):
+def positive(text: str, what: str) -> float:
     """TEXT as a finite number above 0, or ValueError naming WHAT."""
     try:
         v = float(text)
@@ -544,7 +577,7 @@ def positive(text, what):
     raise ValueError(f"{what}: a number above 0 (got {text!r})")
 
 
-def quiet_text(result):
+def quiet_text(result: Mapping[str, Any]) -> str:
     lines = []
     for t in result["tests"]:
         unit = f" {t['unit']}" if t["unit"] else ""
@@ -566,27 +599,34 @@ def quiet_text(result):
     return "\n".join(lines)
 
 
-def quiet(argv, sample=None, sleep=time.sleep, clock=time.monotonic, out=None, environ=None):
+def quiet(
+    argv: Sequence[str],
+    sample: Callable[[], Any] | None = None,
+    sleep: Callable[[float], object] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    out: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
     """Exit 0 if a window of SECONDS was quiet, 1 if not (or --wait ran out),
     2 for a usage error. Reads only; writes nothing but its output."""
-    out = out or sys.stdout
+    out_stream: TextIO = sys.stdout if out is None else out
     try:
         seconds, wait, as_json, limits = quiet_args(argv, os.environ if environ is None else environ)
     except ValueError as e:
         print(f"quiet: {e}", file=sys.stderr)
         return 2
-    sample = sample or (lambda: quiet_sample(clock=clock))
+    sample_fn: Callable[[], Any] = (lambda: quiet_sample(clock=clock)) if sample is None else sample
     if wait is not None:
         print(f"waiting up to {wait:g} s for {seconds} quiet seconds in a row", file=sys.stderr)
-    window = deque(maxlen=seconds + 1)
+    window: deque[Any] = deque(maxlen=seconds + 1)
     try:
         start = clock()
-        window.append(sample())
+        window.append(sample_fn())
         n = 0
         while True:
             n += 1
             sleep(max(0.0, start + n - clock()))
-            window.append(sample())
+            window.append(sample_fn())
             if len(window) <= seconds:
                 continue
             tests = quiet_tests(window, limits)
@@ -598,10 +638,10 @@ def quiet(argv, sample=None, sleep=time.sleep, clock=time.monotonic, out=None, e
         print("quiet: interrupted", file=sys.stderr)
         return 130
 
-    def stamp(s):
+    def stamp(s: Mapping[str, Any]) -> str:
         return datetime.fromtimestamp(s["wall"]).isoformat(sep=" ", timespec="seconds")
 
-    result = {
+    result: dict[str, Any] = {
         "quiet": ok,
         "seconds": seconds,
         "start": stamp(window[0]),
@@ -610,15 +650,20 @@ def quiet(argv, sample=None, sleep=time.sleep, clock=time.monotonic, out=None, e
         "tests": tests,
         "failed": [t["name"] for t in tests if not t["ok"]],
     }
-    print(json.dumps(result) if as_json else quiet_text(result), file=out)
+    print(json.dumps(result) if as_json else quiet_text(result), file=out_stream)
     return 0 if ok else 1
 
 
-def main():
+def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] not in ("watch", "report", "quiet"):
         print(__doc__)
         return 2
-    return {"watch": watch, "report": report, "quiet": quiet}[sys.argv[1]](sys.argv[2:])
+    cmd = sys.argv[1]
+    if cmd == "watch":
+        return watch(sys.argv[2:])
+    if cmd == "report":
+        return report(sys.argv[2:])
+    return quiet(sys.argv[2:])
 
 
 if __name__ == "__main__":

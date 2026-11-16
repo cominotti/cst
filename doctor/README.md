@@ -491,19 +491,31 @@ indexer) and `session.slice` (gnome-shell) are known and not reported. The
 user manager looked at is your own, or, when the doctor runs as root, the
 `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
 
-## 9. Adding a check
+## 9. Adding a check and internal layout
 
-Each check is a small function in `cst-doctor`, registered with
-`@check("area")`. It gets the `Host` (how to run a query and where host
-files are) and yields `Result(status, message, fix)`. Areas are printed in
-the order their first check was registered. A check that crashes becomes
+The code is split into four layers under `doctor/`:
+
+- `doctor/domain.py`: pure domain model, rules, parsers and formatting (no
+  filesystem I/O or subprocess calls).
+- `doctor/ports.py`: port protocols (`DoctorHostPort`, `CheckFn`).
+- `doctor/adapters.py`: `Host` adapter (direct or `flatpak-spawn --host` /
+  `/run/host`) and `load_vm_module`.
+- `doctor/application.py`: host probes, check implementations, `CHECKS` registry,
+  `run_checks` and `render`.
+- `doctor/cst-doctor`: thin CLI entrypoint and compatibility facade.
+
+Each check is a small function in `doctor/application.py`, registered with
+`@check("area")`. It gets a `DoctorHostPort` (how to run a query and where
+host files are) and yields `Result(status, message, fix)`. Areas are printed
+in the order their first check was registered. A check that crashes becomes
 one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 
-`cst-doctor` is one of the typed modules (docs/dev-tools.md, "The typed
-list"): every function has type annotations, so a new check reads
-`def check_name(host: Host) -> Iterator[Result]:`, and
+All `doctor/` modules (including `doctor/tests/test_doctor.py`) are on the
+typed list ([docs/dev-tools.md](../docs/dev-tools.md), "The typed list"): every
+function has type annotations, so a new check reads
+`def check_name(host: DoctorHostPort) -> Iterator[Result]:`, and
 `invowk cmd test types` (ty and ruff's ANN rules) fails until it does.
 
 ## 10. Tests

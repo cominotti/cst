@@ -385,11 +385,13 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | `cst toolchains` | Yes | Override retention or size limits in `~/.config/cst/toolchains.conf` (defaults in [`toolchains/toolchains.conf`](toolchains/toolchains.conf)). |
 | `cst bluetooth` | Yes, once you set your headset's MAC | Put `DEVICE=AA:BB:CC:DD:EE:FF` (and optional `LDAC_QUALITY`, `LE_AUDIO`, `BEARER`) in `~/.config/cst/bluetooth.conf` (defaults in [`bluetooth/bluetooth.conf`](bluetooth/bluetooth.conf)), or pass `--device`. |
 | `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (or in [`cpu-setup.sh`](cpu-setup.sh) / [`cpu/game-profile`](cpu/game-profile)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. The limits of `cst cpu quiet` come from this machine's idle baseline: take your own reading and set them with its flags or `QUIET_*` variables ([cpu/README.md, section 11.1](cpu/README.md#111-is-the-machine-quiet-quiet)). |
-| `cst swap` | Needs your swap partition's UUID and size | In [`swap-setup.sh`](swap-setup.sh), set `DISK_SWAP_PARTUUID` and `DISK_SWAP_SIZE_BYTES` to match your dedicated swap partition, and adjust `MemoryLow=` in [`swap/units/machine.slice.d-50-memory-low.conf`](swap/units/machine.slice.d-50-memory-low.conf) (or zswap's pool cap in [`swap/tmpfiles/zswap.conf`](swap/tmpfiles/zswap.conf)). |
+| `cst swap` | Needs your swap partition's UUID and size | In [`swap/domain.py`](swap/domain.py), set `SwapHardwareSpec` defaults (`partuuid` and `expected_size_bytes`) to match your dedicated swap partition, and adjust `MemoryLow=` in [`swap/units/machine.slice.d-50-memory-low.conf`](swap/units/machine.slice.d-50-memory-low.conf) (or zswap's pool cap in [`swap/tmpfiles/zswap.conf`](swap/tmpfiles/zswap.conf)). |
 | `cst btrfs` | Btrfs root on Fedora Silverblue / Workstation | Health checks, stall monitoring, writeback sysctls, automatic reclaim, snapshots and `~/Bulk` discover the root btrfs UUID dynamically. Check `EXPECTED_OPTS` in [`btrfs-setup.sh`](btrfs-setup.sh) if your mount options differ (e.g. single-disk btrfs without `degraded`), and pass `--host` / `--port` / `--user` / `--path` to `cst btrfs snapshots nas setup`. |
 
 ## Other files in this folder
 
+- `cst_core/`: shared kernel (`domain/`), port protocols (`ports/`), host adapters
+  (`adapters/`) and the Python CLI dispatcher (`cli.py`) behind `cst`.
 - `cst-link.bash`: the helper that `cst btrfs install` and `cst cpu install`
   use to create the link `~/.local/bin/cst` ([The `cst` command](#the-cst-command)).
 - `fix-anaconda-webui-btrfs-compress.sh`: a one-time helper for **installing**

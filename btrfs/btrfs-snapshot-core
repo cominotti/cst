@@ -135,6 +135,8 @@ for `latest` and `list --json`, whose stdout is the result); one summary line
 per snapshot/prune run.
 """
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import datetime as dt
@@ -148,6 +150,8 @@ import subprocess
 import sys
 import time
 import zoneinfo
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from typing import Any, Literal, TypedDict
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUSY, EXIT_REFUSED = 0, 1, 2, 3, 4
 
@@ -188,7 +192,7 @@ DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "
 LOG_STREAM = sys.stdout
 
 
-def log(level, msg):
+def log(level: int, msg: str) -> None:
     print(f"<{level}>btrfs-snapshot: {msg}", file=LOG_STREAM, flush=True)
 
 
@@ -201,7 +205,7 @@ class ParseError(Exception):
 
 
 # ---- policy --------------------------------------------------------------------------
-def parse_policy(text):
+def parse_policy(text: str) -> dict[str, int | str]:
     """'72h 7d 4w 3m' -> {'h': 72, 'd': 7, 'w': 4, 'm': 3}; '*' -> 'all'.
 
     Same tokens as btrbk's preserve matrix (case-insensitive unit, each unit at
@@ -211,7 +215,7 @@ def parse_policy(text):
     tokens = [t for t in re.split(r"[\s,]+", text.strip()) if t]
     if not tokens:
         raise ValueError("empty retention policy")
-    policy = {}
+    policy: dict[str, int | str] = {}
     for tok in tokens:
         m = POLICY_TOKEN.fullmatch(tok)
         if not m:
@@ -223,11 +227,11 @@ def parse_policy(text):
     return policy
 
 
-def format_policy(policy):
+def format_policy(policy: Mapping[str, int | str]) -> str:
     return " ".join(f"{'*' if policy[u] == 'all' else policy[u]}{u}" for u in POLICY_UNITS if u in policy)
 
 
-def policy_max_kept(policy):
+def policy_max_kept(policy: Mapping[str, int | str]) -> int | None:
     """Upper bound of snapshots the policy keeps (excluding future-dated ones),
     or None if a unit is '*'."""
     total = 1  # the latest
@@ -235,13 +239,13 @@ def policy_max_kept(policy):
         n = policy.get(u)
         if n == "all":
             return None
-        if n:
+        if isinstance(n, int) and n:
             total += n + 1  # buckets 0..N
     return total
 
 
 # ---- time ----------------------------------------------------------------------------
-def local_tz(name=None):
+def local_tz(name: str | None = None) -> dt.tzinfo:
     """The zone used for names and retention: --tz, else $TZ, else /etc/localtime."""
     if name:
         return zoneinfo.ZoneInfo(name)
@@ -261,7 +265,7 @@ def local_tz(name=None):
         return dt.UTC
 
 
-def wall_to_epoch(wall, tz):
+def wall_to_epoch(wall: dt.datetime, tz: dt.tzinfo) -> int:
     """Local wall time -> epoch: an ambiguous time (DST end) maps to the EARLIER
     instant, a non-existent one (DST start) to the instant one DST shift later
     (zoneinfo fold=0). That is Perl's timelocal() (btrbk) for every zone with
@@ -273,25 +277,25 @@ def wall_to_epoch(wall, tz):
     return int(wall.replace(tzinfo=tz, fold=0).timestamp())
 
 
-def epoch_to_wall(epoch, tz):
+def epoch_to_wall(epoch: float, tz: dt.tzinfo) -> dt.datetime:
     return dt.datetime.fromtimestamp(epoch, tz).replace(tzinfo=None)
 
 
-def perl_int_div(a, b):
+def perl_int_div(a: int, b: int) -> int:
     """Perl's int(a / b) for b > 0: truncates toward zero (matters for future dates)."""
     q = abs(a) // b
     return q if a >= 0 else -q
 
 
-def snapshot_name(name, wall, seq=0):
+def snapshot_name(name: str, wall: dt.datetime, seq: int = 0) -> str:
     return f"{name}.{wall.strftime(TS_FORMAT)}" + (f"_{seq}" if seq else "")
 
 
-def name_regex(name):
+def name_regex(name: str) -> re.Pattern[str]:
     return re.compile(re.escape(name) + r"\.([0-9]{8}T[0-9]{4})(?:_([0-9]+))?")
 
 
-def parse_snapshot_name(name, entry):
+def parse_snapshot_name(name: str, entry: str) -> tuple[dt.datetime, int] | None:
     """'home.20261013T1400_1' -> (wall datetime, 1), or None if not ours / invalid date."""
     m = name_regex(name).fullmatch(entry)
     if not m:
@@ -322,7 +326,30 @@ class Decision:
     reason: str
 
 
-def plan(snaps, now, policy, tz, *, hod=0, dow=0):
+class _PlanItem(TypedDict):
+    snap: Snap
+    key: tuple[int, int]
+    dh: int
+    dd: int
+    dw: int
+    dm: int
+    dy: int
+    hfh: int
+    dfe: int
+    year: int
+    month: int
+    reason: str | None
+
+
+def plan(
+    snaps: Iterable[Snap],
+    now: float | dt.datetime,
+    policy: Mapping[str, int | str],
+    tz: dt.tzinfo,
+    *,
+    hod: int = 0,
+    dow: int = 0,
+) -> list[Decision]:
     """Retention of btrbk 0.32.7 schedule() (snapshot_preserve_min latest,
     preserve_date_in_future as in its snapshot deletion). Identical decisions
     and reasons in every zone with whole-hour DST shifts; in Australia/Lord_Howe
@@ -334,14 +361,13 @@ def plan(snaps, now, policy, tz, *, hod=0, dow=0):
     Returns [Decision] sorted oldest first; the reason is btrbk's (the last
     rule that matched wins, as in btrbk's output).
     """
-    if isinstance(now, dt.datetime):
-        now = now.timestamp()
-    now_wall = epoch_to_wall(now, tz)
+    now_ts = now.timestamp() if isinstance(now, dt.datetime) else now
+    now_wall = epoch_to_wall(now_ts, tz)
     # btrbk: timegm() of the local hour fields, i.e. DST-blind wall-clock hours.
     now_h = now_wall.replace(minute=0, second=0, microsecond=0)
     dow_name = DAY_NAMES[dow]
 
-    items = []
+    items: list[_PlanItem] = []
     for s in snaps:
         epoch = wall_to_epoch(s.wall, tz)
         tm = epoch_to_wall(epoch, tz)  # localtime(): normalizes non-existent times
@@ -382,15 +408,15 @@ def plan(snaps, now, policy, tz, *, hod=0, dow=0):
         )
     items.sort(key=lambda i: i["key"])
 
-    def delta_text(i):
+    def delta_text(i: _PlanItem) -> str:
         s = (f" {i['dfe']}d" if i["dfe"] else "") + (f" {i['hfh']}h" if i["hfh"] else "")
         return (f"{s} after " if s else " at ") + f"{dow_name} {hod:02d}:00"
 
-    def within(unit, delta):
+    def within(unit: str, delta: int) -> bool:
         n = policy.get(unit)
-        return bool(n) and (n == "all" or delta <= n)
+        return bool(n) and (n == "all" or (isinstance(n, int) and delta <= n))
 
-    first_hours = {}
+    first_hours: dict[int, _PlanItem] = {}
     for i in items:
         if i["dh"] < 0:
             i["reason"] = f"preserve forced: {-i['dh']} hours in the future"
@@ -398,13 +424,13 @@ def plan(snaps, now, policy, tz, *, hod=0, dow=0):
     if items:
         items[-1]["reason"] = "preserve min: latest"
 
-    first_days = {}
+    first_days: dict[int, _PlanItem] = {}
     for k in sorted(first_hours, reverse=True):
         i = first_hours[k]
         if within("h", i["dh"]):
             i["reason"] = f"preserve hourly: first of hour, {i['dh']} hours ago"
         first_days.setdefault(i["dd"], i)
-    first_weeks = {}
+    first_weeks: dict[int, _PlanItem] = {}
     for k in sorted(first_days, reverse=True):
         i = first_days[k]
         if within("d", i["dd"]):
@@ -414,13 +440,13 @@ def plan(snaps, now, policy, tz, *, hod=0, dow=0):
                 + f"{hod:02d}:00"
             )
         first_weeks.setdefault(i["dw"], i)
-    first_months = {}
+    first_months: dict[int, _PlanItem] = {}
     for k in sorted(first_weeks, reverse=True):
         i = first_weeks[k]
         if within("w", i["dw"]):
             i["reason"] = f"preserve weekly: {i['dw']} weeks ago," + delta_text(i)
         first_months.setdefault(i["dm"], i)
-    first_years = {}
+    first_years: dict[int, _PlanItem] = {}
     for k in sorted(first_months, reverse=True):
         i = first_months[k]
         if within("m", i["dm"]):
@@ -436,25 +462,31 @@ def plan(snaps, now, policy, tz, *, hod=0, dow=0):
                 f"preserve yearly: first weekly of year {i['year']} ({i['dy']} years ago," + delta_text(i) + ")"
             )
 
-    out = []
+    out: list[Decision] = []
     for i in items:
-        if i["reason"]:
-            out.append(Decision(i["snap"], "keep", i["reason"]))
+        reason = i["reason"]
+        if reason:
+            out.append(Decision(i["snap"], "keep", reason))
         else:
             out.append(Decision(i["snap"], "delete", f"not kept by policy '{format_policy(policy)}'"))
     return out
 
 
-def newest_of(snaps):
+def newest_of(snaps: Iterable[Snap]) -> Snap | None:
     """Newest by Gen at creation (names can lie after a clock step), then by date."""
     return max(snaps, key=lambda s: (s.cgen, s.wall, s.seq), default=None)
 
 
-def apply_safeguards(decisions, now, tz, pins):
+def apply_safeguards(
+    decisions: list[Decision],
+    now: float,
+    tz: dt.tzinfo,
+    pins: Collection[str],
+) -> list[Decision]:
     """Turn policy deletions into keeps for the 3 newest (by generation and by
     name), anything younger than 24 h, and pinned paths."""
     snaps = [d.snap for d in decisions]
-    protected = set()
+    protected: set[int] = set()
     for key in (lambda s: (s.cgen, s.wall, s.seq), lambda s: (wall_to_epoch(s.wall, tz), s.seq)):
         protected.update(id(s) for s in sorted(snaps, key=key, reverse=True)[:KEEP_NEWEST])
     for d in decisions:
@@ -470,22 +502,30 @@ def apply_safeguards(decisions, now, tz, pins):
     return decisions
 
 
-def is_pinned(path, pins):
+def is_pinned(path: str, pins: Collection[str]) -> bool:
     if not path or not pins:
         return False
     return os.path.normpath(path) in pins or os.path.realpath(path) in pins
 
 
-def mass_delete_limit(owned):
+def mass_delete_limit(owned: int) -> int:
     return max(MASS_DELETE_MIN, owned * MASS_DELETE_PERCENT // 100)
 
 
-def is_mass_delete(count, owned):
+def is_mass_delete(count: int, owned: int) -> bool:
     """More than max(5, 10% of owned)."""
     return count > MASS_DELETE_MIN and count * 100 > owned * MASS_DELETE_PERCENT
 
 
-def unexplained_deletions(decisions, snaps, policy, tz, pins, since, ref=None):
+def unexplained_deletions(
+    decisions: Sequence[Decision],
+    snaps: Sequence[Snap],
+    policy: Mapping[str, int | str],
+    tz: dt.tzinfo,
+    pins: Collection[str],
+    since: int | None,
+    ref: float | None = None,
+) -> list[Decision]:
     """The deletions in DECISIONS (made now) that time passing does not explain.
 
     A deletion is explained when the snapshot was kept at SINCE (the last
@@ -524,18 +564,18 @@ class CacheDir:
 
 @dataclasses.dataclass
 class CacheWalk:
-    folders: list  # CacheDir: tagged folders (dropped in "drop" mode)
-    kept: list  # rel: tagged, but holding a skipped path, so kept and walked
-    skipped: list  # rel: skip paths that exist (never entered)
-    problems: list  # (rel, text): what could not be read or deleted
+    folders: list[CacheDir]  # tagged folders (dropped in "drop" mode)
+    kept: list[str]  # rel: tagged, but holding a skipped path, so kept and walked
+    skipped: list[str]  # rel: skip paths that exist (never entered)
+    problems: list[tuple[str, str]]  # (rel, text): what could not be read or deleted
     seconds: float = 0.0
 
     @property
-    def files(self):
+    def files(self) -> int:
         return sum(c.files for c in self.folders)
 
     @property
-    def size(self):
+    def size(self) -> int:
         return sum(c.size for c in self.folders)
 
 
@@ -543,7 +583,7 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_N
 NOATIME = getattr(os, "O_NOATIME", 0)
 
 
-def open_noatime(name, flags, dir_fd):
+def open_noatime(name: str, flags: int, dir_fd: int | None) -> int:
     """os.open with O_NOATIME: reading a folder or a tag must not write its
     access time (with relatime, the first read after a change, or after a
     day, would: one metadata write per folder in the snapshot, or a change of
@@ -557,7 +597,7 @@ def open_noatime(name, flags, dir_fd):
         return os.open(name, flags, dir_fd=dir_fd)
 
 
-def has_cache_tag(dir_fd):
+def has_cache_tag(dir_fd: int) -> bool:
     """The folder open as DIR_FD holds a regular file CACHEDIR.TAG that starts
     with the signature. Never follows a symlink and never opens anything
     but a regular file (a FIFO or device named CACHEDIR.TAG is no tag)."""
@@ -577,7 +617,7 @@ def has_cache_tag(dir_fd):
         os.close(fd)
 
 
-def subdirs(dir_fd):
+def subdirs(dir_fd: int) -> list[str]:
     """Names of the folders directly in DIR_FD (not symlinks to folders), sorted."""
     with os.scandir(dir_fd) as it:
         return sorted(e.name for e in it if e.is_dir(follow_symlinks=False))
@@ -590,10 +630,12 @@ class Level:
     fd: int
     name: str  # its name in the folder below it on the stack
     rel: str  # its path relative to the walk's root
-    todo: list = None  # subfolders left to visit; None = not listed yet
+    todo: list[str] | None = None  # subfolders left to visit; None = not listed yet
 
 
-def tree(parent_fd, name, top, dev, delete, problems, rel):
+def tree(
+    parent_fd: int, name: str, top: int, dev: int, delete: bool, problems: list[tuple[str, str]], rel: str
+) -> CacheDir:
     """Count (and with DELETE remove) the folder NAME below PARENT_FD, open
     as TOP (closed here), and everything in it. File descriptors only: no
     symlink is followed, and a
@@ -624,7 +666,7 @@ def tree(parent_fd, name, top, dev, delete, problems, rel):
                         continue
                     st = e.stat(follow_symlinks=False)
                 except OSError as err:
-                    problems.append((os.path.join(level.rel, e.name), err.strerror))
+                    problems.append((os.path.join(level.rel, e.name), err_text(err)))
                     continue
                 out.files += 1
                 if stat.S_ISREG(st.st_mode):
@@ -676,7 +718,7 @@ def tree(parent_fd, name, top, dev, delete, problems, rel):
     return out
 
 
-def walk_caches(root, skips=(), mode="count"):
+def walk_caches(root: str, skips: Sequence[str] = (), mode: str = "count") -> CacheWalk:
     """The cache folders below ROOT (never ROOT itself): folders holding a
     CACHEDIR.TAG with the signature (has_cache_tag). Not followed: symlinks;
     not entered: .git, node_modules, the paths in SKIPS (relative to ROOT,
@@ -686,15 +728,15 @@ def walk_caches(root, skips=(), mode="count"):
     MODE: "count" finds them and counts their files and bytes, "drop"
     deletes them (counting as it goes). Returns a CacheWalk."""
     start = time.monotonic()
-    skips = {os.path.normpath(s) for s in skips}
-    holders = set()  # folders above a skipped path
-    for s in skips:
+    skip_set = {os.path.normpath(s) for s in skips}
+    holders: set[str] = set()  # folders above a skipped path
+    for s in skip_set:
         parent = os.path.dirname(s)
         while parent:
             holders.add(parent)
             parent = os.path.dirname(parent)
     result = CacheWalk([], [], [], [])
-    if "." in skips:
+    if "." in skip_set:
         result.skipped.append(".")
         return result
     root_fd = open_noatime(root, DIR_FLAGS, None)
@@ -716,7 +758,7 @@ def walk_caches(root, skips=(), mode="count"):
             crel = os.path.join(level.rel, name) if level.rel else name
             if name in WALK_PRUNE:
                 continue
-            if crel in skips:
+            if crel in skip_set:
                 result.skipped.append(crel)
                 continue
             try:
@@ -744,12 +786,12 @@ def walk_caches(root, skips=(), mode="count"):
     return result
 
 
-def err_text(e):
+def err_text(e: BaseException) -> str:
     """An OSError's strerror, else the exception's text (ParseError, an OSError without one)."""
     return getattr(e, "strerror", None) or str(e)
 
 
-def fmt_bytes(n):
+def fmt_bytes(n: int) -> str:
     for unit, size in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
         if n >= size:
             return f"{n / size:.1f} {unit}"
@@ -757,16 +799,23 @@ def fmt_bytes(n):
 
 
 # ---- btrfs ---------------------------------------------------------------------------
+class _SubvolInfo(TypedDict):
+    uuid: str
+    parent_uuid: str | None
+    generation: int
+    cgen: int
+
+
 SHOW_LABELS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Generation": "generation", "Gen at creation": "cgen"}
 
 
-def parse_subvolume_show(text):
+def parse_subvolume_show(text: str) -> _SubvolInfo:
     """The four fields we use from `btrfs subvolume show`; ParseError on anything odd.
 
     Label lines are indented; the list after "Snapshot(s):" holds paths that are
     not ours to interpret, so parsing stops there.
     """
-    found = {}
+    found: dict[str, str] = {}
     for line in text.splitlines():
         if line.strip().startswith("Snapshot(s):"):
             break
@@ -798,7 +847,7 @@ def parse_subvolume_show(text):
 class Host:
     """Everything that touches the system; tests replace it."""
 
-    def run(self, argv):
+    def run(self, argv: Sequence[str]) -> tuple[int, str, str]:
         env = dict(os.environ, LC_ALL="C")
         try:
             p = subprocess.run(argv, check=False, capture_output=True, text=True, env=env, timeout=CMD_TIMEOUT)
@@ -808,10 +857,10 @@ class Host:
             return 124, "", f"timed out after {CMD_TIMEOUT}s"
         return p.returncode, p.stdout, p.stderr
 
-    def time(self):
+    def time(self) -> float:
         return time.time()
 
-    def boot(self):
+    def boot(self) -> tuple[str | None, float | None]:
         """(boot id, seconds since boot including suspend), or (None, None) if unknown.
 
         Real time elapsed between two runs of the same boot, whatever the wall
@@ -823,10 +872,10 @@ class Host:
         except OSError, AttributeError:
             return None, None
 
-    def listdir(self, path):
+    def listdir(self, path: str) -> list[str]:
         return sorted(os.listdir(path))
 
-    def kind(self, path):
+    def kind(self, path: str) -> str:
         """'subvol' (a real subvolume root), 'symlink', 'missing' or 'other'."""
         try:
             st = os.lstat(path)
@@ -838,24 +887,24 @@ class Host:
             return "subvol"
         return "other"
 
-    def mkdir(self, path, mode):
+    def mkdir(self, path: str, mode: int) -> None:
         os.mkdir(path, mode)
 
-    def walk_caches(self, root, skips, mode):
+    def walk_caches(self, root: str, skips: Sequence[str], mode: str) -> CacheWalk:
         return walk_caches(root, skips, mode)
 
 
 class Btrfs:
-    def __init__(self, host):
+    def __init__(self, host: Host) -> None:
         self.host = host
 
-    def show(self, path):
+    def show(self, path: str) -> _SubvolInfo:
         rc, out, err = self.host.run(["btrfs", "subvolume", "show", path])
         if rc != 0:
             raise ParseError(f"btrfs subvolume show failed (rc={rc}): {err.strip()}")
         return parse_subvolume_show(out)
 
-    def readonly(self, path):
+    def readonly(self, path: str) -> bool:
         rc, out, err = self.host.run(["btrfs", "property", "get", "-ts", path, "ro"])
         if rc != 0:
             raise ParseError(f"btrfs property get failed (rc={rc}): {err.strip()}")
@@ -866,34 +915,37 @@ class Btrfs:
             return False
         raise ParseError(f"unexpected property output {value!r}")
 
-    def snapshot(self, source, dest, readonly=True):
+    def snapshot(self, source: str, dest: str, readonly: bool = True) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "snapshot"] + (["-r"] if readonly else []) + [source, dest])
 
-    def set_readonly(self, path):
+    def set_readonly(self, path: str) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "property", "set", "-ts", path, "ro", "true"])
 
-    def delete(self, path):
+    def delete(self, path: str) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "delete", path])
 
 
 @dataclasses.dataclass
 class Scan:
-    owned: list
-    ignored: list  # (path, reason): not ours, never touched
-    unverifiable: list  # (path, reason): could be ours, blocks deletions
-    writable: list = dataclasses.field(default_factory=list)  # paths of the "not read-only" entries in ignored
+    owned: list[Snap]
+    ignored: list[tuple[str, str]]  # (path, reason): not ours, never touched
+    unverifiable: list[tuple[str, str]]  # (path, reason): could be ours, blocks deletions
+    writable: list[str] = dataclasses.field(default_factory=list)  # paths of the "not read-only" entries in ignored
 
 
-def other_parent(info, source_uuid):
+def other_parent(info: _SubvolInfo, source_uuid: str) -> str | None:
     """Why a subvolume with show() INFO is no snapshot of SOURCE_UUID (None = it is)."""
     if info["parent_uuid"] == source_uuid:
         return None
     return f"snapshot of another subvolume (Parent UUID {info['parent_uuid'] or '-'})"
 
 
-def scan_snapshots(host, btrfs, snapdir, name, source_uuid):
+def scan_snapshots(host: Host, btrfs: Btrfs, snapdir: str, name: str, source_uuid: str | None) -> Scan:
     """Owned snapshots of one source. source_uuid None = skip the parent check (latest)."""
-    owned, ignored, unverifiable, writable = [], [], [], []
+    owned: list[Snap] = []
+    ignored: list[tuple[str, str]] = []
+    unverifiable: list[tuple[str, str]] = []
+    writable: list[str] = []
     try:
         entries = host.listdir(snapdir)
     except FileNotFoundError:
@@ -936,12 +988,12 @@ def scan_snapshots(host, btrfs, snapdir, name, source_uuid):
 class Source:
     name: str
     path: str
-    policy: dict
+    policy: dict[str, int | str]
     policy_text: str
-    skips: list = dataclasses.field(default_factory=list)  # --caches-skip, relative to path
+    skips: list[str] = dataclasses.field(default_factory=list)  # --caches-skip, relative to path
 
 
-def parse_source(text, need_policy=True):
+def parse_source(text: str, need_policy: bool = True) -> Source:
     if "=" not in text:
         raise UsageError(f"--source {text!r}: expected NAME=PATH:POLICY")
     name, rest = text.split("=", 1)
@@ -955,7 +1007,7 @@ def parse_source(text, need_policy=True):
         path, policy_text = rest, ""
     if not path.startswith("/"):
         raise UsageError(f"--source {text!r}: PATH must be absolute")
-    policy = {}
+    policy: dict[str, int | str] = {}
     if need_policy or policy_text.strip():
         try:
             policy = parse_policy(policy_text)
@@ -964,7 +1016,7 @@ def parse_source(text, need_policy=True):
     return Source(name, os.path.normpath(path), policy, policy_text.strip())
 
 
-def parse_skip(text, names):
+def parse_skip(text: str, names: Collection[str]) -> tuple[str, str]:
     """'NAME=REL' -> (NAME, normalized REL); REL relative, inside the source."""
     name, sep, rel = text.partition("=")
     if not sep or name not in names:
@@ -978,11 +1030,11 @@ def parse_skip(text, names):
 @dataclasses.dataclass
 class LastRun:
     epoch: int
-    boot_id: str = None  # None: written without (or by an older format)
-    boottime: float = None
+    boot_id: str | None = None  # None: written without (or by an older format)
+    boottime: float | None = None
 
 
-def parse_state(text):
+def parse_state(text: str) -> LastRun | None:
     """'EPOCH [BOOT_ID BOOTTIME]' -> LastRun, or None if malformed."""
     parts = text.split()
     if not parts or not parts[0].isdigit():
@@ -1001,7 +1053,7 @@ def parse_state(text):
 class Run:
     """State of one snapshot/prune/list invocation."""
 
-    def __init__(self, args, host):
+    def __init__(self, args: argparse.Namespace, host: Host) -> None:
         self.args = args
         self.host = host
         self.btrfs = Btrfs(host)
@@ -1009,17 +1061,17 @@ class Run:
         self.now = host.time()
         self.boot_id, self.boottime = host.boot()
         self.snapdir = os.path.normpath(args.snapdir)
-        self._ntp = None
-        self._pins = None
-        self._last_run = None
-        self.writable = set()  # writable entries named like ours, seen by this run's scans
+        self._ntp: bool | None = None
+        self._pins: tuple[set[str], str | None] | None = None
+        self._last_run: tuple[LastRun | None, str | None] | None = None
+        self.writable: set[str] = set()  # writable entries named like ours, seen by this run's scans
         self.scanned_all = True  # False: a source could not be scanned (keep the old record)
 
     # Lists in the state directory ----------------------------------------------
-    def state_file(self, name):
+    def state_file(self, name: str) -> str:
         return os.path.join(self.args.state_dir, name)
 
-    def read_list(self, name):
+    def read_list(self, name: str) -> list[str]:
         """The entries (one per line) of STATE/name; [] if it does not exist.
         OSError if it cannot be read. Bytes that are not UTF-8 become U+FFFD
         (such a line names no snapshot, so it is left alone with a warning)."""
@@ -1029,7 +1081,7 @@ class Run:
         except FileNotFoundError:
             return []
 
-    def write_list(self, name, entries, sync_dir=True):
+    def write_list(self, name: str, entries: Sequence[str], sync_dir: bool = True) -> None:
         """Replace STATE/name with ENTRIES, durably (fsync of the file and,
         with SYNC_DIR, the folder); removed when ENTRIES is empty.
         World-readable: cst doctor runs as the user."""
@@ -1057,17 +1109,17 @@ class Run:
         finally:
             os.close(dfd)
 
-    def list_add(self, name, entry):
+    def list_add(self, name: str, entry: str) -> None:
         entries = self.read_list(name)
         if entry not in entries:
             self.write_list(name, entries + [entry])
 
-    def list_remove(self, name, entry):
+    def list_remove(self, name: str, entry: str) -> None:
         entries = self.read_list(name)
         if entry in entries:
             self.write_list(name, [e for e in entries if e != entry])
 
-    def record_writable(self):
+    def record_writable(self) -> None:
         """STATE/core-writable: the writable entries the scans saw (cst doctor
         cannot open the root-only snapshot folder); removed when none."""
         if not self.scanned_all:
@@ -1080,7 +1132,7 @@ class Run:
             log(4, f"cannot write {self.state_file(WRITABLE_FILE)}: {e.strerror}")
 
     # Clock guards -----------------------------------------------------------
-    def ntp_problem(self):
+    def ntp_problem(self) -> str | None:
         if self.args.assume_clock_ok:
             return None
         if self._ntp is None:
@@ -1088,7 +1140,7 @@ class Run:
             self._ntp = rc == 0 and out.strip() == "yes"
         return None if self._ntp else "the system clock is not NTP-synchronized (timedatectl NTPSynchronized != yes)"
 
-    def last_run(self):
+    def last_run(self) -> tuple[LastRun | None, str | None]:
         """(LastRun or None, problem or None)."""
         if self._last_run is None:
             try:
@@ -1110,7 +1162,7 @@ class Run:
                 self._last_run = (None, f"cannot read {self.state_file(STATE_FILE)}: {e}")
         return self._last_run
 
-    def behind_last_run(self):
+    def behind_last_run(self) -> str | None:
         """Why the clock is not to be trusted against the state file (None = fine)."""
         last, problem = self.last_run()
         if problem:
@@ -1122,7 +1174,7 @@ class Run:
             )
         return None
 
-    def backwards_problem(self, newest):
+    def backwards_problem(self, newest: Snap | None) -> str | None:
         """Deletions: the clock runs behind what this tool already recorded."""
         problem = self.behind_last_run()
         if problem:
@@ -1138,17 +1190,24 @@ class Run:
                 )
         return None
 
-    def clock_jump(self):
+    def clock_jump(self) -> float:
         """Seconds the wall clock advanced beyond the real time elapsed since the
         last successful run, if that run was in this boot (else 0: unknown)."""
         last, problem = self.last_run()
-        if problem or last is None or last.boot_id is None or self.boot_id is None or self.boottime is None:
+        if (
+            problem
+            or last is None
+            or last.boot_id is None
+            or last.boottime is None
+            or self.boot_id is None
+            or self.boottime is None
+        ):
             return 0
         if last.boot_id != self.boot_id or self.boottime < last.boottime:
             return 0
         return max(0, (self.now - last.epoch) - (self.boottime - last.boottime))
 
-    def creation_check(self, newest):
+    def creation_check(self, newest: Snap | None) -> tuple[str | None, list[tuple[int, str]]]:
         """(problem, notes) for naming a new snapshot after the clock: problem =
         why not to create it now (a refusal), notes = (level, text) to log if it
         is created."""
@@ -1158,8 +1217,8 @@ class Run:
         synced = self.ntp_problem() is None
         last, _ = self.last_run()
         newest_epoch = wall_to_epoch(newest.wall, self.tz) if newest is not None else None
-        notes = []
-        if newest_epoch is not None and self.now < newest_epoch - CLOCK_SLACK:
+        notes: list[tuple[int, str]] = []
+        if newest is not None and newest_epoch is not None and self.now < newest_epoch - CLOCK_SLACK:
             if not synced:
                 return (
                     f"the clock ({fmt_epoch(self.now, self.tz)}) is behind the newest snapshot "
@@ -1178,6 +1237,7 @@ class Run:
         if not synced:
             jump = self.clock_jump()
             if jump > CLOCK_SLACK:
+                assert last is not None
                 return (
                     f"the clock is not NTP-synchronized and moved {fmt_span(jump)} further than the time "
                     f"elapsed since the last successful run ({fmt_epoch(last.epoch, self.tz)}, same boot)"
@@ -1193,10 +1253,10 @@ class Run:
             notes.append((5, "the clock is not NTP-synchronized; the name uses the unverified time"))
         return None, notes
 
-    def pins(self):
+    def pins(self) -> tuple[set[str], str | None]:
         """(set of pinned paths, problem or None)."""
         if self._pins is None:
-            pins = set()
+            pins: set[str] = set()
             try:
                 with open(self.args.pin_file) as f:
                     for raw in f:
@@ -1211,7 +1271,7 @@ class Run:
                 self._pins = (pins, f"cannot read the pin file {self.args.pin_file}: {e}")
         return self._pins
 
-    def record_success(self):
+    def record_success(self) -> None:
         """Store this run as the last successful one - only with a trusted clock,
         and never moving the record backwards (it guards against a clock that
         later runs behind)."""
@@ -1240,13 +1300,15 @@ class Run:
         self._last_run = (parse_state(line), None)
 
     # Per source ---------------------------------------------------------------
-    def source_info(self, src):
+    def source_info(self, src: Source) -> _SubvolInfo:
         kind = self.host.kind(src.path)
         if kind != "subvol":
             raise ParseError(f"{src.path} is not a subvolume ({kind})")
         return self.btrfs.show(src.path)
 
-    def decide(self, src, scan, extra=()):
+    def decide(
+        self, src: Source, scan: Scan, extra: Sequence[Snap] = ()
+    ) -> tuple[list[Decision], list[Decision], str | None]:
         """Decisions after policy and safeguards, the deletion candidates, and
         why deleting is refused (None = allowed)."""
         snaps = list(scan.owned) + list(extra)
@@ -1272,7 +1334,15 @@ class Run:
                 refusal = self.breaker(src, decisions, snaps, pins, doomed, owned)
         return decisions, doomed, refusal
 
-    def breaker(self, src, decisions, snaps, pins, doomed, owned):
+    def breaker(
+        self,
+        src: Source,
+        decisions: Sequence[Decision],
+        snaps: Sequence[Snap],
+        pins: set[str],
+        doomed: Sequence[Decision],
+        owned: int,
+    ) -> str | None:
         last, _ = self.last_run()
         since = last.epoch if last is not None else None
         jump = self.clock_jump()
@@ -1298,7 +1368,7 @@ class Run:
         )
 
 
-def fmt_span(seconds):
+def fmt_span(seconds: float) -> str:
     seconds = int(seconds)
     if seconds >= 2 * 86400:
         return f"{seconds // 86400} days"
@@ -1307,7 +1377,7 @@ def fmt_span(seconds):
     return f"{seconds // 60} min"
 
 
-def fmt_epoch(epoch, tz):
+def fmt_epoch(epoch: float, tz: dt.tzinfo) -> str:
     return dt.datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
@@ -1320,14 +1390,14 @@ class Result:
     kept: int = 0
     note: str = ""
 
-    def worse(self, status):
+    def worse(self, status: int) -> None:
         # error beats refusal beats ok
         rank = {EXIT_OK: 0, EXIT_REFUSED: 1, EXIT_ERROR: 2}
         if rank[status] > rank[self.status]:
             self.status = status
 
 
-def process_source(run, src, create):
+def process_source(run: Run, src: Source, create: bool) -> Result:
     args = run.args
     res = Result(src.name)
     dry = args.dry_run
@@ -1351,7 +1421,7 @@ def process_source(run, src, create):
     for path, why in scan.unverifiable:
         log(4, f"{src.name}: cannot verify {path}: {why}")
     newest = newest_of(scan.owned)
-    extra = []
+    extra: list[Snap] = []
 
     if create:
         reason = None
@@ -1368,6 +1438,7 @@ def process_source(run, src, create):
             # the newest by generation, which lets deletions resume.
             reason = f"newest snapshot {newest.entry} is dated in the future"
         if reason is None:
+            assert newest is not None
             log(6, f"{src.name}: unchanged since {newest.entry}; no new snapshot")
         else:
             problem, notes = run.creation_check(newest)
@@ -1388,11 +1459,13 @@ def process_source(run, src, create):
                     # The real snapshot's "Gen at creation" is the running transaction:
                     # above the source's generation and every existing snapshot's.
                     cgen = max([info["generation"]] + [s.cgen for s in scan.owned]) + 1
+                    parsed_entry = parse_snapshot_name(src.name, entry)
+                    assert parsed_entry is not None
                     extra.append(
                         Snap(
                             entry=entry,
                             wall=wall,
-                            seq=parse_snapshot_name(src.name, entry)[1],
+                            seq=parsed_entry[1],
                             path=dest,
                             cgen=cgen,
                             virtual=True,
@@ -1476,7 +1549,7 @@ def process_source(run, src, create):
     return res
 
 
-def recheck(run, snap, source_uuid):
+def recheck(run: Run, snap: Snap, source_uuid: str) -> str | None:
     """Why SNAP must not be deleted after all (None = go ahead)."""
     problem = run.pins()[1]
     if problem:
@@ -1497,7 +1570,7 @@ def recheck(run, snap, source_uuid):
     return None
 
 
-def free_name(host, snapdir, name, wall):
+def free_name(host: Host, snapdir: str, name: str, wall: dt.datetime) -> str:
     """NAME.TS, or NAME.TS_N with N = highest present + 1 (btrbk)."""
     base = snapshot_name(name, wall)
     pattern = re.compile(re.escape(base) + r"(?:_([0-9]+))?")
@@ -1509,7 +1582,7 @@ def free_name(host, snapdir, name, wall):
     return base if not taken else f"{base}_{max(taken) + 1}"
 
 
-def create_snapshot(run, src, info, dest, entry, reason):
+def create_snapshot(run: Run, src: Source, info: _SubvolInfo, dest: str, entry: str, reason: str) -> bool:
     if run.host.kind(run.snapdir) == "missing":
         try:
             run.host.mkdir(run.snapdir, 0o700)
@@ -1545,7 +1618,7 @@ def create_snapshot(run, src, info, dest, entry, reason):
     return seal(run, src, dest, entry, info["uuid"], created=True) == "sealed" if tracked else True
 
 
-def ours_writable(run, src, dest, entry, source_uuid):
+def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str) -> tuple[str | None, bool | None]:
     """(problem, readonly): problem is why DEST is not a snapshot of SRC that
     this tool may change (None = it is: directly in the snapshot folder,
     named like SRC's snapshots, a subvolume with SRC's Parent UUID)."""
@@ -1563,7 +1636,9 @@ def ours_writable(run, src, dest, entry, source_uuid):
     return (f"a {other}" if other else None), ro
 
 
-def seal(run, src, dest, entry, source_uuid, created):
+def seal(
+    run: Run, src: Source, dest: str, entry: str, source_uuid: str, created: bool
+) -> Literal["sealed", "left", "error"]:
     """The second half of a snapshot taken writable: drop its cache folders
     (with --exclude-caches), make it read-only, check that it is, and take
     it off the unfinished list. CREATED: this run has just made it, so any
@@ -1597,14 +1672,15 @@ def seal(run, src, dest, entry, source_uuid, created):
             )
             run.writable.add(entry)
             return "error"
+        ro_state: bool | str
         try:
-            ro = run.btrfs.readonly(dest)
+            ro_state = run.btrfs.readonly(dest)
         except ParseError as e:
-            ro = f"cannot check: {e}"
-        if ro is not True:
+            ro_state = f"cannot check: {e}"
+        if ro_state is not True:
             log(
                 3,
-                f"{src.name}: {dest} is not read-only after setting it ({ro}); it stays listed in "
+                f"{src.name}: {dest} is not read-only after setting it ({ro_state}); it stays listed in "
                 f"{run.state_file(UNFINISHED_FILE)} and the next run tries again",
             )
             run.writable.add(entry)
@@ -1629,7 +1705,7 @@ def seal(run, src, dest, entry, source_uuid, created):
     return "sealed"
 
 
-def report_walk(src, where, walk, verb):
+def report_walk(src: Source, where: str, walk: CacheWalk, verb: str) -> None:
     """Log lines for a cache walk of SRC (WHERE: the snapshot or source)."""
     level = 3 if verb == "dropped" else 4
     for c in walk.folders:
@@ -1642,7 +1718,7 @@ def report_walk(src, where, walk, verb):
         log(level, f"{src.name}: {where}: and {len(walk.problems) - 20} more problem(s)")
 
 
-def drop_caches(run, src, dest, entry):
+def drop_caches(run: Run, src: Source, dest: str, entry: str) -> None:
     """Delete the cache folders in the fresh writable snapshot DEST. Never
     fails the run: a folder that cannot be deleted (or a walk that breaks)
     is logged as an error and simply stays in the snapshot."""
@@ -1666,7 +1742,7 @@ def drop_caches(run, src, dest, entry):
     )
 
 
-def preview_drop(run, src):
+def preview_drop(run: Run, src: Source) -> None:
     """Dry run: what the new snapshot would lose, read from the source."""
     try:
         walk = run.host.walk_caches(src.path, src.skips, "count")
@@ -1681,11 +1757,11 @@ def preview_drop(run, src):
     )
 
 
-def note_writable(run, scan):
+def note_writable(run: Run, scan: Scan) -> None:
     run.writable.update(os.path.basename(p) for p in scan.writable)
 
 
-def finish_unfinished(run):
+def finish_unfinished(run: Run) -> int:
     """Before anything else (snapshot, prune, finish): the snapshots listed in
     the unfinished file are leftovers of a run that stopped between creating
     a writable snapshot and making it read-only. Only a listed entry that is
@@ -1699,7 +1775,7 @@ def finish_unfinished(run):
         log(4, f"cannot read {path} ({err_text(e)}); interrupted snapshots are not finished")
         return EXIT_OK
     status = EXIT_OK
-    infos = {}
+    infos: dict[str, str | None] = {}
     for entry in entries:
         src = next((s for s in run.args.sources if "/" not in entry and name_regex(s.name).fullmatch(entry)), None)
         if src is None:
@@ -1726,19 +1802,20 @@ def finish_unfinished(run):
             except ParseError as e:
                 infos[src.name] = None
                 log(4, f"{src.name}: cannot read source {src.path}: {e}; its interrupted snapshots wait")
-        if infos[src.name] is None:
+        source_uuid = infos[src.name]
+        if source_uuid is None:
             continue
         if run.args.dry_run:
             log(5, f"{src.name}: would finish {entry}, left writable by an interrupted run")
             continue
         log(4, f"{src.name}: finishing {entry}, left writable by an interrupted run")
-        if seal(run, src, dest, entry, infos[src.name], created=False) == "error":
+        if seal(run, src, dest, entry, source_uuid, created=False) == "error":
             status = EXIT_ERROR
     return status
 
 
 # ---- commands ------------------------------------------------------------------------
-def take_lock(args):
+def take_lock(args: argparse.Namespace) -> int | None:
     """Returns the open fd (close it to unlock), -1 if no lock is wanted, or None if busy."""
     if args.no_lock or args.dry_run:
         return -1
@@ -1751,13 +1828,13 @@ def take_lock(args):
     return fd
 
 
-def check_snapdir(host, snapdir):
+def check_snapdir(host: Host, snapdir: str) -> None:
     # A missing directory just holds no snapshots yet (snapshot creates it).
     if host.kind(snapdir) == "symlink":
         raise UsageError(f"--snapdir {snapdir} is a symlink")
 
 
-def locked(args, host, body):
+def locked(args: argparse.Namespace, host: Host, body: Callable[[], int]) -> int:
     """BODY() under the run lock (EXIT_BUSY, BODY not run, when another run holds it)."""
     check_snapdir(host, args.snapdir)
     fd = take_lock(args)
@@ -1771,18 +1848,18 @@ def locked(args, host, body):
             os.close(fd)
 
 
-def cmd_snapshot_or_prune(args, host, create):
+def cmd_snapshot_or_prune(args: argparse.Namespace, host: Host, create: bool) -> int:
     return locked(args, host, lambda: snapshot_or_prune(args, host, create))
 
 
-def snapshot_or_prune(args, host, create):
+def snapshot_or_prune(args: argparse.Namespace, host: Host, create: bool) -> int:
     run = Run(args, host)
     status = finish_unfinished(run)
     results = [process_source(run, src, create) for src in args.sources]
     for r in results:
         if r.status == EXIT_ERROR or (r.status == EXIT_REFUSED and status == EXIT_OK):
             status = r.status
-    parts = []
+    parts: list[str] = []
     for r in results:
         what = f"created {r.created}" if r.created else ("no new snapshot" if create else "")
         bits = [b for b in (what, f"deleted {r.deleted}", f"kept {r.kept}", r.note) if b]
@@ -1804,16 +1881,16 @@ def snapshot_or_prune(args, host, create):
     return status
 
 
-def cmd_list(args, host):
+def cmd_list(args: argparse.Namespace, host: Host) -> int:
     run = Run(args, host)
-    out = []
+    out: list[dict[str, Any]] = []
     status = EXIT_OK
     try:
         unfinished = set(run.read_list(UNFINISHED_FILE))
     except OSError:
         unfinished = set()
     for src in args.sources:
-        entry = {"name": src.name, "source": src.path, "policy": format_policy(src.policy)}
+        entry: dict[str, Any] = {"name": src.name, "source": src.path, "policy": format_policy(src.policy)}
         try:
             info = run.source_info(src)
         except ParseError as e:
@@ -1832,7 +1909,7 @@ def cmd_list(args, host):
             continue
         decisions, doomed, refusal = run.decide(src, scan)
         newest = newest_of(scan.owned)
-        ignored = []
+        ignored: list[tuple[str, str]] = []
         writable = set(scan.writable)
         for p, r in scan.ignored:
             entry_name = os.path.basename(p)
@@ -1893,7 +1970,7 @@ def cmd_list(args, host):
     return status
 
 
-def cmd_finish(args, host):
+def cmd_finish(args: argparse.Namespace, host: Host) -> int:
     """Only the recovery of interrupted snapshots (btrfs-snapshot purge runs it
     first, so they become ours and are deleted too)."""
     status = locked(args, host, lambda: finish_unfinished(Run(args, host)))
@@ -1906,14 +1983,14 @@ def cmd_finish(args, host):
     return status
 
 
-def cmd_caches(args, host):
+def cmd_caches(args: argparse.Namespace, host: Host) -> int:
     """What --exclude-caches drops from each source's next snapshot (read from
     the sources; changes nothing)."""
     run = Run(args, host)
-    out = []
+    out: list[dict[str, Any]] = []
     status = EXIT_OK
     for src in args.sources:
-        entry = {"name": src.name, "source": src.path, "skips": list(src.skips)}
+        entry: dict[str, Any] = {"name": src.name, "source": src.path, "skips": list(src.skips)}
         try:
             run.source_info(src)
             walk = host.walk_caches(src.path, src.skips, "count")
@@ -1958,7 +2035,7 @@ def cmd_caches(args, host):
     return status
 
 
-def cmd_latest(args, host):
+def cmd_latest(args: argparse.Namespace, host: Host) -> int:
     check_snapdir(host, args.snapdir)
     btrfs = Btrfs(host)
     source_uuid = None
@@ -1983,13 +2060,13 @@ def cmd_latest(args, host):
     return EXIT_OK
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="btrfs-snapshot-core", description="Local btrfs snapshots with btrbk-compatible retention."
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def common(sp, policy=True):
+    def common(sp: argparse.ArgumentParser, policy: bool = True) -> None:
         sp.add_argument("--snapdir", required=True, help="directory holding the snapshots")
         sp.add_argument(
             "--source",
@@ -2022,7 +2099,7 @@ def build_parser():
             help="command named in messages to confirm a mass deletion",
         )
 
-    def caches(sp, exclude=True):
+    def caches(sp: argparse.ArgumentParser, exclude: bool = True) -> None:
         if exclude:
             sp.add_argument(
                 "--exclude-caches",
@@ -2067,7 +2144,7 @@ def build_parser():
     return p
 
 
-def main(argv=None, host=None):
+def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
     global LOG_STREAM
     host = host or Host()
     parser = build_parser()

@@ -23,11 +23,15 @@ Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
 import os
 import re
 import tempfile
 import tokenize
 import tomllib
+from typing import Any
 import unittest
 
 from tests.repo_files import REPO, repo_files
@@ -45,40 +49,10 @@ TY_SETTINGS = frozenset({"src.include", "terminal.error-on-warning"})
 # a file, move the file to the ty gate and delete it here (the test says to).
 # A renamed file keeps its entry under the new name. A new file never goes
 # here: make ty clean on it and add it to the ty gate.
-NOT_YET_CLEAN = frozenset(
-    {
-        ".github/scripts/pin_invowk.py",
-        "bluetooth/tests/test_bluetooth.py",
-        "bluetooth/tests/test_ldac_watch.py",
-        "btrfs/btrfs-bulk",
-        "btrfs/btrfs-snapshot-core",
-        "btrfs/btrfs-stall-monitord",
-        "btrfs/docker-gc",
-        "btrfs/tests/test_btrfs_bulk.py",
-        "btrfs/tests/test_btrfs_snapshot_core.py",
-        "btrfs/tests/test_btrfs_steam.py",
-        "btrfs/tests/test_chrome_cache.py",
-        "btrfs/tests/test_stall_monitord.py",
-        "btrfs/tests/test_stall_report.py",
-        "cpu/cpu-watch",
-        "cpu/tests/test_cpu.py",
-        "cpu/vm-pin",
-        "doctor/tests/test_doctor.py",
-        "swap/tests/test_swap.py",
-        "tests/e2e/run.py",
-        "tests/e2e/test_run_guard.py",
-        "tests/test_pin_invowk.py",
-        "toolchains/cst-toolchains",
-        "toolchains/tests/test_prune_rust_build.py",
-        "toolchains/tests/test_rules.py",
-        "vm/cst-vm",
-        "vm/tests/test_vm.py",
-        "vm/tests/test_vm_nas.py",
-    }
-)
+NOT_YET_CLEAN: frozenset[str] = frozenset()
 
 
-def is_python(path):
+def is_python(path: str) -> bool:
     if path.endswith(".py"):
         return True
     try:
@@ -89,11 +63,11 @@ def is_python(path):
     return bool(PYTHON_SHEBANG.match(first))
 
 
-def python_files(repo, files):
+def python_files(repo: str, files: Iterable[str]) -> set[str]:
     return {rel for rel in files if is_python(os.path.join(repo, rel))}
 
 
-def load_lists(conf):
+def load_lists(conf: Mapping[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """(ruff extend-include, ty gate list, typed list) from the parsed pyproject.toml."""
     tool = conf.get("tool", {})
     ruff = tool.get("ruff", {})
@@ -124,9 +98,15 @@ def load_lists(conf):
     return extend, ty_gate, typed
 
 
-def problems(py_files, extend, ty_gate, typed, not_clean=NOT_YET_CLEAN):
+def problems(
+    py_files: set[str],
+    extend: Sequence[str],
+    ty_gate: Sequence[str],
+    typed: Sequence[str],
+    not_clean: frozenset[str] = NOT_YET_CLEAN,
+) -> list[str]:
     """What is wrong with the lists, as text lines (empty: all fine)."""
-    out = []
+    out: list[str] = []
     extensionless = {p for p in py_files if not p.endswith(".py")}
     for p in sorted(extensionless - set(extend)):
         out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
@@ -159,16 +139,16 @@ def problems(py_files, extend, ty_gate, typed, not_clean=NOT_YET_CLEAN):
     return out
 
 
-def ty_setting_problems(conf, files):
+def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[str]:
     """What could take files or diagnostics out of ty's check, as text lines (empty: all fine)."""
-    out = []
+    out: list[str] = []
     if "ty.toml" in files:
         out.append(
             "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
             "no longer applies; delete it"
         )
     ty = conf.get("tool", {}).get("ty", {})
-    names = set()
+    names: set[str] = set()
     for table, value in ty.items():
         names |= {f"{table}.{key}" for key in value} if isinstance(value, dict) else {table}
     for name in sorted(names - TY_SETTINGS):
@@ -182,9 +162,9 @@ def ty_setting_problems(conf, files):
     return out
 
 
-def ignore_comments(repo, paths):
+def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
     """The ty/type ignore comments in the given files, as text lines (empty: none)."""
-    out = []
+    out: list[str] = []
     for rel in sorted(paths):
         with open(os.path.join(repo, rel), "rb") as fh:
             for tok in tokenize.tokenize(fh.readline):
@@ -196,7 +176,7 @@ def ignore_comments(repo, paths):
 
 
 class PythonFilesTest(unittest.TestCase):
-    def test_detection(self):
+    def test_detection(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-pyfiles-") as tmp:
             for name, first in (
                 ("a.py", b""),
@@ -211,10 +191,15 @@ class PythonFilesTest(unittest.TestCase):
             got = python_files(tmp, sorted(os.listdir(tmp)))
         self.assertEqual(got, {"a.py", "helper", "envpy"})
 
-    def test_problems_catch_each_mistake(self):
+    def test_problems_catch_each_mistake(self) -> None:
         py = {"a.py", "tool", "other"}
 
-        def check(extend=("other", "tool"), ty_gate=("a.py", "tool"), typed=("tool",), not_clean=("other",)):
+        def check(
+            extend: Sequence[str] = ("other", "tool"),
+            ty_gate: Sequence[str] = ("a.py", "tool"),
+            typed: Sequence[str] = ("tool",),
+            not_clean: Sequence[str] = ("other",),
+        ) -> list[str]:
             return problems(py, list(extend), list(ty_gate), list(typed), frozenset(not_clean))
 
         self.assertEqual(check(), [])
@@ -237,8 +222,8 @@ class PythonFilesTest(unittest.TestCase):
         self.assertIn("tool: listed twice in extend-include", check(extend=["other", "tool", "tool"]))
         self.assertIn('no typed list: per-file-ignores has no "!{...}" = ["ANN"] entry', check(typed=[]))
 
-    def test_every_python_file_is_ty_gated_or_not_yet_clean(self):
-        def check(py, ty_gate, not_clean):
+    def test_every_python_file_is_ty_gated_or_not_yet_clean(self) -> None:
+        def check(py: Iterable[str], ty_gate: Iterable[str], not_clean: Iterable[str]) -> list[str]:
             return problems(set(py), ["tool"], list(ty_gate), ["tool"], frozenset(not_clean))
 
         outside = (
@@ -270,8 +255,12 @@ class PythonFilesTest(unittest.TestCase):
             ],
         )
 
-    def test_ty_settings_that_bypass_the_gate(self):
-        def conf(terminal=None, src=None, **more):
+    def test_ty_settings_that_bypass_the_gate(self) -> None:
+        def conf(
+            terminal: Mapping[str, object] | None = None,
+            src: Mapping[str, object] | None = None,
+            **more: object,
+        ) -> dict[str, Any]:
             terminal = {"error-on-warning": True} if terminal is None else terminal
             return {"tool": {"ty": {"terminal": terminal, "src": src or {"include": ["a.py"]}, **more}}}
 
@@ -305,7 +294,7 @@ class PythonFilesTest(unittest.TestCase):
                     ["[tool.ty.terminal] error-on-warning must be true, or a ty warning no longer fails the gate"],
                 )
 
-    def test_ignore_comments(self):
+    def test_ignore_comments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-pyfiles-") as tmp:
             # Built from pieces so that this file holds no ignore comment of its own.
             ty_ignore, type_ignore = "# ty" + ": ignore[invalid-assignment]", "#type" + ":ignore"
@@ -325,7 +314,7 @@ class PythonFilesTest(unittest.TestCase):
                 ],
             )
 
-    def test_typed_list_parsing(self):
+    def test_typed_list_parsing(self) -> None:
         conf = tomllib.loads(
             '[tool.ruff]\nextend-include = ["a/b"]\n[tool.ruff.lint.per-file-ignores]\n'
             '"tests/*" = ["B"]\n"!{a/b, c.py}" = ["ANN"]\n[tool.ty.src]\ninclude = ["a/b", "c.py"]\n'
@@ -343,7 +332,7 @@ class PythonFilesTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     load_lists(tomllib.loads("[tool.ruff.lint.per-file-ignores]\n" + bad))
 
-    def test_every_python_file_is_under_the_gates(self):
+    def test_every_python_file_is_under_the_gates(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, "pyproject.toml"), "rb") as fh:
             conf = tomllib.load(fh)

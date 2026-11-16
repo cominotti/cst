@@ -36,6 +36,7 @@ the CPU side (`cst cpu`), is [../README.md](../README.md).
 12. [The Claude Code rule file](#12-the-claude-code-rule-file)
 13. [What to do if...](#13-what-to-do-if)
 14. [Glossary](#14-glossary)
+15. [Repository layout](#15-repository-layout)
 
 ---
 
@@ -1862,3 +1863,17 @@ journalctl -g 'btrfs-health-check|btrfs-stall-monitor|btrfs-snapshot|btrfs-notif
 | udev | The part of Linux that reacts when devices appear; its rules decide when a disk is "ready". |
 | unallocated space | Disk space not yet reserved in any block group. |
 | wheel | The group of users who are allowed to use `sudo`. |
+
+---
+
+## 15. Repository layout
+
+The `btrfs/` Python code separates pure rules from host commands and standalone installed helpers:
+
+| Module | Role |
+|---|---|
+| `domain.py` | Pure domain model, value objects, and validation rules (`SnapshotRetentionSpec`, `StallMonitorThresholds`, `DockerGcPolicy`, `ChromeCachePolicy`). No I/O or subprocesses. |
+| `ports.py` | Protocol interfaces (`BtrfsHelperRuntimePort`, `BtrfsCommandPort`) separating application use cases from external commands and helper scripts. |
+| `adapters.py` | Concrete host adapters wrapping `subprocess.run` (`SubprocessBtrfsCommandAdapter`) and executing installed or repository Python helpers (`BtrfsHelperScriptAdapter`). |
+| `application.py` | Application service (`BtrfsService`) coordinating domain rule evaluation and helper execution. |
+| `chrome-cache`, `docker-gc`, `docker-volumes-nocow`, `btrfs-stall-monitord`, `btrfs-stall-report`, `btrfs-snapshot-core`, `btrfs-bulk` | Standalone Python CLIs installed to `/usr/local/{bin,sbin}` and invoked directly on the host or via `btrfs-setup.sh`. |

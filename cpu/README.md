@@ -1430,6 +1430,10 @@ this is harmless.
 
 | File | Installed as / used by |
 |------|------------------------|
+| `domain.py` | Pure domain model, configuration parsing (`CpuSetupConfig`), XML pinning, and frame/quiet helpers |
+| `ports.py` | Ports (`VirshPort`, `CpuWatchRuntimePort`, `VmPinRuntimePort`) |
+| `adapters.py` | Host adapters (`SubprocessVirshAdapter`, `CstCpuWatchRuntimeAdapter`, `CstVmPinRuntimeAdapter`) |
+| `application.py` | Application orchestration (`CpuService`) |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin` |
 | `cpu-watch` | `/usr/local/bin/cpu-watch` |

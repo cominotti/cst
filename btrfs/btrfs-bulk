@@ -60,6 +60,8 @@ too), 4 only something inside ~/Bulk needs a look (the in-place NOCOW rewrite: n
 data of it in /home; busy ones may wait too), 3 only busy items wait for the boot, 2 usage error.
 """
 
+from __future__ import annotations
+
 import base64
 import copy
 import errno
@@ -76,12 +78,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Collection, Mapping, Sequence
+from typing import Any, NoReturn, cast
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.geteuid() == 0
 
 
-def _env(name, default):
+def _env(name: str, default: str) -> str:
     # Overrides for tests and dry runs; never honoured as root.
     return default if ROOT else os.environ.get(name, default)
 
@@ -114,7 +118,16 @@ MARGIN = 20 * BIG  # free space kept besides a real (NOCOW) copy
 
 
 class Item:
-    def __init__(self, ident, target, link=None, nocow=False, after=None, flatpak=None, disposable=False):
+    def __init__(
+        self,
+        ident: str,
+        target: str,
+        link: str | None = None,
+        nocow: bool = False,
+        after: str | None = None,
+        flatpak: str | None = None,
+        disposable: bool = False,
+    ) -> None:
         self.id, self.target, self.link = ident, target, link
         self.nocow, self.after, self.flatpak = nocow, after, flatpak
         # A pure cache whose tool's own "clean" deletes the link (not what it
@@ -174,12 +187,12 @@ class Unexpected(Exception):
     """A state this tool does not change by itself."""
 
 
-def log(msg):
+def log(msg: str) -> None:
     print(msg, flush=True)
 
 
 # ---- filesystem primitives (replaced by fakes in btrfs/tests/test_btrfs_bulk.py) ----
-def flags(path):
+def flags(path: str) -> int:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         return struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
@@ -187,11 +200,11 @@ def flags(path):
         os.close(fd)
 
 
-def is_nocow(path):
+def is_nocow(path: str) -> bool:
     return bool(flags(path) & NOCOW)
 
 
-def set_nocow(path):
+def set_nocow(path: str) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         cur = struct.unpack("l", fcntl.ioctl(fd, GET, struct.pack("l", 0)))[0]
@@ -201,7 +214,7 @@ def set_nocow(path):
         os.close(fd)
 
 
-def is_subvol(path):
+def is_subvol(path: str) -> bool:
     """A btrfs subvolume root: inode 256 on btrfs (lstat: a symlink is not one)."""
     try:
         st = os.lstat(path)
@@ -212,7 +225,7 @@ def is_subvol(path):
         return False
 
 
-def _fs_magic(path):
+def _fs_magic(path: str) -> int:
     # statfs f_type is not in os.statvfs: ask stat(1).
     r = subprocess.run(["stat", "-f", "-c", "%t", path], check=False, capture_output=True, text=True)
     try:
@@ -221,7 +234,7 @@ def _fs_magic(path):
         return 0
 
 
-def subvol_create(path):
+def subvol_create(path: str) -> None:
     """Create PATH as a subvolume, as the calling (unprivileged) user: btrfs
     allows that wherever the user may create a folder."""
     parent, name = os.path.split(path)
@@ -235,9 +248,9 @@ def subvol_create(path):
     os.chmod(path, 0o755)
 
 
-def mounts():
+def mounts() -> list[str]:
     """Mount points of this namespace."""
-    out = []
+    out: list[str] = []
     try:
         with open("/proc/self/mountinfo") as f:
             for line in f:
@@ -248,7 +261,7 @@ def mounts():
     return out
 
 
-def busy_paths(paths, home):
+def busy_paths(paths: Sequence[str], home: str) -> set[str]:
     """The subset of PATHS some process uses (open file, cwd, root, binary,
     mapped file, or a container's bind mount of the path, of something below
     it, or of a folder between it and HOME, e.g. -v ~/.m2:/root/.m2), from
@@ -268,7 +281,7 @@ def busy_paths(paths, home):
     return {line for line in r.stdout.splitlines() if line}
 
 
-def du_bytes(path):
+def du_bytes(path: str) -> int:
     r = subprocess.run(["du", "-sxb", "--", path], check=False, capture_output=True, text=True)
     try:
         return int(r.stdout.split()[0])
@@ -276,17 +289,17 @@ def du_bytes(path):
         return 0
 
 
-def free_bytes(path):
+def free_bytes(path: str) -> int:
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize
 
 
-def flatpak_installed(app):
+def flatpak_installed(app: str) -> bool:
     r = subprocess.run(["flatpak", "info", app], check=False, capture_output=True, text=True)
     return r.returncode == 0
 
 
-def flatpak_has_fs(app, path):
+def flatpak_has_fs(app: str, path: str) -> bool:
     r = subprocess.run(["flatpak", "override", "--user", "--show", app], check=False, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if line.startswith("filesystems="):
@@ -294,7 +307,7 @@ def flatpak_has_fs(app, path):
     return False
 
 
-def flatpak_add_fs(app, path):
+def flatpak_add_fs(app: str, path: str) -> None:
     r = subprocess.run(
         ["flatpak", "override", "--user", f"--filesystem={path}", app], check=False, capture_output=True, text=True
     )
@@ -302,7 +315,7 @@ def flatpak_add_fs(app, path):
         raise RuntimeError(f"flatpak override failed: {r.stderr.strip()[:200]}")
 
 
-def copy_tree(src, dst, nocow):
+def copy_tree(src: str, dst: str, nocow: bool) -> None:
     """cp src/. into the empty folder dst. NOCOW: a real copy (+C applies
     only to empty files: every file is created inside dst, which has +C, and
     inherits it before data is written). Otherwise reflink clones where
@@ -317,22 +330,22 @@ def copy_tree(src, dst, nocow):
 
 # ---- running as the user --------------------------------------------------------------
 class Ctx:
-    def __init__(self, home, pw=None):
+    def __init__(self, home: str, pw: pwd.struct_passwd | None = None) -> None:
         self.home = os.path.realpath(home)
         self.bulk = os.path.join(self.home, "Bulk")
         self.pw = pw  # None: already the user (tests, non-root runs)
 
-    def target(self, item):
+    def target(self, item: Item) -> str:
         return os.path.join(self.bulk, item.target)
 
-    def link(self, item):
+    def link(self, item: Item) -> str | None:
         return os.path.join(self.home, item.link) if item.link else None
 
-    def short(self, path):
+    def short(self, path: str) -> str:
         return "~" + path[len(self.home) :] if path.startswith(self.home + "/") else path
 
 
-def as_user(ctx, fn, *args):
+def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:
     """fn(*args) in a child process with the user's uid, gids and HOME.
     Returns its JSON-able result; an exception there is raised here again."""
     if ctx.pw is None:
@@ -383,11 +396,11 @@ def as_user(ctx, fn, *args):
         raise Unexpected(out["unexpected"])
     if "ok" not in out:
         raise RuntimeError(out.get("error", "child process died"))
-    return out["ok"]
+    return cast("R", out["ok"])
 
 
 # ---- inspection (read-only; fine as root: lstat never follows a link) -------------------
-def kind(path):
+def kind(path: str) -> str:
     """absent | link | dir | other (lstat)."""
     try:
         st = os.lstat(path)
@@ -398,7 +411,7 @@ def kind(path):
     return "dir" if stat.S_ISDIR(st.st_mode) else "other"
 
 
-def chain(base, rel):
+def chain(base: str, rel: str) -> str:
     """Every component of base/rel: ok (real folders), absent (one is
     missing), or 'symlink:<path>' / 'file:<path>'."""
     path = base
@@ -414,22 +427,22 @@ def chain(base, rel):
     return "ok"
 
 
-def empty_dir(path):
+def empty_dir(path: str) -> bool:
     with os.scandir(path) as it:
         return next(it, None) is None
 
 
-def link_target(path):
+def link_target(path: str) -> str:
     """Where the symlink PATH points, made absolute and normalized (no lookup)."""
     t = os.readlink(path)
     return os.path.normpath(t if os.path.isabs(t) else os.path.join(os.path.dirname(path), t))
 
 
-def has_mount(path):
+def has_mount(path: str) -> bool:
     return any(m == path or m.startswith(path + "/") for m in mounts())
 
 
-def cow_data(top):
+def cow_data(top: str) -> tuple[int, bool]:
     """Regular files with data and without +C below top, and whether top or a
     folder below it lacks +C (new files there would be copy-on-write)."""
     files, dirs_cow = 0, not is_nocow(top)
@@ -451,7 +464,7 @@ def cow_data(top):
     return files, dirs_cow
 
 
-def tree_stats(top, uid=None):
+def tree_stats(top: str, uid: int | None = None) -> tuple[int, int, bool, int]:
     """(entries, bytes of regular files, foreign, others): foreign is True if
     a folder below is another subvolume or filesystem (cp would copy it);
     others counts entries not owned by uid (None: not counted)."""
@@ -481,7 +494,7 @@ def tree_stats(top, uid=None):
     return entries, size, foreign, others
 
 
-def changed_since(top, stamp, mindepth=0):
+def changed_since(top: str, stamp: int, mindepth: int = 0) -> bool:
     """True if anything at/below top has a ctime >= stamp (ns). ctime cannot
     be set back by programs; >= also counts a change in the same clock tick."""
     if mindepth == 0 and os.lstat(top).st_ctime_ns >= stamp:
@@ -496,7 +509,7 @@ def changed_since(top, stamp, mindepth=0):
     return False
 
 
-def target_state(ctx, item):
+def target_state(ctx: Ctx, item: Item) -> str:
     """absent | empty | data | bad:<reason> for ~/Bulk/<target>."""
     c = chain(ctx.bulk, item.target)
     if c.startswith(("symlink:", "file:")):
@@ -507,7 +520,7 @@ def target_state(ctx, item):
     return "empty" if empty_dir(ctx.target(item)) else "data"
 
 
-def bulk_state(ctx):
+def bulk_state(ctx: Ctx) -> str:
     k = kind(ctx.bulk)
     if k == "absent":
         return "create"
@@ -516,7 +529,7 @@ def bulk_state(ctx):
     return "ok" if is_subvol(ctx.bulk) else "plain"
 
 
-def tag_state(ctx):
+def tag_state(ctx: Ctx) -> str:
     p = os.path.join(ctx.bulk, "CACHEDIR.TAG")
     k = kind(p)
     if k == "absent":
@@ -531,7 +544,7 @@ def tag_state(ctx):
     return "ok" if head == TAG_SIGNATURE.encode() else "bad"
 
 
-def classify(ctx, item, done, kept=None):
+def classify(ctx: Ctx, item: Item, done: set[str], kept: set[str] | None = None) -> tuple[str, str]:
     """(state, detail). done: ids already in place this run (for `after`);
     kept: ids kept in /home by choice (None: read from KEEP).
     States: kept, ok, mkdir, link, move, move-subvol, nocow, wait, unexpected;
@@ -541,12 +554,12 @@ def classify(ctx, item, done, kept=None):
         kept = read_keep()[0]
     if item.id in kept:
         L = ctx.link(item)
-        linked = bool(L) and kind(L) == "link" and link_target(L) == ctx.target(item)
+        linked = L is not None and kind(L) == "link" and link_target(L) == ctx.target(item)
         return "kept", "linked" if linked else ""
     if item.after and item.after in kept:
         why = f"~/{BY_ID[item.after].link} is kept in /home (by choice)"
         L = ctx.link(item)
-        if L and chain(ctx.home, item.link) == "ok" and not is_subvol(L) and not empty_dir(L):
+        if L and item.link and chain(ctx.home, item.link) == "ok" and not is_subvol(L) and not empty_dir(L):
             # Its data would stay in /home snapshots without anyone deciding so.
             return "unexpected", (
                 f"{why}, so this cannot move into ~/Bulk and its data stays in /home: "
@@ -562,6 +575,7 @@ def classify(ctx, item, done, kept=None):
     if item.link is None:
         return ("mkdir" if ts == "absent" else "ok"), ""
     L = ctx.link(item)
+    assert L is not None
     parent = os.path.dirname(item.link)
     c = chain(ctx.home, parent)
     if c == "absent":
@@ -595,7 +609,7 @@ def classify(ctx, item, done, kept=None):
     return "move", ""
 
 
-def nocow_check(ctx, item, ts):
+def nocow_check(ctx: Ctx, item: Item, ts: str) -> tuple[str, str] | None:
     """For a NOCOW item whose target exists (ts: empty or data): ('nocow',
     why) when it, a folder or file in it, or a folder above it up to
     ~/Bulk/NOCOW_TOP lacks +C; None when all is in place (or not NOCOW)."""
@@ -617,7 +631,7 @@ def nocow_check(ctx, item, ts):
 
 
 # ---- changes (run as the user) -----------------------------------------------------------
-def u_mkdirs(bulk, rel, nocow):
+def u_mkdirs(bulk: str, rel: str, nocow: bool) -> str:
     """Create bulk/rel folder by folder; a symlink or file on the way stops it.
     nocow: every folder from bulk/NOCOW_TOP down to bulk/rel gets +C (also
     one that exists already: it affects only files created later)."""
@@ -634,10 +648,11 @@ def u_mkdirs(bulk, rel, nocow):
     return path
 
 
-def nocow_parents(ctx, item):
+def nocow_parents(ctx: Ctx, item: Item) -> list[str]:
     """The folders between ~/Bulk/NOCOW_TOP (included) and the item's target
     (excluded) that exist without +C."""
-    out, path = [], ctx.bulk
+    out: list[str] = []
+    path = ctx.bulk
     for part in os.path.dirname(item.target).split("/"):
         path = os.path.join(path, part)
         if kind(path) != "dir":
@@ -647,11 +662,11 @@ def nocow_parents(ctx, item):
     return out
 
 
-def u_rmtree(path):
+def u_rmtree(path: str) -> None:
     """Delete a tree we own; read-only folders (Go's module cache) are made
     writable first. Never follows symlinks (shutil.rmtree works on fds)."""
 
-    def fix(func, p, exc):
+    def fix(func: Callable[..., object], p: str, exc: BaseException) -> None:
         if isinstance(exc, PermissionError):
             parent = os.path.dirname(p)
             os.chmod(parent, stat.S_IMODE(os.lstat(parent).st_mode) | stat.S_IRWXU)
@@ -669,12 +684,12 @@ def u_rmtree(path):
         os.unlink(path)
 
 
-def u_create_bulk(bulk):
+def u_create_bulk(bulk: str) -> bool:
     subvol_create(bulk)
     return True
 
 
-def u_relabel(path):
+def u_relabel(path: str) -> bool:
     """A new subvolume root has no SELinux label (unlabeled_t), and files
     created in it would inherit that: give it the policy's label (as the
     user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
@@ -685,7 +700,7 @@ def u_relabel(path):
     return True
 
 
-def u_write_tag(bulk):
+def u_write_tag(bulk: str) -> bool:
     p = os.path.join(bulk, "CACHEDIR.TAG")
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     with os.fdopen(fd, "w") as f:
@@ -693,14 +708,14 @@ def u_write_tag(bulk):
     return True
 
 
-def u_symlink(L, T):
+def u_symlink(L: str, T: str) -> bool:
     if kind(L) != "absent":
         raise Unexpected(f"{L} appeared meanwhile")
     os.symlink(T, L)
     return True
 
 
-def u_prepare(src, new, nocow):
+def u_prepare(src: str, new: str, nocow: bool) -> int:
     """Copy src into new (a fresh folder next to the target) and check it.
     Returns the ctime stamp (ns) taken before the copy."""
     if kind(new) != "absent":
@@ -741,7 +756,7 @@ def u_prepare(src, new, nocow):
     return stamp
 
 
-def u_clock(near):
+def u_clock(near: str) -> int:
     """A ctime stamp (ns) of the filesystem's clock, taken one clock tick
     after anything done before (see u_prepare)."""
     time.sleep(0.05)
@@ -756,7 +771,7 @@ def u_clock(near):
         os.unlink(probe)
 
 
-def u_commit(j):
+def u_commit(j: Mapping[str, Any]) -> bool:
     """The switch: src -> old, new -> target, link. j["stamp2"] (taken just
     before, and in the journal already) is for u_new_written. Returns False
     (nothing changed) if src was written to since the copy started."""
@@ -780,7 +795,7 @@ def u_commit(j):
     return True
 
 
-def u_late_write(j):
+def u_late_write(j: Mapping[str, Any]) -> bool:
     """After the switch: was the old tree written to meanwhile? Entries below
     it, or its own list of entries (mtime: an entry added or deleted directly
     in it; the rename to the old name changes only its ctime). Not covered: a
@@ -790,7 +805,7 @@ def u_late_write(j):
     return os.lstat(old).st_mtime_ns >= j["stamp"] or changed_since(old, j["stamp"], mindepth=1)
 
 
-def u_new_written(j):
+def u_new_written(j: Mapping[str, Any]) -> bool:
     """After the switch: was the target (the copy, now in use through the
     link) written to? Entries below it, or its own list of entries (mtime;
     the rename onto the target changes only its ctime)."""
@@ -800,7 +815,7 @@ def u_new_written(j):
     return os.lstat(T).st_mtime_ns >= stamp2 or changed_since(T, stamp2, mindepth=1)
 
 
-def u_rollback(j):
+def u_rollback(j: Mapping[str, Any]) -> bool:
     """Undo a switch, or the part of one an interruption left. Also the
     in-place NOCOW rewrite (src is the target: no link). If the old path
     was created again meanwhile (by an app, while the data waited in old),
@@ -838,7 +853,7 @@ def u_rollback(j):
     return True
 
 
-def u_finish(j):
+def u_finish(j: Mapping[str, Any]) -> bool:
     """Delete the old tree of a completed switch."""
     if kind(j["old"]) != "absent":
         u_rmtree(j["old"])
@@ -847,7 +862,7 @@ def u_finish(j):
     return True
 
 
-def u_move_subvol(L, T):
+def u_move_subvol(L: str, T: str) -> bool:
     """An old subvolume (from an earlier snapshots setup) is renamed into
     ~/Bulk: instant, same data; it stays a nested subvolume there."""
     if kind(T) == "dir":
@@ -857,7 +872,7 @@ def u_move_subvol(L, T):
     return True
 
 
-def u_flatpak(app, path):
+def u_flatpak(app: str, path: str) -> str:
     if not flatpak_installed(app):
         return "absent"
     if flatpak_has_fs(app, path):
@@ -866,18 +881,18 @@ def u_flatpak(app, path):
     return "added"
 
 
-def u_flatpak_state(app, path):
+def u_flatpak_state(app: str, path: str) -> str:
     if not flatpak_installed(app):
         return "absent"
     return "ok" if flatpak_has_fs(app, path) else "missing"
 
 
 # ---- journal (root-owned; the user cannot fake it) ----------------------------------------
-def jpath(ident):
+def jpath(ident: str) -> str:
     return os.path.join(STATE, f"journal-{ident}.json")
 
 
-def jwrite(ident, j):
+def jwrite(ident: str, j: Mapping[str, Any]) -> None:
     os.makedirs(STATE, mode=0o755, exist_ok=True)
     tmp = jpath(ident) + ".tmp"
     with open(tmp, "w") as f:
@@ -893,7 +908,7 @@ def jwrite(ident, j):
         os.close(fd)
 
 
-def jread(ident):
+def jread(ident: str) -> dict[str, Any] | None:
     try:
         with open(jpath(ident)) as f:
             return json.load(f)
@@ -901,20 +916,20 @@ def jread(ident):
         return None
 
 
-def jdrop(ident):
+def jdrop(ident: str) -> None:
     try:
         os.remove(jpath(ident))
     except FileNotFoundError:
         pass
 
 
-def journals():
+def journals() -> list[str]:
     """Ids with a journal (a move not finished or undone yet); a Steam game's
     is "steam-<appid>"."""
     return [i.id for i in ITEMS if os.path.exists(jpath(i.id))] + steam_journal_ids()
 
 
-def committed(j):
+def committed(j: Mapping[str, Any]) -> bool:
     """Did the switch of journal j complete (the target holds the data)?"""
     if j["kind"] == "subvol":
         return kind(j["link"]) == "link"
@@ -924,7 +939,7 @@ def committed(j):
     return kind(j["new"]) == "absent" and kind(j["target"]) == "dir" and kind(j["old"]) != "absent"
 
 
-def conflict_text(ctx, j):
+def conflict_text(ctx: Ctx, j: Mapping[str, Any]) -> str:
     return (
         f"written to on both sides during the move: compare {ctx.short(j['old'])} (the old "
         f"tree) with {ctx.short(j['target'])} (in use now), copy what you need into the "
@@ -933,10 +948,10 @@ def conflict_text(ctx, j):
     )
 
 
-def recover(ctx):
+def recover(ctx: Ctx) -> list[str]:
     """Finish or undo what an interrupted run left (kill, power loss).
     Returns the ids whose journal stays (they need a look)."""
-    stuck = []
+    stuck: list[str] = []
     for item in ITEMS:
         j = jread(item.id)
         if not j:
@@ -1002,7 +1017,7 @@ def recover(ctx):
 
 
 # ---- the actions ------------------------------------------------------------------------------
-def migrate(ctx, item, src, link):
+def migrate(ctx: Ctx, item: Item, src: str, link: str | None) -> str:
     """Move src into the item's target by copy + switch; with link, src then
     becomes a symlink to it. Returns ok | busy | changed."""
     T = ctx.target(item)
@@ -1017,7 +1032,7 @@ def migrate(ctx, item, src, link):
             raise RuntimeError(f"not enough free space for a {gib(need - MARGIN)} copy (plus {gib(MARGIN)} kept free)")
     as_user(ctx, u_mkdirs, ctx.bulk, os.path.dirname(item.target), item.nocow)
     stamp = as_user(ctx, u_prepare, src, new, item.nocow)
-    j = {
+    j: dict[str, Any] = {
         "kind": "copy",
         "src": src,
         "target": T,
@@ -1065,7 +1080,7 @@ def migrate(ctx, item, src, link):
     return "ok"
 
 
-def act(ctx, item, state, detail):
+def act(ctx: Ctx, item: Item, state: str, detail: str) -> str:
     """Apply one item; returns ok | busy | changed | unexpected:<why> | wait."""
     T, L = ctx.target(item), ctx.link(item)
     if state == "kept":
@@ -1074,10 +1089,12 @@ def act(ctx, item, state, detail):
         as_user(ctx, u_mkdirs, ctx.bulk, item.target, item.nocow)
         return "ok"
     if state == "link":
+        assert L is not None
         as_user(ctx, u_mkdirs, ctx.bulk, item.target, item.nocow)
         as_user(ctx, u_symlink, L, T)
         return "ok"
     if state == "move":
+        assert L is not None
         if detail == "empty":
             if busy_paths([L], ctx.home):
                 return "busy"
@@ -1096,6 +1113,7 @@ def act(ctx, item, state, detail):
         as_user(ctx, u_mkdirs, ctx.bulk, item.target, item.nocow)
         return migrate(ctx, item, L, L)
     if state == "move-subvol":
+        assert L is not None
         if busy_paths([L], ctx.home):
             return "busy"
         as_user(ctx, u_mkdirs, ctx.bulk, os.path.dirname(item.target), False)
@@ -1116,7 +1134,7 @@ def act(ctx, item, state, detail):
     return "unexpected:" + detail
 
 
-def u_set_nocow_dirs(top):
+def u_set_nocow_dirs(top: str) -> bool:
     set_nocow(top)
     dev = os.lstat(top).st_dev
     for root, dirs, _ in os.walk(top):
@@ -1130,7 +1148,7 @@ def u_set_nocow_dirs(top):
     return True
 
 
-def convert_bulk_dir(ctx):
+def convert_bulk_dir(ctx: Ctx) -> bool:
     """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
     subvolume (its convert_one: reflink clone + switch, busy -> later)."""
     r = subprocess.run(["bash", SNAPSHOT, "convert-one", ctx.bulk], check=False, capture_output=True, text=True)
@@ -1139,7 +1157,7 @@ def convert_bulk_dir(ctx):
     return is_subvol(ctx.bulk)
 
 
-def prune_convert_plan(ctx):
+def prune_convert_plan(ctx: Ctx) -> None:
     """An older snapshots setup planned some of these paths as nested
     subvolumes: they are symlinks into ~/Bulk now, never to be converted."""
     try:
@@ -1147,7 +1165,7 @@ def prune_convert_plan(ctx):
             lines = f.readlines()
     except OSError:
         return
-    drop = {ctx.link(i) for i in ITEMS if i.link}
+    drop = {link for i in ITEMS if (link := ctx.link(i)) is not None}
     keep = [ln for ln in lines if ln.startswith("#") or not ln.strip() or ln.split(maxsplit=1)[-1].strip() not in drop]
     if keep != lines:
         tmp = CONVERT_PLAN + ".tmp"
@@ -1158,7 +1176,7 @@ def prune_convert_plan(ctx):
         log("  convert-plan: dropped the paths that now live in ~/Bulk")
 
 
-def read_flag():
+def read_flag() -> list[str]:
     try:
         with open(FLAG) as f:
             return [x.strip() for x in f if x.strip()]
@@ -1166,13 +1184,13 @@ def read_flag():
         return []
 
 
-def flag_add(ident):
+def flag_add(ident: str) -> None:
     ids = read_flag()
     if ident not in ids:
         write_flag(ids + [ident])
 
 
-def write_flag(ids):
+def write_flag(ids: Sequence[str]) -> None:
     if ids:
         os.makedirs(ETC, mode=0o755, exist_ok=True)
         tmp = FLAG + ".tmp"
@@ -1188,12 +1206,13 @@ def write_flag(ids):
             pass
 
 
-def read_keep():
+def read_keep() -> tuple[set[str], list[str]]:
     """(ids kept in /home by choice, unknown ids) from KEEP: one id per line,
     '#' starts a comment. Bytes that are not UTF-8 make an unknown id.
     Raises OSError if KEEP exists but cannot be read (a folder, say): then
     nobody knows what is meant to stay, and apply moves nothing."""
-    known, unknown = set(), []
+    known: set[str] = set()
+    unknown: list[str] = []
     try:
         with open(KEEP, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1213,7 +1232,7 @@ KEEP_HEADER = (
 )
 
 
-def edit_keep(add, remove):
+def edit_keep(add: Sequence[str], remove: Collection[str]) -> None:
     """Add/remove ids in KEEP; other lines (comments) stay as they are."""
     # surrogateescape: lines this tool cannot read are written back unchanged.
     try:
@@ -1235,17 +1254,17 @@ def edit_keep(add, remove):
     os.rename(tmp, KEEP)
 
 
-def take_lock():
+def take_lock() -> int:
     fd = os.open(LOCK, os.O_WRONLY | os.O_CREAT, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd
 
 
-def gib(n):
+def gib(n: int) -> str:
     return f"{n / BIG:.1f} GiB" if n >= BIG / 10 else f"{n >> 20} MiB"
 
 
-def kept_text(item, detail):
+def kept_text(item: Item, detail: str) -> str:
     where = "kept in /home (by choice)" if item.link else "left out (by choice)"
     if detail == "linked":
         return (
@@ -1258,15 +1277,15 @@ def kept_text(item, detail):
 # Ids whose problem in the last apply() lies inside ~/Bulk only: the in-place
 # +C rewrite of a folder already linked into ~/Bulk failed or was refused
 # before it wrote a journal (no free space, a copy check, foreign entries).
-BULK_ONLY = set()
+BULK_ONLY: set[str] = set()
 
 
-def bulk_only_journal(ident):
+def bulk_only_journal(ident: str) -> bool:
     j = jread(ident)
     return bool(j and j.get("bulk_only"))
 
 
-def exit_status(deferred, problems):
+def exit_status(deferred: Sequence[str], problems: Sequence[str]) -> int:
     """1 something needs a look, 4 only something inside ~/Bulk (the in-place
     +C rewrite: its journal, or a failure of it; no data of it in /home),
     3 only busy items, 0 done."""
@@ -1278,9 +1297,10 @@ def exit_status(deferred, problems):
     return 3 if deferred else 0
 
 
-def apply(ctx):
+def apply(ctx: Ctx) -> tuple[list[str], list[str]]:
     """Bring every item to its declared state. Returns (deferred, problems)."""
-    deferred, problems = [], []
+    deferred: list[str] = []
+    problems: list[str] = []
     BULK_ONLY.clear()
     # Before taking the lock: btrfs-snapshot convert-one takes it itself.
     if bulk_state(ctx) == "plain":
@@ -1321,7 +1341,7 @@ def apply(ctx):
         elif t == "bad":
             problems.append("CACHEDIR.TAG")
             log("NEEDS A LOOK: ~/Bulk/CACHEDIR.TAG is not a cache tag (left as it is)")
-        done = set()
+        done: set[str] = set()
         try:
             kept, unknown = read_keep()
         except OSError as e:
@@ -1355,7 +1375,7 @@ def apply(ctx):
                     done.add(item.id)
                 if state != "ok":
                     log(
-                        f"{'done:':<10} {name}{'  (folder only: ~/' + os.path.dirname(item.link) + ' absent)' if detail == 'nolink' else ''}"
+                        f"{'done:':<10} {name}{'  (folder only: ~/' + os.path.dirname(item.link or '') + ' absent)' if detail == 'nolink' else ''}"
                     )
             elif res == "busy":
                 deferred.append(item.id)
@@ -1388,7 +1408,7 @@ def apply(ctx):
     return deferred, problems
 
 
-def row(name, text):
+def row(name: str, text: str) -> None:
     """One line of plan/status; a long name gets its own line."""
     if len(name) > 56:
         print(f"  {name}\n  {'':<56} {text}")
@@ -1396,7 +1416,7 @@ def row(name, text):
         print(f"  {name:<56} {text}")
 
 
-def describe_paths(ctx, item):
+def describe_paths(ctx: Ctx, item: Item) -> str:
     t = ctx.short(ctx.target(item))
     return f"~/{item.link} -> {t}" if item.link else t
 
@@ -1410,7 +1430,7 @@ STATE_TEXT = {
 }
 
 
-def item_text(ctx, item, state, detail, mode):
+def item_text(ctx: Ctx, item: Item, state: str, detail: str, mode: str) -> str:
     T, L = ctx.target(item), ctx.link(item)
     parent = os.path.dirname(item.link or "")
     if state == "ok":
@@ -1418,6 +1438,7 @@ def item_text(ctx, item, state, detail, mode):
     if state == "mkdir" and detail == "nolink":
         return f"create the folder (no link: ~/{parent} absent)"
     if state == "move":
+        assert L is not None
         if detail == "empty":
             return "empty: replaced by the link"
         how = "real copy into a +C folder" if item.nocow else "reflink clone, no data written"
@@ -1437,7 +1458,7 @@ def item_text(ctx, item, state, detail, mode):
     return STATE_TEXT.get(state, state) + (f" ({detail})" if detail else "")
 
 
-def report(ctx, mode):
+def report(ctx: Ctx, mode: str) -> int:
     """plan / status text. Returns the number of items not in place."""
     left = 0
     flagged = set(read_flag())
@@ -1489,7 +1510,7 @@ def report(ctx, mode):
     for ident in unknown:
         print(f"  {KEEP}: unknown item '{ident}' (ignored)")
     # Before ~/Bulk exists nothing waits for anything.
-    done = set() if b == "ok" else {i.id for i in ITEMS}
+    done: set[str] = set() if b == "ok" else {i.id for i in ITEMS}
     for item in ITEMS:
         state, detail = classify(ctx, item, done, kept)
         if state == "kept":
@@ -1530,7 +1551,7 @@ def report(ctx, mode):
     return left
 
 
-def old_steam(ctx):
+def old_steam(ctx: Ctx) -> None:
     """The default Steam library stays in /home (snapshotted) until its games
     move into the Bulk library (`bulk steam apply`, or Steam's settings)."""
     p = os.path.join(ctx.home, STEAMAPPS, "common")
@@ -1600,12 +1621,12 @@ class SteamRunning(Exception):
     """Steam (or something of it) runs: nothing is changed."""
 
 
-def dec(s):
+def dec(s: object) -> bool:
     return isinstance(s, str) and DECIMAL.fullmatch(s) is not None
 
 
 # ---- VDF (Valve's text KeyValues): pure functions, no I/O ----
-def vdf_parse(data):
+def vdf_parse(data: bytes) -> dict[str, Any]:
     """Strict parser: quoted strings, braces, whitespace, the escapes \\\\ and
     \\". Anything else (unquoted text, comments, #include/#base, [$COND],
     other escapes, duplicate keys, unbalanced braces, trailing data, NUL,
@@ -1618,17 +1639,17 @@ def vdf_parse(data):
         raise Unexpected(f"not UTF-8 (byte {e.start})") from None
     n = len(text)
 
-    def bad(p, what):
+    def bad(p: int, what: str) -> NoReturn:
         line = text.count("\n", 0, p) + 1
         col = p - (text.rfind("\n", 0, p) + 1) + 1
         raise Unexpected(f"{what} at line {line}, column {col}")
 
-    def ws(p):
+    def ws(p: int) -> int:
         while p < n and text[p] in " \t\r\n":
             p += 1
         return p
 
-    def token_error(p):
+    def token_error(p: int) -> NoReturn:
         if text.startswith("//", p):
             bad(p, "a comment")
         if text[p] == "#":
@@ -1639,7 +1660,7 @@ def vdf_parse(data):
             bad(p, "a '{' without a key")
         bad(p, f"unquoted text {text[p]!r}")
 
-    def string(p):
+    def string(p: int) -> tuple[str, int]:
         start, out = p, []
         p += 1
         while True:
@@ -1657,7 +1678,7 @@ def vdf_parse(data):
             out.append(c)
             p += 1
 
-    def pair(p, depth):
+    def pair(p: int, depth: int) -> tuple[int, str, str | dict[str, Any], int]:
         kp = p
         key, p = string(p)
         p = ws(p)
@@ -1671,10 +1692,10 @@ def vdf_parse(data):
             token_error(p)
         return kp, key, val, p
 
-    def obj(p, depth, open_at):
+    def obj(p: int, depth: int, open_at: int) -> tuple[dict[str, Any], int]:
         if depth > 32:
             bad(open_at, "nesting too deep")
-        d = {}
+        d: dict[str, Any] = {}
         while True:
             p = ws(p)
             if p >= n:
@@ -1706,15 +1727,15 @@ def vdf_parse(data):
     return {key: val}
 
 
-def vdf_dump(tree):
+def vdf_dump(tree: Mapping[str, Any]) -> bytes:
     """Steam's own layout: tab indent, "k"<tab><tab>"v", braces on their own
     lines, a newline at the end."""
-    out = []
+    out: list[str] = []
 
-    def esc(s):
+    def esc(s: str) -> str:
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
-    def walk(d, ind):
+    def walk(d: Mapping[str, Any], ind: str) -> None:
         for k, v in d.items():
             if isinstance(v, dict):
                 out.append(f'{ind}"{esc(k)}"\n{ind}{{\n')
@@ -1727,7 +1748,7 @@ def vdf_dump(tree):
     return "".join(out).encode()
 
 
-def vdf_load(data):
+def vdf_load(data: bytes) -> dict[str, Any]:
     """vdf_parse, plus the round-trip guard: the file must be exactly what
     vdf_dump would write, so writing it back changes only what we change."""
     tree = vdf_parse(data)
@@ -1736,14 +1757,14 @@ def vdf_load(data):
     return tree
 
 
-def lf_validate(tree):
+def lf_validate(tree: Mapping[str, Any]) -> dict[str, Any]:
     """Schema of libraryfolders.vdf; returns its "libraryfolders" dict."""
     if list(tree) != ["libraryfolders"] or not isinstance(tree["libraryfolders"], dict):
         raise Unexpected("the top level is not exactly one 'libraryfolders' block")
     lf = tree["libraryfolders"]
     if not lf or list(lf) != [str(i) for i in range(len(lf))]:
         raise Unexpected(f"library numbers are not 0, 1, 2... in order: {', '.join(lf) or 'none'}")
-    real = []
+    real: list[tuple[str, str]] = []
     for idx, e in lf.items():
         if not isinstance(e, dict):
             raise Unexpected(f"library {idx} is not a block")
@@ -1772,7 +1793,7 @@ def lf_validate(tree):
     return lf
 
 
-def lf_index(tree, path):
+def lf_index(tree: Mapping[str, Any], path: str) -> str | None:
     """The number of the entry whose path is the same folder as PATH, or
     None. Compared after resolving symlinks, like lf_validate does, so that
     /home/u/Bulk/steam and /var/home/u/Bulk/steam (Silverblue: /home is a
@@ -1784,9 +1805,9 @@ def lf_index(tree, path):
     return None
 
 
-def lf_with_library(tree, path, contentid):
+def lf_with_library(tree: Mapping[str, Any], path: str, contentid: str) -> dict[str, Any]:
     """TREE with an entry for PATH appended (a new tree); unchanged if listed."""
-    new = copy.deepcopy(tree)
+    new = copy.deepcopy(dict(tree))
     if lf_index(tree, path) is not None:
         return new
     lf = new["libraryfolders"]
@@ -1802,10 +1823,10 @@ def lf_with_library(tree, path, contentid):
     return new
 
 
-def lf_place_app(tree, appid, lib_path, size):
+def lf_place_app(tree: Mapping[str, Any], appid: str, lib_path: str, size: str) -> dict[str, Any]:
     """A new tree where APPID is listed only under LIB_PATH's entry (with
     SIZE, the string as it was); idempotent."""
-    new = copy.deepcopy(tree)
+    new = copy.deepcopy(dict(tree))
     idx = lf_index(new, lib_path)
     if idx is None:
         raise Unexpected(f"{lib_path} is not a library in libraryfolders.vdf")
@@ -1818,7 +1839,7 @@ def lf_place_app(tree, appid, lib_path, size):
     return new
 
 
-def acf_app(tree, appid):
+def acf_app(tree: Mapping[str, Any], appid: str) -> dict[str, str]:
     """Checks of appmanifest_<appid>.acf (parsed, never written)."""
     if list(tree) != ["AppState"] or not isinstance(tree["AppState"], dict):
         raise Unexpected("not an 'AppState' manifest")
@@ -1844,7 +1865,7 @@ def acf_app(tree, appid):
     return {"name": a["name"], "installdir": d, "mid": "; ".join(busy)}
 
 
-def is_tool(appid, name, installdir):
+def is_tool(appid: str, name: str, installdir: str) -> str:
     """Why APPID is a tool (runtime, Proton, redistributables), or ''."""
     if appid in KNOWN_TOOLS:
         return KNOWN_TOOLS[appid]
@@ -1854,15 +1875,15 @@ def is_tool(appid, name, installdir):
 
 
 # ---- Steam: reading and checking (as root: lstat only; file contents are read as the user) ----
-def ctx_uid(ctx):
+def ctx_uid(ctx: Ctx) -> int:
     return ctx.pw.pw_uid if ctx.pw else os.getuid()
 
 
-def steam_roots(ctx):
+def steam_roots(ctx: Ctx) -> tuple[str, str]:
     return os.path.join(ctx.home, STEAM_ROOT), os.path.join(ctx.bulk, "steam")
 
 
-def u_read(path):
+def u_read(path: str) -> dict[str, Any] | None:
     """A regular file's bytes (base64), mtime, mode and owner; None if absent.
     A symlink or anything else is refused."""
     try:
@@ -1895,19 +1916,19 @@ def u_read(path):
     }
 
 
-def read_file(ctx, path):
+def read_file(ctx: Ctx, path: str) -> dict[str, Any] | None:
     r = as_user(ctx, u_read, path)
     if r is not None:
         r["data"] = base64.b64decode(r["b64"])
     return r
 
 
-def lf_files(src):
+def lf_files(src: str) -> list[str]:
     """Both copies: config/ (the one current clients read) first."""
     return [os.path.join(src, "config", "libraryfolders.vdf"), os.path.join(src, "steamapps", "libraryfolders.vdf")]
 
 
-def newest_backup(path):
+def newest_backup(path: str) -> str | None:
     d, base = os.path.split(path)
     try:
         baks = sorted(n for n in os.listdir(d) if n.startswith(base + ".cst-bak-"))
@@ -1916,7 +1937,10 @@ def newest_backup(path):
     return os.path.join(d, baks[-1]) if baks else None
 
 
-def steam_read_pair(ctx, settle=None):
+def steam_read_pair(
+    ctx: Ctx,
+    settle: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     """Both libraryfolders.vdf, parsed and checked. They must be identical,
     except that SETTLE (a function tree -> tree: what an interrupted run of
     ours meant to write) makes them equal. Returns S, or None if Steam's
@@ -1928,7 +1952,9 @@ def steam_read_pair(ctx, settle=None):
     if c != "ok":
         raise Unexpected(f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder")
     files = lf_files(src)
-    raw, mtime, trees = [], [], []
+    raw: list[bytes] = []
+    mtime: list[int] = []
+    trees: list[dict[str, Any]] = []
     for f in files:
         r = read_file(ctx, f)
         if r is None:
@@ -1962,7 +1988,7 @@ def steam_read_pair(ctx, settle=None):
     }
 
 
-def steam_marker(ctx, T):
+def steam_marker(ctx: Ctx, T: str) -> str | None:
     """contentid of ~/Bulk/steam/libraryfolder.vdf, or None if absent."""
     mk = os.path.join(T, "libraryfolder.vdf")
     k = kind(mk)
@@ -1985,7 +2011,7 @@ def steam_marker(ctx, T):
     return body["contentid"]
 
 
-def steam_target(ctx, S, cid):
+def steam_target(ctx: Ctx, S: Mapping[str, Any], cid: str | None) -> str | None:
     """G4: ~/Bulk/steam as a library. Returns its entry number or None."""
     _, T = steam_roots(ctx)
     c = chain(T, "steamapps/common")
@@ -2004,12 +2030,12 @@ def steam_target(ctx, S, cid):
     return idx
 
 
-def nonempty(path):
+def nonempty(path: str) -> bool:
     k = kind(path)
     return k in ("other", "link") or (k == "dir" and not empty_dir(path))
 
 
-def steam_manifests(folder):
+def steam_manifests(folder: str) -> set[str]:
     try:
         names = os.listdir(os.path.join(folder, "steamapps"))
     except OSError:
@@ -2017,10 +2043,10 @@ def steam_manifests(folder):
     return {m.group(1) for m in (re.fullmatch(r"appmanifest_([0-9]+)\.acf", n) for n in names) if m}
 
 
-def steam_app(ctx, S, appid, explicit):
+def steam_app(ctx: Ctx, S: Mapping[str, Any], appid: str, explicit: bool) -> dict[str, Any]:
     """One app: state move | ok | skip | update | look, with why, parts, size."""
     src, T = steam_roots(ctx)
-    A = {
+    A: dict[str, Any] = {
         "id": appid,
         "name": "",
         "state": "look",
@@ -2048,6 +2074,8 @@ def steam_app(ctx, S, appid, explicit):
         return A
     try:
         r = read_file(ctx, mpath)
+        if r is None:
+            raise Unexpected("is missing")
         info = acf_app(vdf_parse(r["data"]), appid)
     except Unexpected as e:
         A["why"] = f"{ctx.short(mpath)}: {e}"
@@ -2064,6 +2092,7 @@ def steam_app(ctx, S, appid, explicit):
     if listed != [s_idx]:
         A["why"] = f"libraryfolders.vdf lists it under {listed or 'no library'}, its manifest is in library {s_idx}"
         return A
+    assert s_idx is not None
     A["size"] = lf[s_idx]["apps"][appid]
     why = is_tool(appid, info["name"], info["installdir"])
     if why and not explicit:
@@ -2084,7 +2113,7 @@ def steam_app(ctx, S, appid, explicit):
         )
         return A
     ts = time.strftime("%Y%m%dT%H%M%S")
-    parts = []
+    parts: list[dict[str, Any]] = []
     for name, rel, what, optional in (
         ("game", f"common/{info['installdir']}", "dir", False),
         ("workshop", f"workshop/content/{appid}", "dir", True),
@@ -2157,7 +2186,7 @@ def steam_app(ctx, S, appid, explicit):
     return A
 
 
-def steam_nocow_scan(top):
+def steam_nocow_scan(top: str) -> tuple[int, str, str]:
     """(number of regular files with +C, the first of them or '', a
     copy-on-write regular file with data or '') at or below TOP (a file or a
     folder; lstat, no link followed).
@@ -2193,7 +2222,7 @@ def steam_nocow_scan(top):
     return nocow, first, sample
 
 
-def steam_target_cow(ctx, T, dst):
+def steam_target_cow(ctx: Ctx, T: str, dst: str) -> str:
     """'' if every existing folder from ~/Bulk/steam down to DST's folder is
     copy-on-write; else why not. New files inherit +C from their folder, and
     a +C folder would make every moved file NOCOW (no checksums, no
@@ -2212,12 +2241,15 @@ def steam_target_cow(ctx, T, dst):
     return ""
 
 
-def steam_workshop_check(ctx, parts, appid):
+def steam_workshop_check(ctx: Ctx, parts: Sequence[Mapping[str, Any]], appid: str) -> str:
     for p in parts:
         if p["name"] != "workshop-acf":
             continue
         try:
-            t = vdf_parse(read_file(ctx, p["src"])["data"])
+            r = read_file(ctx, p["src"])
+            if r is None:
+                raise Unexpected("is missing")
+            t = vdf_parse(r["data"])
         except Unexpected as e:
             return f"{ctx.short(p['src'])}: {e}"
         body = t.get("AppWorkshop")
@@ -2226,10 +2258,10 @@ def steam_workshop_check(ctx, parts, appid):
     return ""
 
 
-def steam_survey(ctx, ids, allow_copy=False):
+def steam_survey(ctx: Ctx, ids: Sequence[str], allow_copy: bool = False) -> dict[str, Any]:
     """Everything plan prints and apply needs (read-only). allow_copy: --copy
     was given (games with NOCOW data may be copied byte by byte)."""
-    sv = {
+    sv: dict[str, Any] = {
         "running": steam_running(ctx),
         "fatal": "",
         "nothing": False,
@@ -2294,11 +2326,11 @@ def steam_survey(ctx, ids, allow_copy=False):
     return sv
 
 
-def steam_running(ctx):
+def steam_running(ctx: Ctx) -> list[str]:
     """Why Steam seems to run (empty: it does not). Every process of the
     host (a Flatpak's processes are visible there too), Flatpak instances of
     Steam, and Steam's own pid files."""
-    why = []
+    why: list[str] = []
     try:
         pids = [p for p in os.listdir(PROC) if p.isdigit()]
     except OSError:
@@ -2364,7 +2396,7 @@ def steam_running(ctx):
 
 
 # ---- Steam: changes (run as the user) ----
-def copy_reflink(src, dst):
+def copy_reflink(src: str, dst: str) -> None:
     """cp -a with --reflink=always: the data blocks are shared, none is
     written; fails (instead of copying bytes) where a clone is impossible."""
     r = subprocess.run(
@@ -2377,10 +2409,11 @@ def copy_reflink(src, dst):
         raise RuntimeError(f"reflink copy failed: {r.stderr.strip()[:300]}")
 
 
-def listing(top):
+def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
     """(relpath, type, size, mtime_ns, mode, link target) of top and all
     below it (lstat, no link followed)."""
-    out, stack = [], [(top, "")]
+    out: list[tuple[str, str, int, int, int, str]] = []
+    stack = [(top, "")]
     while stack:
         path, rel = stack.pop()
         st = os.lstat(path)
@@ -2398,7 +2431,7 @@ def listing(top):
     return sorted(out)
 
 
-def u_reflink_probe(src_file, T):
+def u_reflink_probe(src_file: str, T: str) -> bool:
     """Clone SRC_FILE (a copy-on-write file of a part that moves by reflink)
     into ~/Bulk/steam and delete the clone again."""
     probe = os.path.join(T, ".bulk-probe")
@@ -2416,7 +2449,7 @@ def u_reflink_probe(src_file, T):
     return True
 
 
-def idle_priority():
+def idle_priority() -> None:
     """This process, and what it starts, at the lowest CPU priority and the
     idle IO class (the IO class only counts with the BFQ IO scheduler)."""
     try:
@@ -2427,18 +2460,18 @@ def idle_priority():
         subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
 
 
-def idle_cmd(cmd):
+def idle_cmd(cmd: list[str]) -> list[str]:
     """CMD run at idle IO and lowest CPU priority (where ionice/nice exist)."""
     pre = (["ionice", "-c3"] if shutil.which("ionice") else []) + (["nice", "-n19"] if shutil.which("nice") else [])
     return pre + cmd
 
 
-def hms(seconds):
+def hms(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600}h{s % 3600 // 60:02d}m{s % 60:02d}s" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
-def tree_bytes(top):
+def tree_bytes(top: str) -> int:
     """Bytes of the regular files at/below TOP so far (a copy in progress:
     entries may come and go; those are skipped)."""
     try:
@@ -2463,19 +2496,19 @@ class Progress:
     """A line every PROGRESS_EVERY seconds or PROGRESS_BYTES, so a long copy
     or comparison shows it is alive."""
 
-    def __init__(self, what, total):
+    def __init__(self, what: str, total: int) -> None:
         self.what, self.total = what, total
         self.start = self.last_t = time.monotonic()
         self.last_b = 0
 
-    def update(self, done, force=False):
+    def update(self, done: int, force: bool = False) -> None:
         now = time.monotonic()
         if force or now - self.last_t >= PROGRESS_EVERY or done - self.last_b >= PROGRESS_BYTES:
             log(f"    {self.what}: {gib(done)} of {gib(self.total)}, {hms(now - self.start)}")
             self.last_t, self.last_b = now, done
 
 
-def copy_bytes(src, dst, label, total):
+def copy_bytes(src: str, dst: str, label: str, total: int) -> None:
     """cp -a with --reflink=never: every byte is written again, at idle
     priority, into DST (inside ~/Bulk/steam, copy-on-write: the new files
     get checksums and compression). A progress line now and then. A kill or
@@ -2500,7 +2533,7 @@ def copy_bytes(src, dst, label, total):
             raise RuntimeError(f"copy failed: {err.read().decode(errors='replace').strip()[:300]}")
 
 
-def read_full(fd, view):
+def read_full(fd: int, view: memoryview) -> int:
     """Fill VIEW from FD; fewer bytes only at the end of the file."""
     n = 0
     while n < len(view):
@@ -2511,7 +2544,7 @@ def read_full(fd, view):
     return n
 
 
-def same_file(a, b, on_chunk=None):
+def same_file(a: str, b: str, on_chunk: Callable[[int], None] | None = None) -> bool:
     """True if the regular files A and B have the same bytes. B (the new
     copy) is fsynced (an error raises OSError), then read from the disk, not
     from memory (only clean pages can be dropped), so btrfs checks its
@@ -2543,7 +2576,7 @@ def same_file(a, b, on_chunk=None):
         os.close(fa)
 
 
-def u_verify_content(src, new, label, total):
+def u_verify_content(src: str, new: str, label: str, total: int) -> str:
     """Every regular file of NEW has the same bytes as in SRC (the tree
     itself, names, types, sizes, modes, links, was compared before). Returns
     the first differing path relative to SRC, or ''. The copy is written to
@@ -2573,7 +2606,7 @@ def u_verify_content(src, new, label, total):
     return ""
 
 
-def nocow_entries(top):
+def nocow_entries(top: str) -> int:
     """Entries (folders and regular files) with +C at/below TOP."""
     st = os.lstat(top)
     if not stat.S_ISDIR(st.st_mode):
@@ -2588,7 +2621,7 @@ def nocow_entries(top):
     return n
 
 
-def u_steam_prepare(parts, idle=False):
+def u_steam_prepare(parts: Sequence[Mapping[str, Any]], idle: bool = False) -> int:
     """Copy every part to its .bulk-new name and check it: a reflink clone,
     or (mode 'copy': NOCOW data) a real copy whose every byte is compared
     afterwards. Returns the ctime stamp (ns) taken before the copy. idle:
@@ -2632,19 +2665,19 @@ def u_steam_prepare(parts, idle=False):
     return stamp
 
 
-def u_steam_drop_news(j):
+def u_steam_drop_news(j: Mapping[str, Any]) -> bool:
     for p in j["parts"]:
         if kind(p["new"]) != "absent":
             u_rmtree(p["new"])
     return True
 
 
-def u_steam_changed(j):
+def u_steam_changed(j: Mapping[str, Any]) -> bool:
     """Was a source written to since the copy started?"""
     return any(changed_since(p["src"], j["stamp"]) for p in j["parts"])
 
 
-def u_steam_switch(j):
+def u_steam_switch(j: Mapping[str, Any]) -> bool:
     """Per part, in order (the manifest last): src -> old, new -> dst."""
     for p in j["parts"]:
         if kind(p["dst"]) != "absent":
@@ -2654,7 +2687,7 @@ def u_steam_switch(j):
     return True
 
 
-def steam_all_switched(j):
+def steam_all_switched(j: Mapping[str, Any]) -> bool:
     return all(
         kind(p["dst"]) != "absent"
         and kind(p["new"]) == "absent"
@@ -2664,7 +2697,7 @@ def steam_all_switched(j):
     )
 
 
-def written_since(path, stamp):
+def written_since(path: str, stamp: int) -> bool:
     if kind(path) == "absent":
         return False
     if os.lstat(path).st_mtime_ns >= stamp:
@@ -2672,17 +2705,17 @@ def written_since(path, stamp):
     return kind(path) == "dir" and changed_since(path, stamp, mindepth=1)
 
 
-def u_steam_late(j):
+def u_steam_late(j: Mapping[str, Any]) -> bool:
     """After the switch: was an old copy written to (see u_late_write)?"""
     return any(written_since(p["old"], j["stamp"]) for p in j["parts"])
 
 
-def u_steam_new_written(j):
+def u_steam_new_written(j: Mapping[str, Any]) -> bool:
     """After the switch: was a moved part written to in the new library?"""
     return any(written_since(p["dst"], j["stamp2"]) for p in j["parts"])
 
 
-def u_steam_rollback(j):
+def u_steam_rollback(j: Mapping[str, Any]) -> bool:
     """Undo a switch, or what an interruption left of one: the manifest
     leaves the new library first, the game comes back first. If a source
     path was created again meanwhile, nothing is deleted (Unexpected)."""
@@ -2712,7 +2745,7 @@ def u_steam_rollback(j):
     return True
 
 
-def u_steam_finish(j):
+def u_steam_finish(j: Mapping[str, Any]) -> bool:
     for p in j["parts"]:
         for x in (p["old"], p["new"]):
             if kind(x) != "absent":
@@ -2720,7 +2753,7 @@ def u_steam_finish(j):
     return True
 
 
-def fsync_dir(d):
+def fsync_dir(d: str) -> None:
     fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -2728,7 +2761,7 @@ def fsync_dir(d):
         os.close(fd)
 
 
-def u_write_new(path, data, mode):
+def u_write_new(path: str, data: bytes, mode: int) -> None:
     """Create PATH (O_EXCL, no symlink followed) with DATA and MODE, synced."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -2741,13 +2774,20 @@ def u_write_new(path, data, mode):
         os.close(fd)
 
 
-def u_write_marker(path, contentid):
+def u_write_marker(path: str, contentid: str) -> bool:
     u_write_new(path, vdf_dump({"libraryfolder": {"contentid": contentid, "label": ""}}), 0o644)
     fsync_dir(os.path.dirname(path))
     return True
 
 
-def u_write_vdf_pair(files, expect_b64, expect_mtime, data_b64, ts, backup):
+def u_write_vdf_pair(
+    files: Sequence[str],
+    expect_b64: Sequence[str],
+    expect_mtime: Sequence[int],
+    data_b64: str,
+    ts: str,
+    backup: bool,
+) -> list[int]:
     """Write DATA over both libraryfolders.vdf (config/ first): each must
     still be what was read; a backup of each (once per run, 5 kept); then a
     temp file, fsync, rename over it, fsync of the folder. Returns the new
@@ -2781,7 +2821,7 @@ def u_write_vdf_pair(files, expect_b64, expect_mtime, data_b64, ts, backup):
     return out
 
 
-def write_vdf_pair(ctx, S, tree):
+def write_vdf_pair(ctx: Ctx, S: dict[str, Any], tree: Mapping[str, Any]) -> bool:
     """Write TREE into both copies if either differs from it. True if written.
     TREE must pass the same checks as a file we read: never write a pair
     that the next run would refuse."""
@@ -2811,7 +2851,7 @@ def write_vdf_pair(ctx, S, tree):
 
 
 # ---- Steam: journal (journal-steam-<appid>.json) and the move ----
-def steam_journal_ids():
+def steam_journal_ids() -> list[str]:
     try:
         names = os.listdir(STATE)
     except OSError:
@@ -2820,7 +2860,7 @@ def steam_journal_ids():
     return sorted(ids, key=lambda i: int(i[6:]))
 
 
-def steam_conflict_text(ctx, j):
+def steam_conflict_text(ctx: Ctx, j: Mapping[str, Any]) -> str:
     olds = ", ".join(ctx.short(p["old"]) for p in j["parts"] if kind(p["old"]) != "absent")
     return (
         f"app {j['appid']} was written to on both sides during its move: compare {olds} (the old copy) "
@@ -2829,11 +2869,11 @@ def steam_conflict_text(ctx, j):
     )
 
 
-def steam_settle_vdf(ctx, j, S=None):
+def steam_settle_vdf(ctx: Ctx, j: Mapping[str, Any], S: dict[str, Any] | None = None) -> None:
     """Both libraryfolders.vdf: the library listed, the app under it only."""
     T, appid, size, cid = j["dst_lib"], j["appid"], j["size"], j["contentid"]
 
-    def settle(t):
+    def settle(t: Mapping[str, Any]) -> dict[str, Any]:
         return lf_place_app(lf_with_library(t, T, cid), appid, T, size)
 
     if S is None:
@@ -2846,7 +2886,7 @@ def steam_settle_vdf(ctx, j, S=None):
         raise Unexpected(f"Steam is running ({e}): close it; the next run finishes this move") from None
 
 
-def steam_finish(ctx, j, S=None):
+def steam_finish(ctx: Ctx, j: dict[str, Any], S: dict[str, Any] | None = None) -> str:
     """The switch passed its checks: the VDF files, then the old copies go."""
     ident = "steam-" + j["appid"]
     if j["phase"] != "finishing":
@@ -2862,7 +2902,7 @@ def steam_finish(ctx, j, S=None):
     return "ok"
 
 
-def steam_after_switch(ctx, j, S=None):
+def steam_after_switch(ctx: Ctx, j: dict[str, Any], S: dict[str, Any] | None = None) -> str:
     """The last check after a complete switch, as in migrate(): a write into
     an old copy undoes the move; a write on both sides keeps both."""
     ident = "steam-" + j["appid"]
@@ -2879,7 +2919,7 @@ def steam_after_switch(ctx, j, S=None):
     return steam_finish(ctx, j, S)
 
 
-def steam_recover(ctx, j):
+def steam_recover(ctx: Ctx, j: dict[str, Any]) -> str:
     """Finish or undo what an interrupted Steam move left."""
     ident = "steam-" + j["appid"]
     phase = j.get("phase")
@@ -2906,8 +2946,8 @@ def steam_recover(ctx, j):
     raise Unexpected(f"unknown phase {phase!r}")
 
 
-def steam_recover_all(ctx):
-    stuck = []
+def steam_recover_all(ctx: Ctx) -> list[str]:
+    stuck: list[str] = []
     for ident in steam_journal_ids():
         j = jread(ident)
         if not j or j.get("kind") != "steam":
@@ -2925,7 +2965,7 @@ def steam_recover_all(ctx):
     return stuck
 
 
-def snapshot_guard():
+def snapshot_guard() -> dict[str, int]:
     """btrfs-snapshot's space guard, in bytes: {'pause': no new /home
     snapshot at or below it, 'resume': they come back only above it,
     'emergency': at or below it the hourly run purges most of the snapshot
@@ -2950,7 +2990,7 @@ def snapshot_guard():
     return {k: v * BIG for k, v in vals.items()}
 
 
-def steam_copy_floor():
+def steam_copy_floor() -> int:
     """Free space a real copy must leave behind: the snapshot emergency
     limit plus MARGIN. The old copy is deleted only after the new one is
     checked, and while /home snapshots still hold it, deleting it frees
@@ -2960,12 +3000,12 @@ def steam_copy_floor():
     return snapshot_guard()["emergency"] + MARGIN
 
 
-def steam_copy_need(a):
+def steam_copy_need(a: Mapping[str, Any]) -> int:
     """Free space a game's real copies need in ~/Bulk (0: reflinks only)."""
     return a["copy_bytes"] + steam_copy_floor() if a["copy_bytes"] else 0
 
 
-def steam_move(ctx, sv, a):
+def steam_move(ctx: Ctx, sv: Mapping[str, Any], a: Mapping[str, Any]) -> str:
     """Move one app. Returns ok | running | busy | changed | space."""
     S, (_, T) = sv["S"], steam_roots(ctx)
     ident, parts = "steam-" + a["id"], a["parts"]
@@ -2977,7 +3017,7 @@ def steam_move(ctx, sv, a):
     # per game: an earlier game's old copy may still be held by snapshots).
     if steam_copy_need(a) and free_bytes(T) < steam_copy_need(a):
         return "space"
-    j = {
+    j: dict[str, Any] = {
         "kind": "steam",
         "appid": a["id"],
         "src_lib": steam_roots(ctx)[0],
@@ -3026,7 +3066,7 @@ def steam_move(ctx, sv, a):
     return steam_after_switch(ctx, j, S)
 
 
-def ensure_library(ctx, sv):
+def ensure_library(ctx: Ctx, sv: dict[str, Any]) -> None:
     """~/Bulk/steam as a Steam library: steamapps/common, the marker
     libraryfolder.vdf (a new random contentid), the entry in both
     libraryfolders.vdf. Idempotent."""
@@ -3046,7 +3086,7 @@ def ensure_library(ctx, sv):
     sv["idx"] = lf_index(sv["S"]["tree"], T)
 
 
-def steam_print(ctx, sv):
+def steam_print(ctx: Ctx, sv: Mapping[str, Any]) -> None:
     src, T = steam_roots(ctx)
     print("Steam (Flatpak): games move from the main library into ~/Bulk/steam (reflink where possible, Steam closed).")
     r = sv["running"]
@@ -3120,7 +3160,7 @@ def steam_print(ctx, sv):
         row("", "at idle priority: expect minutes per 10 GiB, more while the PC is busy")
 
 
-def steam_nocow_files(ctx, a):
+def steam_nocow_files(ctx: Ctx, a: Mapping[str, Any]) -> str:
     """'K file(s) ... have +C (NOCOW), for example PATH' for a game with a
     real copy."""
     k = a["nocow_files"]
@@ -3130,10 +3170,10 @@ def steam_nocow_files(ctx, a):
     )
 
 
-def steam_move_lines(ctx, a, allow_copy):
+def steam_move_lines(ctx: Ctx, a: Mapping[str, Any], allow_copy: bool) -> list[str]:
     """What plan says about a game that moves: reflink, real copy, or both."""
     c, r = a["copy_bytes"], a["reflink_bytes"]
-    out = []
+    out: list[str] = []
     if r or not c:
         out.append(f"move {gib(r)} (reflink, no data written)")
     if c:
@@ -3147,7 +3187,7 @@ def steam_move_lines(ctx, a, allow_copy):
     return out
 
 
-def steam_apply(ctx, ids, allow_copy=False):
+def steam_apply(ctx: Ctx, ids: Sequence[str], allow_copy: bool = False) -> int:
     """Returns the exit status: 0 done, 1 needs a look, 5 Steam is running.
     allow_copy (--copy): games with NOCOW data may be copied byte by byte;
     without it they are refused (1), the others still move."""
@@ -3248,9 +3288,13 @@ def steam_apply(ctx, ids, allow_copy=False):
 STEAM_USAGE = "usage: btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"
 
 
-def steam_cmd(args):
+def steam_cmd(args: Sequence[str]) -> int:
     """btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"""
-    sub, ids, user_args, i, allow_copy = (args[0] if args else ""), [], [], 1, False
+    sub = args[0] if args else ""
+    ids: list[str] = []
+    user_args: list[str] = []
+    i = 1
+    allow_copy = False
     while i < len(args):
         a = args[i]
         if a == "--copy":
@@ -3289,7 +3333,7 @@ def steam_cmd(args):
     return steam_apply(ctx, ids, allow_copy)
 
 
-def user_ctx(args):
+def user_ctx(args: Sequence[str]) -> Ctx:
     """Ctx from --user NAME (root) or, not as root, the current user and
     BTRFS_BULK_HOME (tests, dry runs)."""
     name = None
@@ -3312,13 +3356,13 @@ def user_ctx(args):
     return Ctx(os.environ.get("BTRFS_BULK_HOME") or os.path.expanduser("~"))
 
 
-def alert(title, body):
+def alert(title: str, body: str) -> None:
     log(f"<4>btrfs-bulk: {title}: {body}")
     if os.access(NOTIFY, os.X_OK):
         subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True)
 
 
-def boot(ctx):
+def boot(ctx: Ctx) -> int:
     """At boot, before any login: nothing of the session holds files open.
     Never blocks the login more than twice for the same leftovers."""
     if not os.path.exists(FLAG):
@@ -3354,13 +3398,13 @@ def boot(ctx):
     return exit_status(deferred, problems)
 
 
-def keep_cmd(cmd, args):
+def keep_cmd(cmd: str, args: Sequence[str]) -> int:
     """btrfs-bulk keep|unkeep ID... [--user NAME]"""
     if "--user" in args:
         i = args.index("--user")
-        ids, user_args = args[:i] + args[i + 2 :], args[i : i + 2]
+        ids, user_args = list(args[:i]) + list(args[i + 2 :]), list(args[i : i + 2])
     else:
-        ids, user_args = args, []
+        ids, user_args = list(args), []
     bad = [i for i in ids if i not in BY_ID]
     if not ids or bad:
         if bad:
@@ -3372,7 +3416,7 @@ def keep_cmd(cmd, args):
         if cmd == "keep":
             edit_keep(ids, set())
             # Busy items waiting for the boot (and those inside them): not any more.
-            write_flag([i for i in read_flag() if i not in ids and getattr(BY_ID.get(i), "after", None) not in ids])
+            write_flag([i for i in read_flag() if i not in ids and (BY_ID[i].after if i in BY_ID else None) not in ids])
         else:
             edit_keep([], set(ids))
     except OSError as e:
@@ -3395,13 +3439,13 @@ def keep_cmd(cmd, args):
         )
         if ctx and item.link:
             L = ctx.link(item)
-            if kind(L) == "link" and link_target(L) == ctx.target(item):
+            if L and kind(L) == "link" and link_target(L) == ctx.target(item):
                 print(f"  ~/{item.link} is still a link into ~/Bulk: to bring the data back, see")
                 print("  btrfs/SNAPSHOTS.md, section 12 (Undo one Bulk link)")
     return 0
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "status"
     if cmd in ("keep", "unkeep"):
         return keep_cmd(cmd, argv[2:])

@@ -37,10 +37,14 @@ from adding them again.
 Exit status: 0 fine (also "nothing to do"), 1 refused or failed, 2 usage.
 """
 
+from __future__ import annotations
+
 import os
 import shlex
 import stat
 import sys
+from collections.abc import Sequence
+from typing import TypedDict
 
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
@@ -70,17 +74,24 @@ USER_INSTALL_REL = ".local/share/flatpak"
 RUNTIME_DIR = f"/run/user/{os.getuid()}"
 
 
+class _InspectResult(TypedDict):
+    dir: str | None
+    size: str | None
+    on: bool
+    off: bool
+
+
 class Refused(Exception):
     pass
 
 
 # ---- reading the flags file ---------------------------------------------------------------
-def marked(s, rest):
+def marked(s: str, rest: str) -> bool:
     """Whether the stripped line S starts with one of the MARKS followed by REST."""
     return any(s.startswith(m + rest) for m in MARKS)
 
 
-def words(line):
+def words(line: str) -> list[str]:
     """The shell words of one non-comment line (cobalt parses each line so)."""
     try:
         return shlex.split(line, comments=True)
@@ -88,7 +99,7 @@ def words(line):
         return line.split()
 
 
-def flag_value(tokens, name):
+def flag_value(tokens: Sequence[str], name: str) -> str | None:
     """Value of --name=VALUE (the last one wins, as in Chrome); "" for a bare
     --name; None if absent."""
     val = None
@@ -100,7 +111,7 @@ def flag_value(tokens, name):
     return val
 
 
-def inspect(text):
+def inspect(text: str) -> _InspectResult:
     lines = text.splitlines()
     tokens, on, off = [], False, False
     for ln in lines:
@@ -120,7 +131,7 @@ def inspect(text):
     }
 
 
-def decide(text):
+def decide(text: str) -> tuple[str, str | None, str]:
     """(state, new_text or None, message). new_text None: nothing to write."""
     i = inspect(text)
     d, s = i["dir"], i["size"]
@@ -149,7 +160,7 @@ def decide(text):
     return "user", None, f"set by you ({fmt(d, s)}): left as it is{note}"
 
 
-def fmt(d, s):
+def fmt(d: str | None, s: str | None) -> str:
     parts = []
     if d is not None:
         parts.append(f"--disk-cache-dir={d}")
@@ -158,19 +169,19 @@ def fmt(d, s):
     return " ".join(parts) or "none"
 
 
-def nl_end(text):
+def nl_end(text: str) -> str:
     return text if not text or text.endswith("\n") else text + "\n"
 
 
-def add_block(text):
+def add_block(text: str) -> str:
     return nl_end(text) + "\n".join([ON_LINE, FLAG_DIR, FLAG_SIZE]) + "\n"
 
 
-def has_line(text, line):
+def has_line(text: str, line: str) -> bool:
     return any(ln.strip() == line for ln in text.splitlines())
 
 
-def add_after(text, anchor, new):
+def add_after(text: str, anchor: str, new: str) -> str:
     """Insert line NEW right after the last line equal to ANCHOR."""
     lines = nl_end(text).splitlines(keepends=True)
     idx = max(n for n, ln in enumerate(lines) if ln.strip() == anchor)
@@ -178,7 +189,7 @@ def add_after(text, anchor, new):
     return "".join(lines)
 
 
-def turn_off(text):
+def turn_off(text: str) -> str | None:
     """Our flag lines out (only if our marker is there), marker -> OFF_LINE;
     no marker at all: OFF_LINE appended. None if already off."""
     i = inspect(text)
@@ -200,7 +211,7 @@ def turn_off(text):
 
 
 # ---- safe file access (as the user; no symlinks on the way) ------------------------------
-def open_dir_chain(home, rel_dir, create):
+def open_dir_chain(home: str, rel_dir: str, create: bool) -> int | None:
     """fd of HOME/REL_DIR walked component by component with O_NOFOLLOW (a
     symlink anywhere below HOME is refused). Missing folders are created when
     CREATE, else None is returned."""
@@ -228,7 +239,7 @@ def open_dir_chain(home, rel_dir, create):
     return fd
 
 
-def read_flags(dfd, name):
+def read_flags(dfd: int, name: str) -> tuple[str, os.stat_result | None]:
     """(text, stat) of the flags file in DFD; ("", None) if absent."""
     try:
         st = os.lstat(name, dir_fd=dfd)
@@ -247,7 +258,7 @@ def read_flags(dfd, name):
     return data.decode("utf-8", "surrogateescape"), fst
 
 
-def write_flags(dfd, name, text, old_st):
+def write_flags(dfd: int, name: str, text: str, old_st: os.stat_result | None) -> None:
     """Atomic replace: a new file next to it, then rename. Refused if the file
     changed since it was read."""
     tmp = f".{name}.cst-new"
@@ -285,7 +296,7 @@ def write_flags(dfd, name, text, old_st):
 
 
 # ---- facts about the app -------------------------------------------------------------------
-def installed(home):
+def installed(home: str) -> str | None:
     """ "system", "user" or None."""
     for base in SYSTEM_INSTALLS:
         if os.path.isdir(os.path.join(base, "app", APP, "current", "active")):
@@ -295,7 +306,7 @@ def installed(home):
     return None
 
 
-def tree_bytes(path):
+def tree_bytes(path: str) -> int:
     """Disk usage (allocated blocks) of a tree; symlinks not followed."""
     total = 0
     try:
@@ -311,7 +322,7 @@ def tree_bytes(path):
     return total
 
 
-def old_cache(home):
+def old_cache(home: str) -> tuple[int, int, int]:
     """(HTTP cache bytes, Code Cache bytes, profiles with an HTTP cache) in
     ~/.var/app/com.google.Chrome/cache/google-chrome/<profile>/."""
     top = os.path.join(home, OLD_CACHE_REL)
@@ -335,7 +346,7 @@ def old_cache(home):
     return http, code, profiles
 
 
-def is_subvol(path):
+def is_subvol(path: str) -> bool:
     try:
         st = os.lstat(path)
     except OSError:
@@ -343,12 +354,12 @@ def is_subvol(path):
     return stat.S_ISDIR(st.st_mode) and st.st_ino == 256
 
 
-def size_text(n):
+def size_text(n: int) -> str:
     return f"{n / 1024**3:.1f} GiB" if n >= 1024**3 // 10 else f"{n >> 20} MiB"
 
 
 # ---- actions -------------------------------------------------------------------------------
-def current(home, create=False):
+def current(home: str, create: bool = False) -> tuple[int | None, str, os.stat_result | None]:
     """(dir fd or None, text, stat)."""
     dfd = open_dir_chain(home, os.path.dirname(FLAGS_REL), create)
     if dfd is None:
@@ -361,7 +372,7 @@ def current(home, create=False):
     return dfd, text, st
 
 
-def apply(home):
+def apply(home: str) -> tuple[str, str, bool]:
     """(state, message, changed)."""
     if not installed(home):
         return "no-app", "Chrome Flatpak not installed: nothing to do", False
@@ -372,6 +383,7 @@ def apply(home):
             return state, msg, False
         if dfd is None:
             dfd, text, st = current(home, create=True)
+            assert dfd is not None
             state, new, msg = decide(text)
             if new is None:
                 return state, msg, False
@@ -382,7 +394,7 @@ def apply(home):
             os.close(dfd)
 
 
-def off_message(text, new):
+def off_message(text: str, new: str) -> str:
     """What turn_off changed (TEXT -> NEW), in words."""
     i, left = inspect(text), inspect(new)
     if left["dir"] is not None or left["size"] is not None:
@@ -397,7 +409,7 @@ def off_message(text, new):
     return "off: our flag lines removed (your other lines kept); setup will not add them again"
 
 
-def off(home):
+def off(home: str) -> tuple[str, bool, bool]:
     """(message, changed, still_set): STILL_SET when cache flags remain."""
     dfd, text, st = current(home, create=False)
     try:
@@ -406,6 +418,7 @@ def off(home):
             return "already off: nothing changed", False, False
         if dfd is None:
             dfd, text, st = current(home, create=True)
+            assert dfd is not None
             new = turn_off(text)
             if new is None:
                 return "already off: nothing changed", False, False
@@ -417,7 +430,7 @@ def off(home):
             os.close(dfd)
 
 
-def plan_line(home):
+def plan_line(home: str) -> str:
     if not installed(home):
         return "not installed: nothing to do"
     dfd, text, _ = current(home, create=False)
@@ -427,7 +440,7 @@ def plan_line(home):
     return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
 
 
-def status(home):
+def status(home: str) -> int:
     print("Chrome (Flatpak): HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB")
     inst = installed(home)
     print(f"  Chrome Flatpak:        {('installed (' + inst + ')') if inst else 'not installed (nothing to do)'}")
@@ -468,7 +481,7 @@ def status(home):
     return rc
 
 
-def main(argv):
+def main(argv: Sequence[str]) -> int:
     args = argv[1:]
     cmd = args[0] if args else "status"
     home = None

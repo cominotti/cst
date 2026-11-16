@@ -14,9 +14,11 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s vm/tests -t . -p test_vm_nas.py -v
 """
 
-import importlib.machinery
-import importlib.util
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
 import fcntl
+import importlib.machinery
 import json
 import os
 import pty
@@ -29,6 +31,8 @@ import sys
 import tempfile
 import termios
 import time
+import types
+from typing import Any, Protocol, cast
 import unittest
 
 sys.dont_write_bytecode = True
@@ -43,12 +47,32 @@ STAMP = "20261108T010640Z"
 SNAP_ID = "a1b2c3d4" + "e" * 56
 
 
-def load():
+class _VmModule(Protocol):
+    Usage: type[Exception]
+    NAS_SSH_ALIAS: str
+    SNAPSHOT_TIMEOUT: int
+    SNAPSHOT_SETTLE: int
+    COMMIT_TIMEOUT: int
+
+    def read_index(self, path: str | None = None) -> list[dict[str, Any]]: ...
+
+    def overlay_recovery(
+        self, vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, str]
+    ) -> list[str]: ...
+
+    def overlay_kind(self, state: str | None, live_src: str | None, base: str) -> str: ...
+
+    def parse_args(self, argv: Sequence[str]) -> dict[str, Any]: ...
+
+    def forget_args(self, vm: str, host: str, weekly: int, monthly: int) -> list[str]: ...
+
+
+def load() -> _VmModule:
     loader = importlib.machinery.SourceFileLoader("cst_vm", TOOL)
-    spec = importlib.util.spec_from_loader("cst_vm", loader)
-    mod = importlib.util.module_from_spec(spec)
+    mod = types.ModuleType("cst_vm")
+    mod.__file__ = TOOL
     loader.exec_module(mod)
-    return mod
+    return cast("_VmModule", cast("object", mod))
 
 
 # The VM, as JSON in $FIX/vm.json: state, agent, live and persistent disk
@@ -212,13 +236,13 @@ exit 0
 """
 
 
-def read(path):
+def read(path: str) -> str:
     with open(path) as f:
         return f.read()
 
 
 class Nas(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-nas-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
         self.bin, self.fix = os.path.join(self.tmp, "bin"), os.path.join(self.tmp, "fix")
@@ -284,8 +308,8 @@ class Nas(unittest.TestCase):
             "CST_VM_SBIN_COPY": os.path.join(self.tmp, "sbin", "cst-vm"),
         }
 
-    def vm(self, **kw):
-        state = {
+    def vm(self, **kw: object) -> None:
+        state: dict[str, Any] = {
             "state": "running",
             "uuid": UUID,
             "nvram": self.nvram,
@@ -298,17 +322,17 @@ class Nas(unittest.TestCase):
         with open(os.path.join(self.fix, "vm.json"), "w") as f:
             json.dump(state, f)
 
-    def vm_state(self):
+    def vm_state(self) -> dict[str, Any]:
         with open(os.path.join(self.fix, "vm.json")) as f:
             return json.load(f)
 
-    def restic_cfg(self, **kw):
-        cfg = {"snapshots": [SNAP_ID]}
+    def restic_cfg(self, **kw: object) -> None:
+        cfg: dict[str, Any] = {"snapshots": [SNAP_ID]}
         cfg.update(kw)
         with open(os.path.join(self.fix, "restic.json"), "w") as f:
             json.dump(cfg, f)
 
-    def run_tool(self, *args):
+    def run_tool(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["python3", "-I", TOOL, *args],
             check=False,
@@ -319,30 +343,30 @@ class Nas(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
 
-    def calls(self):
+    def calls(self) -> list[str]:
         try:
             with open(self.log) as f:
                 return f.read().splitlines()
         except FileNotFoundError:
             return []
 
-    def restic_calls(self):
+    def restic_calls(self) -> list[dict[str, Any]]:
         try:
             with open(os.path.join(self.fix, "restic.log")) as f:
                 return [json.loads(ln) for ln in f]
         except FileNotFoundError:
             return []
 
-    def virsh_calls(self, sub):
+    def virsh_calls(self, sub: str) -> list[str]:
         return [c for c in self.calls() if c.startswith(f"virsh -c qemu:///system {sub}")]
 
-    def index_entries(self):
+    def index_entries(self) -> list[dict[str, Any]]:
         with open(self.index) as f:
             return json.load(f)["backups"]
 
 
 class LiveBackupTest(Nas):
-    def test_running_vm_quiesced(self):
+    def test_running_vm_quiesced(self) -> None:
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         snaps = self.virsh_calls("snapshot-create-as")
@@ -438,7 +462,7 @@ class LiveBackupTest(Nas):
         self.assertIn("quiesced", r.stdout)
         self.assertNotIn("notify", "\n".join(self.calls()))
 
-    def test_quiesce_fallback(self):
+    def test_quiesce_fallback(self) -> None:
         self.vm(fail=["quiesce"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -449,7 +473,7 @@ class LiveBackupTest(Nas):
         self.assertIn("crash-consistent snapshot (quiesce failed: error: Guest agent is not responding", r.stdout)
         self.assertEqual(self.index_entries()[0]["consistency"], "crash-consistent")
 
-    def test_no_agent_and_no_quiesce_skip_the_attempt(self):
+    def test_no_agent_and_no_quiesce_skip_the_attempt(self) -> None:
         for agent, args, why in (
             (None, (), "no guest agent channel"),
             ("disconnected", (), "the guest agent is not connected"),
@@ -464,7 +488,7 @@ class LiveBackupTest(Nas):
             self.assertNotIn("--quiesce", snaps[0])
             self.assertIn(f"crash-consistent snapshot ({why}", r.stdout)
 
-    def test_commit_runs_when_restic_fails(self):
+    def test_commit_runs_when_restic_fails(self) -> None:
         self.restic_cfg(backup_rc=1)
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -475,7 +499,7 @@ class LiveBackupTest(Nas):
         self.assertFalse(os.path.exists(self.index))
         self.assertNotIn("forget", [c["args"][0] for c in self.restic_calls()])
 
-    def test_sigterm_during_restic_still_merges(self):
+    def test_sigterm_during_restic_still_merges(self) -> None:
         self.vm(fail=["term-during-backup"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -485,7 +509,7 @@ class LiveBackupTest(Nas):
         self.assertFalse(os.path.exists(self.overlay))
         self.assertFalse(os.path.exists(self.index))
 
-    def test_sigterm_during_the_snapshot_call_still_merges(self):
+    def test_sigterm_during_the_snapshot_call_still_merges(self) -> None:
         # libvirt finished the snapshot, but the stop arrived before virsh returned.
         self.vm(fail=["term-after-snapshot"], agent=None)
         r = self.run_tool("backup", "win", "--nas")
@@ -496,7 +520,7 @@ class LiveBackupTest(Nas):
         self.assertFalse(os.path.exists(self.overlay))
         self.assertNotIn("backup", [c["args"][0] for c in self.restic_calls()])
 
-    def test_unreadable_persistent_definition_keeps_the_overlay(self):
+    def test_unreadable_persistent_definition_keeps_the_overlay(self) -> None:
         # After the pivot the --inactive listing fails: the file stays (fail closed).
         self.vm(fail=["blklist-inactive"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
@@ -505,7 +529,7 @@ class LiveBackupTest(Nas):
         self.assertTrue(os.path.exists(self.overlay))
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
 
-    def test_incomplete_restic_snapshot_is_forgotten(self):
+    def test_incomplete_restic_snapshot_is_forgotten(self) -> None:
         self.restic_cfg(backup_rc=3)
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -514,7 +538,7 @@ class LiveBackupTest(Nas):
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
 
-    def test_commit_failure_is_loud_and_leaves_everything(self):
+    def test_commit_failure_is_loud_and_leaves_everything(self) -> None:
         self.vm(fail=["commit"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -531,7 +555,7 @@ class LiveBackupTest(Nas):
         self.assertFalse(os.path.exists(self.index))
         self.assertNotIn("forget", [c["args"][0] for c in self.restic_calls()])
 
-    def test_persistent_definition_still_on_the_overlay(self):
+    def test_persistent_definition_still_on_the_overlay(self) -> None:
         self.vm(fail=["persistent-stays"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -543,7 +567,7 @@ class LiveBackupTest(Nas):
         self.assertNotIn("sudo qemu-img commit", r.stderr)
         self.assertNotIn("blockcommit win sda --active --pivot --wait --verbose     #", r.stderr)
 
-    def test_vm_stopped_during_the_backup(self):
+    def test_vm_stopped_during_the_backup(self) -> None:
         self.vm(fail=["stop-during-backup"], agent="connected")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -552,7 +576,7 @@ class LiveBackupTest(Nas):
         self.assertEqual(self.virsh_calls("blockcommit"), [])
         self.assertTrue(os.path.exists(self.overlay))
 
-    def test_snapshot_failure_changes_nothing(self):
+    def test_snapshot_failure_changes_nothing(self) -> None:
         self.vm(fail=["snapshot"], agent=None)
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -560,7 +584,7 @@ class LiveBackupTest(Nas):
         self.assertEqual(self.virsh_calls("blockcommit"), [])
         self.assertNotIn("backup", [c["args"][0] for c in self.restic_calls()])
 
-    def test_keep_tag_and_retention(self):
+    def test_keep_tag_and_retention(self) -> None:
         with open(self.env["CST_VM_CONF"], "w") as f:
             f.write("VM_NAS_KEEP_WEEKLY=6\nVM_NAS_KEEP_MONTHLY=2\n")
         r = self.run_tool("backup", "win", "--nas", "--keep-tag", "pre-f46")
@@ -591,7 +615,7 @@ class LiveBackupTest(Nas):
         self.assertEqual(self.index_entries()[0]["keep"], "pre-f46")
         self.assertIn("kept until removed by hand", r.stdout)
 
-    def test_forgotten_snapshots_leave_the_index(self):
+    def test_forgotten_snapshots_leave_the_index(self) -> None:
         os.makedirs(os.path.dirname(self.index))
         local = os.path.join(self.tmp, "local-backup")
         os.makedirs(local)
@@ -621,13 +645,13 @@ class LiveBackupTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
 
-    def test_list_shows_nas_entries(self):
+    def test_list_shows_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         r = self.run_tool("list")
         self.assertIn(f"win              {STAMP}  nas      deployment 45.1", r.stdout)
         self.assertIn("restic a1b2c3d4 (quiesced)", r.stdout)
 
-    def test_a_local_backup_keeps_the_nas_entries(self):
+    def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         m = load()
         entries = [e for e in m.read_index(self.index)]
@@ -639,10 +663,35 @@ class RobustnessTest(Nas):
     reader that went away, Ctrl-C pressed twice, a paused VM, a virsh that
     does not answer."""
 
-    def popen_tool(self, **kw):
-        return subprocess.Popen(["python3", "-I", TOOL, "backup", "win", "--nas"], env=self.env, **kw)
+    def popen_tool(
+        self,
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+        text: bool = False,
+        start_new_session: bool = False,
+    ) -> subprocess.Popen[str] | subprocess.Popen[bytes]:
+        if text:
+            return subprocess.Popen(
+                ["python3", "-I", TOOL, "backup", "win", "--nas"],
+                env=self.env,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                start_new_session=start_new_session,
+            )
+        return subprocess.Popen(
+            ["python3", "-I", TOOL, "backup", "win", "--nas"],
+            env=self.env,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=start_new_session,
+        )
 
-    def wait_for(self, name):
+    def wait_for(self, name: str) -> None:
         path = os.path.join(self.fix, name)
         for _ in range(400):
             if os.path.exists(path):
@@ -650,12 +699,12 @@ class RobustnessTest(Nas):
             time.sleep(0.05)
         self.fail(f"{name} never appeared")
 
-    def assert_merged(self):
+    def assert_merged(self) -> None:
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
         self.assertEqual(self.vm_state()["live"]["sda"], self.disk)
         self.assertFalse(os.path.exists(self.overlay))
 
-    def test_closed_stdout_still_merges(self):
+    def test_closed_stdout_still_merges(self) -> None:
         r, w = os.pipe()
         os.close(r)  # `| head` that is gone: EPIPE on the first write
         p = self.popen_tool(stdin=subprocess.DEVNULL, stdout=w, stderr=subprocess.DEVNULL)
@@ -664,11 +713,11 @@ class RobustnessTest(Nas):
         self.assert_merged()
         self.assertEqual(len(self.index_entries()), 1)
 
-    def test_closed_terminal_during_restic_still_merges(self):
+    def test_closed_terminal_during_restic_still_merges(self) -> None:
         self.vm(agent="connected", fail=["slow-backup"])
         master, slave = pty.openpty()
 
-        def controlling_tty():
+        def controlling_tty() -> None:
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
@@ -689,7 +738,7 @@ class RobustnessTest(Nas):
         self.assert_merged()
         self.assertFalse(os.path.exists(self.index))
 
-    def test_commit_failure_with_closed_stderr_still_alerts(self):
+    def test_commit_failure_with_closed_stderr_still_alerts(self) -> None:
         self.vm(agent="connected", fail=["commit"])
         r, w = os.pipe()
         os.close(r)
@@ -699,7 +748,7 @@ class RobustnessTest(Nas):
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
         self.assertTrue(os.path.exists(self.overlay))
 
-    def test_ctrl_c_twice_does_not_cancel_the_merge(self):
+    def test_ctrl_c_twice_does_not_cancel_the_merge(self) -> None:
         self.vm(agent="connected", fail=["slow-backup", "commit-sigint"])
         p = self.popen_tool(
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
@@ -709,12 +758,13 @@ class RobustnessTest(Nas):
         self.wait_for("commit-started")
         os.killpg(p.pid, signal.SIGINT)  # again, while virsh merges
         out, err = p.communicate(timeout=60)
+        assert isinstance(out, str) and isinstance(err, str)
         self.assertEqual(p.returncode, 1, out + err)
         self.assertIn("stopped by signal SIGINT", err)
         self.assertNotIn("DISK NOT MERGED BACK", err)
         self.assert_merged()
 
-    def test_paused_vm_is_merged_back(self):
+    def test_paused_vm_is_merged_back(self) -> None:
         self.vm(agent="connected", fail=["pause-during-backup"])
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -722,10 +772,10 @@ class RobustnessTest(Nas):
         self.assert_merged()
         self.assertNotIn("qemu-img", r.stdout + r.stderr)
 
-    def short_snapshot_limits(self):
+    def short_snapshot_limits(self) -> None:
         self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
 
-    def test_snapshot_timeout_then_in_place(self):
+    def test_snapshot_timeout_then_in_place(self) -> None:
         self.short_snapshot_limits()
         self.vm(agent="connected", fail=["snapshot-hang"])
         r = self.run_tool("backup", "win", "--nas")
@@ -735,7 +785,7 @@ class RobustnessTest(Nas):
         self.assertEqual(self.index_entries()[0]["consistency"], "crash-consistent")
         self.assert_merged()
 
-    def test_snapshot_timeout_unclear_keeps_the_files_and_alerts(self):
+    def test_snapshot_timeout_unclear_keeps_the_files_and_alerts(self) -> None:
         self.short_snapshot_limits()
         self.vm(agent="connected", fail=["snapshot-hang-nothing"])
         r = self.run_tool("backup", "win", "--nas")
@@ -748,13 +798,13 @@ class RobustnessTest(Nas):
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
         self.assertIn("domblklist win --details --inactive", r.stderr)
 
-    def test_nvram_written_during_the_read_is_noted(self):
+    def test_nvram_written_during_the_read_is_noted(self) -> None:
         self.vm(agent="connected", fail=["touch-nvram"])
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(f"note: {self.nvram} changed while restic read it", r.stdout)
 
-    def test_recovery_kinds(self):
+    def test_recovery_kinds(self) -> None:
         mod = load()
         # State unreadable: only commands that look.
         lines = mod.overlay_recovery("win", [("sda", (self.disk, self.overlay))], {})
@@ -774,7 +824,7 @@ class RobustnessTest(Nas):
 
 
 class ShutOffAndRefusalTest(Nas):
-    def test_shut_off_vm_is_read_directly(self):
+    def test_shut_off_vm_is_read_directly(self) -> None:
         self.vm(state="shut off")
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -790,7 +840,7 @@ class ShutOffAndRefusalTest(Nas):
             "checked again after restic",
         )
 
-    def test_shut_off_vm_started_during_the_read(self):
+    def test_shut_off_vm_started_during_the_read(self) -> None:
         self.vm(state="shut off", fail=["start-during-backup"])
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 1)
@@ -799,7 +849,7 @@ class ShutOffAndRefusalTest(Nas):
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertFalse(os.path.exists(self.index))
 
-    def test_refused_states(self):
+    def test_refused_states(self) -> None:
         for state in ("paused", "pmsuspended", "in shutdown"):
             self.vm(state=state)
             r = self.run_tool("backup", "win", "--nas")
@@ -811,7 +861,7 @@ class ShutOffAndRefusalTest(Nas):
         self.assertIn("managed save", r.stderr)
         self.assertEqual(self.restic_calls(), [])
 
-    def test_leftover_overlay_is_refused(self):
+    def test_leftover_overlay_is_refused(self) -> None:
         left = f"{self.disk}.cst-overlay-20261101T000000Z"
         self.vm(
             live={"sda": left, "sdb": "/iso/virtio.iso"}, persistent={"sda": left, "sdb": "/iso/virtio.iso"}, chain=True
@@ -823,7 +873,7 @@ class ShutOffAndRefusalTest(Nas):
         self.assertIn("an overlay a NAS backup left behind", r.stderr)
         self.assertEqual(self.virsh_calls("snapshot-create-as"), [])
 
-    def test_unusable_repository_before_any_snapshot(self):
+    def test_unusable_repository_before_any_snapshot(self) -> None:
         for rc, text in (
             (12, "does not open the repository"),
             (10, "no restic repository"),
@@ -837,7 +887,7 @@ class ShutOffAndRefusalTest(Nas):
             self.assertIn("no snapshot taken", r.stderr)
         self.assertEqual(self.virsh_calls("snapshot-create-as"), [])
 
-    def test_nas_not_set_up(self):
+    def test_nas_not_set_up(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")
         r = self.run_tool("backup", "win", "--nas")
@@ -850,7 +900,7 @@ class ShutOffAndRefusalTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertIn("missing or empty", r.stderr)
 
-    def test_needs_root_and_arguments(self):
+    def test_needs_root_and_arguments(self) -> None:
         env = dict(self.env)
         del env["CST_VM_NONROOT_OK"]
         r = subprocess.run(
@@ -882,7 +932,7 @@ class ShutOffAndRefusalTest(Nas):
             with self.assertRaises(m.Usage, msg=bad):
                 m.parse_args(bad)
 
-    def test_scheduled_failure_alerts(self):
+    def test_scheduled_failure_alerts(self) -> None:
         self.restic_cfg(cat_rc=12)
         self.env["INVOCATION_ID"] = "x"
         r = self.run_tool("backup", "win", "--nas")
@@ -891,13 +941,15 @@ class ShutOffAndRefusalTest(Nas):
 
 
 class ConstantsTest(unittest.TestCase):
-    def test_nas_constants_match_btrfs_snapshot(self):
+    def test_nas_constants_match_btrfs_snapshot(self) -> None:
         with open(os.path.join(REPO, "btrfs", "btrfs-snapshot")) as f:
             text = f.read()
         m = load()
 
-        def shell(name):
-            return re.search(rf"^{name}=(\S+)", text, re.M).group(1)
+        def shell(name: str) -> str:
+            m_re = re.search(rf"^{name}=(\S+)", text, re.M)
+            assert m_re is not None
+            return m_re.group(1)
 
         self.assertEqual(shell("NAS_SSH_ALIAS"), m.NAS_SSH_ALIAS)
         self.assertEqual(shell("RESTIC_PASSWORD"), "/etc/btrfs-setup/restic-password")
@@ -906,7 +958,7 @@ class ConstantsTest(unittest.TestCase):
         # The /home job forgets only its own tag: the VM backups are never in its groups.
         self.assertIn("--tag btrfs-setup --keep-daily", text)
 
-    def test_forget_args_are_scoped(self):
+    def test_forget_args_are_scoped(self) -> None:
         m = load()
         a = m.forget_args("win", "sophia", 4, 3)
         self.assertEqual(a[a.index("--host") + 1], "sophia")
@@ -915,7 +967,7 @@ class ConstantsTest(unittest.TestCase):
 
 
 class TimerTest(Nas):
-    def test_on_status_off(self):
+    def test_on_status_off(self) -> None:
         r = self.run_tool("backup-timer", "status", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("weekly NAS backup of win: off", r.stdout)
@@ -940,6 +992,7 @@ class TimerTest(Nas):
         # systemd never kills a merge half done: the stop budget covers the merge's own limit.
         stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.M)
         self.assertTrue(stop, service)
+        assert stop is not None
         mod = load()
         self.assertGreaterEqual(
             int(stop.group(1)) * 60, mod.SNAPSHOT_TIMEOUT + mod.SNAPSHOT_SETTLE + mod.COMMIT_TIMEOUT + 300 + 15 * 60
@@ -969,7 +1022,7 @@ class TimerTest(Nas):
         self.assertFalse(os.path.exists(copy))
         self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.service")))
 
-    def test_on_refuses_without_nas_and_foreign_files(self):
+    def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")
         r = self.run_tool("backup-timer", "on", "win")
@@ -983,7 +1036,7 @@ class TimerTest(Nas):
 
 
 class SetupRoutingTest(unittest.TestCase):
-    def test_backup_timer_routing(self):
+    def test_backup_timer_routing(self) -> None:
         setup = os.path.join(REPO, "vm-setup.sh")
         env = {"PATH": "/usr/bin:/bin", "CST_PROG": "cst vm", "CST_VM_CONTAINER": "1"}
         r = subprocess.run(
