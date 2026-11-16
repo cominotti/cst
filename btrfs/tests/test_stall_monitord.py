@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import importlib.machinery
 import json
 import os
 import shutil
@@ -30,6 +29,7 @@ import unittest
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, cast
 from unittest import mock
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -95,10 +95,7 @@ class _StallMonitordModule(Protocol):
 def load() -> _StallMonitordModule:
     # Loading only defines constants and functions: main() runs under
     # `if __name__ == "__main__"`, which is not the case here.
-    loader = importlib.machinery.SourceFileLoader("btrfs_stall_monitord", TOOL)
-    mod = types.ModuleType("btrfs_stall_monitord")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "btrfs_stall_monitord")
     return cast("_StallMonitordModule", cast("object", mod))
 
 

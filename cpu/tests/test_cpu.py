@@ -15,7 +15,6 @@ from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import csv
 import difflib
-import importlib.machinery
 import io
 import json
 import os
@@ -23,7 +22,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import types
 from typing import Any, Protocol, cast
 import unittest
 import unittest.mock
@@ -35,6 +33,7 @@ from cpu.adapters import CstCpuWatchRuntimeAdapter, CstVmPinRuntimeAdapter, Subp
 from cpu.application import CpuService  # noqa: E402
 from cpu.domain import CpuSetupConfig, expand_cpu_range  # noqa: E402
 from cpu.ports import CpuWatchRuntimePort, VirshPort, VmPinRuntimePort  # noqa: E402
+from tests.script_loader import load_script
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU = os.path.dirname(HERE)
@@ -116,10 +115,7 @@ class _CpuWatchModule(Protocol):
 
 
 def _exec_script_module(name: str, path: str) -> object:
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    mod = types.ModuleType(name)
-    mod.__file__ = path
-    loader.exec_module(mod)
+    mod = load_script(path, name)
     return mod
 
 
@@ -716,6 +712,8 @@ class SetupQuietDispatchTest(unittest.TestCase):
         with open(self.script, "w") as f:
             f.write(src.replace(line, patched))
         open(os.path.join(t, "cst", "cpu", "cpu-watch"), "w").close()
+        # Sourced at the top of cpu-setup.sh (only its install commands use it).
+        shutil.copy(os.path.join(REPO, "cst-install.bash"), os.path.join(t, "cst", "cst-install.bash"))
         self.log = os.path.join(t, "log")
         for name in ("python3", "flatpak-spawn"):
             p = os.path.join(t, "bin", name)

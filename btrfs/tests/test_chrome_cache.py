@@ -9,17 +9,16 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
-import importlib.machinery
 import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from collections.abc import Callable, Sequence
 from typing import Protocol, cast
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -55,10 +54,7 @@ class _ChromeCacheModule(Protocol):
 
 
 def load() -> _ChromeCacheModule:
-    loader = importlib.machinery.SourceFileLoader("chrome_cache", TOOL)
-    mod = types.ModuleType("chrome_cache")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "chrome_cache")
     return cast("_ChromeCacheModule", cast("object", mod))
 
 

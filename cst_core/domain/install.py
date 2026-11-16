@@ -1,6 +1,6 @@
 """Declarative installation manifest and executable inventory for CST."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -20,6 +20,19 @@ class InstallEntry:
     owner: Owner
     kind: ArtifactKind
     runner: Owner
+    # Repository files a python-entry reads at run time (through
+    # cst_core.adapters.runtime.read_resource); bundled into its zipapp.
+    resources: tuple[str, ...] = ()
+
+    @property
+    def module(self) -> str:
+        """The CST module (top-level folder) this file belongs to."""
+        return self.src.split("/", 1)[0]
+
+    @property
+    def is_template(self) -> bool:
+        """True for `*.in` sources: installed with every @KEY@ replaced."""
+        return self.src.endswith(".in")
 
 
 INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = (
@@ -251,6 +264,22 @@ INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = (
         runner="user",
     ),
     InstallEntry(
+        src="btrfs/snapshots/top.mount.in",
+        dest="/etc/systemd/system/var-mnt-btrfs\\x2dtop.mount",
+        mode=OctalMode(0o644),
+        owner="root",
+        kind="unit",
+        runner="root",
+    ),
+    InstallEntry(
+        src="btrfs/snapshots/top.automount.in",
+        dest="/etc/systemd/system/var-mnt-btrfs\\x2dtop.automount",
+        mode=OctalMode(0o644),
+        owner="root",
+        kind="unit",
+        runner="root",
+    ),
+    InstallEntry(
         src="btrfs/sysctl/90-btrfs-writeback.conf",
         dest="/etc/sysctl.d/90-btrfs-writeback.conf",
         mode=OctalMode(0o644),
@@ -428,7 +457,11 @@ INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = (
 SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
     {
         "cst",
+        "cst-install.bash",
+        "cst-link.bash",
         "btrfs-setup.sh",
+        "btrfs/setup-bulk.bash",
+        "btrfs/setup-snapshots.bash",
         "btrfs/btrfs-degraded-boot-setup.sh",
         "cpu-setup.sh",
         "bluetooth-setup.sh",
@@ -446,6 +479,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "btrfs/chrome-cache",
         "btrfs/tests/realbtrfs-snapshot-core.sh",
         "cst_core/cli.py",
+        "cst_core/installer.py",
         "doctor/cst-doctor",
         "fix-anaconda-webui-btrfs-compress.sh",
         "swap/cli.py",
@@ -453,6 +487,13 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "tests/uv-dev",
     }
 )
+
+
+# Repository files that look installable (a config or data file next to a
+# module) but are read from the checkout only, with the reason.
+CHECKOUT_ONLY_FILES: Final[Mapping[str, str]] = {
+    "bluetooth/bluetooth.conf": "defaults read by bluetooth-setup.sh from the checkout; never copied",
+}
 
 
 def manifest_by_src() -> Mapping[str, InstallEntry]:
@@ -468,3 +509,37 @@ def manifest_by_dest() -> Mapping[str, InstallEntry]:
 def python_entry_srcs() -> tuple[InstallEntry, ...]:
     """Return all Python helper entries packaged as standalone zipapps."""
     return tuple(entry for entry in INSTALL_MANIFEST if entry.kind == "python-entry")
+
+
+def expand_dest(dest: str, home: str | None) -> str:
+    """The destination with a leading `~/` replaced by `home` (a user-owned entry)."""
+    if dest == "~" or dest.startswith("~/"):
+        if not home:
+            raise ValueError(f"{dest}: a home folder is needed for this destination")
+        return home.rstrip("/") + dest[1:]
+    return dest
+
+
+def render_template(text: str, values: Mapping[str, str]) -> str:
+    """`text` with every @KEY@ replaced literally by its value, ending in one newline.
+
+    Same result as the shell render it replaces (`$(<file)` drops the trailing
+    newlines, printf adds one back).
+    """
+    for key, value in values.items():
+        text = text.replace(f"@{key}@", value)
+    return text.rstrip("\n") + "\n"
+
+
+def select_entries(
+    entries: Sequence[InstallEntry],
+    *,
+    module: str | None = None,
+    kind: ArtifactKind | None = None,
+) -> tuple[InstallEntry, ...]:
+    """The entries of one module and/or one kind, in manifest order."""
+    return tuple(
+        entry
+        for entry in entries
+        if (module is None or entry.module == module) and (kind is None or entry.kind == kind)
+    )

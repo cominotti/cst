@@ -151,6 +151,7 @@ __all__ = [
     "ExecutionContextPort",
     "FileSystemPort",
     "HostPathPort",
+    "InstallTargetPort",
     "SystemdPort",
     "VirshPort",
 ]
@@ -168,3 +169,15 @@ class SystemdPort(Protocol):
     def restart(self, unit: str) -> bool: ...
 
     def escape_path(self, path: str, *, suffix: str) -> str: ...
+
+
+class InstallTargetPort(Protocol):
+    """The files `install` reads and writes (the real root, or a staging folder in tests)."""
+
+    def current(self, path: str) -> tuple[bytes, int] | None:
+        """(content, permission bits) of the regular file at path; None when absent or not a regular file."""
+        ...
+
+    def write(self, path: str, data: bytes, mode: int) -> None:
+        """Replace path atomically with data and mode (parent folders created 0755)."""
+        ...

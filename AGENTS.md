@@ -142,14 +142,17 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - **`cst` only dispatches.** `cst` delegates to `cst_core/cli.py`
   (`CstDispatcher`, backed by `cst_core/domain/dispatch.py` and `CstDispatchPort`).
   - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
-  - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives in `cst_core/domain/dispatch.py` (with `MODULES` and `SCRIPT` kept in `cst` for compatibility checks).
+  - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives only in `cst_core/domain/dispatch.py`; `cst` itself is a short bash wrapper that runs `cst_core/cli.py`.
   - `cst doctor` runs `doctor/cst-doctor`. `cst status` loops over every module.
 - **Each module has two parts.**
   - The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status.
-  - The parts it installs live in the `<module>/` folder: helper programs, systemd `units/`, `sysctl/`, `tmpfiles/` and udev rules. `install` copies them to `/usr/local/{bin,sbin}`, `/etc/systemd/system` and other system folders.
+  - The parts it installs live in the `<module>/` folder: helper programs, systemd `units/`, `sysctl/`, `tmpfiles/` and udev rules.
+  - **`INSTALL_MANIFEST` (`cst_core/domain/install.py`) is the one list of installed files**: source, destination, mode, owner, kind and who runs it. A setup script never names a destination itself: it sources `cst-install.bash` and calls `cst_install SRC...` (root files), `cst_install_as USER SRC...` (files in a home, written by a process running as that user) or `cst_install_text DEST MODE [USER]` (generated text). They run `cst_core/installer.py` on `/usr/bin/python3`, which writes a file only when its content or mode changed, atomically, and prints `unchanged: DEST` or `written:   DEST`. `installer.py plan` shows the same without writing.
+  - A `python-entry` is installed as a **zipapp**: one file holding the entry as `__main__.py`, every repository package it imports (the static import closure) and the data files the manifest lists in `resources`. Same path, same mode, shebang `#!/usr/bin/python3 -I`; its bytes are reproducible. Anything that compares an installed copy with the repository compares with these built bytes (`installer.py payload SRC`, `cst_core.adapters.runtime.install_payload`), never with the source file. A `*.in` source is a template: `--set KEY=VALUE` fills its `@KEY@`.
+  - A new installable file is added to the manifest in the same change (`tests/test_distribution.py` fails otherwise); a file that only the checkout reads goes to `CHECKOUT_ONLY_FILES` with the reason.
   - The copy that runs on the machine can therefore be older than the repository. A change to a helper reaches the machine only when the module's `install` runs again.
 - **Most helpers are Python scripts with no `.py` extension.** Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-toolchains`.
-  - Most tests load them with `importlib.machinery.SourceFileLoader` (see `<module>/tests/test_*.py`).
+  - Tests load them with `tests/script_loader.py` (`load_script(path, name)`), which registers the module in `sys.modules` before running it (`@dataclass` needs that on Python 3.14) and returns a fresh module each call.
   - Tests call the functions directly, with fakes for `virsh`, `systemctl`, sudo, restic and similar tools.
 - **Toolbox vs host.** The scripts detect a container through `/run/.containerenv` or `/.dockerenv`.
   - Inside one, read-only commands still work, sometimes by moving to the host with `flatpak-spawn --host`.

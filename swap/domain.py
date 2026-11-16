@@ -475,4 +475,3 @@ class SwapApplyResult:
     swapon_out: str
     verify_error: str
     prog: str
-

@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 import contextlib
 import hashlib
-import importlib.machinery
 import io
 import json
 import os
@@ -32,15 +31,15 @@ from typing import Any
 import unittest
 from unittest import mock
 
+from tests.script_loader import load_script
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
 
 
 def load() -> ModuleType:
     # The helper has no .py extension, so it is loaded from its path.
-    mod = ModuleType("cst_mutation")
-    mod.__file__ = TOOL
-    importlib.machinery.SourceFileLoader("cst_mutation", TOOL).exec_module(mod)
+    mod = load_script(TOOL, "cst_mutation")
     return mod
 
 

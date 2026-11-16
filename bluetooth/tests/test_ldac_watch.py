@@ -679,6 +679,7 @@ class InstallTest(unittest.TestCase):
 set -Eeuo pipefail
 PROG=test; CHECK=0
 SRC="$REPO/bluetooth"
+source "$REPO/cst-install.bash"  # as bluetooth-setup.sh does: lw_install and lw_plan use the installer
 LW_UNIT="cst-bt-ldac48.service"
 LW_SRC="${SRC}/bt-ldac-watch"
 LW_PROG="${HOME}/.local/lib/cst/bt-ldac-watch"

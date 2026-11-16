@@ -51,6 +51,7 @@ class CstCpuWatchRuntimeAdapter:
             loader = importlib.machinery.SourceFileLoader("cst_cpu_watch_runtime", self._tool_path)
             mod = types.ModuleType("cst_cpu_watch_runtime")
             mod.__file__ = self._tool_path
+            sys.modules["cst_cpu_watch_runtime"] = mod  # registered first: @dataclass looks the module up
             loader.exec_module(mod)
             self._mod = cast("_CpuWatchModule", cast("object", mod))
         return self._mod
@@ -95,6 +96,7 @@ class CstVmPinRuntimeAdapter:
             loader = importlib.machinery.SourceFileLoader("cst_cpu_vm_pin_runtime", self._tool_path)
             mod = types.ModuleType("cst_cpu_vm_pin_runtime")
             mod.__file__ = self._tool_path
+            sys.modules["cst_cpu_vm_pin_runtime"] = mod  # registered first: @dataclass looks the module up
             loader.exec_module(mod)
             self._mod = cast("_VmPinModule", cast("object", mod))
         return self._mod

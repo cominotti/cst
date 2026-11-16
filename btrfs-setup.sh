@@ -146,6 +146,8 @@ set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(dirname "${SELF}")/btrfs"
+# shellcheck source=cst-install.bash
+source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 SYSCTL_FILE="/etc/sysctl.d/90-btrfs-writeback.conf"
 RECLAIM_FILE="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
@@ -164,14 +166,9 @@ OLD_ALERTS_DIR=/var/lib/f44-alerts
 OLD_PENDING_UNIT=f44-pending-alerts.service
 OLD_PENDING_READER=/usr/local/bin/f44-pending-alerts
 OLD_BELOW_DROPIN="${UNIT_DIR}/below.service.d/10-f44-tools.conf"
-# source (relative to btrfs/) -> destination
-declare -A BINARIES=(
-    [btrfs-health-check]=/usr/local/sbin/btrfs-health-check
-    [btrfs-notify]=/usr/local/sbin/btrfs-notify
-    [btrfs-stall-monitord]=/usr/local/sbin/btrfs-stall-monitord
-    [btrfs-stall-report]=/usr/local/bin/btrfs-stall-report
-    [docker-volumes-nocow]=/usr/local/sbin/docker-volumes-nocow
-)
+# Programs (in btrfs/) that install copies; their destinations are in the
+# install manifest (cst_core/domain/install.py).
+BINARIES=(btrfs-health-check btrfs-notify btrfs-stall-monitord btrfs-stall-report docker-volumes-nocow)
 UNITS=(btrfs-health-check.service btrfs-health-check.timer btrfs-scrub-weekly.service
        btrfs-scrub-weekly.timer btrfs-stall-monitor.service btrfs-stall-alert.service
        docker-volumes-nocow.service)
@@ -252,52 +249,9 @@ root_fs_uuid() {
     findmnt -rn -o UUID --target /sysroot 2>/dev/null | head -n1
 }
 
-# install_file SRC DEST MODE [OWNER]: copy only when the content changed.
-install_file() {
-    local src="$1" dest="$2" mode="$3" owner="${4:-root}"
-    if [[ -f "${dest}" ]] && cmp -s "${src}" "${dest}"; then
-        echo "unchanged: ${dest}"
-        return
-    fi
-    if [[ "${owner}" == root ]]; then
-        install -D -m "${mode}" -o root -g root "${src}" "${dest}"
-        restorecon "${dest}" 2>/dev/null || true
-    else
-        # Into the user's home as the user: no root-owned dirs, no following
-        # symlinks with root privileges.
-        runuser -u "${owner}" -- install -D -m "${mode}" "${src}" "${dest}"
-    fi
-    echo "written:   ${dest}"
-}
-
-# install_text DEST MODE [OWNER] < content
-install_text() {
-    local tmp
-    tmp="$(mktemp)"
-    cat >"${tmp}"
-    chmod 0644 "${tmp}"
-    install_file "${tmp}" "$@"
-    rm -f "${tmp}"
-}
-
-# render SRC KEY=VALUE...: SRC with every @KEY@ replaced by VALUE, literally
-# (quoted replacement: no escaping of '|', '&' or '\' in values needed).
-render() {
-    local text kv
-    text="$(<"$1")"
-    shift
-    for kv in "$@"; do
-        text="${text//"@${kv%%=*}@"/"${kv#*=}"}"
-    done
-    printf '%s\n' "${text}"
-}
-
-# install_units NAME...: unit files from btrfs/units into UNIT_DIR.
+# install_units NAME...: unit files from btrfs/units (to UNIT_DIR, per the manifest).
 install_units() {
-    local u
-    for u in "$@"; do
-        install_file "${SRC}/units/${u}" "${UNIT_DIR}/${u}" 0644
-    done
+    cst_install "${@/#/btrfs/units/}"
 }
 
 # check_syntax FILE: bash -n or a Python parse, by shebang; fails on errors.
@@ -319,8 +273,7 @@ sysval() { cat "$1" 2>/dev/null || echo '?'; }
 install_pending_alerts() {
     check_syntax "${SRC}/cst-pending-alerts"
     migrate_old_alerts
-    install_file "${SRC}/cst-pending-alerts" "${PENDING_READER}" 0755
-    install_file "${SRC}/units/user/${PENDING_UNIT}" "${USER_UNIT_DIR}/${PENDING_UNIT}" 0644
+    cst_install btrfs/cst-pending-alerts "btrfs/units/user/${PENDING_UNIT}"
     # Written only by root (btrfs-notify); every user may read it.
     install -d -m 0755 -o root -g root "${ALERTS_DIR}" "${ALERTS_DIR}/pending"
     restorecon -R "${ALERTS_DIR}" 2>/dev/null || true
@@ -620,7 +573,7 @@ docker_gc() {
     case "${action}" in
         enable)
             check_syntax "${SRC}/docker-gc" || { echo "${SRC}/docker-gc: syntax error" >&2; exit 1; }
-            install_file "${SRC}/docker-gc" "${bin}" 0755
+            cst_install btrfs/docker-gc
             install_units "${DOCKER_GC_UNITS[@]}"
             systemctl daemon-reload
             systemctl enable docker-gc-recorder.service docker-gc.timer
@@ -659,7 +612,7 @@ docker_gc() {
 }
 
 uninstall() {
-    local unit
+    local unit dest dests
     # One by one: a missing unit must not stop the others from being stopped.
     for unit in "${TIMERS[@]}" btrfs-stall-monitor.service; do
         systemctl disable --now "${unit}" 2>/dev/null || true
@@ -675,14 +628,15 @@ uninstall() {
     for unit in "${UNITS[@]}" "${OLD_UNITS[@]}"; do
         rm -fv "${UNIT_DIR}/${unit}"
     done
-    for dest in "${BINARIES[@]}"; do
+    mapfile -t dests < <(cst_installed_dests "${BINARIES[@]/#/btrfs/}")
+    for dest in "${dests[@]}"; do
         rm -fv "${dest}"
     done
     # The snapshot component (left alone here) still alerts through btrfs-notify,
     # and its alerts at boot still need the login-time reader (brought to the
     # current names, so that reader and btrfs-notify use the same folder).
     if [[ -x /usr/local/sbin/btrfs-snapshot ]]; then
-        install -m 0755 "${SRC}/btrfs-notify" /usr/local/sbin/btrfs-notify
+        cst_install btrfs/btrfs-notify
         install_pending_alerts
         echo "kept:      /usr/local/sbin/btrfs-notify, ${PENDING_READER}, ${USER_UNIT_DIR}/${PENDING_UNIT}"
         echo "           and ${ALERTS_DIR} (used by the snapshot component)"
@@ -730,7 +684,7 @@ install_all() {
     done
 
     # Preflight: every component must at least parse.
-    for f in "${!BINARIES[@]}" btrfs-stall-watch cst-pending-alerts; do
+    for f in "${BINARIES[@]}" btrfs-stall-watch cst-pending-alerts; do
         check_syntax "${SRC}/${f}"
     done
     for u in "${UNITS[@]}" "user/${PENDING_UNIT}"; do
@@ -741,18 +695,16 @@ install_all() {
         { echo "unexpected root fs UUID '${uuid}'" >&2; exit 1; }
 
     # Files.
-    for f in "${!BINARIES[@]}"; do
-        install_file "${SRC}/${f}" "${BINARIES[${f}]}" 0755
-    done
+    cst_install "${BINARIES[@]/#/btrfs/}"
     install_units "${UNITS[@]}"
     install_pending_alerts
-    install_file "${SRC}/sysctl/90-btrfs-writeback.conf" "${SYSCTL_FILE}" 0644
+    cst_install btrfs/sysctl/90-btrfs-writeback.conf
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
-    render "${SRC}/tmpfiles/btrfs-automatic-reclaim.conf.in" UUID="${uuid}" | install_text "${RECLAIM_FILE}" 0644
+    cst_install --set "UUID=${uuid}" btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in
     systemd-tmpfiles --create "${RECLAIM_FILE}"
     if [[ -n "${shim}" ]]; then
-        shim_content | install_text "${shim}" 0755 "${target_user}"
+        shim_content | cst_install_text "${shim}" 0755 "${target_user}"
     fi
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
@@ -777,7 +729,7 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
             fi
             rpm -q below >/dev/null 2>&1 || below_pending=1
         fi
-        install_file "${SRC}/units/below.service.d/10-cst.conf" "${BELOW_DROPIN}" 0644
+        cst_install btrfs/units/below.service.d/10-cst.conf
     fi
     # The drop-in under its name from versions called f44-tools: renamed (kept
     # with --no-below, as before), or removed once the new one is there.

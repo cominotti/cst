@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import importlib.machinery
 import io
 import os
 import re
@@ -26,6 +25,7 @@ import unittest
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Protocol, cast
 from unittest import mock
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -145,10 +145,7 @@ class _ToolchainsModule(Protocol):
 
 
 def load() -> _ToolchainsModule:
-    loader = importlib.machinery.SourceFileLoader("cst_toolchains", TOOL)
-    mod = types.ModuleType("cst_toolchains")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "cst_toolchains")
     return cast("_ToolchainsModule", cast("object", mod))
 
 

@@ -363,7 +363,9 @@ class StatusMathTest(unittest.TestCase):
         ):
             with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
                 f.write(val + "\n")
-        service = self._service(os.path.join(tmp, "proc"), os.path.join(tmp, "cg"), os.path.join(tmp, "run"), zdebug=tmp)
+        service = self._service(
+            os.path.join(tmp, "proc"), os.path.join(tmp, "cg"), os.path.join(tmp, "run"), zdebug=tmp
+        )
         report = service.status_report()
         assert report.debug is not None
         out = io.StringIO()
@@ -834,7 +836,9 @@ class SwapApplicationTest(unittest.TestCase):
         bad_size_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=12345)
         err = io.StringIO()
         self.assertEqual(
-            render_apply(SwapApplicationService(self.env, fs, systemd, bad_size_sys).apply_changes(), out=io.StringIO(), err=err),
+            render_apply(
+                SwapApplicationService(self.env, fs, systemd, bad_size_sys).apply_changes(), out=io.StringIO(), err=err
+            ),
             1,
         )
         self.assertIn("expected", err.getvalue())
@@ -843,7 +847,9 @@ class SwapApplicationTest(unittest.TestCase):
         bad_fs_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, part_type="ext4")
         err = io.StringIO()
         self.assertEqual(
-            render_apply(SwapApplicationService(self.env, fs, systemd, bad_fs_sys).apply_changes(), out=io.StringIO(), err=err),
+            render_apply(
+                SwapApplicationService(self.env, fs, systemd, bad_fs_sys).apply_changes(), out=io.StringIO(), err=err
+            ),
             1,
         )
         self.assertIn("ext4", err.getvalue())
@@ -854,7 +860,9 @@ class SwapApplicationTest(unittest.TestCase):
         good_sys = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
         err = io.StringIO()
         self.assertEqual(
-            render_apply(SwapApplicationService(self.env, fs, systemd, good_sys).apply_changes(), out=io.StringIO(), err=err),
+            render_apply(
+                SwapApplicationService(self.env, fs, systemd, good_sys).apply_changes(), out=io.StringIO(), err=err
+            ),
             1,
         )
         self.assertIn("unmarked entry", err.getvalue())

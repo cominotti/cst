@@ -17,7 +17,6 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-import importlib.machinery
 import io
 import json
 import os
@@ -48,6 +47,7 @@ if REPO not in sys.path:
 from doctor import domain as doc_domain
 from doctor.domain import Nevra, Request, Result, Usage
 from doctor.ports import CheckFn, DoctorHostPort
+from tests.script_loader import load_script
 
 
 class _VmModule(Protocol):
@@ -103,10 +103,7 @@ class _DoctorModule(Protocol):
 
 
 def load() -> _DoctorModule:
-    loader = importlib.machinery.SourceFileLoader("cst_doctor", TOOL)
-    mod = ModuleType("cst_doctor")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "cst_doctor")
     return cast("_DoctorModule", mod)
 
 

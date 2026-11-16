@@ -7,7 +7,6 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-import importlib.machinery
 import io
 import os
 import re
@@ -36,6 +35,7 @@ if REPO not in sys.path:
 from bluetooth import application as bt_app  # noqa: E402
 from bluetooth.adapters import LocalBluetoothHostAdapter  # noqa: E402
 from bluetooth.domain import classify_other_fragments  # noqa: E402
+from tests.script_loader import load_script
 
 ISO = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
 MAC = "0A:1B:2C:3D:4E:5F"
@@ -130,10 +130,7 @@ class HelperModule(Protocol):
 
 def load(path: str = HELPER, name: str = "bt_helper") -> types.ModuleType:
     """Load an extensionless helper script as a Python module."""
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    mod = types.ModuleType(name)
-    mod.__file__ = path
-    loader.exec_module(mod)
+    mod = load_script(path, name)
     return mod
 
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 import fcntl
-import importlib.machinery
 import json
 import os
 import pty
@@ -31,9 +30,10 @@ import sys
 import tempfile
 import termios
 import time
-import types
 from typing import Any, Protocol, cast
 import unittest
+
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -68,10 +68,7 @@ class _VmModule(Protocol):
 
 
 def load() -> _VmModule:
-    loader = importlib.machinery.SourceFileLoader("cst_vm", TOOL)
-    mod = types.ModuleType("cst_vm")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "cst_vm")
     return cast("_VmModule", cast("object", mod))
 
 

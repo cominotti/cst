@@ -15,14 +15,9 @@ from cst_core.adapters import (
     SubprocessCommandRunner,
     SystemClockAdapter,
     SystemctlAdapter,
-    build_python_zipapp,
-    load_script,
-    script_path,
-    write_python_zipapp,
 )
 from cst_core.cli import CstDispatcher
 from cst_core.domain import (
-    INSTALL_MANIFEST,
     ByteSize,
     CpuSet,
     DomainValidationError,
@@ -294,47 +289,6 @@ class AdaptersTest(unittest.TestCase):
         clock = SystemClockAdapter()
         self.assertGreater(clock.now(), 0.0)
         self.assertGreater(clock.monotonic(), 0.0)
-
-    def test_load_script_and_deterministic_zipapp(self) -> None:
-        tmp = tempfile.mkdtemp(prefix="cst-core-zip-")
-        self.addCleanup(shutil.rmtree, tmp)
-        pkg_dir = os.path.join(tmp, "demo")
-        core_dir = os.path.join(tmp, "cst_core")
-        os.makedirs(pkg_dir)
-        os.makedirs(core_dir)
-        with open(os.path.join(core_dir, "__init__.py"), "w", encoding="utf-8") as fh:
-            fh.write("CORE_VAL = 7\n")
-        with open(os.path.join(pkg_dir, "__init__.py"), "w", encoding="utf-8") as fh:
-            fh.write("")
-        with open(os.path.join(pkg_dir, "domain.py"), "w", encoding="utf-8") as fh:
-            fh.write("from dataclasses import dataclass\n@dataclass(frozen=True, slots=True)\nclass Item:\n    v: int\n")
-        script = os.path.join(pkg_dir, "demo-tool")
-        with open(script, "w", encoding="utf-8") as fh:
-            fh.write(
-                "#!/usr/bin/python3 -I\n"
-                "# managed-by: demo-setup.sh (CST)\n"
-                "from demo.domain import Item\n"
-                "def run() -> int:\n"
-                "    return Item(7).v\n"
-                "if __name__ == '__main__':\n"
-                "    from cst_core import CORE_VAL\n"
-                "    print(Item(CORE_VAL).v)\n"
-            )
-
-        mod = load_script(script)
-        self.assertEqual(mod.run(), 7)
-        self.assertEqual(script_path("/tmp/app.zip/__main__.py"), "/tmp/app.zip/__main__.py")
-        b1 = build_python_zipapp(tmp, "demo/demo-tool")
-        b2 = build_python_zipapp(tmp, "demo/demo-tool")
-        self.assertEqual(b1, b2)
-        self.assertIn(b"# managed-by: demo-setup.sh (CST)", b1)
-
-        out_bin = os.path.join(tmp, "bin", "demo-tool")
-        self.assertTrue(write_python_zipapp(tmp, "demo/demo-tool", out_bin, mode=0o755))
-        self.assertFalse(write_python_zipapp(tmp, "demo/demo-tool", out_bin, mode=0o755))
-        res = SubprocessCommandRunner().run([sys.executable, "-I", "-B", out_bin], check=True)
-        self.assertEqual(res.stdout.strip(), "7")
-        self.assertTrue(INSTALL_MANIFEST)
 
 
 class _FakeDispatchPort:

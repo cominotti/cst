@@ -1,31 +1,15 @@
-"""Concrete infrastructure adapters implementing cst_core ports and zipapp packaging."""
+"""Concrete infrastructure adapters implementing cst_core ports (zipapps: cst_core.adapters.zipapp)."""
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
-import importlib.machinery
-import importlib.util
-import io
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
-import types
-import zipfile
 
-if __name__ == "__main__":
-    _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if os.path.isdir(_repo_root) and _repo_root not in sys.path:
-        sys.path.insert(0, _repo_root)
-
-from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.ports import CommandFailed, CommandResult, CommandRunnerPort, ExecutionContextPort
-
-_ZIP_FIXED_TIME = (2026, 1, 1, 0, 0, 0)
-_ZIP_PREAMBLE = b"#!/usr/bin/python3 -I\n"
 
 
 def _decode_stream(data: str | bytes | None) -> str:
@@ -361,151 +345,6 @@ class SubprocessVirshAdapter:
         return res.stdout if res.returncode == 0 else None
 
 
-def load_script(path: str | Path, module_name: str | None = None) -> types.ModuleType:
-    """Load a Python script (including extensionless helpers) with sys.modules registration.
-
-    Python 3.15 `@dataclass` and `typing` inspection require the module to be
-    registered in `sys.modules` before executing its body.
-    """
-    abs_path = os.path.abspath(os.fspath(path))
-    repo_root = os.path.dirname(os.path.dirname(abs_path))
-    if os.path.isdir(os.path.join(repo_root, "cst_core")) and repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-    if module_name is None:
-        slug = os.path.basename(abs_path).replace("-", "_").replace(".", "_")
-        module_name = f"cst_script_{slug}_{abs(hash(abs_path))}"
-    loader = importlib.machinery.SourceFileLoader(module_name, abs_path)
-    spec = importlib.util.spec_from_loader(module_name, loader, origin=abs_path)
-    assert spec is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    try:
-        loader.exec_module(mod)
-    except BaseException:
-        sys.modules.pop(module_name, None)
-        raise
-    return mod
-
-
-def script_path(dunder_file: str) -> str:
-    """Return the path of the running script or zipapp archive."""
-    abs_file = os.path.abspath(dunder_file)
-    if os.path.basename(abs_file) == "__main__.py":
-        archive = os.path.dirname(abs_file)
-        if os.path.isfile(archive):
-            return archive
-    return abs_file
-
-
-def _collect_package_files(pkg_dir: Path, pkg_name: str) -> list[tuple[str, bytes]]:
-    files: list[tuple[str, bytes]] = []
-    if not pkg_dir.is_dir():
-        return files
-    for path in sorted(pkg_dir.rglob("*.py")):
-        rel_parts = path.relative_to(pkg_dir).parts
-        if "tests" in rel_parts or "__pycache__" in rel_parts:
-            continue
-        arc_name = f"{pkg_name}/{'/'.join(rel_parts)}"
-        files.append((arc_name, path.read_bytes()))
-    return files
-
-
-def build_python_zipapp(repo_root: str | Path, src_rel: str) -> bytes:
-    """Build a deterministic, uncompressed self-contained zipapp for a CST helper.
-
-    Bundles `__main__.py` (`src_rel`), `cst_core/`, and the helper's owning
-    bounded-context package (`<pkg>/`) using ZIP_STORED and fixed timestamps so
-    repeated builds are byte-for-byte reproducible and grep-friendly.
-    """
-    root = Path(repo_root).resolve()
-    norm_rel = src_rel.strip("/")
-    entry_path = root / norm_rel
-    if not entry_path.is_file():
-        raise FileNotFoundError(f"zipapp source not found: {entry_path}")
-
-    pkg_name = norm_rel.split("/", 1)[0]
-    raw_entry = entry_path.read_bytes()
-    preamble_lines: list[bytes] = [_ZIP_PREAMBLE]
-    for line in raw_entry.splitlines(keepends=True)[1:4]:
-        if line.startswith(b"# managed-by:"):
-            preamble_lines.append(line if line.endswith(b"\n") else line + b"\n")
-            break
-    preamble = b"".join(preamble_lines)
-
-    entries: dict[str, bytes] = {"__main__.py": raw_entry}
-    for arc_name, data in _collect_package_files(root / "cst_core", "cst_core"):
-        entries[arc_name] = data
-    if "/" in norm_rel and (root / pkg_name / "__init__.py").is_file():
-        for arc_name, data in _collect_package_files(root / pkg_name, pkg_name):
-            entries[arc_name] = data
-
-    buf = io.BytesIO()
-    buf.write(preamble)
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_STORED) as zf:
-        for arc_name in sorted(entries):
-            info = zipfile.ZipInfo(filename=arc_name, date_time=_ZIP_FIXED_TIME)
-            info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = 0o644 << 16
-            zf.writestr(info, entries[arc_name])
-    return buf.getvalue()
-
-
-def write_python_zipapp(
-    repo_root: str | Path,
-    src_rel: str,
-    dest_path: str | Path,
-    mode: int = 0o755,
-) -> bool:
-    """Write a deterministic zipapp atomically; return True if dest bytes changed."""
-    payload = build_python_zipapp(repo_root, src_rel)
-    abs_dest = os.path.abspath(os.fspath(dest_path))
-    try:
-        if (
-            not os.path.islink(abs_dest)
-            and os.path.isfile(abs_dest)
-            and stat.S_IMODE(os.stat(abs_dest).st_mode) == mode
-        ):
-            with open(abs_dest, "rb") as fh:
-                if fh.read() == payload:
-                    return False
-    except OSError:
-        pass
-    write_bytes_atomic(abs_dest, payload, mode=mode)
-    return True
-
-
-def _cli_main(argv: Sequence[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args[:1] == ["build-zipapp"] and len(args) in (4, 5):
-        repo_root, src_rel, dest_path = args[1], args[2], args[3]
-        mode = int(args[4], 8) if len(args) == 5 else 0o755
-        data = build_python_zipapp(repo_root, src_rel)
-        parent = os.path.dirname(os.path.abspath(dest_path))
-        if parent:
-            os.makedirs(parent, mode=0o755, exist_ok=True)
-        with open(dest_path, "wb") as fh:
-            fh.write(data)
-        os.chmod(dest_path, mode)
-        return 0
-    if args[:1] == ["manifest-tsv"]:
-        kind_filter = args[1] if len(args) > 1 else ""
-        for entry in INSTALL_MANIFEST:
-            if not kind_filter or entry.kind == kind_filter:
-                print(
-                    f"{entry.src}\t{entry.dest}\t{entry.mode.bits:04o}\t{entry.owner}\t{entry.kind}\t{entry.runner}"
-                )
-        return 0
-    print(
-        "usage: cst_core.adapters [build-zipapp <repo> <src_rel> <dest> [mode] | manifest-tsv [kind]]",
-        file=sys.stderr,
-    )
-    return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(_cli_main())
-
-
 __all__ = [
     "HostExecutionContext",
     "LocalFileSystemAdapter",
@@ -513,9 +352,5 @@ __all__ = [
     "SubprocessVirshAdapter",
     "SystemClockAdapter",
     "SystemctlAdapter",
-    "build_python_zipapp",
-    "load_script",
-    "script_path",
     "write_bytes_atomic",
-    "write_python_zipapp",
 ]

@@ -14,7 +14,6 @@ or directly:
 from __future__ import annotations
 
 import contextlib
-import importlib.machinery
 import io
 import os
 import shutil
@@ -22,11 +21,11 @@ import stat
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Protocol, cast
 from unittest import mock
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -142,10 +141,7 @@ class _BtrfsBulkModule(Protocol):
 
 
 def load() -> _BtrfsBulkModule:
-    loader = importlib.machinery.SourceFileLoader("btrfs_bulk", TOOL)
-    mod = types.ModuleType("btrfs_bulk")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "btrfs_bulk")
     return cast("_BtrfsBulkModule", cast("object", mod))
 
 

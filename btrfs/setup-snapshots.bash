@@ -1,12 +1,11 @@
 # shellcheck shell=bash
 #
 # setup-snapshots.bash: `cst btrfs snapshots ...` (sourced by the frontend,
-# runs as root; uses its helpers install_file/install_text/install_units/render/
+# runs as root; uses its helpers cst_install/cst_install_text (cst-install.bash), install_units/
 # check_syntax/root_fs_uuid/install_pending_alerts and
 # variables SRC, UNIT_DIR, PROG, target_user). Nothing here runs unless one of these
 # explicit actions is called.
 
-SNAP_SRC="${SRC}/snapshots"
 SNAP_CONF=/etc/btrfs-setup/snapshots.conf
 SNAP_PLAN=/etc/btrfs-setup/convert-plan
 SNAP_STATE=/var/lib/btrfs-snapshot
@@ -148,7 +147,7 @@ snap_install_runtime() {
     local f
     for f in btrfs-snapshot btrfs-snapshot-core btrfs-notify btrfs-bulk; do
         check_syntax "${SRC}/${f}" || { echo "${SRC}/${f}: syntax error, not installed" >&2; exit 1; }
-        install_file "${SRC}/${f}" "/usr/local/sbin/${f}" 0755
+        cst_install "btrfs/${f}"
     done
     # Alerts raised before the login (convert-boot) are shown at the next login.
     install_pending_alerts
@@ -245,7 +244,7 @@ snap_setup() {
             read -r strategy rel <<<"${entry}"
             echo "${strategy} ${home}/${rel}"
         done
-    } | install_text "${SNAP_PLAN}" 0644
+    } | cst_install_text "${SNAP_PLAN}" 0644
     snap_conf_set HOME_DIR="${home}" HOME_SUBVOL="${subvol}"
     snap_install_runtime
     snap_user_configs "${home}"
@@ -379,9 +378,9 @@ snap_activate() {
     opts="subvolid=5${opts:+,${opts}}"
     unit="$(systemd-escape --path "${SNAP_TOP}")"
     install -d -m 0700 "${SNAP_TOP}"
-    render "${SNAP_SRC}/top.mount.in" UUID="${uuid}" OPTIONS="${opts}" |
-        install_text "${UNIT_DIR}/${unit}.mount" 0644
-    install_text "${UNIT_DIR}/${unit}.automount" 0644 <"${SNAP_SRC}/top.automount.in"
+    # The manifest's dests for these two are the unit names of SNAP_TOP.
+    cst_install --set "UUID=${uuid}" --set "OPTIONS=${opts}" btrfs/snapshots/top.mount.in \
+        btrfs/snapshots/top.automount.in
     systemctl daemon-reload
     systemctl enable --now "${unit}.automount"
     install -d -m 0700 "${SNAP_TOP}/${SNAP_DIR_NAME}"

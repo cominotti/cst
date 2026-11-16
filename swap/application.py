@@ -6,6 +6,7 @@ import posixpath
 import re
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
+from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
 from cst_core.ports import FileSystemPort, SystemdPort
 from swap.domain import (
@@ -43,6 +44,19 @@ from swap.domain import (
 from swap.ports import SwapSystemPort
 
 
+# The files swap installs: where they go and with which mode comes from the
+# install manifest (cst_core/domain/install.py), the one list of installed files.
+_MANIFEST = manifest_by_src()
+TMPFILES_ENTRY: InstallEntry = _MANIFEST["swap/tmpfiles/zswap.conf"]
+SYSCTL_ENTRY: InstallEntry = _MANIFEST["swap/sysctl/99-swap-tuning.conf"]
+DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-50-memory-low.conf"]
+
+
+def _under(base: str, manifest_path: str, prefix: str) -> str:
+    """manifest_path (which starts with prefix) moved under base."""
+    return posixpath.join(base, manifest_path[len(prefix) :])
+
+
 class MissingDesiredFileError(RuntimeError):
     """Raised when a desired config file inside CST's swap/ directory is missing."""
 
@@ -72,11 +86,11 @@ class SwapEnvironment:
 
     @property
     def tmpfiles_conf(self) -> str:
-        return posixpath.join(self.etc_dir, "tmpfiles.d", "zswap.conf")
+        return _under(self.etc_dir, TMPFILES_ENTRY.dest, "/etc/")
 
     @property
     def sysctl_conf(self) -> str:
-        return posixpath.join(self.etc_dir, "sysctl.d", "99-swap-tuning.conf")
+        return _under(self.etc_dir, SYSCTL_ENTRY.dest, "/etc/")
 
     @property
     def old_sysctl_conf(self) -> str:
@@ -84,7 +98,7 @@ class SwapEnvironment:
 
     @property
     def slice_dropin(self) -> str:
-        return posixpath.join(self.etc_dir, "systemd", "system", "machine.slice.d", "50-memory-low.conf")
+        return _under(self.etc_dir, DROPIN_ENTRY.dest, "/etc/")
 
     @property
     def zram_conf(self) -> str:
@@ -92,15 +106,15 @@ class SwapEnvironment:
 
     @property
     def src_tmpfiles(self) -> str:
-        return posixpath.join(self.src_dir, "tmpfiles", "zswap.conf")
+        return _under(self.src_dir, TMPFILES_ENTRY.src, "swap/")
 
     @property
     def src_sysctl(self) -> str:
-        return posixpath.join(self.src_dir, "sysctl", "99-swap-tuning.conf")
+        return _under(self.src_dir, SYSCTL_ENTRY.src, "swap/")
 
     @property
     def src_dropin(self) -> str:
-        return posixpath.join(self.src_dir, "units", "machine.slice.d-50-memory-low.conf")
+        return _under(self.src_dir, DROPIN_ENTRY.src, "swap/")
 
 
 def _short_etc_path(etc_dir: str, path: str) -> str:
@@ -200,7 +214,9 @@ class SwapApplicationService:
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
         file_items.append(
-            PlanItem(describe_state(c_state), f"crypttab: {spec.name} line", state_note(c_state, spec.name, env.prog, verb))
+            PlanItem(
+                describe_state(c_state), f"crypttab: {spec.name} line", state_note(c_state, spec.name, env.prog, verb)
+            )
         )
         file_items.append(
             PlanItem(
@@ -218,7 +234,9 @@ class SwapApplicationService:
         ):
             st = self._inspect_file(src, dest)
             file_items.append(
-                PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, spec.name, env.prog, verb))
+                PlanItem(
+                    describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, spec.name, env.prog, verb)
+                )
             )
 
         if self._fs.exists(env.old_sysctl_conf):
@@ -248,7 +266,9 @@ class SwapApplicationService:
         if part is not None:
             dev, size = part
             if size == spec.expected_size_bytes:
-                runtime_items.append(PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected"))
+                runtime_items.append(
+                    PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected")
+                )
             else:
                 runtime_items.append(
                     PlanItem(
@@ -330,7 +350,9 @@ class SwapApplicationService:
         want_low = parse_memory_low(self._desired_text(self._env.src_dropin))
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
         if live_low is None:
-            rows.append(SettingCheckRow("-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low)))
+            rows.append(
+                SettingCheckRow("-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low))
+            )
         else:
             ok = live_low.isdigit() and int(live_low) == want_low
             rows.append(
@@ -368,7 +390,9 @@ class SwapApplicationService:
                 posixpath.join(self._env.sys_dir, "class", "block", posixpath.basename(entry.device), "dm", "name")
             )
             label = f"{entry.device} ({name})" if name else entry.device
-            out.append(SwapDeviceRow(label, entry.swap_type, entry.used_kib * 1024, entry.size_kib * 1024, entry.priority))
+            out.append(
+                SwapDeviceRow(label, entry.swap_type, entry.used_kib * 1024, entry.size_kib * 1024, entry.priority)
+            )
         return tuple(out)
 
     def _cgroups(self) -> list[tuple[str, str]]:
@@ -524,11 +548,15 @@ class SwapApplicationService:
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
         if st == "adopt":
-            events.append(ApplyEvent("out", "line", f"adopted:   {path} ({name} entry: marker renewed, entry unchanged)"))
+            events.append(
+                ApplyEvent("out", "line", f"adopted:   {path} ({name} entry: marker renewed, entry unchanged)")
+            )
             return True, False, True
         if st == "duplicate":
             events.append(
-                ApplyEvent("out", "line", f"deduped:   {path} ({name} entry was there twice: one kept, entry unchanged)")
+                ApplyEvent(
+                    "out", "line", f"deduped:   {path} ({name} entry was there twice: one kept, entry unchanged)"
+                )
             )
             return True, False, True
         events.append(ApplyEvent("out", "line", f"written:   {path} ({name} entry)"))
@@ -601,7 +629,9 @@ class SwapApplicationService:
             if line_changed:
                 if swap0_used == 0:
                     events.append(
-                        ApplyEvent("out", "line", f"{spec.mapper_path}: entry changed and the device is empty: re-activating")
+                        ApplyEvent(
+                            "out", "line", f"{spec.mapper_path}: entry changed and the device is empty: re-activating"
+                        )
                     )
                     if not (
                         self._systemd.stop(swap_unit)
@@ -624,13 +654,15 @@ class SwapApplicationService:
             else:
                 events.append(ApplyEvent("out", "line", f"{spec.mapper_path} is active as swap."))
         else:
-            events.append(ApplyEvent("out", "line", f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)"))
+            events.append(
+                ApplyEvent("out", "line", f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)")
+            )
             if not (self._systemd.start(crypt_unit) and self._systemd.start(swap_unit)):
                 events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: failed to activate {spec.mapper_path}."))
                 return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
 
         events.append(ApplyEvent("out", "section", "== zswap"))
-        self._apply_managed_file(env.src_tmpfiles, env.tmpfiles_conf, 0o644, events)
+        self._apply_managed_file(env.src_tmpfiles, env.tmpfiles_conf, TMPFILES_ENTRY.mode.bits, events)
         for name, val in parse_tmpfiles_params(tmpfiles_text):
             param_path = posixpath.join(env.zswap_params_dir, name)
             live = self._read_first(param_path, "")
@@ -643,7 +675,9 @@ class SwapApplicationService:
             events.append(ApplyEvent("out", "line", f"unchanged: {env.zram_conf} (masked)"))
         else:
             self._fs.force_symlink("/dev/null", env.zram_conf)
-            events.append(ApplyEvent("out", "line", f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)"))
+            events.append(
+                ApplyEvent("out", "line", f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)")
+            )
             self._systemd.daemon_reload()
 
         swaps_after_zswap = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
@@ -679,7 +713,7 @@ class SwapApplicationService:
         if self._fs.exists(env.old_sysctl_conf):
             self._fs.remove_file(env.old_sysctl_conf)
             events.append(ApplyEvent("out", "line", f"removed:   {env.old_sysctl_conf} (legacy)"))
-        self._apply_managed_file(env.src_sysctl, env.sysctl_conf, 0o644, events)
+        self._apply_managed_file(env.src_sysctl, env.sysctl_conf, SYSCTL_ENTRY.mode.bits, events)
         exp_name, exp_key = WSF_EXPERIMENT
         if self._fs.exists(posixpath.join(env.cpu_run_dir, "exp-" + exp_name)):
             live_wsf = self._read_first(posixpath.join(env.proc_dir, "sys", "vm", "watermark_scale_factor"), "?")
@@ -687,14 +721,16 @@ class SwapApplicationService:
                 ApplyEvent("out", "line", f"kept:      {exp_key} = {live_wsf} (the cpu experiment {exp_name} is on;")
             )
             events.append(
-                ApplyEvent("out", "line", "           after 'cst cpu experiment off wsf-300', run apply again, or reboot)")
+                ApplyEvent(
+                    "out", "line", "           after 'cst cpu experiment off wsf-300', run apply again, or reboot)"
+                )
             )
             self._system.apply_sysctl_file(env.sysctl_conf, exclude_key=exp_key)
         else:
             self._system.apply_sysctl_file(env.sysctl_conf)
 
         events.append(ApplyEvent("out", "section", "== machine.slice"))
-        if self._apply_managed_file(env.src_dropin, env.slice_dropin, 0o644, events):
+        if self._apply_managed_file(env.src_dropin, env.slice_dropin, DROPIN_ENTRY.mode.bits, events):
             self._systemd.daemon_reload()
 
         settings = self.build_settings_report(self.zswap_params())
@@ -713,9 +749,7 @@ class SwapApplicationService:
             verify_notes.append(
                 "  later zram0 still active as swap (gone after a reboot, or apply again under lower pressure)"
             )
-        verify_error = (
-            f"{env.prog}: ERROR: one or more settings did not apply as expected (see above)." if fail else ""
-        )
+        verify_error = f"{env.prog}: ERROR: one or more settings did not apply as expected (see above)." if fail else ""
         return SwapApplyResult(
             1 if fail else 0,
             tuple(events),

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import importlib.machinery
 import os
 import subprocess
+import sys
 import types
 from typing import Protocol, cast
 
@@ -56,6 +57,7 @@ class CstVmRuntimeAdapter:
             loader = importlib.machinery.SourceFileLoader("cst_vm_runtime", self._tool_path)
             mod = types.ModuleType("cst_vm_runtime")
             mod.__file__ = self._tool_path
+            sys.modules["cst_vm_runtime"] = mod  # registered first: @dataclass looks the module up
             loader.exec_module(mod)
             self._mod = cast("_VmModule", cast("object", mod))
         return self._mod

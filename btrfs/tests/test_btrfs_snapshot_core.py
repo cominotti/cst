@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import fcntl  # noqa: F401 - preimported environment check
-import importlib.machinery
 import io
 import json
 import os
@@ -33,6 +32,7 @@ import zoneinfo
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Protocol, TypedDict, cast
 from unittest import mock
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True  # keep __pycache__ out of the repository
 
@@ -183,9 +183,7 @@ class _SnapshotCoreModule(Protocol):
 
 
 def load_core() -> _SnapshotCoreModule:
-    loader = importlib.machinery.SourceFileLoader("btrfs_snapshot_core", CORE_PATH)
-    mod = types.ModuleType("btrfs_snapshot_core")
-    loader.exec_module(mod)
+    mod = load_script(CORE_PATH, "btrfs_snapshot_core")
     return cast("_SnapshotCoreModule", mod)
 
 

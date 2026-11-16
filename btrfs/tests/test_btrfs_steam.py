@@ -14,18 +14,18 @@ Run from the repository root:
 from __future__ import annotations
 
 import contextlib
-import importlib.machinery
 import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 from unittest import mock
+
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -36,11 +36,7 @@ REAL_ROOT = "/var/home/danilo/.var/app/com.valvesoftware.Steam/.local/share/Stea
 if TYPE_CHECKING:
     from btrfs.tests import test_btrfs_bulk as tb
 else:
-    _loader = importlib.machinery.SourceFileLoader("btrfs_bulk_test_base", os.path.join(HERE, "test_btrfs_bulk.py"))
-    _mod = types.ModuleType("btrfs_bulk_test_base")
-    _mod.__file__ = os.path.join(HERE, "test_btrfs_bulk.py")
-    _loader.exec_module(_mod)
-    tb = _mod
+    tb = load_script(os.path.join(HERE, "test_btrfs_bulk.py"), "btrfs_bulk_test_base")
 
 Crash = tb.Crash
 TOOL = tb.TOOL
@@ -1268,7 +1264,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
     def calls(self, *args: str) -> list[str]:
         stubs = (
             "exec 3>&1; snap_home() { echo snap_home >&3; }; snap_install_runtime() { echo install_runtime >&3; }; "
-            'install_text() { cat >/dev/null; echo "install_text $1" >&3; }; '
+            'cst_install_text() { cat >/dev/null; echo "cst_install_text $1" >&3; }; '
             'systemctl() { echo "systemctl $*" >&3; }; bulk_run() { echo "bulk_run $*"; return 5; }; '
         )
         r = subprocess.run(
@@ -1295,7 +1291,7 @@ class BulkSteamFrontendTest(unittest.TestCase):
             [
                 "snap_home",
                 "install_runtime",
-                "install_text /etc/btrfs-setup/bulk.conf",
+                "cst_install_text /etc/btrfs-setup/bulk.conf",
                 "systemctl enable btrfs-bulk-boot.service",
                 "bulk_run steam apply --app 570",
                 "rc 5",

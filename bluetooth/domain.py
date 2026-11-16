@@ -725,4 +725,3 @@ def profiles(dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, 
         alt = others[0] if others else None
     active = card.get("active_profile")
     return None if active is None else str(active), ldac, alt
-

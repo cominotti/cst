@@ -59,6 +59,7 @@ class BtrfsHelperRuntimeAdapter:
             loader = importlib.machinery.SourceFileLoader(mod_name, path)
             mod = types.ModuleType(mod_name)
             mod.__file__ = path
+            sys.modules[mod_name] = mod  # registered first: @dataclass looks the module up
             loader.exec_module(mod)
             self._modules[helper_name] = mod
         return mod

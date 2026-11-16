@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import importlib.machinery
 import os
 import subprocess
+import sys
 import time
 from types import ModuleType
 
@@ -59,6 +60,7 @@ def load_vm_module(vm_tool_path: str) -> ModuleType | None:
         loader = importlib.machinery.SourceFileLoader("cst_vm", vm_tool_path)
         mod = ModuleType("cst_vm")
         mod.__file__ = vm_tool_path
+        sys.modules["cst_vm"] = mod  # registered first: @dataclass looks the module up
         loader.exec_module(mod)
         return mod
     except Exception:  # noqa: BLE001 - a missing or broken copy is an info line, not an ERROR

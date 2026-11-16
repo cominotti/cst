@@ -87,6 +87,8 @@ set -Eeuo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(dirname "${SELF}")/bluetooth"
 HELPER="${SRC}/bt-helper"
+# shellcheck source=cst-install.bash
+source "$(dirname "${SELF}")/cst-install.bash"
 DEFAULT_SETTINGS="${SRC}/bluetooth.conf"
 # The kernel's experimental "ISO socket" feature (also in bt-helper).
 ISO_UUID="6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
@@ -435,7 +437,7 @@ lw_plan() {
         LW_PROG_ST=conflict
     elif [[ ! -e "${LW_PROG}" ]]; then
         LW_PROG_ST=missing
-    elif cmp -s "${LW_SRC}" "${LW_PROG}"; then
+    elif cmp -s <(cst_installer payload bluetooth/bt-ldac-watch) "${LW_PROG}"; then
         LW_PROG_ST=ok
     elif grep -qF -e "${WP_MARKER}" "${LW_PROG}"; then
         LW_PROG_ST=change
@@ -1115,12 +1117,8 @@ lw_install() {
     local tmp changed=0
     if [[ "${LW_PROG_ST}" != ok ]]; then
         python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${LW_SRC}"
-        mkdir -p "$(dirname "${LW_PROG}")"
-        tmp="$(mktemp -p "$(dirname "${LW_PROG}")" ".bt-ldac-watch.XXXXXX")"
-        cp "${LW_SRC}" "${tmp}"
-        chmod 0755 "${tmp}"
-        mv -f "${tmp}" "${LW_PROG}"
-        echo "written:   ${LW_PROG}"
+        # The zipapp of the manifest (dest ~/.local/lib/cst/bt-ldac-watch, i.e. LW_PROG).
+        cst_installer install --home "${HOME}" --dest "${LW_PROG}" bluetooth/bt-ldac-watch
         changed=1
     fi
     if [[ "${LW_UNIT_ST}" != ok ]]; then

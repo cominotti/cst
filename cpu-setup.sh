@@ -72,6 +72,8 @@ set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(dirname "${SELF}")/cpu"
+# shellcheck source=cst-install.bash
+source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 CONF=/etc/cpu-setup/cpu-setup.conf
 POLKIT_RULE=/etc/polkit-1/rules.d/50-cpu-setup-game.rules
@@ -90,11 +92,9 @@ DAEMON_JSON=/etc/docker/daemon.json
 # systemd-tmpfiles, and at once by install.
 HWP_BOOST=/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost
 HWP_TMPFILES=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
-declare -A BINARIES=(
-    [game-profile]=/usr/local/sbin/cpu-game-profile
-    [vm-pin]=/usr/local/sbin/cpu-vm-pin
-    [cpu-watch]=/usr/local/bin/cpu-watch
-)
+# Programs (in cpu/) that install copies; their destinations are in the
+# install manifest (cst_core/domain/install.py).
+BINARIES=(game-profile vm-pin cpu-watch)
 UNITS=(cpu-game.service cpu-game-watchdog.service cpu-game-watchdog.timer)
 # The game profile's MemoryLow drop-ins (GAME_DROPIN in cpu/game-profile):
 # 'off' removes them; uninstall also removes any left behind.
@@ -158,28 +158,6 @@ fi
 user_home() { getent passwd "${target_user}" | cut -d: -f6; }
 usys() { systemctl --user -M "${target_user}@" "$@"; }
 
-install_file() {
-    local src="$1" dest="$2" mode="$3" owner="${4:-root}"
-    if [[ -f "${dest}" ]] && cmp -s "${src}" "${dest}"; then
-        echo "unchanged: ${dest}"
-        return
-    fi
-    if [[ "${owner}" == root ]]; then
-        install -D -m "${mode}" -o root -g root "${src}" "${dest}"
-        restorecon "${dest}" 2>/dev/null || true
-    else
-        runuser -u "${owner}" -- install -D -m "${mode}" "${src}" "${dest}"
-    fi
-    echo "written:   ${dest}"
-}
-install_text() {
-    local tmp
-    tmp="$(mktemp)"
-    cat >"${tmp}"
-    chmod 0644 "${tmp}"
-    install_file "${tmp}" "$@"
-    rm -f "${tmp}"
-}
 check_syntax() {
     if head -n1 "$1" | grep -q python; then
         python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$1"
@@ -225,7 +203,7 @@ install_all() {
     local f ini group_line ecores
     [[ -n "${target_user}" && "${target_user}" != root ]] ||
         { echo "install: run through sudo from your user account (needs SUDO_USER)" >&2; exit 1; }
-    for f in "${!BINARIES[@]}"; do
+    for f in "${BINARIES[@]}"; do
         check_syntax "${SRC}/${f}" || { echo "${SRC}/${f}: syntax error" >&2; exit 1; }
     done
     install -d -m 0755 "$(dirname "${CONF}")"
@@ -233,19 +211,13 @@ install_all() {
         printf '%s\n' "# Managed by cpu-setup.sh (CST); values may be edited." \
             "TARGET_USER='${target_user}'" "BUILD_CPUS='12-23'" "P_CORES='0-7'" "VM_WEIGHT=10" \
             "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='no'" "VM_NAME='win11-devbox'" "VM_VCPUS=12" \
-            "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'" | install_text "${CONF}" 0644
+            "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'" | cst_install_text "${CONF}" 0644
     fi
-    for f in "${!BINARIES[@]}"; do
-        install_file "${SRC}/${f}" "${BINARIES[${f}]}" 0755
-    done
-    for f in "${UNITS[@]}"; do
-        install_file "${SRC}/units/${f}" "${UNIT_DIR}/${f}" 0644
-    done
-    install_file "${SRC}/units/machine.slice.d-${DROPIN_NAME}" "${MACHINE_DROPIN}" 0644
-    install_file "${SRC}/units/user@.service.d-50-cpu-setup-cpuset.conf" "${DELEGATE_DROPIN}" 0644
+    cst_install "${BINARIES[@]/#/cpu/}" "${UNITS[@]/#/cpu/units/}" "cpu/units/machine.slice.d-${DROPIN_NAME}" \
+        cpu/units/user@.service.d-50-cpu-setup-cpuset.conf
     if [[ -w "${HWP_BOOST}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST): intel_pstate HWP dynamic boost on." \
-            "w ${HWP_BOOST} - - - - 1" | install_text "${HWP_TMPFILES}" 0644
+            "w ${HWP_BOOST} - - - - 1" | cst_install_text "${HWP_TMPFILES}" 0644
         echo 1 >"${HWP_BOOST}" && echo "set:       ${HWP_BOOST} = 1"
     else
         echo "NOTE: ${HWP_BOOST} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped" >&2
@@ -258,25 +230,25 @@ install_all() {
     if [[ -n "${ecores}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST): toolbox containers (inner user.slice of the" \
             "# user manager, sibling of app.slice) on the E-cores, weighing like background.slice." \
-            "[Slice]" "CPUWeight=30" "AllowedCPUs=${ecores}" | install_text "$(toolbox_dropin)" 0644 "${target_user}"
+            "[Slice]" "CPUWeight=30" "AllowedCPUs=${ecores}" | cst_install_text "$(toolbox_dropin)" 0644 "${target_user}"
         printf '%s\n' "# Managed by cpu-setup.sh (CST): host commands of toolboxes and Flatpak apps" \
             "# (flatpak-spawn --host) on the E-cores, like the toolboxes themselves." \
-            "[Service]" "AllowedCPUs=${ecores}" | install_text "$(helper_dropin)" 0644 "${target_user}"
+            "[Service]" "AllowedCPUs=${ecores}" | cst_install_text "$(helper_dropin)" 0644 "${target_user}"
     else
         echo "NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped" >&2
         printf '%s\n' "# Managed by cpu-setup.sh (CST)." "[Slice]" "CPUWeight=30" |
-            install_text "$(toolbox_dropin)" 0644 "${target_user}"
+            cst_install_text "$(toolbox_dropin)" 0644 "${target_user}"
         rm -fv "$(helper_dropin)"
     fi
     remove_old_dropins   # the daemon-reloads below then read without them
-    sed "s/@USER@/${target_user}/g" "${SRC}/cpu-game.rules.in" | install_text "${POLKIT_RULE}" 0644
+    cst_install --set "USER=${target_user}" cpu/cpu-game.rules.in
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
     link_cst_command "${target_user}"
     # GameMode: our ini unless the user has one of their own.
     ini="$(gamemode_ini)"
     if [[ ! -e "${ini}" ]] || grep -q 'Managed by cpu-setup.sh' "${ini}"; then
-        install_file "${SRC}/gamemode.ini" "${ini}" 0644 "${target_user}"
+        cst_install_as "${target_user}" cpu/gamemode.ini
     else
         echo "NOTE: ${ini} is your own: add [custom] start/end from ${SRC}/gamemode.ini by hand" >&2
     fi
@@ -321,7 +293,8 @@ uninstall() {
         [[ -w "${HWP_BOOST}" ]] && echo 0 >"${HWP_BOOST}" && echo "set:       ${HWP_BOOST} = 0"
     fi
     rmdir "$(dirname "${MACHINE_DROPIN}")" "$(dirname "${DELEGATE_DROPIN}")" 2>/dev/null || true
-    for f in "${BINARIES[@]}"; do rm -fv "${f}"; done
+    mapfile -t f < <(cst_installed_dests "${BINARIES[@]/#/cpu/}")
+    rm -fv "${f[@]}"
     if [[ -n "${target_user}" ]]; then
         rm -fv "$(toolbox_dropin)" "$(helper_dropin)"
         rmdir "$(dirname "$(toolbox_dropin)")" "$(dirname "$(helper_dropin)")" 2>/dev/null || true
@@ -346,7 +319,7 @@ docker_slice() {
             {
                 cat "${SRC}/units/builds.slice"
                 if [[ -n "$(e_cores)" ]]; then echo "AllowedCPUs=$(e_cores)"; fi
-            } | install_text "${UNIT_DIR}/builds.slice" 0644
+            } | cst_install_text "${UNIT_DIR}/builds.slice" 0644
             systemctl daemon-reload
             systemctl start builds.slice
             python3 -I - "${DAEMON_JSON}" <<'PY'

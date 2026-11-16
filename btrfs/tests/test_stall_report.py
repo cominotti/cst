@@ -14,14 +14,13 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
-import importlib.machinery
 import io
 import os
 import sys
-import types
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, cast
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -67,10 +66,7 @@ class _StallReportModule(Protocol):
 
 
 def load() -> _StallReportModule:
-    loader = importlib.machinery.SourceFileLoader("btrfs_stall_report", TOOL)
-    mod = types.ModuleType("btrfs_stall_report")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "btrfs_stall_report")
     return cast("_StallReportModule", cast("object", mod))
 
 
@@ -637,10 +633,7 @@ class FrameListsTest(unittest.TestCase):
     def test_report_and_daemon_agree(self) -> None:
         report = load()
         daemon_path = os.path.join(os.path.dirname(HERE), "btrfs-stall-monitord")
-        loader = importlib.machinery.SourceFileLoader("btrfs_stall_monitord", daemon_path)
-        daemon_mod = types.ModuleType("btrfs_stall_monitord")
-        daemon_mod.__file__ = daemon_path
-        loader.exec_module(daemon_mod)
+        daemon_mod = load_script(daemon_path, "btrfs_stall_monitord")
         daemon = cast("_StallMonitordModule", cast("object", daemon_mod))
         self.assertEqual(dict(report.STACK_RULES)["reclaim"].pattern, daemon.SWAP_FRAME.pattern)
         reclaim = next(rx for k, rx, _ in report.CATEGORIES if k == "reclaim")

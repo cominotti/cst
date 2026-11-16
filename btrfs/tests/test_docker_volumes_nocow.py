@@ -33,7 +33,6 @@ import builtins
 import contextlib
 import fcntl
 import gc
-import importlib.machinery
 import io
 import json
 import os
@@ -49,6 +48,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from types import ModuleType, SimpleNamespace
 from unittest import mock
+from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
 
@@ -58,9 +58,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "docker-volumes-nocow")
 
 def load(name: str = "docker_volumes_nocow") -> ModuleType:
     # The helper has no .py extension, so it is loaded from its path.
-    mod = ModuleType(name)
-    mod.__file__ = TOOL
-    importlib.machinery.SourceFileLoader(name, TOOL).exec_module(mod)
+    mod = load_script(TOOL, name)
     return mod
 
 

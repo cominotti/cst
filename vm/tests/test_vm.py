@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
-import importlib.machinery
 import io
 import json
 import os
@@ -34,6 +33,7 @@ import xml.etree.ElementTree as ET
 
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from vm.adapters import CstVmRuntimeAdapter, SubprocessVirshAdapter
+from tests.script_loader import load_script
 from vm.application import VmService
 from vm.domain import (
     Usage,
@@ -151,10 +151,7 @@ class _VmModule(Protocol):
 
 
 def load() -> _VmModule:
-    loader = importlib.machinery.SourceFileLoader("cst_vm", TOOL)
-    mod = ModuleType("cst_vm")
-    mod.__file__ = TOOL
-    loader.exec_module(mod)
+    mod = load_script(TOOL, "cst_vm")
     return cast("_VmModule", cast("object", mod))
 
 
@@ -1479,9 +1476,6 @@ class SetupScriptTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self.assertIn("vm         the libvirt VM", r.stdout)
-        with open(os.path.join(REPO, "cst")) as f:
-            text = f.read()
-        self.assertIn("[vm]=vm-setup.sh", text)
         self.assertEqual(MODULE_BY_NAME["vm"].script, "vm-setup.sh")
         self.assertFalse(MODULE_BY_NAME["vm"].status_needs_root)
 
