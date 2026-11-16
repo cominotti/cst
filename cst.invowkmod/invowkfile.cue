@@ -35,6 +35,7 @@ cmds: [
 				scripts=(
 					cst
 					cst-link.bash
+					cst-install.bash
 					btrfs-setup.sh
 					cpu-setup.sh
 					swap-setup.sh

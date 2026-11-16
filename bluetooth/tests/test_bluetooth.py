@@ -32,7 +32,7 @@ DEFAULTS = os.path.join(BT, "bluetooth.conf")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from bluetooth import application as bt_app  # noqa: E402
+from bluetooth import adapters as bt_adapters, cli as bt_app, domain as bt_domain  # noqa: E402
 from bluetooth.adapters import LocalBluetoothHostAdapter  # noqa: E402
 from bluetooth.domain import classify_other_fragments  # noqa: E402
 from tests.script_loader import load_script
@@ -135,8 +135,13 @@ def load(path: str = HELPER, name: str = "bt_helper") -> types.ModuleType:
 
 
 def load_helper() -> HelperModule:
-    """Load `bluetooth/bt-helper` cast to `HelperModule`."""
-    return cast(HelperModule, load())
+    """The rules bt-helper runs: bluetooth.domain, with other_fragments from bluetooth.adapters.
+
+    bt-helper itself only wires argv (tests/test_entrypoints.py); the code it
+    runs is imported from where it is defined.
+    """
+    rules = {k: v for k, v in vars(bt_domain).items() if not k.startswith("__")}
+    return cast(HelperModule, types.SimpleNamespace(**rules, other_fragments=bt_adapters.other_fragments))
 
 
 def general(text: str) -> list[str]:

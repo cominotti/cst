@@ -499,10 +499,16 @@ The code is split into four layers under `doctor/`:
   filesystem I/O or subprocess calls).
 - `doctor/ports.py`: port protocols (`DoctorHostPort`, `CheckFn`).
 - `doctor/adapters.py`: `Host` adapter (direct or `flatpak-spawn --host` /
-  `/run/host`) and `load_vm_module`.
-- `doctor/application.py`: host probes, check implementations, `CHECKS` registry,
-  `run_checks` and `render`.
-- `doctor/cst-doctor`: thin CLI entrypoint and compatibility facade.
+  `/run/host`; it also opens, lists and stats the host's files for the
+  checks, and knows where the CST checkout is) and `load_vm_module`.
+- `doctor/application.py`: host probes, check implementations, `CHECKS` registry
+  and `run_checks`. No direct I/O: files and commands go through
+  `DoctorHostPort` (`tests/test_architecture.py` checks it).
+- `doctor/presenter.py`: `render`, the report as text.
+- `doctor/cli.py`: the command line: arguments, the `Host`, the checks that need
+  the checkout's `vm/cst-vm` wired with it, the report.
+- `doctor/cst-doctor`: the entry point: only the bootstrap and a `main()` that
+  runs `cli.py`.
 
 Each check is a small function in `doctor/application.py`, registered with
 `@check("area")`. It gets a `DoctorHostPort` (how to run a query and where

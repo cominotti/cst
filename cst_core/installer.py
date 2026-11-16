@@ -18,7 +18,8 @@ Usage:
   installer.py dests [--home DIR] [--module M] [--kind K]
                                           the destination of each matching entry, one per line
 OPTIONS: --home DIR, --root DIR (a staging folder), --dest PATH (one SRC only),
-         --set KEY=VALUE (templates), --module M / --kind K (select entries instead of SRC)
+         --set KEY=VALUE (templates), --module M / --kind K / --owner root|user
+         (select entries instead of naming them)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
 """
 
@@ -42,7 +43,7 @@ from cst_core.adapters.install import LocalInstallTarget
 from cst_core.adapters.runtime import checkout_root
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, expand_dest, select_entries
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, Owner, expand_dest, select_entries
 from cst_core.domain.values import DomainValidationError, OctalMode
 
 NAME = "cst installer"
@@ -68,6 +69,7 @@ def _parser() -> _Parser:
     p.add_argument("--set", action="append", default=[], dest="values")
     p.add_argument("--module")
     p.add_argument("--kind", choices=["python-entry", "shell", "unit", "data"])
+    p.add_argument("--owner", choices=["root", "user"])
     return p
 
 
@@ -81,14 +83,18 @@ def _values(pairs: Sequence[str]) -> dict[str, str]:
     return out
 
 
-def _entries(srcs: Sequence[str], module: str | None, kind: ArtifactKind | None) -> tuple[InstallEntry, ...]:
+def _entries(
+    srcs: Sequence[str], module: str | None, kind: ArtifactKind | None, owner: Owner | None = None
+) -> tuple[InstallEntry, ...]:
     by_src = {e.src: e for e in INSTALL_MANIFEST}
-    if srcs and (module or kind):
-        raise _UsageError("name the files (SRC...) or select them (--module/--kind), not both")
+    if srcs and (module or kind or owner):
+        raise _UsageError("name the files (SRC...) or select them (--module/--kind/--owner), not both")
     if not srcs:
-        if not (module or kind):
+        if not (module or kind or owner):
             raise _UsageError("no file named")
-        return select_entries(INSTALL_MANIFEST, module=module, kind=kind)
+        return tuple(
+            e for e in select_entries(INSTALL_MANIFEST, module=module, kind=kind) if owner is None or e.owner == owner
+        )
     unknown = [s for s in srcs if s not in by_src]
     if unknown:
         raise _UsageError(f"not in the install manifest: {', '.join(unknown)}")
@@ -113,10 +119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(service.write_if_changed(staged(a.root, a.args[0]), sys.stdin.buffer.read(), mode))
             return 0
         if a.command == "dests":
-            for e in _entries(a.args, a.module, a.kind):
+            for e in _entries(a.args, a.module, a.kind, a.owner):
                 print(expand_dest(e.dest, a.home) if e.dest.startswith("~") and a.home else e.dest)
             return 0
-        entries = _entries(a.args, a.module, a.kind)
+        entries = _entries(a.args, a.module, a.kind, a.owner)
         if a.command == "payload":
             if len(entries) != 1:
                 raise _UsageError("payload SRC (one file)")

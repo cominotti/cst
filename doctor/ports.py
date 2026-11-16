@@ -1,7 +1,8 @@
 """Ports (interfaces) for the `doctor` bounded context."""
 
 from collections.abc import Iterable
-from typing import Protocol
+import os
+from typing import BinaryIO, Protocol, TextIO
 
 from doctor.domain import Deployment, OstreeAnswer, Result
 
@@ -11,6 +12,8 @@ class DoctorHostPort(Protocol):
 
     container: bool
     root: str
+    # The cst command for hints ("cst", or what CST_PROG names).
+    cst: str
     now: float
     uid: int
     state_home: str
@@ -25,6 +28,51 @@ class DoctorHostPort(Protocol):
 
     def run(self, cmd: list[str], timeout: float = 60) -> tuple[int, str, str]:
         """Run a read-only query command on the host; return (rc, stdout, stderr)."""
+        ...
+
+    def repo_path(self, rel: str) -> str:
+        """Where the CST checkout's file `rel` is (it may not exist)."""
+        ...
+
+    # Files, by paths already mapped with path(). Each raises OSError like the os call it stands for.
+    def open_text(self, path: str) -> TextIO:
+        """Open for reading as UTF-8 (undecodable bytes replaced)."""
+        ...
+
+    def open_bytes(self, path: str) -> BinaryIO:
+        """Open for reading as bytes."""
+        ...
+
+    def listdir(self, path: str) -> list[str]:
+        """The names in a folder."""
+        ...
+
+    def exists(self, path: str) -> bool:
+        """True when path exists (following links)."""
+        ...
+
+    def isdir(self, path: str) -> bool:
+        """True for a folder (following links)."""
+        ...
+
+    def isfile(self, path: str) -> bool:
+        """True for a regular file (following links)."""
+        ...
+
+    def islink(self, path: str) -> bool:
+        """True for a symbolic link."""
+        ...
+
+    def stat(self, path: str) -> os.stat_result:
+        """os.stat of path."""
+        ...
+
+    def lstat(self, path: str) -> os.stat_result:
+        """os.lstat of path."""
+        ...
+
+    def realpath(self, path: str) -> str:
+        """The path with every link resolved."""
         ...
 
 

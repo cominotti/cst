@@ -893,3 +893,57 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_11_manifest_installs_and_every_entry_runs_from_root(self) -> None:
+        """The real installer writes the whole INSTALL_MANIFEST (staged under
+        /var/tmp/e2e-dist, so the other tests see no change): root files as
+        root, the user's files as tester through runuser (what cst_install_as
+        does). A second run changes nothing. Then every python-entry runs its
+        help mode from `/` on /usr/bin/python3 -I, as root and as tester, with
+        no ImportError: the zipapps hold everything they import."""
+        stage = "/var/tmp/e2e-dist"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {stage}", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rm -rf {stage} && install -d -m 0755 {stage} {stage}/home && install -d -o tester {stage}/home/tester
+            {installer} install --root {stage} --owner root {sets}
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets}
+            again="$({installer} install --root {stage} --owner root {sets})"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
+            ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
+            if grep -v '^unchanged: ' <<<"$ugain"; then echo "second user run changed files" >&2; exit 1; fi
+            echo E2E-INSTALLED
+            """,
+        ).stdout
+        self.assertIn("E2E-INSTALLED", out)
+        # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
+        entries = {
+            "/usr/local/sbin/btrfs-bulk": ("--help", 2),
+            "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
+            "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
+            "/usr/local/bin/btrfs-stall-report": ("--help", 0),
+            "/usr/local/sbin/docker-gc": ("--help", 2),
+            "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
+            "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
+            "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
+            "/usr/local/sbin/cst-vm": ("help", 0),
+        }
+        for dest, (arg, rc) in entries.items():
+            path = stage + dest
+            runners = ["root"] if "/sbin/" in dest else ["root", "tester"]
+            if dest.startswith("/home/"):
+                runners = ["tester"]
+            for who in runners:
+                with self.subTest(dest=dest, who=who):
+                    prefix = "" if who == "root" else "runuser -u tester -- "
+                    p = exec_bash(
+                        self.SYSTEMD_CONTAINER,
+                        f"cd / && {prefix}env -i PATH=/usr/bin:/bin /usr/bin/python3 -I {path} {arg}",
+                        check=False,
+                    )
+                    self.assertNotRegex(p.stderr, r"ImportError|ModuleNotFoundError|Traceback", p.stderr)
+                    self.assertEqual(p.returncode, rc, p.stdout + p.stderr)

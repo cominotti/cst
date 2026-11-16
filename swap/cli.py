@@ -1,15 +1,23 @@
 #!/usr/bin/python3 -I
 """Command-line entrypoint for `cst swap` (`swap-setup.sh`)."""
 
+import os.path as _cst_path
+import sys as _cst_sys
+
+# CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
+# it): from a checkout, cst_core and the module packages are in the folder above
+# this file; inside an installed zipapp, sys.path already holds the archive.
+_cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
+if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.path.insert(0, _cst_root)
+
 from collections.abc import Callable, Mapping, Sequence
 import os
 import sys
 from typing import NoReturn, TextIO
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
+from cst_core.adapters.runtime import checkout_root, program_path
 from cst_core.adapters import HostExecutionContext, LocalFileSystemAdapter, SubprocessCommandRunner, SystemctlAdapter
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
@@ -120,7 +128,7 @@ def execute_cli(
                     sys.executable,
                     "-I",
                     "-B",
-                    os.path.abspath(__file__),
+                    program_path(__file__),
                     *orig_args,
                 ]
             )
@@ -130,7 +138,7 @@ def execute_cli(
     systemd = SystemctlAdapter(cmd_runner)
     swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
     swap_env = SwapEnvironment(
-        src_dir=os.path.dirname(os.path.abspath(__file__)),
+        src_dir=os.path.join(checkout_root(__file__) or _cst_root, "swap"),
         etc_dir=exec_ctx.etc_dir(),
         cpu_run_dir=exec_ctx.host_run_dir("cpu-setup"),
         prog=prog,

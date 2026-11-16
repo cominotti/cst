@@ -55,239 +55,25 @@ Run as root (sudo), the checks of your user's units are skipped: `cst`
 starts it as the user who called sudo.
 """
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
-import os
+import os.path as _cst_path
+import sys as _cst_sys
+
+# CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
+# it): from a checkout, cst_core and the module packages are in the folder above
+# this file; inside an installed zipapp, sys.path already holds the archive.
+_cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
+if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.path.insert(0, _cst_root)
+
 import sys
-from types import ModuleType
-from typing import TextIO
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
-from doctor import application as _app
-from doctor.adapters import Host as Host, load_vm_module
-from doctor.application import (
-    CST as CST,
-    HEALTH_CHECK_REPO as HEALTH_CHECK_REPO,
-    PROG as PROG,
-    USAGE as USAGE,
-    VM_PIN_REPO as VM_PIN_REPO,
-    VM_TOOL as VM_TOOL,
-    btrfs_device_bytes as btrfs_device_bytes,
-    btrfs_devices as btrfs_devices,
-    btrfs_mounts as btrfs_mounts,
-    btrfs_profiles as btrfs_profiles,
-    cgroup_units as cgroup_units,
-    check_docker_nocow_postponed as check_docker_nocow_postponed,
-    check_game_profile_drift as check_game_profile_drift,
-    check_legacy_alerts as check_legacy_alerts,
-    check_local_packages as check_local_packages,
-    check_overrides as check_overrides,
-    check_pending_alerts as check_pending_alerts,
-    check_pinned_layering as check_pinned_layering,
-    check_snapshots_writable as check_snapshots_writable,
-    check_staged as check_staged,
-    check_system_units as check_system_units,
-    check_user_manager_boxes as check_user_manager_boxes,
-    check_user_units as check_user_units,
-    conf_value as conf_value,
-    cpu_disable_names as cpu_disable_names,
-    cpu_seconds as cpu_seconds,
-    deployments as deployments,
-    domain_xml as domain_xml,
-    failed_units as failed_units,
-    file_newer as file_newer,
-    game_again as game_again,
-    game_dropins_left as game_dropins_left,
-    installed_packages as installed_packages,
-    libvirt_domains as libvirt_domains,
-    mtime_matches as mtime_matches,
-    nas_backup_running as nas_backup_running,
-    nas_configured as nas_configured,
-    newest_vm_backup as newest_vm_backup,
-    offered_features as offered_features,
-    ostree_deployments as ostree_deployments,
-    read_alert as read_alert,
-    read_entries as read_entries,
-    read_int as read_int,
-    read_text as read_text,
-    render as render,
-    seen_record as seen_record,
-    unit_props as unit_props,
-    user_manager as user_manager,
-    user_manager_cgroup as user_manager_cgroup,
-    virsh as virsh,
-    virsh_problem as virsh_problem,
-)
-from doctor.domain import (
-    ALERT_KEEP_DAYS as ALERT_KEEP_DAYS,
-    ALERT_MAX_FILE as ALERT_MAX_FILE,
-    ALERT_NAME as ALERT_NAME,
-    ARCHES as ARCHES,
-    BTRFS_SYSFS as BTRFS_SYSFS,
-    CET_ISSUE as CET_ISSUE,
-    CPU_CONF as CPU_CONF,
-    CPU_DISABLE_FALLBACK as CPU_DISABLE_FALLBACK,
-    ERROR as ERROR,
-    FS_UUID as FS_UUID,
-    GAME_DROPIN as GAME_DROPIN,
-    GAME_DROPIN_DIR as GAME_DROPIN_DIR,
-    GAME_INTENDED as GAME_INTENDED,
-    GAME_MANUAL as GAME_MANUAL,
-    GAME_PROFILE_HOST as GAME_PROFILE_HOST,
-    GAME_RUN as GAME_RUN,
-    GAME_STATE as GAME_STATE,
-    GIB as GIB,
-    HEALTH_CHECK_HOST as HEALTH_CHECK_HOST,
-    INFO as INFO,
-    LIST_MAX as LIST_MAX,
-    MIRROR_COPIES as MIRROR_COPIES,
-    NAME as NAME,
-    NATIVE_ARCH as NATIVE_ARCH,
-    NOCOW_POSTPONED as NOCOW_POSTPONED,
-    NOCOW_WARN_BOOTS as NOCOW_WARN_BOOTS,
-    NVR_FORM as NVR_FORM,
-    OK as OK,
-    ONE_DEVICE_FACTOR as ONE_DEVICE_FACTOR,
-    RECLAIM_CONF as RECLAIM_CONF,
-    RESIZE_SLACK as RESIZE_SLACK,
-    SEVERITY as SEVERITY,
-    SNAP_CONF as SNAP_CONF,
-    SNAP_STATE as SNAP_STATE,
-    SNAP_UNFINISHED as SNAP_UNFINISHED,
-    SNAP_WRITABLE as SNAP_WRITABLE,
-    STAGED_OLD_DAYS as STAGED_OLD_DAYS,
-    TRANSIENT as TRANSIENT,
-    UNALLOC_DEFAULTS as UNALLOC_DEFAULTS,
-    USER_KNOWN_SLICES as USER_KNOWN_SLICES,
-    VIRSH_URI as VIRSH_URI,
-    VIRT_MAIN as VIRT_MAIN,
-    VIRT_PREFIXES as VIRT_PREFIXES,
-    VM_CONF as VM_CONF,
-    VM_INDEX as VM_INDEX,
-    VM_LIVE_STATES as VM_LIVE_STATES,
-    VM_OVERLAY_MARK as VM_OVERLAY_MARK,
-    VM_PIN_HOST as VM_PIN_HOST,
-    VM_RUN_DIR as VM_RUN_DIR,
-    VM_TIMER_WANTS as VM_TIMER_WANTS,
-    WARN as WARN,
-    Deployment as Deployment,
-    Nevra as Nevra,
-    OstreeAnswer as OstreeAnswer,
-    Request as Request,
-    Result as Result,
-    Usage as Usage,
-    classify_requests as classify_requests,
-    cpu_time as cpu_time,
-    describe as describe,
-    first_line as first_line,
-    gib as gib,
-    install_spec as install_spec,
-    name_list as name_list,
-    parse_args as parse_args,
-    parse_nevra as parse_nevra,
-    per_device_allocated as per_device_allocated,
-    pick_mount as pick_mount,
-    pkg_names as pkg_names,
-    read_intended as read_intended,
-    spellings as spellings,
-    summary as summary,
-    unit_results as unit_results,
-    unpin_command as unpin_command,
-    virt_changes as virt_changes,
-    virt_versions as virt_versions,
-)
-from doctor.ports import CheckFn as CheckFn, DoctorHostPort as DoctorHostPort
-
-_vm_mod: ModuleType | None = None
-_vm_mod_loaded = False
+from doctor import cli
 
 
-def vm_module() -> ModuleType | None:
-    """vm/cst-vm of this copy, loaded as a module (its tune and NOCOW logic,
-    so the doctor does not keep a second copy), or None."""
-    global _vm_mod, _vm_mod_loaded
-    if not _vm_mod_loaded:
-        _vm_mod, _vm_mod_loaded = load_vm_module(VM_TOOL), True
-    return _vm_mod
-
-
-def unalloc_thresholds(host: DoctorHostPort) -> tuple[int, int]:
-    """(warn_gib, crit_gib) respecting module-level HEALTH_CHECK_REPO."""
-    return _app.unalloc_thresholds(host, health_check_repo=HEALTH_CHECK_REPO)
-
-
-def check_btrfs_allocation(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_btrfs_allocation(host, health_check_repo=HEALTH_CHECK_REPO)
-
-
-def check_vm_cpu_features(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_vm_cpu_features(host, domains_fn=libvirt_domains)
-
-
-def check_virt_stack_change(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_virt_stack_change(host, domains_fn=libvirt_domains)
-
-
-def check_vm_overlays(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_vm_overlays(host, domains_fn=libvirt_domains)
-
-
-def check_vm_backup_timer(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_vm_backup_timer(host, domains_fn=libvirt_domains)
-
-
-def check_vm_hardware(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_vm_hardware(host, vm_mod_fn=vm_module, domains_fn=libvirt_domains)
-
-
-def check_vm_image_dirs(host: DoctorHostPort) -> Iterator[Result]:
-    return _app.check_vm_image_dirs(host, vm_mod_fn=vm_module)
-
-
-_WRAPPED: dict[CheckFn, CheckFn] = {
-    _app.check_btrfs_allocation: check_btrfs_allocation,
-    _app.check_vm_cpu_features: check_vm_cpu_features,
-    _app.check_virt_stack_change: check_virt_stack_change,
-    _app.check_vm_overlays: check_vm_overlays,
-    _app.check_vm_backup_timer: check_vm_backup_timer,
-    _app.check_vm_hardware: check_vm_hardware,
-    _app.check_vm_image_dirs: check_vm_image_dirs,
-}
-
-CHECKS: list[tuple[str, CheckFn]] = [(area, _WRAPPED.get(fn, fn)) for area, fn in _app.CHECKS]
-
-
-def check[F: CheckFn](area: str) -> Callable[[F], F]:
-    """Register a check function on this facade's CHECKS list."""
-
-    def register(fn: F) -> F:
-        CHECKS.append((area, fn))
-        return fn
-
-    return register
-
-
-def run_checks(host: DoctorHostPort, checks: Iterable[tuple[str, CheckFn]] | None = None) -> list[tuple[str, Result]]:
-    """Run all registered checks (or a supplied subset) and catch check crashes as ERROR."""
-    return _app.run_checks(host, CHECKS if checks is None else checks)
-
-
-def main(argv: Sequence[str], out: TextIO = sys.stdout) -> int:
-    """CLI entry point for `cst doctor`."""
-    try:
-        cmd, brief = parse_args(argv)
-    except Usage as e:
-        print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
-        return 2
-    if cmd == "help":
-        doc = __doc__ or ""
-        print(doc.replace("doctor [--brief]", f"{PROG} [--brief]", 1), file=out)
-        return 0
-    host = Host()
-    return render(run_checks(host), brief, out, host.container)
+def main() -> int:
+    """Run the check-up for this machine."""
+    return cli.main(sys.argv[1:], doc=__doc__ or "", entry_file=__file__)
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())

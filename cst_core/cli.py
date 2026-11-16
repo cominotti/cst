@@ -1,6 +1,16 @@
 #!/usr/bin/python3 -I
 """Hexagonal CLI dispatcher for the top-level `cst` command."""
 
+import os.path as _cst_path
+import sys as _cst_sys
+
+# CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
+# it): from a checkout, cst_core and the module packages are in the folder above
+# this file; inside an installed zipapp, sys.path already holds the archive.
+_cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
+if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.path.insert(0, _cst_root)
+
 from collections.abc import Mapping, Sequence
 import os
 import pwd
@@ -9,10 +19,8 @@ import subprocess
 import sys
 from typing import TextIO
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
+from cst_core.adapters.runtime import checkout_root
 from cst_core.domain.dispatch import MODULE_BY_NAME, MODULES, format_cst_usage
 from cst_core.ports import CstDispatchPort
 
@@ -201,7 +209,7 @@ class CstDispatcher:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for `cst`."""
-    repo_dir = os.environ.get("CST_DIR") or _REPO_ROOT
+    repo_dir = os.environ.get("CST_DIR") or checkout_root(__file__) or _cst_root
     self_path = os.environ.get("CST_SELF") or os.path.join(repo_dir, "cst")
     arg0 = os.environ.get("CST_ARG0") or (sys.argv[0] if sys.argv else "cst")
     dispatcher = CstDispatcher(

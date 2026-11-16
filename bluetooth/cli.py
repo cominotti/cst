@@ -1,4 +1,9 @@
-"""Application use cases and CLI command dispatch for `bt-helper`."""
+"""The `bt-helper` command line: argv to the bluetooth.domain rules, printed.
+
+A driving adapter: it reads files and the system through BluetoothHostPort
+(bluetooth.adapters in production, fakes in tests) and writes the answers
+to the given streams, in the formats bluetooth-setup.sh parses.
+"""
 
 from collections.abc import Sequence
 import json

@@ -54,81 +54,31 @@ Exit status: 0 fine, 10 see above, 1 the input could not be used, 2 usage,
 3 pw-dump output unreadable, 4 the headset is not in PipeWire.
 """
 
-from collections.abc import Sequence
-import os
+import os.path as _cst_path
+import sys as _cst_sys
+
+# CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
+# it): from a checkout, cst_core and the module packages are in the folder above
+# this file; inside an installed zipapp, sys.path already holds the archive.
+_cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
+if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.path.insert(0, _cst_root)
+
 import sys
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
-from bluetooth import application as _app
-from bluetooth.adapters import (
-    LocalBluetoothHostAdapter as LocalBluetoothHostAdapter,
-    other_fragments as other_fragments,
-    read as read,
-    read_or_none as read_or_none,
-    wp_effective_roles as wp_effective_roles,
-)
-from bluetooth.domain import (
-    CLASSIC_ROLES as CLASSIC_ROLES,
-    ISO_UUID as ISO_UUID,
-    JOURNAL_LINE as JOURNAL_LINE,
-    KEYS as KEYS,
-    KEYWORD as KEYWORD,
-    LDAC_PROG as LDAC_PROG,
-    LDAC_UNIT as LDAC_UNIT,
-    LE_CONF_NAME as LE_CONF_NAME,
-    LE_SECTION as LE_SECTION,
-    MARKER as MARKER,
-    OLD_MARKERS as OLD_MARKERS,
-    QUALITIES as QUALITIES,
-    QUALITY_NUM as QUALITY_NUM,
-    SECTION_RE as SECTION_RE,
-    SETTING_KEYS as SETTING_KEYS,
-    WANTED as WANTED,
-    adapter_path as adapter_path,
-    card_state as card_state,
-    classify_other_fragments as classify_other_fragments,
-    current_values as current_values,
-    defines_section as defines_section,
-    device_id as device_id,
-    edit_general as edit_general,
-    effective as effective,
-    general_ranges as general_ranges,
-    join_lines as join_lines,
-    key_lines as key_lines,
-    key_pattern as key_pattern,
-    lw_failure as lw_failure,
-    merged_settings as merged_settings,
-    node_rate as node_rate,
-    parse_settings as parse_settings,
-    parse_settings_order as parse_settings_order,
-    pw_state as pw_state,
-    render_le_off as render_le_off,
-    render_unit as render_unit,
-    render_wp as render_wp,
-    revert_general as revert_general,
-    roles_state as roles_state,
-    satisfied as satisfied,
-    set_keys as set_keys,
-    settings_set as settings_set,
-    split_lines as split_lines,
-    unit_state as unit_state,
-    wp_state as wp_state,
-)
-from bluetooth.ports import BluetoothHostPort
+from bluetooth import cli
+from bluetooth.adapters import LocalBluetoothHostAdapter
 
 
-def main(argv: Sequence[str], host: BluetoothHostPort | None = None) -> int:
-    """CLI entrypoint delegating to `bluetooth.application.main`."""
-    return _app.main(
-        argv,
-        host if host is not None else LocalBluetoothHostAdapter(),
+def main() -> int:
+    """Run one bt-helper command on this machine."""
+    return cli.main(
+        sys.argv[1:],
+        LocalBluetoothHostAdapter(),
         doc=__doc__ or "",
         argv0=sys.argv[0] if sys.argv else "bt-helper",
     )
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())

@@ -7,6 +7,14 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
 - `ports` and `application` modules must not import `adapters` or `cli`.
 - Every `@dataclass` defined inside a `domain` module must declare
   `frozen=True` and `slots=True`.
+- `domain` and `application` modules do no I/O themselves: no call to
+  `open`, `print`, `input`, the file and process functions of `os` and
+  `os.path`, `subprocess`, `shutil`, `time.time/sleep`, `sys.exit`/streams,
+  nor `Path(...)` file methods (DIRECT_IO_CALLS lists them). They reach the
+  machine through ports, which adapters implement.
+- Every package module is imported (directly or not) by an entry point:
+  a module nothing runs is a shadow that drifts from the real code.
+  ORPHAN_ALLOWED names the packages a later stage of the conversion wires in.
 
 Standard library only.
 """
@@ -16,6 +24,7 @@ import os
 from typing import Final, Literal
 import unittest
 
+from tests.code_graph import entry_points, module_closure, module_of, production_python
 from tests.repo_files import REPO, repo_files
 
 type LayerRole = Literal["domain", "ports", "application"]
@@ -23,6 +32,44 @@ type LayerRole = Literal["domain", "ports", "application"]
 FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
     {"subprocess", "shutil", "socket", "fcntl", "ctypes", "sqlite3", "urllib"}
 )
+
+# Calls that reach the machine, by the name they are called through.
+_OS_IO: Final = frozenset(
+    {
+        "access", "chdir", "chmod", "chown", "close", "environ", "execv", "execvp", "fdopen", "fsync",
+        "getcwd", "getenv", "geteuid", "getpid", "getuid", "kill", "link", "listdir", "lstat", "makedirs",
+        "mkdir", "open", "popen", "read", "readlink", "remove", "rename", "replace", "rmdir", "scandir",
+        "stat", "statvfs", "symlink", "system", "umask", "unlink", "utime", "walk", "write",
+    }
+)  # fmt: skip
+_OS_PATH_IO: Final = frozenset(
+    {
+        "abspath", "exists", "expanduser", "getatime", "getctime", "getmtime", "getsize", "isdir",
+        "isfile", "islink", "ismount", "lexists", "realpath", "samefile",
+    }
+)  # fmt: skip
+_PATH_IO: Final = frozenset(
+    {
+        "chmod", "exists", "glob", "is_dir", "is_file", "is_symlink", "iterdir", "lstat", "mkdir", "open",
+        "read_bytes", "read_text", "readlink", "rename", "replace", "resolve", "rglob", "rmdir", "stat",
+        "symlink_to", "touch", "unlink", "write_bytes", "write_text",
+    }
+)  # fmt: skip
+DIRECT_IO_CALLS: Final[dict[str, frozenset[str]]] = {
+    "": frozenset({"open", "print", "input", "exec", "eval"}),
+    "os": _OS_IO,
+    "os.path": _OS_PATH_IO,
+    "subprocess": frozenset({"run", "Popen", "call", "check_call", "check_output"}),
+    "shutil": frozenset({"copy", "copy2", "copyfile", "copytree", "move", "rmtree", "which", "disk_usage"}),
+    "time": frozenset({"time", "sleep", "monotonic", "time_ns"}),
+    "sys": frozenset({"exit", "stdout", "stderr", "stdin", "argv"}),
+}
+IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
+
+# Packages whose modules no entry point imports yet (their programs are still
+# monoliths). Each later stage of the conversion wires its package in and
+# removes it from here.
+ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs", "cpu", "toolchains", "vm"})
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 
@@ -66,6 +113,48 @@ def _forbidden_import_reason(target: str, role: LayerRole) -> str | None:
     return None
 
 
+def _dotted(node: ast.expr) -> str | None:
+    """`a.b.c` for a Name/Attribute chain, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def direct_io_problems(source: str, rel: str) -> list[str]:
+    """Calls (and stream/env uses) of DIRECT_IO_CALLS in one module."""
+    tree = ast.parse(source, filename=rel)
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        target: ast.expr | None = None
+        if isinstance(node, ast.Call):
+            target = node.func
+            # Path(...).read_text() and the like.
+            if (
+                isinstance(target, ast.Attribute)
+                and target.attr in _PATH_IO
+                and isinstance(target.value, ast.Call)
+                and _dotted(target.value.func) in {"Path", "pathlib.Path"}
+            ):
+                problems.append(f"{rel}:{node.lineno}: Path(...).{target.attr}() does I/O (use a port)")
+                continue
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            target = node  # os.environ, sys.stdout, sys.argv: used without a call
+        if target is None:
+            continue
+        name = _dotted(target)
+        if name is None:
+            continue
+        mod, _, attr = name.rpartition(".")
+        if attr in DIRECT_IO_CALLS.get(mod, frozenset()) and (isinstance(node, ast.Call) or mod in {"os", "sys"}):
+            problems.append(f"{rel}:{target.lineno}: {name} does I/O (use a port)")
+    return sorted(set(problems), key=lambda p: (int(p.split(":")[1]), p))
+
+
 def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
     """Return Hexagonal/DDD architectural violations for one Python source module."""
     tree = ast.parse(source, filename=rel)
@@ -102,7 +191,14 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
                             f"{rel}:{node.lineno}: @dataclass {node.name} in domain must set frozen=True and slots=True"
                         )
 
+    if role in IO_LAYERS:
+        problems.extend(direct_io_problems(source, rel))
     return problems
+
+
+def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
+    """Package modules no entry point reaches, outside ORPHAN_ALLOWED."""
+    return [rel for rel in package_files if rel not in reachable and rel.split("/", 1)[0] not in ORPHAN_ALLOWED]
 
 
 class ArchitectureGateTest(unittest.TestCase):
@@ -172,6 +268,45 @@ class ArchitectureGateTest(unittest.TestCase):
 
         good_app = "from cst_core.ports import FileSystemPort\nfrom swap.domain import parse_kv\n"
         self.assertEqual(architecture_problems(good_app, "swap/application.py", "application"), [])
+
+    def test_domain_and_application_do_no_direct_io(self) -> None:
+        bad = (
+            "def f(p):\n    return open(p).read()\n",
+            "def f():\n    print('x')\n",
+            "import os\ndef f(p):\n    return os.listdir(p)\n",
+            "import os\ndef f(p):\n    return os.path.exists(p)\n",
+            "import os\nX = os.environ.get('A')\n",
+            "import sys\ndef f():\n    sys.stdout.write('x')\n",
+            "import time\ndef f():\n    return time.time()\n",
+            "from pathlib import Path\ndef f(p):\n    return Path(p).read_text()\n",
+            "import subprocess\ndef f():\n    subprocess.run(['x'], check=False)\n",
+        )
+        for src in bad:
+            with self.subTest(src=src):
+                self.assertTrue(architecture_problems(src, "pkg/application.py", "application"))
+                self.assertTrue(direct_io_problems(src, "pkg/domain.py"))
+        good = (
+            "import os\ndef f(a, b):\n    return os.path.join(a, b), os.path.basename(a), os.sep\n",
+            "def f(host, p):\n    return host.read_text(p), host.listdir(p)\n",
+            "import time\ndef f(t):\n    return time.strftime('%Y', time.gmtime(t))\n",
+        )
+        for src in good:
+            with self.subTest(src=src):
+                self.assertEqual(direct_io_problems(src, "pkg/application.py"), [])
+        # Adapters may do I/O.
+        self.assertEqual(architecture_problems(bad[0], "pkg/adapters.py", "domain")[:0], [])
+
+    def test_every_package_module_is_reached_from_an_entry_point(self) -> None:
+        files = [rel for rel in production_python() if module_of(rel) is not None]
+        problems = orphan_modules(files, module_closure(entry_points()))
+        self.assertEqual(problems, [], "modules no entry point imports:\n" + "\n".join(problems))
+        self.assertEqual(orphan_modules(["swap/x.py", "btrfs/y.py"], set()), ["swap/x.py"])
+
+    def test_orphan_allowlist_only_holds_packages_with_orphans(self) -> None:
+        files = [rel for rel in production_python() if module_of(rel) is not None]
+        reach = module_closure(entry_points())
+        stale = sorted(p for p in ORPHAN_ALLOWED if all(r in reach for r in files if r.startswith(p + "/")))
+        self.assertEqual(stale, [], "packages wired in since: remove them from ORPHAN_ALLOWED")
 
     def test_repository_layers_obey_hexagonal_boundaries(self) -> None:
         problems: list[str] = []
