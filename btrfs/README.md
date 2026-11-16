@@ -1881,9 +1881,9 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines and the run lock (cst_core's `log` and `take_lock`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | No rule of its own without I/O, so no `domain.py`. `adapters.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`), their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the postponed record, SELinux labels, the journal lines. `cli.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark`, `status` and `main()`. |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and keys, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`), the episode being recorded (`Episode`); no I/O. `adapters.py`: reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines and the `Writer` thread of the log files. `monitor.py`: the sampling loop (`Monitor`: probes, samples, episodes, hung and busy tasks, the kernel log, alerts). `cli.py`: the arguments and `main()`. |
+| `btrfs-stall-report` | `stall_report/` | `domain.py`: the record formats, the wait categories and hints, classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift), the open episode, the verdict lines and number formats; no I/O. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, below and the container names. `analysis.py`: `analyse()`, one window's coverage, totals, categories, episodes and events (it reads the clock, and runs below when asked). `cli.py`: the text report, the arguments and `main()`. |
 
-Still a program file of its own (converted in a later change):
-`btrfs-stall-report`. The top-level `domain.py`,
-`ports.py`, `adapters.py` and `application.py` are an early sketch of the
-policies of `btrfs-stall-monitord`, `docker-gc` and `chrome-cache` (`StallMonitorThresholds`, `DockerGcPolicy`,
-`ChromeCachePolicy`) that no program uses yet; their conversion replaces it.
+The top-level `domain.py`, `ports.py`, `adapters.py` and `application.py`
+are an early sketch of the policies of `btrfs-stall-monitord`, `docker-gc`
+and `chrome-cache` (`StallMonitorThresholds`, `DockerGcPolicy`,
+`ChromeCachePolicy`) that no program uses; a later change removes it.

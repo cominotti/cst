@@ -208,6 +208,8 @@ class DistributionGateTest(unittest.TestCase):
                 )
                 self.assertNotRegex(r.stderr, r"ImportError|ModuleNotFoundError|Traceback", r.stderr)
                 self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+                # argparse names a zipapp "python3 ARCHIVE" unless the program sets prog=.
+                self.assertNotRegex(r.stdout + r.stderr, r"(?m)^usage: python", "usage names the program")
 
     @unittest.skipUnless(os.access(SYSTEM_PYTHON, os.X_OK), "needs /usr/bin/python3")
     def test_an_installed_entry_finds_its_siblings_at_their_installed_dests(self) -> None:

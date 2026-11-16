@@ -11,7 +11,7 @@ from btrfs.stall_monitord.monitor import Monitor
 def main(argv: Sequence[str]) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="btrfs/IO stall telemetry daemon (read-only)")
+    ap = argparse.ArgumentParser(prog="btrfs-stall-monitord", description="btrfs/IO stall telemetry daemon (read-only)")
     ap.add_argument("--log-dir", default=os.environ.get("LOGS_DIRECTORY", "/var/log/btrfs-stall-monitor"))
     ap.add_argument("--run-dir", default=os.environ.get("RUNTIME_DIRECTORY", ""))
     ap.add_argument("--duration", type=float, help="stop after N seconds (testing)")

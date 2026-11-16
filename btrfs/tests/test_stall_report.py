@@ -27,12 +27,14 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from btrfs.stall_monitord import domain as md_domain
-from tests.script_loader import load_script
+from btrfs.stall_report import adapters as rp_adapters
+from btrfs.stall_report import analysis as rp_analysis
+from btrfs.stall_report import cli as rp_cli
+from btrfs.stall_report import domain as rp_domain
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = os.path.join(os.path.dirname(HERE), "btrfs-stall-report")
 VM_KEYS = ["nr_dirty", "nr_writeback", "pswpin", "pswpout", "zswpin", "zswpout", "zswpwb"]
 T0 = 1_700_000_000.0
 BOOT_ZSWPWB = 6_837_407  # pages: the real counter since boot on the test machine
@@ -73,8 +75,9 @@ class _StallReportModule(Protocol):
 
 
 def load() -> _StallReportModule:
-    mod = load_script(TOOL, "btrfs_stall_report")
-    return cast("_StallReportModule", cast("object", mod))
+    """The report's package as one namespace (the program is a thin entry over it)."""
+    view = PackageView(rp_cli, rp_analysis, rp_adapters, rp_domain)
+    return cast("_StallReportModule", cast("object", view))
 
 
 def meta(ts: float, v: int) -> dict[str, Any]:
@@ -634,8 +637,8 @@ class ZswapTrafficTest(ReportCase):
 
 
 class FrameListsTest(unittest.TestCase):
-    """The report re-classifies old logs with the daemon's memory frames: the
-    two copies of each list must stay the same."""
+    """The report re-classifies old logs with the daemon's memory frames: it
+    uses the daemon's lists (btrfs.stall_monitord.domain), not copies."""
 
     def test_report_and_daemon_agree(self) -> None:
         report = load()

@@ -35,7 +35,7 @@ CEILINGS: Final[dict[str, float]] = {
     # one line; only the total of code lines went down.
     "python type-1 W=8 duplicated %": 0.37,
     "python type-1 W=8 cross-file lines": 32,
-    "python type-2 W=8 duplicated %": 6.2,
+    "python type-2 W=8 duplicated %": 6.11,
     "shell W=5 duplicated %": 0.47,
     # Includes the canonical homes in cst_core (Usage, Refused, read_text,
     # read_int, read_bytes, log, take_lock, set_nocow, inode_flags,

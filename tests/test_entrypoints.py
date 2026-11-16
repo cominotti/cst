@@ -39,12 +39,8 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 """
 
 # Entry points of modules not converted yet (their logic still lives in the
-# program itself). Each later stage of the conversion removes its own.
-NOT_YET_THIN: Final[frozenset[str]] = frozenset(
-    {
-        "btrfs/btrfs-stall-report",
-    }
-)
+# program itself). Every program is converted: it stays empty.
+NOT_YET_THIN: Final[frozenset[str]] = frozenset()
 
 
 def _read(rel: str) -> str:
