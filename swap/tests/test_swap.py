@@ -904,6 +904,10 @@ class SwapApplicationTest(unittest.TestCase):
         self.assertEqual(execute_cli(["help"], env={"CST_PROG": "cst swap"}, out=out, err=err), 0)
         self.assertIn("Usage: cst swap <command> [args]", out.getvalue())
         self.assertEqual(format_usage("cst swap").splitlines()[-1], "Usage: cst swap <command> [args]")
+        # The layout of the bash usage() it replaces: a blank line first, one before "Usage:".
+        text = format_usage("cst swap")
+        self.assertTrue(text.startswith("\nswap-setup.sh  (the `swap` module"), text[:40])
+        self.assertIn("memory.zswap.writeback.\n\nUsage: cst swap <command> [args]\n", text)
 
         for bad_args in (["bogus"], ["plan", "--nope"], ["apply", "extra"]):
             with self.subTest(bad_args=bad_args):

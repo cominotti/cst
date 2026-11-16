@@ -10,6 +10,8 @@ import time
 from types import ModuleType
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.text import first_line
+from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
     ALERT_KEEP_DAYS,
     ALERT_MAX_FILE,
@@ -26,7 +28,6 @@ from doctor.domain import (
     GAME_MANUAL,
     GAME_PROFILE_HOST,
     GAME_STATE,
-    GIB,
     HEALTH_CHECK_HOST,
     INFO,
     MIRROR_COPIES,
@@ -60,8 +61,6 @@ from doctor.domain import (
     classify_requests,
     cpu_time,
     describe,
-    first_line,
-    gib,
     mtime_matches_ns,
     name_list,
     parse_alert_text,
@@ -568,7 +567,9 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
             pair = fill[kind]
             if pair:
                 u, t = pair
-                parts.append(f"{kind} chunks {gib(u)} used of {gib(t)} allocated ({100 * u // t}%)")
+                parts.append(
+                    f"{kind} chunks {format_bytes_gib_mib(u)} used of {format_bytes_gib_mib(t)} allocated ({100 * u // t}%)"
+                )
         if fill["data"] and fill["metadata"] and fill["data"][0]:
             parts.append(f"metadata is {100 * fill['metadata'][0] / fill['data'][0]:.1f}% of data")
         if parts:
@@ -627,14 +628,14 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
                 unknown = f"the filesystem size could not be read (stat -f {where})"
             elif block_bytes > fs_bytes:
                 unknown = (
-                    f"the btrfs devices use {gib(block_bytes - fs_bytes)} less than their block "
+                    f"the btrfs devices use {format_bytes_gib_mib(block_bytes - fs_bytes)} less than their block "
                     "devices (shrunk with btrfs filesystem resize?)"
                 )
             else:
                 unknown = "the filesystem size from statfs does not match its block devices"
             free = [(label, size - each) for _, label, size in devs]
             low = min(b for _, b in free)
-            listed = ", ".join(f"{label} {gib(b)}" for label, b in free)
+            listed = ", ".join(f"{label} {format_bytes_gib_mib(b)}" for label, b in free)
             if not exact:
                 listed = "at most " + listed
             meta_free = (fill["metadata"][1] - fill["metadata"][0]) if fill["metadata"] else None
@@ -677,14 +678,14 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
         if disk_total and total_free < warn_gib * GIB * len(devs):
             yield Result(
                 WARN,
-                f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s), so at least "
+                f"{name}: {format_bytes_gib_mib(total_free)} unallocated over {len(devs)} device(s), so at least "
                 f"one device has less than {warn_gib} GiB ({limits}); {needs_root}. "
                 f"Steps: {readme}",
             )
         elif disk_total:
             yield Result(
                 INFO,
-                f"{name}: {gib(total_free)} unallocated over {len(devs)} device(s) (layout {layout}); {needs_root}",
+                f"{name}: {format_bytes_gib_mib(total_free)} unallocated over {len(devs)} device(s) (layout {layout}); {needs_root}",
             )
         else:
             yield Result(INFO, f"{name}: {needs_root}")

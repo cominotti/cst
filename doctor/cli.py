@@ -15,7 +15,8 @@ from typing import TextIO
 from cst_core.adapters.runtime import checkout_root
 from doctor import application as app
 from doctor.adapters import Host, load_vm_module
-from doctor.domain import NAME, Result, Usage, parse_args
+from cst_core.domain.errors import Usage
+from doctor.domain import NAME, Result, parse_args
 from doctor.ports import CheckFn, DoctorHostPort
 from doctor.presenter import render
 

@@ -51,7 +51,8 @@ from doctor import (
     domain as doc_domain,
     presenter as doc_presenter,
 )
-from doctor.domain import Result, Usage
+from cst_core.domain.errors import Usage
+from doctor.domain import Result
 from doctor.ports import DoctorHostPort
 
 

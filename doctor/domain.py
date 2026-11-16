@@ -11,6 +11,8 @@ import shlex
 from typing import Any, Self
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.errors import Usage
+
 NAME = "cst-doctor"
 
 OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
@@ -42,7 +44,6 @@ FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 # per device on a one-device filesystem. Other layouts: no per-device number.
 MIRROR_COPIES: dict[str, int] = {"raid1": 2, "raid1c3": 3, "raid1c4": 4}
 ONE_DEVICE_FACTOR: dict[str, int] = {"single": 1, "dup": 2}
-GIB = 1024**3
 # statfs rounds the size down to whole blocks, per device and per copy: a
 # difference up to this much between the btrfs devices and their block
 # devices is rounding, not a shrunk device.
@@ -90,10 +91,6 @@ VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "
 VIRT_MAIN = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 
 
-class Usage(Exception):
-    """Raised when command-line arguments to `cst doctor` are invalid."""
-
-
 class Result(tuple):
     """(status, message, fix): fix is the command to run, or ""."""
 
@@ -123,14 +120,6 @@ type OstreeAnswer = tuple[Deployment | None, Deployment | None, str]
 type Nevra = tuple[str, str, str, str, str]
 # (request, spec, how) of one requested package, from classify_requests.
 type Request = tuple[str, str, str]
-
-
-def first_line(text: str | None) -> str:
-    """Return the first non-empty stripped line of text, or empty string."""
-    for line in (text or "").splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
 
 
 def parse_nevra(s: str) -> Nevra | None:
@@ -353,11 +342,6 @@ def parse_unalloc_thresholds_text(text: str) -> tuple[int, int] | None:
     if w and c:
         return int(w.group(1)), int(c.group(1))
     return None
-
-
-def gib(n: int) -> str:
-    """Format byte count n as GiB (>= 1 GiB) or MiB."""
-    return f"{n / GIB:.1f} GiB" if abs(n) >= GIB else f"{n // 2**20} MiB"
 
 
 def pick_mount(targets: Sequence[str]) -> str:

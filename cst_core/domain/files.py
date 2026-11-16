@@ -5,6 +5,7 @@ import re
 from typing import Literal
 
 type ManagedState = Literal["ok", "adopt", "duplicate", "change", "missing", "conflict", "unreadable"]
+type OwnedState = Literal["ok", "change", "conflict", "missing"]
 
 _UNMARKED_KEY_RE = re.compile(r"^\s*([^\s#]\S*)")
 
@@ -82,6 +83,22 @@ class MarkedLineSpec:
         if not placed:
             out_lines.append(self.desired_line)
         return "\n".join(out_lines) + "\n"
+
+
+def owned_file_state(content: str | None, *, is_link: bool, wanted: str | None, ours: bool) -> OwnedState:
+    """State of a file CST writes whole (a unit, an installed program) against what it wants there.
+
+    content None = no file. ok: exactly wanted; change: CST's (ours: it carries
+    CST's marker) but different; conflict: someone else's file, or a symbolic
+    link (never written through); missing.
+    """
+    if is_link:
+        return "conflict"
+    if content is None:
+        return "missing"
+    if wanted is not None and content == wanted:
+        return "ok"
+    return "change" if ours else "conflict"
 
 
 def effective_lines(content: str) -> list[str]:

@@ -60,8 +60,8 @@ apply runs on the host only. Nothing here changes memory.zswap.writeback."""
 
 
 def format_usage(prog: str) -> str:
-    """Format the help text and usage line for prog."""
-    return f"{_HELP_TEXT}\nUsage: {prog} <command> [args]\n"
+    """The help text and usage line for prog, laid out as swap-setup.sh always printed them."""
+    return f"\n{_HELP_TEXT}\n\nUsage: {prog} <command> [args]\n"
 
 
 def _sudo_reexec(argv: list[str]) -> NoReturn:

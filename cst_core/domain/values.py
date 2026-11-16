@@ -9,6 +9,10 @@ class DomainValidationError(ValueError):
     """Raised when a domain value object invariant is violated."""
 
 
+KIB: Final = 1 << 10
+MIB: Final = 1 << 20
+GIB: Final = 1 << 30
+
 _DURATION_UNITS: Final[dict[str, int]] = {
     "s": 1,
     "m": 60,
@@ -41,11 +45,16 @@ def format_bytes_gib_mib(
     gib_threshold: float = 2**30,
     mib_decimals: int = 0,
     comma: bool = False,
+    mib_floor: bool = True,
 ) -> str:
-    """Format a byte count as GiB (>= threshold) or MiB."""
+    """Format a byte count as GiB (>= threshold, one decimal) or MiB.
+
+    MiB with no decimals: an int count is floored (1.9 MiB -> "1 MiB") unless
+    mib_floor=False, which rounds like a float (-> "2 MiB").
+    """
     if abs(n) >= gib_threshold:
         return f"{n / 2**30:,.1f} GiB" if comma else f"{n / 2**30:.1f} GiB"
-    if mib_decimals == 0 and isinstance(n, int):
+    if mib_decimals == 0 and isinstance(n, int) and mib_floor:
         val = n // 2**20
         return f"{val:,} MiB" if comma else f"{val} MiB"
     fmt = f",.{mib_decimals}f" if comma else f".{mib_decimals}f"

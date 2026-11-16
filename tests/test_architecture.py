@@ -70,6 +70,16 @@ IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 # monoliths). Each later stage of the conversion wires its package in and
 # removes it from here.
 ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs", "cpu", "toolchains", "vm"})
+# Shared cst_core modules made for the modules a later stage converts, with
+# the programs that will import them. A stage that wires one in removes it.
+ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {
+    "cst_core/adapters/files.py": "btrfs-stall-monitord, cst-toolchains (read_text/read_int/read_bytes)",
+    "cst_core/adapters/journal.py": "btrfs-bulk, btrfs-snapshot-core, btrfs-stall-monitord, docker-gc, "
+    "docker-volumes-nocow, bt-ldac-watch (log)",
+    "cst_core/adapters/locks.py": "btrfs-bulk, btrfs-snapshot-core, docker-gc (take_lock)",
+    "cst_core/adapters/nocow.py": "btrfs-bulk, docker-volumes-nocow, cst-vm (set_nocow/inode_flags)",
+    "cst_core/domain/units.py": "cst-vm, cst-toolchains (render_timer/render_unit_file)",
+}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 
@@ -198,7 +208,11 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
 
 def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     """Package modules no entry point reaches, outside ORPHAN_ALLOWED."""
-    return [rel for rel in package_files if rel not in reachable and rel.split("/", 1)[0] not in ORPHAN_ALLOWED]
+    return [
+        rel
+        for rel in package_files
+        if rel not in reachable and rel.split("/", 1)[0] not in ORPHAN_ALLOWED and rel not in ORPHAN_ALLOWED_FILES
+    ]
 
 
 class ArchitectureGateTest(unittest.TestCase):
@@ -307,6 +321,8 @@ class ArchitectureGateTest(unittest.TestCase):
         reach = module_closure(entry_points())
         stale = sorted(p for p in ORPHAN_ALLOWED if all(r in reach for r in files if r.startswith(p + "/")))
         self.assertEqual(stale, [], "packages wired in since: remove them from ORPHAN_ALLOWED")
+        wired = sorted(rel for rel in ORPHAN_ALLOWED_FILES if rel in reach or rel not in files)
+        self.assertEqual(wired, [], "files wired in (or gone) since: remove them from ORPHAN_ALLOWED_FILES")
 
     def test_repository_layers_obey_hexagonal_boundaries(self) -> None:
         problems: list[str] = []
