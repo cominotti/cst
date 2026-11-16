@@ -42,7 +42,6 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 # program itself). Each later stage of the conversion removes its own.
 NOT_YET_THIN: Final[frozenset[str]] = frozenset(
     {
-        "btrfs/btrfs-bulk",
         "btrfs/btrfs-stall-monitord",
         "btrfs/btrfs-stall-report",
         "btrfs/chrome-cache",

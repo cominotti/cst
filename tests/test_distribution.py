@@ -216,7 +216,14 @@ class DistributionGateTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, stage)
         dest = os.path.join(stage, "btrfs-bulk")
         Path(dest).write_bytes(build_python_zipapp(REPO, "btrfs/btrfs-bulk"))
-        probe = f"import runpy; print(runpy.run_path({dest!r}, run_name='probe')['SNAPSHOT'])"
+        # What main() does with the entry's __file__, run from the archive's own copy of the package.
+        main_file = os.path.join(dest, "__main__.py")
+        probe = (
+            f"import sys; sys.path.insert(0, {dest!r})\n"
+            "from btrfs.bulk.adapters import Program, snapshot_program\n"
+            f"Program.entry_file = {main_file!r}\n"
+            "print(snapshot_program())"
+        )
         r = subprocess.run(
             [SYSTEM_PYTHON, "-I", "-c", probe],
             check=False,

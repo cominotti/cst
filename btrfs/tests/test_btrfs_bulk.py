@@ -31,7 +31,9 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from btrfs.bulk import adapters as bulk_adapters, cli as bulk_cli, domain as bulk_domain, items as bulk_items
+from btrfs.bulk import steam as bulk_steam
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
 
@@ -74,7 +76,7 @@ class _BtrfsBulkModule(Protocol):
     BTRFS_MAGIC: int
     PROC: str
     RUN_USER: str
-    SNAPSHOT: str
+    SNAPSHOT: str | None
     STEAM_ROOT: str
     NOCOW_TOP: str
     ITEMS: Sequence[_ItemProto]
@@ -147,8 +149,14 @@ class _BtrfsBulkModule(Protocol):
 
 
 def load() -> _BtrfsBulkModule:
-    mod = load_script(TOOL, "btrfs_bulk")
-    return cast("_BtrfsBulkModule", cast("object", mod))
+    """btrfs-bulk's package as one namespace, back to its real code (the
+    program is a thin entry over it; a new view undoes the last test's fakes)."""
+    view = PackageView(bulk_cli, bulk_items, bulk_steam, bulk_adapters, bulk_domain)
+    # What a fresh run starts with: no ids from an earlier apply(), and the
+    # checkout's btrfs-bulk as the running program (btrfs-snapshot next to it).
+    bulk_domain.BULK_ONLY.clear()
+    bulk_adapters.Program.entry_file = TOOL
+    return cast("_BtrfsBulkModule", cast("object", view))
 
 
 class Crash(BaseException):
@@ -308,6 +316,23 @@ class BulkBase(unittest.TestCase):
 
 
 class BulkTest(BulkBase):
+    def test_btrfs_snapshot_is_found_from_the_running_entry(self) -> None:
+        # main() names the entry point; from a checkout, btrfs-snapshot is the one next to it.
+        snapshot = os.path.join(os.path.dirname(TOOL), "btrfs-snapshot")
+        bulk_adapters.Program.entry_file = ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "bogus"], entry_file=TOOL), 2)
+        self.assertEqual(bulk_adapters.Program.entry_file, TOOL)
+        self.assertEqual(bulk_adapters.snapshot_program(), snapshot)
+        # BTRFS_BULK_SNAPSHOT (SNAPSHOT, not as root) wins.
+        self.m.SNAPSHOT = "/elsewhere/btrfs-snapshot"
+        self.assertEqual(bulk_adapters.snapshot_program(), "/elsewhere/btrfs-snapshot")
+        # Never a guess: without an entry point it refuses.
+        self.m.SNAPSHOT = None
+        bulk_adapters.Program.entry_file = ""
+        with self.assertRaises(RuntimeError):
+            bulk_adapters.snapshot_program()
+
     def test_fresh_home_creates_layout_and_is_idempotent(self) -> None:
         os.makedirs(self.H("Downloads"))
         deferred, problems = self.apply()

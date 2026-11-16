@@ -59,32 +59,3 @@ class StallMonitorThresholds:
             and max_commit_ms < self.enter_commit_ms
             and d_storage_tasks <= self.quiet_d_tasks
         )
-
-
-@dataclass(frozen=True, slots=True)
-class BulkItemState:
-    """Declarative state snapshot for one managed entry under `~/Bulk`."""
-
-    item_id: str
-    rel_path: str
-    status: str
-    detail: str = ""
-
-
-def parse_btrfs_conf_text(text: str) -> dict[str, str]:
-    """Parse `KEY=VALUE` configuration lines, ignoring `#` comments and stripping outer quotes."""
-    vals: dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        k, raw_val = stripped.split("=", 1)
-        val = raw_val.strip()
-        if val and val[0] in ("'", '"'):
-            quote = val[0]
-            end_idx = val.find(quote, 1)
-            val = val[1:end_idx] if end_idx != -1 else val[1:]
-        elif "#" in val:
-            val = val.split("#", 1)[0].strip()
-        vals[k.strip()] = val
-    return vals

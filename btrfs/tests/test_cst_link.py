@@ -22,7 +22,6 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from btrfs.application import BtrfsService  # noqa: E402
-from btrfs.domain import BulkItemState, parse_btrfs_conf_text  # noqa: E402
 from btrfs.snapshot.domain import parse_policy, policy_max_kept  # noqa: E402
 
 LIB = os.path.join(REPO, "cst-link.bash")
@@ -101,12 +100,6 @@ class HexagonalArchitectureTest(unittest.TestCase):
         )
         self.assertTrue(service.is_protected_image("registry.example.com/org/app:1"))
         self.assertFalse(service.is_protected_image("alpine:latest"))
-
-        conf = parse_btrfs_conf_text("# comment\nNAS_ENABLED=1\nNAS_HOST='nas.local'\n")
-        self.assertEqual(conf, {"NAS_ENABLED": "1", "NAS_HOST": "nas.local"})
-
-        state = BulkItemState(item_id="media", rel_path="Bulk/media", status="present")
-        self.assertEqual(state.detail, "")
 
 
 if __name__ == "__main__":

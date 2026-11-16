@@ -1876,9 +1876,10 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | Program | Package | What is where |
 |---|---|---|
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`; no I/O. `adapters.py`: the `Host` (commands, clock, directory entries; tests replace it), the btrfs commands, the scan of the snapshot folder, the cache-folder walk, the local time zone, and the safeguards (they resolve pinned paths on the filesystem). `cli.py`: one `Run` per invocation, the run lock, the argument parser and `main()`. |
+| `btrfs-bulk` | `bulk/` | `domain.py`: the items (`Item`, `ITEMS`), the CACHEDIR.TAG text, sizes and texts, and Steam's file formats (VDF, `libraryfolders.vdf`, app manifests); no I/O. `adapters.py`: settings and state paths, btrfs and the filesystem (subvolumes, +C, mounts, busy files, copies), the child process that runs as the user (`Ctx`, `as_user`) and the steps it runs (`u_*`), the journals, the boot flag, the keep list, the run lock, and where `btrfs-snapshot` is (`snapshot_program()`: the checkout's copy from a checkout, the installed one from the zipapp). `steam.py`: one game's move into `~/Bulk/steam` with its journal and recovery. `items.py`: each item's state, its move and link, recovery, `apply`, the plan/status report. `cli.py`: `steam plan/apply`, `keep/unkeep`, `boot`, `main()`. |
 
 Still a program file of its own (converted in a later change):
-`btrfs-bulk`, `chrome-cache`, `docker-gc`, `docker-volumes-nocow`,
+`chrome-cache`, `docker-gc`, `docker-volumes-nocow`,
 `btrfs-stall-monitord`, `btrfs-stall-report`. The top-level `domain.py`,
 `ports.py`, `adapters.py` and `application.py` are an early sketch of the
 policies of the last four (`StallMonitorThresholds`, `DockerGcPolicy`,
