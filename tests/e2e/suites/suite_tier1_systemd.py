@@ -978,19 +978,25 @@ EOF
             tool=/opt/cst-rw/vm/cst-vm
             # The copy an older CST installed: the script itself, as text.
             printf '#!/usr/bin/python3 -I\n\"\"\"cst-vm: an older CST\n' >"$w/sbin/cst-vm"
-            /usr/bin/python3 -I "$tool" backup-timer status e2evm | grep -q "$w/sbin/cst-vm: installed, OLDER"
-            /usr/bin/python3 -I "$tool" backup-timer on e2evm | grep -q "updated: $w/sbin/cst-vm"
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm >"$w/status1"
+            grep -q "$w/sbin/cst-vm: installed, OLDER" "$w/status1"
+            /usr/bin/python3 -I "$tool" backup-timer on e2evm >"$w/on1"
+            grep -q "updated: $w/sbin/cst-vm" "$w/on1"
             systemctl is-enabled cst-vm-backup@e2evm.timer
-            systemctl cat cst-vm-backup@.service | grep -qF "ExecStart=/usr/bin/python3 -I $w/sbin/cst-vm backup %i --nas"
-            head -c 22 "$w/sbin/cst-vm" | grep -q '^#!/usr/bin/python3 -I$'
+            grep -qF "ExecStart=/usr/bin/python3 -I $w/sbin/cst-vm backup %i --nas" \
+                /etc/systemd/system/cst-vm-backup@.service
+            [ "$(head -n 1 "$w/sbin/cst-vm")" = "#!/usr/bin/python3 -I" ]
             python3 -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$w/sbin/cst-vm"
             # The installed copy runs on its own, from /, as root and as tester.
-            (cd / && env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) | grep -q 'backup-timer on'
+            (cd / && env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) >"$w/help-root"
+            grep -q 'backup-timer on' "$w/help-root"
             (cd / && runuser -u tester -- env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) \
-                | grep -q 'backup-timer on'
+                >"$w/help-tester"
+            grep -q 'backup-timer on' "$w/help-tester"
             again="$(/usr/bin/python3 -I "$tool" backup-timer on e2evm)"
             if grep -E 'installed:|updated:' <<<"$again"; then echo "second on wrote files" >&2; exit 1; fi
-            /usr/bin/python3 -I "$tool" backup-timer status e2evm | grep -q "$w/sbin/cst-vm: installed, up to date"
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm >"$w/status2"
+            grep -q "$w/sbin/cst-vm: installed, up to date" "$w/status2"
             /usr/bin/python3 -I "$tool" backup-timer off e2evm
             if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
             [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]

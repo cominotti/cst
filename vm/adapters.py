@@ -25,6 +25,7 @@ from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused
+from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import first_line
 from vm.domain import (
     BTRFS_MAGIC,
@@ -91,7 +92,7 @@ SNAPSHOT_SETTLE = int(os.environ.get("CST_VM_SNAPSHOT_SETTLE") or 600)
 # The weekly timer (backup-timer).
 UNIT_DIR = os.environ.get("CST_VM_UNIT_DIR") or "/etc/systemd/system"  # override: tests
 
-SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or "/usr/local/sbin/cst-vm"
+SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"].dest  # as `install` places it
 
 # True during the merge back of a NAS backup: every child then runs in its own
 # session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
