@@ -121,7 +121,7 @@ written only by successful runs with an NTP-synchronized clock, and never
 moves backwards.
 
 Locking: snapshot and prune take an exclusive, non-blocking flock on --lock
-(default /run/btrfs-snapshot.lock, the same file btrfs-snapshot locks for its
+(a plain absolute path; default /run/btrfs-snapshot.lock, the same file btrfs-snapshot locks for its
 hourly run and the conversions, so manual runs exclude both) and exit 3 if it
 is busy. A caller that already holds that lock (btrfs-snapshot hourly) passes
 --no-lock: flock locks belong to an open file description, so a second open of

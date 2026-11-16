@@ -221,6 +221,23 @@ class MainConfTest(unittest.TestCase):
         )
         self.assertFalse(self.m.edit_general(new)[1])
 
+    def test_only_general_blocks_count_and_the_right_line_changes(self) -> None:
+        # A key in another section is not ours, even on the line right before [General].
+        text = "[Policy]\nExperimental = false\n[General]\nName = x\n"
+        new, changed = self.m.edit_general(text)
+        self.assertTrue(changed)
+        self.assertTrue(new.startswith("[Policy]\nExperimental = false\n[General]\n"), new)
+        # The last commented example is the one replaced; a missing key goes under the first [General].
+        text = "[General]\n#Experimental = a\n#Experimental = b\n[General]\nName = y\n"
+        new, _ = self.m.edit_general(text)
+        self.assertEqual(
+            new,
+            f"[General]\nKernelExperimental = {ISO}\n#Experimental = a\nExperimental = true\n[General]\nName = y\n",
+        )
+        # An empty file gets the section and ends in a newline; a file without one keeps it that way.
+        self.assertEqual(self.m.edit_general("")[0], f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n\n")
+        self.assertFalse(self.m.edit_general("[LE]")[0].endswith("\n"))
+
     def test_crlf_kept(self) -> None:
         new, changed = self.m.edit_general(VENDOR.replace("\n", "\r\n"))
         self.assertTrue(changed)

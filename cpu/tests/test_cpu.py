@@ -1709,5 +1709,48 @@ class CpuWatchCliTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
 
 
+class QuietNumbersTest(unittest.TestCase):
+    """cpu-watch quiet: its command line, its CPU busy number and vm-pin's feature rule, case by case."""
+
+    def test_quiet_args(self) -> None:
+        q = cpu_domain.quiet_args
+        seconds, wait, as_json, limits = q([], {"QUIET_CPU_PCT": ""})
+        self.assertEqual((seconds, wait, as_json), (60, None, False))
+        self.assertEqual(limits, {lim.name: lim.default for lim in cpu_domain.QUIET_LIMITS})  # "" = the default
+        seconds, wait, as_json, limits = q(
+            ["--json", "--for", "1", "--wait", "2m", "--io-pressure", "2.5", "--write-mbps", "40"], {}
+        )
+        self.assertEqual((seconds, wait, as_json, limits["io-pressure"], limits["writes"]), (1, 120.0, True, 2.5, 40.0))
+        self.assertEqual(q(["--for", "12", "--cpu", "3"], {})[0], 12)
+        for argv in (
+            ["--for"],
+            ["--for", "0"],
+            ["--for", "1.5"],
+            ["--cpu"],
+            ["--cpu", "0"],
+            ["--json", "--wait"],
+            ["-x"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                q(argv, {})
+        with self.assertRaises(ValueError):
+            q([], {"QUIET_CPU_PCT": "-1"})
+
+    def test_busy_pct(self) -> None:
+        window = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
+        self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 750 / 9)  # 900 ticks, 150 idle
+        window = [{"v": {"cpu": (7, 3)}}, {"v": {"cpu": (17, 3)}}]
+        self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 100.0)
+        for end in (1000, 999):
+            with self.subTest(end=end), self.assertRaises(ValueError):
+                cpu_domain.busy_pct([{"v": {"cpu": (1000, 600)}}, {"v": {"cpu": (end, 600)}}], "cpu")
+
+    def test_disable_features_only_for_host_passthrough(self) -> None:
+        for mode in ("maximum", "host-model", "custom"):
+            root = ET.fromstring(f"<domain><cpu mode='{mode}'/></domain>")
+            cpu_domain.disable_features(root, ["cet-ss"])
+            self.assertEqual(root.findall("cpu/feature"), [], mode)
+
+
 if __name__ == "__main__":
     unittest.main()

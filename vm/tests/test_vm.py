@@ -299,6 +299,11 @@ class PartsTest(unittest.TestCase):
             vm_domain.version_changes({"qemu-kvm": "a", "swtpm": "x"}, {"qemu-kvm": "b", "swtpm": "x"}),
             ["qemu-kvm: a -> b"],
         )
+        # A downgrade (rpm-ostree rollback) is a change too; a package missing on one side is not.
+        self.assertEqual(
+            vm_domain.version_changes({"qemu-kvm": "b", "swtpm": "x"}, {"qemu-kvm": "a"}),
+            ["qemu-kvm: b -> a"],
+        )
 
     def test_cpu_disable_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1477,6 +1482,9 @@ class PackageTest(unittest.TestCase):
             self.assertFalse(vm_domain.valid_keep(bad_tag), bad_tag)
         self.assertEqual(vm_domain.overlay_kind("running", "/live.qcow2", "/base.qcow2"), "live")
         self.assertEqual(vm_domain.overlay_kind("running", "/base.qcow2", "/base.qcow2"), "definition")
+        # Equal paths, not the same object or ordering: an overlay path sorting before the image is still live.
+        self.assertEqual(vm_domain.overlay_kind("running", "/a-overlay.qcow2", "/base.qcow2"), "live")
+        self.assertEqual(vm_domain.overlay_kind("running", "".join(["/base", ".qcow2"]), "/base.qcow2"), "definition")
         self.assertEqual(vm_domain.overlay_kind("shut off", "/live.qcow2", "/base.qcow2"), "offline")
         self.assertEqual(vm_domain.overlay_kind("weird", "/live.qcow2", "/base.qcow2"), "unknown")
         args = vm_domain.forget_args("win", "workstation", 4, 3)

@@ -2023,5 +2023,31 @@ class HostAccountsTest(unittest.TestCase):
         self.assertEqual(host.arch, os.uname().machine)
 
 
+class PackageRulesEdgeTest(unittest.TestCase):
+    """parse_nevra, classify_requests and virt_changes on the cases a mutation run left unchecked."""
+
+    def test_parse_nevra_refuses_malformed(self) -> None:
+        p = doc_domain.parse_nevra
+        self.assertIsNone(p("foo-1.x86_64"))  # no release
+        self.assertIsNone(p("-1-1.fc45.x86_64"))  # no name
+        self.assertIsNone(p("a-1:-4.x86_64"))  # an epoch and no version
+        self.assertEqual(p("a-1:2:3-4.x86_64"), ("a", "1", "2:3", "4", "x86_64"))  # only the first colon is the epoch
+
+    def test_classify_multilib_and_unreadable_entries(self) -> None:
+        c = doc_domain.classify_requests
+        pkgs = ["garbage", "wine-core-9-1.fc45.i686", "wine-core-9-1.fc45.x86_64"]
+        # An unreadable entry is skipped, not the end of the list.
+        self.assertEqual(c(["wine-core-9-1.fc45"], pkgs, "x86_64"), [("wine-core-9-1.fc45", "wine-core", "pinned")])
+        # Neither installed arch is the native one: the first installed arch is named.
+        self.assertEqual(
+            c(["wine-core-9-1.fc45"], pkgs, "aarch64"), [("wine-core-9-1.fc45", "wine-core.i686", "pinned")]
+        )
+
+    def test_virt_changes_counts_the_rest(self) -> None:
+        old = {"qemu-kvm": "1", "a": "1", "b": "1", "c": "1"}
+        new = {"qemu-kvm": "2", "a": "2", "b": "2", "c": "2"}
+        self.assertEqual(doc_domain.virt_changes(old, new), "qemu-kvm 1 -> 2, and 3 more virtualization package(s)")
+
+
 if __name__ == "__main__":
     unittest.main()

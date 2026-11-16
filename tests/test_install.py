@@ -75,6 +75,8 @@ class DomainTest(unittest.TestCase):
     def test_expand_dest(self) -> None:
         self.assertEqual(expand_dest("~/.config/x", "/home/u/"), "/home/u/.config/x")
         self.assertEqual(expand_dest("/etc/x", None), "/etc/x")
+        self.assertEqual(expand_dest("~", "/home/u"), "/home/u")  # the home itself
+        self.assertEqual(expand_dest("~x/y", "/home/u"), "~x/y")  # another user's ~: not expanded
         with self.assertRaises(ValueError):
             expand_dest("~/.config/x", None)
 
