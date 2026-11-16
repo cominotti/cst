@@ -305,6 +305,14 @@ class PartsTest(unittest.TestCase):
             ["qemu-kvm: b -> a"],
         )
 
+    def test_read_conf_takes_blanks_around_the_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "vm.conf")
+            with open(p, "w") as f:
+                f.write("VM_NOCOW = 0\n# VM_TUNE=x\nVM_TUNE_DISK_BUS='scsi'\n")
+            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
+            self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent")), {})
+
     def test_cpu_disable_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "c.conf")

@@ -133,8 +133,10 @@ def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[in
 
 
 def read_conf(path: str) -> dict[str, str]:
-    """The settings of a KEY=VALUE file ({} when it cannot be read)."""
-    return parse_assignments(read_text(path, ""))
+    """The settings of a KEY=VALUE file ({} when it cannot be read). cst-vm has
+    always accepted blanks around the key (`VM_NOCOW = 0` in vm.conf, which
+    only Python reads), so the key is stripped here."""
+    return {k.strip(): v for k, v in parse_assignments(read_text(path, "")).items()}
 
 
 def default_vm() -> str:
