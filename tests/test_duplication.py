@@ -41,7 +41,7 @@ CEILINGS: Final[dict[str, float]] = {
     # read_int, read_bytes, log, take_lock, set_nocow, inode_flags,
     # render_timer, VirshPort, SubprocessVirshAdapter, first_line) next to
     # the copies the unconverted modules still hold; each stage removes its copies.
-    "same-name definitions in >1 file": 35,
+    "same-name definitions in >1 file": 34,
 }
 
 # Names that several files may define, and why.
