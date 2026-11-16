@@ -26,6 +26,7 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
+from btrfs.stall_monitord import domain as md_domain
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
@@ -638,9 +639,7 @@ class FrameListsTest(unittest.TestCase):
 
     def test_report_and_daemon_agree(self) -> None:
         report = load()
-        daemon_path = os.path.join(os.path.dirname(HERE), "btrfs-stall-monitord")
-        daemon_mod = load_script(daemon_path, "btrfs_stall_monitord")
-        daemon = cast("_StallMonitordModule", cast("object", daemon_mod))
+        daemon = cast("_StallMonitordModule", cast("object", md_domain))
         self.assertEqual(dict(report.STACK_RULES)["reclaim"].pattern, daemon.SWAP_FRAME.pattern)
         reclaim = next(rx for k, rx, _ in report.CATEGORIES if k == "reclaim")
         self.assertTrue(reclaim.endswith("|" + daemon.MMAP_LOCK_FRAME.pattern), reclaim)

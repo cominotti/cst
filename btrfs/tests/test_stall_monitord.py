@@ -35,12 +35,14 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from btrfs.stall_monitord import adapters as md_adapters
+from btrfs.stall_monitord import cli as md_cli
+from btrfs.stall_monitord import domain as md_domain
+from btrfs.stall_monitord import monitor as md_monitor
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = os.path.join(os.path.dirname(HERE), "btrfs-stall-monitord")
 PAGE = 4096
 
 
@@ -99,10 +101,11 @@ class _StallMonitordModule(Protocol):
 
 
 def load() -> _StallMonitordModule:
-    # Loading only defines constants and functions: main() runs under
-    # `if __name__ == "__main__"`, which is not the case here.
-    mod = load_script(TOOL, "btrfs_stall_monitord")
-    return cast("_StallMonitordModule", cast("object", mod))
+    """The daemon's package as one namespace (the program is a thin entry over
+    it). A new view puts back what the previous test replaced; loading runs
+    nothing: main() runs only from the program file."""
+    view = PackageView(md_cli, md_monitor, md_adapters, md_domain)
+    return cast("_StallMonitordModule", cast("object", view))
 
 
 def fake_vmstat() -> str:
