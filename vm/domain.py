@@ -10,8 +10,8 @@ import shlex
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from cpu.domain import keep_prefixes
 from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
 from cst_core.domain.values import GIB
 

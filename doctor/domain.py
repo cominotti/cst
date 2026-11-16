@@ -377,16 +377,6 @@ def read_intended(text: str) -> list[tuple[str, ...]]:
     return out
 
 
-def parse_conf_value_text(text: str, key: str) -> str | None:
-    """Return the last KEY= assignment value (quotes stripped) from shell config text."""
-    value: str | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(f"{key}="):
-            value = stripped.split("=", 1)[1].strip().strip("'\"")
-    return value
-
-
 def parse_cpu_stat_seconds(text: str) -> float | None:
     """Parse cgroup cpu.stat text and return usage_usec in seconds, or None."""
     for line in text.splitlines():

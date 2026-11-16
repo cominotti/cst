@@ -130,8 +130,13 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - Python packages follow the Hexagonal Architecture + DDD layout
   (`domain.py` / `domain/` for pure rules and frozen `slots=True` dataclasses,
   `ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
-  cases, `adapters.py` / `adapters/` for host I/O and subprocesses).
-  `tests/test_architecture.py` enforces those import and dataclass invariants.
+  cases, `adapters.py` / `adapters/` for host I/O and subprocesses, `cli.py`
+  for a program's commands). Only swap, doctor and `cst_core` have an
+  application layer with ports; in the other packages `cli.py` orchestrates
+  the commands and still does some I/O itself. `tests/test_architecture.py`
+  enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
+  each `cli.py` so it only shrinks: new logic goes into `domain` (pure) or
+  `adapters` (I/O).
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
 - A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
@@ -162,7 +167,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   - `main()` is a docstring and one statement that hands argv to the package.
   - No re-export facades (`from m import a as a`, `__all__`, a package `__init__.py` importing its own submodules): tests import a name from the module that defines it and inject fakes through ports.
 - **A concept more than one module needs lives once, in `cst_core`**; a module imports it instead of keeping a copy:
-  - domain: `errors` (`Usage`, `Refused`), `text` (`first_line`, `is_yes`), `values` (sizes: `GIB`, `MIB`, `ByteSize`, `format_bytes_*`; durations; CPU sets), `files` (managed lines and files, `owned_file_state`, `checked_path`), `units` (`render_unit_file`, `render_timer`), `install` (the manifest), `imports` (AST import analysis);
+  - domain: `errors` (`Usage`, `Refused`), `text` (`first_line`, `is_yes`, `parse_assignments` for KEY=VALUE settings files), `libvirt_xml` (`keep_prefixes`), `values` (sizes: `GIB`, `MIB`, `ByteSize`, `format_bytes_*`; durations; CPU sets), `files` (managed lines and files, `owned_file_state`, `checked_path`), `units` (`render_unit_file`, `render_timer`), `install` (the manifest), `imports` (AST import analysis);
   - ports and adapters: commands (`CommandRunnerPort`), files (`FileSystemPort`), host vs toolbox (`HostExecutionContext`), systemd (`SystemdPort`), libvirt (`VirshPort`, `SubprocessVirshAdapter`), `adapters.files` (`read_text`, `read_int`, `read_bytes`), `adapters.journal.log`, `adapters.locks.take_lock`, `adapters.nocow` (`set_nocow`, `inode_flags`), `adapters.runtime`, `adapters.zipapp`;
   - application: `install` (the installer's use case).
 - **Static gates beyond lint and types** (all in the unit suite):

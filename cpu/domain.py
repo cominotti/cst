@@ -5,11 +5,12 @@ Pure: text in, text or values out. Reading the host is cpu.adapters' job.
 """
 
 from collections.abc import Callable, Mapping, Sequence
-import io
 from itertools import islice
 import re
 from typing import Any, NamedTuple
 import xml.etree.ElementTree as ET
+
+from cst_core.domain.libvirt_xml import keep_prefixes
 
 URI = "qemu:///system"
 GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
@@ -24,16 +25,6 @@ GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
 # Windows fix it upstream. cpu-setup.conf's VM_CPU_DISABLE overrides it;
 # cst vm (status) and cst doctor import it from here.
 CPU_DISABLE_DEFAULT: str = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
-
-
-def keep_prefixes(xml_text: str) -> None:
-    """Register the document's own namespace prefixes (libosinfo metadata etc.),
-    so serializing does not rename them to ns0. A default namespace
-    (xmlns='...' on a <metadata> child) is not registered: as "" ElementTree
-    would write it on <domain>, moving every libvirt element into it."""
-    for _, (prefix, uri) in ET.iterparse(io.StringIO(xml_text), events=("start-ns",)):
-        if prefix and not re.fullmatch(r"ns\d+", prefix):  # ns0...: ElementTree's own, it refuses them
-            ET.register_namespace(prefix, uri)
 
 
 def disable_features(root: ET.Element, names: Sequence[str]) -> None:

@@ -22,6 +22,7 @@ import time
 from typing import Any, TextIO
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import is_yes
 from cpu.adapters import (
     CG,
@@ -44,7 +45,6 @@ from cpu.domain import (
     URI,
     cpu_line,
     features_note,
-    keep_prefixes,
     pinned,
     quiet_args,
     quiet_tests,

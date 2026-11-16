@@ -182,8 +182,9 @@ def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
     if os.geteuid() == 0:
         restorecon = shutil.which("restorecon")
         if restorecon is not None:
+            # "--": the path is an operand even if a caller ever passes one starting with "-".
             subprocess.run(
-                [restorecon, "-F", abs_dest],
+                [restorecon, "-F", "--", abs_dest],
                 check=False,
                 capture_output=True,
                 stdin=subprocess.DEVNULL,

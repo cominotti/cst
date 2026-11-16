@@ -8,7 +8,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.text import first_line
+from cst_core.domain.text import first_line, parse_assignments
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
@@ -61,7 +61,6 @@ from doctor.domain import (
     mtime_matches_ns,
     name_list,
     parse_alert_text,
-    parse_conf_value_text,
     parse_cpu_stat_seconds,
     parse_offered_features_xml,
     parse_unalloc_thresholds_text,
@@ -788,7 +787,7 @@ def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
     last assignment wins, as in the shell and in vm-pin's conf()."""
     try:
         with host.open_text(host.path(path)) as f:
-            return parse_conf_value_text(f.read(), key)
+            return parse_assignments(f.read()).get(key)
     except OSError:
         return None
 

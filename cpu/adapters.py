@@ -14,6 +14,7 @@ from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT, GAME_STATE, QUIET_LIMITS, URI, lows, pressure_field
 from cst_core.adapters.files import read_text
+from cst_core.domain.text import parse_assignments
 
 CONF = "/etc/cpu-setup/cpu-setup.conf"
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
@@ -22,15 +23,9 @@ PROC = "/proc"
 
 
 def conf() -> dict[str, str]:
+    """cpu-setup.conf's settings over vm-pin's defaults."""
     vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
-    try:
-        with open(CONF) as f:
-            for line in f:
-                if "=" in line and not line.lstrip().startswith("#"):
-                    k, v = line.strip().split("=", 1)
-                    vals[k] = v.strip().strip("'\"")
-    except OSError:
-        pass
+    vals.update(parse_assignments(read_text(CONF, "")))
     return vals
 
 

@@ -16,6 +16,11 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
 - Every package module is imported (directly or not) by an entry point:
   a module nothing runs is a shadow that drifts from the real code.
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
+- A package's `cli.py` is the outer layer that orchestrates a program's
+  commands; in the modules without an application layer (all but swap,
+  doctor and cst_core) it still does I/O directly. CLI_CEILINGS caps the
+  size of each one so that layer only shrinks: new logic goes into domain
+  (pure) or adapters (I/O), or into an application layer with ports.
 
 Standard library only.
 """
@@ -68,6 +73,25 @@ IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset()
 ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
+
+# Code lines of each package's cli.py (cli_code_lines), a ceiling that only goes down (see the
+# module docstring). A new cli.py is added here on purpose.
+CLI_CEILINGS: Final[dict[str, int]] = {
+    "bluetooth/cli.py": 134,
+    "btrfs/bulk/cli.py": 422,
+    "btrfs/chrome_cache/cli.py": 131,
+    "btrfs/docker_gc/cli.py": 347,
+    "btrfs/docker_volumes_nocow/cli.py": 193,
+    "btrfs/snapshot/cli.py": 1069,
+    "btrfs/stall_monitord/cli.py": 11,
+    "btrfs/stall_report/cli.py": 161,
+    "cpu/cli.py": 258,
+    "cst_core/cli.py": 195,
+    "doctor/cli.py": 36,
+    "swap/cli.py": 136,
+    "toolchains/cli.py": 1956,
+    "vm/cli.py": 1302,
+}
 
 
 def layer_role(rel: str) -> LayerRole | None:
@@ -229,6 +253,18 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
     return problems
 
 
+def cli_code_lines(source: str) -> int:
+    """Lines of a module's top-level statements, imports and the docstring left out."""
+    body = ast.parse(source).body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    return sum(
+        (node.end_lineno or node.lineno) - node.lineno + 1
+        for node in body
+        if not isinstance(node, (ast.Import, ast.ImportFrom))
+    )
+
+
 def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     """Package modules no entry point reaches, outside ORPHAN_ALLOWED."""
     return [
@@ -378,6 +414,23 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(stale, [], "packages wired in since: remove them from ORPHAN_ALLOWED")
         wired = sorted(rel for rel in ORPHAN_ALLOWED_FILES if rel in reach or rel not in files)
         self.assertEqual(wired, [], "files wired in (or gone) since: remove them from ORPHAN_ALLOWED_FILES")
+
+    def test_cli_modules_do_not_grow(self) -> None:
+        sizes: dict[str, int] = {}
+        for rel in production_python():
+            if rel.endswith("/cli.py"):
+                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                    sizes[rel] = cli_code_lines(fh.read())
+        self.assertEqual(sorted(sizes), sorted(CLI_CEILINGS), "every package cli.py has a ceiling, and only those")
+        over = [
+            f"{rel}: {n} lines, ceiling {CLI_CEILINGS[rel]}"
+            for rel, n in sorted(sizes.items())
+            if n > CLI_CEILINGS[rel]
+        ]
+        self.assertEqual(over, [], "cli.py grew: put new logic in domain or adapters")
+        self.assertEqual(
+            cli_code_lines('"""Doc."""\nimport os\nfrom a import (\n    b,\n)\n\n\ndef f():\n    return 1\n'), 2
+        )
 
     def test_repository_layers_obey_hexagonal_boundaries(self) -> None:
         problems: list[str] = []

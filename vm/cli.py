@@ -23,10 +23,10 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from cpu.domain import keep_prefixes
 from cst_core.adapters.files import owned_file_state_at
 from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import (

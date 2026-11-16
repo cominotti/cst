@@ -1224,6 +1224,12 @@ class ChangeDetectionTests(CliTestCase):
         self.assertEqual(self.cli(h, "snapshot", sources=["a=/top/home:1d", "b=/top/home:1d"]), 2)
         self.assertEqual(self.cli(h, "snapshot", sources=["a=/top/home:1d", "a=/top/x:1d"]), 2)
         self.assertEqual(self.cli(h, "frobnicate"), 2)
+        # The lock is a plain absolute path (it is opened as root): a usage error, not a traceback.
+        for bad in ("rel.lock", "/run/../tmp/x.lock"):
+            with self.subTest(lock=bad):
+                self.assertEqual(self.cli(h, "snapshot", "--lock", bad), 2)
+                self.assertIn("--lock", self.err)
+        self.assertEqual(h.mutating_calls(), [])
 
 
 class OwnershipTests(CliTestCase):

@@ -23,10 +23,11 @@ from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters.files import read_text
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import first_line, is_yes
+from cst_core.domain.text import first_line, is_yes, parse_assignments
 from vm.domain import (
     BTRFS_MAGIC,
     DEFAULT_VM,
@@ -132,16 +133,8 @@ def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[in
 
 
 def read_conf(path: str) -> dict[str, str]:
-    vals: dict[str, str] = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                if "=" in line and not line.lstrip().startswith("#"):
-                    k, v = line.strip().split("=", 1)
-                    vals[k.strip()] = v.strip().strip("'\"")
-    except OSError:
-        pass
-    return vals
+    """The settings of a KEY=VALUE file ({} when it cannot be read)."""
+    return parse_assignments(read_text(path, ""))
 
 
 def default_vm() -> str:

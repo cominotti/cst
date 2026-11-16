@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from cst_core import adapters as core_adapters
 from cst_core.adapters import nocow
 from cst_core.adapters.files import owned_file_state_at, read_bytes, read_int, read_text
 from cst_core.adapters.journal import log
@@ -21,7 +22,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
-from cst_core.domain.text import first_line, is_yes
+from cst_core.domain.text import first_line, is_yes, parse_assignments
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
@@ -197,6 +198,59 @@ class AdaptersTest(unittest.TestCase):
         os.symlink(p, self.path("link"))
         with self.assertRaises(OSError):
             nocow.inode_flags(self.path("link"))
+
+
+class WriteBytesAtomicTest(unittest.TestCase):
+    """write_bytes_atomic: the mode is exact, a link is replaced (not followed), restorecon as root."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-wba-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_mode_ignores_umask_and_a_link_is_replaced(self) -> None:
+        target = os.path.join(self.tmp, "target")
+        with open(target, "wb") as fh:
+            fh.write(b"keep")
+        dest = os.path.join(self.tmp, "sub", "dest")
+        os.makedirs(os.path.dirname(dest))
+        os.symlink(target, dest)
+        old = os.umask(0o077)
+        try:
+            core_adapters.write_bytes_atomic(dest, b"new", mode=0o755)
+        finally:
+            os.umask(old)
+        self.assertFalse(os.path.islink(dest))
+        with open(dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"new")
+        with open(target, "rb") as fh:
+            self.assertEqual(fh.read(), b"keep")
+        self.assertEqual(os.stat(dest).st_mode & 0o7777, 0o755)
+        self.assertEqual(sorted(os.listdir(os.path.dirname(dest))), ["dest"])  # no temporary file left
+
+    def test_as_root_restorecon_gets_the_path_as_an_operand(self) -> None:
+        dest = os.path.join(self.tmp, "-odd")
+        calls: list[list[str]] = []
+        with (
+            mock.patch.object(core_adapters.os, "geteuid", return_value=0),
+            mock.patch.object(core_adapters.os, "chown"),
+            mock.patch.object(core_adapters.shutil, "which", return_value="/usr/sbin/restorecon"),
+            mock.patch.object(core_adapters.subprocess, "run", side_effect=lambda argv, **_: calls.append(argv)),
+        ):
+            core_adapters.write_bytes_atomic(dest, b"x")
+        self.assertEqual(calls, [["/usr/sbin/restorecon", "-F", "--", dest]])
+
+
+class ParseAssignmentsTest(unittest.TestCase):
+    """The one KEY=VALUE reader of cpu-setup.conf, vm.conf and the snapshot settings (cpu, vm, doctor)."""
+
+    def test_quotes_comments_and_the_last_assignment(self) -> None:
+        text = "FOO='a'\n# FOO=b\n  #BAR=x\nFOO=\"c\"\n  BAZ = d=e \nEMPTY=''\nnot a setting\n"
+        self.assertEqual(parse_assignments(text), {"FOO": "c", "BAZ ": "d=e", "EMPTY": ""})
+
+    def test_a_blank_before_the_equal_sign_is_no_assignment(self) -> None:
+        # The shell runs `VM_NAME =x` as a command; no lookup finds it here either.
+        self.assertNotIn("VM_NAME", parse_assignments("VM_NAME =x\n"))
+        self.assertEqual(parse_assignments(""), {})
 
 
 if __name__ == "__main__":

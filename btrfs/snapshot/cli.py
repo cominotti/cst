@@ -74,6 +74,7 @@ from btrfs.snapshot.domain import (
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Usage
+from cst_core.domain.files import checked_path
 from cst_core.domain.values import format_bytes_human
 
 LOG_STREAM = sys.stdout
@@ -1132,7 +1133,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--dry-run", action="store_true", help="show what would be created/deleted")
         if name != "finish":
             sp.add_argument("--allow-mass-delete", action="store_true", help="disable the circuit breaker")
-        sp.add_argument("--lock", default=DEFAULT_LOCK, help=f"lock file (default {DEFAULT_LOCK})")
+        sp.add_argument("--lock", default=DEFAULT_LOCK, type=checked_path, help=f"lock file (default {DEFAULT_LOCK})")
         sp.add_argument("--no-lock", action="store_true", help="the caller already holds the lock")
         caches(sp)
         if name == "snapshot":

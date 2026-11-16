@@ -1980,10 +1980,6 @@ class DoctorDomainTest(unittest.TestCase):
             (42, 3),
         )
         self.assertIsNone(doc_domain.parse_unalloc_thresholds_text("UNALLOC_MIN_GIB=42\n"))
-        self.assertEqual(
-            doc_domain.parse_conf_value_text("FOO='a'\n# FOO=b\nFOO=\"c\"\n", "FOO"),
-            "c",
-        )
 
     def test_parse_cpu_stat_and_offered_features(self) -> None:
         self.assertEqual(doc_domain.parse_cpu_stat_seconds("nr_periods 5\nusage_usec 2500000\n"), 2.5)
