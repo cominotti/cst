@@ -154,11 +154,14 @@ class InstallServiceTest(unittest.TestCase):
             ["written:   /stage/home/u/.config/u"],
         )
 
-    def test_dest_override_and_staging_root(self) -> None:
-        req = InstallRequest(dest="/srv/other", root="/stage/")
-        self.assertEqual(self.svc.install([self.a], req), ["written:   /stage/srv/other"])
-        with self.assertRaises(InstallRefused):
-            self.svc.install([self.a, self.t], req)
+    def test_staging_root_and_only_manifest_destinations(self) -> None:
+        # The entry's own dest, under the staging root; there is no other destination to ask for.
+        self.assertEqual(self.svc.install([self.a], InstallRequest(root="/stage/")), ["written:   /stage/etc/a"])
+        for root in ("stage", "/stage/../etc"):
+            with self.subTest(root=root), self.assertRaises(ValueError):
+                self.svc.install([self.a], InstallRequest(root=root))
+        with self.assertRaises(ValueError):
+            self.svc.install([entry("m/b", "/etc/../root/b")], InstallRequest())
 
 
 class ZipappTest(unittest.TestCase):
@@ -349,7 +352,10 @@ class InstallerCliTest(unittest.TestCase):
             ("install", "--root", self.stage, "no/such-file"),
             ("install", "--root", self.stage),
             ("install", "--root", self.stage, "--module", "cpu", "cpu/vm-pin"),
-            ("install", "--root", self.stage, "--dest", "/x", "cpu/vm-pin", "cpu/cpu-watch"),
+            ("install", "--root", self.stage, "--dest", "/x", "cpu/vm-pin"),  # no free destination
+            ("install", "--root", "relative/stage", "cpu/vm-pin"),
+            ("text", "/etc/../tmp/x", "0644", "--root", self.stage),
+            ("text", "etc/x", "0644", "--root", self.stage),
             ("install", "--root", self.stage, "--set", "NOEQUALS", "cpu/vm-pin"),
             ("text", "/etc/x", "9999", "--root", self.stage),
             ("bogus",),

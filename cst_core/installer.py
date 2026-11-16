@@ -17,7 +17,7 @@ Usage:
   installer.py payload SRC                the bytes install writes for SRC, to stdout
   installer.py dests [--home DIR] [--module M] [--kind K]
                                           the destination of each matching entry, one per line
-OPTIONS: --home DIR, --root DIR (a staging folder), --dest PATH (one SRC only),
+OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
          --set KEY=VALUE (templates), --module M / --kind K / --owner root|user
          (select entries instead of naming them)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
@@ -65,7 +65,6 @@ def _parser() -> _Parser:
     p.add_argument("args", nargs="*")
     p.add_argument("--home")
     p.add_argument("--root", default="")
-    p.add_argument("--dest")
     p.add_argument("--set", action="append", default=[], dest="values")
     p.add_argument("--module")
     p.add_argument("--kind", choices=["python-entry", "shell", "unit", "data"])
@@ -128,7 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise _UsageError("payload SRC (one file)")
             sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
             return 0
-        req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, dest=a.dest, as_root=os.geteuid() == 0)
+        req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=os.geteuid() == 0)
         if a.command == "install":
             for line in service.install(entries, req):
                 print(line, flush=True)

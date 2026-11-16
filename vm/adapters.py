@@ -26,7 +26,7 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import first_line
+from cst_core.domain.text import first_line, is_yes
 from vm.domain import (
     BTRFS_MAGIC,
     DEFAULT_VM,
@@ -604,7 +604,7 @@ def needs_mark(d: Mapping[str, Any]) -> bool:
 def confirm(question: str) -> bool:
     if not sys.stdin.isatty():
         raise Refused("apply asks for confirmation: run it in a terminal")
-    return input(f"{question} [y/N] ").strip()[:1] in ("y", "Y", "s", "S")
+    return is_yes(input(f"{question} [y/N] "))
 
 
 def domain_state(vm: str) -> str:

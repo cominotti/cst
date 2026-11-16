@@ -20,7 +20,8 @@ from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
-from cst_core.domain.text import first_line
+from cst_core.domain.files import checked_path
+from cst_core.domain.text import first_line, is_yes
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
@@ -29,10 +30,27 @@ from vm import domain as vm_domain
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+class CheckedPathTest(unittest.TestCase):
+    def test_plain_absolute_paths_pass(self) -> None:
+        for p in ("/", "/etc/x.conf", "/home/u/.config/a b"):
+            self.assertEqual(checked_path(p), p)
+
+    def test_other_paths_are_refused(self) -> None:
+        for p in ("", "etc/x", "./x", "/etc/../tmp/x", "/etc/./x", "//etc/x", "/etc//x", "/etc/x/", "/etc/x\0y"):
+            with self.subTest(p=p), self.assertRaises(ValueError):
+                checked_path(p)
+
+
 class DomainTest(unittest.TestCase):
     def test_errors_are_distinct_exceptions(self) -> None:
         self.assertTrue(issubclass(Usage, Exception) and issubclass(Refused, Exception))
         self.assertFalse(issubclass(Usage, Refused) or issubclass(Refused, Usage))
+
+    def test_is_yes(self) -> None:
+        for answer in ("y", "Y", "yes", " s", "Sim\n"):
+            self.assertTrue(is_yes(answer), answer)
+        for answer in ("", "n", "N", "no", " ", "x y", "não"):
+            self.assertFalse(is_yes(answer), answer)
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")

@@ -14,6 +14,7 @@ from typing import Any
 from btrfs.docker_gc.domain import HEARTBEAT_SECONDS, ts
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
+from cst_core.domain.text import is_yes
 
 STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")  # override: tests
 LAST_USED = os.path.join(STATE_DIR, "last-used.json")
@@ -125,6 +126,6 @@ def docker_up() -> bool:
 
 def ask(q: str) -> bool:
     try:
-        return input(q).strip()[:1] in ("y", "Y", "s", "S")
+        return is_yes(input(q))
     except EOFError:
         return False

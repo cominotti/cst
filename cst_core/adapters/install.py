@@ -4,6 +4,7 @@ import os
 import stat
 
 from cst_core.adapters import write_bytes_atomic
+from cst_core.domain.files import checked_path
 
 
 class LocalInstallTarget:
@@ -16,6 +17,7 @@ class LocalInstallTarget:
 
     def current(self, path: str) -> tuple[bytes, int] | None:
         """(content, permission bits) of a regular file; None when absent, a link or not a file."""
+        path = checked_path(path)
         try:
             st = os.lstat(path)
             if not stat.S_ISREG(st.st_mode):
@@ -27,4 +29,4 @@ class LocalInstallTarget:
 
     def write(self, path: str, data: bytes, mode: int) -> None:
         """Atomic replace (a link at path is replaced, not followed)."""
-        write_bytes_atomic(path, data, mode=mode)
+        write_bytes_atomic(checked_path(path), data, mode=mode)

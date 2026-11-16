@@ -1118,7 +1118,7 @@ lw_install() {
     if [[ "${LW_PROG_ST}" != ok ]]; then
         python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${LW_SRC}"
         # The zipapp of the manifest (dest ~/.local/lib/cst/bt-ldac-watch, i.e. LW_PROG).
-        cst_installer install --home "${HOME}" --dest "${LW_PROG}" bluetooth/bt-ldac-watch
+        cst_installer install --home "${HOME}" bluetooth/bt-ldac-watch
         changed=1
     fi
     if [[ "${LW_UNIT_ST}" != ok ]]; then

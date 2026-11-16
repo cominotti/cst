@@ -1321,6 +1321,13 @@ class BulkTest(BulkBase):
         self.assertEqual(len(found), 1, found)
         self.assertTrue(os.path.exists(self.m.jpath("apps")))
 
+    def test_journal_ids_stay_in_the_state_folder(self) -> None:
+        for ident in ("apps", "steam-570", "steam-1.2"):
+            self.assertEqual(os.path.dirname(self.m.jpath(ident)), os.path.dirname(self.m.jpath("apps")))
+        for ident in ("", "../x", "steam-1/../../etc", "a/b", ".hidden", "steam-1..2"):
+            with self.subTest(ident=ident), self.assertRaises(ValueError):
+                self.m.jpath(ident)
+
     def test_link_removed_after_commit_keeps_the_written_copy(self) -> None:
         self.write("Programs/a", "a")
         m = self.m

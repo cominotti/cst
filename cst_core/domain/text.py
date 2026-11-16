@@ -7,3 +7,8 @@ def first_line(text: str | None) -> str:
         if line.strip():
             return line.strip()
     return ""
+
+
+def is_yes(answer: str) -> bool:
+    """A [y/N] prompt's answer is yes: it starts with y or s (sim), any case."""
+    return answer.strip().lower().startswith(("y", "s"))

@@ -685,6 +685,11 @@ def u_flatpak_state(app: str, path: str) -> str:
 
 # ---- journal (root-owned; the user cannot fake it) ----------------------------------------
 def jpath(ident: str) -> str:
+    """The journal file of an item or a Steam game ("steam-<appid>"); the id
+    comes from ITEMS or a Steam manifest, so anything but a plain name
+    (a `/` or `..` that would leave STATE) is refused."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", ident) or ".." in ident:
+        raise ValueError(f"{ident!r}: not a journal id")
     return os.path.join(STATE, f"journal-{ident}.json")
 
 

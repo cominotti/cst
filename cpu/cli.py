@@ -22,6 +22,7 @@ import time
 from typing import Any, TextIO
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.text import is_yes
 from cpu.adapters import (
     CG,
     RUNS,
@@ -89,9 +90,9 @@ def vm_pin(argv: Sequence[str], doc: str) -> int:
         return 0
     if not sys.stdin.isatty():
         sys.exit("apply asks for confirmation: run it in a terminal")
-    if input(
-        f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] "
-    ).strip()[:1] not in ("y", "Y", "s", "S"):
+    if not is_yes(
+        input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] ")
+    ):
         print("Nothing changed.")
         return 0
     backup = f"/etc/cpu-setup/{name}.xml.before-vm-pin"

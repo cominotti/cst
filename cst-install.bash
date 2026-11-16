@@ -16,13 +16,13 @@ cst_installer() {
     /usr/bin/python3 -I -B "${CST_INSTALLER}" "$@"
 }
 
-# cst_install [--set KEY=VALUE]... [--dest DEST] SRC...: root-owned manifest files.
+# cst_install [--set KEY=VALUE]... SRC...: root-owned manifest files.
 cst_install() {
     cst_installer install "$@"
 }
 
-# cst_install_as USER [--set KEY=VALUE]... [--dest DEST] SRC...: files of USER's
-# home (dest `~/...`, or a --dest inside it), written by a process running as
+# cst_install_as USER [--set KEY=VALUE]... SRC...: files of USER's
+# home (dest `~/...`), written by a process running as
 # USER: no root-owned folders in the home, no link followed with root rights.
 cst_install_as() {
     local user="$1" home

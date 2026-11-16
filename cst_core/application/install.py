@@ -8,6 +8,7 @@ Output lines are the ones the setup scripts always printed:
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from cst_core.domain.files import checked_path
 from cst_core.domain.install import InstallEntry, expand_dest, render_template
 from cst_core.ports import InstallTargetPort
 
@@ -27,13 +28,15 @@ class InstallRequest:
     home: str | None = None
     values: Mapping[str, str] | None = None
     root: str = ""
-    dest: str | None = None
     as_root: bool = False
 
 
 def staged(root: str, path: str) -> str:
-    """`path` under the staging folder `root` ('' = the real root)."""
-    return root.rstrip("/") + path if root else path
+    """`path` under the staging folder `root` ('' = the real root); both plain absolute paths."""
+    checked_path(path)
+    if not root:
+        return path
+    return checked_path(root.rstrip("/") or "/").rstrip("/") + path
 
 
 class InstallService:
@@ -51,12 +54,10 @@ class InstallService:
         return data
 
     def destination(self, entry: InstallEntry, req: InstallRequest) -> str:
-        """Where the entry goes for this request (dest override, `~/` expanded, staged)."""
-        return staged(req.root, req.dest or expand_dest(entry.dest, req.home))
+        """Where the entry goes for this request (`~/` expanded, staged)."""
+        return staged(req.root, expand_dest(entry.dest, req.home))
 
     def _check(self, entries: Sequence[InstallEntry], req: InstallRequest) -> None:
-        if req.dest is not None and len(entries) != 1:
-            raise InstallRefused("--dest names the destination of exactly one file")
         for entry in entries:
             if entry.owner == "user" and req.as_root and not req.root:
                 raise InstallRefused(

@@ -1,6 +1,7 @@
 """Pure domain rules for comparing and updating managed files and marked lines."""
 
 from dataclasses import dataclass
+import posixpath
 import re
 from typing import Literal
 
@@ -126,3 +127,15 @@ def inspect_managed_file(
     if effective_lines(desired_content) == effective_lines(actual_content):
         return "adopt"
     return "change"
+
+
+def checked_path(path: str) -> str:
+    """`path` when it is absolute and already normal (no `..`, `.`, `//`, NUL), else ValueError.
+
+    Programs that write as root take paths from the manifest, their settings
+    or their command line: a path that is not plainly absolute is refused,
+    never resolved into somewhere else.
+    """
+    if not path.startswith("/") or path.startswith("//") or "\0" in path or posixpath.normpath(path) != path:
+        raise ValueError(f"{path!r}: not a plain absolute path")
+    return path
