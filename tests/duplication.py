@@ -14,8 +14,14 @@
   of shared).
 
 The method is the one of the reference scripts the conversion was measured
-with, except that function and class docstrings are dropped too (the
-reference dropped only the module's), so the numbers are a little lower.
+with, except for two things that make the numbers a little lower:
+- function and class docstrings are dropped too (the reference dropped only
+  the module's);
+- an import statement is one code line however the formatter wraps it. A
+  long `from pkg.mod import (` list is one name per line, which type 2
+  turns into runs of identical `N ,` lines: two such lists anywhere looked
+  like copied code, and moving a monolith into a package "duplicated" its
+  imports. The statement is still measured, as one line.
 """
 
 import ast
@@ -68,11 +74,20 @@ def normalized_python(source: str, *, type2: bool) -> list[str]:
         return []
     lines: dict[int, list[str]] = defaultdict(list)
     prev: int | None = None
+    import_line: int | None = None  # first line of the import statement being read
     for tk in toks:
         if tk.type in _SKIP_TOKENS:
             if tk.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
                 prev = tk.type  # a docstring is the first token of its line
+            if tk.type == tokenize.NEWLINE:
+                import_line = None
             continue
+        if (
+            tk.type == tokenize.NAME
+            and tk.string in ("import", "from")
+            and prev in (None, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+        ):
+            import_line = tk.start[0]  # `from` at the start of a statement is an import
         if (
             tk.type == tokenize.STRING
             and prev in (None, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
@@ -90,7 +105,7 @@ def normalized_python(source: str, *, type2: bool) -> list[str]:
             text = "0"
         else:
             text = tk.string
-        lines[tk.start[0]].append(text)
+        lines[tk.start[0] if import_line is None else import_line].append(text)
         prev = tk.type
     out = []
     for ln in sorted(lines):

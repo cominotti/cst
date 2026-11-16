@@ -7,7 +7,8 @@ the copies cannot come back. The run prints the numbers measured.
 
 Targets of the hexagonal conversion (the ceilings move towards them):
 - python type 1, W=8, cross-file lines: 0 (no block of 8 lines in two files);
-- python type 2, W=8: under 3.5 % (what main had before the conversion);
+- python type 2, W=8: under 3.5 % (what main had before the conversion,
+  3.50 % whether a wrapped import counts as one line or as many);
 - shell, W=5: at most 1.1 %;
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its reason.
 """
@@ -30,9 +31,11 @@ from tests.repo_files import REPO, repo_files
 
 # One table: metric -> ceiling. Lower a number when a change brings it down.
 CEILINGS: Final[dict[str, float]] = {
-    "python type-1 W=8 duplicated %": 0.36,
+    # 0.37: the same 32 duplicated lines as before an import statement became
+    # one line; only the total of code lines went down.
+    "python type-1 W=8 duplicated %": 0.37,
     "python type-1 W=8 cross-file lines": 32,
-    "python type-2 W=8 duplicated %": 9.74,
+    "python type-2 W=8 duplicated %": 7.45,
     "shell W=5 duplicated %": 0.47,
     # Includes the canonical homes in cst_core (Usage, Refused, read_text,
     # read_int, read_bytes, log, take_lock, set_nocow, inode_flags,
@@ -91,6 +94,28 @@ class DuplicationRatchetTest(unittest.TestCase):
         self.assertEqual((rep.cross_file, rep.per_file.get("c", 0)), (16, 0))
         norm2 = {p: normalized_python(src, type2=True) for p, src in (("a", a), ("c", renamed))}
         self.assertEqual(clones(norm2, 8).cross_file, 18)
+
+    def test_a_wrapped_import_list_is_one_line(self) -> None:
+        names = "".join(f"    name{i},\n" for i in range(12))
+        a = f"from pkg.one import (\n{names})\nimport os\n"
+        b = f"from pkg.two import (\n{names.replace('name', 'other')})\n"
+        self.assertEqual(
+            normalized_python(a, type2=False)[0],
+            "from pkg . one import ( " + " ".join(f"name{i} ," for i in range(12)) + " )",
+        )
+        self.assertEqual(len(normalized_python(a, type2=True)), 2)
+        self.assertEqual(
+            clones({p: normalized_python(src, type2=True) for p, src in (("a", a), ("b", b))}, 8).duplicated, 0
+        )
+        # Only a statement that starts with `from`/`import`: `raise ... from` and a copied body still count.
+        self.assertEqual(
+            normalized_python("raise E(\n    x\n) from None\n", type2=False), ["raise E (", "x", ") from None"]
+        )
+        body = "".join(f"    x{i} = f(a, {i})\n" for i in range(8))
+        copied = {
+            p: normalized_python(f"{imports}def {p}(a):\n{body}", type2=True) for p, imports in (("one", a), ("two", b))
+        }
+        self.assertEqual(clones(copied, 8).cross_file, 18)
 
     def test_comments_docstrings_and_trivial_lines_do_not_count(self) -> None:
         src = 'def f():\n    """doc"""\n    # comment\n    return (\n        1\n    )\n'
