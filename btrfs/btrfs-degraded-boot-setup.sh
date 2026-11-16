@@ -103,19 +103,13 @@ fi
 die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARNING: $*" >&2; }
 
+# Generated files (stdin) go through CST's one installer: written only when
+# the content or the mode differs, atomically, owned by root, relabelled;
+# it prints `unchanged: DEST` or `written:   DEST`.
+# shellcheck source=cst-install.bash
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../cst-install.bash"
 write_if_changed() {
-    local dest="$1" mode="$2" tmp
-    tmp="$(mktemp)"
-    cat >"${tmp}"
-    if [[ -f "${dest}" ]] && cmp -s "${tmp}" "${dest}"; then
-        rm -f "${tmp}"
-        echo "unchanged: ${dest}"
-        return
-    fi
-    install -D -m "${mode}" -o root -g root "${tmp}" "${dest}"
-    rm -f "${tmp}"
-    restorecon "${dest}" 2>/dev/null || true
-    echo "written:   ${dest}"
+    cst_install_text "$1" "$2"
 }
 
 # Queries over `rpm-ostree status --json`. Deployment 0 is the one the next
