@@ -657,5 +657,35 @@ class FrameListsTest(unittest.TestCase):
         self.assertTrue(reclaim.endswith("|" + daemon.MMAP_LOCK_FRAME.pattern), reclaim)
 
 
+class ClassifyBranchesTest(unittest.TestCase):
+    """Each way classify() decides, one case per branch (the mutation run left them unchecked)."""
+
+    def test_cases(self) -> None:
+        c = rp_domain.classify
+        cases = [
+            # (sig, examples, comms, kind) -> category
+            (("x", [], (), "memory"), "reclaim"),
+            (("x", [], (), "idle"), "idle"),
+            (("x", [["btrfs_sync_log"]], (), None), "log-sync"),
+            # A commit anywhere on the stack wins over the innermost frame (wbt).
+            (("x", [["wbt_wait", "btrfs_commit_transaction"]], (), None), "commit"),
+            (("no-stack", [], ("fstrim",), None), "maintenance"),
+            (("no-stack", [], ("btrfs-discard-1",), None), "maintenance"),
+            (("no-stack", [], ("zsh",), None), "no-stack"),
+            (("no-stack", [], ("btrfs-transaction",), None), "commit"),
+            (("no-stack", [], ("kcryptd/253:0",), None), "device"),
+            (("no-stack", [], ("bash",), None), "no-stack"),
+            (("wchan:balance_dirty_pages", [], (), None), "dirty-throttle"),
+            (("wchan:", [], (), None), "no-stack"),
+            (("ep_poll", [], (), None), "idle"),
+            (("ep_poll", [], (), "storage"), "other"),
+            (("mystery", [["x", "wbt_wait"]], (), None), "wbt"),
+            (("mystery", [["x", "y"]], (), None), "other"),
+        ]
+        for (sig, examples, comms, kind), want in cases:
+            with self.subTest(sig=sig, comms=comms, kind=kind):
+                self.assertEqual(c(sig, examples, comms, kind), want)
+
+
 if __name__ == "__main__":
     unittest.main()

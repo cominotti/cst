@@ -1075,5 +1075,24 @@ class PackageLayersTest(Scratch):
             tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
 
 
+class ParseSizeTest(unittest.TestCase):
+    """MAX_TOTAL and friends: a number with its unit, or 0/off for no cap."""
+
+    def test_units_multiply(self) -> None:
+        self.assertEqual(tc_domain.parse_size("150G"), 150 << 30)
+        self.assertEqual(tc_domain.parse_size(" 1.5k "), 1536)
+        self.assertEqual(tc_domain.parse_size("2TiB"), 2 << 40)
+        self.assertEqual(tc_domain.parse_size("3mb"), 3 << 20)
+
+    def test_no_cap_is_zero(self) -> None:
+        for text in ("0", "0.0", "off", "none", "no", "OFF"):
+            self.assertEqual(tc_domain.parse_size(text), 0, text)
+
+    def test_a_bare_number_is_refused(self) -> None:
+        for text in ("150", "1x", "", "G"):
+            with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
+                tc_domain.parse_size(text)
+
+
 if __name__ == "__main__":
     unittest.main()

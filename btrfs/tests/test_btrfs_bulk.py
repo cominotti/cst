@@ -1483,5 +1483,17 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
 
 
+class GibTest(unittest.TestCase):
+    """bulk shows GiB from a tenth of a GiB on (old data worth pointing out), else whole MiB."""
+
+    def test_threshold_and_units(self) -> None:
+        tenth = bulk_domain.BIG // 10 + 1
+        self.assertEqual(bulk_domain.gib(tenth), "0.1 GiB")
+        self.assertEqual(bulk_domain.gib(tenth - 2), "102 MiB")
+        self.assertEqual(bulk_domain.gib(bulk_domain.BIG // 10), "102 MiB")  # just under a tenth
+        self.assertEqual(bulk_domain.gib(3 * bulk_domain.BIG), "3.0 GiB")
+        self.assertEqual(bulk_domain.gib((5 << 20) + (1 << 19)), "5 MiB")  # floored
+
+
 if __name__ == "__main__":
     unittest.main()
