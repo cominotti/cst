@@ -592,6 +592,46 @@ class MemoryKindSamplingTest(unittest.TestCase):
         self.assertEqual(self.m.VERSION, 8)
 
 
+class EpisodeThresholdsTest(unittest.TestCase):
+    """What opens an episode: IO pressure, a long commit, or tasks waiting on
+    storage, each at its threshold (ENTER_*); below all three, nothing."""
+
+    m: _StallMonitordModule
+    mon: _MonitorProto
+
+    def setUp(self) -> None:
+        self.m = load()
+        self.mon = monitor(self.m)
+
+    @staticmethod
+    def rec(mono: float, io_total_us: int, commit_ms: int = 0, d: int = 0) -> dict[str, Any]:
+        return {
+            "ts": 1000.0 + mono,
+            "mono": mono,
+            "psi": {"io": [0.0, io_total_us, 0.0, 0]},
+            "fs": {"uuid": {"c": [0, 0, 0, 0, 0, commit_ms]}},
+            "d": d,
+            "procs": [1, 0],
+        }
+
+    def reason(self, io_pct: float, commit_ms: int, d: int) -> str | None:
+        """The episode one sample opens, 1 s after the previous one."""
+        self.mon.prev = self.rec(0.0, 0)
+        self.mon.episode = None
+        self.mon.update_episode(self.rec(1.0, round(io_pct * 1e4), commit_ms, d), [])
+        return None if self.mon.episode is None else self.mon.episode.reason
+
+    def test_each_threshold_opens_an_episode(self) -> None:
+        self.assertEqual(self.reason(10.0, 0, 0), "io_some 10%")
+        self.assertEqual(self.reason(0.0, 1000, 0), "commit 1000 ms")
+        self.assertEqual(self.reason(0.0, 0, 3), "3 tasks waiting on storage")
+        self.assertEqual(self.reason(12.0, 1200, 4), "io_some 12%")  # IO pressure is named first
+
+    def test_below_every_threshold_nothing_opens(self) -> None:
+        self.assertIsNone(self.reason(9.9, 999, 2))
+        self.assertIsNone(self.reason(2.0, 100, 0))
+
+
 class HungKindTest(unittest.TestCase):
     m: _StallMonitordModule
     mon: _MonitorProto

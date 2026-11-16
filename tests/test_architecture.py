@@ -14,7 +14,7 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   machine through ports, which adapters implement.
 - Every package module is imported (directly or not) by an entry point:
   a module nothing runs is a shadow that drifts from the real code.
-  ORPHAN_ALLOWED names the packages a later stage of the conversion wires in.
+  ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 
 Standard library only.
 """
@@ -67,19 +67,11 @@ DIRECT_IO_CALLS: Final[dict[str, frozenset[str]]] = {
 }
 IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 
-# Packages whose modules no entry point imports yet (their programs are still
-# monoliths). Each later stage of the conversion wires its package in and
-# removes it from here.
+# Packages, and single files, that no entry point imports. Every module is
+# converted and wired in: both stay empty (a module nothing runs is a shadow
+# that drifts from the real code).
 ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset()
-# Files no entry point imports yet, with the programs that will (or why they
-# stay). A stage that wires one in, or deletes it, removes its line.
-_BTRFS_SHADOW = "shadow of chrome-cache, docker-gc and btrfs-stall-*: their stage wires the package in"
-ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {
-    "btrfs/adapters.py": _BTRFS_SHADOW,
-    "btrfs/application.py": _BTRFS_SHADOW,
-    "btrfs/domain.py": _BTRFS_SHADOW,
-    "btrfs/ports.py": _BTRFS_SHADOW,
-}
+ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 

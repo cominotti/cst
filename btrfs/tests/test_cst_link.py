@@ -21,7 +21,6 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from btrfs.application import BtrfsService  # noqa: E402
 from btrfs.chrome_cache.domain import FLAG_DIR, FLAG_SIZE  # noqa: E402
 from btrfs.snapshot.domain import parse_policy, policy_max_kept  # noqa: E402
 
@@ -79,12 +78,13 @@ class CstLinkTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(CST))
 
 
-class HexagonalArchitectureTest(unittest.TestCase):
-    """Tests directly exercising btrfs.{domain,ports,adapters,application}."""
+class DomainRulesTest(unittest.TestCase):
+    """Rules of the btrfs packages, called straight from their domain modules.
+    The stall thresholds are tested on the daemon (test_stall_monitord,
+    EpisodeThresholdsTest) and the protected registries on docker-gc
+    (test_docker_gc)."""
 
     def test_domain_policies_and_parsers(self) -> None:
-        service = BtrfsService()
-
         # Retention policies: btrfs-snapshot-core's parser (the real one).
         self.assertEqual(parse_policy("48h 14d 8w 12m 2y"), {"h": 48, "d": 14, "w": 8, "m": 12, "y": 2})
         self.assertEqual(parse_policy("*d"), {"d": "all"})
@@ -93,15 +93,11 @@ class HexagonalArchitectureTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_policy(bad)
 
-        self.assertTrue(service.evaluate_stall(12.0, 1200, 4))
-        self.assertFalse(service.evaluate_stall(2.0, 100, 0))
         # chrome-cache's flag lines: its domain (the real one).
         self.assertEqual(
             (FLAG_DIR, FLAG_SIZE),
             ("--disk-cache-dir=/tmp/chrome-cache", "--disk-cache-size=536870912"),
         )
-        self.assertTrue(service.is_protected_image("registry.example.com/org/app:1"))
-        self.assertFalse(service.is_protected_image("alpine:latest"))
 
 
 if __name__ == "__main__":
