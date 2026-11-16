@@ -391,7 +391,16 @@ everything with `plan`, `status` or `doctor` before changing anything:
 ## Other files in this folder
 
 - `cst_core/`: shared kernel (`domain/`), port protocols (`ports/`), host adapters
-  (`adapters/`) and the Python CLI dispatcher (`cli.py`) behind `cst`.
+  (`adapters/`), shared use cases (`application/`), the Python CLI dispatcher
+  (`cli.py`) behind `cst`, and the installer (`installer.py`).
+- `cst-install.bash`: how every module installs its files. The list of what is
+  installed where, with which mode, is one table, `INSTALL_MANIFEST` in
+  `cst_core/domain/install.py`. A file is written only when it changed, and the
+  output says `unchanged:` or `written:` per file. The Python helpers are
+  installed as **zipapps**: one file at the usual path (for example
+  `/usr/local/sbin/docker-gc`) that holds the program and the CST code it
+  imports, so it runs without this folder. `cst_core/installer.py plan SRC...`
+  (or `--module btrfs`) shows what an install would write, without writing.
 - `cst-link.bash`: the helper that `cst btrfs install` and `cst cpu install`
   use to create the link `~/.local/bin/cst` ([The `cst` command](#the-cst-command)).
 - `fix-anaconda-webui-btrfs-compress.sh`: a one-time helper for **installing**
