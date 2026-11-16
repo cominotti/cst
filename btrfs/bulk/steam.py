@@ -68,7 +68,6 @@ from btrfs.bulk.domain import (
     hms,
     is_tool,
     lf_files,
-    read_full,
     vdf_dump,
     vdf_load,
     vdf_parse,
@@ -736,6 +735,17 @@ def copy_bytes(src: str, dst: str, label: str, total: int) -> None:
         if proc.returncode != 0:
             err.seek(0)
             raise RuntimeError(f"copy failed: {err.read().decode(errors='replace').strip()[:300]}")
+
+
+def read_full(fd: int, view: memoryview) -> int:
+    """Fill VIEW from FD; fewer bytes only at the end of the file."""
+    n = 0
+    while n < len(view):
+        k = os.readv(fd, [view[n:]])
+        if k == 0:
+            break
+        n += k
+    return n
 
 
 def same_file(a: str, b: str, on_chunk: Callable[[int], None] | None = None) -> bool:

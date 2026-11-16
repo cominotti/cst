@@ -1882,5 +1882,5 @@ Still a program file of its own (converted in a later change):
 `chrome-cache`, `docker-gc`, `docker-volumes-nocow`,
 `btrfs-stall-monitord`, `btrfs-stall-report`. The top-level `domain.py`,
 `ports.py`, `adapters.py` and `application.py` are an early sketch of the
-policies of the last four (`StallMonitorThresholds`, `DockerGcPolicy`,
+policies of three of them (`StallMonitorThresholds`, `DockerGcPolicy`,
 `ChromeCachePolicy`) that no program uses yet; their conversion replaces it.

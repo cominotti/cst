@@ -363,15 +363,4 @@ def hms(seconds: float) -> str:
     return f"{s // 3600}h{s % 3600 // 60:02d}m{s % 60:02d}s" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
-def read_full(fd: int, view: memoryview) -> int:
-    """Fill VIEW from FD; fewer bytes only at the end of the file."""
-    n = 0
-    while n < len(view):
-        k = os.readv(fd, [view[n:]])
-        if k == 0:
-            break
-        n += k
-    return n
-
-
 STEAM_USAGE = "usage: btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"
