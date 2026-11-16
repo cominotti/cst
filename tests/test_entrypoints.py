@@ -128,6 +128,44 @@ def thin_entry_problems(source: str, rel: str) -> list[str]:
     return problems
 
 
+# The cst_core.adapters.runtime functions (and an entry's hand-over to its
+# package's main) that may receive __file__: everything else that needs a
+# path asks them.
+FILE_CONSUMERS: Final[frozenset[str]] = frozenset(
+    {"checkout_root", "install_payload", "main", "program_argv", "program_path", "running_archive", "sibling_program"}
+)
+# Programs that still compute paths from __file__ themselves (their stage
+# moves them onto cst_core.adapters.runtime).
+FILE_PATHS_NOT_YET: Final[frozenset[str]] = frozenset(
+    {
+        "btrfs/adapters.py",
+        "cpu/adapters.py",
+        "toolchains/adapters.py",
+        "toolchains/cst-toolchains",
+        "vm/adapters.py",
+        "vm/cst-vm",
+    }
+)
+
+
+def file_path_problems(source: str, rel: str) -> list[str]:
+    """Uses of __file__ outside the bootstrap that are not an argument of a FILE_CONSUMERS call."""
+    tree = ast.parse(without_bootstrap(source), filename=rel)
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            if name in FILE_CONSUMERS:
+                for arg in [*node.args, *(k.value for k in node.keywords)]:
+                    allowed.add(id(arg))
+    return [
+        f"{rel}:{node.lineno}: computes a path from __file__ (ask cst_core.adapters.runtime)"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "__file__" and id(node) not in allowed
+    ]
+
+
 def reexport_problems(source: str, rel: str) -> list[str]:
     """`import a as a` / `from m import a as a`: the explicit re-export idiom."""
     problems: list[str] = []
@@ -162,6 +200,18 @@ class EntryPointGateTest(unittest.TestCase):
                 continue
             problems.extend(thin_entry_problems(_read(rel), rel))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_paths_come_from_the_runtime_resolver(self) -> None:
+        problems: list[str] = []
+        for rel in production_python():
+            if rel not in FILE_PATHS_NOT_YET:
+                problems.extend(file_path_problems(_read(rel), rel))
+        self.assertEqual(problems, [], "\n".join(problems))
+        stale = sorted(rel for rel in FILE_PATHS_NOT_YET if not file_path_problems(_read(rel), rel))
+        self.assertEqual(stale, [], "no longer computes paths from __file__: remove from FILE_PATHS_NOT_YET")
+        self.assertTrue(file_path_problems("import os\nHERE = os.path.dirname(__file__)\n", "x"))
+        self.assertEqual(file_path_problems("X = sibling_program('a/b', __file__)\n", "x"), [])
+        self.assertEqual(file_path_problems(BOOTSTRAP, "x"), [])
 
     def test_not_yet_thin_names_real_entry_points(self) -> None:
         self.assertLessEqual(NOT_YET_THIN, set(entry_points()))

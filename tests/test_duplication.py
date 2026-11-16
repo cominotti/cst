@@ -30,9 +30,9 @@ from tests.repo_files import REPO, repo_files
 
 # One table: metric -> ceiling. Lower a number when a change brings it down.
 CEILINGS: Final[dict[str, float]] = {
-    "python type-1 W=8 duplicated %": 5.97,
+    "python type-1 W=8 duplicated %": 5.96,
     "python type-1 W=8 cross-file lines": 1176,
-    "python type-2 W=8 duplicated %": 14.65,
+    "python type-2 W=8 duplicated %": 14.64,
     "shell W=5 duplicated %": 0.47,
     # Includes the canonical homes in cst_core (Usage, Refused, read_text,
     # read_int, read_bytes, log, take_lock, set_nocow, inode_flags,

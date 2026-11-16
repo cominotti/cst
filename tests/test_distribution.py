@@ -208,6 +208,25 @@ class DistributionGateTest(unittest.TestCase):
                 self.assertNotRegex(r.stderr, r"ImportError|ModuleNotFoundError|Traceback", r.stderr)
                 self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
 
+    @unittest.skipUnless(os.access(SYSTEM_PYTHON, os.X_OK), "needs /usr/bin/python3")
+    def test_an_installed_entry_finds_its_siblings_at_their_installed_dests(self) -> None:
+        # btrfs-bulk runs btrfs-snapshot: from a zipapp, the installed one, not a path inside the archive.
+        stage = tempfile.mkdtemp(prefix="cst-dist-sibling-")
+        self.addCleanup(shutil.rmtree, stage)
+        dest = os.path.join(stage, "btrfs-bulk")
+        Path(dest).write_bytes(build_python_zipapp(REPO, "btrfs/btrfs-bulk"))
+        probe = f"import runpy; print(runpy.run_path({dest!r}, run_name='probe')['SNAPSHOT'])"
+        r = subprocess.run(
+            [SYSTEM_PYTHON, "-I", "-c", probe],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "/usr/local/sbin/btrfs-snapshot"), r.stderr)
+
     def test_shell_files_parse_and_source_only_checkout_files(self) -> None:
         problems: list[str] = []
         shell = [e.src for e in INSTALL_MANIFEST if e.kind == "shell"]

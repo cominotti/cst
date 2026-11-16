@@ -32,6 +32,12 @@ import zoneinfo
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from typing import Any, Protocol, TypedDict, cast
 from unittest import mock
+
+# Run directly (python3 -I -B btrfs/tests/test_btrfs_snapshot_core.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True  # keep __pycache__ out of the repository

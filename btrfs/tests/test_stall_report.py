@@ -20,6 +20,12 @@ import sys
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, cast
+
+# Run directly (python3 -I -B btrfs/tests/test_stall_report.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True

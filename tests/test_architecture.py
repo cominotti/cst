@@ -24,6 +24,7 @@ import os
 from typing import Final, Literal
 import unittest
 
+from cst_core.domain.imports import loads_code_by_path
 from tests.code_graph import entry_points, module_closure, module_of, production_python
 from tests.repo_files import REPO, repo_files
 
@@ -215,7 +216,28 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     ]
 
 
+# Modules that still load a monolith by its path (SourceFileLoader); each
+# stage that turns the monolith into a package import removes its line.
+PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset(
+    {"btrfs/adapters.py", "cpu/adapters.py", "doctor/adapters.py", "toolchains/adapters.py", "vm/adapters.py"}
+)
+
+
 class ArchitectureGateTest(unittest.TestCase):
+    def test_production_code_loads_no_code_by_path(self) -> None:
+        loads: dict[str, list[int]] = {}
+        for rel in production_python():
+            with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                lines = loads_code_by_path(fh.read(), rel)
+            if lines:
+                loads[rel] = lines
+        problems = [
+            f"{rel}:{lines[0]}: loads code by path" for rel, lines in loads.items() if rel not in PATH_LOADS_NOT_YET
+        ]
+        self.assertEqual(problems, [], "import the package instead:\n" + "\n".join(problems))
+        stale = sorted(PATH_LOADS_NOT_YET - set(loads))
+        self.assertEqual(stale, [], "no longer loads by path: remove from PATH_LOADS_NOT_YET")
+
     def test_layer_role_classification(self) -> None:
         self.assertEqual(layer_role("cst_core/domain/values.py"), "domain")
         self.assertEqual(layer_role("swap/domain.py"), "domain")

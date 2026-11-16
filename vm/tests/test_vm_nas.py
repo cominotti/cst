@@ -33,6 +33,11 @@ import time
 from typing import Any, Protocol, cast
 import unittest
 
+# Run directly (python3 -I -B vm/tests/test_vm_nas.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True

@@ -31,6 +31,11 @@ from typing import Any
 import unittest
 from unittest import mock
 
+# Run directly (python3 -I -B tests/mutation/tests/test_cst_mutation.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
 from tests.script_loader import load_script
 
 HERE = os.path.dirname(os.path.abspath(__file__))
