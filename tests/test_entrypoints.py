@@ -44,7 +44,6 @@ NOT_YET_THIN: Final[frozenset[str]] = frozenset(
     {
         "btrfs/btrfs-stall-monitord",
         "btrfs/btrfs-stall-report",
-        "btrfs/chrome-cache",
         "btrfs/docker-gc",
         "btrfs/docker-volumes-nocow",
     }

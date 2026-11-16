@@ -22,6 +22,7 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from btrfs.application import BtrfsService  # noqa: E402
+from btrfs.chrome_cache.domain import FLAG_DIR, FLAG_SIZE  # noqa: E402
 from btrfs.snapshot.domain import parse_policy, policy_max_kept  # noqa: E402
 
 LIB = os.path.join(REPO, "cst-link.bash")
@@ -94,8 +95,9 @@ class HexagonalArchitectureTest(unittest.TestCase):
 
         self.assertTrue(service.evaluate_stall(12.0, 1200, 4))
         self.assertFalse(service.evaluate_stall(2.0, 100, 0))
+        # chrome-cache's flag lines: its domain (the real one).
         self.assertEqual(
-            service.chrome_cache_flags(),
+            (FLAG_DIR, FLAG_SIZE),
             ("--disk-cache-dir=/tmp/chrome-cache", "--disk-cache-size=536870912"),
         )
         self.assertTrue(service.is_protected_image("registry.example.com/org/app:1"))

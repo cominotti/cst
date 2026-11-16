@@ -24,7 +24,10 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from btrfs.chrome_cache import adapters as chrome_adapters
+from btrfs.chrome_cache import cli as chrome_cli
+from btrfs.chrome_cache import domain as chrome_domain
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
 
@@ -60,8 +63,10 @@ class _ChromeCacheModule(Protocol):
 
 
 def load() -> _ChromeCacheModule:
-    mod = load_script(TOOL, "chrome_cache")
-    return cast("_ChromeCacheModule", cast("object", mod))
+    """chrome-cache's package as one namespace, back to its real code (the
+    program is a thin entry over it; a new view undoes the last test's fakes)."""
+    view = PackageView(chrome_cli, chrome_adapters, chrome_domain)
+    return cast("_ChromeCacheModule", cast("object", view))
 
 
 class ChromeCacheTest(unittest.TestCase):
@@ -74,6 +79,7 @@ class ChromeCacheTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.m = load()
+        self.addCleanup(cast("PackageView", self.m).restore)
         self.tmp = tempfile.mkdtemp(prefix="chrome-cache-test-")
         self.home = os.path.join(self.tmp, "home")
         self.sys = os.path.join(self.tmp, "system-flatpak")

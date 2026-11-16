@@ -2,6 +2,7 @@
 
 import types
 import unittest
+from unittest import mock
 
 from tests.package_view import PackageView
 
@@ -50,6 +51,27 @@ class PackageViewTest(unittest.TestCase):
         second = PackageView(cli, domain)
         self.addCleanup(second.restore)
         self.assertEqual((cli.LIMIT, domain.LIMIT), (5, 5))
+
+    def test_mock_patch_object_sets_and_restores_every_module(self) -> None:
+        cli, domain = modules()
+        view = PackageView(cli, domain)
+        self.addCleanup(view.restore)
+        with mock.patch.object(view, "LIMIT", 0):
+            self.assertEqual((cli.LIMIT, domain.LIMIT), (0, 0))
+            with mock.patch.object(view, "LIMIT", 1):  # nested: the inner end goes back to 0
+                self.assertEqual((cli.LIMIT, domain.LIMIT), (1, 1))
+            self.assertEqual((cli.LIMIT, domain.LIMIT), (0, 0))
+        self.assertEqual((cli.LIMIT, domain.LIMIT), (5, 5))
+        view.restore()  # nothing left to restore
+        self.assertEqual((cli.LIMIT, domain.LIMIT), (5, 5))
+
+    def test_deleting_a_name_never_set_is_an_error(self) -> None:
+        cli, domain = modules()
+        view = PackageView(cli, domain)
+        self.addCleanup(view.restore)
+        with self.assertRaisesRegex(AttributeError, "not replaced"):
+            del view.LIMIT
+        self.assertEqual(cli.LIMIT, 5)
 
 
 if __name__ == "__main__":
