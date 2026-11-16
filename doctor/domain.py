@@ -75,9 +75,6 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
 CPU_CONF = "/etc/cpu-setup/cpu-setup.conf"
-VM_PIN_HOST = "/usr/local/sbin/cpu-vm-pin"
-# As CPU_DISABLE_DEFAULT in cpu/vm-pin (read from there when possible).
-CPU_DISABLE_FALLBACK = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX = "/var/lib/cst/vm-backups.json"
 VM_CONF = "/etc/cst/vm.conf"

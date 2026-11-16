@@ -928,6 +928,7 @@ EOF
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
             "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
             "/usr/local/sbin/cst-vm": ("help", 0),

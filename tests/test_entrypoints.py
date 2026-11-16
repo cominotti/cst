@@ -50,8 +50,6 @@ NOT_YET_THIN: Final[frozenset[str]] = frozenset(
         "btrfs/chrome-cache",
         "btrfs/docker-gc",
         "btrfs/docker-volumes-nocow",
-        "cpu/cpu-watch",
-        "cpu/vm-pin",
         "toolchains/cst-toolchains",
         "vm/cst-vm",
     }
@@ -139,7 +137,6 @@ FILE_CONSUMERS: Final[frozenset[str]] = frozenset(
 FILE_PATHS_NOT_YET: Final[frozenset[str]] = frozenset(
     {
         "btrfs/adapters.py",
-        "cpu/adapters.py",
         "toolchains/adapters.py",
         "toolchains/cst-toolchains",
         "vm/adapters.py",

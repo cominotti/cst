@@ -70,11 +70,10 @@ IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 # Packages whose modules no entry point imports yet (their programs are still
 # monoliths). Each later stage of the conversion wires its package in and
 # removes it from here.
-ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs", "cpu", "toolchains", "vm"})
+ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs", "toolchains", "vm"})
 # Shared cst_core modules made for the modules a later stage converts, with
 # the programs that will import them. A stage that wires one in removes it.
 ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {
-    "cst_core/adapters/files.py": "btrfs-stall-monitord, cst-toolchains (read_text/read_int/read_bytes)",
     "cst_core/adapters/journal.py": "btrfs-bulk, btrfs-snapshot-core, btrfs-stall-monitord, docker-gc, "
     "docker-volumes-nocow, bt-ldac-watch (log)",
     "cst_core/adapters/locks.py": "btrfs-bulk, btrfs-snapshot-core, docker-gc (take_lock)",
@@ -219,7 +218,7 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
 # Modules that still load a monolith by its path (SourceFileLoader); each
 # stage that turns the monolith into a package import removes its line.
 PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset(
-    {"btrfs/adapters.py", "cpu/adapters.py", "doctor/adapters.py", "toolchains/adapters.py", "vm/adapters.py"}
+    {"btrfs/adapters.py", "doctor/adapters.py", "toolchains/adapters.py", "vm/adapters.py"}
 )
 
 

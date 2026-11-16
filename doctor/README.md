@@ -330,7 +330,7 @@ that already accounts for the QEMU version, the kernel and the processor
 the names that are both offered and in the list of `cst cpu vm-pin` count.
 The list is `VM_CPU_DISABLE` in `/etc/cpu-setup/cpu-setup.conf` when that
 line exists (empty switches the check off, on purpose), else
-`CPU_DISABLE_DEFAULT` in `cpu/vm-pin`.
+`CPU_DISABLE_DEFAULT` in `cpu/domain.py` (the list `cst cpu vm-pin` uses).
 
 **Virtualization packages changed.** A Fedora upgrade brings a new QEMU,
 libvirt, UEFI firmware and TPM emulator at once, and the guest sees new

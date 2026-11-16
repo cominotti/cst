@@ -1921,7 +1921,10 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        shutil.copytree(os.path.join(REPO, "cst_core"), os.path.join(self.repo, "cst_core"))
+        for pkg in ("cst_core", "cpu"):  # doctor imports these packages
+            shutil.copytree(
+                os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
+            )
         shutil.copy(CST, self.repo)
         shutil.copy(TOOL, os.path.join(self.repo, "doctor"))
         for fn in os.listdir(DOCTOR_DIR):

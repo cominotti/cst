@@ -866,7 +866,7 @@ The guest loses only what it never had under QEMU 10. `cst doctor` warns when
 a host-passthrough VM lacks one of these disables while this QEMU offers the
 feature (see [doctor/README.md](../doctor/README.md)).
 
-The list is `CPU_DISABLE_DEFAULT` in `cpu/vm-pin` (`VM_CPU_DISABLE` in
+The list is `CPU_DISABLE_DEFAULT` in `cpu/domain.py` (`VM_CPU_DISABLE` in
 `cpu-setup.conf` overrides it). Retire it once QEMU, KVM or Windows fix the
 problem upstream. **How to undo** (give the features back to the guest):
 set `VM_CPU_DISABLE=''` in `/etc/cpu-setup/cpu-setup.conf`, then remove the
@@ -1430,13 +1430,12 @@ this is harmless.
 
 | File | Installed as / used by |
 |------|------------------------|
-| `domain.py` | Pure domain model, configuration parsing (`CpuSetupConfig`), XML pinning, and frame/quiet helpers |
-| `ports.py` | Ports (`VirshPort`, `CpuWatchRuntimePort`, `VmPinRuntimePort`) |
-| `adapters.py` | Host adapters (`SubprocessVirshAdapter`, `CstCpuWatchRuntimeAdapter`, `CstVmPinRuntimeAdapter`) |
-| `application.py` | Application orchestration (`CpuService`) |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
-| `vm-pin` | `/usr/local/sbin/cpu-vm-pin` |
-| `cpu-watch` | `/usr/local/bin/cpu-watch` |
+| `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
+| `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
+| `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (frame lows, the `quiet` tests and limits) |
+| `adapters.py` | What reads the host: `cpu-setup.conf`, `virsh`, sysfs, procfs, cgroups, the recorded runs |
+| `cli.py` | The command lines of `vm-pin` and `cpu-watch` (the two entry points above only call it) |
 | `gamemode.ini` | `~/.config/gamemode.ini` |
 | `cpu-game.rules.in` | polkit rule (`@USER@` replaced by your user) |
 | `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer` | `/etc/systemd/system/` |

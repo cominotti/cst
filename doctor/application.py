@@ -11,6 +11,7 @@ from types import ModuleType
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.text import first_line
+from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
     ALERT_KEEP_DAYS,
@@ -19,7 +20,6 @@ from doctor.domain import (
     BTRFS_SYSFS,
     CET_ISSUE,
     CPU_CONF,
-    CPU_DISABLE_FALLBACK,
     ERROR,
     FS_UUID,
     GAME_DROPIN,
@@ -50,7 +50,6 @@ from doctor.domain import (
     VM_INDEX,
     VM_LIVE_STATES,
     VM_OVERLAY_MARK,
-    VM_PIN_HOST,
     VM_RUN_DIR,
     VM_TIMER_WANTS,
     WARN,
@@ -81,7 +80,6 @@ from doctor.ports import CheckFn, DoctorHostPort
 
 # The checkout's copies the doctor reads (host.repo_path gives where they are).
 HEALTH_CHECK_SRC = "btrfs/btrfs-health-check"
-VM_PIN_SRC = "cpu/vm-pin"
 VM_TOOL_SRC = "vm/cst-vm"
 
 type DomainsFn = Callable[[DoctorHostPort], tuple[list[str] | None, str]]
@@ -1022,20 +1020,12 @@ def domain_xml(host: DoctorHostPort, vm: str) -> tuple[int, str, str]:
 
 
 def cpu_disable_names(host: DoctorHostPort) -> list[str]:
-    """VM_CPU_DISABLE of cpu-setup.conf when set there (also empty), else the
-    default of cpu/vm-pin (this copy, else the installed one)."""
+    """VM_CPU_DISABLE of cpu-setup.conf when set there (also empty), else
+    vm-pin's default (cpu.domain.CPU_DISABLE_DEFAULT)."""
     value = conf_value(host, CPU_CONF, "VM_CPU_DISABLE")
     if value is not None:
         return value.split()
-    for path in (host.repo_path(VM_PIN_SRC), host.path(VM_PIN_HOST)):
-        try:
-            with host.open_text(path) as f:
-                m = re.search(r'^CPU_DISABLE_DEFAULT = "([^"]*)"', f.read(65536), re.M)
-        except OSError:
-            continue
-        if m:
-            return m.group(1).split()
-    return list(CPU_DISABLE_FALLBACK)
+    return CPU_DISABLE_DEFAULT.split()
 
 
 def offered_features(host: DoctorHostPort) -> tuple[set[str | None] | None, str]:

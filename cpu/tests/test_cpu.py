@@ -22,18 +22,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Protocol, cast
+from typing import Any
 import unittest
 import unittest.mock
 import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 
-from cpu.adapters import CstCpuWatchRuntimeAdapter, CstVmPinRuntimeAdapter, SubprocessVirshAdapter  # noqa: E402
-from cpu.application import CpuService  # noqa: E402
-from cpu.domain import CpuSetupConfig, expand_cpu_range  # noqa: E402
-from cpu.ports import CpuWatchRuntimePort, VirshPort, VmPinRuntimePort  # noqa: E402
-from tests.script_loader import load_script
+from cpu import adapters as cpu_adapters, cli as cpu_cli, domain as cpu_domain  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU = os.path.dirname(HERE)
@@ -64,72 +60,9 @@ SAMPLE_DOMAIN_XML = """\
 """
 
 
-class _VmPinModule(Protocol):
-    CONF: str
-    CPU_DISABLE_DEFAULT: str
-
-    def pinned(self, xml_text: str, vcpus: int, cpus: str, disable: Sequence[str] = ()) -> str: ...
-
-    def conf(self) -> dict[str, str]: ...
-
-    def features_note(self, root: ET.Element, disable: Sequence[str], planned: bool = False) -> str: ...
-
-    def cpu_line(self, xml_text: str, disable: Sequence[str]) -> str: ...
-
-
-class _LimitProto(Protocol):
-    env: str
-
-
-class _CpuWatchModule(Protocol):
-    QUIET_LIMITS: tuple[_LimitProto, ...]
-
-    def pressure_field(self, text: str, kind: str, key: str) -> str | None: ...
-
-    def pressure_total(self, path: str, kind: str) -> int | None: ...
-
-    def frametimes(self, path: str) -> list[float]: ...
-
-    def lows(self, ft: Sequence[float]) -> tuple[float, float, float] | None: ...
-
-    def summarize(self, run_dir: str) -> str: ...
-
-    def quiet_sample(
-        self,
-        proc: str = ...,
-        game_state: str = ...,
-        clock: Callable[[], float] = ...,
-    ) -> dict[str, Any]: ...
-
-    def quiet(
-        self,
-        argv: Sequence[str],
-        sample: Callable[[], Any] | None = None,
-        sleep: Callable[[float], object] = ...,
-        clock: Callable[[], float] = ...,
-        out: io.StringIO | None = None,
-        environ: Mapping[str, str] | None = None,
-    ) -> int: ...
-
-    def duration(self, text: str) -> float: ...
-
-
-def _exec_script_module(name: str, path: str) -> object:
-    mod = load_script(path, name)
-    return mod
-
-
-def load_vm_pin() -> _VmPinModule:
-    return cast("_VmPinModule", _exec_script_module("vm_pin", VM_PIN))
-
-
-def load_cpu_watch() -> _CpuWatchModule:
-    return cast("_CpuWatchModule", _exec_script_module("cpu_watch", CPU_WATCH))
-
-
 class VmPinTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.m: _VmPinModule = load_vm_pin()
+        self.m = cpu_domain
 
     def test_pins_vcpus_emulator_and_topology(self) -> None:
         out = self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23")
@@ -179,7 +112,7 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
     """The CET/MBEC features vm-pin keeps disabled on host-passthrough."""
 
     def setUp(self) -> None:
-        self.m: _VmPinModule = load_vm_pin()
+        self.m = cpu_domain
         self.names = self.m.CPU_DISABLE_DEFAULT.split()
 
     def features(self, out: str) -> list[tuple[str | None, str | None]]:
@@ -251,13 +184,13 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "w") as f:
                 f.write("VM_NAME='x'\nVM_CPU_DISABLE=''\n")
-            self.m.CONF = p
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), [])
-            with open(p, "w") as f:
-                f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
-            self.m.CONF = os.path.join(tmp, "absent")
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), self.names)
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), [])
+                with open(p, "w") as f:
+                    f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
+            with unittest.mock.patch.object(cpu_adapters, "CONF", os.path.join(tmp, "absent")):
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), self.names)
 
     def test_messages(self) -> None:
         root = ET.fromstring(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names))
@@ -270,13 +203,10 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
 
 
 class CpuWatchTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.m: _CpuWatchModule = load_cpu_watch()
-
     def test_pressure_fields_watch_and_quiet_read(self) -> None:
         # One parser of the pressure line format: watch's totals and quiet's avg10.
         text = "some avg10=1.25 avg60=0.50 avg300=0.10 total=123456\nfull avg10=0.75 avg60=0.00 avg300=0.00 total=789\n"
-        f = self.m.pressure_field
+        f = cpu_domain.pressure_field
         self.assertEqual((f(text, "some", "avg10"), f(text, "full", "avg10")), ("1.25", "0.75"))
         self.assertEqual((f(text, "some", "total"), f(text, "full", "total")), ("123456", "789"))
         self.assertIsNone(f("some avg10=x avg60=0.00 total=1\n", "some", "avg10"))
@@ -286,8 +216,10 @@ class CpuWatchTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu.pressure")
             with open(p, "w") as fh:
                 fh.write(text)
-            self.assertEqual((self.m.pressure_total(p, "some"), self.m.pressure_total(p, "full")), (123456, 789))
-            self.assertIsNone(self.m.pressure_total(os.path.join(tmp, "missing"), "some"))
+            self.assertEqual(
+                (cpu_adapters.pressure_total(p, "some"), cpu_adapters.pressure_total(p, "full")), (123456, 789)
+            )
+            self.assertIsNone(cpu_adapters.pressure_total(os.path.join(tmp, "missing"), "some"))
 
     def test_frametimes_and_lows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,15 +231,15 @@ class CpuWatchTest(unittest.TestCase):
                 for ft in [10.0] * 99 + [20.0]:
                     w.writerow(["100", str(ft), "50"])
                 w.writerow(["bad", "not-a-number", "0"])
-            ft = self.m.frametimes(p)
+            ft = cpu_adapters.frametimes(p)
             self.assertEqual(len(ft), 100)
-            res = self.m.lows(ft)
+            res = cpu_domain.lows(ft)
             assert res is not None
             avg_fps, low1, low01 = res
             self.assertAlmostEqual(avg_fps, 1000 / 10.1, places=2)
             self.assertAlmostEqual(low1, 50.0, places=2)
             self.assertAlmostEqual(low01, 50.0, places=2)
-            self.assertIsNone(self.m.lows([]))
+            self.assertIsNone(cpu_domain.lows([]))
 
     def test_summarize_with_and_without_game(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -333,7 +265,7 @@ class CpuWatchTest(unittest.TestCase):
                 w.writerow(fields)
                 w.writerow([1.0, 1, 1234, 25.0, 2.0, 40, 10.0, 5200, 3800, 2.5, 4.0])
                 w.writerow([2.0, 1, 1234, 35.0, 3.0, 60, 12.0, 5400, 4000, 3.5, 6.0])
-            s = self.m.summarize(run)
+            s = cpu_adapters.summarize(run)
             self.assertIn("20261111T120000-baseline", s)
             self.assertIn("game wait   3.0% (max   3.5%)", s)
             self.assertIn("mem stall       5 ms", s)
@@ -344,7 +276,7 @@ class CpuWatchTest(unittest.TestCase):
                 w = csv.writer(f)
                 w.writerow(fields)
                 w.writerow([1.0, 0, "", "", "", "", 5.0, 5000, 3600, 0.0, 0.0])
-            s_nogame = self.m.summarize(run)
+            s_nogame = cpu_adapters.summarize(run)
             self.assertIn("no game found", s_nogame)
             self.assertIn("profile off", s_nogame)
 
@@ -403,7 +335,6 @@ class QuietTest(unittest.TestCase):
     is one second: the fake files advance by that second)."""
 
     def setUp(self) -> None:
-        self.m: _CpuWatchModule = load_cpu_watch()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.proc = FakeProc(self.tmp.name)
@@ -425,9 +356,9 @@ class QuietTest(unittest.TestCase):
 
         out = io.StringIO()
         with unittest.mock.patch("sys.stderr", io.StringIO()):  # "waiting up to ..."
-            rc = self.m.quiet(
+            rc = cpu_cli.quiet(
                 argv,
-                sample=lambda: self.m.quiet_sample(
+                sample=lambda: cpu_adapters.quiet_sample(
                     proc=self.proc.root, game_state=self.proc.game_state, clock=lambda: clock[0]
                 ),
                 sleep=sleep,
@@ -491,9 +422,9 @@ class QuietTest(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         with unittest.mock.patch("sys.stderr", err):
-            rc = self.m.quiet(
+            rc = cpu_cli.quiet(
                 ["--for", "5"],
-                sample=lambda: self.m.quiet_sample(proc=self.proc.root, game_state=self.proc.game_state),
+                sample=lambda: cpu_adapters.quiet_sample(proc=self.proc.root, game_state=self.proc.game_state),
                 sleep=interrupted,
                 out=out,
                 environ={},
@@ -663,7 +594,7 @@ class QuietTest(unittest.TestCase):
                 taken: list[int] = []
                 err = io.StringIO()
                 with unittest.mock.patch("sys.stderr", err):
-                    rc = self.m.quiet(
+                    rc = cpu_cli.quiet(
                         argv,
                         sample=lambda taken=taken: taken.append(1),
                         sleep=lambda d: None,
@@ -674,7 +605,9 @@ class QuietTest(unittest.TestCase):
                 self.assertTrue(err.getvalue().startswith("quiet: "), err.getvalue())
 
     def test_duration(self) -> None:
-        self.assertEqual([self.m.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")], [120, 90, 1800, 7200, 5400])
+        self.assertEqual(
+            [cpu_domain.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")], [120, 90, 1800, 7200, 5400]
+        )
 
     def test_command_line_dispatch(self) -> None:
         r = subprocess.run(
@@ -769,7 +702,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
         # The list in cpu-setup.sh must follow cpu-watch's QUIET_LIMITS: a limit
         # added there but not here would be dropped inside a toolbox.
         open(self.marker, "w").close()
-        envs = [lim.env for lim in load_cpu_watch().QUIET_LIMITS]
+        envs = [lim.env for lim in cpu_domain.QUIET_LIMITS]
         self.assertTrue(envs)
         rc, log, err = self.run_setup("quiet", env={v: str(i + 1) for i, v in enumerate(envs)})
         self.assertEqual(rc, 0, err)
@@ -1671,65 +1604,109 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertEqual((out, actions), ("", []))
 
 
-class HexagonalArchitectureTest(unittest.TestCase):
-    def test_config_and_expand_cpu_range_in_domain(self) -> None:
-        cfg = CpuSetupConfig.from_text(
-            "VM_NAME='box'\nVM_VCPUS=8\nBUILD_CPUS=4-7,9\nVM_CPU_DISABLE=\"cet-ss\"\nTARGET_USER=alice\n"
+class VmPinCliTest(unittest.TestCase):
+    """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
+
+    CONF = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": "cet-ss cet-ibt"}
+
+    def run_vm_pin(self, argv: list[str], xml: str) -> tuple[int, str, list[tuple[str, ...]]]:
+        calls: list[tuple[str, ...]] = []
+
+        def fake_virsh(*args: str, check: bool = True) -> str:
+            calls.append(args)
+            if args[0] == "dumpxml":
+                return xml
+            if args[0] == "domstate":
+                return "shut off\n"
+            return ""
+
+        out = io.StringIO()
+        with (
+            unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
+            unittest.mock.patch.object(cpu_cli, "conf", lambda: dict(self.CONF)),
+            contextlib.redirect_stdout(out),
+        ):
+            rc = cpu_cli.vm_pin(argv, doc="DOC")
+        return rc, out.getvalue(), calls
+
+    def test_conf_reads_the_settings_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "w") as f:
+                f.write("VM_NAME='box'\nVM_VCPUS=8\nBUILD_CPUS=4-7,9\nVM_CPU_DISABLE=\"cet-ss\"\nTARGET_USER=alice\n")
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                c = cpu_adapters.conf()
+        self.assertEqual(
+            (c["VM_NAME"], c["VM_VCPUS"], c["BUILD_CPUS"], c["VM_CPU_DISABLE"], c["TARGET_USER"]),
+            ("box", "8", "4-7,9", "cet-ss", "alice"),
         )
-        self.assertEqual(cfg.vm_name, "box")
-        self.assertEqual(cfg.vm_vcpus, 8)
-        self.assertEqual(cfg.build_cpus, "4-7,9")
-        self.assertEqual(cfg.vm_cpu_disable, ("cet-ss",))
-        self.assertEqual(cfg.target_user, "alice")
-        self.assertEqual(expand_cpu_range("0-3,6,12-14"), [0, 1, 2, 3, 6, 12, 13, 14])
 
-    def test_cpu_service_plan_status_frame_stats_and_quiet_args(self) -> None:
-        watch_port: CpuWatchRuntimePort = CstCpuWatchRuntimeAdapter()
-        vm_port: VmPinRuntimePort = CstVmPinRuntimeAdapter()
-        service = CpuService(watch_port, vm_port)
+    def test_plan_prints_the_diff_and_is_idempotent(self) -> None:
+        rc, out, calls = self.run_vm_pin(["plan"], SAMPLE_DOMAIN_XML)
+        self.assertEqual(rc, 0)
+        self.assertIn("+++ pinned", out)
+        self.assertIn("Plan only. Apply with: cst cpu vm-pin apply", out)
+        self.assertEqual(calls, [("dumpxml", "--inactive", "--security-info", "win11-devbox")])
+        after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", ["cet-ss", "cet-ibt"])
+        rc, out, _ = self.run_vm_pin(["plan", "win11-devbox"], after)
+        self.assertEqual(rc, 0)
+        self.assertIn("win11-devbox: already 12 vCPUs pinned to 12-23; CPU features disabled: cet-ss cet-ibt.", out)
 
-        cfg = CpuSetupConfig()
-        after, diff, note = service.plan_vm_pin(SAMPLE_DOMAIN_XML, cfg)
-        self.assertTrue(diff)
-        self.assertTrue(note)
+    def test_status_reports_the_features(self) -> None:
+        rc, out, calls = self.run_vm_pin(["status", "box"], SAMPLE_DOMAIN_XML)
+        self.assertEqual(rc, 0)
+        self.assertIn("box: shut off", out)
+        self.assertIn("NOT disabled yet: cet-ss cet-ibt", out)
+        self.assertEqual(calls[0], ("domstate", "box"))
+        after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", ["cet-ss", "cet-ibt"])
+        _, out, _ = self.run_vm_pin(["status"], after)
+        self.assertIn("; disabled: cet-ss cet-ibt", out)
 
-        _, diff_again, _ = service.plan_vm_pin(after, cfg)
-        self.assertEqual(diff_again, [])
+    def test_refuses_vcpu_tied_elements_and_unknown_actions(self) -> None:
+        bad_xml = "<domain><name>win11-devbox</name><vcpu>4</vcpu><cputune><vcpusched/></cputune></domain>"
+        with self.assertRaisesRegex(SystemExit, "has <cputune/vcpusched>: adjust it by hand"):
+            self.run_vm_pin(["plan"], bad_xml)
+        rc, out, calls = self.run_vm_pin(["bogus"], SAMPLE_DOMAIN_XML)
+        self.assertEqual((rc, out, calls), (2, "DOC\n", []))
 
-        self.assertIn("NOT disabled yet", service.vm_cpu_status_line(SAMPLE_DOMAIN_XML, cfg))
-        self.assertIn("disabled:", service.vm_cpu_status_line(after, cfg))
-
-        bad_xml = "<domain><name>win11-devbox</name><cputune><vcpusched/></cputune></domain>"
-        with self.assertRaisesRegex(ValueError, "cputune/vcpusched"):
-            service.plan_vm_pin(bad_xml, cfg)
-
-        stats = service.evaluate_frame_stats([10.0, 20.0])
-        assert stats is not None
-        self.assertAlmostEqual(stats.avg_fps, 1000.0 / 15.0, places=2)
-        self.assertIsNone(service.evaluate_frame_stats([]))
-
-        query = service.validate_quiet_args(["--for", "5", "--json"], {"QUIET_CPU_PCT": "15"})
-        self.assertEqual(query.seconds, 5)
-        self.assertTrue(query.as_json)
-        self.assertEqual(query.limits["cpu"], 15.0)
-
-    def test_adapters_virsh_and_runtime_ports(self) -> None:
-        service = CpuService(CstCpuWatchRuntimeAdapter(), CstVmPinRuntimeAdapter())
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(service.quiet(["--for", "0"]), 2)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(service.vm_pin(["bogus"]), 2)
-
-        virsh: VirshPort = SubprocessVirshAdapter()
+    def test_virsh_adapter(self) -> None:
         ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")
-        with unittest.mock.patch("subprocess.run", return_value=ok):
-            self.assertEqual(virsh.run("dumpxml", "win11-devbox"), "<domain/>")
-
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=ok) as run:
+            self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox"), "<domain/>")
+        self.assertEqual(run.call_args.args[0], ["virsh", "-c", "qemu:///system", "dumpxml", "win11-devbox"])
         fail = subprocess.CompletedProcess(["virsh"], 1, "partial", "boom")
-        with unittest.mock.patch("subprocess.run", return_value=fail):
-            with self.assertRaisesRegex(RuntimeError, "boom"):
-                virsh.run("dumpxml", "win11-devbox")
-            self.assertEqual(virsh.run("dumpxml", "win11-devbox", check=False), "partial")
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=fail):
+            with self.assertRaisesRegex(SystemExit, "virsh dumpxml win11-devbox: boom"):
+                cpu_adapters.virsh("dumpxml", "win11-devbox")
+            self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox", check=False), "partial")
+
+
+class CpuWatchCliTest(unittest.TestCase):
+    """cpu-watch's numbers and command line, on the package (cpu.domain, cpu.cli)."""
+
+    def test_frame_lows_and_quiet_args(self) -> None:
+        res = cpu_domain.lows([10.0, 20.0])
+        assert res is not None
+        self.assertAlmostEqual(res[0], 1000.0 / 15.0, places=2)
+        self.assertIsNone(cpu_domain.lows([]))
+        seconds, wait, as_json, limits = cpu_domain.quiet_args(["--for", "5", "--json"], {"QUIET_CPU_PCT": "15"})
+        self.assertEqual((seconds, wait, as_json, limits["cpu"]), (5, None, True, 15.0))
+
+    def test_dispatch(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cpu_cli.cpu_watch(["quiet", "--for", "0"], doc="DOC"), 2)
+        self.assertIn("quiet: --for: a whole number of seconds", err.getvalue())
+        for argv in ([], ["bogus"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cpu_cli.cpu_watch(argv, doc="DOC"), 2)
+            self.assertEqual(out.getvalue(), "DOC\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with unittest.mock.patch.object(cpu_cli, "RUNS", tmp), contextlib.redirect_stdout(out):
+                self.assertEqual(cpu_cli.cpu_watch(["report"], doc="DOC"), 0)
+        self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
 
 
 if __name__ == "__main__":
