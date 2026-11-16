@@ -153,6 +153,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   - The copy that runs on the machine can therefore be older than the repository. A change to a helper reaches the machine only when the module's `install` runs again.
 - **Most helpers are Python scripts with no `.py` extension.** Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-toolchains`.
   - Tests load them with `tests/script_loader.py` (`load_script(path, name)`), which registers the module in `sys.modules` before running it (`@dataclass` needs that on Python 3.14) and returns a fresh module each call.
+  - Tests of a converted program import its package. A test written against the old one-file namespace can use `tests/package_view.py` (`PackageView(cli, adapters, domain)`): a name set on it reaches every module that uses it, and `restore()` puts the real ones back.
   - Tests call the functions directly, with fakes for `virsh`, `systemctl`, sudo, restic and similar tools.
 - **Entry points only wire argv; the logic lives once, in the package.**
   - An extension-less Python program holds a docstring, the bootstrap, imports, one `main()` and the `__main__` guard (`tests/test_entrypoints.py`; modules not converted yet are listed in `NOT_YET_THIN`).

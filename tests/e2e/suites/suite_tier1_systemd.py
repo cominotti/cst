@@ -173,7 +173,16 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             /opt/cst-rw/cst toolchains config apply --lean-debuginfo
             grep -q 'target-dir\\|build-dir' /home/tester/.cargo/config.toml
             grep -q 'link-mode = "clone"' /home/tester/.config/uv/uv.toml
+            # An older CST installed the program as a plain script (it holds
+            # CST's marker): auto on replaces it with the zipapp.
+            prog=/home/tester/.local/lib/cst/cst-toolchains
+            mkdir -p /home/tester/.local/lib/cst
+            printf '#!/usr/bin/python3 -I\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n' >"$prog"
             /opt/cst-rw/cst toolchains auto on
+            python3 -I -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$prog"
+            (cd / && env -i PATH=/usr/bin:/bin HOME=/home/tester /usr/bin/python3 -I "$prog" help) | grep -q 'cst-toolchains:'
+            again="$(/opt/cst-rw/cst toolchains auto on)"
+            grep -q 'unchanged: ~/.local/lib/cst/cst-toolchains' <<<"$again"
             systemctl --user is-enabled cst-toolchains-prune.timer
             systemctl --user is-active cst-toolchains-prune.timer
             systemctl --user start cst-toolchains-prune.service

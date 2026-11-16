@@ -7,6 +7,7 @@ vm.adapters reads from the host, the answer printed.
 
 from collections.abc import Mapping, Sequence
 import difflib
+import functools
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from typing import Any
 import xml.etree.ElementTree as ET
 
 from cpu.domain import keep_prefixes
+from cst_core.adapters.files import owned_file_state_at
 from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.text import first_line
@@ -55,7 +57,7 @@ from vm.adapters import (
     describe_entry,
     domain_state,
     domain_state_or_none,
-    file_state,
+    is_ours,
     fingerprint,
     flag_state,
     has_managed_save,
@@ -1012,15 +1014,15 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
     files = timer_files(entry_file)
-    states = {p: file_state(p, t) for p, (t, _) in files.items()}
+    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p)) for p, (t, _) in files.items()}
     if sub == "status":
         on = unit in wants_links()
         print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
         words = {
             "ok": "installed, up to date",
             "missing": "not installed",
-            "foreign": "not CST's file",
-            "stale": f"installed, OLDER than this copy of CST: {PROG} backup-timer on {vm} updates it",
+            "conflict": "not CST's file",
+            "change": f"installed, OLDER than this copy of CST: {PROG} backup-timer on {vm} updates it",
         }
         for p, st in states.items():
             print(f"  {p}: {words[st]}")
@@ -1037,7 +1039,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
         if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
             print(f"  the NAS backup is not set up: {CST} btrfs snapshots nas setup")
         return 0
-    foreign = [p for p, st in states.items() if st == "foreign"]
+    foreign = [p for p, st in states.items() if st == "conflict"]
     if foreign:
         raise Refused("not CST's files, left as they are: " + ", ".join(foreign))
     if sub == "on":
@@ -1045,7 +1047,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
         for p, (text, mode) in files.items():
             if states[p] != "ok":
                 write_file(p, text, mode)
-                print(f"  {'updated' if states[p] == 'stale' else 'installed'}: {p}")
+                print(f"  {'updated' if states[p] == 'change' else 'installed'}: {p}")
         for args in (("daemon-reload",), ("enable", "--now", unit)):
             rc, _, err = systemctl(*args)
             if rc != 0:

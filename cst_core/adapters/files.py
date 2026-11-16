@@ -1,6 +1,10 @@
 """Reading small files (sysfs, procfs, state files) the way CST programs need it."""
 
+from collections.abc import Callable
+import os
 from typing import overload
+
+from cst_core.domain.files import OwnedState, owned_file_state
 
 
 @overload
@@ -33,3 +37,22 @@ def read_int(path: str, default: int | None = None) -> int | None:
     """The integer the file holds (surrounding blanks ignored; a leading minus allowed), else default."""
     text = (read_text(path, "", limit=64)).strip()
     return int(text) if text.lstrip("-").isdigit() else default
+
+
+def owned_file_state_at(path: str, wanted: bytes | None, is_ours: Callable[[bytes], bool]) -> OwnedState:
+    """State of the file CST writes whole at `path` (an installed program, a unit) against `wanted`.
+
+    ok: exactly wanted; change: is_ours(its bytes) but different; conflict:
+    someone else's file, a symbolic link (never written through) or a file
+    that cannot be read; missing.
+    """
+    try:
+        if os.path.islink(path):
+            return owned_file_state(None, is_link=True, wanted=wanted, ours=False)
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "conflict"
+    return owned_file_state(data, is_link=False, wanted=wanted, ours=is_ours(data))

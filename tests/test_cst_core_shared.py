@@ -11,12 +11,11 @@ import os
 import shutil
 import struct
 import tempfile
-from typing import Any
 import unittest
 from unittest import mock
 
 from cst_core.adapters import nocow
-from cst_core.adapters.files import read_bytes, read_int, read_text
+from cst_core.adapters.files import owned_file_state_at, read_bytes, read_int, read_text
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
@@ -24,7 +23,7 @@ from cst_core.domain.files import owned_file_state
 from cst_core.domain.text import first_line
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
-from tests.script_loader import load_script
+from toolchains import domain as tc_domain
 from vm import domain as vm_domain
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,23 +48,31 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(format_bytes_gib_mib(1500 * MIB, gib_threshold=10 * GIB, comma=True), "1,500 MiB")
 
     def test_owned_file_state(self) -> None:
-        self.assertEqual(owned_file_state("a", is_link=False, wanted="a", ours=True), "ok")
-        self.assertEqual(owned_file_state("b", is_link=False, wanted="a", ours=True), "change")
-        self.assertEqual(owned_file_state("b", is_link=False, wanted="a", ours=False), "conflict")
-        self.assertEqual(owned_file_state(None, is_link=False, wanted="a", ours=False), "missing")
-        self.assertEqual(owned_file_state("a", is_link=True, wanted="a", ours=True), "conflict")
-        self.assertEqual(owned_file_state("a", is_link=False, wanted=None, ours=True), "change")
+        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True), "ok")
+        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True), "change")
+        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=False), "conflict")
+        self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False), "missing")
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True), "conflict")
+        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True), "change")
 
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
         self.assertEqual(text, "# head\n[Unit]\nDescription=x\n\n[Service]\n# why\nType=oneshot\n")
 
     def test_render_timer_matches_the_toolchains_timer(self) -> None:
-        tc: Any = load_script(os.path.join(REPO, "toolchains", "cst-toolchains"), "cst_toolchains_units")
-        header = [f"{tc.MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."]
-        self.assertEqual(
-            render_timer(header, "CST: prune old toolchain caches, hourly", "hourly", "10min"), tc.render_timer()
+        # The timer cst-toolchains wrote before it used render_timer, byte for byte.
+        before = (
+            "# managed-by: toolchains-setup.sh (CST): installed by `cst toolchains auto on` (or snapshots setup); "
+            "not edited by hand.\n"
+            "[Unit]\nDescription=CST: prune old toolchain caches, hourly\n\n"
+            "[Timer]\nOnCalendar=hourly\nRandomizedDelaySec=10min\nPersistent=true\n\n"
+            "[Install]\nWantedBy=timers.target\n"
         )
+        header = [
+            f"{tc_domain.MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
+        ]
+        self.assertEqual(render_timer(header, "CST: prune old toolchain caches, hourly", "hourly", "10min"), before)
+        self.assertEqual(tc_domain.render_timer(), before)
 
     def test_render_timer_matches_the_vm_backup_timer(self) -> None:
         # vm renders its timer with render_timer; the bytes stay those of the
@@ -111,6 +118,24 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(read_int(self.path("n", b"-7\n")), -7)
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
+
+    def test_owned_file_state_at(self) -> None:
+        ours = self.path("ours", b"#!/x\nMARK v1\n")
+        theirs = self.path("theirs", b"#!/x\nv1\n")
+        os.symlink(ours, self.path("link"))
+        os.mkdir(self.path("dir"))
+
+        def mark(data: bytes) -> bool:
+            return b"MARK" in data
+
+        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark), "ok")
+        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark), "change")
+        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nMARK v2\n", mark), "conflict")
+        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nv1\n", mark), "ok")
+        self.assertEqual(owned_file_state_at(self.path("link"), b"#!/x\nMARK v1\n", mark), "conflict")
+        self.assertEqual(owned_file_state_at(self.path("missing"), b"x", mark), "missing")
+        self.assertEqual(owned_file_state_at(self.path("dir"), b"x", mark), "conflict")
+        self.assertEqual(owned_file_state_at(ours, None, mark), "change")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()

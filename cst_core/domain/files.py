@@ -85,7 +85,7 @@ class MarkedLineSpec:
         return "\n".join(out_lines) + "\n"
 
 
-def owned_file_state(content: str | None, *, is_link: bool, wanted: str | None, ours: bool) -> OwnedState:
+def owned_file_state(content: bytes | None, *, is_link: bool, wanted: bytes | None, ours: bool) -> OwnedState:
     """State of a file CST writes whole (a unit, an installed program) against what it wants there.
 
     content None = no file. ok: exactly wanted; change: CST's (ours: it carries

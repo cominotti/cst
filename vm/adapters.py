@@ -417,21 +417,10 @@ class VmLock:
             self.fd = None
 
 
-def file_state(path: str, wanted: bytes) -> str:
-    """ok | stale (ours, differs) | foreign (not ours, or a link) | missing."""
-    try:
-        if os.path.islink(path):
-            return "foreign"
-        with open(path, "rb") as f:
-            data = f.read()
-    except FileNotFoundError:
-        return "missing"
-    except OSError:
-        return "foreign"
-    if data == wanted:
-        return "ok"
-    ours = UNIT_MARKER.encode() in data or path == SBIN_COPY and is_cst_vm_program(data)
-    return "stale" if ours else "foreign"
+def is_ours(path: str, data: bytes) -> bool:
+    """Whether the file at PATH with these bytes is CST's: a unit with CST's
+    marker, or (at SBIN_COPY) a copy of cst-vm from any CST version."""
+    return UNIT_MARKER.encode() in data or path == SBIN_COPY and is_cst_vm_program(data)
 
 
 def wants_links() -> list[str]:

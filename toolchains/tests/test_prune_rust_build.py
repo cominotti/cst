@@ -11,6 +11,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import fcntl
 import io
@@ -31,13 +32,18 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
+from tests.package_view import PackageView  # noqa: E402
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
 
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLCHAINS = os.path.dirname(HERE)
 TOOL = os.path.join(TOOLCHAINS, "cst-toolchains")
+REPO = os.path.dirname(TOOLCHAINS)
+with open(TOOL, encoding="utf-8") as _fh:
+    HELP = ast.get_docstring(ast.parse(_fh.read()), clean=False) or ""
 H = 3600
 NOW = 2_000_000_000.0  # fixed "now" (2033); every mtime is set relative to it
 
@@ -147,17 +153,23 @@ class _ToolchainsModule(Protocol):
     sccache_apply: Callable[[str, _SettingsProto | None, bool | None], int]
     wrapper_text: Callable[[_WrapperValuesProto], str | None]
     read_text: Callable[[str], str]
-    main: Callable[[Sequence[str]], int]
+    main: Callable[[Sequence[str], str, str], int]
+    restore: Callable[[], object]
 
 
 def load() -> _ToolchainsModule:
-    mod = load_script(TOOL, "cst_toolchains")
-    return cast("_ToolchainsModule", cast("object", mod))
+    """The toolchains package as one namespace (cli, adapters, domain): a
+    name set on it reaches every module that uses it; restore() undoes that.
+    The program is the checkout's cst-toolchains (what main() would be told)."""
+    tc_adapters.Program.entry_file = TOOL
+    view = PackageView(tc_cli, tc_adapters, tc_domain)
+    return cast("_ToolchainsModule", cast("object", view))
 
 
 class Base(unittest.TestCase):
     def setUp(self) -> None:
         self.m = load()
+        self.addCleanup(self.m.restore)
         self.m.JOURNAL = False
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
         self.home = os.path.join(self.tmp, "home")
@@ -254,7 +266,7 @@ class Base(unittest.TestCase):
     def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home])
+            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue() + err.getvalue()
 
     def present(self, key: str) -> bool:
@@ -677,8 +689,9 @@ class TimerTest(Base):
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         prog = os.path.join(self.home, ".local/lib/cst/cst-toolchains")
-        with open(prog) as f, open(TOOL) as g:
-            self.assertEqual(f.read(), g.read())
+        # The copy is the zipapp `install` builds from this checkout.
+        with open(prog, "rb") as f:
+            self.assertEqual(f.read(), build_python_zipapp(REPO, "toolchains/cst-toolchains"))
         self.assertTrue(os.access(prog, os.X_OK))
         for u in (self.m.SERVICE, self.m.TIMER):
             with open(self.unit(u)) as f:

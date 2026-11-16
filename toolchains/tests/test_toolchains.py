@@ -26,11 +26,10 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from toolchains.adapters import CstToolchainsRuntimeAdapter, SubprocessSystemctlUserAdapter  # noqa: E402
-from toolchains.application import ToolchainsService  # noqa: E402
-from toolchains.domain import FolderSnapshot, Refused, RustBuildPolicy, Usage  # noqa: E402
-from toolchains.ports import SystemctlUserPort, ToolchainsRuntimePort  # noqa: E402
-from toolchains.tests.test_prune_rust_build import NOW, TOOL, _ToolchainsModule, load  # noqa: E402
+from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
+from cst_core.domain.errors import Refused, Usage  # noqa: E402
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
+from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, _ToolchainsModule, load  # noqa: E402
 
 TOOLCHAINS = os.path.dirname(TOOL)
 REPO = os.path.dirname(TOOLCHAINS)
@@ -103,6 +102,7 @@ class Scratch(unittest.TestCase):
 
         self.addCleanup(restore)
         self.m: _ToolchainsModule = load()
+        self.addCleanup(self.m.restore)
         self.m.JOURNAL = False
         self.m.cargo_procs = lambda uid=None: []
 
@@ -137,7 +137,7 @@ class Scratch(unittest.TestCase):
     def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home])
+            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue() + err.getvalue()
 
     def write(self, rel: str, text: str) -> str:
@@ -192,7 +192,7 @@ class CliTest(Scratch):
         for args in (["prune", "apply", "--home="], ["auto", "off", "--home="], ["config", "apply", "--home", ""]):
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                rc = self.m.main(args)
+                rc = self.m.main(args, HELP, TOOL)
             self.assertEqual(rc, 2, args)
             self.assertIn("--home needs a folder", err.getvalue())
         self.assertEqual(self.calls(), [])
@@ -488,7 +488,8 @@ class AutoTest(Scratch):
             self.assertIn(line, service)
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
-        self.assertIn(self.m.MARKER, self.read(".local/lib/cst/cst-toolchains"))
+        with open(os.path.join(self.home, ".local/lib/cst/cst-toolchains"), "rb") as f:
+            self.assertIn(self.m.MARKER.encode(), f.read())
         self.assertEqual(self.calls(), ["--user daemon-reload", "--user enable --now cst-toolchains-prune.timer"])
         # The installed copy runs with its own defaults file (as the timer does).
         r = subprocess.run(
@@ -772,7 +773,7 @@ class AutoTest(Scratch):
         """run_main, with stdout and stderr apart: warnings and errors go to stderr."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home])
+            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue(), err.getvalue()
 
     def raw_calls(self) -> list[str]:
@@ -820,6 +821,33 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), [])
         self.assertTrue(os.path.exists(service))
         self.assertTrue(os.path.exists(prog))
+
+    def test_auto_on_upgrades_a_plain_script_copy_to_the_zipapp(self) -> None:
+        # Older CST versions installed cst-toolchains as a plain script (it
+        # holds CST's marker): auto on replaces it with the zipapp, and a
+        # second run changes nothing. A foreign program is refused.
+        self.csts_cargo_config()
+        old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
+        prog = self.write(".local/lib/cst/cst-toolchains", old)
+        status = io.StringIO()
+        with contextlib.redirect_stdout(status):
+            tc_cli.cmd_status(self.home, NOW, False)
+        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
+        with open(prog, "rb") as f:
+            self.assertEqual(f.read(), build_python_zipapp(REPO, "toolchains/cst-toolchains"))
+        self.assertEqual(os.stat(prog).st_mode & 0o777, 0o755)
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
+        self.write(".local/lib/cst/cst-toolchains", "#!/bin/sh\necho mine\n")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not written by CST (or a symlink), left alone: ~/.local/lib/cst/cst-toolchains", out)
+        with open(prog) as f:
+            self.assertEqual(f.read(), "#!/bin/sh\necho mine\n")
 
     def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self) -> None:
         # A running timer whose file is there but not CST's is not the
@@ -1007,48 +1035,44 @@ class FrontendTest(Scratch):
         self.assertIn("Unknown command: cargo-gc", r.stderr)
 
 
-class HexagonalArchitectureTest(Scratch):
-    def test_service_validates_and_delegates_through_ports(self) -> None:
-        runtime: ToolchainsRuntimePort = CstToolchainsRuntimeAdapter(tool_path=TOOL)
-        service = ToolchainsService(runtime)
-        parsed = service.validate_command(["status", "--brief"])
-        self.assertEqual(parsed.cmd, "status")
-        self.assertTrue(parsed.brief)
-        with self.assertRaises(Usage):
-            service.validate_command(["prune", "bogus"])
+class PackageLayersTest(Scratch):
+    """The package's layers used directly: the rules in toolchains.domain,
+    the user manager through toolchains.adapters, the commands through
+    toolchains.cli (what the program's main() runs)."""
 
-        policy = RustBuildPolicy(max_idle=3600 * 48, max_total=150 * (1 << 30), min_keep=7200)
-        snapshots = [
-            FolderSnapshot(key="aa/bbbbbbbbbbbbbb", path="/tmp/build/aa/bbbbbbbbbbbbbb", size=100, activity=NOW - 1e6),
-            FolderSnapshot(key="cc/dddddddddddddd", path="/tmp/build/cc/dddddddddddddd", size=100, activity=NOW - 60),
-        ]
-        decisions = service.evaluate_rust_build_decisions(snapshots, policy, NOW, {})
+    def test_domain_parses_and_decides(self) -> None:
+        a = tc_domain.parse_args(["status", "--brief"])
+        self.assertEqual((a["cmd"], a["brief"]), ("status", True))
+        with self.assertRaises(Usage):
+            tc_domain.parse_args(["prune", "bogus"])
+        old = tc_domain.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
+        old.size, old.activity = 100, NOW - 1e6
+        new = tc_domain.Folder("/tmp/build", "cc", "dddddddddddddd")
+        new.size, new.activity = 100, NOW - 60
+        pol = {"max_idle": 3600 * 48, "max_total": 150 * (1 << 30), "min_keep": 7200}
         self.assertEqual(
-            [(d.folder.key, d.action) for d in decisions],
+            [(f.key, action) for f, action, _ in tc_domain.decide([new, old], pol, NOW, {})],
             [("aa/bbbbbbbbbbbbbb", "delete"), ("cc/dddddddddddddd", "keep")],
         )
 
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = service.dispatch(["config", "apply", "--home", self.home])
-        self.assertEqual(rc, 0)
+    def test_cli_commands_run_on_the_scratch_home(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tc_cli.cmd_config(self.home, "apply"), 0)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
-
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(service.status(self.home, NOW, brief=True), 0)
-            self.assertEqual(service.prune(self.home, NOW, "plan", []), 0)
-            self.assertEqual(service.config(self.home, "plan"), 0)
-            self.assertEqual(service.auto_on(self.home, NOW, unless_off=False), 0)
-            self.assertEqual(service.auto_off(self.home, NOW), 0)
+            self.assertEqual(tc_cli.cmd_status(self.home, NOW, True), 0)
+            self.assertEqual(tc_cli.cmd_prune(self.home, NOW, "plan", []), 0)
+            self.assertEqual(tc_cli.cmd_config(self.home, "plan"), 0)
+            self.assertEqual(tc_cli.cmd_auto_on(self.home, NOW), 0)
+            self.assertEqual(tc_cli.cmd_auto_off(self.home, NOW), 0)
 
-    def test_systemctl_user_adapter_uses_configured_stub(self) -> None:
-        adapter: SystemctlUserPort = SubprocessSystemctlUserAdapter()
+    def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
-            self.assertEqual(adapter.run("is-active", "cst-toolchains-prune.timer"), "active")
-        self.assertIsNone(adapter.manager_path())
+            self.assertEqual(tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
+        self.assertIsNone(tc_adapters.manager_path())
         with self.failing("is-active"), self.assertRaises(Refused):
-            adapter.run("is-active", "cst-toolchains-prune.timer", check=True)
+            tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
 
 
 if __name__ == "__main__":
