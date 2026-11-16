@@ -16,6 +16,8 @@ class DoctorHostPort(Protocol):
     cst: str
     now: float
     uid: int
+    # The machine's architecture (uname -m), e.g. x86_64.
+    arch: str
     state_home: str
     _ostree: OstreeAnswer
     _ostree_list: list[Deployment]
@@ -73,6 +75,14 @@ class DoctorHostPort(Protocol):
 
     def realpath(self, path: str) -> str:
         """The path with every link resolved."""
+        ...
+
+    def user_name(self, uid: int) -> str:
+        """The login name of uid ("" when the account is unknown)."""
+        ...
+
+    def user_id(self, name: str) -> int | None:
+        """The uid of the account name (None when it is unknown)."""
         ...
 
 

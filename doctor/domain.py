@@ -5,7 +5,6 @@ layers).
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-import os
 import re
 import shlex
 from typing import Any, Self
@@ -25,7 +24,6 @@ ALERT_MAX_FILE = 16384
 ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
 
 # The machine's own architecture: a bare name installs this one (or noarch).
-NATIVE_ARCH = os.uname().machine
 ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64", "src"})
 
 # name-[epoch:]version-release with a distribution tag in the release
@@ -167,9 +165,7 @@ def install_spec(name: str, arch: str, named: bool, native: str) -> str:
     return name
 
 
-def classify_requests(
-    requests: Iterable[str], packages: Iterable[str] | None, native: str | None = None
-) -> list[Request]:
+def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, native: str) -> list[Request]:
     """Split requested-packages into by name and pinned to a version.
     packages: the deployment's installed NEVRAs, or None if unknown.
     Returns a list of (request, spec, how). how is:
@@ -183,7 +179,6 @@ def classify_requests(
       "inactive"      looks like a pin, but no installed package matches
                       (an inactive request, for example one the base image
                       now provides): spec is "", nothing to install back."""
-    native = native or NATIVE_ARCH
     names: set[str]
     versioned: dict[str, list[tuple[str, str, bool]]]
     names, versioned = set(), {}

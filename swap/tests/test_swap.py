@@ -969,7 +969,8 @@ class SwapApplicationTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Usage: cst swap <command> [args]", proc.stdout)
-        self.assertTrue(HostExecutionContext().etc_dir() in ("/etc", "/run/host/etc"))
+        # No container marker (faked: CI itself runs in Docker): the host /etc.
+        self.assertEqual(HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000).etc_dir(), "/etc")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 from collections.abc import Callable, Iterable, Iterator, Mapping
 import json
 import os
-import pwd
 import re
 import shlex
 import time
@@ -150,7 +149,7 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
         if d is None:
             continue
         reqs = d.get("requested-packages") or []
-        cls = classify_requests(reqs, installed_packages(host, d))
+        cls = classify_requests(reqs, installed_packages(host, d), host.arch)
         found[id(d)] = (d, reqs, cls, [c for c in cls if c[2] != "name"])
     if not found:
         yield Result(WARN, "layered packages: no deployment in rpm-ostree status")
@@ -801,10 +800,7 @@ def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
         if not target:
             return None, f"no TARGET_USER in {CPU_CONF}"
         return ["systemctl", "--user", "-M", f"{target}@"], ""
-    try:
-        me = pwd.getpwuid(host.uid).pw_name
-    except KeyError:
-        me = ""
+    me = host.user_name(host.uid)
     if target and me and target != me:
         return None, f"the profile is for {target}, this is {me}"
     return ["systemctl", "--user"], ""
@@ -920,10 +916,10 @@ def user_manager_cgroup(host: DoctorHostPort) -> str | None:
         target = conf_value(host, CPU_CONF, "TARGET_USER")
         if not target:
             return None
-        try:
-            uid = pwd.getpwnam(target).pw_uid
-        except KeyError:
+        found = host.user_id(target)
+        if found is None:
             return None
+        uid = found
     return f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service"
 
 

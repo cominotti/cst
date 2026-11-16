@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Protocol
+import types
 import unittest
 from unittest import mock
 
@@ -251,7 +252,7 @@ class ClassifyTest(unittest.TestCase):
             "tini-static-0.19.0-12.fc44",
             "pigz-2.8-8.fc44",
         ]
-        got = doc_domain.classify_requests(reqs, self.pkgs)
+        got = doc_domain.classify_requests(reqs, self.pkgs, native="x86_64")
         self.assertEqual(
             got,
             [
@@ -266,7 +267,7 @@ class ClassifyTest(unittest.TestCase):
     def test_names_with_digits_and_dashes_are_not_pins(self) -> None:
         reqs = ["python3.13", "gtk4", "java-21-openjdk", "vim", "pkgconfig(gtk4)", "/usr/bin/zsh"]
         for pkgs in (self.pkgs, None):  # with and without the package list
-            for r, n, how in doc_domain.classify_requests(reqs, pkgs):
+            for r, n, how in doc_domain.classify_requests(reqs, pkgs, native="x86_64"):
                 self.assertEqual((n, how), (r, "name"), r)
 
     def test_other_spellings_of_a_version(self) -> None:
@@ -276,7 +277,7 @@ class ClassifyTest(unittest.TestCase):
             "pigz-2.8",
             "NetworkManager-1:1.56.1-2.fc44.x86_64",
         ]
-        got = doc_domain.classify_requests(reqs, self.pkgs)
+        got = doc_domain.classify_requests(reqs, self.pkgs, native="x86_64")
         self.assertEqual(
             [(n, how) for _, n, how in got],
             [("samba", "pinned"), ("samba.x86_64", "pinned"), ("pigz", "pinned"), ("NetworkManager.x86_64", "pinned")],
@@ -313,7 +314,7 @@ class ClassifyTest(unittest.TestCase):
         install back: pigz may now come from the base image (another build),
         and --install=pigz would make rpm-ostree refuse the whole fix."""
         pkgs = [p for p in self.pkgs if not p.startswith("pigz-")] + ["pigz-2.8-9.fc44.x86_64"]
-        got = doc_domain.classify_requests(["pigz-2.8-8.fc44", "containerd-2.3.4-1.fc44"], pkgs)
+        got = doc_domain.classify_requests(["pigz-2.8-8.fc44", "containerd-2.3.4-1.fc44"], pkgs, native="x86_64")
         self.assertEqual(
             got, [("pigz-2.8-8.fc44", "", "inactive"), ("containerd-2.3.4-1.fc44", "containerd", "pinned")]
         )
@@ -321,10 +322,12 @@ class ClassifyTest(unittest.TestCase):
             doc_domain.unpin_command(got),
             "sudo rpm-ostree uninstall pigz-2.8-8.fc44 containerd-2.3.4-1.fc44 --install=containerd",
         )
-        self.assertEqual(doc_domain.classify_requests(["foo-1.0-1.fc44"], self.pkgs)[0][2], "inactive")
+        self.assertEqual(doc_domain.classify_requests(["foo-1.0-1.fc44"], self.pkgs, native="x86_64")[0][2], "inactive")
 
     def test_form_only_when_package_list_unknown(self) -> None:
-        got = doc_domain.classify_requests(["moby-engine-rootless-extras-29.7.2-1.fc44", "foo-1.0-1"], None)
+        got = doc_domain.classify_requests(
+            ["moby-engine-rootless-extras-29.7.2-1.fc44", "foo-1.0-1"], None, native="x86_64"
+        )
         self.assertEqual(
             got[0], ("moby-engine-rootless-extras-29.7.2-1.fc44", "moby-engine-rootless-extras", "pinned-form")
         )
@@ -332,14 +335,18 @@ class ClassifyTest(unittest.TestCase):
 
     def test_unpin_command(self) -> None:
         cls = doc_domain.classify_requests(
-            ["below", "containerd-2.3.4-1.fc44", "samba-2:4.23.2-1.fc44", "pigz-2.8-8.fc44", "pigz"], self.pkgs
+            ["below", "containerd-2.3.4-1.fc44", "samba-2:4.23.2-1.fc44", "pigz-2.8-8.fc44", "pigz"],
+            self.pkgs,
+            native="x86_64",
         )
         self.assertEqual(
             doc_domain.unpin_command(cls),
             "sudo rpm-ostree uninstall containerd-2.3.4-1.fc44 samba-2:4.23.2-1.fc44 "
             "pigz-2.8-8.fc44 --install=containerd --install=samba",
         )
-        self.assertEqual(doc_domain.unpin_command(doc_domain.classify_requests(["below"], self.pkgs)), "")
+        self.assertEqual(
+            doc_domain.unpin_command(doc_domain.classify_requests(["below"], self.pkgs, native="x86_64")), ""
+        )
 
     def test_pkg_names(self) -> None:
         with open(os.path.join(FIX, "overrides.json")) as f:
@@ -1998,6 +2005,26 @@ class DoctorDomainTest(unittest.TestCase):
         self.assertEqual(doc_domain.parse_args(["--brief"]), ("run", True))
         with self.assertRaises(Usage):
             doc_domain.parse_args(["--bogus"])
+
+
+class HostAccountsTest(unittest.TestCase):
+    """The Host adapter answers the account and machine questions the checks
+    used to ask pwd and os.uname directly (fakes: pwd stubs, no real accounts)."""
+
+    def test_user_name_and_id(self) -> None:
+        host = doc_adapters.Host({"CST_DOCTOR_ROOT": "/nonexistent"}, repo=REPO)
+        entry = types.SimpleNamespace(pw_name="alice", pw_uid=4242)
+        by_uid = {4242: entry}
+        by_name = {"alice": entry}
+        with (
+            mock.patch.object(doc_adapters.pwd, "getpwuid", lambda u: by_uid[u]),
+            mock.patch.object(doc_adapters.pwd, "getpwnam", lambda n: by_name[n]),
+        ):
+            self.assertEqual(host.user_name(4242), "alice")
+            self.assertEqual(host.user_name(1), "")
+            self.assertEqual(host.user_id("alice"), 4242)
+            self.assertIsNone(host.user_id("nobody-here"))
+        self.assertEqual(host.arch, os.uname().machine)
 
 
 if __name__ == "__main__":

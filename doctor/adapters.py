@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping
 import os
+import pwd
 import subprocess
 import time
 from typing import Any, BinaryIO, TextIO
@@ -35,6 +36,7 @@ class Host:
         self.root = env.get("CST_DOCTOR_ROOT") or ("/run/host" if self.container else "/")
         self.now = float(env.get("CST_DOCTOR_NOW") or time.time())
         self.uid = os.getuid()
+        self.arch = os.uname().machine
         self.state_home = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
 
     def path(self, p: str) -> str:
@@ -84,6 +86,20 @@ class Host:
     def realpath(self, path: str) -> str:
         """os.path.realpath."""
         return os.path.realpath(path)
+
+    def user_name(self, uid: int) -> str:
+        """pwd.getpwuid(uid).pw_name, or "" for an unknown uid."""
+        try:
+            return pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return ""
+
+    def user_id(self, name: str) -> int | None:
+        """pwd.getpwnam(name).pw_uid, or None for an unknown name."""
+        try:
+            return pwd.getpwnam(name).pw_uid
+        except KeyError:
+            return None
 
     def run(self, cmd: list[str], timeout: float = 60) -> tuple[int, str, str]:
         """(rc, stdout, stderr) of a read-only query command on the host;

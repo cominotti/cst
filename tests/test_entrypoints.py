@@ -9,9 +9,11 @@
   Everything else about paths (the program's own path, siblings, data
   files, the installed bytes) goes through cst_core.adapters.runtime.
 - **Entry points only wire argv.** An extension-less program holds a
-  docstring, the bootstrap, imports, one `main()` and the `__main__` guard:
-  its logic lives once, in its package, where tests import it. Rule chosen
-  over a size cap: a cap lets logic creep back a few lines at a time.
+  docstring, the bootstrap, imports, one `main()` and the `__main__` guard;
+  `main()` holds a docstring and one statement that hands argv to the
+  package (`return cli.main(sys.argv[1:], ...)`). Its logic lives once, in
+  its package, where tests import it. Rule chosen over a line cap: a cap
+  lets logic creep back a few lines at a time.
 - **No re-export facades.** Neither `from m import a as a` (the explicit
   re-export idiom), nor an `__all__` list, nor a package `__init__.py` that
   imports from its own submodules: tests import the module that defines a
@@ -94,6 +96,16 @@ def _is_main_guard(node: ast.stmt) -> bool:
     )
 
 
+def _main_problems(node: ast.FunctionDef, rel: str) -> list[str]:
+    """main() holds a docstring at most and one statement handing argv over to the package."""
+    body = node.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    if len(body) == 1 and isinstance(body[0], ast.Return | ast.Expr):
+        return []
+    return [f"{rel}:{node.lineno}: main() does more than hand argv to its package ({len(body)} statements)"]
+
+
 def thin_entry_problems(source: str, rel: str) -> list[str]:
     """Top-level statements other than docstring, bootstrap, imports, main() and the guard."""
     problems: list[str] = []
@@ -106,6 +118,7 @@ def thin_entry_problems(source: str, rel: str) -> list[str]:
             continue
         if isinstance(node, ast.FunctionDef) and node.name == "main":
             mains += 1
+            problems.extend(_main_problems(node, rel))
             continue
         what = getattr(node, "name", type(node).__name__)
         problems.append(f"{rel}:{node.lineno}: {what} at the top of an entry point (move it into the package)")
@@ -231,6 +244,10 @@ class EntryPointGateTest(unittest.TestCase):
         self.assertEqual(thin_entry_problems(thin, "x"), [])
         self.assertTrue(thin_entry_problems(thin + "X = 1\n", "x"))
         self.assertTrue(thin_entry_problems(thin + "def helper():\n    pass\n", "x"))
+        fat = thin.replace("    return run(sys.argv[1:])\n", "    args = sys.argv[1:]\n    return run(args)\n")
+        self.assertEqual(len(thin_entry_problems(fat, "x")), 1)
+        branchy = thin.replace("    return run(sys.argv[1:])\n", "    if sys.argv:\n        return run(sys.argv[1:])\n")
+        self.assertEqual(len(thin_entry_problems(branchy, "x")), 1)
 
 
 if __name__ == "__main__":

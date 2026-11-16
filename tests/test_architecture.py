@@ -7,11 +7,12 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
 - `ports` and `application` modules must not import `adapters` or `cli`.
 - Every `@dataclass` defined inside a `domain` module must declare
   `frozen=True` and `slots=True`.
-- `domain` and `application` modules do no I/O themselves: no call to
-  `open`, `print`, `input`, the file and process functions of `os` and
-  `os.path`, `subprocess`, `shutil`, `time.time/sleep`, `sys.exit`/streams,
-  nor `Path(...)` file methods (DIRECT_IO_CALLS lists them). They reach the
-  machine through ports, which adapters implement.
+- `domain` and `application` modules do no I/O themselves. An allow-list
+  (PURE_MODULES, PURE_NAMES) says what they may import and use, resolved
+  through aliases and `from m import x`; anything else (os.listdir, pwd,
+  time.time, sys.stdout, os.readv...) and the I/O builtins (`open`, `print`,
+  `input`, `exec`...) fail. They reach the machine through ports, which
+  adapters implement.
 - Every package module is imported (directly or not) by an entry point:
   a module nothing runs is a shadow that drifts from the real code.
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
@@ -34,37 +35,31 @@ FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
     {"subprocess", "shutil", "socket", "fcntl", "ctypes", "sqlite3", "urllib"}
 )
 
-# Calls that reach the machine, by the name they are called through.
-_OS_IO: Final = frozenset(
+# What domain and application code may import and use, an allow-list (a
+# deny-list missed os.readv): pure standard modules whole, a few modules only
+# for the names listed (the rest of os, time, io... reaches the machine), and
+# the repository's own packages (the layer rules above check those). Imports
+# are resolved through aliases and `from m import x`.
+PURE_MODULES: Final[frozenset[str]] = frozenset(
     {
-        "access", "chdir", "chmod", "chown", "close", "environ", "execv", "execvp", "fdopen", "fsync",
-        "getcwd", "getenv", "geteuid", "getpid", "getuid", "kill", "link", "listdir", "lstat", "makedirs",
-        "mkdir", "open", "popen", "read", "readlink", "remove", "rename", "replace", "rmdir", "scandir",
-        "stat", "statvfs", "symlink", "system", "umask", "unlink", "utime", "walk", "write",
+        "__future__", "ast", "collections", "collections.abc", "dataclasses", "enum", "fnmatch",
+        "functools", "itertools", "json", "math", "operator", "posixpath", "re", "shlex", "stat",
+        "string", "textwrap", "tomllib", "typing", "xml.etree.ElementTree",
     }
 )  # fmt: skip
-_OS_PATH_IO: Final = frozenset(
-    {
-        "abspath", "exists", "expanduser", "getatime", "getctime", "getmtime", "getsize", "isdir",
-        "isfile", "islink", "ismount", "lexists", "realpath", "samefile",
-    }
-)  # fmt: skip
-_PATH_IO: Final = frozenset(
-    {
-        "chmod", "exists", "glob", "is_dir", "is_file", "is_symlink", "iterdir", "lstat", "mkdir", "open",
-        "read_bytes", "read_text", "readlink", "rename", "replace", "resolve", "rglob", "rmdir", "stat",
-        "symlink_to", "touch", "unlink", "write_bytes", "write_text",
-    }
-)  # fmt: skip
-DIRECT_IO_CALLS: Final[dict[str, frozenset[str]]] = {
-    "": frozenset({"open", "print", "input", "exec", "eval"}),
-    "os": _OS_IO,
-    "os.path": _OS_PATH_IO,
-    "subprocess": frozenset({"run", "Popen", "call", "check_call", "check_output"}),
-    "shutil": frozenset({"copy", "copy2", "copyfile", "copytree", "move", "rmtree", "which", "disk_usage"}),
-    "time": frozenset({"time", "sleep", "monotonic", "time_ns"}),
-    "sys": frozenset({"exit", "stdout", "stderr", "stdin", "argv"}),
+PURE_NAMES: Final[dict[str, frozenset[str]]] = {
+    "os": frozenset({"path", "sep", "stat_result"}),
+    "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),
+    "time": frozenset({"gmtime", "localtime", "strftime", "struct_time"}),
+    "io": frozenset({"StringIO"}),
+    "datetime": frozenset({"date", "datetime", "timedelta", "timezone", "tzinfo"}),
+    "datetime.datetime": frozenset({"fromisoformat", "fromtimestamp", "strptime"}),
 }
+# Builtins that reach the terminal, files or run code.
+IO_BUILTINS: Final[frozenset[str]] = frozenset({"open", "print", "input", "exec", "eval", "compile", "__import__"})
+REPO_PACKAGES: Final[frozenset[str]] = frozenset(
+    {"bluetooth", "btrfs", "cpu", "cst_core", "doctor", "swap", "toolchains", "vm"}
+)
 IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 
 # Packages, and single files, that no entry point imports. Every module is
@@ -127,33 +122,69 @@ def _dotted(node: ast.expr) -> str | None:
     return None
 
 
+def _allowed_module(module: str) -> bool:
+    return module in PURE_MODULES or module in PURE_NAMES or module.split(".", 1)[0] in REPO_PACKAGES
+
+
+def _allowed_use(dotted: str) -> bool:
+    """A fully qualified name (os.path.join, time.time) inside the allow-list."""
+    if dotted.split(".", 1)[0] in REPO_PACKAGES:
+        return True
+    for module in sorted({*PURE_MODULES, *PURE_NAMES}, key=len, reverse=True):
+        if dotted == module:
+            return True
+        if dotted.startswith(module + "."):
+            first = dotted[len(module) + 1 :].split(".", 1)[0]
+            if module in PURE_MODULES:
+                return True
+            if first in PURE_NAMES[module]:
+                nested = f"{module}.{first}"
+                rest = dotted[len(nested) + 1 :].split(".", 1)[0] if dotted != nested else ""
+                return not rest or nested not in PURE_NAMES or rest in PURE_NAMES[nested]
+            return False
+    return False
+
+
 def direct_io_problems(source: str, rel: str) -> list[str]:
-    """Calls (and stream/env uses) of DIRECT_IO_CALLS in one module."""
+    """Imports and uses outside the inner layers' allow-list, and I/O builtins, in one module."""
     tree = ast.parse(source, filename=rel)
     problems: list[str] = []
+    bound: dict[str, str] = {}  # local name -> fully qualified name
     for node in ast.walk(tree):
-        target: ast.expr | None = None
-        if isinstance(node, ast.Call):
-            target = node.func
-            # Path(...).read_text() and the like.
-            if (
-                isinstance(target, ast.Attribute)
-                and target.attr in _PATH_IO
-                and isinstance(target.value, ast.Call)
-                and _dotted(target.value.func) in {"Path", "pathlib.Path"}
-            ):
-                problems.append(f"{rel}:{node.lineno}: Path(...).{target.attr}() does I/O (use a port)")
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if not _allowed_module(alias.name):
+                    problems.append(f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)")
+                bound[alias.asname or alias.name.split(".", 1)[0]] = (
+                    alias.name if alias.asname else alias.name.split(".", 1)[0]
+                )
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                full = f"{node.module}.{alias.name}"
+                if not (_allowed_module(node.module) and (_allowed_use(full) or _allowed_module(full))):
+                    problems.append(f"{rel}:{node.lineno}: imports {full} (reach the machine through a port)")
+                bound[alias.asname or alias.name] = full
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in IO_BUILTINS:
+            if node.func.id not in bound:
+                problems.append(f"{rel}:{node.lineno}: {node.func.id}() does I/O (use a port)")
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            name = _dotted(node)
+            if name is None:
                 continue
-        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
-            target = node  # os.environ, sys.stdout, sys.argv: used without a call
-        if target is None:
-            continue
-        name = _dotted(target)
-        if name is None:
-            continue
-        mod, _, attr = name.rpartition(".")
-        if attr in DIRECT_IO_CALLS.get(mod, frozenset()) and (isinstance(node, ast.Call) or mod in {"os", "sys"}):
-            problems.append(f"{rel}:{target.lineno}: {name} does I/O (use a port)")
+            head, _, rest = name.partition(".")
+            if head not in bound:
+                continue
+            full = f"{bound[head]}.{rest}"
+            if not _allowed_use(full):
+                problems.append(f"{rel}:{node.lineno}: {full} does I/O (use a port)")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Call)
+            and _dotted(node.func.value.func) in {"Path", "pathlib.Path"}
+        ):
+            problems.append(f"{rel}:{node.lineno}: Path(...).{node.func.attr}() does I/O (use a port)")
     return sorted(set(problems), key=lambda p: (int(p.split(":")[1]), p))
 
 
@@ -305,6 +336,16 @@ class ArchitectureGateTest(unittest.TestCase):
             "import time\ndef f():\n    return time.time()\n",
             "from pathlib import Path\ndef f(p):\n    return Path(p).read_text()\n",
             "import subprocess\ndef f():\n    subprocess.run(['x'], check=False)\n",
+            # Forms a deny-list of call names missed: other os functions, aliases, from-imports, pwd.
+            "import os\ndef f(fd):\n    return os.readv(fd, [])\n",
+            "import os as o\ndef f(p):\n    return o.listdir(p)\n",
+            "from os import listdir\n",
+            "from os.path import exists\n",
+            "import os.path as osp\ndef f(p):\n    return osp.isfile(p)\n",
+            "import pwd\n",
+            "from datetime import datetime\ndef f():\n    return datetime.now()\n",
+            "import time as t\ndef f():\n    return t.monotonic()\n",
+            "def f(p):\n    return __import__('os').listdir(p)\n",
         )
         for src in bad:
             with self.subTest(src=src):
@@ -314,6 +355,9 @@ class ArchitectureGateTest(unittest.TestCase):
             "import os\ndef f(a, b):\n    return os.path.join(a, b), os.path.basename(a), os.sep\n",
             "def f(host, p):\n    return host.read_text(p), host.listdir(p)\n",
             "import time\ndef f(t):\n    return time.strftime('%Y', time.gmtime(t))\n",
+            "from os.path import join as j\nimport xml.etree.ElementTree as ET\ndef f(a):\n    return ET.fromstring(j(a, 'b'))\n",
+            "from datetime import datetime, timezone\ndef f(s):\n    return datetime.fromisoformat(s).astimezone(timezone.utc)\n",
+            "from collections.abc import Mapping\nfrom cst_core.domain.values import GIB\nimport stat\nX = stat.S_ISDIR\n",
         )
         for src in good:
             with self.subTest(src=src):
