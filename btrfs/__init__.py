@@ -1,1 +1,1 @@
-# Marks btrfs/ as a package only so that `python3 -I -B -m unittest`, run from the repository root, finds btrfs/tests.
+# The btrfs module's packages (snapshot/, ...) and its tests (btrfs/tests); the programs are the files next to it.

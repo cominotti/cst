@@ -1868,12 +1868,18 @@ journalctl -g 'btrfs-health-check|btrfs-stall-monitor|btrfs-snapshot|btrfs-notif
 
 ## 15. Repository layout
 
-The `btrfs/` Python code separates pure rules from host commands and standalone installed helpers:
+Each Python program here is an entry point: the program file that `install`
+writes (as a self-contained zipapp) or a setup script runs from the checkout.
+A converted program's file only reads its arguments and calls its package;
+the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 
-| Module | Role |
-|---|---|
-| `domain.py` | Pure domain model, value objects, and validation rules (`SnapshotRetentionSpec`, `StallMonitorThresholds`, `DockerGcPolicy`, `ChromeCachePolicy`). No I/O or subprocesses. |
-| `ports.py` | Protocol interfaces (`BtrfsHelperRuntimePort`, `BtrfsCommandPort`) separating application use cases from external commands and helper scripts. |
-| `adapters.py` | Concrete host adapters wrapping `subprocess.run` (`SubprocessBtrfsCommandAdapter`) and executing installed or repository Python helpers (`BtrfsHelperScriptAdapter`). |
-| `application.py` | Application service (`BtrfsService`) coordinating domain rule evaluation and helper execution. |
-| `chrome-cache`, `docker-gc`, `docker-volumes-nocow`, `btrfs-stall-monitord`, `btrfs-stall-report`, `btrfs-snapshot-core`, `btrfs-bulk` | Standalone Python CLIs installed to `/usr/local/{bin,sbin}` and invoked directly on the host or via `btrfs-setup.sh`. |
+| Program | Package | What is where |
+|---|---|---|
+| `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`; no I/O. `adapters.py`: the `Host` (commands, clock, directory entries; tests replace it), the btrfs commands, the scan of the snapshot folder, the cache-folder walk, the local time zone, and the safeguards (they resolve pinned paths on the filesystem). `cli.py`: one `Run` per invocation, the run lock, the argument parser and `main()`. |
+
+Still a program file of its own (converted in a later change):
+`btrfs-bulk`, `chrome-cache`, `docker-gc`, `docker-volumes-nocow`,
+`btrfs-stall-monitord`, `btrfs-stall-report`. The top-level `domain.py`,
+`ports.py`, `adapters.py` and `application.py` are an early sketch of the
+policies of the last four (`StallMonitorThresholds`, `DockerGcPolicy`,
+`ChromeCachePolicy`) that no program uses yet; their conversion replaces it.

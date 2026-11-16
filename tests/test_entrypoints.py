@@ -43,7 +43,6 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 NOT_YET_THIN: Final[frozenset[str]] = frozenset(
     {
         "btrfs/btrfs-bulk",
-        "btrfs/btrfs-snapshot-core",
         "btrfs/btrfs-stall-monitord",
         "btrfs/btrfs-stall-report",
         "btrfs/chrome-cache",
@@ -131,11 +130,7 @@ FILE_CONSUMERS: Final[frozenset[str]] = frozenset(
 )
 # Programs that still compute paths from __file__ themselves (their stage
 # moves them onto cst_core.adapters.runtime).
-FILE_PATHS_NOT_YET: Final[frozenset[str]] = frozenset(
-    {
-        "btrfs/adapters.py",
-    }
-)
+FILE_PATHS_NOT_YET: Final[frozenset[str]] = frozenset()
 
 
 def file_path_problems(source: str, rel: str) -> list[str]:

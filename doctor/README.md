@@ -210,7 +210,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `core-writable` (world-readable, written by the hourly snapshot run) and
   `TOP`/`SNAP_DIR_NAME` from `/etc/btrfs-setup/snapshots.conf` for the path in
   its fix line. It never opens the snapshot folder (root-only) and runs no
-  command.
+  command. The names of those two files come from the `btrfs.snapshot`
+  package of the same CST copy (what btrfs-snapshot-core writes).
 - The Docker NOCOW check reads `/var/lib/docker-volumes-nocow/postponed`
   (world-readable, written by `docker-volumes-nocow` at boot). It never opens
   Docker's folders (root-only) and runs no command.

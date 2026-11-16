@@ -3,28 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
-
-KNOWN_HELPERS: frozenset[str] = frozenset(
-    {
-        "chrome-cache",
-        "docker-gc",
-        "docker-volumes-nocow",
-        "btrfs-stall-monitord",
-        "btrfs-stall-report",
-        "btrfs-snapshot-core",
-        "btrfs-bulk",
-    }
-)
-_POLICY_TOKEN_RE = re.compile(r"(\*|[0-9]+)([hdwmy])", re.IGNORECASE)
-
-
-class Usage(Exception):
-    """Invalid CLI or configuration usage in the `btrfs` context."""
-
-
-class Refused(Exception):
-    """Safety precondition refused a `btrfs` operation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,51 +58,6 @@ class StallMonitorThresholds:
             io_some_pct < self.quiet_io_some_pct
             and max_commit_ms < self.enter_commit_ms
             and d_storage_tasks <= self.quiet_d_tasks
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SnapshotRetentionSpec:
-    """Parsed btrbk-compatible local snapshot retention matrix."""
-
-    hourly: int = 0
-    daily: int = 0
-    weekly: int = 0
-    monthly: int = 0
-    yearly: int = 0
-    keep_all: bool = False
-
-    @classmethod
-    def parse(cls, spec: str) -> SnapshotRetentionSpec:
-        """Parse retention tokens like `'72h 7d 4w 3m'` or `'*'` into `SnapshotRetentionSpec`."""
-        tokens = [t for t in re.split(r"[\s,]+", spec.strip()) if t]
-        if not tokens:
-            raise Usage("empty retention policy")
-        if tokens == ["*"]:
-            return cls(keep_all=True)
-
-        values: dict[str, int | str] = {}
-        for tok in tokens:
-            m = _POLICY_TOKEN_RE.fullmatch(tok)
-            if m is None:
-                raise Usage(f"bad retention token {tok!r} (expected <N>h, <N>d, <N>w, <N>m or <N>y)")
-            unit = m.group(2).lower()
-            if unit in values:
-                raise Usage(f"retention unit {unit!r} given twice")
-            values[unit] = "all" if m.group(1) == "*" else int(m.group(1))
-
-        def _num(unit: str) -> int:
-            val = values.get(unit, 0)
-            return val if isinstance(val, int) else 0
-
-        keep_all = any(v == "all" for v in values.values())
-        return cls(
-            hourly=_num("h"),
-            daily=_num("d"),
-            weekly=_num("w"),
-            monthly=_num("m"),
-            yearly=_num("y"),
-            keep_all=keep_all,
         )
 
 

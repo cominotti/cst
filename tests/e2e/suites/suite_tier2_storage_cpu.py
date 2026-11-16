@@ -528,8 +528,8 @@ EOF
             dev0="$(head -n1 /run/e2e-loop-devs)"
             mount -o "$opts" "$dev0" /var/mnt/btrfs-top
             findmnt -rn -M /var/mnt/btrfs-top >/dev/null
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot /usr/local/sbin/btrfs-snapshot
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot-core /usr/local/sbin/btrfs-snapshot-core
+            # The installer writes btrfs-snapshot-core as the zipapp a real install makes.
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
 
             /usr/local/sbin/btrfs-snapshot convert
             btrfs subvolume show /var/home/tester/Workspace >/dev/null
@@ -588,8 +588,8 @@ EOF
                 mount -o "$opts" "$(head -n1 /run/e2e-loop-devs)" "$TOP"
             fi
             trap 'umount "$TOP" 2>/dev/null || true' EXIT
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot "$RT"
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot-core "$CORE"
+            # $RT and $CORE are the manifest's dests; the core goes in as its zipapp.
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
             # test_03 made these subvolumes; ~/Workspace is a source of its own.
             btrfs subvolume show "$WS" >/dev/null
             btrfs subvolume show "$H/.cache" >/dev/null

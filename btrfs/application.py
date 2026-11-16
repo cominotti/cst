@@ -2,26 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
-from btrfs.domain import (
-    ChromeCachePolicy,
-    DockerGcPolicy,
-    SnapshotRetentionSpec,
-    StallMonitorThresholds,
-)
-from btrfs.ports import BtrfsHelperRuntimePort
+from btrfs.domain import ChromeCachePolicy, DockerGcPolicy, StallMonitorThresholds
 
 
 class BtrfsService:
-    """Coordinates `btrfs` domain policy evaluation and helper CLI delegation."""
-
-    def __init__(self, runtime: BtrfsHelperRuntimePort) -> None:
-        self._runtime = runtime
-
-    def parse_retention(self, spec: str) -> SnapshotRetentionSpec:
-        """Validate and parse a snapshot retention specification."""
-        return SnapshotRetentionSpec.parse(spec)
+    """Coordinates `btrfs` domain policy evaluation."""
 
     def evaluate_stall(
         self,
@@ -43,7 +28,3 @@ class BtrfsService:
         """Check whether `repo_tag` matches a protected Docker registry prefix."""
         resolved = DockerGcPolicy() if policy is None else policy
         return resolved.is_protected_image(repo_tag)
-
-    def run_helper(self, helper_name: str, argv: Sequence[str]) -> int:
-        """Execute a named `btrfs/` standalone helper via the runtime port."""
-        return self._runtime.run_helper(helper_name, argv)

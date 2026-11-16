@@ -38,12 +38,12 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from tests.script_loader import load_script
+from btrfs.snapshot import adapters as snap_adapters, cli as snap_cli, domain as snap_domain
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True  # keep __pycache__ out of the repository
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE_PATH = os.path.join(os.path.dirname(HERE), "btrfs-snapshot-core")
 
 
 class _SnapProto(Protocol):
@@ -141,7 +141,7 @@ class _SnapshotCoreModule(Protocol):
     WRITABLE_FILE: str
     os: types.ModuleType
     ParseError: type[Exception]
-    UsageError: type[Exception]
+    Usage: type[Exception]
     Snap: _SnapCtor
     CacheDir: _CacheDirCtor
     CacheWalk: _CacheWalkCtor
@@ -189,8 +189,8 @@ class _SnapshotCoreModule(Protocol):
 
 
 def load_core() -> _SnapshotCoreModule:
-    mod = load_script(CORE_PATH, "btrfs_snapshot_core")
-    return cast("_SnapshotCoreModule", mod)
+    """btrfs-snapshot-core's package as one namespace (the program is a thin entry over it)."""
+    return cast("_SnapshotCoreModule", PackageView(snap_cli, snap_adapters, snap_domain))
 
 
 core = load_core()
@@ -387,7 +387,7 @@ class PolicyTests(unittest.TestCase):
         s = core.parse_source("x=/a:b/c:1d")  # the policy is after the LAST colon
         self.assertEqual(s.path, "/a:b/c")
         for bad in ("home", "ho me=/x:1d", "home=rel:1d", "home=/x", "home=/x:", "home=/x:1q", "=/x:1d"):
-            with self.subTest(bad=bad), self.assertRaises(core.UsageError):
+            with self.subTest(bad=bad), self.assertRaises(core.Usage):
                 core.parse_source(bad)
 
 

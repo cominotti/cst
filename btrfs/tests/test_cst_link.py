@@ -8,16 +8,12 @@ Run from the repository root:
 
 from __future__ import annotations
 
-import contextlib
-import io
-import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Sequence
 
 sys.dont_write_bytecode = True
 
@@ -25,15 +21,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from btrfs.adapters import BtrfsHelperRuntimeAdapter  # noqa: E402
 from btrfs.application import BtrfsService  # noqa: E402
-from btrfs.domain import (  # noqa: E402
-    BulkItemState,
-    SnapshotRetentionSpec,
-    Usage,
-    parse_btrfs_conf_text,
-)
-from btrfs.ports import BtrfsHelperRuntimePort  # noqa: E402
+from btrfs.domain import BulkItemState, parse_btrfs_conf_text  # noqa: E402
+from btrfs.snapshot.domain import parse_policy, policy_max_kept  # noqa: E402
 
 LIB = os.path.join(REPO, "cst-link.bash")
 CST = os.path.join(REPO, "cst")
@@ -89,28 +79,19 @@ class CstLinkTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(CST))
 
 
-class _FakeHelperRuntime:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, list[str]]] = []
-
-    def run_helper(self, helper_name: str, argv: Sequence[str]) -> int:
-        self.calls.append((helper_name, list(argv)))
-        return 0
-
-
 class HexagonalArchitectureTest(unittest.TestCase):
     """Tests directly exercising btrfs.{domain,ports,adapters,application}."""
 
     def test_domain_policies_and_parsers(self) -> None:
-        runtime: BtrfsHelperRuntimePort = _FakeHelperRuntime()
-        service = BtrfsService(runtime)
+        service = BtrfsService()
 
-        spec = service.parse_retention("48h 14d 8w 12m 2y")
-        self.assertEqual((spec.hourly, spec.daily, spec.weekly, spec.monthly, spec.yearly), (48, 14, 8, 12, 2))
-        self.assertFalse(spec.keep_all)
-        self.assertTrue(SnapshotRetentionSpec.parse("*").keep_all)
-        with self.assertRaises(Usage):
-            SnapshotRetentionSpec.parse("")
+        # Retention policies: btrfs-snapshot-core's parser (the real one).
+        self.assertEqual(parse_policy("48h 14d 8w 12m 2y"), {"h": 48, "d": 14, "w": 8, "m": 12, "y": 2})
+        self.assertEqual(parse_policy("*d"), {"d": "all"})
+        self.assertIsNone(policy_max_kept(parse_policy("*d")))
+        for bad in ("", "*"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                parse_policy(bad)
 
         self.assertTrue(service.evaluate_stall(12.0, 1200, 4))
         self.assertFalse(service.evaluate_stall(2.0, 100, 0))
@@ -126,33 +107,6 @@ class HexagonalArchitectureTest(unittest.TestCase):
 
         state = BulkItemState(item_id="media", rel_path="Bulk/media", status="present")
         self.assertEqual(state.detail, "")
-
-        rc = service.run_helper("chrome-cache", ["plan"])
-        self.assertEqual(rc, 0)
-        assert isinstance(runtime, _FakeHelperRuntime)
-        self.assertEqual(runtime.calls, [("chrome-cache", ["plan"])])
-
-    def test_runtime_adapter_passes_prog_when_helper_slices_argv(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="btrfs-adapter-test-") as tmp:
-            stub = os.path.join(tmp, "chrome-cache")
-            with open(stub, "w", encoding="utf-8") as f:
-                f.write(
-                    "import json, sys\n"
-                    "seen = []\n"
-                    "def main(argv):\n"
-                    "    seen.append(list(argv))\n"
-                    "    print(json.dumps(seen))\n"
-                    "    return 0\n"
-                )
-            adapter = BtrfsHelperRuntimeAdapter(btrfs_dir=tmp)
-            service = BtrfsService(adapter)
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                rc = service.run_helper("chrome-cache", ["plan", "--home", tmp])
-            self.assertEqual(rc, 0)
-            self.assertEqual(json.loads(out.getvalue()), [[stub, "plan", "--home", tmp]])
-            with self.assertRaises(ValueError):
-                adapter.run_helper("nonexistent-helper", [])
 
 
 if __name__ == "__main__":

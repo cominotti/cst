@@ -11,6 +11,7 @@ import shlex
 from typing import Any, Self
 import xml.etree.ElementTree as ET
 
+from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.errors import Usage
 
 NAME = "cst-doctor"
@@ -49,9 +50,10 @@ ONE_DEVICE_FACTOR: dict[str, int] = {"single": 1, "dup": 2}
 # devices is rounding, not a shrunk device.
 RESIZE_SLACK = 16 * 2**20
 
-SNAP_STATE = "/var/lib/btrfs-snapshot"
-SNAP_UNFINISHED = f"{SNAP_STATE}/core-unfinished"
-SNAP_WRITABLE = f"{SNAP_STATE}/core-writable"
+# What btrfs-snapshot-core writes (its state folder and the two lists in it).
+SNAP_STATE = DEFAULT_STATE_DIR
+SNAP_UNFINISHED = f"{SNAP_STATE}/{UNFINISHED_FILE}"
+SNAP_WRITABLE = f"{SNAP_STATE}/{WRITABLE_FILE}"
 SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"  # also read by the VM NAS check
 
 NOCOW_POSTPONED = "/var/lib/docker-volumes-nocow/postponed"

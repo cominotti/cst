@@ -70,10 +70,16 @@ IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 # Packages whose modules no entry point imports yet (their programs are still
 # monoliths). Each later stage of the conversion wires its package in and
 # removes it from here.
-ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs"})
-# Shared cst_core modules made for the modules a later stage converts, with
-# the programs that will import them. A stage that wires one in removes it.
-ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
+ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset()
+# Files no entry point imports yet, with the programs that will (or why they
+# stay). A stage that wires one in, or deletes it, removes its line.
+_BTRFS_SHADOW = "shadow of chrome-cache, docker-gc and btrfs-stall-*: their stage wires the package in"
+ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {
+    "btrfs/adapters.py": _BTRFS_SHADOW,
+    "btrfs/application.py": _BTRFS_SHADOW,
+    "btrfs/domain.py": _BTRFS_SHADOW,
+    "btrfs/ports.py": _BTRFS_SHADOW,
+}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 
@@ -211,7 +217,7 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
 
 # Modules that still load a monolith by its path (SourceFileLoader); each
 # stage that turns the monolith into a package import removes its line.
-PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset({"btrfs/adapters.py"})
+PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset()
 
 
 class ArchitectureGateTest(unittest.TestCase):
@@ -327,7 +333,7 @@ class ArchitectureGateTest(unittest.TestCase):
         files = [rel for rel in production_python() if module_of(rel) is not None]
         problems = orphan_modules(files, module_closure(entry_points()))
         self.assertEqual(problems, [], "modules no entry point imports:\n" + "\n".join(problems))
-        self.assertEqual(orphan_modules(["swap/x.py", "btrfs/y.py"], set()), ["swap/x.py"])
+        self.assertEqual(orphan_modules(["swap/x.py", *ORPHAN_ALLOWED_FILES], set()), ["swap/x.py"])
 
     def test_orphan_allowlist_only_holds_packages_with_orphans(self) -> None:
         files = [rel for rel in production_python() if module_of(rel) is not None]
