@@ -189,6 +189,9 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(d(profile="headset-head-unit"), "skip")
         self.assertEqual(bt_domain.decide(bt_domain.snapshot("00_00", pw_dump()), 48000)[0], "none")
         self.assertEqual(bt_domain.decide(None, 48000)[0], "none")
+        # The reason names the codec in use.
+        sbc = bt_domain.snapshot(DEV, pw_dump(rate=44100, codec="sbc"))
+        self.assertEqual(bt_domain.decide(sbc, 48000), ("none", "codec sbc"))
 
     def test_relevant_events(self) -> None:
         rel = bt_domain.relevant

@@ -227,6 +227,12 @@ class MainConfTest(unittest.TestCase):
         new, changed = self.m.edit_general(text)
         self.assertTrue(changed)
         self.assertTrue(new.startswith("[Policy]\nExperimental = false\n[General]\n"), new)
+        # [General] on line 1: a key line above it (outside any section) is not ours, and the
+        # missing keys go right under the header.
+        new, _ = self.m.edit_general("Experimental = false\n[General]\nName = x\n")
+        self.assertEqual(
+            new, f"Experimental = false\n[General]\nKernelExperimental = {ISO}\nExperimental = true\nName = x\n"
+        )
         # The last commented example is the one replaced; a missing key goes under the first [General].
         text = "[General]\n#Experimental = a\n#Experimental = b\n[General]\nName = y\n"
         new, _ = self.m.edit_general(text)
