@@ -17,11 +17,15 @@ The method is the one of the reference scripts the conversion was measured
 with, except for two things that make the numbers a little lower:
 - function and class docstrings are dropped too (the reference dropped only
   the module's);
-- an import statement is one code line however the formatter wraps it. A
-  long `from pkg.mod import (` list is one name per line, which type 2
-  turns into runs of identical `N ,` lines: two such lists anywhere looked
-  like copied code, and moving a monolith into a package "duplicated" its
-  imports. The statement is still measured, as one line.
+- an import statement is one code line however the formatter wraps it, and
+  type 2 keeps the names in it as written. A long `from pkg.mod import (`
+  list is one name per line, and type 2 turned those lines, and any run of
+  `import os` / `import re` / ..., into identical `N ,` or `import N`
+  lines: two such blocks anywhere looked like copied code, and moving a
+  monolith into a package "duplicated" its imports. Renaming what an
+  import names is not a renamed copy: it imports something else. The
+  statement is still measured, as one line, and an identical import block
+  still counts.
 """
 
 import ast
@@ -97,7 +101,7 @@ def normalized_python(source: str, *, type2: bool) -> list[str]:
         ):
             prev = tk.type
             continue  # a docstring
-        if type2 and tk.type == tokenize.NAME and not keyword.iskeyword(tk.string):
+        if type2 and tk.type == tokenize.NAME and not keyword.iskeyword(tk.string) and import_line is None:
             text = "N"
         elif type2 and tk.type == tokenize.STRING:
             text = "S"

@@ -7,8 +7,8 @@ the copies cannot come back. The run prints the numbers measured.
 
 Targets of the hexagonal conversion (the ceilings move towards them):
 - python type 1, W=8, cross-file lines: 0 (no block of 8 lines in two files);
-- python type 2, W=8: under 3.5 % (what main had before the conversion,
-  3.50 % whether a wrapped import counts as one line or as many);
+- python type 2, W=8: at most what main had before the conversion: 2.52 %
+  with this method (3.50 % when type 2 also renamed the names in imports);
 - shell, W=5: at most 1.1 %;
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its reason.
 """
@@ -35,7 +35,7 @@ CEILINGS: Final[dict[str, float]] = {
     # one line; only the total of code lines went down.
     "python type-1 W=8 duplicated %": 0.37,
     "python type-1 W=8 cross-file lines": 32,
-    "python type-2 W=8 duplicated %": 7.39,
+    "python type-2 W=8 duplicated %": 6.22,
     "shell W=5 duplicated %": 0.47,
     # Includes the canonical homes in cst_core (Usage, Refused, read_text,
     # read_int, read_bytes, log, take_lock, set_nocow, inode_flags,
@@ -104,6 +104,11 @@ class DuplicationRatchetTest(unittest.TestCase):
             "from pkg . one import ( " + " ".join(f"name{i} ," for i in range(12)) + " )",
         )
         self.assertEqual(len(normalized_python(a, type2=True)), 2)
+        self.assertEqual(normalized_python(a, type2=True)[1], "import os")
+        # Type 2 keeps an import's names: eight different imports are no renamed copy of eight others.
+        imports = ["os", "re", "sys", "json", "time", "stat", "errno", "shutil", "subprocess"]
+        blocks = {p: "".join(f"import {m}\n" for m in mods) for p, mods in (("x", imports[:8]), ("y", imports[1:]))}
+        self.assertEqual(clones({p: normalized_python(src, type2=True) for p, src in blocks.items()}, 8).duplicated, 0)
         self.assertEqual(
             clones({p: normalized_python(src, type2=True) for p, src in (("a", a), ("b", b))}, 8).duplicated, 0
         )
