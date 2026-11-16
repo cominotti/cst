@@ -8,7 +8,7 @@ Run from the repository root:
     python3 -I -B -m unittest discover -s bluetooth/tests -t . -v
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
@@ -18,65 +18,16 @@ import subprocess
 import sys
 import tempfile
 import types
-from typing import Any, Protocol, cast
+from typing import Any
 import unittest
 from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, HelperModule, load, load_helper, shell_functions  # noqa: E402
+from bluetooth import domain as bt_domain, ldac_watch  # noqa: E402
+from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, HelperModule, load_helper, shell_functions  # noqa: E402
 
 DEV = "0A_1B_2C_3D_4E_5F"
-
-
-class _TrackerProto(Protocol):
-    def observe(self, snap: Mapping[str, Any] | None, now: float) -> tuple[str, str | float]: ...
-    def attempted(self, now: float) -> None: ...
-    def own_node(self, snap: Mapping[str, Any] | None) -> None: ...
-    def result(self, ok: bool) -> None: ...
-
-
-class _StopProto(Protocol):
-    busy: bool
-    asked: bool
-
-    def handler(self, signum: int, frame: types.FrameType | None) -> None: ...
-
-
-class _WatcherProto(Protocol):
-    live: object
-    tracker: _TrackerProto
-    known: set[int]
-
-    def look(self) -> float | None: ...
-    def listen(self, proc: object) -> None: ...
-
-
-class _WatchModule(Protocol):
-    SBC_HOLD: float
-    DEBOUNCE: float
-    time: types.SimpleNamespace
-    log: Callable[..., None]
-    Stop: _StopProto
-
-    def snapshot(self, dev: str, objs: Sequence[Mapping[str, Any]]) -> dict[str, Any]: ...
-    def decide(self, snap: Mapping[str, Any] | None, rate: int) -> tuple[str, str]: ...
-    def relevant(self, line: str, known: set[int]) -> bool: ...
-    def profiles(self, dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, str | None, str | None]: ...
-    def Tracker(
-        self,
-        rate: int,
-        settle: float = ...,
-        cooldown: float = ...,
-        relapse: float = ...,
-        max_tries: int = ...,
-    ) -> _TrackerProto: ...
-    def Watcher(self, dev: str, rate: int, dry_run: bool = ...) -> _WatcherProto: ...
-
-
-def load_watch() -> _WatchModule:
-    """Load `bluetooth/bt-ldac-watch` cast to `_WatchModule`."""
-    return cast(_WatchModule, load(WATCH, "bt_ldac_watch"))
 
 
 @dataclass(frozen=True)
@@ -168,11 +119,10 @@ def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False)
 
 class ParseTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.w = load_watch()
         self.h: HelperModule = load_helper()
 
     def test_snapshot(self) -> None:
-        s = self.w.snapshot(DEV, pw_dump())
+        s = bt_domain.snapshot(DEV, pw_dump())
         self.assertEqual(
             s,
             {
@@ -185,20 +135,20 @@ class ParseTest(unittest.TestCase):
                 "mic": False,
             },
         )
-        self.assertTrue(self.w.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
-        self.assertIsNone(self.w.snapshot("00_00", pw_dump())["card"])
+        self.assertTrue(bt_domain.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
+        self.assertIsNone(bt_domain.snapshot("00_00", pw_dump())["card"])
 
     def test_suspended_node_rate_from_enumformat(self) -> None:
-        self.assertEqual(self.w.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
+        self.assertEqual(bt_domain.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
         objs = pw_dump()
         objs[1]["info"]["params"] = {}
-        self.assertIsNone(self.w.snapshot(DEV, objs)["rate"])
+        self.assertIsNone(bt_domain.snapshot(DEV, objs)["rate"])
 
     def test_helper_reads_the_same_rate(self) -> None:
         for objs in (pw_dump(), pw_dump(rate=48000, suspended=True)):
             pw = self.h.pw_state(DEV, objs)
             assert pw is not None
-            self.assertEqual(pw[4], str(self.w.snapshot(DEV, objs)["rate"]))
+            self.assertEqual(pw[4], str(bt_domain.snapshot(DEV, objs)["rate"]))
 
     def test_snapshot_cli(self) -> None:
         r = subprocess.run(
@@ -226,8 +176,8 @@ class ParseTest(unittest.TestCase):
             profile: str = "a2dp-sink",
             mic_state: str = "suspended",
         ) -> str:
-            return self.w.decide(
-                self.w.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
+            return bt_domain.decide(
+                bt_domain.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
                 48000,
             )[0]
 
@@ -237,11 +187,11 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(d(codec="sbc", rate=44100), "none")
         self.assertEqual(d(mic_state="running"), "skip")
         self.assertEqual(d(profile="headset-head-unit"), "skip")
-        self.assertEqual(self.w.decide(self.w.snapshot("00_00", pw_dump()), 48000)[0], "none")
-        self.assertEqual(self.w.decide(None, 48000)[0], "none")
+        self.assertEqual(bt_domain.decide(bt_domain.snapshot("00_00", pw_dump()), 48000)[0], "none")
+        self.assertEqual(bt_domain.decide(None, 48000)[0], "none")
 
     def test_relevant_events(self) -> None:
-        rel = self.w.relevant
+        rel = bt_domain.relevant
         known = {500, 600, 601}
         self.assertTrue(rel("Event 'new' on card #900\n", known))
         self.assertTrue(rel("Event 'remove' on sink #12\n", known))
@@ -254,7 +204,7 @@ class ParseTest(unittest.TestCase):
         self.assertFalse(rel("garbage\n", known))
 
     def test_profiles(self) -> None:
-        p = self.w.profiles
+        p = bt_domain.profiles
         self.assertEqual(p(DEV, cards()), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         self.assertEqual(p(DEV, cards(lang_names=True)), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         # No SBC: another A2DP codec does the same job.
@@ -268,8 +218,7 @@ class ParseTest(unittest.TestCase):
 
 class TrackerTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.w = load_watch()
-        self.t = self.w.Tracker(48000, settle=5, cooldown=600)
+        self.t = bt_domain.Tracker(48000, settle=5, cooldown=600)
 
     def snap(
         self,
@@ -282,7 +231,7 @@ class TrackerTest(unittest.TestCase):
         suspended: bool = False,
     ) -> dict[str, Any]:
         return dict(
-            self.w.snapshot(
+            bt_domain.snapshot(
                 DEV,
                 pw_dump(
                     rate=rate,
@@ -389,7 +338,7 @@ class TrackerTest(unittest.TestCase):
         self.t.own_node(self.snap(out=700, rate=48000))
         self.t.result(True)
         objs = [o for o in pw_dump() if "bluez_output" not in str(o)]
-        self.assertEqual(self.t.observe(self.w.snapshot(DEV, objs), 10)[0], "none")
+        self.assertEqual(self.t.observe(bt_domain.snapshot(DEV, objs), 10)[0], "none")
         self.assertEqual(self.t.observe(self.snap(out=710), 12)[0], "done")
         self.assertEqual(self.t.observe(self.snap(out=710), 1000)[0], "done")
 
@@ -422,8 +371,7 @@ class FakeLive:
     """The system as the watcher sees it: switching to the bounce profile and
     back to LDAC makes the PC configure the stream at BACK_RATE."""
 
-    def __init__(self, mod: _WatchModule, back_rate: int = 48000, fail: tuple[str, ...] | set[str] = ()) -> None:
-        self.mod = mod
+    def __init__(self, back_rate: int = 48000, fail: tuple[str, ...] | set[str] = ()) -> None:
         self.dev = DEV
         self.active = "a2dp-sink"
         self.rate = 96000
@@ -439,7 +387,7 @@ class FakeLive:
         if self._snap_fn is not None:
             return self._snap_fn()
         codec = "ldac" if self.active == "a2dp-sink" else "sbc"
-        return self.mod.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
+        return bt_domain.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
 
     def cards(self) -> list[dict[str, Any]]:
         return cards(active=self.active)
@@ -461,22 +409,27 @@ class FakeLive:
 
 class BounceTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.w = load_watch()
         # No waiting: sleeps do nothing, the wait limits are zero.
         clock = types.SimpleNamespace(t=0.0)
-        self.w.time = types.SimpleNamespace(monotonic=lambda: clock.t, sleep=lambda s: setattr(clock, "t", clock.t + s))
-        self.w.SBC_HOLD = 0
+        fake_time = types.SimpleNamespace(monotonic=lambda: clock.t, sleep=lambda s: setattr(clock, "t", clock.t + s))
         self.lines: list[tuple[int, str]] = []
-        self.w.log = lambda msg, level=6: self.lines.append((level, msg))
+        for name, value in (
+            ("time", fake_time),
+            ("SBC_HOLD", 0),
+            ("log", lambda level, msg: self.lines.append((level, msg))),
+        ):
+            patcher = mock.patch.object(ldac_watch, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def watcher(self, live: FakeLive, dry: bool = False) -> _WatcherProto:
-        w = self.w.Watcher(DEV, 48000, dry_run=dry)
+    def watcher(self, live: FakeLive, dry: bool = False) -> ldac_watch.Watcher:
+        w = ldac_watch.Watcher(DEV, 48000, dry_run=dry)
         w.live = live
-        w.tracker = self.w.Tracker(48000, settle=0, cooldown=600)
+        w.tracker = bt_domain.Tracker(48000, settle=0, cooldown=600)
         return w
 
     def test_bounce_fixes_the_rate(self) -> None:
-        live = FakeLive(self.w)
+        live = FakeLive()
         w = self.watcher(live)
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
@@ -494,7 +447,7 @@ class BounceTest(unittest.TestCase):
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
 
     def test_headset_insists_on_96k(self) -> None:
-        live = FakeLive(self.w, back_rate=96000)
+        live = FakeLive(back_rate=96000)
         w = self.watcher(live)
         w.look()
         self.assertTrue(any(lv == 3 and "came back at 96000 Hz" in m for lv, m in self.lines))
@@ -503,14 +456,14 @@ class BounceTest(unittest.TestCase):
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
 
     def test_switch_back_fails(self) -> None:
-        live = FakeLive(self.w, fail={"a2dp-sink"})
+        live = FakeLive(fail={"a2dp-sink"})
         w = self.watcher(live)
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink", "a2dp-sink"])
         self.assertTrue(any(lv == 3 and "could not switch back" in m for lv, m in self.lines))
 
     def test_dry_run_switches_nothing(self) -> None:
-        live = FakeLive(self.w)
+        live = FakeLive()
         w = self.watcher(live, dry=True)
         w.look()
         w.look()
@@ -520,7 +473,7 @@ class BounceTest(unittest.TestCase):
     def test_profile_changed_during_the_bounce_is_left_alone(self) -> None:
         # WirePlumber switches to HFP (an app opened the microphone) while
         # the card is on SBC: the bounce does not force LDAC back.
-        live = FakeLive(self.w)
+        live = FakeLive()
 
         def set_profile(prof: str) -> bool:
             ok = live._real_set_profile(prof)
@@ -537,7 +490,7 @@ class BounceTest(unittest.TestCase):
         self.assertEqual(live.calls, ["a2dp-sink-sbc"])
 
     def test_microphone_in_use_during_the_bounce(self) -> None:
-        live = FakeLive(self.w)
+        live = FakeLive()
 
         def snap_mic() -> dict[str, Any]:
             live._snap_fn = None
@@ -555,7 +508,7 @@ class BounceTest(unittest.TestCase):
         self.assertTrue(any(lv == 3 and "microphone came into use" in m and "by hand" in m for lv, m in self.lines))
 
     def test_alt_never_active_still_switches_back(self) -> None:
-        live = FakeLive(self.w)
+        live = FakeLive()
 
         def set_profile(prof: str) -> bool:
             if prof == "a2dp-sink":
@@ -570,28 +523,28 @@ class BounceTest(unittest.TestCase):
         self.assertIn((6, "fixed: LDAC now at 48000 Hz"), self.lines)
 
     def test_stop_signal_waits_for_the_bounce(self) -> None:
-        live = FakeLive(self.w)
+        live = FakeLive()
 
         def set_profile(prof: str) -> bool:
             if prof == "a2dp-sink-sbc":
-                self.w.Stop.handler(15, None)  # SIGTERM while switching
+                ldac_watch.Stop.handler(15, None)  # SIGTERM while switching
             return live._real_set_profile(prof)
 
         live._set_profile_fn = set_profile
         w = self.watcher(live)
-        self.addCleanup(setattr, self.w.Stop, "asked", False)
+        self.addCleanup(setattr, ldac_watch.Stop, "asked", False)
         with self.assertRaises(SystemExit):
             w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
         self.assertEqual(live.active, "a2dp-sink")
         self.assertTrue(any("stop asked during the profile switch" in m for _, m in self.lines))
         # Outside a bounce, a stop is immediate.
-        self.w.Stop.asked = False
+        ldac_watch.Stop.asked = False
         with self.assertRaises(SystemExit):
-            self.w.Stop.handler(15, None)
+            ldac_watch.Stop.handler(15, None)
 
     def test_no_pw_dump_is_not_a_disconnection(self) -> None:
-        live = FakeLive(self.w, back_rate=96000)
+        live = FakeLive(back_rate=96000)
         w = self.watcher(live)
         w.look()
         n = len(live.calls)
@@ -607,9 +560,8 @@ class ListenTest(unittest.TestCase):
     when it is not the first line of a read), back on end of file."""
 
     def test_events_from_a_pipe(self) -> None:
-        w = load_watch()
-        w.DEBOUNCE = 0
-        watcher = w.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
+        watcher = ldac_watch.Watcher(DEV, 48000)
         looks: list[int] = []
         watcher.known = {600}
         with mock.patch.object(watcher, "look", side_effect=lambda: looks.append(1)):
@@ -629,9 +581,8 @@ class ListenTest(unittest.TestCase):
             self.assertEqual(len(looks), 1)  # nothing relevant: only the start
 
     def test_relevant_burst_triggers_a_look(self) -> None:
-        w = load_watch()
-        w.DEBOUNCE = 0
-        watcher = w.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
+        watcher = ldac_watch.Watcher(DEV, 48000)
         looks: list[int] = []
         r, wfd = os.pipe()
 

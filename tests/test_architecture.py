@@ -73,10 +73,7 @@ IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset({"btrfs", "toolchains"})
 # Shared cst_core modules made for the modules a later stage converts, with
 # the programs that will import them. A stage that wires one in removes it.
-ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {
-    "cst_core/adapters/journal.py": "btrfs-bulk, btrfs-snapshot-core, btrfs-stall-monitord, docker-gc, "
-    "docker-volumes-nocow, bt-ldac-watch (log)",
-}
+ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 

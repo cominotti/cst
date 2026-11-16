@@ -496,13 +496,13 @@ def pw_state(
 
 def node_rate(info: Mapping[str, Any]) -> int | None:
     """The node's negotiated Format rate, else the rate its EnumFormat offers
-    (a suspended node has an empty Format). Same as in bt-ldac-watch."""
+    (a suspended node has an empty Format)."""
     params = info.get("params") or {}
     for key in ("Format", "EnumFormat"):
         for fmt in params.get(key) or []:
-            r = fmt.get("rate") if isinstance(fmt, dict) else None
-            if isinstance(r, int):
-                return r
+            rate = fmt.get("rate") if isinstance(fmt, dict) else None
+            if isinstance(rate, int):
+                return rate
     return None
 
 
@@ -529,20 +529,13 @@ def lw_failure(text: str) -> tuple[str, str, str] | None:
     return last
 
 
-# ---- LDAC sample-rate watcher pure rules & state tracker ------------------------------------
+# ---- the LDAC rate watcher (bt-ldac-watch): what it sees and what it decides ---------------
+# Seconds. SETTLE: how long the wrong rate must last before acting (the
+# headset and WirePlumber are often still busy just after a connection).
 SETTLE: Final[float] = 5.0
 COOLDOWN: Final[float] = 600.0
-DEFAULT_DEBOUNCE: Final[float] = 1.0
-FALLBACK: Final[float] = 120.0
-BACKOFF_MAX: Final[float] = 60.0
-SBC_WAIT: Final[float] = 6.0
-DEFAULT_SBC_HOLD: Final[float] = 2.0
-LDAC_WAIT: Final[float] = 10.0
-RELAPSE: Final[float] = 300.0
-MAX_TRIES: Final[int] = 2
-
-EVENT: Final[re.Pattern[str]] = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
-A2DP_DESC: Final[re.Pattern[str]] = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
+RELAPSE: Final[float] = 300.0  # wrong rate again this soon after a fix: the fix did not hold
+MAX_TRIES: Final[int] = 2  # attempts per connection, whatever happens
 
 
 def serial(props: Mapping[str, Any]) -> int | None:
@@ -557,7 +550,10 @@ def serial(props: Mapping[str, Any]) -> int | None:
 
 
 def snapshot(dev: str, objs: Iterable[Any]) -> dict[str, Any]:
-    """Extract headset card/profile/output/codec/rate/mic snapshot from pw-dump objects."""
+    """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
+    dict: card (object serial, None = not in PipeWire), profile (active card
+    profile), out (output node serial), codec, rate, mic (the headset's input
+    node is running). Missing parts are None."""
     mac = dev.replace("_", ":")
     inputs: list[int | None] = []
     snap: dict[str, Any] = {
@@ -595,7 +591,8 @@ def snapshot(dev: str, objs: Iterable[Any]) -> dict[str, Any]:
 
 
 def decide(snap: Mapping[str, Any] | None, rate: int) -> tuple[str, str]:
-    """Return ('none'|'skip'|'act', reason) for one PipeWire headset snapshot."""
+    """(what, why) for one snapshot: what is "none" (nothing wrong),
+    "skip" (wrong rate, but not now) or "act" (wrong rate, may be fixed)."""
     if snap is None or snap["card"] is None:
         return "none", "headset not in PipeWire"
     if snap["codec"] != "ldac":
@@ -612,7 +609,14 @@ def decide(snap: Mapping[str, Any] | None, rate: int) -> tuple[str, str]:
 
 
 class Tracker:
-    """One-attempt-per-connection state machine with settle, cooldown, and relapse guard."""
+    """The one-attempt-per-connection rule (at most MAX_TRIES, and none
+    after a failure or a fix that did not hold), the settle time and the
+    cooldown. observe() takes a snapshot and the time and says what to do:
+      ("none"|"skip", why)   nothing to do now
+      ("wait", seconds)      wrong rate: look again after SECONDS
+      ("act", why)           do the bounce now (then call attempted/result)
+      ("done", why)          wrong rate, but this connection had its attempt(s)
+      ("cooldown", seconds)  wrong rate, the last attempt was too recent"""
 
     def __init__(
         self,
@@ -630,11 +634,11 @@ class Tracker:
         self.card: int | None = None
         self.out: int | None = None
         self.tried: bool = False
-        self.failed: str | None = None
-        self.tries: int = 0
-        self.fixed: float | None = None
-        self.last: float | None = None
-        self.since: float | None = None
+        self.failed: str | None = None  # why this connection gets no more attempts
+        self.tries: int = 0  # attempts on this connection
+        self.fixed: float | None = None  # time of the last attempt that worked, this connection
+        self.last: float | None = None  # time of the last attempt (any connection)
+        self.since: float | None = None  # wrong rate seen first at
 
     def _new_connection(self) -> None:
         self.tried = False
@@ -648,8 +652,12 @@ class Tracker:
         card: int | None = snap["card"] if snap else None
         out: int | None = snap["out"] if snap else None
         if card != self.card:
+            # Gone, or connected again (a new card object): a new connection.
             self._new_connection()
         elif out != self.out and self.out is not None:
+            # The output node went away or was replaced, not by us (own
+            # bounces are recorded with own_node): one more attempt, unless
+            # the last one failed or the connection had all its attempts.
             self.tried = False
             self.since = None
         self.card, self.out = card, out
@@ -659,6 +667,9 @@ class Tracker:
             return what, why
         assert snap is not None
         if not self.failed and self.fixed is not None and now - self.fixed < self.relapse:
+            # The wrong rate is back soon after a fix, on the same connection:
+            # the headset set the stream up again by itself. Another bounce
+            # would not hold either and would only repeat the dropout.
             self.failed = f"the headset went back to {snap['rate']} Hz by itself {now - self.fixed:.0f} s after the fix"
         if self.failed:
             return "done", f"{self.failed}: given up until it connects again"
@@ -682,7 +693,7 @@ class Tracker:
         self.since = None
 
     def own_node(self, snap: Mapping[str, Any] | None) -> None:
-        """Record the output node created by our own profile bounce."""
+        """After our own bounce: its new output node is not a reason to try again."""
         if snap and snap["card"] == self.card:
             self.out = snap["out"]
 
@@ -694,8 +705,13 @@ class Tracker:
             self.failed = "an attempt failed on this connection"
 
 
+EVENT: Final[re.Pattern[str]] = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
+
+
 def relevant(line: str, known: set[int]) -> bool:
-    """Return True when a `pactl subscribe` line warrants re-checking headset state."""
+    """Whether a `pactl subscribe` line can matter: a card or sink that comes
+    or goes, or a change of one of the headset's objects (KNOWN: their
+    indexes, which are the PipeWire object serials)."""
     m = EVENT.match(line.strip())
     if not m:
         return False
@@ -705,8 +721,15 @@ def relevant(line: str, known: set[int]) -> bool:
     return idx in known
 
 
+A2DP_DESC: Final[re.Pattern[str]] = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
+
+
 def profiles(dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, str | None, str | None]:
-    """Return `(active_profile, ldac_profile, fallback_profile)` from `pactl` card info."""
+    """(card's active profile, LDAC profile, profile to bounce through) from
+    `pactl -f json list cards`. Found by the codec in each profile's
+    description, else by PipeWire's usual names. The bounce profile is SBC,
+    else another available A2DP codec (SBC-XQ, AAC, ...); None when the card
+    or a profile is missing."""
     card = next((c for c in cards if c.get("name") == "bluez_card." + dev), None)
     if card is None:
         return None, None, None

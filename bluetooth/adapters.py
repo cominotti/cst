@@ -2,10 +2,13 @@
 
 from collections.abc import Sequence
 import ctypes
+import json
 import os
+import subprocess
 import sys
+from typing import Any
 
-from bluetooth.domain import LE_SECTION, classify_other_fragments
+from bluetooth.domain import LE_SECTION, classify_other_fragments, snapshot
 
 
 def read(path: str) -> str:
@@ -99,3 +102,47 @@ class LocalBluetoothHostAdapter:
     def read_stdin(self) -> str:
         """Read all text from sys.stdin."""
         return sys.stdin.read()
+
+
+# ---- the LDAC rate watcher: pw-dump and pactl ------------------------------------------------
+def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
+    """(exit status, stdout) of CMD; 127 when it cannot be started, 124 on timeout."""
+    try:
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+
+
+class Live:
+    """The real system: pw-dump and pactl (a LiveAudioPort)."""
+
+    def __init__(self, dev: str) -> None:
+        self.dev = dev
+
+    def snap(self) -> dict[str, Any] | None:
+        """Query `pw-dump` and return this device's parsed snapshot, or None."""
+        rc, out = run(["pw-dump"], timeout=10)
+        if rc != 0:
+            return None
+        try:
+            return snapshot(self.dev, json.loads(out))
+        except ValueError:
+            return None
+
+    def cards(self) -> list[dict[str, Any]] | None:
+        """Query `pactl -f json list cards`, or return None on failure."""
+        rc, out = run(["pactl", "-f", "json", "list", "cards"])
+        if rc != 0:
+            return None
+        try:
+            data = json.loads(out)
+        except ValueError:
+            return None
+        return data if isinstance(data, list) else None
+
+    def set_profile(self, prof: str) -> bool:
+        """Switch `bluez_card.<dev>` to profile `prof` via `pactl`."""
+        return run(["pactl", "set-card-profile", "bluez_card." + self.dev, prof])[0] == 0
