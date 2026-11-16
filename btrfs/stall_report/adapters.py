@@ -1,7 +1,5 @@
 """btrfs-stall-report's machine side: the log folder, `date -d` for --since/--until, reading the daily log files, below and container names."""
 
-from __future__ import annotations
-
 from typing import Any
 import glob
 import gzip

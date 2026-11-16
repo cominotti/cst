@@ -112,6 +112,15 @@ def new_run(start: float, n: int = 10, first: int = BOOT_ZSWPWB) -> list[dict[st
     return [meta(start, 7)] + [sample(start + 1 + 5 * i, 2000 + 10 * i, first + 5 * i) for i in range(n)]
 
 
+class RecordTypesTest(unittest.TestCase):
+    def test_fields_older_daemons_lack_stay_optional_at_run_time(self) -> None:
+        # NotRequired holds at run time only without `from __future__ import
+        # annotations` (a string annotation hides it from TypedDict).
+        self.assertLessEqual({"d_mem", "d_maint", "vm", "mono"}, rp_domain.SampleRecord.__optional_keys__)
+        self.assertLessEqual({"max_d_mem", "max_d_all"}, rp_domain.EpisodeRecord.__optional_keys__)
+        self.assertIn("psi", rp_domain.SampleRecord.__required_keys__)
+
+
 class ZswapAcrossUpgradeTest(unittest.TestCase):
     m: _StallReportModule
 

@@ -1,7 +1,5 @@
 """btrfs-stall-report's analysis of one window: coverage, totals, categories, episodes and events (reads the clock, and below when asked)."""
 
-from __future__ import annotations
-
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 import math

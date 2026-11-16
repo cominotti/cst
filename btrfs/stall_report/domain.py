@@ -1,7 +1,5 @@
 """btrfs-stall-report's rules, no I/O: the record formats, the wait categories and hints, classifying a stack, the open episode, the verdict lines and number formats."""
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from typing import Any
 from typing import NotRequired
