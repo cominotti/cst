@@ -14,6 +14,20 @@ from cst_core.domain.libvirt_xml import keep_prefixes
 
 URI = "qemu:///system"
 GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
+# The columns of a cpu-watch run's samples.csv (watch writes them, summarize reads them by name).
+SAMPLE_FIELDS = (
+    "t",
+    "profile_on",
+    "game_pid",
+    "game_cpu_wait_ms",
+    "game_mem_stall_ms",
+    "game_invol_switches",
+    "sys_cpu_some_ms",
+    "p_mhz",
+    "e_mhz",
+    "vm_cpus_used",
+    "builds_cpus_used",
+)
 
 # CPU features hidden from a host-passthrough guest. QEMU 11 (Fedora 45)
 # started to pass Intel CET (shadow stacks, indirect branch tracking) and

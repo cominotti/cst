@@ -239,6 +239,18 @@ or `off`; see [LE Audio: off by default](#le-audio-off-by-default)).
 turns it on (section 7). It has no command line option. `plan` and `status`
 say when a setting comes from your file rather than the defaults.
 
+**Files that are links.** The files `apply` writes in your home (the
+WirePlumber rule, the LE Audio drop-in, the watcher's program and its unit)
+may be symbolic links, for example from a dotfiles manager. A link is judged
+by the file it points to, as the CST installer does: when that file already
+holds what `apply` would write, the link stays as it is; when it holds an
+older text of CST, `apply` replaces the link with a plain file and never
+writes into the file it pointed to; when it holds something CST did not
+write, or the link points to `/dev/null` or to a folder, it is a conflict, as
+a plain file would be. `revert` removes a link to a CST file, never the file it points to.
+`/etc/bluetooth/main.conf` is different: CST edits it in place, and refuses
+to edit it when it is a link.
+
 **What happens at a restart.** After WirePlumber restarts, the headset's A2DP
 channel closes and often only HFP comes back by itself (the headset then sits
 in `headset-head-unit`). `apply` reconnects only the A2DP Audio Sink (no
@@ -480,8 +492,8 @@ replaces it with a backup of the current rule.
 | `bt-helper` | The Python entry point: only the bootstrap and a `main()` that runs `cli.py` with the local adapter. It never writes a file. |
 | `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7), only the bootstrap and a `main()` that runs `ldac_watch.py`; its docstring is the help. `apply` installs it as a zipapp (the program plus every CST package it imports, see `cst_core/installer.py`) at `~/.local/lib/cst/bt-ldac-watch` for the user service `cst-bt-ldac48.service`. |
 | `bluetooth.conf` | The default settings. |
-| `tests/test_bluetooth.py` | Unit tests (`python3 -I -B tests/run_unit.py`, from the repository root, runs them with all others; see [AGENTS.md, "Commands"](../AGENTS.md#commands)), among them the LE Audio file: its text, off/on/off in a scratch home, `plan`, `revert`, `le-audio on\|off` (a fresh home without `~/.config/cst`, a settings file without a final newline, a symlinked one), the role check, other WirePlumber files, the bearer warning, and reading the watcher's last failure from its log. Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
-| `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a profile change by WirePlumber during it, the profile switch against a fake system, the install and removal steps with `systemctl` as a stub, and `apply` when the Bluetooth restart is declined. |
+| `tests/test_bluetooth.py` | Unit tests (`python3 -I -B tests/run_unit.py`, from the repository root, runs them with all others; see [AGENTS.md, "Commands"](../AGENTS.md#commands)), among them the LE Audio file: its text, off/on/off in a scratch home, `plan`, `revert`, `le-audio on\|off` (a fresh home without `~/.config/cst`, a settings file without a final newline, a symlinked one), the rule and the drop-in as links (same text, older text, not ours, `/dev/null`), the role check, other WirePlumber files, the bearer warning, and reading the watcher's last failure from its log. Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
+| `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a profile change by WirePlumber during it, the profile switch against a fake system, the install and removal steps with `systemctl` as a stub (also with the unit as a link), and `apply` when the Bluetooth restart is declined. |
 
 ## 11. Glossary
 

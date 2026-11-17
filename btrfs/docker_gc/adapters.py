@@ -129,6 +129,35 @@ def df() -> dict[str, str]:
     return out
 
 
+def remove_image(img: Mapping[str, Any], plan_at: float) -> str:
+    """Re-checked right before removal: still unused (fresh container list and
+    recorder state), and each tag still pointing at this very image."""
+    iid = img["id"]
+    if iid in {c.get("Image") for c in inspect_all("container", ("ps", "-aq", "--no-trunc"))}:
+        return "now used by a container"
+    if load_state()["images"].get(iid, 0) > plan_at - 60:
+        return "used meanwhile"
+    for t in img["tags"]:
+        r = docker("image", "inspect", "--format", "{{.Id}}", t, check=False)
+        if r.returncode != 0 or r.stdout.strip() != iid:
+            continue  # re-pulled or retagged meanwhile: that tag is not ours
+        r = docker("image", "rm", t, check=False)
+        if r.returncode != 0:
+            return f"cannot remove {t}: {r.stderr.strip()[:100]}"
+    r = docker("image", "inspect", iid, check=False)
+    if r.returncode == 0:
+        try:
+            left = json.loads(r.stdout)[0].get("RepoTags") or []
+        except ValueError, IndexError:
+            left = ["?"]
+        if left:
+            return "got new tags meanwhile"
+        r = docker("image", "rm", iid, check=False)
+        if r.returncode != 0 and "no such image" not in r.stderr.lower():
+            return r.stderr.strip()[:120]
+    return ""
+
+
 def locked() -> int:
     """The run lock's fd, held until the process ends; exit 0 when another run holds it."""
     fd = take_lock(LOCK, wait=False, mode=0o644, nofollow=False)

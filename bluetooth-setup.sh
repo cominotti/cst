@@ -350,6 +350,20 @@ bt_info() {
 }
 
 # ---- what apply would do ----------------------------------------------------------------
+# file_state STATE-COMMAND PATH ARGS...: bt-helper's state (wp-state,
+# le-state, unit-state) of a file apply writes in the home. A link is judged by
+# what it points to, as the installer does (cst_core.domain.install.
+# link_read_through), and a write replaces the link itself (mktemp + mv). Something
+# there that is not a readable plain file (a folder, also through a link; a
+# file without read permission) is a conflict: nothing of CST's is in it.
+file_state() {
+    if [[ -e "$2" && ! ( -f "$2" && -r "$2" ) ]]; then
+        echo conflict
+    else
+        helper "$@"
+    fi
+}
+
 # compute_plan: sets MC_CHANGED (main.conf, new text in TMP), WP_STATE,
 # LEGACY (0/1), the LE_* of le_plan, BEARER_STATE (none|ok|set|unpaired|
 # unknown) and the restart needs BT_RESTART / WP_RESTART.
@@ -363,11 +377,7 @@ compute_plan() {
         10) MC_CHANGED=1 ;;
         *) die "could not process ${MAIN_CONF} (rc=${rc})" ;;
     esac
-    if [[ -L "${WP_CONF}" ]]; then
-        WP_STATE=conflict
-    else
-        WP_STATE="$(helper wp-state "${WP_CONF}" "${DEVICE_MAC}" "${LDAC_QUALITY}")"
-    fi
+    WP_STATE="$(file_state wp-state "${WP_CONF}" "${DEVICE_MAC}" "${LDAC_QUALITY}")"
     LEGACY=0
     [[ -f "${LEGACY_WP_CONF}" && "${LEGACY_WP_CONF}" != "${WP_CONF}" ]] && LEGACY=1
     le_plan
@@ -400,19 +410,17 @@ compute_plan() {
 # le_plan: the LE Audio drop-in. LE_STATE: with LE_AUDIO=off as wp-state
 # (ok|adopt|change|missing|conflict); with LE_AUDIO=on: absent, remove (ours,
 # apply removes it) or conflict (not ours: left alone). LE_CHANGE=1 when apply
-# writes or removes it (WirePlumber is restarted then; not for "adopt").
+# writes or removes it (WirePlumber is restarted then; not for "adopt"). A link
+# is judged by what it points to (a link to nothing: missing or absent); apply
+# replaces or removes the link itself, never what it points to.
 le_plan() {
     LE_CHANGE=0
     if [[ "${LE_AUDIO}" == off ]]; then
-        if [[ -L "${LE_CONF}" ]]; then
-            LE_STATE=conflict
-        else
-            LE_STATE="$(helper le-state "${LE_CONF}")"
-        fi
+        LE_STATE="$(file_state le-state "${LE_CONF}")"
         [[ "${LE_STATE}" == missing || "${LE_STATE}" == change ]] && LE_CHANGE=1
-    elif [[ ! -e "${LE_CONF}" && ! -L "${LE_CONF}" ]]; then
+    elif [[ ! -e "${LE_CONF}" ]]; then
         LE_STATE=absent
-    elif [[ ! -L "${LE_CONF}" ]] && grep -qF -e "${WP_MARKER}" "${LE_CONF}"; then
+    elif grep -qsF -e "${WP_MARKER}" "${LE_CONF}"; then
         LE_STATE=remove
         LE_CHANGE=1
     else
@@ -428,13 +436,10 @@ le_plan() {
 lw_plan() {
     LW_WANT=0
     [[ -n "${LDAC_RATE}" ]] && LW_WANT=1
-    if [[ -L "${LW_UNIT_FILE}" ]]; then
-        LW_UNIT_ST=conflict
-    else
-        LW_UNIT_ST="$(helper unit-state "${LW_UNIT_FILE}" "${DEVICE_MAC}" "${LDAC_RATE:-48000}")"
-    fi
-    # The installer's own check (exit 0: current), with its rule for a link in
-    # the home: a link is judged by what it points to and replaced on a write.
+    # The unit and the program follow the installer's rule for a link in the
+    # home: judged by what it points to, and replaced (never written through).
+    LW_UNIT_ST="$(file_state unit-state "${LW_UNIT_FILE}" "${DEVICE_MAC}" "${LDAC_RATE:-48000}")"
+    # The program: the installer's own check (exit 0: current).
     if [[ ! -e "${LW_PROG}" ]]; then
         LW_PROG_ST=missing
     elif cst_installer check --home "${HOME}" bluetooth/bt-ldac-watch; then
@@ -471,7 +476,7 @@ wp_note() {
         adopt) echo "up to date; written by apply-le-audio.sh or with older comments: apply only renews the comments, no restart" ;;
         change) echo "differs (apply writes LDAC ${LDAC_QUALITY}; the old file is kept as .bak)" ;;
         missing) echo "missing" ;;
-        conflict) echo "not written by CST or the old script (or a symlink): apply refuses; move it away by hand" ;;
+        conflict) echo "not written by CST or the old script: apply refuses; move it away by hand" ;;
     esac
 }
 wp_word() {
@@ -522,7 +527,7 @@ le_report() {
         off:adopt) item adopt "${label}" "LE Audio off; older comments: apply only renews them, no restart" ;;
         off:change) item update "${label}" "differs (apply rewrites it: LE Audio off; restarts WirePlumber)" ;;
         off:missing) item write "${label}" "LE Audio off (${le_from}): PipeWire will offer only A2DP and HFP" ;;
-        off:conflict) item CONFLICT "${label}" "not written by CST (or a symlink): apply refuses; move it away by hand" ;;
+        off:conflict) item CONFLICT "${label}" "not written by CST: apply refuses; move it away by hand" ;;
         on:absent) item ok "LE Audio" "on (${le_from}): PipeWire offers the bap-* profiles too" ;;
         on:remove) item remove "${label}" "LE Audio on (${le_from}): apply removes it and restarts WirePlumber" ;;
         on:conflict) item CONFLICT "${label}" "not written by CST: left alone (it may keep LE Audio off)" ;;
@@ -605,7 +610,7 @@ lw_report() {
         ok) item ok "$(lw_unit_label)" "up to date (LDAC to ${LDAC_RATE} Hz)" ;;
         change) item update "$(lw_unit_label)" "differs (apply rewrites it)" ;;
         missing) item write "$(lw_unit_label)" "the LDAC rate watcher (LDAC_RATE=${LDAC_RATE})" ;;
-        conflict) item CONFLICT "$(lw_unit_label)" "not written by CST (or a symlink): apply refuses; move it away by hand" ;;
+        conflict) item CONFLICT "$(lw_unit_label)" "not written by CST: apply refuses; move it away by hand" ;;
     esac
     case "${LW_PROG_ST}" in
         ok) item ok "$(lw_prog_label)" "same as ${LW_SRC##*/} in CST" ;;
@@ -987,11 +992,11 @@ apply() {
     preconditions
     compute_plan
     [[ "${WP_STATE}" != conflict ]] ||
-        die "${WP_CONF} was not written by CST or apply-le-audio.sh (or is a symlink): move it away, then run apply again."
+        die "${WP_CONF} was not written by CST or apply-le-audio.sh: move it away, then run apply again."
     [[ "${LE_AUDIO}" != off || "${LE_STATE}" != conflict ]] ||
-        die "${LE_CONF} was not written by CST (or is a symlink): move it away, then run apply again."
+        die "${LE_CONF} was not written by CST: move it away, then run apply again."
     if (( LW_WANT )); then
-        [[ "${LW_UNIT_ST}" != conflict ]] || die "${LW_UNIT_FILE} was not written by CST (or is a symlink): move it away, then run apply again."
+        [[ "${LW_UNIT_ST}" != conflict ]] || die "${LW_UNIT_FILE} was not written by CST: move it away, then run apply again."
         [[ "${LW_PROG_ST}" != conflict ]] || die "${LW_PROG} was not written by CST: move it away, then run apply again."
     fi
 
@@ -1210,16 +1215,16 @@ revert() {
     echo "== WirePlumber: ${WP_CONF}"
     if [[ ! -e "${WP_CONF}" ]]; then
         echo "unchanged: the rule does not exist"
-    elif [[ -L "${WP_CONF}" ]] || ! grep -qF -e "${WP_MARKER}" -e "${OLD_WP_MARKER}" "${WP_CONF}"; then
+    elif ! grep -qsF -e "${WP_MARKER}" -e "${OLD_WP_MARKER}" "${WP_CONF}"; then
         echo "WARNING: ${WP_CONF} was not written by CST or apply-le-audio.sh: left alone" >&2
     else
         wp=1
         if (( CHECK )); then echo "would remove ${WP_CONF}"; else rm -f "${WP_CONF}"; echo "removed:   ${WP_CONF}"; fi
     fi
     echo "== LE Audio: ${LE_CONF}"
-    if [[ ! -e "${LE_CONF}" && ! -L "${LE_CONF}" ]]; then
+    if [[ ! -e "${LE_CONF}" ]]; then
         echo "unchanged: the drop-in does not exist (LE Audio on)"
-    elif [[ -L "${LE_CONF}" ]] || ! grep -qF -e "${WP_MARKER}" "${LE_CONF}"; then
+    elif ! grep -qsF -e "${WP_MARKER}" "${LE_CONF}"; then
         echo "WARNING: ${LE_CONF} was not written by CST: left alone" >&2
     else
         le=1

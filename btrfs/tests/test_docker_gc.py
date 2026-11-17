@@ -14,6 +14,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,9 @@ class ProgramTest(unittest.TestCase):
         self.v.LAST_USED = os.path.join(self.tmp, "last-used.json")
         self.v.LAST_RUN = os.path.join(self.tmp, "last-run.json")
         self.v.LOCK = os.path.join(self.tmp, "docker-gc.lock")
+        # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+        self.restored: list[str] = []
+        self.v.restore_default_signals = lambda: self.restored.append("x")
 
     def run_main(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -127,6 +131,19 @@ class ProgramTest(unittest.TestCase):
         rc, out, _ = self.run_main("status")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "image use not recorded yet (recorder not started)\nlast run: never\n")
+
+    def test_only_status_and_a_dry_run_get_sigpipe_back(self) -> None:
+        # They only read: `docker-gc status | head` ends quietly. The weekly run,
+        # cleanup-now and the recorder keep Python's handling (they remove things).
+        self.v.docker_up = lambda: False
+        self.assertEqual(self.run_main("status")[0], 0)
+        self.assertEqual(self.restored, ["x"])
+        self.assertEqual(self.run_main()[0], 0)  # no command: status
+        self.assertEqual(self.run_main("run", "--dry-run")[0], 0)
+        self.assertEqual(self.restored, ["x", "x", "x"])
+        for argv in (("run",), ("cleanup-now",), ("bogus",)):
+            self.run_main(*argv)
+        self.assertEqual(self.restored, ["x", "x", "x"], "run and cleanup-now must keep Python's handling")
 
     def test_status_shows_the_last_run_in_decimal_units(self) -> None:
         self.v.docker_up = lambda: False
@@ -229,6 +246,31 @@ class EntryTest(unittest.TestCase):
             cwd="/",
         )
         self.assertEqual((r.returncode, r.stderr), (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status\n"))
+
+    def test_status_and_a_dry_run_into_a_closed_pipe_stop_quietly(self) -> None:
+        # `cst btrfs docker-gc status | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). Docker is a stub that is not running.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "docker"), "w") as f:
+                f.write("#!/bin/sh\nexit 1\n")
+            os.chmod(os.path.join(tmp, "docker"), 0o755)
+            env = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": tmp}
+            for args in (("status",), ("run", "--dry-run")):
+                r, w = os.pipe()
+                os.close(r)
+                try:
+                    p = subprocess.run(
+                        [sys.executable, "-I", "-B", TOOL, *args],
+                        check=False,
+                        stdout=w,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        env=env,
+                        timeout=60,
+                    )
+                finally:
+                    os.close(w)
+                self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
 
 
 if __name__ == "__main__":

@@ -939,6 +939,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             self.STUBS
             + f'LE_AUDIO="{le}"\n'
             + shell_functions(
+                "file_state",
                 "le_plan",
                 "le_report",
                 "le_others_report",
@@ -1066,6 +1067,105 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         r = self.sh("revert\n")
         self.assertIn("left alone", r.stderr)
         self.assertTrue(os.path.exists(self.le_conf))
+
+    WP_PLAN = 'LEGACY_WP_CONF="$WP_CONF_DIR/50-jbl-live-beam-4.conf"\n'
+
+    def wp(self, body: str) -> subprocess.CompletedProcess[str]:
+        """BODY after the real compute_plan and write_wp (the stub compute_plan is replaced)."""
+        return self.sh(self.WP_PLAN + shell_functions("compute_plan", "write_wp") + body)
+
+    def test_a_linked_wireplumber_rule_is_judged_by_what_it_points_to(self) -> None:
+        # The installer's rule for a link in the home (cst_core.domain.install.link_read_through):
+        # the same text is up to date and stays a link; ours with other settings is rewritten,
+        # the link replaced and its target untouched. Before, any link was a conflict.
+        wp_conf = os.path.join(os.path.dirname(self.le_conf), "50-bluez-0A_1B_2C_3D_4E_5F.conf")
+        r = self.wp('compute_plan; echo "wp=$WP_STATE"; write_wp\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("wp=missing", r.stdout)
+        kept = os.path.join(self.home, "dotfiles-wp.conf")
+        os.rename(wp_conf, kept)
+        os.symlink(kept, wp_conf)
+        r = self.wp('compute_plan; echo "wp=$WP_STATE"\n')
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("wp=ok", r.stdout)
+        self.assertTrue(os.path.islink(wp_conf))
+        with open(kept, "a") as f:
+            f.write("monitor.bluez.properties = { bluez5.hw-volume = [ ] }\n")
+        r = self.wp('compute_plan; echo "wp=$WP_STATE"; write_wp\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("wp=change", r.stdout)
+        self.assertFalse(os.path.islink(wp_conf))
+        with open(kept) as f:
+            self.assertIn("bluez5.hw-volume", f.read(), "the link was written through")
+        self.assertIn("wp=ok", self.wp('compute_plan; echo "wp=$WP_STATE"\n').stdout)
+        # revert removes a link to our rule, never what it points to.
+        os.unlink(wp_conf)
+        os.symlink(kept, wp_conf)
+        r = self.sh("revert\n")
+        self.assertIn(f"removed:   {wp_conf}", r.stdout)
+        self.assertFalse(os.path.lexists(wp_conf))
+        self.assertTrue(os.path.isfile(kept))
+
+    def test_a_linked_drop_in_is_judged_by_what_it_points_to(self) -> None:
+        self.sh("le_plan; apply_le\n")
+        kept = os.path.join(self.home, "dotfiles-le.conf")
+        os.rename(self.le_conf, kept)
+        os.symlink(kept, self.le_conf)
+        self.assertEqual(self.state(), "st=ok change=0")
+        r = self.sh("le_plan; apply_le\n")
+        self.assertIn("unchanged: LE Audio off", r.stdout)
+        self.assertTrue(os.path.islink(self.le_conf))
+        with open(kept, "a") as f:
+            f.write("monitor.bluez.properties = { bluez5.hw-volume = [ ] }\n")
+        self.assertEqual(self.state(), "st=change change=1")
+        r = self.sh("le_plan; apply_le\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("written:", r.stdout)
+        self.assertFalse(os.path.islink(self.le_conf))
+        self.assertEqual(self.state(), "st=ok change=0")
+        with open(kept) as f:
+            self.assertIn("bluez5.hw-volume", f.read(), "the link was written through")
+        # LE Audio on: a link to our drop-in is removed (the link, not its target), by apply and by revert.
+        os.unlink(self.le_conf)
+        os.symlink(kept, self.le_conf)
+        self.assertEqual(self.state("on"), "st=remove change=1")
+        r = self.sh("le_plan; apply_le\n", le="on")
+        self.assertIn("removed:", r.stdout)
+        self.assertFalse(os.path.lexists(self.le_conf))
+        os.symlink(kept, self.le_conf)
+        r = self.sh("revert\n")
+        self.assertIn(f"removed:   {self.le_conf}", r.stdout)
+        self.assertFalse(os.path.lexists(self.le_conf))
+        self.assertTrue(os.path.isfile(kept))
+        # A link to nothing holds nothing of ours: as if the file were missing.
+        os.symlink(os.path.join(self.home, "gone.conf"), self.le_conf)
+        self.assertEqual(self.state("on"), "st=absent change=0")
+        self.assertEqual(self.state(), "st=missing change=1")
+
+    def test_a_link_to_something_not_ours_stays_a_conflict(self) -> None:
+        # Judged by what it points to: a foreign file, /dev/null (a file switched off) or a folder
+        # (apply's mv would land inside it) is a conflict, and nothing prints a Python error.
+        wp_conf = os.path.join(os.path.dirname(self.le_conf), "50-bluez-0A_1B_2C_3D_4E_5F.conf")
+        os.makedirs(os.path.dirname(self.le_conf))
+        foreign = os.path.join(self.home, "foreign.conf")
+        with open(foreign, "w") as f:
+            f.write("monitor.bluez.properties = { }\n")
+        folder = os.path.join(self.home, "a-folder")
+        os.mkdir(folder)
+        for target in (foreign, os.devnull, folder):
+            os.symlink(target, self.le_conf)
+            os.symlink(target, wp_conf)
+            self.assertEqual(self.state(), "st=conflict change=0", target)
+            self.assertEqual(self.state("on"), "st=conflict change=0", target)
+            r = self.wp('compute_plan; echo "wp=$WP_STATE"\n')
+            self.assertEqual((r.returncode, r.stderr), (0, ""), target)
+            self.assertIn("wp=conflict", r.stdout, target)
+            r = self.sh("revert\n")
+            self.assertEqual(r.stderr.count("left alone"), 2, target)
+            self.assertNotIn("grep:", r.stderr, target)
+            self.assertTrue(os.path.islink(self.le_conf) and os.path.islink(wp_conf), target)
+            os.unlink(self.le_conf)
+            os.unlink(wp_conf)
 
     def test_bearer_warning(self) -> None:
         info_le = "\tPaired: yes\n\tUUID: Telephony Bearer (0000184b-...)\n\tPreferredBearer: le\n"

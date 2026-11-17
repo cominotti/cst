@@ -31,9 +31,11 @@ from btrfs.docker_gc.adapters import (
     locked,
     log,
     recorder_alive,
+    remove_image,
     save_state,
 )
 from btrfs.docker_gc.domain import DAY, HEARTBEAT_SECONDS, MIN_UPTIME, day, ephemeral, ts
+from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.values import format_bytes_decimal
 
 
@@ -234,35 +236,6 @@ def show(p: Mapping[str, Any], full: bool = False) -> None:
         print(f"held back: {p['held']} image(s) ({why})")
 
 
-def remove_image(img: Mapping[str, Any], plan_at: float) -> str:
-    """Re-checked right before removal: still unused (fresh container list and
-    recorder state), and each tag still pointing at this very image."""
-    iid = img["id"]
-    if iid in {c.get("Image") for c in inspect_all("container", ("ps", "-aq", "--no-trunc"))}:
-        return "now used by a container"
-    if load_state()["images"].get(iid, 0) > plan_at - 60:
-        return "used meanwhile"
-    for t in img["tags"]:
-        r = docker("image", "inspect", "--format", "{{.Id}}", t, check=False)
-        if r.returncode != 0 or r.stdout.strip() != iid:
-            continue  # re-pulled or retagged meanwhile: that tag is not ours
-        r = docker("image", "rm", t, check=False)
-        if r.returncode != 0:
-            return f"cannot remove {t}: {r.stderr.strip()[:100]}"
-    r = docker("image", "inspect", iid, check=False)
-    if r.returncode == 0:
-        try:
-            left = json.loads(r.stdout)[0].get("RepoTags") or []
-        except ValueError, IndexError:
-            left = ["?"]
-        if left:
-            return "got new tags meanwhile"
-        r = docker("image", "rm", iid, check=False)
-        if r.returncode != 0 and "no such image" not in r.stderr.lower():
-            return r.stderr.strip()[:120]
-    return ""
-
-
 def apply(p: Mapping[str, Any]) -> int:
     failed = 0
     for c in p["containers"]:
@@ -385,6 +358,8 @@ def status() -> int:
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status" or (cmd == "run" and "--dry-run" in sys.argv[2:]):
+        restore_default_signals()  # status and a dry run only read: `| head` ends them quietly
     try:
         if cmd == "record":
             record()

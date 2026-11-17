@@ -1391,7 +1391,7 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | `snapshots disable --purge` | The same, then deletes **all snapshots owned by btrfs-snapshot-core** and removes the top-level mount units. |
 | `snapshots nas setup ...` | See [section 7](#7-optional-backup-on-the-nas-restic). |
 | `snapshots nas status / run / disable / enable` | See [section 7](#other-nas-commands). |
-| `snapshots chrome-cache [status\|apply\|off]` | Only Chrome's cache flags ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)): show their state and the old cache left on the disk, add them (also done by `setup`), or remove them for good (`off`). Runs as your user. |
+| `snapshots chrome-cache [status\|apply\|off]` | Only Chrome's cache flags ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)): show their state and the old cache left on the disk, add them (also done by `setup`), or remove them for good (`off`). Runs as your user. `status` only reads: it ends quietly when its reader goes away (`\| head`). |
 | `bulk plan` | Dry run of the `~/Bulk` step: each item and what would happen, with sizes ([section 3](#order-with-snapshots-setup)); a size `du` could not read whole (a folder it may not enter) shows as `at least ...`. Changes nothing. |
 | `bulk apply` | Fills `~/Bulk` (also done by `snapshots setup`). Safe to re-run; busy items wait for the next boot. |
 | `bulk status` | The state of each `~/Bulk` item, the `+C` state of the emulator folders (`~/Bulk/emulators` and the AVD folder), items waiting for the boot, old game data still in /home. |

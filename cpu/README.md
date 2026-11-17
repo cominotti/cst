@@ -1052,8 +1052,10 @@ What is recorded per second:
 Note: the "game's box" is the Steam app scope, so the Steam client counts
 too.
 
-`report` prints one line per run (default: the last 10). An **illustrative**
-line (one line on screen, wrapped here):
+`report` prints one line per run (default: the last 10). It only reads, like
+the help (`cpu-watch` with no command): both end quietly when their reader
+goes away (`cst cpu report | head -3`). An **illustrative** line (one line on
+screen, wrapped here):
 
 ```
 20261013T201500-profile-build              299s  game wait   1.2% (max   6.0%)  mem stall       0 ms
@@ -1447,7 +1449,7 @@ this is harmless.
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
-| `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (frame lows, the `quiet` tests and limits) |
+| `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |
 | `adapters.py` | What reads the host: `cpu-setup.conf`, `virsh`, sysfs, procfs, cgroups, the recorded runs |
 | `cli.py` | The command lines of `vm-pin` and `cpu-watch` (the two entry points above only call it) |
 | `gamemode.ini` | `~/.config/gamemode.ini` |
