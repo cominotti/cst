@@ -289,6 +289,8 @@ unset -f exec
 PATH="{self.tmp}/bin:/usr/bin:/bin"
 R="{self.root}"
 {REPOINT if repoint else ""}
+# It reads the host's /boot and /run/ostree: a test that reaches it stubs it.
+next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
 {code}
 """
         return subprocess.run(
@@ -378,6 +380,12 @@ write_if_changed() {{
         )
         for line in out.splitlines():
             self.assertTrue(line.startswith(self.root + "/"), line)
+
+    def test_next_overlay_must_be_stubbed(self) -> None:
+        """next_overlay reads the host's /boot and /run/ostree: unstubbed, it stops the test."""
+        r = self.run_bash("next_overlay")
+        self.assertEqual(r.returncode, 97, r.stdout + r.stderr)
+        self.assertIn("next_overlay is not stubbed", r.stderr)
 
     def test_the_fakes_are_the_commands_the_functions_find(self) -> None:
         out = self.ok("for c in " + " ".join(FAKES) + ' ; do type -P "$c"; done')

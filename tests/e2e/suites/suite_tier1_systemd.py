@@ -1176,9 +1176,9 @@ EOF
         self.assertEqual(modes, [f"{'755' if f.endswith('last-resort') else '644'} root {f}" for f in (*files, record)])
         self.assertEqual(step("systemctl is-enabled btrfs-degraded-boot-record.service").strip(), "enabled")
 
+        # The install already ran the real `udevadm verify` on the rule it
+        # wrote (it stops when verify fails), so this needs no skip.
         with self.subTest("udevadm verify on the installed rule"):
-            if exec_bash(c, "udevadm verify --help", check=False).returncode != 0:
-                self.skipTest("udevadm verify is not in this image")
             out = exec_bash(c, f"udevadm verify --resolve-names=never --no-style {files[0]}").stdout
             self.assertIn("Success: 1", out)
         # Without --recursive-errors=no, verify exits 0 on an unknown key (only a

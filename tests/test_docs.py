@@ -1,8 +1,10 @@
 """Static gate: the Markdown documents and the agent files hold together.
 
 - Every relative link in a Markdown file of the repository, [text](path),
-  [text](path#anchor) or [text](#anchor), names a repository file or an
-  existing folder, and every anchor names a heading of the target file.
+  [text](path#anchor) or [text](#anchor), and every reference definition,
+  [label]: path, names a repository file or an existing folder, and every
+  anchor names a heading of the target file. A target with a space or a
+  parenthesis in it is not read.
   Anchors follow GitHub's rule for heading ids (see slug()). Links with a
   scheme (https:, mailto:, ...) are not checked; nor is text inside fenced
   code blocks or `code spans`.
@@ -50,6 +52,9 @@ CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)((?:(?!\n[ \t]*\n).)+?)(?<!`)\1(?!`)", r
 # [text](target) or ![alt](target), with an optional "title"; the text may
 # hold one level of brackets and span lines.
 LINK = re.compile(r"!?\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(\s*<?([^\s()<>]*)>?(?:\s+\"[^\"]*\")?\s*\)")
+# A reference definition on a line of its own, [label]: target (a footnote,
+# [^1]: text, is not a link).
+REF_DEF = re.compile(r"^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*<?([^\s<>]+)>?", re.M)
 HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 INLINE_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 HTML_TAG = re.compile(r"<[^>]+>")
@@ -111,7 +116,8 @@ def anchors(text: str) -> set[str]:
 def link_targets(text: str) -> list[tuple[int, str]]:
     """(line number, target) of every link outside code, in order."""
     plain = blank_code_spans(blank_fences(text))
-    return [(plain.count("\n", 0, m.start()) + 1, m.group(1)) for m in LINK.finditer(plain)]
+    found = sorted((m.start(), m.group(1)) for pattern in (LINK, REF_DEF) for m in pattern.finditer(plain))
+    return [(plain.count("\n", 0, start) + 1, target) for start, target in found]
 
 
 def read(repo: str, rel: str) -> str:
@@ -265,7 +271,8 @@ class DetectorTest(unittest.TestCase):
         tree = {
             "README.md": "# Top\n## Part two\n[ok](docs/a.md#a-heading) [ok](#part-two) [dir](docs/)\n"
             "[web](https://example.org/x.md) [mail](mailto:a@b)\n"
-            "[gone](docs/b.md)\n[bad anchor](#nope)\n[out](../x.md)\n",
+            "[gone](docs/b.md)\n[bad anchor](#nope)\n[out](../x.md)\n"
+            "[ok]: docs/a.md#a-heading\n  [ref]: <docs/c.md>\n[^1]: a footnote, not a link\n",
             "docs/a.md": "# A heading\n[up](../README.md#top) [bad](../README.md#part-three)\n",
         }
         with tempfile.TemporaryDirectory() as root:
@@ -276,6 +283,7 @@ class DetectorTest(unittest.TestCase):
                     "README.md:5: docs/b.md: no such file or folder in the repository",
                     "README.md:6: #nope: no heading with the id #nope in README.md",
                     "README.md:7: ../x.md: outside the repository",
+                    "README.md:9: docs/c.md: no such file or folder in the repository",
                     "docs/a.md:2: ../README.md#part-three: no heading with the id #part-three in README.md",
                 ],
             )
