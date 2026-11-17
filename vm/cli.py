@@ -1014,7 +1014,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
     files = timer_files(entry_file)
-    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p)) for p, (t, _) in files.items()}
+    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p), owner="root") for p, (t, _) in files.items()}
     if sub == "status":
         on = unit in wants_links()
         print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")

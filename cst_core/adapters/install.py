@@ -5,6 +5,8 @@ import stat
 
 from cst_core.adapters import write_bytes_atomic
 from cst_core.domain.files import checked_path
+from cst_core.domain.install import OnDisk
+from cst_core.ports import WriteFailed
 
 
 class LocalInstallTarget:
@@ -15,22 +17,31 @@ class LocalInstallTarget:
     as that user (cst_install_as drops privileges first), never by root.
     """
 
-    def current(self, path: str) -> tuple[bytes, int] | None:
-        """(content, permission bits) of the regular file at path, read through a link; None when absent or not a file.
+    def current(self, path: str) -> OnDisk | None:
+        """What is at path: the regular file read through a link (data None when there is none to read).
 
-        A link to the wanted content is current, as the old install_file's
-        `[[ -f ]] && cmp -s` saw it: it stays a link. write() replaces it.
+        None when nothing is there at all. Whether a link counts as current
+        is domain.install.link_read_through's rule; write() replaces it.
         """
         path = checked_path(path)
         try:
+            is_link = os.path.islink(path)
             st = os.stat(path)
-            if not stat.S_ISREG(st.st_mode):
-                return None
-            with open(path, "rb") as fh:
-                return fh.read(), stat.S_IMODE(st.st_mode)
         except OSError:
-            return None
+            return OnDisk(None, 0, -1, -1, True) if os.path.lexists(path) else None
+        data: bytes | None = None
+        if stat.S_ISREG(st.st_mode):
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                data = None
+        return OnDisk(data, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, is_link)
 
     def write(self, path: str, data: bytes, mode: int) -> None:
-        """Atomic replace (a link at path is replaced, not followed)."""
-        write_bytes_atomic(checked_path(path), data, mode=mode)
+        """Atomic replace (a link at path is replaced, not followed); WriteFailed naming path on an error."""
+        path = checked_path(path)
+        try:
+            write_bytes_atomic(path, data, mode=mode)
+        except OSError as e:
+            raise WriteFailed(path, e.strerror or str(e)) from None

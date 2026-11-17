@@ -9,7 +9,7 @@ owned by root and relabelled. User files (dest `~/...`) are installed by a
 process running as that user, with --home naming the home folder.
 
 Usage:
-  installer.py install [OPTIONS] SRC...   unchanged:/written: per file
+  installer.py install [OPTIONS] SRC...   unchanged:/written: per file, as it goes
   installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file; changes nothing
   installer.py check [OPTIONS] SRC...     exit 0 when every file is current, else 1; prints nothing
   installer.py text DEST MODE [--root DIR]
@@ -21,6 +21,10 @@ OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
          --set KEY=VALUE (templates), --module M / --kind K / --owner root|user
          (select entries instead of naming them)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
+A @KEY@ of a template without a --set value, or a --set KEY no template of the
+call uses, is a usage error (exit 2) and nothing is written. A file that
+cannot be written ends the run with "cst installer: cannot write DEST: REASON"
+(exit 1), after the lines of the files written before it.
 """
 
 import os.path as _cst_path
@@ -45,6 +49,7 @@ from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, Owner, expand_dest, select_entries
 from cst_core.domain.values import DomainValidationError, OctalMode
+from cst_core.ports import WriteFailed
 
 NAME = "cst installer"
 
@@ -117,7 +122,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if len(a.args) != 2:
                 raise _UsageError("text DEST MODE")
             mode = OctalMode.parse(a.args[1]).bits
-            print(service.write_if_changed(staged(a.root, a.args[0]), sys.stdin.buffer.read(), mode))
+            as_root = os.geteuid() == 0
+            # Generated text as root goes to a root destination; as a user (cst_install_text DEST MODE USER), to theirs.
+            owner: Owner = "root" if as_root else "user"
+            dest = staged(a.root, a.args[0])
+            print(service.write_if_changed(dest, sys.stdin.buffer.read(), mode, owner, as_root=as_root))
             return 0
         if a.command == "dests":
             for e in _entries(a.args, a.module, a.kind, a.owner):
@@ -142,8 +151,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (_UsageError, DomainValidationError, ValueError) as e:
         print(f"{NAME}: {e}", file=sys.stderr)
         return 2
-    except InstallRefused as e:
+    except (InstallRefused, WriteFailed) as e:
         print(f"{NAME}: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:  # a source file of the checkout (writes raise WriteFailed)
+        print(f"{NAME}: cannot read {e.filename or 'a source file'}: {e.strerror or e}", file=sys.stderr)
         return 1
 
 

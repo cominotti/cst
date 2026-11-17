@@ -965,9 +965,13 @@ def manager_path() -> str | None:
 
 
 def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> OwnedState:
-    """ok | change (ours: it holds MARKER, and differs) | conflict (not ours, or a symlink) | missing."""
+    """ok | change (ours: it holds MARKER, and differs) | conflict (not ours) | missing.
+
+    Every file here is in the user's home: a symbolic link is judged by what
+    it points to (cst_core.domain.install.link_read_through), and a write
+    replaces the link itself."""
     want = wanted.encode() if isinstance(wanted, str) else wanted
-    return owned_file_state_at(path, want, lambda data: marker.encode() in data)
+    return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
 
 
 def write_atomic(path: str, text: str | bytes, mode: int) -> None:

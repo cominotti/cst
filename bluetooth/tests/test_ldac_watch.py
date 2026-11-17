@@ -768,6 +768,30 @@ systemctl() {
         self.assertNotIn("item note", r.stdout)
         self.assertNotIn("item warn", r.stdout)
 
+    def test_the_program_state_comes_from_the_installer_check_and_its_link_rule(self) -> None:
+        # status/plan ask the installer (`installer check`), not `cmp <(installer payload)`: no Python
+        # message on stderr for an older copy, and a link in the home is judged by what it points to
+        # (cst_core.domain.install.link_read_through) instead of being a conflict.
+        r, _, home = self.run_lw("lw_plan; lw_install\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prog = os.path.join(home, ".local/lib/cst/bt-ldac-watch")
+        kept = os.path.join(home, "dotfiles-bt-ldac-watch")
+        os.rename(prog, kept)
+        os.symlink(kept, prog)
+        r, _, _ = self.run_lw('lw_plan; echo "st=$LW_PROG_ST"\n', home=home, extra_env={"CMD": "plan"})
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("st=ok", r.stdout)
+        with open(kept, "a") as f:
+            f.write("# old\n")
+        r, _, _ = self.run_lw('lw_plan; echo "st=$LW_PROG_ST"\n', home=home, extra_env={"CMD": "plan"})
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("st=change", r.stdout)
+        r, _, _ = self.run_lw("lw_plan; lw_install\n", home=home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.islink(prog))
+        with open(kept, "rb") as f:
+            self.assertTrue(f.read().endswith(b"# old\n"), "the link was written through")
+
     def test_foreign_unit_is_left_alone(self) -> None:
         home = tempfile.mkdtemp(prefix="bt-test-")
         os.makedirs(os.path.join(home, ".config/systemd/user"))

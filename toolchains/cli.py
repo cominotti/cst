@@ -1358,7 +1358,7 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
     st = unit_states(home)
     conflicts = [k for k, v in st.items() if v == "conflict"]
     if conflicts:
-        raise Refused("not written by CST (or a symlink), left alone: " + ", ".join(label(k) for k in conflicts))
+        raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
     changed = False
     for rel, text in copies().items():
         if st[rel] != "ok":
@@ -1645,7 +1645,7 @@ def wrapper_text(values: WrapperValues) -> str | None:
 
 
 def wrapper_state(home: str, text: str) -> str:
-    """ok | change | missing | conflict (not CST's, or a symlink)."""
+    """ok | change | missing | conflict (not CST's; a symlink counts by what it points to)."""
     path = wrapper_path(home)
     st = file_state(path, text)
     if st == "ok":
@@ -1764,7 +1764,7 @@ def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues)
     if st == "ok":
         return [("ok", shown, f"sccache wrapper up to date ({values})")]
     if st == "conflict":
-        return [("keep", shown, "not CST's file (or a symlink): left alone, so CST writes no rustc-wrapper line")]
+        return [("keep", shown, "not CST's file: left alone, so CST writes no rustc-wrapper line")]
     return [
         (
             "write",
@@ -1856,7 +1856,7 @@ def install_wrapper(home: str, values: WrapperValues) -> int:
         return 1
     st = wrapper_state(home, text)
     if st == "conflict":
-        say(f"{NAME}: sccache: {path} is not CST's file (or a symlink): left alone", 3, err=True)
+        say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
         return 1
     if st == "ok":
         say(f"kept:      {path} (sccache wrapper)")

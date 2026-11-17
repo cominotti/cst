@@ -5,6 +5,7 @@ import posixpath
 import re
 from typing import Literal
 
+from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import file_lines
 
 type ManagedState = Literal["ok", "adopt", "duplicate", "change", "missing", "conflict", "unreadable"]
@@ -88,15 +89,21 @@ class MarkedLineSpec:
         return "\n".join(out_lines) + "\n"
 
 
-def owned_file_state(content: bytes | None, *, is_link: bool, wanted: bytes | None, ours: bool) -> OwnedState:
+def owned_file_state(
+    content: bytes | None, *, is_link: bool, wanted: bytes | None, ours: bool, owner: Owner
+) -> OwnedState:
     """State of a file CST writes whole (a unit, an installed program) against what it wants there.
 
-    content None = no file. ok: exactly wanted; change: CST's (ours: it carries
-    CST's marker) but different; conflict: someone else's file, or a symbolic
-    link (never written through); missing.
+    content None = no file (for a link read through: no target). ok: exactly
+    wanted; change: CST's (ours: it carries CST's marker) but different;
+    conflict: someone else's file; missing. A symbolic link follows
+    install.link_read_through, the installer's rule: at a root destination
+    it is "change" (a write replaces the link, never follows it); at a user
+    destination content and ours are its target's, and a write replaces the
+    link itself.
     """
-    if is_link:
-        return "conflict"
+    if is_link and not link_read_through(owner):
+        return "change"
     if content is None:
         return "missing"
     if wanted is not None and content == wanted:

@@ -67,12 +67,21 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(format_bytes_gib_mib(1500 * MIB, gib_threshold=10 * GIB, comma=True), "1,500 MiB")
 
     def test_owned_file_state(self) -> None:
-        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True), "ok")
-        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True), "change")
-        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=False), "conflict")
-        self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False), "missing")
-        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True), "conflict")
-        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True), "change")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True, owner=owner), "ok")
+                self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True, owner=owner), "change")
+                self.assertEqual(
+                    owned_file_state(b"b", is_link=False, wanted=b"a", ours=False, owner=owner), "conflict"
+                )
+                self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False, owner=owner), "missing")
+                self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True, owner=owner), "change")
+        # The installer's link rule: replaced at a root destination, judged by its target at a user one.
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="root"), "change")
+        self.assertEqual(owned_file_state(None, is_link=True, wanted=b"a", ours=False, owner="root"), "change")
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="user"), "ok")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=True, owner="user"), "change")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=False, owner="user"), "conflict")
 
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
@@ -147,14 +156,26 @@ class AdaptersTest(unittest.TestCase):
         def mark(data: bytes) -> bool:
             return b"MARK" in data
 
-        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark), "ok")
-        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark), "change")
-        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nMARK v2\n", mark), "conflict")
-        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nv1\n", mark), "ok")
-        self.assertEqual(owned_file_state_at(self.path("link"), b"#!/x\nMARK v1\n", mark), "conflict")
-        self.assertEqual(owned_file_state_at(self.path("missing"), b"x", mark), "missing")
-        self.assertEqual(owned_file_state_at(self.path("dir"), b"x", mark), "conflict")
-        self.assertEqual(owned_file_state_at(ours, None, mark), "change")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark, owner=owner), "ok")
+                self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark, owner=owner), "change")
+                self.assertEqual(owned_file_state_at(theirs, b"#!/x\nMARK v2\n", mark, owner=owner), "conflict")
+                self.assertEqual(owned_file_state_at(theirs, b"#!/x\nv1\n", mark, owner=owner), "ok")
+                self.assertEqual(owned_file_state_at(self.path("missing"), b"x", mark, owner=owner), "missing")
+                self.assertEqual(owned_file_state_at(self.path("dir"), b"x", mark, owner=owner), "conflict")
+                self.assertEqual(owned_file_state_at(ours, None, mark, owner=owner), "change")
+        link = self.path("link")
+        os.symlink(theirs, self.path("link-theirs"))
+        os.symlink(self.path("missing"), self.path("dangling"))
+        # One link rule with the installer (pr-a preexisting #11): at a root destination a link is
+        # always replaced ("change", whatever it points to); at a user destination its target counts.
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="root"), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="root"), "change")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="user"), "ok")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner="user"), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="user"), "conflict")
+        self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner="user"), "missing")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()

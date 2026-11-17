@@ -1032,6 +1032,21 @@ class TimerTest(Nas):
         self.assertEqual(r.returncode, 1)
         self.assertIn(f"not CST's files, left as they are: {copy}", r.stderr)
 
+    def test_a_link_at_a_root_destination_is_replaced_not_followed(self) -> None:
+        # The installer's one link rule (cst_core.domain.install.link_read_through): at a root
+        # destination a link is replaced, whatever it points to; it was "not CST's file" before.
+        elsewhere = os.path.join(self.tmp, "elsewhere.timer")
+        with open(elsewhere, "w") as f:
+            f.write("[Timer]\n")
+        timer = os.path.join(self.units, "cst-vm-backup@.timer")
+        os.symlink(elsewhere, timer)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  updated: {timer}", r.stdout)
+        self.assertFalse(os.path.islink(timer))
+        self.assertIn("Persistent=true\n", read(timer))
+        self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")

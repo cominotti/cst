@@ -433,11 +433,11 @@ lw_plan() {
     else
         LW_UNIT_ST="$(helper unit-state "${LW_UNIT_FILE}" "${DEVICE_MAC}" "${LDAC_RATE:-48000}")"
     fi
-    if [[ -L "${LW_PROG}" ]]; then
-        LW_PROG_ST=conflict
-    elif [[ ! -e "${LW_PROG}" ]]; then
+    # The installer's own check (exit 0: current), with its rule for a link in
+    # the home: a link is judged by what it points to and replaced on a write.
+    if [[ ! -e "${LW_PROG}" ]]; then
         LW_PROG_ST=missing
-    elif cmp -s <(cst_installer payload bluetooth/bt-ldac-watch) "${LW_PROG}"; then
+    elif cst_installer check --home "${HOME}" bluetooth/bt-ldac-watch; then
         LW_PROG_ST=ok
     elif grep -qF -e "${WP_MARKER}" "${LW_PROG}"; then
         LW_PROG_ST=change
@@ -611,7 +611,7 @@ lw_report() {
         ok) item ok "$(lw_prog_label)" "same as ${LW_SRC##*/} in CST" ;;
         change) item update "$(lw_prog_label)" "older copy (apply installs the one in CST)" ;;
         missing) item write "$(lw_prog_label)" "copy of bluetooth/bt-ldac-watch" ;;
-        conflict) item CONFLICT "$(lw_prog_label)" "not written by CST (or a symlink): apply refuses; move it away by hand" ;;
+        conflict) item CONFLICT "$(lw_prog_label)" "not written by CST: apply refuses; move it away by hand" ;;
     esac
     if [[ "${LW_ENABLED}" == enabled && "${LW_ACTIVE}" == active ]]; then
         if [[ "${LW_UNIT_ST}" == ok && "${LW_PROG_ST}" == ok ]]; then

@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from cst_core.domain.install import OnDisk
+
 
 @dataclass(frozen=True, slots=True)
 class CommandResult:
@@ -30,6 +32,15 @@ class CommandFailed(RuntimeError):
         self.stderr: str = stderr
         detail = stderr.strip() or stdout.strip() or f"exit status {returncode}"
         super().__init__(f"{' '.join(self.argv)}: {detail}")
+
+
+class WriteFailed(Exception):
+    """A destination could not be written: "cannot write PATH: REASON"."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path: str = path
+        self.reason: str = reason
+        super().__init__(f"cannot write {path}: {reason}")
 
 
 class CommandRunnerPort(Protocol):
@@ -171,10 +182,13 @@ class SystemdPort(Protocol):
 class InstallTargetPort(Protocol):
     """The files `install` reads and writes (the real root, or a staging folder in tests)."""
 
-    def current(self, path: str) -> tuple[bytes, int] | None:
-        """(content, permission bits) of the regular file at path (read through a link); None when absent or not a file."""
+    def current(self, path: str) -> OnDisk | None:
+        """What is at path (a regular file read through a link); None when nothing is there."""
         ...
 
     def write(self, path: str, data: bytes, mode: int) -> None:
-        """Replace path atomically with data and mode (parent folders created 0755)."""
+        """Replace path atomically with data and mode (parent folders created 0755).
+
+        A failure raises WriteFailed (cst_core.ports), naming path.
+        """
         ...
