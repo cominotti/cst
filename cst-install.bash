@@ -11,9 +11,21 @@
 
 CST_INSTALLER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cst_core/installer.py"
 
+# _cst_installer_as USER COMMAND ARGS...: the installer as USER (through
+# runuser), or as the current user when USER is "". CST_LC_CTYPE hands the
+# caller's LC_CTYPE over ("" when unset, "=VALUE" when set): Python changes it
+# at start under a C locale, and installer.py puts it back for its commands.
+_cst_installer_as() {
+    local user="$1"
+    shift
+    local -a as=()
+    [[ -z "${user}" ]] || as=(runuser -u "${user}" --)
+    CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" "${as[@]}" /usr/bin/python3 -I -B "${CST_INSTALLER}" "$@"
+}
+
 # cst_installer COMMAND ARGS...: the installer as the current user (root in a setup script).
 cst_installer() {
-    /usr/bin/python3 -I -B "${CST_INSTALLER}" "$@"
+    _cst_installer_as "" "$@"
 }
 
 # cst_install [--set KEY=VALUE]... SRC...: root-owned manifest files.
@@ -29,7 +41,7 @@ cst_install_as() {
     shift
     home="$(getent passwd "${user}" | cut -d: -f6)"
     [[ -n "${home}" ]] || { echo "cst_install_as: no home folder for user '${user}'" >&2; return 1; }
-    runuser -u "${user}" -- /usr/bin/python3 -I -B "${CST_INSTALLER}" install --home "${home}" "$@"
+    _cst_installer_as "${user}" install --home "${home}" "$@"
 }
 
 # cst_install_text DEST MODE [OWNER] < content: generated text (not a file of
@@ -39,7 +51,7 @@ cst_install_text() {
     if [[ "${owner}" == root ]]; then
         cst_installer text "${dest}" "${mode}"
     else
-        runuser -u "${owner}" -- /usr/bin/python3 -I -B "${CST_INSTALLER}" text "${dest}" "${mode}"
+        _cst_installer_as "${owner}" text "${dest}" "${mode}"
     fi
 }
 

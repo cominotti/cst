@@ -18,8 +18,8 @@ import sys
 from typing import TextIO
 
 
-from cst_core.adapters.dispatch import LocalCstDispatchAdapter
-from cst_core.adapters.runtime import checkout_root, restore_default_signals, restore_lc_ctype
+from cst_core.adapters.dispatch import LocalCstDispatchAdapter, ignore_quit
+from cst_core.adapters.runtime import checkout_root, undo_python_start
 from cst_core.domain.dispatch import MODULE_BY_NAME, MODULES, format_cst_usage
 from cst_core.ports import CstDispatchPort
 
@@ -178,12 +178,12 @@ class CstDispatcher:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for `cst`."""
-    restore_default_signals()
+    undo_python_start()
+    ignore_quit()
     # What the cst wrapper hands over; popped, so the modules do not inherit it.
     repo_dir = os.environ.pop("CST_DIR", "") or checkout_root(__file__) or _cst_root
     self_path = os.environ.pop("CST_SELF", "") or os.path.join(repo_dir, "cst")
     arg0 = os.environ.pop("CST_ARG0", "") or (sys.argv[0] if sys.argv else "cst")
-    restore_lc_ctype(os.environ.pop("CST_LC_CTYPE", None))
     dispatcher = CstDispatcher(port=LocalCstDispatchAdapter(), repo_dir=repo_dir, self_path=self_path, arg0=arg0)
     return dispatcher.dispatch(sys.argv[1:] if argv is None else argv)
 

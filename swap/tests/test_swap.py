@@ -25,7 +25,7 @@ from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
-from swap.cli import execute_cli, format_usage
+from swap.cli import execute_cli, format_usage, main as swap_main
 import swap.domain as D
 from swap.domain import (
     DEBUG_HELP,
@@ -1349,6 +1349,58 @@ class SwapArgumentsTest(unittest.TestCase):
                 err = io.StringIO()
                 self.assertEqual(execute_cli([cmd, "--nope", "--root"], env={}, out=io.StringIO(), err=err), 2)
                 self.assertEqual(err.getvalue(), f"{cmd}: unknown argument '--nope' (only --root)\n")
+
+
+class SwapLocaleHandoverTest(unittest.TestCase):
+    """The caller's LC_CTYPE reaches the commands `cst swap` runs (Python sets C.UTF-8 under a C locale, PEP 538)."""
+
+    def test_swap_setup_hands_lc_ctype_over(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-swap-lc-")
+        self.addCleanup(shutil.rmtree, tmp)
+        shutil.copy2(SETUP, tmp)
+        os.makedirs(os.path.join(tmp, "swap"))
+        with open(os.path.join(tmp, "swap", "cli.py"), "w", encoding="utf-8") as fh:
+            fh.write("import os\nprint(repr(os.environ.get('CST_LC_CTYPE')))\n")
+        for caller, handed in (({}, "''"), ({"LC_CTYPE": "C"}, "'=C'"), ({"LC_CTYPE": ""}, "'='")):
+            with self.subTest(caller=caller):
+                proc = subprocess.run(
+                    ["bash", os.path.join(tmp, "swap-setup.sh"), "help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    env={"PATH": "/usr/bin:/bin", **caller},
+                    timeout=60,
+                )
+                self.assertEqual(proc.stdout, handed + "\n", proc.stderr)
+
+    def test_main_puts_the_caller_s_lc_ctype_back(self) -> None:
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGPIPE, signal.SIGXFSZ)}
+        for sig, handler in saved.items():
+            self.addCleanup(signal.signal, sig, handler)
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"CST_LC_CTYPE": "=C", "LC_CTYPE": "C.UTF-8"}, clear=True),
+            mock.patch.object(sys, "argv", ["swap/cli.py", "help"]),
+            mock.patch.object(sys, "stdout", out),
+        ):
+            self.assertEqual(swap_main(), 0)
+            self.assertEqual(dict(os.environ), {"LC_CTYPE": "C"}, "what the commands it runs inherit")
+        self.assertIn("Usage: cst swap", out.getvalue())
+
+    def test_the_sudo_rerun_hands_lc_ctype_over(self) -> None:
+        called: list[list[str]] = []
+
+        def _fake_elevate(argv: list[str]) -> NoReturn:
+            called.append(argv)
+            raise SystemExit(99)
+
+        ctx = _FakeContext(container=False, root=False, etc_dir="/nonexistent", run_dir="/nonexistent")
+        for env, setting in (({}, "CST_LC_CTYPE="), ({"LC_CTYPE": "C"}, "CST_LC_CTYPE==C")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(SystemExit):
+                    execute_cli(["apply"], env={"CST_PROG": "cst swap"}, ctx=ctx, elevate=_fake_elevate)
+                self.assertEqual(called[-1][:5], ["sudo", "--", "env", "CST_PROG=cst swap", setting])
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-
 
 - An extension-less Python program holds a docstring, the bootstrap, imports, one `main()` and the `__main__` guard (`tests/test_entrypoints.py`; `NOT_YET_THIN` is empty: every program is converted).
 - **The bootstrap** is one stanza, byte for byte the same in every entry point that imports CST code (`BOOTSTRAP` in `tests/test_entrypoints.py`): from a checkout it puts the checkout root on `sys.path` (under `python3 -I` a script sees only its own folder); inside an installed zipapp it does nothing. Nothing else changes `sys.path`.
-- Paths are never computed from `__file__` by hand: `cst_core.adapters.runtime` gives the checkout root, the program's own path and argv (to run itself again), a sibling program (checkout path, or its installed dest), and the installed bytes.
+- Paths are never computed from `__file__` by hand: `cst_core.adapters.runtime` gives the checkout root, the program's own path and argv (to run itself again), a sibling program (checkout path, or its installed dest), and the installed bytes; `undo_python_start` undoes what Python changes at start (SIGPIPE ignored, LC_CTYPE=C.UTF-8 under a C locale) in `cst`, `cst swap` and the installer, whose shell wrappers hand the caller's LC_CTYPE over as `CST_LC_CTYPE`.
 - `main()` is a docstring and one statement that hands argv to the package.
 - No re-export facades (`from m import a as a`, `__all__`, a package `__init__.py` importing its own submodules): tests import a name from the module that defines it and inject fakes through ports.
 

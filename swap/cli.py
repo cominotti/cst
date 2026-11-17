@@ -17,7 +17,7 @@ import sys
 from typing import NoReturn, TextIO
 
 
-from cst_core.adapters.runtime import checkout_root, program_path, restore_default_signals
+from cst_core.adapters.runtime import checkout_root, lc_ctype_handover, program_path, undo_python_start
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
@@ -120,7 +120,7 @@ def execute_cli(
         if not exec_ctx.is_root():
             reexec = _sudo_reexec if elevate is None else elevate
             python = [sys.executable, "-I", "-B", program_path(__file__)]
-            reexec(["sudo", "--", "env", f"CST_PROG={prog}", *python, *orig_args])
+            reexec(["sudo", "--", "env", f"CST_PROG={prog}", lc_ctype_handover(), *python, *orig_args])
 
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     file_sys = LocalFileSystemAdapter() if fs is None else fs
@@ -138,7 +138,7 @@ def execute_cli(
 
 def main() -> int:
     """CLI entrypoint returning process exit status."""
-    restore_default_signals()  # a closed pipe stops it quietly, as it stopped the bash swap-setup.sh
+    undo_python_start()  # SIGPIPE at its default (a closed pipe stops it quietly), the caller's LC_CTYPE
     return execute_cli()
 
 

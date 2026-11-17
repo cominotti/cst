@@ -16,6 +16,17 @@ from cst_core.domain.errors import shell_exit_status
 _FOREGROUND_SIGNALS = (signal.SIGINT, signal.SIGQUIT)
 
 
+def ignore_quit() -> None:
+    """cst itself ignores Ctrl-\\ (SIGQUIT) the whole time, as bash does; the programs it starts get it at its default.
+
+    A Python handler that does nothing, not SIG_IGN: exec resets a handler to
+    the default but keeps an ignore. A SIGQUIT cst started with ignored stays
+    ignored (and so for its programs), as in bash.
+    """
+    if signal.getsignal(signal.SIGQUIT) is not signal.SIG_IGN:
+        signal.signal(signal.SIGQUIT, lambda _sig, _frame: None)
+
+
 def _start_failure(argv: Sequence[str], exc: OSError) -> int:
     """Report a command that could not start, as bash does: 127 when it is not found, else 126."""
     print(f"{argv[0]}: {exc.strerror}", file=sys.stderr, flush=True)

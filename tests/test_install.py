@@ -6,14 +6,18 @@ the machine is touched, no sudo, no runuser (a stub stands in for it).
 """
 
 from collections.abc import Mapping
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 from cst_core.adapters.install import LocalInstallTarget
@@ -41,6 +45,7 @@ from cst_core.domain.install import (
     template_keys,
 )
 from cst_core.domain.values import DomainValidationError, OctalMode
+from cst_core.installer import main as installer_main
 from cst_core.ports import WriteFailed
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -596,6 +601,29 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash("cst_install_as nobody-here cpu/gamemode.ini")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"no home folder", r.stderr)
+
+    def test_the_installer_gets_the_caller_s_lc_ctype(self) -> None:
+        # Python sets LC_CTYPE=C.UTF-8 under a C locale (PEP 538); each of the three ways in hands the
+        # caller's value over for installer.py to put back.
+        probe = os.path.join(self.tmp, "probe.py")
+        Path(probe).write_text("import os, sys\nprint(sys.argv[1], repr(os.environ.get('CST_LC_CTYPE')))\n")
+        script = f'CST_INSTALLER="{probe}"\ncst_installer a\ncst_install_as alice b\ncst_install_text /x 0644 alice'
+        for caller, handed in (({}, "''"), ({"LC_CTYPE": "C"}, "'=C'")):
+            with self.subTest(caller=caller):
+                self.env.update(caller)
+                r = self.bash(script)
+                self.assertEqual(r.stdout.decode(), f"a {handed}\ninstall {handed}\ntext {handed}\n", r.stderr)
+
+    def test_installer_main_puts_the_caller_s_lc_ctype_back(self) -> None:
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGPIPE, signal.SIGXFSZ)}
+        for sig, handler in saved.items():
+            self.addCleanup(signal.signal, sig, handler)
+        with (
+            mock.patch.dict(os.environ, {"CST_LC_CTYPE": "", "LC_CTYPE": "C.UTF-8"}, clear=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(installer_main(["help"]), 0)
+            self.assertEqual(dict(os.environ), {}, "what the commands it runs inherit: LC_CTYPE unset, as the caller's")
 
 
 class RuntimeResolverTest(unittest.TestCase):
