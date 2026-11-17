@@ -62,7 +62,8 @@
 #     64-btrfs.rules (booted and next boot) still has the ID_BTRFS_READY /
 #     SYSTEMD_READY=0 semantics this rule builds on.
 #   * The generated rule passes `udevadm verify` before anything is written.
-#   * After writing, the udev self-test must show every root fs member ready;
+#   * After writing, the udev self-test must show every root fs member ready
+#     (lsblk must list as many as btrfs counts);
 #     otherwise the new rule is removed and no rpm-ostree change is made.
 #   * A new deployment is only created when the tracked file set changes, or
 #     the next-boot initramfs overlay content differs from /etc.
@@ -193,6 +194,16 @@ overlay_in_sync() {
 
 root_fs_uuid() {
     findmnt -rn -o UUID --target /sysroot 2>/dev/null | head -n1
+}
+
+# The kernel names (dm-0, ...) of the members of btrfs filesystem $1, from lsblk.
+root_members() {
+    local name fstype fsuuid
+    while read -r name fstype fsuuid; do
+        if [[ "${fstype}" == "btrfs" && "${fsuuid}" == "$1" ]]; then
+            echo "${name}"
+        fi
+    done < <(lsblk -rn -o KNAME,FSTYPE,UUID)
 }
 
 tracked_sums() {
@@ -723,10 +734,13 @@ systemctl enable "${RECORD_UNIT}" 2>&1 | grep -v '^$' || true
 
 # `udevadm test` skips the btrfs builtin in test mode, so it cannot show
 # readiness (and the rule then only takes silent GOTOs). Check that udev loads
-# the rule, and that every root fs member currently is ready.
+# the rule, that every root fs member currently is ready, and that lsblk
+# lists as many members as btrfs counts (the guards' ndev): with fewer, a
+# member would go unchecked.
 selftest_ok=1
-while read -r name fstype fsuuid; do
-    [[ "${fstype}" == "btrfs" && "${fsuuid}" == "${UUID}" ]] || continue
+members=0
+while read -r name; do
+    members=$(( members + 1 ))
     out="$(udevadm test --action=change "/sys/class/block/${name}" 2>&1)"
     if ! grep -qxF "Reading rules file: ${RULE}" <<<"${out}"; then
         echo "self-test: ${name}: udev does not load ${RULE}" >&2
@@ -739,7 +753,11 @@ while read -r name fstype fsuuid; do
         echo "self-test: ${name}: NOT ready: $(grep -E '^(ID_BTRFS_READY|SYSTEMD_READY)=' <<<"${props}" | xargs)" >&2
         selftest_ok=0
     fi
-done < <(lsblk -rn -o KNAME,FSTYPE,UUID)
+done < <(root_members "${UUID}")
+if (( members != ndev )); then
+    echo "self-test: lsblk lists ${members} member(s) of ${UUID}, btrfs counts ${ndev}" >&2
+    selftest_ok=0
+fi
 if (( ! selftest_ok )); then
     if (( ! rule_was_present )); then
         rm -f "${RULE}"

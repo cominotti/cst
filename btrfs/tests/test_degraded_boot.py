@@ -698,8 +698,14 @@ next_overlay || :
 
     # ---------------------------------------------------------- self-test --
     def selftest(
-        self, *, ready: dict[str, bool], rule_was_present: int = 0, env: dict[str, str] | None = None
+        self,
+        *,
+        ready: dict[str, bool],
+        rule_was_present: int = 0,
+        env: dict[str, str] | None = None,
+        ndev: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """The self-test with these lsblk members; ndev (the guards' btrfs device count) defaults to their number."""
         self.install()
         lsblk = "".join(f"{name} btrfs {UUID}\n" for name in ready) + "nvme2n1p1 vfat 1234-ABCD\n"
         self.put("lsblk", lsblk)
@@ -708,7 +714,9 @@ next_overlay || :
             props = "ID_BTRFS_READY=1\n" if is_ready else "ID_BTRFS_READY=0\nSYSTEMD_READY=0\n"
             self.put(f"udev-info-{name}", props)
         self.put("calls", "")
-        return self.run_bash(f"UUID={UUID}\nrule_was_present={rule_was_present}\n" + self.section("self-test"), env=env)
+        count = len(ready) if ndev is None else ndev
+        code = f"UUID={UUID}\nndev={count}\nrule_was_present={rule_was_present}\n" + self.section("self-test")
+        return self.run_bash(code, env=env)
 
     def test_selftest_passes_when_every_member_is_ready(self) -> None:
         r = self.selftest(ready={"dm-0": True, "dm-1": True})
@@ -747,6 +755,21 @@ next_overlay || :
         self.assertEqual(r.returncode, 1)
         self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
         self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
+
+    def test_selftest_fails_when_lsblk_lists_another_member_count(self) -> None:
+        """Every member btrfs counts must be checked: fewer (or more) in lsblk fails, all ready or not."""
+        cases: dict[str, tuple[dict[str, bool], int, int]] = {
+            "no member listed": ({}, 2, 0),
+            "one of two": ({"dm-0": True}, 2, 1),
+            "three of two": ({"dm-0": True, "dm-1": True, "dm-2": True}, 2, 3),
+        }
+        for label, (ready, ndev, listed) in cases.items():
+            with self.subTest(label):
+                r = self.selftest(ready=ready, ndev=ndev)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"self-test: lsblk lists {listed} member(s) of {UUID}, btrfs counts {ndev}", r.stderr)
+                self.assertIn("ERROR: udev self-test failed; no initramfs change made", r.stderr)
+                self.assertFalse(os.path.exists(self.at(RULE)))
 
     def test_selftest_stops_on_a_typo_in_a_unit(self) -> None:
         """systemd-analyze verify only warns about an unknown key unless --recursive-errors=no."""
