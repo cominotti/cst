@@ -944,8 +944,9 @@ class DockerGcUnitsTest(unittest.TestCase):
             with self.subTest(unit=name):
                 s = self.service(name)
                 self.assertEqual(s.get("CapabilityBoundingSet"), [""])
+                # Not NoNewPrivileges: it blocks the SELinux move into the Docker domain.
+                self.assertNotIn("NoNewPrivileges", s)
                 for key, value in (
-                    ("NoNewPrivileges", "yes"),
                     ("ProtectSystem", "strict"),
                     ("ProtectHome", "read-only"),
                     ("PrivateTmp", "yes"),

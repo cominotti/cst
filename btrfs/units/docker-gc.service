@@ -17,7 +17,13 @@ TimeoutStartSec=1h
 # state, StateDirectory=) and /run/docker-gc (the run lock, RuntimeDirectory=),
 # the only writable places. The lock folder stays after the run: a cleanup-now
 # that holds the lock then keeps its file.
-NoNewPrivileges=yes
+# No NoNewPrivileges=: Fedora's SELinux policy labels /usr/local/sbin/docker*
+# container_runtime_exec_t (like dockerd), and the program reaches
+# /run/docker.sock only after the exec moves it into that domain; with
+# NoNewPrivileges the kernel blocks that move, the program stays in init_t and
+# every docker call fails with "permission denied". The other settings below
+# do not switch it on (checked on Fedora: NoNewPrivs stays 0 in
+# /proc/PID/status).
 CapabilityBoundingSet=
 ProtectSystem=strict
 StateDirectory=docker-gc

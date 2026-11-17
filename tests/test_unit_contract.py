@@ -20,7 +20,7 @@ import unittest
 
 from cst_core.domain.install import InstallEntry, manifest_by_dest
 from cst_core.domain.values import OctalMode
-from tests.unit_files import UnitText, generated_units, manifest_units
+from tests.unit_files import Scope, UnitText, generated_units, manifest_units
 
 ROOTS = ("/usr/local/", "%h/.local/")
 
@@ -61,7 +61,43 @@ def contract_problems(unit: UnitText, by_dest: Mapping[str, InstallEntry]) -> li
     return problems
 
 
+# Fedora's file contexts give /usr/(local/)s?bin/docker* the type
+# container_runtime_exec_t, whose domain alone may connect to the Docker
+# socket. NoNewPrivileges forbids that domain change at exec.
+DOCKER_DOMAIN_PREFIX = "/usr/local/sbin/docker"
+
+
+def nnp_problems(unit: UnitText) -> list[str]:
+    """A system unit that starts a docker* program must not set NoNewPrivileges=yes."""
+    if unit.scope != "system":
+        return []
+    starts = [path for key, path in unit_paths(unit.text) if key.startswith("Exec")]
+    if not any(path.startswith(DOCKER_DOMAIN_PREFIX) for path in starts):
+        return []
+    lines = [line.strip().replace(" ", "") for line in unit.text.splitlines()]
+    if any(
+        line.lower() in ("nonewprivileges=yes", "nonewprivileges=true", "nonewprivileges=1", "nonewprivileges=on")
+        for line in lines
+    ):
+        return [f"{unit.origin}: {unit.name}: NoNewPrivileges=yes blocks the SELinux move into the Docker domain"]
+    return []
+
+
 class UnitContractTest(unittest.TestCase):
+    def test_docker_programs_keep_their_selinux_domain(self) -> None:
+        problems = [p for unit in manifest_units() for p in nnp_problems(unit)]
+        self.assertEqual(problems, [])
+
+    def test_nnp_rule_catches_the_setting_only_where_it_matters(self) -> None:
+        def unit(text: str, scope: Scope = "system") -> UnitText:
+            return UnitText(origin="t", name="x.service", scope=scope, text=text)
+
+        bad = "[Service]\nExecStart=/usr/local/sbin/docker-gc record\nNoNewPrivileges=yes\n"
+        self.assertEqual(len(nnp_problems(unit(bad))), 1)
+        self.assertEqual(nnp_problems(unit(bad.replace("yes", "no"))), [])
+        self.assertEqual(nnp_problems(unit(bad.replace("docker-gc", "btrfs-notify"))), [])
+        self.assertEqual(nnp_problems(unit(bad, scope="user")), [])
+
     def test_every_unit_names_installed_programs(self) -> None:
         by_dest = manifest_by_dest()
         units = manifest_units() + generated_units()

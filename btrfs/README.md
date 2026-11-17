@@ -1503,7 +1503,12 @@ to `/var/lib/docker-gc/buildx` instead (`BUILDX_CONFIG`), so it uses the
 default builder (the Docker daemon's own build cache) even if root picked
 another one with `docker buildx use`. As root they still own
 `/run/docker.sock`, `/var/lib/docker-gc` and `/run/docker-gc`, so they need no capability.
-`systemd-analyze security docker-gc-recorder.service` rates them about 2.1
+They do not set `NoNewPrivileges=`: Fedora's SELinux policy labels
+`/usr/local/sbin/docker*` like dockerd, and the program reaches
+`/run/docker.sock` only after its exec moves it into that domain, which
+`NoNewPrivileges` forbids (every docker call then fails with "permission
+denied"). `tests/test_unit_contract.py` keeps it out.
+`systemd-analyze security docker-gc-recorder.service` rates them about 2.3
 (it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
 until `enable` installs the new program, an old installed copy and
 `cleanup-now` or `run --dry-run` from the checkout do not see each other's
