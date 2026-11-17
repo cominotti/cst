@@ -1,0 +1,272 @@
+"""btrfs-stall-monitord's machine side: reading /proc, /sys and cgroupfs to the end of each file, the btrfs/disk/container topology, D-state tasks, the journal lines and the writer thread of the log files."""
+
+from __future__ import annotations
+
+from collections.abc import Set as AbstractSet
+from typing import Any
+import glob
+import os
+import queue
+import threading
+import time
+
+from btrfs.stall_monitord.domain import CGROUP_RESCAN, KEEP_DAYS
+from cst_core.adapters.journal import log as journal_log
+
+CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def log(msg: str, prio: int = 6) -> None:
+    """One journal line: msg with its sd-daemon priority prefix (cst_core's journal log)."""
+    journal_log(prio, msg)
+
+
+def read_bytes(path: str, size: int = 65536) -> bytes | None:
+    """Up to `size` bytes of a file, or None if it cannot be read.
+
+    Reads until end of file: one read() of a /proc file such as /proc/vmstat
+    returns only about one page (4 KiB), and the rest comes in later reads.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        chunks = []
+        left = size
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_text(path: str) -> str | None:
+    data = read_bytes(path)
+    return data.decode("utf-8", "replace") if data is not None else None
+
+
+def read_kv(path: str) -> dict[str, int]:
+    out = {}
+    text = read_text(path)
+    if text:
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    out[parts[0]] = int(parts[1])
+                except ValueError:
+                    pass
+    return out
+
+
+def read_int(path: str) -> int:
+    v = (read_text(path) or "").strip()
+    return int(v) if v.lstrip("-").isdigit() else 0
+
+
+def parse_psi(path: str) -> list[float | int] | None:
+    """Return [some_avg10, some_total_us, full_avg10, full_total_us]."""
+    text = read_text(path)
+    if not text:
+        return None
+    res: list[float | int] = [0.0, 0, 0.0, 0]
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] not in ("some", "full"):
+            continue
+        vals = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
+        idx = 0 if fields[0] == "some" else 2
+        res[idx] = float(vals.get("avg10", 0))
+        res[idx + 1] = int(vals.get("total", 0))
+    return res
+
+
+def parse_io_stat(path: str, devices: AbstractSet[str]) -> list[int] | None:
+    """Sum rbytes/wbytes of a cgroup io.stat over the given "maj:min" devices.
+
+    Only the top-level devices (dm-crypt of each btrfs member, swap) are
+    counted, otherwise every byte is counted again for the NVMe below it.
+    """
+    text = read_text(path)
+    if text is None:
+        return None
+    rb = wb = 0
+    for line in text.splitlines():
+        if line.split(" ", 1)[0] not in devices:
+            continue
+        for item in line.split()[1:]:
+            k, _, v = item.partition("=")
+            if k == "rbytes":
+                rb += int(v)
+            elif k == "wbytes":
+                wb += int(v)
+    return [rb, wb]
+
+
+def block_parents(name: str, seen: set[str] | None = None) -> list[str]:
+    """Whole-disk ancestors of a block device (dm-0 -> nvme0n1p3 -> nvme0n1)."""
+    seen = seen if seen is not None else set()
+    if name in seen:
+        return []
+    seen.add(name)
+    slaves = glob.glob(f"/sys/class/block/{name}/slaves/*")
+    if slaves:
+        out = []
+        for s in slaves:
+            out += block_parents(os.path.basename(s), seen)
+        return out
+    if os.path.exists(f"/sys/class/block/{name}/partition"):
+        return [os.path.basename(os.path.dirname(os.path.realpath(f"/sys/class/block/{name}")))]
+    return [name]
+
+
+class Topology:
+    """btrfs filesystems, their devices, swap devices and container cgroups."""
+
+    def __init__(self) -> None:
+        self.fs: dict[str, dict[str, Any]] = {}  # uuid -> {"label", "devs", "disks", "devids"}
+        self.disks: dict[str, str] = {}  # disk or dm name -> role string
+        self.top_devs: set[str] = set()  # "maj:min" of btrfs member devices and swap
+        self.containers: dict[str, str] = {}  # short name -> cgroup dir
+        self.last_cgroup_scan = -1e9
+        self.refresh_fs()
+
+    def refresh_fs(self) -> None:
+        for d in glob.glob("/sys/fs/btrfs/*-*-*-*-*"):
+            uuid = os.path.basename(d)
+            devs = sorted(os.listdir(f"{d}/devices")) if os.path.isdir(f"{d}/devices") else []
+            disks = sorted({p for dev in devs for p in block_parents(dev)})
+            label = (read_text(f"{d}/label") or "").strip()
+            devids = sorted(os.listdir(f"{d}/devinfo")) if os.path.isdir(f"{d}/devinfo") else []
+            self.fs[uuid] = {"label": label, "devs": devs, "disks": disks, "devids": devids}
+            for name in devs + disks:
+                self.disks.setdefault(name, f"btrfs:{label or uuid[:8]}")
+            for name in devs:
+                self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
+        for line in (read_text("/proc/swaps") or "").splitlines()[1:]:
+            dev = line.split()[0] if line.split() else ""
+            if dev.startswith("/dev/"):
+                name = os.path.basename(os.path.realpath(dev))
+                self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
+                for n in [name] + block_parents(name):
+                    self.disks.setdefault(n, "swap")
+
+    def scan_cgroups(self, now: float) -> None:
+        if now - self.last_cgroup_scan < CGROUP_RESCAN:
+            return
+        self.last_cgroup_scan = now
+        found = {}
+        for path in glob.glob(f"{CGROUP_ROOT}/system.slice/docker-*.scope"):
+            found["docker-" + os.path.basename(path)[7:19]] = path
+        for path in glob.glob(f"{CGROUP_ROOT}/machine.slice/libpod-*.scope"):
+            found["libpod-" + os.path.basename(path)[7:19]] = path
+        for path in glob.glob(
+            f"{CGROUP_ROOT}/user.slice/user-*.slice/user@*.service/**/libpod-*.scope", recursive=True
+        ):
+            name = os.path.basename(path)
+            if not name.startswith("libpod-conmon"):
+                found["libpod-" + name[7:19]] = path
+        for path in glob.glob(f"{CGROUP_ROOT}/machine.slice/machine-*.scope"):
+            found[os.path.basename(path)[:40]] = path
+        self.containers = found
+
+
+def short_cgroup(pid: str | int) -> str:
+    text = read_text(f"/proc/{pid}/cgroup")
+    if not text:
+        return "?"
+    path = text.strip().splitlines()[-1].partition("::")[2] or "/"
+    leaf = path.rstrip("/").rsplit("/", 1)[-1] or "/"
+    if leaf.startswith(("docker-", "libpod-")) and leaf.endswith(".scope"):
+        kind, _, rest = leaf.partition("-")
+        return f"{kind}-{rest[:12]}"
+    return leaf[:60]
+
+
+def run_slices(pid: str | int, tid: str | int) -> int | None:
+    """Times the task was scheduled onto a CPU (schedstat field 3); None if
+    unreadable (gone, or schedstats unavailable): then no progress is assumed."""
+    s = read_text(f"/proc/{pid}/task/{tid}/schedstat")
+    try:
+        return int(s.split()[2]) if s else None
+    except IndexError, ValueError:
+        return None
+
+
+def d_comm(pid: str | int, tid: str | int) -> str | None:
+    """comm of the task if it is in D state, else None. comm may contain ')':
+    the state follows the last one."""
+    data = read_bytes(f"/proc/{pid}/task/{tid}/stat", 1024)
+    if not data:
+        return None
+    rp = data.rfind(b")")
+    if rp > 0 and data[rp + 2 : rp + 3] == b"D":
+        return data[data.find(b"(") + 1 : rp].decode("utf-8", "replace")
+    return None
+
+
+def scan_d_tasks() -> list[tuple[str, str, str]]:
+    """[(pid, tid, comm)] of all tasks in uninterruptible sleep. Stat-only."""
+    out = []
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return out
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            tids = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            continue
+        for tid in tids:
+            comm = d_comm(pid, tid)
+            if comm is not None:
+                out.append((pid, tid, comm))
+    return out
+
+
+class Writer(threading.Thread):
+    """Appends batches to per-day files; slow writes only delay this thread."""
+
+    def __init__(self, log_dir: str) -> None:
+        super().__init__(name="writer", daemon=True)
+        self.log_dir = log_dir
+        self.q: queue.Queue[list[tuple[float, str]] | None] = queue.Queue(maxsize=64)
+        self.last_housekeeping_day: str | None = None
+
+    def run(self) -> None:
+        while True:
+            batch = self.q.get()
+            if batch is None:
+                return
+            by_day = {}
+            for ts, line in batch:
+                by_day.setdefault(time.strftime("%Y-%m-%d", time.localtime(ts)), []).append(line)
+            for day, lines in sorted(by_day.items()):
+                path = os.path.join(self.log_dir, f"stall-{day}.jsonl")
+                try:
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write("\n".join(lines) + "\n")
+                except OSError as e:
+                    log(f"cannot write {path}: {e}", 3)
+            today = time.strftime("%Y-%m-%d")
+            if today != self.last_housekeeping_day:
+                self.last_housekeeping_day = today
+                self.housekeeping()
+
+    def housekeeping(self) -> None:
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - KEEP_DAYS * 86400))
+        for path in glob.glob(os.path.join(self.log_dir, "stall-*.jsonl*")):
+            if os.path.basename(path)[6:16] < cutoff:
+                try:
+                    os.unlink(path)
+                except OSError as e:
+                    log(f"cannot remove {path}: {e}", 4)

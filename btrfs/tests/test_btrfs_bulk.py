@@ -11,9 +11,9 @@ or directly:
     python3 -I -B btrfs/tests/test_btrfs_bulk.py
 """
 
+from __future__ import annotations
+
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shutil
@@ -22,6 +22,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any, Protocol, cast
+from unittest import mock
+
+# Run directly (python3 -I -B btrfs/tests/test_btrfs_bulk.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
+from btrfs.bulk import adapters as bulk_adapters, cli as bulk_cli, domain as bulk_domain, items as bulk_items
+from btrfs.bulk import steam as bulk_steam
+from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
 
@@ -29,12 +41,122 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 
 
-def load():
-    loader = importlib.machinery.SourceFileLoader("btrfs_bulk", TOOL)
-    spec = importlib.util.spec_from_loader("btrfs_bulk", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+class _ItemProto(Protocol):
+    id: str
+    link: str | None
+    target: str
+    nocow: bool
+
+
+class _CtxProto(Protocol):
+    home: str
+    bulk: str
+
+
+CtxProto = _CtxProto
+
+
+class _CopyProto(Protocol):
+    def deepcopy[T](self, x: T) -> T: ...
+
+
+class _BtrfsBulkModule(Protocol):
+    copy: _CopyProto
+    ETC: str
+    CONF: str
+    FLAG: str
+    KEEP: str
+    CONVERT_PLAN: str
+    STATE: str
+    LOCK: str
+    NOTIFY: str
+    BIG: int
+    MARGIN: int
+    PROGRESS_EVERY: int
+    BTRFS_MAGIC: int
+    PROC: str
+    RUN_USER: str
+    SNAPSHOT: str | None
+    STEAM_ROOT: str
+    NOCOW_TOP: str
+    ITEMS: Sequence[_ItemProto]
+    BY_ID: Mapping[str, _ItemProto]
+    Unexpected: type[Exception]
+    Ctx: Callable[[str], _CtxProto]
+    is_subvol: Callable[[str], bool]
+    subvol_create: Callable[[str], None]
+    is_nocow: Callable[[str], bool]
+    set_nocow: Callable[[str], None]
+    copy_tree: Callable[[str, str, bool], None]
+    busy_paths: Callable[[Iterable[str], str], set[str]]
+    mounts: Callable[[], Sequence[object]]
+    free_bytes: Callable[[str], int]
+    flatpak_installed: Callable[[str], bool]
+    flatpak_has_fs: Callable[[str, str], bool]
+    flatpak_add_fs: Callable[[str, str], None]
+    convert_bulk_dir: Callable[[_CtxProto], bool]
+    apply: Callable[[_CtxProto], tuple[list[str], list[str]]]
+    report: Callable[[_CtxProto, str], int]
+    boot: Callable[[_CtxProto], int]
+    alert: Callable[[str, str], object]
+    classify: Callable[[_CtxProto, _ItemProto, set[str]], tuple[str, str]]
+    cow_data: Callable[[str], tuple[int, bool]]
+    nocow_parents: Callable[[_CtxProto, _ItemProto], list[str]]
+    exit_status: Callable[[Sequence[str], Sequence[str]], int]
+    journals: Callable[[], list[str]]
+    jpath: Callable[[str], str]
+    jread: Callable[[str], dict[str, Any]]
+    jwrite: Callable[[str, dict[str, Any]], None]
+    u_prepare: Callable[[str, str, bool], object]
+    u_late_write: Callable[[dict[str, Any]], bool]
+    u_finish: Callable[[dict[str, Any]], None]
+    u_rollback: Callable[[dict[str, Any]], None]
+    u_move_subvol: Callable[[str, str], None]
+    u_rmtree: Callable[[str], None]
+    _fs_magic: Callable[[str], int]
+    steam_running: Callable[[_CtxProto], list[str]]
+    copy_reflink: Callable[[str, str], None]
+    lf_files: Callable[[str], list[str]]
+    lf_index: Callable[[dict[str, Any], str], str | None]
+    lf_validate: Callable[[dict[str, Any]], None]
+    lf_with_library: Callable[[dict[str, Any], str, str], dict[str, Any]]
+    lf_place_app: Callable[[dict[str, Any], str, str, str], dict[str, Any]]
+    vdf_dump: Callable[[dict[str, Any]], bytes]
+    vdf_load: Callable[[bytes], dict[str, Any]]
+    vdf_parse: Callable[[bytes], dict[str, Any]]
+    write_vdf_pair: Callable[[_CtxProto, dict[str, Any], dict[str, Any]], None]
+    steam_read_pair: Callable[[_CtxProto], dict[str, Any]]
+    steam_apply: Callable[..., int]
+    steam_cmd: Callable[[list[str]], int]
+    steam_print: Callable[[_CtxProto, dict[str, Any]], None]
+    steam_survey: Callable[[_CtxProto, list[str], bool], dict[str, Any]]
+    steam_copy_floor: Callable[[], int]
+    snapshot_guard: Callable[[], dict[str, int]]
+    u_steam_drop_news: Callable[[dict[str, Any]], bool]
+    u_steam_late: Callable[[dict[str, Any]], bool]
+    u_steam_switch: Callable[[dict[str, Any]], object]
+    u_verify_content: Callable[[str, str, str, int], str]
+    u_write_marker: Callable[[str, str], None]
+    u_clock: Callable[[str], object]
+    copy_bytes: Callable[[str, str, str, int], None]
+    edit_keep: Callable[[Sequence[str], Iterable[str]], object]
+    recover: Callable[[_CtxProto], list[str]]
+    CHUNK: int
+    PROGRESS_BYTES: int
+    same_file: Callable[..., bool]
+    user_ctx: Callable[[Sequence[str]], _CtxProto]
+    u_steam_finish: Callable[[dict[str, Any]], None]
+
+
+def load() -> _BtrfsBulkModule:
+    """btrfs-bulk's package as one namespace, back to its real code (the
+    program is a thin entry over it; a new view undoes the last test's fakes)."""
+    view = PackageView(bulk_cli, bulk_items, bulk_steam, bulk_adapters, bulk_domain)
+    # What a fresh run starts with: no ids from an earlier apply(), and the
+    # checkout's btrfs-bulk as the running program (btrfs-snapshot next to it).
+    bulk_domain.BULK_ONLY.clear()
+    bulk_adapters.Program.entry_file = TOOL
+    return cast("_BtrfsBulkModule", cast("object", view))
 
 
 class Crash(BaseException):
@@ -44,8 +166,9 @@ class Crash(BaseException):
 class BulkBase(unittest.TestCase):
     """Scratch home and fakes (shared with test_btrfs_steam.py); no tests here."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.m = load()
+        self.out: str = ""
         self.tmp = tempfile.mkdtemp(prefix="bulk-test-")
         self.home = os.path.join(self.tmp, "home")
         os.mkdir(self.home)
@@ -61,42 +184,42 @@ class BulkBase(unittest.TestCase):
         m.LOCK = os.path.join(self.tmp, "lock")
         m.NOTIFY = os.path.join(self.tmp, "no-notify")
         # Fakes for what needs btrfs, root or the host.
-        self.subvols = set()  # (dev, ino) of fake subvolumes
-        self.nocow = set()  # (dev, ino) with +C
-        self.busy = set()
-        self.flatpaks = {}  # app -> set of filesystem overrides
-        self.convert_calls = []
+        self.subvols: set[tuple[int, int]] = set()  # (dev, ino) of fake subvolumes
+        self.nocow: set[tuple[int, int]] = set()  # (dev, ino) with +C
+        self.busy: set[str] = set()
+        self.flatpaks: dict[str, set[str]] = {}  # app -> set of filesystem overrides
+        self.convert_calls: list[str] = []
 
-        def key(p):
+        def key(p: str) -> tuple[int, int]:
             st = os.lstat(p)
             return st.st_dev, st.st_ino
 
-        def is_subvol(p):
+        def is_subvol(p: str) -> bool:
             try:
                 return stat.S_ISDIR(os.lstat(p).st_mode) and key(p) in self.subvols
             except OSError:
                 return False
 
-        def subvol_create(p):
+        def subvol_create(p: str) -> None:
             os.mkdir(p, 0o755)
             self.subvols.add(key(p))
 
-        def is_nocow(p):
+        def is_nocow(p: str) -> bool:
             return key(p) in self.nocow
 
-        def set_nocow(p):
+        def set_nocow(p: str) -> None:
             self.nocow.add(key(p))
 
         real_copy = m.copy_tree
 
-        def copy_tree(src, dst, nocow):
+        def copy_tree(src: str, dst: str, nocow: bool) -> None:
             real_copy(src, dst, nocow)
             if nocow:  # btrfs: new files inherit +C from their folder
                 for root, dirs, files in os.walk(dst):
                     for n in dirs + files:
                         self.nocow.add(key(os.path.join(root, n)))
 
-        def busy_paths(paths, home):
+        def busy_paths(paths: Iterable[str], home: str) -> set[str]:
             return {
                 p for p in paths if any(p == b or p.startswith(b + "/") or b.startswith(p + "/") for b in self.busy)
             }
@@ -115,31 +238,31 @@ class BulkBase(unittest.TestCase):
         m.convert_bulk_dir = lambda ctx: self.convert_calls.append(ctx.bulk) or False
         self.ctx = m.Ctx(self.home)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         for root, dirs, _ in os.walk(self.tmp):
             for d in dirs:
                 os.chmod(os.path.join(root, d), 0o755)
         shutil.rmtree(self.tmp)
 
     # ---- helpers ----
-    def H(self, rel):
+    def H(self, rel: str) -> str:
         return os.path.join(self.home, rel)
 
-    def B(self, rel=""):
+    def B(self, rel: str = "") -> str:
         return os.path.join(self.home, "Bulk", rel) if rel else os.path.join(self.home, "Bulk")
 
-    def write(self, rel, data="x"):
+    def write(self, rel: str, data: str = "x") -> str:
         p = self.H(rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w") as f:
             f.write(data)
         return p
 
-    def read(self, rel):
+    def read(self, rel: str) -> str:
         with open(self.H(rel)) as f:
             return f.read()
 
-    def purge_tree(self, path):
+    def purge_tree(self, path: str) -> None:
         # Clear fake inode sets before deleting so recycled inodes on ext4/tmpfs do not look +C.
         if os.path.exists(path):
             st = os.lstat(path)
@@ -152,22 +275,22 @@ class BulkBase(unittest.TestCase):
                     self.subvols.discard((st.st_dev, st.st_ino))
             shutil.rmtree(path)
 
-    def apply(self):
+    def apply(self) -> tuple[list[str], list[str]]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             res = self.m.apply(self.ctx)
         self.out = out.getvalue()
         return res
 
-    def report(self, mode="status"):
+    def report(self, mode: str = "status") -> tuple[int, str]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             left = self.m.report(self.ctx, mode)
         return left, out.getvalue()
 
-    def tree(self):
+    def tree(self) -> list[tuple[str, str, str | bytes | int]]:
         """Every path below the temp dir with its type, link target and content."""
-        out = []
+        out: list[tuple[str, str, str | bytes | int]] = []
         for root, dirs, files in os.walk(self.tmp):
             for n in sorted(dirs + files):
                 p = os.path.join(root, n)
@@ -183,17 +306,34 @@ class BulkBase(unittest.TestCase):
                     out.append((p, "dir", stat.S_IMODE(st.st_mode)))
         return sorted(out)
 
-    def assertLink(self, rel, target):
+    def assertLink(self, rel: str, target: str) -> None:
         p = self.H(rel)
         self.assertTrue(os.path.islink(p), f"{rel} is not a symlink")
         self.assertEqual(os.readlink(p), self.B(target))
 
-    def journals(self):
+    def journals(self) -> list[str]:
         return [f for f in os.listdir(self.m.STATE) if f.startswith("journal-")] if os.path.isdir(self.m.STATE) else []
 
 
 class BulkTest(BulkBase):
-    def test_fresh_home_creates_layout_and_is_idempotent(self):
+    def test_btrfs_snapshot_is_found_from_the_running_entry(self) -> None:
+        # main() names the entry point; from a checkout, btrfs-snapshot is the one next to it.
+        snapshot = os.path.join(os.path.dirname(TOOL), "btrfs-snapshot")
+        bulk_adapters.Program.entry_file = ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "bogus"], entry_file=TOOL), 2)
+        self.assertEqual(bulk_adapters.Program.entry_file, TOOL)
+        self.assertEqual(bulk_adapters.snapshot_program(), snapshot)
+        # BTRFS_BULK_SNAPSHOT (SNAPSHOT, not as root) wins.
+        self.m.SNAPSHOT = "/elsewhere/btrfs-snapshot"
+        self.assertEqual(bulk_adapters.snapshot_program(), "/elsewhere/btrfs-snapshot")
+        # Never a guess: without an entry point it refuses.
+        self.m.SNAPSHOT = None
+        bulk_adapters.Program.entry_file = ""
+        with self.assertRaises(RuntimeError):
+            bulk_adapters.snapshot_program()
+
+    def test_fresh_home_creates_layout_and_is_idempotent(self) -> None:
         os.makedirs(self.H("Downloads"))
         deferred, problems = self.apply()
         self.assertEqual((deferred, problems), ([], []))
@@ -239,7 +379,7 @@ class BulkTest(BulkBase):
         left, text = self.report()
         self.assertEqual(left, 0, text)
 
-    def test_tool_installed_later_gets_its_link_on_rerun(self):
+    def test_tool_installed_later_gets_its_link_on_rerun(self) -> None:
         self.apply()
         self.assertFalse(os.path.lexists(self.H(".cargo/registry")))
         self.write(".cargo/config.toml", "[build]\n")
@@ -249,7 +389,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read(".cargo/config.toml"), "[build]\n")  # config stays
         self.assertEqual(self.read(".cargo/registry/index/a"), "crate")  # through the link
 
-    def test_moves_data_and_keeps_config(self):
+    def test_moves_data_and_keeps_config(self) -> None:
         self.write("Programs/App/app.bin", "binary")
         self.write(".local/share/JetBrains/Toolbox/apps/idea/bin/idea.sh", "#!/bin/sh")
         self.write(".local/share/JetBrains/Toolbox/.settings.json", "{}")
@@ -313,7 +453,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.apply(), ([], []))
         self.assertEqual(self.tree(), before)
 
-    def test_unexpected_states_are_reported_and_untouched(self):
+    def test_unexpected_states_are_reported_and_untouched(self) -> None:
         os.makedirs(self.H("elsewhere"))
         os.symlink(self.H("elsewhere"), self.H("Programs"))  # link to somewhere else
         self.write("Android/Sdk", "a file")  # file where a folder belongs
@@ -340,14 +480,14 @@ class BulkTest(BulkBase):
         self.assertIn("a file, not a folder", text)
         self.assertIn("data in both", text)
 
-    def test_bulk_is_a_file_stops_everything(self):
+    def test_bulk_is_a_file_stops_everything(self) -> None:
         self.write("Bulk", "oops")
         self.write("Programs/a", "a")
         before = self.tree()
         self.assertEqual(self.apply(), ([], ["bulk"]))
         self.assertEqual(self.tree(), before)
 
-    def test_plain_bulk_folder_is_converted_first_or_deferred(self):
+    def test_plain_bulk_folder_is_converted_first_or_deferred(self) -> None:
         os.makedirs(self.B())
         self.write("Programs/a", "a")
         deferred, _ = self.apply()
@@ -357,7 +497,7 @@ class BulkTest(BulkBase):
             self.assertEqual(f.read(), "bulk\n")
         self.assertTrue(os.path.isdir(self.H("Programs")) and not os.path.islink(self.H("Programs")))
 
-    def test_busy_item_waits_for_boot_then_moves(self):
+    def test_busy_item_waits_for_boot_then_moves(self) -> None:
         self.write("Programs/a", "a")
         self.write(".local/share/JetBrains/Toolbox/apps/idea/x", "x")
         self.write(".m2/repository/x.jar", "jar")
@@ -383,11 +523,11 @@ class BulkTest(BulkBase):
         self.assertLink(".local/share/JetBrains/Toolbox/apps", "apps/jetbrains")
         self.assertEqual(self.read(".local/share/JetBrains/Toolbox/apps/idea/x"), "x")
 
-    def test_boot_gives_up_after_two_attempts(self):
+    def test_boot_gives_up_after_two_attempts(self) -> None:
         self.write("Programs/a", "a")
         self.busy = {self.H("Programs")}
         self.apply()
-        sent = []
+        sent: list[str] = []
         self.m.alert = lambda title, body: sent.append(title)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 3)  # still busy: waits again
@@ -399,7 +539,7 @@ class BulkTest(BulkBase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 0)  # no flag: nothing to do
 
-    def test_written_during_switch_is_rolled_back(self):
+    def test_written_during_switch_is_rolled_back(self) -> None:
         self.write("Programs/a", "a")
         self.m.u_late_write = lambda j: True
         deferred, _ = self.apply()
@@ -411,11 +551,11 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertEqual([n for n in os.listdir(self.home) if ".bulk-" in n], [])
 
-    def test_written_during_copy_is_retried(self):
+    def test_written_during_copy_is_retried(self) -> None:
         self.write("Programs/a", "a")
         real = self.m.u_prepare
 
-        def prepare(src, new, nocow):
+        def prepare(src: str, new: str, nocow: bool) -> object:
             stamp = real(src, new, nocow)
             self.write("Programs/late", "late")  # a write after the copy started
             return stamp
@@ -427,13 +567,13 @@ class BulkTest(BulkBase):
         self.assertFalse(os.path.islink(self.H("Programs")))
         self.assertFalse(os.path.exists(self.B("apps.bulk-new")))
 
-    def crash_in(self, name, after_calls):
+    def crash_in(self, name: str, after_calls: int) -> tuple[Callable[..., object], Callable[..., object]]:
         """Make os.<name> raise Crash after `after_calls` successful calls
         inside u_commit/u_finish, like a kill at that instant."""
-        real = getattr(os, name)
+        real = cast("Callable[..., object]", getattr(os, name))
         calls = {"n": 0}
 
-        def wrapped(*a, **k):
+        def wrapped(*a: object, **k: object) -> object:
             if calls["n"] >= after_calls:
                 raise Crash()
             calls["n"] += 1
@@ -441,12 +581,12 @@ class BulkTest(BulkBase):
 
         return real, wrapped
 
-    def run_crash(self, fn_name, os_name, after_calls):
+    def run_crash(self, fn_name: str, os_name: str, after_calls: int) -> None:
         m = self.m
-        real_fn = getattr(m, fn_name)
+        real_fn = cast("Callable[..., object]", getattr(m, fn_name))
         real_os, wrapped = self.crash_in(os_name, after_calls)
 
-        def patched(*a):
+        def patched(*a: object) -> object:
             setattr(os, os_name, wrapped)
             try:
                 return real_fn(*a)
@@ -458,7 +598,7 @@ class BulkTest(BulkBase):
             m.apply(self.ctx)
         setattr(m, fn_name, real_fn)
 
-    def check_recovered(self):
+    def check_recovered(self) -> None:
         self.assertEqual(self.apply(), ([], []), self.out)
         self.assertLink("Programs", "apps")
         self.assertEqual(self.read("Programs/a"), "a")
@@ -466,11 +606,11 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertEqual([n for r, d, f in os.walk(self.home) for n in d + f if ".bulk-" in n], [])
 
-    def setup_programs(self):
+    def setup_programs(self) -> None:
         self.write("Programs/a", "a")
         self.write("Programs/sub/b", "b")
 
-    def test_crash_after_first_rename_is_undone(self):
+    def test_crash_after_first_rename_is_undone(self) -> None:
         self.setup_programs()
         self.run_crash("u_commit", "rename", 1)  # Programs -> old done, new -> T not
         self.assertFalse(os.path.lexists(self.H("Programs")))
@@ -478,14 +618,14 @@ class BulkTest(BulkBase):
         self.check_recovered()
         self.assertIn("undid an interrupted move", self.out)
 
-    def test_crash_before_symlink_is_undone(self):
+    def test_crash_before_symlink_is_undone(self) -> None:
         self.setup_programs()
         self.run_crash("u_commit", "symlink", 0)  # both renames done, no link
         self.assertFalse(os.path.lexists(self.H("Programs")))
         self.assertTrue(os.path.isfile(self.B("apps/a")))
         self.check_recovered()
 
-    def test_crash_while_deleting_old_tree_is_finished(self):
+    def test_crash_while_deleting_old_tree_is_finished(self) -> None:
         self.setup_programs()
         self.run_crash("u_finish", "unlink", 0)  # switched, old tree not deleted yet
         self.assertLink("Programs", "apps")
@@ -493,11 +633,11 @@ class BulkTest(BulkBase):
         self.check_recovered()
         self.assertIn("deleted the old copy", self.out)
 
-    def test_crash_during_copy_leaves_no_trace(self):
+    def test_crash_during_copy_leaves_no_trace(self) -> None:
         self.setup_programs()
         real = self.m.copy_tree
 
-        def copy(src, dst, nocow):
+        def copy(src: str, dst: str, nocow: bool) -> None:
             real(src, dst, nocow)
             raise Crash()
 
@@ -508,7 +648,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.check_recovered()
 
-    def test_crash_in_nocow_rewrite_is_undone(self):
+    def test_crash_in_nocow_rewrite_is_undone(self) -> None:
         # AVD already linked, but holding copy-on-write files (e.g. an old
         # subvolume renamed in, or +C removed by hand).
         self.write(".android/x", "x")
@@ -524,7 +664,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read(".android/avd/disk.img"), "disk")
         self.assertEqual(self.m.cow_data(self.B("emulators/android/avd")), (0, False))
 
-    def test_old_subvolume_is_renamed_in(self):
+    def test_old_subvolume_is_renamed_in(self) -> None:
         os.makedirs(self.H("Downloads/iso"))
         self.write("Downloads/iso/f.iso", "iso")
         st = os.lstat(self.H("Downloads/iso"))
@@ -535,7 +675,7 @@ class BulkTest(BulkBase):
         self.assertTrue(self.m.is_subvol(self.B("iso")))  # same subvolume, now nested in Bulk
         self.assertEqual(self.read("Downloads/iso/f.iso"), "iso")
 
-    def test_old_avd_subvolume_is_copied_into_nocow(self):
+    def test_old_avd_subvolume_is_copied_into_nocow(self) -> None:
         self.write(".android/avd/disk.img", "disk")
         st = os.lstat(self.H(".android/avd"))
         self.subvols.add((st.st_dev, st.st_ino))
@@ -544,11 +684,11 @@ class BulkTest(BulkBase):
         self.assertLink(".android/avd", "emulators/android/avd")
         self.assertEqual(self.m.cow_data(self.B("emulators/android/avd")), (0, False))
 
-    def unset_nocow(self, rel):
+    def unset_nocow(self, rel: str) -> None:
         st = os.lstat(self.B(rel))
         self.nocow.discard((st.st_dev, st.st_ino))
 
-    def test_emulators_parent_without_nocow_is_repaired_in_place(self):
+    def test_emulators_parent_without_nocow_is_repaired_in_place(self) -> None:
         # +C belongs to emulators/ and emulators/android too (future emulator
         # disk folders inherit it): a parent that lost it is not "ok".
         self.write(".android/x", "x")
@@ -571,7 +711,7 @@ class BulkTest(BulkBase):
         self.assertEqual(left, 0, text)
         self.assertIn("+C (NOCOW): yes\n", text)
 
-    def test_avd_without_link_is_still_checked_for_nocow(self):
+    def test_avd_without_link_is_still_checked_for_nocow(self) -> None:
         # No ~/.android yet: the AVD folder exists in ~/Bulk without its link.
         # A parent without +C or a copy-on-write file in it is not "ok" there either.
         self.apply()
@@ -594,7 +734,7 @@ class BulkTest(BulkBase):
         left, text = self.report()
         self.assertIn("+C (NOCOW): yes\n", text)
 
-    def test_symlinked_emulators_gets_no_nocow_line(self):
+    def test_symlinked_emulators_gets_no_nocow_line(self) -> None:
         # ~/Bulk/emulators is a symlink: NEEDS A LOOK, and no +C reading of
         # the folders it points to (outside ~/Bulk).
         self.apply()
@@ -608,7 +748,7 @@ class BulkTest(BulkBase):
         self.assertNotIn("+C (NOCOW)", text)
         self.assertEqual(self.m.nocow_parents(self.ctx, self.m.BY_ID["avd"]), [])
 
-    def test_nocow_rewrite_also_sets_parents(self):
+    def test_nocow_rewrite_also_sets_parents(self) -> None:
         self.make_avd_cow()
         self.unset_nocow("emulators")
         self.assertEqual(self.apply(), ([], []), self.out)
@@ -616,7 +756,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.m.cow_data(self.B("emulators/android/avd")), (0, False))
         self.assertEqual(self.read(".android/avd/disk.img"), "old")
 
-    def test_existing_cow_emulators_folder_gets_nocow(self):
+    def test_existing_cow_emulators_folder_gets_nocow(self) -> None:
         # A ~/Bulk/emulators made by hand before (copy-on-write, with other
         # data): it gets +C (only files created later are affected), nothing moves.
         self.apply()
@@ -628,7 +768,7 @@ class BulkTest(BulkBase):
         self.assertFalse(self.m.is_nocow(self.B("emulators/other")))  # not ours: left alone
         self.assertEqual(self.read("Bulk/emulators/other/x.img"), "x")
 
-    def test_empty_old_folder_is_replaced_by_link(self):
+    def test_empty_old_folder_is_replaced_by_link(self) -> None:
         os.makedirs(self.H(".var/app/ai.lmstudio.lm-studio/.lmstudio/models"))
         self.assertEqual(self.m.classify(self.ctx, self.m.BY_ID["models"], set()), ("move", "empty"))
         self.apply()
@@ -636,7 +776,7 @@ class BulkTest(BulkBase):
         # LM Studio not installed: no override.
         self.assertEqual(self.flatpaks, {})
 
-    def test_steam_library_and_override(self):
+    def test_steam_library_and_override(self) -> None:
         self.flatpaks["com.valvesoftware.Steam"] = set()
         self.write(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/G/g", "game")
         self.apply()
@@ -648,7 +788,7 @@ class BulkTest(BulkBase):
         _, text = self.report()
         self.assertIn("of games here, in /home snapshots", text)
 
-    def test_plan_changes_nothing(self):
+    def test_plan_changes_nothing(self) -> None:
         self.write("Programs/a", "a")
         self.write(".android/avd/d.img", "d")
         before = self.tree()
@@ -658,7 +798,7 @@ class BulkTest(BulkBase):
         self.assertIn("real copy into a +C folder", text)
         self.assertGreater(left, 0)
 
-    def test_convert_plan_drops_bulk_paths(self):
+    def test_convert_plan_drops_bulk_paths(self) -> None:
         with open(self.m.CONVERT_PLAN, "w") as f:
             f.write(
                 f"# header\ncopy {self.H('.cache')}\ncopy {self.H('.android/avd')}\n"
@@ -668,7 +808,7 @@ class BulkTest(BulkBase):
         with open(self.m.CONVERT_PLAN) as f:
             self.assertEqual(f.read(), f"# header\ncopy {self.H('.cache')}\ncopy {self.H('Workspace')}\n")
 
-    def test_rmtree_handles_read_only_trees(self):
+    def test_rmtree_handles_read_only_trees(self) -> None:
         self.write("ro/a/b", "b")
         os.chmod(self.H("ro/a/b"), 0o444)
         os.chmod(self.H("ro/a"), 0o555)
@@ -677,7 +817,7 @@ class BulkTest(BulkBase):
         self.assertFalse(os.path.lexists(self.H("ro")))
 
     # ---- review round 2 ----
-    def make_avd_cow(self):
+    def make_avd_cow(self) -> None:
         """AVD linked, but holding a copy-on-write file: state nocow."""
         self.write(".android/x", "x")
         self.apply()
@@ -686,11 +826,11 @@ class BulkTest(BulkBase):
         self.nocow.discard((st.st_dev, st.st_ino))
         self.assertEqual(self.m.classify(self.ctx, self.m.BY_ID["avd"], {"apps"})[0], "nocow")
 
-    def test_nocow_rewrite_written_during_switch_is_rolled_back(self):
+    def test_nocow_rewrite_written_during_switch_is_rolled_back(self) -> None:
         self.make_avd_cow()
         m = self.m
 
-        def late(j):
+        def late(j: dict[str, Any]) -> bool:
             # A still-open fd writes the latest state into the old tree.
             with open(os.path.join(j["old"], "disk.img"), "w") as f:
                 f.write("latest")
@@ -703,11 +843,11 @@ class BulkTest(BulkBase):
         self.assertEqual([n for n in os.listdir(self.B("emulators/android")) if ".bulk-" in n], [])
         self.assertEqual(self.journals(), [])
 
-    def test_written_on_both_sides_keeps_both(self):
+    def test_written_on_both_sides_keeps_both(self) -> None:
         self.write("Programs/a", "a")
         m = self.m
 
-        def late(j):
+        def late(j: dict[str, Any]) -> bool:
             self.write("Programs/through-link", "new")  # through the fresh link, into the copy
             with open(os.path.join(j["old"], "a"), "w") as f:
                 f.write("late")  # and into the old tree
@@ -732,7 +872,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.apply(), ([], []), self.out)
         self.assertEqual(self.journals(), [])
 
-    def test_recreated_old_path_after_crash_is_not_deleted(self):
+    def test_recreated_old_path_after_crash_is_not_deleted(self) -> None:
         self.setup_programs()
         self.run_crash("u_commit", "rename", 1)  # Programs -> old, power loss
         self.assertTrue(os.path.exists(self.m.FLAG))  # the boot service will run
@@ -750,7 +890,7 @@ class BulkTest(BulkBase):
         shutil.rmtree(self.H("Programs"))
         self.check_recovered()
 
-    def test_boot_recovers_without_flag(self):
+    def test_boot_recovers_without_flag(self) -> None:
         self.setup_programs()
         self.run_crash("u_commit", "rename", 1)
         os.remove(self.m.FLAG)  # e.g. an older run's state
@@ -760,12 +900,12 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read("Programs/sub/b"), "b")
         self.assertEqual(self.journals(), [])
 
-    def test_failed_recovery_is_a_problem(self):
+    def test_failed_recovery_is_a_problem(self) -> None:
         self.setup_programs()
         self.run_crash("u_finish", "unlink", 0)
         real = self.m.u_finish
 
-        def fail(j):
+        def fail(j: dict[str, Any]) -> None:
             raise PermissionError(13, "Permission denied", j["old"])
 
         self.m.u_finish = fail
@@ -777,21 +917,17 @@ class BulkTest(BulkBase):
         self.m.u_finish = real
         self.check_recovered()
 
-    def test_entries_not_owned_are_not_moved(self):
+    def test_entries_not_owned_are_not_moved(self) -> None:
         self.write(".m2/repository/org/x.jar", "jar")
-        real = os.getuid
-        os.getuid = lambda: 0  # "every file belongs to someone else"
-        try:
+        with mock.patch.object(os, "getuid", return_value=0):  # "every file belongs to someone else"
             deferred, problems = self.apply()
-        finally:
-            os.getuid = real
         self.assertIn("m2", problems)
         self.assertIn("sudo chown -R root:", self.out)
         self.assertFalse(os.path.islink(self.H(".m2/repository")))
         self.assertEqual(self.read(".m2/repository/org/x.jar"), "jar")
         self.assertFalse(os.path.exists(self.B("toolchains/jvm/m2/repository.bulk-new")))
 
-    def test_empty_old_folder_next_to_filled_target_gets_the_link(self):
+    def test_empty_old_folder_next_to_filled_target_gets_the_link(self) -> None:
         self.write(".m2/repository/x.jar", "jar")
         self.apply()
         os.unlink(self.H(".m2/repository"))
@@ -800,14 +936,14 @@ class BulkTest(BulkBase):
         self.assertEqual(self.apply(), ([], []))
         self.assertEqual(self.read(".m2/repository/x.jar"), "jar")
 
-    def test_convert_plan_with_blank_lines(self):
+    def test_convert_plan_with_blank_lines(self) -> None:
         with open(self.m.CONVERT_PLAN, "w") as f:
             f.write(f"# header\n\ncopy {self.H('.android/avd')}\n   \ncopy {self.H('Workspace')}\n")
         self.assertEqual(self.apply(), ([], []), self.out)
         with open(self.m.CONVERT_PLAN) as f:
             self.assertEqual(f.read(), f"# header\n\n   \ncopy {self.H('Workspace')}\n")
 
-    def test_cli_plan_as_user(self):
+    def test_cli_plan_as_user(self) -> None:
         env = dict(
             os.environ,
             BTRFS_BULK_HOME=self.home,
@@ -829,13 +965,13 @@ class BulkTest(BulkBase):
         self.assertEqual(r.returncode, 2)
 
     # ---- review round 3 ----
-    def crash_after_late_write(self, through_link=None):
+    def crash_after_late_write(self, through_link: str | None = None) -> None:
         """Something writes into the old tree right after the switch, then a
         kill/power loss hits before the last check finished."""
         m = self.m
         real = m.u_late_write
 
-        def late(j):
+        def late(j: dict[str, Any]) -> bool:
             names = os.listdir(j["old"])
             name = "disk.img" if "disk.img" in names else "a"
             with open(os.path.join(j["old"], name), "w") as f:
@@ -850,7 +986,7 @@ class BulkTest(BulkBase):
         m.u_late_write = real
         self.assertEqual(len(self.journals()), 1)
 
-    def test_crash_after_late_write_is_rolled_back(self):
+    def test_crash_after_late_write_is_rolled_back(self) -> None:
         self.setup_programs()
         self.crash_after_late_write()
         self.assertLink("Programs", "apps")  # the switch was complete
@@ -865,7 +1001,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertEqual([n for r, d, f in os.walk(self.home) for n in d + f if ".bulk-" in n], [])
 
-    def test_crash_after_late_write_in_nocow_rewrite_is_rolled_back(self):
+    def test_crash_after_late_write_in_nocow_rewrite_is_rolled_back(self) -> None:
         self.make_avd_cow()
         self.crash_after_late_write()
         self.assertTrue(self.m.jread("avd")["bulk_only"])
@@ -876,7 +1012,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertEqual([n for n in os.listdir(self.B("emulators/android")) if ".bulk-" in n], [])
 
-    def test_crash_after_writes_on_both_sides_keeps_both(self):
+    def test_crash_after_writes_on_both_sides_keeps_both(self) -> None:
         self.setup_programs()
         self.crash_after_late_write(through_link="Programs/through-link")
         deferred, problems = self.apply()
@@ -893,7 +1029,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.apply(), ([], []), self.out)
         self.assertEqual(self.journals(), [])
 
-    def test_crash_with_journal_without_stamp2_keeps_both(self):
+    def test_crash_with_journal_without_stamp2_keeps_both(self) -> None:
         # A journal of an older version: no stamp2, the copy's side is unknown.
         self.setup_programs()
         self.crash_after_late_write()
@@ -905,11 +1041,11 @@ class BulkTest(BulkBase):
         self.assertIn("written to on both sides", self.out)
         self.assertTrue([n for n in os.listdir(self.home) if n.startswith("Programs.bulk-old-")])
 
-    def test_conflict_inside_bulk_does_not_block(self):
+    def test_conflict_inside_bulk_does_not_block(self) -> None:
         self.make_avd_cow()
         m = self.m
 
-        def late(j):
+        def late(j: dict[str, Any]) -> bool:
             with open(os.path.join(j["old"], "disk.img"), "w") as f:
                 f.write("late")
             self.write(".android/avd/new.img", "new")  # into the copy, in use now
@@ -927,7 +1063,7 @@ class BulkTest(BulkBase):
         self.assertIn("NEEDS A LOOK", text)
         self.assertIn("snapshots do not wait for it", text)
 
-    def keep_cli(self, *args):
+    def keep_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = dict(
             os.environ,
             BTRFS_BULK_HOME=self.home,
@@ -939,7 +1075,7 @@ class BulkTest(BulkBase):
             [sys.executable, "-I", "-B", TOOL, *args], check=False, env=env, capture_output=True, text=True
         )
 
-    def test_keep_and_unkeep(self):
+    def test_keep_and_unkeep(self) -> None:
         self.write(".m2/repository/x.jar", "jar")
         r = self.keep_cli("keep", "m2", "bogus")
         self.assertEqual(r.returncode, 2)
@@ -976,7 +1112,7 @@ class BulkTest(BulkBase):
         self.assertLink(".m2/repository", "toolchains/jvm/m2/repository")
         self.assertFalse(os.path.islink(self.H("Downloads/iso")))
 
-    def test_keep_a_linked_item_says_so_and_drops_the_boot_flag(self):
+    def test_keep_a_linked_item_says_so_and_drops_the_boot_flag(self) -> None:
         self.write(".m2/repository/x.jar", "jar")
         self.write("Programs/a", "a")
         self.busy = {self.H("Programs")}
@@ -997,7 +1133,7 @@ class BulkTest(BulkBase):
         self.assertFalse(os.path.islink(self.H("Programs")))
 
     # ---- review round 3, second pass ----
-    def test_crash_partway_through_deleting_old_tree_is_finished(self):
+    def test_crash_partway_through_deleting_old_tree_is_finished(self) -> None:
         # Some files of the old tree are gone already: their folders' ctimes
         # changed, which must not look like a late write (a rollback onto the
         # half-deleted tree would delete the only full copy).
@@ -1016,7 +1152,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.journals(), [])
         self.assertEqual([n for r, d, f in os.walk(self.home) for n in d + f if ".bulk-" in n], [])
 
-    def test_crash_partway_through_deleting_old_tree_in_nocow_rewrite(self):
+    def test_crash_partway_through_deleting_old_tree_in_nocow_rewrite(self) -> None:
         self.make_avd_cow()
         self.write(".android/avd/img3", "img3")
         for i in range(4):
@@ -1033,7 +1169,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.m.cow_data(self.B("emulators/android/avd")), (0, False))
         self.assertEqual([n for n in os.listdir(self.B("emulators/android")) if ".bulk-" in n], [])
 
-    def test_crash_while_repair_deletes_old_tree_is_finished(self):
+    def test_crash_while_repair_deletes_old_tree_is_finished(self) -> None:
         # A journal of an older version (no "finishing"): the repair checks,
         # marks it, deletes; a second kill there is finished by the next run.
         self.write("Programs/top", "top")
@@ -1052,7 +1188,7 @@ class BulkTest(BulkBase):
             self.assertEqual(self.read(f"Programs/sub/f{i}"), str(i))
         self.assertEqual(self.journals(), [])
 
-    def test_kept_parent_with_data_in_child_needs_a_look(self):
+    def test_kept_parent_with_data_in_child_needs_a_look(self) -> None:
         self.write("Programs/a", "a")
         r = self.keep_cli("keep", "apps")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1070,7 +1206,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.apply(), ([], []), self.out)
         self.assertFalse(os.path.islink(self.H(".local/share/JetBrains/Toolbox/apps")))
 
-    def test_keep_file_not_utf8_or_unreadable(self):
+    def test_keep_file_not_utf8_or_unreadable(self) -> None:
         self.write(".m2/repository/x.jar", "jar")
         with open(self.m.KEEP, "wb") as f:
             f.write(b"m2\n# caf\xe9 note\nbad\xff\n")
@@ -1097,7 +1233,7 @@ class BulkTest(BulkBase):
         self.assertIn("cannot update", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
-    def test_npm_cache_clean_removes_link_and_apply_repairs(self):
+    def test_npm_cache_clean_removes_link_and_apply_repairs(self) -> None:
         self.write(".npm/_cacache/content-v2/a", "a")
         self.write(".npm/_logs/debug.log", "log")
         self.assertEqual(self.apply(), ([], []), self.out)
@@ -1122,7 +1258,7 @@ class BulkTest(BulkBase):
             f.write("y")
         self.assertEqual(self.m.classify(self.ctx, self.m.BY_ID["m2"], {"apps"})[0], "unexpected")
 
-    def test_go_clean_modcache_read_only_stale_copy(self):
+    def test_go_clean_modcache_read_only_stale_copy(self) -> None:
         self.write("go/pkg/mod/m@v1/a.go", "a")
         self.assertEqual(self.apply(), ([], []), self.out)
         os.chmod(self.B("toolchains/go/pkg/mod/m@v1"), 0o555)  # Go's module cache is read-only
@@ -1135,7 +1271,7 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read("go/pkg/mod/m@v2/b.go"), "b")
         self.assertFalse(os.path.exists(self.B("toolchains/go/pkg/mod/m@v1")))
 
-    def test_nocow_rewrite_failure_without_journal_is_bulk_only(self):
+    def test_nocow_rewrite_failure_without_journal_is_bulk_only(self) -> None:
         self.make_avd_cow()
         self.m.free_bytes = lambda path: 0
         deferred, problems = self.apply()
@@ -1148,12 +1284,12 @@ class BulkTest(BulkBase):
 
     # ---- crash and race points found by the adversarial review of recover() ----
 
-    def test_delete_directly_in_old_top_folder_is_a_late_write(self):
+    def test_delete_directly_in_old_top_folder_is_a_late_write(self) -> None:
         self.write("Programs/a", "a")
         self.write("Programs/lock", "L")
         real = self.m.u_late_write
 
-        def late(j):
+        def late(j: dict[str, Any]) -> bool:
             os.unlink(os.path.join(j["old"], "lock"))  # an app removes its lock file
             return real(j)
 
@@ -1164,13 +1300,13 @@ class BulkTest(BulkBase):
         self.assertFalse(os.path.exists(self.H("Programs/lock")))
         self.assertTrue(os.path.exists(self.H("Programs/a")))
 
-    def test_undo_after_kill_keeps_writes_made_through_the_link(self):
+    def test_undo_after_kill_keeps_writes_made_through_the_link(self) -> None:
         self.write("Programs/a", "a")
         m = self.m
         m.u_late_write = lambda j: True
         real_rb = m.u_rollback
 
-        def rb(j):
+        def rb(j: dict[str, Any]) -> None:
             raise Crash()
 
         m.u_rollback = rb
@@ -1185,12 +1321,19 @@ class BulkTest(BulkBase):
         self.assertEqual(len(found), 1, found)
         self.assertTrue(os.path.exists(self.m.jpath("apps")))
 
-    def test_link_removed_after_commit_keeps_the_written_copy(self):
+    def test_journal_ids_stay_in_the_state_folder(self) -> None:
+        for ident in ("apps", "steam-570", "steam-1.2"):
+            self.assertEqual(os.path.dirname(self.m.jpath(ident)), os.path.dirname(self.m.jpath("apps")))
+        for ident in ("", "../x", "steam-1/../../etc", "a/b", ".hidden", "steam-1..2"):
+            with self.subTest(ident=ident), self.assertRaises(ValueError):
+                self.m.jpath(ident)
+
+    def test_link_removed_after_commit_keeps_the_written_copy(self) -> None:
         self.write("Programs/a", "a")
         m = self.m
         real = m.u_late_write
 
-        def boom(j):
+        def boom(j: dict[str, Any]) -> bool:
             raise Crash()
 
         m.u_late_write = boom
@@ -1205,7 +1348,7 @@ class BulkTest(BulkBase):
         self.assertEqual(len(found), 1, found)
         self.assertTrue(os.path.exists(self.H("Programs/a")))
 
-    def test_subvol_moved_then_old_path_recreated_is_not_deleted(self):
+    def test_subvol_moved_then_old_path_recreated_is_not_deleted(self) -> None:
         self.write("go/pkg/mod/a", "data")
         L = self.H("go/pkg/mod")
         st = os.lstat(L)
@@ -1213,7 +1356,7 @@ class BulkTest(BulkBase):
         m = self.m
         real = m.u_move_subvol
 
-        def mv(Lp, Tp):
+        def mv(Lp: str, Tp: str) -> None:
             if os.path.isdir(Tp):
                 os.rmdir(Tp)
             os.rename(Lp, Tp)
@@ -1229,7 +1372,7 @@ class BulkTest(BulkBase):
         self.assertTrue(os.path.exists(self.B("toolchains/go/pkg/mod/a")))
         self.assertTrue(os.path.exists(self.H("go/pkg/mod/b")))
 
-    def test_toolchain_targets_are_nested_and_their_parents_made_on_the_way(self):
+    def test_toolchain_targets_are_nested_and_their_parents_made_on_the_way(self) -> None:
         # toolchains/<language>/<tool>/<the folder's own name>, all copy-on-write;
         # the Android SDK is the tool itself (toolchains/android/sdk).
         tc = [i for i in self.m.ITEMS if i.target.startswith("toolchains/")]
@@ -1257,6 +1400,7 @@ class BulkTest(BulkBase):
             if i.id == "android-sdk":
                 continue
             self.assertEqual(len(i.target.split("/")), 4, i.target)
+            assert i.link is not None
             self.assertEqual(os.path.basename(i.target), os.path.basename(i.link), i.id)
         # Grouped by treatment: exactly the NOCOW items live below emulators/.
         self.assertEqual(self.m.NOCOW_TOP, "emulators")
@@ -1308,7 +1452,7 @@ class BulkTest(BulkBase):
         self.assertEqual(left, 0, text)
         self.assertIn("~/.m2/repository -> ~/Bulk/toolchains/jvm/m2/repository", text)
 
-    def test_symlink_or_file_in_a_toolchain_parent_is_untouched(self):
+    def test_symlink_or_file_in_a_toolchain_parent_is_untouched(self) -> None:
         self.apply()
         os.makedirs(self.H("elsewhere"))
         shutil.rmtree(self.B("toolchains/jvm"))
@@ -1329,7 +1473,7 @@ class BulkTest(BulkBase):
         self.assertIn("~/Bulk/toolchains/jvm is a symlink", text)
         self.assertIn("~/Bulk/toolchains/rust/cargo is a file", text)
 
-    def test_old_toolchain_subvolume_is_renamed_into_a_nested_target(self):
+    def test_old_toolchain_subvolume_is_renamed_into_a_nested_target(self) -> None:
         self.write("go/pkg/mod/a", "data")
         st = os.lstat(self.H("go/pkg/mod"))
         self.subvols.add((st.st_dev, st.st_ino))
@@ -1337,6 +1481,18 @@ class BulkTest(BulkBase):
         self.assertLink("go/pkg/mod", "toolchains/go/pkg/mod")
         self.assertTrue(self.m.is_subvol(self.B("toolchains/go/pkg/mod")))
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
+
+
+class GibTest(unittest.TestCase):
+    """bulk shows GiB from a tenth of a GiB on (old data worth pointing out), else whole MiB."""
+
+    def test_threshold_and_units(self) -> None:
+        tenth = bulk_domain.BIG // 10 + 1
+        self.assertEqual(bulk_domain.gib(tenth), "0.1 GiB")
+        self.assertEqual(bulk_domain.gib(tenth - 2), "102 MiB")
+        self.assertEqual(bulk_domain.gib(bulk_domain.BIG // 10), "102 MiB")  # just under a tenth
+        self.assertEqual(bulk_domain.gib(3 * bulk_domain.BIG), "3.0 GiB")
+        self.assertEqual(bulk_domain.gib((5 << 20) + (1 << 19)), "5 MiB")  # floored
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ It only reads from github.com and writes nothing outside the temporary directory
 """
 
 import argparse
+from collections.abc import Sequence
 import hashlib
 import re
 import shutil
@@ -92,9 +93,9 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def parse_checksums(text: str) -> dict:
+def parse_checksums(text: str) -> dict[str, str]:
     """Map file name -> SHA256 from a goreleaser checksums.txt."""
-    listed = {}
+    listed: dict[str, str] = {}
     for line in text.splitlines():
         parts = line.split()
         if len(parts) != 2:
@@ -160,7 +161,7 @@ def warn_skip_cosign(tag: str) -> None:
     )
 
 
-def run(tag: str, skip_cosign: bool) -> list:
+def run(tag: str, skip_cosign: bool) -> list[str]:
     if not TAG_RE.fullmatch(tag):
         raise PinError(f"'{tag}' is not a release tag like v0.16.0")
     cosign = shutil.which("cosign")
@@ -177,11 +178,12 @@ def run(tag: str, skip_cosign: bool) -> list:
         if skip_cosign:
             warn_skip_cosign(tag)
         else:
+            assert cosign is not None
             verify_cosign(cosign, workdir, tag)
             print(f"cosign: checksums.txt for {tag} is signed by {certificate_identity(tag)}", file=sys.stderr)
 
         listed = parse_checksums((workdir / CHECKSUMS).read_text(encoding="utf-8"))
-        lines = []
+        lines: list[str] = []
         for arch in ARCHES:
             asset = asset_name(tag, arch)
             if asset not in listed:
@@ -197,7 +199,7 @@ def run(tag: str, skip_cosign: bool) -> list:
         return lines
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print setup-invowk SHA256 pins for an invowk release.")
     parser.add_argument("version", help="exact release tag, e.g. v0.16.0")
     parser.add_argument(

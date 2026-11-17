@@ -11,6 +11,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_snapshot_runtime -v
 """
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess
@@ -25,7 +27,7 @@ BTRFS = os.path.dirname(HERE)
 RUNTIME = os.path.join(BTRFS, "btrfs-snapshot")
 
 
-def shell_function(path, name):
+def shell_function(path: str, name: str) -> str:
     """The definition of the shell function NAME in PATH ('name() {' to '}')."""
     with open(path) as f:
         text = f.read()
@@ -36,7 +38,11 @@ def shell_function(path, name):
 
 
 class CoreCacheArgsTest(unittest.TestCase):
-    def args(self, exclude="yes", skips=".local/share/containers", workspace_subvol=False):
+    skips: list[str]
+
+    def args(
+        self, exclude: str = "yes", skips: str = ".local/share/containers", workspace_subvol: bool = False
+    ) -> tuple[list[str], list[str]]:
         script = "\n".join(
             [
                 "set -Eeuo pipefail",
@@ -72,24 +78,24 @@ class CoreCacheArgsTest(unittest.TestCase):
             [ln for ln in lines if not ln.startswith(("arg ", "skip "))],
         )
 
-    def test_default_is_on_with_podman_kept_whole(self):
+    def test_default_is_on_with_podman_kept_whole(self) -> None:
         args, logs = self.args()
         self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/.local/share/containers"])
         self.assertEqual(logs, [])
         # What `caches` gets (it takes no --exclude-caches).
         self.assertEqual(self.skips, ["--caches-skip", "home=u/.local/share/containers"])
 
-    def test_off_keeps_the_skips_for_the_listing(self):
+    def test_off_keeps_the_skips_for_the_listing(self) -> None:
         args, _ = self.args(exclude="no")
         self.assertEqual(args, ["--caches-skip", "home=u/.local/share/containers"])
         self.assertEqual(self.skips, args)
 
-    def test_a_typo_warns_and_stays_on(self):
+    def test_a_typo_warns_and_stays_on(self) -> None:
         args, logs = self.args(exclude="nope")
         self.assertEqual(args[0], "--exclude-caches")
         self.assertEqual(logs, ["<4>btrfs-snapshot: SNAPSHOT_EXCLUDE_CACHES='nope' is not yes or no; using yes"])
 
-    def test_paths_go_to_the_source_that_holds_them(self):
+    def test_paths_go_to_the_source_that_holds_them(self) -> None:
         skips = "Workspace/big/target Workspace .local/share/containers/ ./notes"
         args, _ = self.args(skips=skips, workspace_subvol=True)
         self.assertEqual(
@@ -110,13 +116,13 @@ class CoreCacheArgsTest(unittest.TestCase):
         args, _ = self.args(skips="Workspace/big/target", workspace_subvol=False)
         self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/Workspace/big/target"])
 
-    def test_paths_outside_the_home_are_ignored_with_a_warning(self):
+    def test_paths_outside_the_home_are_ignored_with_a_warning(self) -> None:
         args, logs = self.args(skips="/etc ../other a/../../b x/./y ok *")
         self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/ok", "--caches-skip", "home=u/*"])
         self.assertEqual(len(logs), 4, logs)
         self.assertTrue(all("is not a path inside your home; ignored" in ln for ln in logs))
 
-    def test_empty_skip_list(self):
+    def test_empty_skip_list(self) -> None:
         args, logs = self.args(skips="")
         self.assertEqual((args, logs), (["--exclude-caches"], []))
 
@@ -125,7 +131,7 @@ class ListCachesTest(unittest.TestCase):
     """`btrfs-snapshot caches --json` must print only the core's JSON on
     stdout, also when the settings make core_cache_args warn."""
 
-    def test_warnings_go_to_stderr_not_into_the_json(self):
+    def test_warnings_go_to_stderr_not_into_the_json(self) -> None:
         script = "\n".join(
             [
                 "set -Eeuo pipefail",
@@ -171,7 +177,7 @@ class SnapStatusCachesTest(unittest.TestCase):
         ]
     )
 
-    def status(self, text):
+    def status(self, text: str | None) -> list[str]:
         with tempfile.TemporaryDirectory() as d:
             conf = os.path.join(d, "snapshots.conf")
             if text is not None:
@@ -196,12 +202,12 @@ class SnapStatusCachesTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.splitlines()
 
-    def cache_line(self, text):
+    def cache_line(self, text: str | None) -> str:
         lines = [ln for ln in self.status(text) if "cache folders (CACHEDIR.TAG)" in ln]
         self.assertEqual(len(lines), 1, lines)
         return lines[0]
 
-    def test_values(self):
+    def test_values(self) -> None:
         dropped = "  cache folders (CACHEDIR.TAG): dropped from new snapshots; which ones: cst btrfs snapshots caches"
         kept = "  cache folders (CACHEDIR.TAG): kept in new snapshots (SNAPSHOT_EXCLUDE_CACHES=no)"
         self.assertEqual(self.cache_line(None), dropped)
@@ -214,7 +220,7 @@ class SnapStatusCachesTest(unittest.TestCase):
         # As btrfs-snapshot sources it: a comment after the value is no part of it.
         self.assertEqual(self.cache_line("SNAPSHOT_EXCLUDE_CACHES=no   # off for now\n"), kept)
 
-    def test_the_nas_part_still_reads_the_same_file(self):
+    def test_the_nas_part_still_reads_the_same_file(self) -> None:
         self.assertIn("NAS backup: off", self.status("NAS_ENABLED=0\n"))
         on = [
             ln

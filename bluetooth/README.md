@@ -374,7 +374,7 @@ cst bluetooth status    # cst-bt-ldac48.service active; the headset's rate
 
 | Path | What |
 |---|---|
-| `~/.local/lib/cst/bt-ldac-watch` | A **copy** of `bluetooth/bt-ldac-watch`. |
+| `~/.local/lib/cst/bt-ldac-watch` | A **copy** of `bluetooth/bt-ldac-watch`, built as a zipapp with the packages it imports. |
 | `~/.config/systemd/user/cst-bt-ldac48.service` | The user unit, enabled for `default.target` (it starts with your session). |
 
 Why a copy, and not the file in this folder: the service then does not
@@ -470,8 +470,13 @@ replaces it with a backup of the current rule.
 | File | What it is |
 |---|---|
 | `../bluetooth-setup.sh` | The module: commands, sudo calls, restarts, checks. |
-| `bt-helper` | Python, no root: edits the `main.conf` text, renders and compares the WirePlumber rule and the LE Audio file, finds other WirePlumber files that set `monitor.bluez.properties`, asks `libwireplumber` for the role list it resolves, reads the settings (and prints the settings file with a changed `LE_AUDIO` line), parses `busctl`, `pactl` and `pw-dump` output and the watcher's log. It never writes a file. |
-| `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7). `apply` copies it to `~/.local/lib/cst/` for the user service `cst-bt-ldac48.service`. |
+| `domain.py` | Pure domain model: `main.conf` [General] rules, WirePlumber/systemd rendering and state classification, settings parsing/merging, journal failure parsing, and live state JSON parsing; for the watcher, what it sees in `pw-dump` (`snapshot`, `decide`), the `pactl` events and profiles that matter, and the one-attempt-per-connection rule (`Tracker`). No I/O or subprocesses. |
+| `ports.py` | Ports (`Protocol` interfaces): `BluetoothHostPort` for files, WirePlumber resolution, and stdin; `LiveAudioPort` for live PipeWire/PulseAudio state and profile switching. |
+| `adapters.py` | Local host adapter reading config files, scanning WirePlumber `.conf` directories, and resolving `bluez5.roles` through `libwireplumber`; `Live`, the watcher's `LiveAudioPort` over `pw-dump` and `pactl`. |
+| `ldac_watch.py` | The watcher's loop and command line: it listens to `pactl subscribe`, looks at the headset through `LiveAudioPort`, bounces the profile (LDAC, SBC, LDAC) when `Tracker` says so, and defers a stop signal until a bounce is done. |
+| `cli.py` | The `bt-helper` command line: argv to the `domain.py` rules through `BluetoothHostPort`, answers printed in the formats `bluetooth-setup.sh` parses. |
+| `bt-helper` | The Python entry point: only the bootstrap and a `main()` that runs `cli.py` with the local adapter. It never writes a file. |
+| `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7), only the bootstrap and a `main()` that runs `ldac_watch.py`; its docstring is the help. `apply` installs it as a zipapp (the program plus every CST package it imports, see `cst_core/installer.py`) at `~/.local/lib/cst/bt-ldac-watch` for the user service `cst-bt-ldac48.service`. |
 | `bluetooth.conf` | The default settings. |
 | `tests/test_bluetooth.py` | Unit tests (`python3 -I -B -m unittest`, from the repository root, runs them with all others), among them the LE Audio file: its text, off/on/off in a scratch home, `plan`, `revert`, `le-audio on\|off` (a fresh home without `~/.config/cst`, a settings file without a final newline, a symlinked one), the role check, other WirePlumber files, the bearer warning, and reading the watcher's last failure from its log. Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
 | `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a profile change by WirePlumber during it, the profile switch against a fake system, the install and removal steps with `systemctl` as a stub, and `apply` when the Bluetooth restart is declined. |

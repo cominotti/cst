@@ -22,6 +22,7 @@ home paths, such as ~/Workspace (a snapshotted subvolume) or
 ~/Bulk/toolchains, are fine.
 """
 
+from collections.abc import Iterable
 import os
 import re
 import unittest
@@ -34,12 +35,12 @@ HOME_PATH = re.compile(r"(?:~|\$\{?HOME\}?|/var/home/[\w.-]+|/home/[\w.-]+)/(?!\
 FORMER_NAMES = {"cst", "f44-tools"}
 
 
-def top_level_entries(files):
+def top_level_entries(files: Iterable[str]) -> set[str]:
     return {rel.split("/")[0] for rel in files}
 
 
-def offending_paths(text, folders, entries):
-    found = []
+def offending_paths(text: str, folders: set[str], entries: set[str]) -> list[str]:
+    found: list[str] = []
     for match in HOME_PATH.finditer(text):
         parts = match.group(0).rstrip(".:").split("/")[1:]
         for i, part in enumerate(parts):
@@ -50,7 +51,7 @@ def offending_paths(text, folders, entries):
 
 
 class RepoPathTest(unittest.TestCase):
-    def test_detector(self):
+    def test_detector(self) -> None:
         folders, entries = {"cst", "f44-tools", "mytools"}, {"cst", "AGENTS.md", "btrfs", "toolchains"}
         for bad in (
             "~/Workspace/github/cominotti/cst/cst btrfs install",
@@ -72,7 +73,7 @@ class RepoPathTest(unittest.TestCase):
         ):
             self.assertFalse(offending_paths(good, folders, entries), good)
 
-    def test_no_fixed_checkout_path(self):
+    def test_no_fixed_checkout_path(self) -> None:
         files = repo_files()
         folders = FORMER_NAMES | {os.path.basename(REPO)}
         entries = top_level_entries(files)

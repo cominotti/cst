@@ -11,9 +11,11 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest tests.mutation.tests.test_cst_mutation -v
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 import contextlib
 import hashlib
-import importlib.machinery
 import io
 import json
 import os
@@ -24,9 +26,17 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-import unittest
 from types import ModuleType
+from typing import Any
+import unittest
 from unittest import mock
+
+# Run directly (python3 -I -B tests/mutation/tests/test_cst_mutation.py): the checkout root holds the tests package.
+_CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
+from tests.script_loader import load_script
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
@@ -34,9 +44,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
 
 def load() -> ModuleType:
     # The helper has no .py extension, so it is loaded from its path.
-    mod = ModuleType("cst_mutation")
-    mod.__file__ = TOOL
-    importlib.machinery.SourceFileLoader("cst_mutation", TOOL).exec_module(mod)
+    mod = load_script(TOOL, "cst_mutation")
     return mod
 
 
@@ -232,9 +240,9 @@ def snapshot(repo: str) -> tuple[dict[str, tuple[int, int, str]], str]:
 
 
 class ParseArgsTest(unittest.TestCase):
-    def test_defaults(self):
-        o = M.parse_args(["swap/swap-status", "swap.tests.test_swap"])
-        self.assertEqual(o.helper, "swap/swap-status")
+    def test_defaults(self) -> None:
+        o = M.parse_args(["swap/domain.py", "swap.tests.test_swap"])
+        self.assertEqual(o.helper, "swap/domain.py")
         self.assertEqual(o.test_module, "swap.tests.test_swap")
         self.assertIsNone(o.base)  # run() uses main
         self.assertFalse(o.whole_file)
@@ -242,7 +250,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertIsNone(o.out)
         self.assertEqual(o.timeout, 60.0)
 
-    def test_options(self):
+    def test_options(self) -> None:
         o = M.parse_args(["./a/b", "a.t", "--functions", "f, g", "--functions", "g,h", "--out", "/x", "--timeout", "5"])
         self.assertEqual(o.helper, "a/b")
         self.assertEqual(o.functions, ("f", "g", "h"))
@@ -250,7 +258,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertTrue(M.parse_args(["a/b", "a.t", "--all"]).whole_file)
         self.assertEqual(M.parse_args(["a/b", "a.t", "--base", "HEAD~2"]).base, "HEAD~2")
 
-    def test_usage_errors(self):
+    def test_usage_errors(self) -> None:
         for argv in (
             [],
             ["a/b"],
@@ -278,7 +286,7 @@ class ParseArgsTest(unittest.TestCase):
 
 
 class RangesTest(unittest.TestCase):
-    def test_ranges_from_diff(self):
+    def test_ranges_from_diff(self) -> None:
         diff = (
             "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
             "@@ -3 +3 @@ def f():\n-a\n+b\n"  # one line, count left out
@@ -288,30 +296,30 @@ class RangesTest(unittest.TestCase):
         )
         self.assertEqual(M.ranges_from_diff(diff), [(3, 3), (11, 12), (30, 32)])
 
-    def test_ranges_from_diff_edges(self):
+    def test_ranges_from_diff_edges(self) -> None:
         self.assertEqual(M.ranges_from_diff(""), [])
         self.assertEqual(M.ranges_from_diff("@@ -1,2 +1,0 @@\n-a\n-b\n"), [])
         self.assertEqual(M.ranges_from_diff("+@@ -1 +1 @@ in a line\n"), [])  # not a hunk header
         self.assertEqual(M.ranges_from_diff("@@ -1 +1,2 @@\n@@ -5 +3,2 @@\n"), [(1, 4)])  # touching: joined
 
-    def test_merge_ranges(self):
+    def test_merge_ranges(self) -> None:
         self.assertEqual(M.merge_ranges([]), [])
         self.assertEqual(M.merge_ranges([(8, 9), (1, 3), (2, 5), (7, 7)]), [(1, 5), (7, 9)])
         self.assertEqual(M.merge_ranges([(1, 10), (2, 3)]), [(1, 10)])
 
-    def test_whole_file_range(self):
+    def test_whole_file_range(self) -> None:
         self.assertEqual(M.whole_file_range("a\nb\nc\n"), [(1, 3)])
         self.assertEqual(M.whole_file_range(""), [(1, 1)])
 
 
 class FunctionRangesTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         lines = HELPER_SOURCE.splitlines()
         self.assertTrue(lines[4].startswith("def double"))
         self.assertTrue(lines[9].strip().startswith("@staticmethod"))
         self.assertTrue(lines[17].startswith("async def later"))
 
-    def test_top_level_method_nested_async(self):
+    def test_top_level_method_nested_async(self) -> None:
         self.assertEqual(M.function_ranges(HELPER_SOURCE, ["double"]), [(5, 6)])
         self.assertEqual(M.function_ranges(HELPER_SOURCE, ["size"]), [(10, 15)])  # a method, with its decorator
         self.assertEqual(M.function_ranges(HELPER_SOURCE, ["inner"]), [(12, 13)])  # a nested def
@@ -319,28 +327,28 @@ class FunctionRangesTest(unittest.TestCase):
         self.assertEqual(M.function_ranges(HELPER_SOURCE, ["later", "double"]), [(5, 6), (18, 19)])
         self.assertEqual(M.function_ranges(HELPER_SOURCE, ["size", "inner"]), [(10, 15)])
 
-    def test_every_def_with_the_name(self):
+    def test_every_def_with_the_name(self) -> None:
         src = "def read(a): ...\n\n\ndef read(a, b): ...\n\n\ndef read(a, b, c):\n    return a\n"
         self.assertEqual(M.function_ranges(src, ["read"]), [(1, 1), (4, 4), (7, 8)])
 
-    def test_unknown_name_is_a_usage_error(self):
+    def test_unknown_name_is_a_usage_error(self) -> None:
         with self.assertRaisesRegex(M.UsageError, "no function named Box, nope"):
             M.function_ranges(HELPER_SOURCE, ["double", "Box", "nope"])  # a class is not a function
 
 
 class ConfigTest(unittest.TestCase):
-    def test_config_reads_back(self):
-        text = M.config_text("swap/swap-status.py", "swap.tests.test_swap", 30, [(3, 5), (9, 9)])
+    def test_config_reads_back(self) -> None:
+        text = M.config_text("swap/domain.py", "swap.tests.test_swap", 30, [(3, 5), (9, 9)])
         conf = tomllib.loads(text)["cosmic-ray"]
-        self.assertEqual(conf["module-path"], "swap/swap-status.py")
+        self.assertEqual(conf["module-path"], "swap/domain.py")
         self.assertEqual(conf["timeout"], 30.0)
         self.assertEqual(conf["excluded-modules"], [])
         self.assertEqual(conf["test-command"], "python3 -B -m unittest swap.tests.test_swap")
         self.assertEqual(conf["distributor"], {"name": "local"})
         # The line filter's key must be the module path, or it filters out everything.
-        self.assertEqual(conf["filters"]["line-filter"]["lines"], {"swap/swap-status.py": ["3-5", "9-9"]})
+        self.assertEqual(conf["filters"]["line-filter"]["lines"], {"swap/domain.py": ["3-5", "9-9"]})
 
-    def test_toml_str(self):
+    def test_toml_str(self) -> None:
         for value in ("plain", 'qu"ote', "back\\slash", "tab\there", "new\nline", "del\x7f", "ünïcode", ""):
             with self.subTest(value=value):
                 self.assertEqual(tomllib.loads("k = " + M.toml_str(value))["k"], value)
@@ -349,10 +357,10 @@ class ConfigTest(unittest.TestCase):
 class SandboxTest(unittest.TestCase):
     COPY, OUT, STUBS, VENV = "/tmp/w/copy", "/var/home/u/.cache/cst-mutation/x", "/tmp/w/stubs", "/var/home/u/venv"
 
-    def argv(self, hidden=("/run", "/tmp", "/var/home")):
+    def argv(self, hidden: Sequence[str] = ("/run", "/tmp", "/var/home")) -> list[str]:
         return M.sandbox_argv("/usr/bin/bwrap", self.COPY, self.OUT, self.STUBS, self.VENV, list(hidden))
 
-    def test_the_profile(self):
+    def test_the_profile(self) -> None:
         home = self.COPY + "/.home"
         self.assertEqual(
             self.argv(),
@@ -377,7 +385,7 @@ class SandboxTest(unittest.TestCase):
             ],
         )
 
-    def test_binds_come_after_every_tmpfs_and_only_copy_and_out_are_writable(self):
+    def test_binds_come_after_every_tmpfs_and_only_copy_and_out_are_writable(self) -> None:
         argv = self.argv(hidden=("/run", "/tmp", "/var/home", "/home"))
         last_tmpfs = max(i for i, a in enumerate(argv) if a == "--tmpfs")
         for path in (self.VENV, self.STUBS, self.COPY, self.OUT):
@@ -388,8 +396,8 @@ class SandboxTest(unittest.TestCase):
         self.assertNotIn("--share-net", argv)
         self.assertLess(argv.index("--clearenv"), argv.index("--setenv"))  # nothing of ours is cleared
 
-    def test_hidden_trees(self):
-        def fake(dirs, links):
+    def test_hidden_trees(self) -> None:
+        def fake(dirs: set[str], links: set[str]) -> list[str]:
             return M.hidden_trees([], isdir=lambda p: p in dirs, islink=lambda p: p in links)
 
         # Silverblue: /home, /mnt and /media are symlinks (to /var/home, /var/mnt and /run/media).
@@ -402,7 +410,7 @@ class SandboxTest(unittest.TestCase):
             fake({"/run", "/tmp", "/home", "/mnt", "/media"}, set()), ["/run", "/tmp", "/home", "/mnt", "/media"]
         )
 
-    def test_stubs_fail_and_say_why(self):
+    def test_stubs_fail_and_say_why(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
             M.write_stubs(tmp)
             self.assertEqual(sorted(os.listdir(tmp)), sorted(M.STUBBED))
@@ -418,7 +426,7 @@ class SandboxTest(unittest.TestCase):
                 self.assertIn(f"{name} is not available during mutation testing", r.stderr)
 
 
-def mountinfo(*rows: str) -> list:
+def mountinfo(*rows: str) -> list[Any]:
     """Mounts from short rows "DEV ROOT POINT TYPE", in the format of /proc/self/mountinfo."""
     lines = []
     for n, row in enumerate(rows, start=20):
@@ -443,10 +451,10 @@ class MountsTest(unittest.TestCase):
     )
 
     @staticmethod
-    def views(rows, hidden, dirs=None):
+    def views(rows: Sequence[str], hidden: Sequence[str], dirs: set[str] | None = None) -> list[str]:
         return M.other_views(mountinfo(*rows), hidden, lambda p: dirs is None or p in dirs)
 
-    def test_parse_mountinfo(self):
+    def test_parse_mountinfo(self) -> None:
         text = (
             "29 1 0:29 / /run rw,nosuid shared:5 - tmpfs tmpfs rw\n"
             "30 29 0:39 /home/a\\040b /mnt/with\\040space rw - btrfs /dev/dm-1 rw,subvol=/home\n"  # no tags
@@ -462,7 +470,7 @@ class MountsTest(unittest.TestCase):
             ],
         )
 
-    def test_the_whole_btrfs_mounted_elsewhere_shows_the_home(self):
+    def test_the_whole_btrfs_mounted_elsewhere_shows_the_home(self) -> None:
         # With /var/mnt not hidden, the automount point is hidden itself (what it mounts is unknown),
         # and so is the home inside the top level when it is mounted (it is under the automount point).
         self.assertEqual(self.views(self.HOST, ["/run", "/tmp", "/var/home"]), ["/var/mnt/btrfs-top"])
@@ -471,7 +479,7 @@ class MountsTest(unittest.TestCase):
         # With /var/mnt hidden (the default), nothing more; /proc gets a fresh mount anyway.
         self.assertEqual(self.views(self.HOST, ["/run", "/tmp", "/var/home", "/var/mnt"]), [])
 
-    def test_a_toolbox(self):
+    def test_a_toolbox(self) -> None:
         # The toolbox's / is one of the overlays of the container store in the home; the user's home is a bind
         # of the host's /home/USER; the host's /var/mnt is bound with the top level mounted in it.
         rows = (
@@ -490,12 +498,12 @@ class MountsTest(unittest.TestCase):
         self.assertEqual(self.views(rows, ["/run", "/tmp", "/var/home"]), ["/var/mnt/btrfs-top/home/u"])
         self.assertEqual(self.views(rows, ["/run", "/tmp", "/var/home", "/var/mnt"]), [])
 
-    def test_a_home_partition_mounted_twice(self):
+    def test_a_home_partition_mounted_twice(self) -> None:
         rows = ("8:1 / / ext4", "8:2 / /home ext4", "8:2 / /srv/homes ext4", "8:2 /alice /srv/alice ext4")
         # /srv/homes shows the whole partition, /srv/alice one folder of it.
         self.assertEqual(self.views(rows, ["/run", "/tmp", "/home"]), ["/srv/homes", "/srv/alice"])
 
-    def test_a_folder_on_the_root_filesystem_and_missing_views(self):
+    def test_a_folder_on_the_root_filesystem_and_missing_views(self) -> None:
         # /home is a plain folder of /: the only other view is / itself, which is never hidden.
         self.assertEqual(self.views(("8:1 / / ext4", "0:29 / /run tmpfs"), ["/run", "/tmp", "/home"]), [])
         # A view that is not a folder here is skipped (bwrap could not mount over it).
@@ -503,7 +511,7 @@ class MountsTest(unittest.TestCase):
         self.assertEqual(self.views(rows, ["/var/home"], dirs={"/pool/home"}), ["/pool/home"])
         self.assertEqual(self.views(rows, ["/var/home"], dirs=set()), [])
 
-    def test_hidden_trees_adds_the_other_views(self):
+    def test_hidden_trees_adds_the_other_views(self) -> None:
         # The whole btrfs mounted at /pool (not in a folder hidden anyway): its home is hidden too.
         rows = ("0:39 /home /var/home btrfs", "0:39 / /pool btrfs")
         dirs = {"/run", "/tmp", "/var/home", "/pool/home"}
@@ -512,7 +520,7 @@ class MountsTest(unittest.TestCase):
             ["/run", "/tmp", "/var/home", "/pool/home"],
         )
 
-    def test_outermost_only_and_no_repeats(self):
+    def test_outermost_only_and_no_repeats(self) -> None:
         rows = (
             "0:60 / /a autofs",
             "0:39 /home /var/home btrfs",
@@ -524,11 +532,11 @@ class MountsTest(unittest.TestCase):
 
 
 class FindToolsTest(unittest.TestCase):
-    def test_outside_a_virtual_environment(self):
+    def test_outside_a_virtual_environment(self) -> None:
         with self.assertRaisesRegex(M.UsageError, "cosmic-ray is not installed for this Python"):
             M.find_tools(which=lambda _: "/usr/bin/bwrap", prefix="/usr", base_prefix="/usr")
 
-    def test_tools_from_the_venv_and_bwrap_from_path(self):
+    def test_tools_from_the_venv_and_bwrap_from_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
             venv = os.path.realpath(tmp)
             os.mkdir(os.path.join(venv, "bin"))
@@ -549,7 +557,7 @@ class FindToolsTest(unittest.TestCase):
 
 
 class SessionCountsTest(unittest.TestCase):
-    def test_counts_both_enum_spellings(self):
+    def test_counts_both_enum_spellings(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
             path = os.path.join(tmp, "s.sqlite")
             with contextlib.closing(sqlite3.connect(path)) as db:
@@ -577,7 +585,7 @@ class SessionCountsTest(unittest.TestCase):
         )
         self.assertEqual(c.mutants, 7)
 
-    def test_a_session_cosmic_ray_wrote_differently_is_a_failed_step(self):
+    def test_a_session_cosmic_ray_wrote_differently_is_a_failed_step(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-mutation-test-") as tmp:
             session = os.path.join(tmp, "other.sqlite")
             with contextlib.closing(sqlite3.connect(session)) as db:
@@ -590,7 +598,7 @@ class SessionCountsTest(unittest.TestCase):
 class RunTest(unittest.TestCase):
     """The whole run with a fake bwrap and fake cosmic-ray tools."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-mutation-test-")
         self.addCleanup(tmp.cleanup)
         self.tmp = os.path.realpath(tmp.name)
@@ -624,33 +632,39 @@ class RunTest(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     @staticmethod
-    def write_exec(path, text):
+    def write_exec(path: str, text: str) -> None:
         with open(path, "w") as fh:
             fh.write(text)
         os.chmod(path, 0o755)
 
-    def set_control(self, **control):
+    def set_control(self, **control: object) -> None:
         with open(self.control, "w") as fh:
             json.dump(control, fh)
 
-    def execute(self, *args, tools=None, out=True, helper="pkg/tool"):
+    def execute(
+        self,
+        *args: str,
+        tools: object = None,
+        out: bool = True,
+        helper: str = "pkg/tool",
+    ) -> tuple[int, str, str]:
         argv = [helper, "pkg.tests.test_tool", *args] + (["--out", self.out] if out else [])
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             rc = M.execute(argv, repo=lambda: self.repo, tools=lambda: tools or self.tools, env={"HOME": self.tmp})
         return rc, stdout.getvalue(), stderr.getvalue()
 
-    def config(self):
+    def config(self) -> dict[str, Any]:
         with open(os.path.join(self.out, "cosmic-ray.toml"), "rb") as fh:
             return tomllib.load(fh)["cosmic-ray"]
 
-    def calls(self):
+    def calls(self) -> list[dict[str, Any]]:
         if not os.path.exists(self.log):
             return []
         with open(self.log) as fh:
             return [json.loads(line) for line in fh]
 
-    def steps(self):
+    def steps(self) -> list[str]:
         out = []
         for c in self.calls():
             if "bwrap" in c:
@@ -658,7 +672,7 @@ class RunTest(unittest.TestCase):
             out.append(c["args"][0] if c["tool"] == "cosmic-ray" else c["tool"])
         return out
 
-    def test_steps_in_order_all_in_the_sandbox_survivors_exit_0(self):
+    def test_steps_in_order_all_in_the_sandbox_survivors_exit_0(self) -> None:
         before = snapshot(self.repo)
         rc, stdout, stderr = self.execute("--all", "--timeout", "7")
         self.assertEqual(rc, 0, stdout + stderr)
@@ -704,7 +718,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(snapshot(self.repo), before)
         self.assertEqual(os.listdir(self.scratch), [])
 
-    def test_the_copy_is_a_faithful_copy(self):
+    def test_the_copy_is_a_faithful_copy(self) -> None:
         dest = os.path.join(self.tmp, "dest")
         os.mkdir(dest)
         os.remove(os.path.join(self.repo, "script.sh"))  # tracked, deleted in the working tree
@@ -718,7 +732,7 @@ class RunTest(unittest.TestCase):
         with open(os.path.join(dest, "pkg/tool")) as fh:
             self.assertEqual(fh.read(), HELPER_SOURCE)
 
-    def test_baseline_failure_stops_before_init_with_exit_2(self):
+    def test_baseline_failure_stops_before_init_with_exit_2(self) -> None:
         self.set_control(outcomes=["killed"], fail_baseline=True)
         rc, stdout, _ = self.execute("--all")
         self.assertEqual(rc, 2)
@@ -727,7 +741,7 @@ class RunTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.out, "session.sqlite")))
         self.assertEqual(os.listdir(self.scratch), [])
 
-    def test_a_failed_step_exits_1(self):
+    def test_a_failed_step_exits_1(self) -> None:
         for failing, done in (
             ("init", ["baseline", "init"]),
             ("cr-filter-lines", ["baseline", "init", "cr-filter-lines"]),
@@ -743,13 +757,13 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(self.steps(), done)
                 self.assertIn("failed with exit status 3", stderr)
 
-    def test_mutants_that_could_not_run_exit_1(self):
+    def test_mutants_that_could_not_run_exit_1(self) -> None:
         self.set_control(outcomes=["killed", "incompetent"])
         rc, stdout, _ = self.execute("--all")
         self.assertEqual(rc, 1)
         self.assertIn("some mutants did not run normally", stdout)
 
-    def test_without_bwrap_it_refuses_and_runs_nothing(self):
+    def test_without_bwrap_it_refuses_and_runs_nothing(self) -> None:
         tools = M.Tools(bwrap=None, python=sys.executable, venv=self.venv)
         before = snapshot(self.repo)
         rc, stdout, stderr = self.execute("--all", tools=tools)
@@ -760,14 +774,14 @@ class RunTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.out))
         self.assertEqual(snapshot(self.repo), before)
 
-    def test_a_bwrap_that_cannot_build_the_sandbox_runs_nothing(self):
+    def test_a_bwrap_that_cannot_build_the_sandbox_runs_nothing(self) -> None:
         self.set_control(outcomes=["killed"], fail_probe=True)
         rc, _, stderr = self.execute("--all")
         self.assertEqual(rc, 2)
         self.assertIn("bwrap cannot build the sandbox here", stderr)
         self.assertEqual(self.steps(), [])
 
-    def test_base_mutates_the_changed_lines(self):
+    def test_base_mutates_the_changed_lines(self) -> None:
         with open(os.path.join(self.repo, "pkg/tool"), "a") as fh:
             fh.write("\n\ndef added():\n    return 2\n")
         before = snapshot(self.repo)
@@ -777,20 +791,20 @@ class RunTest(unittest.TestCase):
         self.assertEqual(conf["filters"]["line-filter"]["lines"], {"pkg/tool.py": ["20-23"]})
         self.assertEqual(snapshot(self.repo), before)
 
-    def test_functions_choose_the_lines(self):
+    def test_functions_choose_the_lines(self) -> None:
         rc, stdout, stderr = self.execute("--functions", "double,inner")
         self.assertEqual(rc, 0, stdout + stderr)
         conf = self.config()
         self.assertEqual(conf["filters"]["line-filter"]["lines"], {"pkg/tool.py": ["5-6", "12-13"]})
 
-    def test_no_changes_means_nothing_to_mutate(self):
+    def test_no_changes_means_nothing_to_mutate(self) -> None:
         rc, stdout, _ = self.execute()  # --base main by default, and the helper is unchanged
         self.assertEqual(rc, 0)
         self.assertIn("nothing to mutate", stdout)
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(self.out))
 
-    def test_default_output_folder_is_under_the_cache(self):
+    def test_default_output_folder_is_under_the_cache(self) -> None:
         rc, stdout, stderr = self.execute("--all", out=False)
         self.assertEqual(rc, 0, stdout + stderr)
         made = os.listdir(os.path.join(self.tmp, ".cache", "cst-mutation"))
@@ -800,7 +814,7 @@ class RunTest(unittest.TestCase):
             M.default_out("a/b", {"XDG_CACHE_HOME": "/c", "HOME": "/h"}, 0).rsplit("-", 2)[0], "/c/cst-mutation/a-b"
         )
 
-    def test_usage_errors_run_nothing(self):
+    def test_usage_errors_run_nothing(self) -> None:
         cases = [
             (["--functions", "nope"], "no function named nope"),
             (["--base", "no-such-ref"], "git diff no-such-ref failed"),
@@ -823,7 +837,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(self.out))
 
-    def test_a_helper_whose_py_name_is_taken_is_refused(self):
+    def test_a_helper_whose_py_name_is_taken_is_refused(self) -> None:
         with open(os.path.join(self.repo, "pkg/tool.py"), "w") as fh:
             fh.write("")
         rc, _, stderr = self.execute("--all")
@@ -831,7 +845,7 @@ class RunTest(unittest.TestCase):
         self.assertIn("pkg/tool.py exists, so the .py link cosmic-ray needs cannot be made", stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_functions_of_a_helper_that_is_not_valid_python(self):
+    def test_functions_of_a_helper_that_is_not_valid_python(self) -> None:
         with open(os.path.join(self.repo, "pkg/tool"), "a") as fh:
             fh.write("def broken(:\n")
         rc, _, stderr = self.execute("--functions", "double")
@@ -839,14 +853,14 @@ class RunTest(unittest.TestCase):
         self.assertIn("the helper is not valid Python", stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_an_untracked_helper_counts_as_all_new(self):
+    def test_an_untracked_helper_counts_as_all_new(self) -> None:
         shutil.copy2(os.path.join(self.repo, "pkg/tool"), os.path.join(self.repo, "pkg/new_tool"))
         rc, stdout, stderr = self.execute(helper="pkg/new_tool")  # --base main by default
         self.assertEqual(rc, 0, stdout + stderr)
         self.assertIn("git does not track it yet", stdout)
         self.assertEqual(self.config()["filters"]["line-filter"]["lines"], {"pkg/new_tool.py": ["1-19"]})
 
-    def test_every_step_reads_nothing_from_the_terminal(self):
+    def test_every_step_reads_nothing_from_the_terminal(self) -> None:
         # A mutant must not read (or wait for) the terminal the run started from: stdin is /dev/null.
         # The run gets a pipe as stdin here, so that a step that inherits it shows up whatever
         # stdin the test suite itself has (it can be /dev/null already).
@@ -864,7 +878,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(len(calls), 15)
         self.assertEqual([c for c in calls if not c["stdin_null"]], [])
 
-    def test_links_a_mutant_leaves_in_the_output_folder_are_not_followed(self):
+    def test_links_a_mutant_leaves_in_the_output_folder_are_not_followed(self) -> None:
         victims = os.path.join(self.tmp, "victims")
         os.mkdir(victims)
         for name in ("survivors.txt", "report.txt", "counts.json"):
@@ -883,7 +897,7 @@ class RunTest(unittest.TestCase):
         with open(os.path.join(self.out, "survivors.txt")) as fh:
             self.assertIn("--- diff 1", fh.read())
 
-    def test_output_folder_must_be_new_and_outside_the_checkout(self):
+    def test_output_folder_must_be_new_and_outside_the_checkout(self) -> None:
         os.makedirs(self.out)
         with open(os.path.join(self.out, "old"), "w") as fh:
             fh.write("x")
@@ -964,7 +978,7 @@ print(json.dumps({"copy": attempt(copy), "outside": [attempt(o) for o in outside
 class RealBwrapTest(unittest.TestCase):
     """The real sandbox, when this machine can build one (CI's container usually cannot)."""
 
-    def test_only_the_copy_is_writable_and_no_socket_or_home_is_visible(self):
+    def test_only_the_copy_is_writable_and_no_socket_or_home_is_visible(self) -> None:
         hidden = M.hidden_trees(M.read_mounts())
         bwrap, reason = usable_bwrap(hidden)
         if bwrap is None:

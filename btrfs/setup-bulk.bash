@@ -2,7 +2,7 @@
 #
 # setup-bulk.bash: `cst btrfs bulk ...` and the ~/Bulk step of
 # `snapshots setup` (sourced by setup-snapshots.bash; runs as root; uses
-# snap_home/snap_install_runtime from there and the frontend's install_text,
+# snap_home/snap_install_runtime from there and the frontend's cst_install_text,
 # SRC, PROG and target_user). The work itself is btrfs/btrfs-bulk (Python): every
 # change in the home is made by a child process running as the user.
 
@@ -14,7 +14,7 @@ BULK_UNIT=btrfs-bulk-boot.service
 # The repo copy (like docker-gc): matches these sources before reinstalling.
 bulk_run() {   # plan|apply|status | keep|unkeep ID... | steam plan|apply [--app ID]... [--copy]
     # shellcheck disable=SC2154  # target_user: set by btrfs-setup.sh
-    python3 -I "${BULK_TOOL}" "$@" --user "${target_user}"
+    python3 -I -B "${BULK_TOOL}" "$@" --user "${target_user}"
 }
 
 # Before any run that can leave a journal (bulk apply, bulk steam apply):
@@ -25,7 +25,7 @@ bulk_prepare() {
     snap_home >/dev/null   # refuses without SUDO_USER
     snap_install_runtime
     printf '# Managed by btrfs-setup.sh (CST): whose ~/Bulk btrfs-bulk-boot.service handles.\nBULK_USER=%s\n' \
-        "${target_user}" | install_text "${BULK_CONF}" 0644
+        "${target_user}" | cst_install_text "${BULK_CONF}" 0644
     # Gated by the flag file or a journal: does nothing at boot otherwise.
     systemctl enable "${BULK_UNIT}" >/dev/null 2>&1 || true
 }

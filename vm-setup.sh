@@ -133,13 +133,13 @@ case "${mode}" in
         # system connection answers the user's queries (libvirt group or polkit rule).
         if in_container; then
             if command -v flatpak-spawn >/dev/null 2>&1; then
-                exec flatpak-spawn --host "--env=CST_PROG=${PROG}" python3 -I "${TOOL}" "${cmd}" "$@"
+                exec flatpak-spawn --host "--env=CST_PROG=${PROG}" python3 -I -B "${TOOL}" "${cmd}" "$@"
             fi
             # A container without a way to the host (CI, plain podman/docker):
             # answer from here, which degrades to info lines.
             echo "(cannot reach the host from this container: showing what is visible here)"
         fi
-        CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
+        CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
         ;;
 esac
 
@@ -150,7 +150,7 @@ if in_container; then
     exit 1
 fi
 if [[ "${mode}" == user ]]; then
-    CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
+    CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
 fi
 if [[ ${EUID} -ne 0 ]]; then
     # sudo resets the environment: CST_PROG is handed over explicitly.
@@ -159,4 +159,4 @@ if [[ ${EUID} -ne 0 ]]; then
     fi
     exec sudo -- "${SELF}" "${orig_args[@]}"
 fi
-CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
+CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"

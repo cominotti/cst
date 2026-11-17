@@ -1,5 +1,8 @@
 """Docker Layer 1 E2E suite: unprivileged systemd PID 1 + user manager + SFTP sidecar."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 import os
 import shlex
 import subprocess
@@ -7,7 +10,15 @@ import time
 import unittest
 
 
-def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text=None):
+def docker_exec(
+    container: str,
+    cmd: Sequence[str],
+    *,
+    check: bool = True,
+    user: str = "root",
+    env: Mapping[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     full = ["docker", "exec"]
     if input_text is not None:
         full.append("-i")
@@ -25,11 +36,17 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
     return p
 
 
-def exec_bash(container, script, *, check=True, env=None):
+def exec_bash(
+    container: str,
+    script: str,
+    *,
+    check: bool = True,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return docker_exec(container, ["bash", "-euo", "pipefail", "-c", script], check=check, env=env)
 
 
-def as_tester_bash(container, script, *, check=True):
+def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
         "runuser -u tester -- env "
@@ -48,7 +65,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
     CST_ROOT_MOUNT = os.environ["CST_E2E_REPO_ROOT"]
 
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         # Provide a working writable copy of CST inside the container so symlink tests
         # and user-owned operations do not rely on mutating the read-only host repo.
         exec_bash(
@@ -56,7 +73,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             "rm -rf /opt/cst-rw && cp -a /opt/cst /opt/cst-rw && chmod -R a+rX /opt/cst-rw",
         )
 
-    def test_01_in_container_guardrail_blocks_mutations(self):
+    def test_01_in_container_guardrail_blocks_mutations(self) -> None:
         """When /.dockerenv is present, install/apply commands must refuse cleanly."""
         repo = self.CST_ROOT_MOUNT
         for extra_flags, subcmd in (
@@ -93,7 +110,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
                 f"expected container refusal message for {subcmd}, got: {combined}",
             )
 
-    def test_02_systemd_and_user_dbus_healthy(self):
+    def test_02_systemd_and_user_dbus_healthy(self) -> None:
         """systemd PID 1, system dbus-broker and user@1000.service run without --privileged."""
         st = exec_bash(self.SYSTEMD_CONTAINER, "systemctl is-system-running").stdout.strip()
         self.assertEqual(st, "running")
@@ -105,7 +122,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(docker_env_check, "OK")
 
-    def test_03_cst_root_link_status_and_doctor(self):
+    def test_03_cst_root_link_status_and_doctor(self) -> None:
         """cst dispatch, ~/.local/bin/cst symlink, cst status and cst doctor work live."""
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -141,7 +158,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         # Reset any hardwareless bluetooth.service D-Bus activation failure inside the container
         exec_bash(self.SYSTEMD_CONTAINER, "systemctl reset-failed bluetooth.service 2>/dev/null || true")
 
-    def test_04_toolchains_e2e_timer_config_and_prune(self):
+    def test_04_toolchains_e2e_timer_config_and_prune(self) -> None:
         """toolchains config apply, hourly systemd --user timer, service run, and auto off."""
         # Configure cargo/uv settings & create stale cache under ~/.cache/cargo-build (cst-toolchains layout)
         as_tester_bash(
@@ -156,7 +173,16 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             /opt/cst-rw/cst toolchains config apply --lean-debuginfo
             grep -q 'target-dir\\|build-dir' /home/tester/.cargo/config.toml
             grep -q 'link-mode = "clone"' /home/tester/.config/uv/uv.toml
+            # An older CST installed the program as a plain script (it holds
+            # CST's marker): auto on replaces it with the zipapp.
+            prog=/home/tester/.local/lib/cst/cst-toolchains
+            mkdir -p /home/tester/.local/lib/cst
+            printf '#!/usr/bin/python3 -I\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n' >"$prog"
             /opt/cst-rw/cst toolchains auto on
+            python3 -I -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$prog"
+            (cd / && env -i PATH=/usr/bin:/bin HOME=/home/tester /usr/bin/python3 -I "$prog" help) | grep -q 'cst-toolchains:'
+            again="$(/opt/cst-rw/cst toolchains auto on)"
+            grep -q 'unchanged: ~/.local/lib/cst/cst-toolchains' <<<"$again"
             systemctl --user is-enabled cst-toolchains-prune.timer
             systemctl --user is-active cst-toolchains-prune.timer
             systemctl --user start cst-toolchains-prune.service
@@ -186,7 +212,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         '[ "$state" = inactive ] || { echo "timer state after auto off: [$state]" >&2; exit 1; }'
     )
 
-    def toolchains_auto_off_without_a_user_manager(self):
+    def toolchains_auto_off_without_a_user_manager(self) -> None:
         """auto off when the user manager cannot be reached: exit 1, nothing removed, timer still running."""
         res = as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -222,7 +248,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertIn("nothing was removed", res.stdout)
 
-    def toolchains_auto_off(self):
+    def toolchains_auto_off(self) -> None:
         """A normal auto off (after the refusal above): the timer stops and the files go."""
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -236,7 +262,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             """,
         )
 
-    def toolchains_auto_off_stops_an_orphan_timer(self):
+    def toolchains_auto_off_stops_an_orphan_timer(self) -> None:
         """What auto off left before it checked `disable`: the timer still running, its files gone, and its
         timers.target.wants link pointing at nothing. is-enabled reads the unit files, so it answers as if
         the timer were off (why the checks here ask is-active). status shows it; a second auto off stops
@@ -276,7 +302,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         self.assertIn("stopped:   cst-toolchains-prune.timer", res.stdout)
         self.assertIn("removed:   ~/.config/systemd/user/timers.target.wants/cst-toolchains-prune.timer", res.stdout)
 
-    def test_05_bluetooth_config_wp_roles_and_ldac_unit(self):
+    def test_05_bluetooth_config_wp_roles_and_ldac_unit(self) -> None:
         """bluetooth plan, apply --no-restart, real libwireplumber wp-roles validation, and revert."""
         exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -359,7 +385,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertNotEqual(ldac_enabled.returncode, 0, "cst-bt-ldac48.service still enabled after revert")
 
-    def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self):
+    def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self) -> None:
         """btrfs-notify queue -> cst-pending-alerts delivery + doctor detection + real restic over SFTP."""
         # 1. Queue pending alert, detect via cst doctor, deliver via cst-pending-alerts
         exec_bash(
@@ -429,7 +455,7 @@ EOF
             """,
         )
 
-    def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self):
+    def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self) -> None:
         """systemd's real drop-in order: a `set-property --runtime` value (the game
         profile) must survive a daemon-reload next to CST's baseline drop-in,
         which only works because its name sorts before 50-<Property>.conf. And a
@@ -484,7 +510,7 @@ EOF
             """,
         )
 
-    def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self):
+    def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
         system and user managers: a top-level user slice of its own and a
         systemd-run job straight in app.slice get CPUWeight=idle; the slice
@@ -640,7 +666,7 @@ EOF
                 check=False,
             )
 
-    def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self):
+    def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self) -> None:
         """The real rustc wrapper, installed by `cst toolchains config apply
         --sccache`, under real cargo (offline: no network in the container), with
         a fake sccache that logs each crate it is handed. A workspace member and
@@ -777,7 +803,7 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_10_cpu_quiet_reads_the_real_proc_files(self):
+    def test_10_cpu_quiet_reads_the_real_proc_files(self) -> None:
         """`cst cpu quiet` against the real kernel files (/proc/stat, /proc/vmstat,
         /proc/pressure/*) and the real game profile flag: a plain run exits 0 or
         1 with one line per test and no crash; busy loops on every CPU must fail
@@ -872,6 +898,126 @@ EOF
             [ "$rc" = 1 ]
             grep -Eq '^  game profile +on in 3 of 3 readings +limit off +FAIL$' "$w/game"
             grep -Eq '^NOT quiet: (.+, )?game profile \(' "$w/game"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_11_manifest_installs_and_every_entry_runs_from_root(self) -> None:
+        """The real installer writes the whole INSTALL_MANIFEST (staged under
+        /var/tmp/e2e-dist, so the other tests see no change): root files as
+        root, the user's files as tester through runuser (what cst_install_as
+        does). A second run changes nothing. Then every python-entry runs its
+        help mode from `/` on /usr/bin/python3 -I, as root and as tester, with
+        no ImportError: the zipapps hold everything they import."""
+        stage = "/var/tmp/e2e-dist"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {stage}", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rm -rf {stage} && install -d -m 0755 {stage} {stage}/home && install -d -o tester {stage}/home/tester
+            {installer} install --root {stage} --owner root {sets}
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets}
+            again="$({installer} install --root {stage} --owner root {sets})"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
+            ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
+            if grep -v '^unchanged: ' <<<"$ugain"; then echo "second user run changed files" >&2; exit 1; fi
+            # A dotfiles-style link to the same content stays a link and counts as unchanged.
+            d="{stage}$(runuser -u tester -- {installer} dests --owner user --home /home/tester | head -n 1)"
+            runuser -u tester -- cp -p "$d" /home/tester/.e2e-link-target
+            runuser -u tester -- ln -sfn /home/tester/.e2e-link-target "$d"
+            lgain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
+            if grep -v '^unchanged: ' <<<"$lgain"; then echo "a link to the same content was rewritten" >&2; exit 1; fi
+            [[ -L "$d" ]] || {{ echo "the link was replaced" >&2; exit 1; }}
+            rm -f "$d" /home/tester/.e2e-link-target
+            echo E2E-INSTALLED
+            """,
+        ).stdout
+        self.assertIn("E2E-INSTALLED", out)
+        # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
+        entries = {
+            "/usr/local/sbin/btrfs-bulk": ("--help", 2),
+            "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
+            "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
+            "/usr/local/bin/btrfs-stall-report": ("--help", 0),
+            "/usr/local/sbin/docker-gc": ("--help", 2),
+            "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
+            "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
+            "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
+            "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
+            "/usr/local/sbin/cst-vm": ("help", 0),
+        }
+        for dest, (arg, rc) in entries.items():
+            path = stage + dest
+            runners = ["root"] if "/sbin/" in dest else ["root", "tester"]
+            if dest.startswith("/home/"):
+                runners = ["tester"]
+            for who in runners:
+                with self.subTest(dest=dest, who=who):
+                    prefix = "" if who == "root" else "runuser -u tester -- "
+                    p = exec_bash(
+                        self.SYSTEMD_CONTAINER,
+                        f"cd / && {prefix}env -i PATH=/usr/bin:/bin /usr/bin/python3 -I {path} {arg}",
+                        check=False,
+                    )
+                    self.assertNotRegex(p.stderr, r"ImportError|ModuleNotFoundError|Traceback", p.stderr)
+                    self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+
+    def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
+        """`cst vm backup-timer on` with the real systemd: it installs cst-vm
+        as the zipapp `install` builds (replacing the plain-script copy an
+        older CST left), the service and the timer, and enables the timer;
+        the installed copy runs from / without the checkout; a second `on`
+        writes nothing; `off` disables and removes everything. The NAS
+        settings and the program's path are scratch files (CST_VM_*)."""
+        w = "/var/tmp/e2e-vm-timer"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"systemctl disable --now cst-vm-backup@e2evm.timer; rm -rf {w} "
+            "/etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -euo pipefail
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/sbin"
+            printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
+            printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_SBIN_COPY="$w/sbin/cst-vm" CST_VM_INDEX="$w/index.json"
+            tool=/opt/cst-rw/vm/cst-vm
+            # The copy an older CST installed: the script itself, as text.
+            printf '#!/usr/bin/python3 -I\n\"\"\"cst-vm: an older CST\n' >"$w/sbin/cst-vm"
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm >"$w/status1"
+            grep -q "$w/sbin/cst-vm: installed, OLDER" "$w/status1"
+            /usr/bin/python3 -I "$tool" backup-timer on e2evm >"$w/on1"
+            grep -q "updated: $w/sbin/cst-vm" "$w/on1"
+            systemctl is-enabled cst-vm-backup@e2evm.timer
+            grep -qF "ExecStart=/usr/bin/python3 -I $w/sbin/cst-vm backup %i --nas" \
+                /etc/systemd/system/cst-vm-backup@.service
+            [ "$(head -n 1 "$w/sbin/cst-vm")" = "#!/usr/bin/python3 -I" ]
+            python3 -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$w/sbin/cst-vm"
+            # The installed copy runs on its own, from /, as root and as tester.
+            (cd / && env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) >"$w/help-root"
+            grep -q 'backup-timer on' "$w/help-root"
+            (cd / && runuser -u tester -- env -i PATH=/usr/bin:/bin /usr/bin/python3 -I "$w/sbin/cst-vm" help) \
+                >"$w/help-tester"
+            grep -q 'backup-timer on' "$w/help-tester"
+            again="$(/usr/bin/python3 -I "$tool" backup-timer on e2evm)"
+            if grep -E 'installed:|updated:' <<<"$again"; then echo "second on wrote files" >&2; exit 1; fi
+            /usr/bin/python3 -I "$tool" backup-timer status e2evm >"$w/status2"
+            grep -q "$w/sbin/cst-vm: installed, up to date" "$w/status2"
+            /usr/bin/python3 -I "$tool" backup-timer off e2evm
+            if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
+            [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
             echo E2E-OK
             """,
         ).stdout

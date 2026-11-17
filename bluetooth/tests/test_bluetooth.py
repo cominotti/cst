@@ -6,8 +6,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s bluetooth/tests -t . -v
 """
 
-import importlib.machinery
-import importlib.util
+from collections.abc import Iterable, Mapping, Sequence
+import io
 import os
 import re
 import shlex
@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
+from typing import Any, Protocol, cast
 import unittest
 
 sys.dont_write_bytecode = True
@@ -26,6 +28,14 @@ HELPER = os.path.join(BT, "bt-helper")
 WATCH = os.path.join(BT, "bt-ldac-watch")
 SETUP = os.path.join(REPO, "bluetooth-setup.sh")
 DEFAULTS = os.path.join(BT, "bluetooth.conf")
+
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+from bluetooth import adapters as bt_adapters, cli as bt_app, domain as bt_domain  # noqa: E402
+from bluetooth.adapters import LocalBluetoothHostAdapter  # noqa: E402
+from bluetooth.domain import classify_other_fragments  # noqa: E402
+from tests.script_loader import load_script
 
 ISO = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
 MAC = "0A:1B:2C:3D:4E:5F"
@@ -76,17 +86,67 @@ monitor.bluez.rules = [
 """
 
 
-def load(path=HELPER, name="bt_helper"):
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    spec = importlib.util.spec_from_loader(name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
+class HelperModule(Protocol):
+    """Typed interface for functions and constants exposed by `bluetooth/bt-helper`."""
+
+    ISO_UUID: str
+    MARKER: str
+    OLD_MARKERS: tuple[str, ...]
+    CLASSIC_ROLES: tuple[str, ...]
+    LE_CONF_NAME: str
+    LDAC_UNIT: str
+    LDAC_PROG: str
+
+    def edit_general(self, text: str) -> tuple[str, bool]: ...
+    def revert_general(self, text: str, backup: str) -> tuple[str, bool]: ...
+    def current_values(self, text: str) -> dict[str, str | None]: ...
+    def render_wp(self, mac: str, quality: str) -> str: ...
+    def wp_state(self, existing: str | None, rendered: str) -> str: ...
+    def effective(self, text: str) -> list[str]: ...
+    def device_id(self, mac: str) -> str: ...
+    def render_unit(self, mac: str, rate: str | int) -> str: ...
+    def unit_state(self, existing: str | None, rendered: str) -> str: ...
+    def merged_settings(self, texts: Iterable[str]) -> dict[str, str]: ...
+    def parse_settings(self, text: str) -> dict[str, str]: ...
+    def set_keys(self, text: str) -> list[str]: ...
+    def adapter_path(self, objects: Mapping[str, Any]) -> str | None: ...
+    def card_state(
+        self,
+        dev: str,
+        cards: Sequence[Mapping[str, Any]],
+        srcs: Sequence[Mapping[str, Any]],
+        outs: Sequence[Mapping[str, Any]],
+    ) -> tuple[str, bool, bool] | None: ...
+    def pw_state(
+        self, dev: str, objs: Sequence[Mapping[str, Any]]
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None] | None: ...
+    def render_le_off(self) -> str: ...
+    def defines_section(self, text: str, section: str = ...) -> bool: ...
+    def roles_state(self, value: str | None) -> str: ...
+    def other_fragments(self, ours: str, dirs: Sequence[str]) -> list[tuple[str, str]]: ...
+    def settings_set(self, text: str | None, key: str, value: str) -> tuple[str, bool]: ...
+    def lw_failure(self, text: str) -> tuple[str, str, str] | None: ...
+
+
+def load(path: str = HELPER, name: str = "bt_helper") -> types.ModuleType:
+    """Load an extensionless helper script as a Python module."""
+    mod = load_script(path, name)
     return mod
 
 
-def general(text):
+def load_helper() -> HelperModule:
+    """The rules bt-helper runs: bluetooth.domain, with other_fragments from bluetooth.adapters.
+
+    bt-helper itself only wires argv (tests/test_entrypoints.py); the code it
+    runs is imported from where it is defined.
+    """
+    rules = {k: v for k, v in vars(bt_domain).items() if not k.startswith("__")}
+    return cast(HelperModule, types.SimpleNamespace(**rules, other_fragments=bt_adapters.other_fragments))
+
+
+def general(text: str) -> list[str]:
     """The [General] lines of TEXT."""
-    out = []
+    out: list[str] = []
     for line in text.splitlines():
         if line.startswith("[") and out:
             break
@@ -95,10 +155,10 @@ def general(text):
 
 
 class MainConfTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_vendor_examples_replaced_in_place(self):
+    def test_vendor_examples_replaced_in_place(self) -> None:
         new, changed = self.m.edit_general(VENDOR)
         self.assertTrue(changed)
         old_lines, new_lines = VENDOR.splitlines(), new.splitlines()
@@ -113,13 +173,13 @@ class MainConfTest(unittest.TestCase):
         )
         self.assertIn("#Experimental = false", new.split("[LE]")[1])  # other sections untouched
 
-    def test_idempotent(self):
+    def test_idempotent(self) -> None:
         once, _ = self.m.edit_general(VENDOR)
         twice, changed = self.m.edit_general(once)
         self.assertFalse(changed)
         self.assertEqual(once, twice)
 
-    def test_old_true_becomes_the_iso_uuid(self):
+    def test_old_true_becomes_the_iso_uuid(self) -> None:
         text = VENDOR.replace("#Experimental = false", "Experimental = true").replace(
             "#KernelExperimental = false", "KernelExperimental = true"
         )
@@ -129,7 +189,7 @@ class MainConfTest(unittest.TestCase):
         self.assertNotIn("KernelExperimental = true", new)
         self.assertEqual(self.m.current_values(new), {"Experimental": "true", "KernelExperimental": ISO})
 
-    def test_uuid_list_with_iso_is_kept(self):
+    def test_uuid_list_with_iso_is_kept(self) -> None:
         other = "d4992530-b9ec-469f-ab01-6c481c47da1c"
         text = VENDOR.replace("#Experimental = false", "Experimental = true").replace(
             "#KernelExperimental = false", f"KernelExperimental = {other},{ISO.upper()}"
@@ -138,7 +198,7 @@ class MainConfTest(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(new, text)
 
-    def test_last_active_line_wins_and_earlier_ones_are_commented(self):
+    def test_last_active_line_wins_and_earlier_ones_are_commented(self) -> None:
         text = "[General]\nExperimental = false\nName = x\nExperimental = false\n[BR]\n"
         new, changed = self.m.edit_general(text)
         self.assertTrue(changed)
@@ -150,7 +210,7 @@ class MainConfTest(unittest.TestCase):
         )
         self.assertIn("Name = x", g)
 
-    def test_missing_key_goes_under_general_and_missing_section_on_top(self):
+    def test_missing_key_goes_under_general_and_missing_section_on_top(self) -> None:
         new, changed = self.m.edit_general("[General]\nName = x\n\n[BR]\n")
         self.assertTrue(changed)
         self.assertEqual(general(new)[:3], ["[General]", f"KernelExperimental = {ISO}", "Experimental = true"])
@@ -161,12 +221,35 @@ class MainConfTest(unittest.TestCase):
         )
         self.assertFalse(self.m.edit_general(new)[1])
 
-    def test_crlf_kept(self):
+    def test_only_general_blocks_count_and_the_right_line_changes(self) -> None:
+        # A key in another section is not ours, even on the line right before [General].
+        text = "[Policy]\nExperimental = false\n[General]\nName = x\n"
+        new, changed = self.m.edit_general(text)
+        self.assertTrue(changed)
+        self.assertTrue(new.startswith("[Policy]\nExperimental = false\n[General]\n"), new)
+        # [General] on line 1: a key line above it (outside any section) is not ours, and the
+        # missing keys go right under the header.
+        new, _ = self.m.edit_general("Experimental = false\n[General]\nName = x\n")
+        self.assertEqual(
+            new, f"Experimental = false\n[General]\nKernelExperimental = {ISO}\nExperimental = true\nName = x\n"
+        )
+        # The last commented example is the one replaced; a missing key goes under the first [General].
+        text = "[General]\n#Experimental = a\n#Experimental = b\n[General]\nName = y\n"
+        new, _ = self.m.edit_general(text)
+        self.assertEqual(
+            new,
+            f"[General]\nKernelExperimental = {ISO}\n#Experimental = a\nExperimental = true\n[General]\nName = y\n",
+        )
+        # An empty file gets the section and ends in a newline; a file without one keeps it that way.
+        self.assertEqual(self.m.edit_general("")[0], f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n\n")
+        self.assertFalse(self.m.edit_general("[LE]")[0].endswith("\n"))
+
+    def test_crlf_kept(self) -> None:
         new, changed = self.m.edit_general(VENDOR.replace("\n", "\r\n"))
         self.assertTrue(changed)
         self.assertEqual(new.count("\r\n"), VENDOR.count("\n"))
 
-    def test_revert_to_vendor_backup(self):
+    def test_revert_to_vendor_backup(self) -> None:
         applied, _ = self.m.edit_general(VENDOR)
         # A hand edit made later (in another section) survives the revert.
         applied = applied.replace("#PageScanType =", "PageScanType = 1")
@@ -175,13 +258,13 @@ class MainConfTest(unittest.TestCase):
         self.assertEqual(reverted, VENDOR.replace("#PageScanType =", "PageScanType = 1"))
         self.assertFalse(self.m.revert_general(reverted, VENDOR)[1])
 
-    def test_revert_to_backup_with_old_true(self):
+    def test_revert_to_backup_with_old_true(self) -> None:
         backup = VENDOR.replace("#KernelExperimental = false", "KernelExperimental = true")
         applied, _ = self.m.edit_general(backup)
         reverted, _ = self.m.revert_general(applied, backup)
         self.assertEqual(reverted, backup)
 
-    def test_revert_without_key_in_backup_comments_it_out(self):
+    def test_revert_without_key_in_backup_comments_it_out(self) -> None:
         current = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
         reverted, changed = self.m.revert_general(current, "[General]\nName = x\n")
         self.assertTrue(changed)
@@ -190,7 +273,7 @@ class MainConfTest(unittest.TestCase):
         reverted, _ = self.m.revert_general("[General]\nName = y\n", "[General]\nExperimental = true\n")
         self.assertEqual(self.m.current_values(reverted)["Experimental"], "true")
 
-    def test_repeated_general_group_counts_as_one(self):
+    def test_repeated_general_group_counts_as_one(self) -> None:
         # GLib merges a second [General] into the first: its later line wins.
         text = (
             "[General]\nExperimental = true\nKernelExperimental = "
@@ -221,7 +304,7 @@ class MainConfTest(unittest.TestCase):
         # A key only in a later [General] block is found too.
         self.assertEqual(self.m.current_values("[BR]\n[General]\nExperimental = true\n")["Experimental"], "true")
 
-    def test_no_final_newline(self):
+    def test_no_final_newline(self) -> None:
         applied, _ = self.m.edit_general(VENDOR)
         bare = applied.rstrip("\n")
         self.assertEqual(self.m.revert_general(bare, bare), (bare, False))
@@ -241,7 +324,7 @@ class MainConfTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout), (0, bare))
 
-    def test_cli_exit_codes(self):
+    def test_cli_exit_codes(self) -> None:
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         p = os.path.join(tmp, "main.conf")
@@ -264,24 +347,24 @@ class MainConfTest(unittest.TestCase):
 
 
 class WirePlumberTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_old_script_file_is_adopted(self):
+    def test_old_script_file_is_adopted(self) -> None:
         new = self.m.render_wp(MAC, "auto")
         self.assertEqual(self.m.wp_state(OLD_WP, new), "adopt")
         self.assertEqual(self.m.wp_state(new, new), "ok")
         self.assertTrue(new.startswith(self.m.MARKER))
         self.assertEqual(self.m.effective(new), self.m.effective(OLD_WP))
 
-    def test_change_conflict_missing(self):
+    def test_change_conflict_missing(self) -> None:
         new = self.m.render_wp(MAC, "auto")
         self.assertEqual(self.m.wp_state(OLD_WP.replace('"auto"', '"hq"'), new), "change")
         self.assertEqual(self.m.wp_state(self.m.render_wp(MAC, "hq"), new), "change")
         self.assertEqual(self.m.wp_state(OLD_WP.split("monitor", 1)[1], new), "conflict")  # no marker
         self.assertEqual(self.m.wp_state(None, new), "missing")
 
-    def test_render(self):
+    def test_render(self) -> None:
         text = self.m.render_wp(MAC.lower(), "hq")
         self.assertIn('device.name = "bluez_card.0A_1B_2C_3D_4E_5F"', text)
         self.assertIn('bluez5.a2dp.ldac.quality = "hq"', text)
@@ -291,15 +374,15 @@ class WirePlumberTest(unittest.TestCase):
 
 
 class SettingsTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_defaults_file(self):
+    def test_defaults_file(self) -> None:
         with open(DEFAULTS) as f:
             s = self.m.merged_settings([f.read()])
         self.assertEqual(s, {"DEVICE": MAC, "LDAC_QUALITY": "auto", "BEARER": "", "LDAC_RATE": "", "LE_AUDIO": "off"})
 
-    def test_user_file_wins_and_parsing(self):
+    def test_user_file_wins_and_parsing(self) -> None:
         user = "# mine\nDEVICE = 'aa:bb:cc:dd:ee:ff'   # other headset\nBEARER=\"le\"\nFOO=1\nnot a line\nLDAC_RATE=48000\n"
         with open(DEFAULTS) as f:
             s = self.m.merged_settings([f.read(), user])
@@ -318,7 +401,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s["LE_AUDIO"], "on")
         self.assertEqual(self.m.merged_settings(["LE_AUDIO=off\nLE_AUDIO=on\n"])["LE_AUDIO"], "on")
 
-    def test_settings_keys(self):
+    def test_settings_keys(self) -> None:
         self.assertEqual(
             self.m.set_keys("# c\nLDAC_RATE=48000\nFOO=1\nLE_AUDIO=on\nLDAC_RATE=\n"), ["LDAC_RATE", "LE_AUDIO"]
         )
@@ -336,7 +419,7 @@ class SettingsTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
-    def test_shell_and_helper_agree(self):
+    def test_shell_and_helper_agree(self) -> None:
         with open(SETUP) as f:
             sh = f.read()
         self.assertIn(f'ISO_UUID="{self.m.ISO_UUID}"', sh)
@@ -351,10 +434,10 @@ class SettingsTest(unittest.TestCase):
 
 
 class LiveParsingTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_adapter_path(self):
+    def test_adapter_path(self) -> None:
         objs = {
             "type": "a{oa{sa{sv}}}",
             "data": [
@@ -369,7 +452,7 @@ class LiveParsingTest(unittest.TestCase):
         self.assertEqual(self.m.adapter_path(objs), "/org/bluez/hci0")
         self.assertIsNone(self.m.adapter_path({"data": [{}]}))
 
-    def test_card_state(self):
+    def test_card_state(self) -> None:
         dev = "0A_1B_2C_3D_4E_5F"
         cards = [
             {"name": "alsa_card.x"},
@@ -381,10 +464,12 @@ class LiveParsingTest(unittest.TestCase):
         ]
         srcs = [{"index": 7, "name": f"bluez_input.{dev}.0"}, {"index": 3, "name": "alsa_input.x"}]
         self.assertEqual(self.m.card_state(dev, cards, srcs, [{"source": 3}]), ("headset-head-unit", True, False))
-        self.assertEqual(self.m.card_state(dev, cards, srcs, [{"source": 7}])[2], True)
+        card = self.m.card_state(dev, cards, srcs, [{"source": 7}])
+        assert card is not None
+        self.assertEqual(card[2], True)
         self.assertIsNone(self.m.card_state("00_00", cards, srcs, []))
 
-    def test_pw_state(self):
+    def test_pw_state(self) -> None:
         dev = "0A_1B_2C_3D_4E_5F"
         objs = [
             {
@@ -405,9 +490,13 @@ class LiveParsingTest(unittest.TestCase):
         ]
         self.assertEqual(self.m.pw_state(dev, objs), ("a2dp-sink", "auto", "ldac", "auto", None))
         objs[1]["info"]["params"]["Format"] = [{"rate": 96000}]
-        self.assertEqual(self.m.pw_state(dev, objs)[4], "96000")
+        pw1 = self.m.pw_state(dev, objs)
+        assert pw1 is not None
+        self.assertEqual(pw1[4], "96000")
         objs[1]["info"]["params"]["Props"][1]["quality"] = 0
-        self.assertEqual(self.m.pw_state(dev, objs)[3], "hq")
+        pw2 = self.m.pw_state(dev, objs)
+        assert pw2 is not None
+        self.assertEqual(pw2[3], "hq")
         self.assertIsNone(self.m.pw_state("00_00", objs))
         r = subprocess.run(
             [sys.executable, "-I", HELPER, "pw-parse", "00_00"], check=False, input="[]", capture_output=True, text=True
@@ -424,10 +513,10 @@ class LiveParsingTest(unittest.TestCase):
 
 
 class LeAudioRenderTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_render(self):
+    def test_render(self) -> None:
         text = self.m.render_le_off()
         self.assertTrue(text.startswith(self.m.MARKER))
         eff = self.m.effective(text)
@@ -446,12 +535,12 @@ class LeAudioRenderTest(unittest.TestCase):
         self.assertIn("cst bluetooth le-audio on", text)
         self.assertTrue(self.m.defines_section(text))
 
-    def test_classic_roles_are_pipewire_defaults_without_le(self):
+    def test_classic_roles_are_pipewire_defaults_without_le(self) -> None:
         # PipeWire 1.6.11 (man pipewire-props): the default bluez5.roles.
         default = "a2dp_sink a2dp_source bap_sink bap_source bap_bcast_sink bap_bcast_source hfp_hf hfp_ag".split()
         self.assertEqual(list(self.m.CLASSIC_ROLES), [r for r in default if not r.startswith("bap_")])
 
-    def test_state(self):
+    def test_state(self) -> None:
         text = self.m.render_le_off()
         self.assertEqual(self.m.wp_state(None, text), "missing")
         self.assertEqual(self.m.wp_state(text, text), "ok")
@@ -474,24 +563,24 @@ class LeAudioEffectTest(unittest.TestCase):
     """What WirePlumber makes of the files: roles, other fragments, the
     settings line that `le-audio on|off` writes."""
 
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
         self.tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
 
-    def test_roles_state(self):
+    def test_roles_state(self) -> None:
         self.assertEqual(self.m.roles_state(None), "default")
         self.assertEqual(self.m.roles_state("[ a2dp_sink a2dp_source hfp_hf hfp_ag ]"), "classic")
         self.assertEqual(self.m.roles_state("[a2dp_sink, a2dp_source, hfp_hf, hfp_ag, bap_sink]"), "le")
 
-    def test_wp_roles_without_libwireplumber(self):
+    def test_wp_roles_without_libwireplumber(self) -> None:
         env = dict(os.environ, CST_BT_LIBWP=os.path.join(self.tmp, "no-such-lib.so"))
         r = subprocess.run(
             [sys.executable, "-I", HELPER, "wp-roles"], check=False, capture_output=True, text=True, env=env
         )
         self.assertEqual((r.returncode, r.stdout), (5, ""))
 
-    def test_defines_section(self):
+    def test_defines_section(self) -> None:
         for text in (
             "monitor.bluez.properties = {\n}\n",
             "override.monitor.bluez.properties = { }\n",
@@ -506,7 +595,7 @@ class LeAudioEffectTest(unittest.TestCase):
         ):
             self.assertFalse(self.m.defines_section(text), text)
 
-    def test_other_fragments(self):
+    def test_other_fragments(self) -> None:
         user, etc = os.path.join(self.tmp, "user"), os.path.join(self.tmp, "etc")
         for d in (user, etc):
             os.makedirs(d)
@@ -534,7 +623,7 @@ class LeAudioEffectTest(unittest.TestCase):
         )
         self.assertEqual(r.stdout.splitlines(), [f"before|{user}/51-props.conf", f"after|{etc}/95-late.conf"])
 
-    def test_settings_set(self):
+    def test_settings_set(self) -> None:
         f = self.m.settings_set
         new, changed = f(None, "LE_AUDIO", "on")
         self.assertTrue(changed)
@@ -564,7 +653,7 @@ class LeAudioEffectTest(unittest.TestCase):
             self.assertEqual(r.returncode, 2, (key, val))
 
 
-def _libwireplumber():
+def _libwireplumber() -> bool:
     try:
         import ctypes
 
@@ -579,7 +668,7 @@ class WirePlumberResolveTest(unittest.TestCase):
     """The CST file as WirePlumber itself merges it (read-only: the config
     is only parsed, nothing is started)."""
 
-    def roles(self, files):
+    def roles(self, files: Mapping[str, str]) -> str:
         xdg = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, xdg)
         d = os.path.join(xdg, "wireplumber", "wireplumber.conf.d")
@@ -595,14 +684,14 @@ class WirePlumberResolveTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.strip()
 
-    def test_cst_file_alone(self):
-        m = load()
+    def test_cst_file_alone(self) -> None:
+        m = load_helper()
         self.assertEqual(
             self.roles({m.LE_CONF_NAME: m.render_le_off()}), "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]"
         )
 
-    def test_cst_file_replaces_an_earlier_role_list(self):
-        m = load()
+    def test_cst_file_replaces_an_earlier_role_list(self) -> None:
+        m = load_helper()
         self.assertEqual(
             self.roles(
                 {
@@ -613,7 +702,7 @@ class WirePlumberResolveTest(unittest.TestCase):
             "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]",
         )
 
-    def test_the_old_key_override_did_nothing(self):
+    def test_the_old_key_override_did_nothing(self) -> None:
         # What CST wrote before: the key kept its literal name, roles unset.
         old = "monitor.bluez.properties = {\n  override.bluez5.roles = [ a2dp_sink ]\n}\n"
         self.assertEqual(self.roles({"90-cst-le-audio-off.conf": old}), "default|")
@@ -636,10 +725,10 @@ JOURNAL = """\
 
 
 class WatcherFailureTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load()
+    def setUp(self) -> None:
+        self.m = load_helper()
 
-    def test_last_outcome_failed(self):
+    def test_last_outcome_failed(self) -> None:
         self.assertEqual(
             self.m.lw_failure(JOURNAL),
             (
@@ -649,13 +738,13 @@ class WatcherFailureTest(unittest.TestCase):
             ),
         )
 
-    def test_fixed_afterwards_or_never_failed(self):
+    def test_fixed_afterwards_or_never_failed(self) -> None:
         later = "2026-11-12T09:00:05-03:00 sophia python3[999]: fixed: LDAC now at 48000 Hz\n"
         self.assertIsNone(self.m.lw_failure(JOURNAL + later))
         self.assertIsNone(self.m.lw_failure(JOURNAL.split("-- Boot")[0]))
         self.assertIsNone(self.m.lw_failure(""))
 
-    def test_detail_only_from_the_same_attempt(self):
+    def test_detail_only_from_the_same_attempt(self) -> None:
         text = (
             "T1 h python3[1]: some error of an older attempt\n"
             "T2 h python3[1]: act: LDAC at 96000 Hz\n"
@@ -663,7 +752,7 @@ class WatcherFailureTest(unittest.TestCase):
         )
         self.assertEqual(self.m.lw_failure(text), ("T3", "profile switch failed", ""))
 
-    def test_cli(self):
+    def test_cli(self) -> None:
         r = subprocess.run(
             [sys.executable, "-I", HELPER, "lw-failure"], check=False, input=JOURNAL, capture_output=True, text=True
         )
@@ -675,11 +764,11 @@ class WatcherFailureTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (1, ""))
 
 
-def shell_functions(*names):
+def shell_functions(*names: str) -> str:
     """The text of the named top-level functions of bluetooth-setup.sh."""
     with open(SETUP) as f:
         src = f.read()
-    out = []
+    out: list[str] = []
     for n in names:
         m = re.search(rf"^{n}\(\) {{\n.*?^}}\n", src, re.M | re.S)
         assert m, n
@@ -704,7 +793,9 @@ restart_hint() { echo hint; }
 le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
 """
 
-    def run_restarts(self, sudo_rc, wp_rc, bt=1, wp=1, le_off=0, no_restart=0):
+    def run_restarts(
+        self, sudo_rc: int, wp_rc: int, bt: int = 1, wp: int = 1, le_off: int = 0, no_restart: int = 0
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         tmp = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, tmp)
         log = os.path.join(tmp, "log")
@@ -723,13 +814,13 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
         r = subprocess.run(
             ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
         )
-        calls = []
+        calls: list[str] = []
         if os.path.exists(log):
             with open(log) as f:
                 calls = f.read().splitlines()
         return r, calls
 
-    def test_ok(self):
+    def test_ok(self) -> None:
         r, calls = self.run_restarts(0, 0)
         self.assertIn("rc=0", r.stdout)
         self.assertEqual(
@@ -737,12 +828,12 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
             ["sudo systemctl restart bluetooth", "systemctl --user restart wireplumber", "wait bap", "restore_a2dp"],
         )
 
-    def test_no_bap_wait_with_le_audio_off(self):
+    def test_no_bap_wait_with_le_audio_off(self) -> None:
         r, calls = self.run_restarts(0, 0, bt=0, le_off=1)
         self.assertIn("rc=0", r.stdout)
         self.assertEqual(calls, ["systemctl --user restart wireplumber", "restore_a2dp"])
 
-    def test_no_restart_hint_names_only_what_is_needed(self):
+    def test_no_restart_hint_names_only_what_is_needed(self) -> None:
         r, calls = self.run_restarts(0, 0, bt=0, no_restart=1)
         self.assertEqual(calls, [])
         self.assertIn("To finish: systemctl --user restart wireplumber", r.stdout)
@@ -750,13 +841,13 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
         r, _ = self.run_restarts(0, 0, bt=1, no_restart=1)
         self.assertIn("To finish: hint", r.stdout)
 
-    def test_failed_bluetooth_restart_stops_before_wireplumber(self):
+    def test_failed_bluetooth_restart_stops_before_wireplumber(self) -> None:
         r, calls = self.run_restarts(1, 0)
         self.assertIn("rc=2", r.stdout)
         self.assertEqual(calls, ["sudo systemctl restart bluetooth"])
         self.assertIn("bluetooth.service was not restarted", r.stderr)
 
-    def test_failed_wireplumber_restart(self):
+    def test_failed_wireplumber_restart(self) -> None:
         r, calls = self.run_restarts(0, 1, bt=0)
         self.assertIn("rc=2", r.stdout)
         self.assertEqual(calls, ["systemctl --user restart wireplumber"])
@@ -808,7 +899,7 @@ wp_roles() { [[ -n "${WP_ROLES:-}" ]] || return 5; echo "$WP_ROLES"; }
 YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOME/self"
 """
 
-    def sh(self, body, le="off", home=None, **env):
+    def sh(self, body: str, le: str = "off", home: str | None = None, **env: str) -> subprocess.CompletedProcess[str]:
         home = home or self.home
         script = (
             self.STUBS
@@ -834,19 +925,19 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             ["bash", "-c", script], check=False, capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL
         )
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.home = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, self.home)
         with open(os.path.join(self.home, "main.conf"), "w") as f:
             f.write(f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n")
         self.le_conf = os.path.join(self.home, ".config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf")
 
-    def state(self, le="off"):
+    def state(self, le: str = "off") -> str:
         r = self.sh('le_plan; echo "st=$LE_STATE change=$LE_CHANGE"\n', le=le)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.strip().splitlines()[-1]
 
-    def test_state_read_again_after_writing(self):
+    def test_state_read_again_after_writing(self) -> None:
         # apply's closing verify must not report the state from before the
         # changes ("drop-in is not in place yet" right after writing it).
         r = self.sh('compute_plan; echo "before=$LE_STATE"; apply_le; le_plan; echo "after=$LE_STATE"\n')
@@ -854,12 +945,12 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("before=missing", r.stdout)
         self.assertIn("after=ok", r.stdout)
 
-    def test_apply_reads_state_again_before_verify(self):
+    def test_apply_reads_state_again_before_verify(self) -> None:
         body = shell_functions("apply")
         tail = body[body.rindex("\n    verify\n") - 40 :]
         self.assertRegex(tail, r"le_plan\n\s*lw_plan\n\s*verify\n")
 
-    def test_off_on_off(self):
+    def test_off_on_off(self) -> None:
         self.assertEqual(self.state(), "st=missing change=1")
         r = self.sh("le_plan; apply_le\n")
         self.assertIn("written:", r.stdout)
@@ -879,7 +970,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertEqual(self.state("on"), "st=absent change=0")
         self.assertEqual(self.state(), "st=missing change=1")
 
-    def test_changed_and_foreign_files(self):
+    def test_changed_and_foreign_files(self) -> None:
         self.sh("le_plan; apply_le\n")
         with open(self.le_conf, "a") as f:
             f.write("monitor.bluez.properties = { bluez5.hw-volume = [ ] }\n")
@@ -892,7 +983,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("left alone", r.stderr)
         self.assertTrue(os.path.exists(self.le_conf))
 
-    def test_plan_output(self):
+    def test_plan_output(self) -> None:
         r = self.sh("plan || echo rc=$?\n")
         self.assertIn("LE Audio off (the CST default)", r.stdout)
         self.assertIn("item write | wireplumber.conf.d/90-cst-le-audio-off.conf", r.stdout)
@@ -909,7 +1000,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         r = self.sh("plan || :\n", BEARER="le")
         self.assertIn("item warn | preferred bearer | BEARER=le while LE Audio is off", r.stdout)
 
-    def test_plan_shows_the_diff_of_a_changed_file(self):
+    def test_plan_shows_the_diff_of_a_changed_file(self) -> None:
         self.sh("le_plan; apply_le\n")
         with open(self.le_conf) as f:
             text = f.read()
@@ -919,7 +1010,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("as apply would write it", r.stdout)
         self.assertIn("-  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag bap_sink ]", r.stdout)
 
-    def test_revert_removes_the_drop_in(self):
+    def test_revert_removes_the_drop_in(self) -> None:
         self.sh("le_plan; apply_le\n")
         r = self.sh("CHECK=1; revert || echo rc=$?\n")
         self.assertIn("would remove", r.stdout)
@@ -934,7 +1025,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         r = self.sh("revert\n")
         self.assertIn("none needed", r.stdout)
 
-    def test_revert_leaves_a_foreign_file(self):
+    def test_revert_leaves_a_foreign_file(self) -> None:
         os.makedirs(os.path.dirname(self.le_conf))
         with open(self.le_conf, "w") as f:
             f.write("monitor.bluez.properties = { }\n")
@@ -942,7 +1033,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("left alone", r.stderr)
         self.assertTrue(os.path.exists(self.le_conf))
 
-    def test_bearer_warning(self):
+    def test_bearer_warning(self) -> None:
         info_le = "\tPaired: yes\n\tUUID: Telephony Bearer (0000184b-...)\n\tPreferredBearer: le\n"
         info_bredr = info_le.replace("PreferredBearer: le", "PreferredBearer: bredr")
         body = 'bearer_check "$INFO"; echo "warns=$WARNS"\n'
@@ -954,7 +1045,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("warns=0", self.sh(body, le="on", INFO=info_le).stdout)
         self.assertIn("warns=0", self.sh(body, INFO="").stdout)
 
-    def test_effective_roles_check(self):
+    def test_effective_roles_check(self) -> None:
         body = 'le_plan; le_roles_check; echo "fails=$FAILS warns=$WARNS"\n'
         classic = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]"
         r = self.sh(body, WP_ROLES=classic)
@@ -983,7 +1074,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("item warn | WirePlumber bluez5.roles | could not be read", r.stdout)
         self.assertIn("fails=0 warns=1", r.stdout)
 
-    def test_other_fragments_are_named(self):
+    def test_other_fragments_are_named(self) -> None:
         d = os.path.dirname(self.le_conf)
         os.makedirs(d)
         os.makedirs(os.path.join(self.home, "etc-wp.d"))
@@ -996,7 +1087,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("item warn | ~/etc-wp.d/99-late.conf | sets monitor.bluez.properties after", r.stdout)
         self.assertEqual(self.sh("le_plan; le_others_report\n", le="on").stdout, "")
 
-    def le_audio(self, value, **env):
+    def le_audio(self, value: str, **env: str) -> subprocess.CompletedProcess[str]:
         with open(os.path.join(self.home, "self"), "w") as f:
             f.write('#!/bin/sh\necho "SELF $*"\n')
         os.chmod(os.path.join(self.home, "self"), 0o755)
@@ -1004,19 +1095,19 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
-    def test_le_audio_command_without_a_settings_folder(self):
+    def test_le_audio_command_without_a_settings_folder(self) -> None:
         # Fresh user: no ~/.config/cst yet (the old `echo ... >>` hint failed there).
         settings = os.path.join(self.home, ".config/cst/bluetooth.conf")
         r = self.le_audio("on")
         self.assertIn("written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=on", r.stdout)
         self.assertIn("SELF apply", r.stdout)
         with open(settings) as f:
-            self.assertEqual(load().parse_settings(f.read()), {"LE_AUDIO": "on"})
+            self.assertEqual(load_helper().parse_settings(f.read()), {"LE_AUDIO": "on"})
         r = self.le_audio("on", YES="1", NO_RESTART="1")
         self.assertIn("unchanged:", r.stdout)
         self.assertIn("SELF apply --yes --no-restart", r.stdout)
 
-    def test_le_audio_command_keeps_the_other_lines(self):
+    def test_le_audio_command_keeps_the_other_lines(self) -> None:
         # The case that broke the appended hint: no newline at the end.
         os.makedirs(os.path.join(self.home, ".config/cst"))
         real = os.path.join(self.home, "dotfiles.conf")
@@ -1034,7 +1125,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         with open(real) as f:
             self.assertEqual(f.read(), "# mine\nLDAC_RATE=48000\nLE_AUDIO=off\n")
 
-    def test_le_audio_command_shows_the_setting(self):
+    def test_le_audio_command_shows_the_setting(self) -> None:
         r = self.sh("le_audio_cmd\n")
         self.assertIn("LE Audio in PipeWire: off (the CST default)", r.stdout)
         self.assertIn("Turn it on: cst-test le-audio on", r.stdout)
@@ -1042,7 +1133,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         r = self.sh("le_audio_cmd\n", le="on")
         self.assertIn("Turn it off: cst-test le-audio off", r.stdout)
 
-    def test_install_main_conf_respects_selinux_state(self):
+    def test_install_main_conf_respects_selinux_state(self) -> None:
         orig = os.path.join(self.home, "main.conf")
         new = os.path.join(self.home, "main.conf.newsrc")
         with open(orig, "w") as f:
@@ -1075,7 +1166,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("--preserve=context", lines[2])
         self.assertIn(" -Z ", lines[3])
 
-    def test_bt_info_uses_timeout_and_null_stdin(self):
+    def test_bt_info_uses_timeout_and_null_stdin(self) -> None:
         # BT_TIMEOUT > 0: bluetoothctl runs under timeout BT_TIMEOUT with stdin=/dev/null
         script = (
             shell_functions("bt_info") + 'hostcmd() { "$@"; }\n'
@@ -1088,7 +1179,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn(f"stdin_target=/dev/null args=7 bluetoothctl info {MAC}", r.stdout)
         self.assertNotIn("direct call", r.stdout)
 
-    def test_bt_info_without_timeout_calls_bluetoothctl_directly(self):
+    def test_bt_info_without_timeout_calls_bluetoothctl_directly(self) -> None:
         # BT_TIMEOUT=0 is the test seam: no timeout, so a shell function stub is reached
         script = (
             shell_functions("bt_info") + 'hostcmd() { "$@"; }\n'
@@ -1101,7 +1192,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn(f"fn stdin=/dev/null args=info {MAC}", r.stdout)
         self.assertNotIn("timeout used", r.stdout)
 
-    def test_bt_timeout_default_and_validation(self):
+    def test_bt_timeout_default_and_validation(self) -> None:
         with open(SETUP) as f:
             src = f.read()
         self.assertIn('BT_TIMEOUT="${BT_TIMEOUT:-5}"', src)
@@ -1113,7 +1204,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BT_TIMEOUT must be a whole number", r.stderr)
 
-    def test_bt_timeout_leading_zero_is_decimal(self):
+    def test_bt_timeout_leading_zero_is_decimal(self) -> None:
         # "08" and "09" are not valid octal, so without base-10 normalisation
         # (( BT_TIMEOUT > 0 )) would fail and bluetoothctl would run with no timeout.
         with open(SETUP) as f:
@@ -1149,7 +1240,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
             )
             self.assertEqual(r.returncode, 2, bad)
 
-    def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self):
+    def test_apply_bearer_uses_bluetoothctl_and_null_stdin(self) -> None:
         apply_fn = shell_functions("apply")
         stub_plan = (
             "compute_plan() { MC_CHANGED=0; WP_STATE=ok; LE_STATE=ok; LE_CHANGE=0; LEGACY=0; "
@@ -1203,13 +1294,13 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
 class OptionsTest(unittest.TestCase):
     """bluetooth-setup.sh stops on bad options before it looks at the system."""
 
-    def run_setup(self, *args, home=None):
+    def run_setup(self, *args: str, home: str | None = None) -> subprocess.CompletedProcess[str]:
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home or tempfile.gettempdir()}
         return subprocess.run(
             ["bash", SETUP, *args], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
         )
 
-    def test_bad_options(self):
+    def test_bad_options(self) -> None:
         for args in (
             ("plan", "--ldac-quality", "best"),
             ("plan", "--bearer=usb"),
@@ -1231,7 +1322,7 @@ class OptionsTest(unittest.TestCase):
             self.assertEqual(r.returncode, 2, (args, r.stderr))
         self.assertEqual(self.run_setup("nonsense").returncode, 2)
 
-    def test_bad_device_in_user_settings_is_named(self):
+    def test_bad_device_in_user_settings_is_named(self) -> None:
         home = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, home)
         os.makedirs(os.path.join(home, ".config", "cst"))
@@ -1242,7 +1333,7 @@ class OptionsTest(unittest.TestCase):
         self.assertIn("got 'headset'", r.stderr)
         self.assertIn(os.path.join(home, ".config", "cst", "bluetooth.conf"), r.stderr)
 
-    def test_bad_ldac_rate_in_user_settings(self):
+    def test_bad_ldac_rate_in_user_settings(self) -> None:
         home = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, home)
         os.makedirs(os.path.join(home, ".config", "cst"))
@@ -1252,7 +1343,7 @@ class OptionsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("LDAC_RATE must be empty", r.stderr)
 
-    def test_bad_le_audio_in_user_settings(self):
+    def test_bad_le_audio_in_user_settings(self) -> None:
         home = tempfile.mkdtemp(prefix="bt-test-")
         self.addCleanup(shutil.rmtree, home)
         os.makedirs(os.path.join(home, ".config", "cst"))
@@ -1262,11 +1353,113 @@ class OptionsTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("LE Audio must be on or off (got 'true'", r.stderr)
 
-    def test_help_lists_the_commands(self):
+    def test_help_lists_the_commands(self) -> None:
         r = self.run_setup("help")
         self.assertEqual(r.returncode, 0)
         for c in ("plan", "apply", "status", "revert", "le-audio"):
             self.assertRegex(r.stdout, re.compile(rf"^\s+{c}\b", re.M))
+
+
+class _FakeBluetoothHost:
+    def __init__(
+        self,
+        *,
+        files: Mapping[str, str] | None = None,
+        fragments: list[tuple[str, str]] | None = None,
+        roles: tuple[bool, str | None] = (True, None),
+        stdin_text: str = "",
+    ) -> None:
+        self.files = dict(files or {})
+        self.fragments = list(fragments or [])
+        self.roles = roles
+        self.stdin_text = stdin_text
+
+    def read(self, path: str) -> str:
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return self.files[path]
+
+    def read_or_none(self, path: str) -> str | None:
+        return self.files.get(path)
+
+    def other_fragments(self, ours: str, dirs: Sequence[str]) -> list[tuple[str, str]]:
+        return list(self.fragments)
+
+    def wp_effective_roles(self) -> tuple[bool, str | None]:
+        return self.roles
+
+    def read_stdin(self) -> str:
+        return self.stdin_text
+
+
+class HexagonalArchitectureTest(unittest.TestCase):
+    """Tests directly exercising bluetooth.domain, bluetooth.adapters, and bluetooth.application."""
+
+    def test_classify_other_fragments_handles_priority_shadowing_and_ordering(self) -> None:
+        dir_files = [
+            (
+                "/user/wp.conf.d",
+                [
+                    ("50-rules.conf", "monitor.bluez.rules = []\n"),
+                    ("51-props.conf", "monitor.bluez.properties = { bluez5.enable-msbc = true }\n"),
+                    ("60-shadowed.conf", "context.properties = {}\n"),
+                    ("80-notes.txt", "monitor.bluez.properties = {}\n"),
+                    ("90-cst-le-audio-off.conf", "override.monitor.bluez.properties = {}\n"),
+                ],
+            ),
+            (
+                "/etc/wp.conf.d",
+                [
+                    ("60-shadowed.conf", "monitor.bluez.properties = {}\n"),
+                    ("95-late.conf", "override.monitor.bluez.properties = { bluez5.roles = [ bap_sink ] }\n"),
+                ],
+            ),
+        ]
+        self.assertEqual(
+            classify_other_fragments("90-cst-le-audio-off.conf", dir_files),
+            [
+                ("before", "/user/wp.conf.d/51-props.conf"),
+                ("after", "/etc/wp.conf.d/95-late.conf"),
+            ],
+        )
+
+    def test_local_adapter_and_application_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bt-hex-") as tmp:
+            main_conf = os.path.join(tmp, "main.conf")
+            with open(main_conf, "w", encoding="utf-8") as fh:
+                fh.write(VENDOR)
+            host = LocalBluetoothHostAdapter()
+            out, err = io.StringIO(), io.StringIO()
+            rc = bt_app.main(["general-apply", main_conf], host, stdout=out, stderr=err)
+            self.assertEqual(rc, 10)
+            self.assertEqual(err.getvalue(), "")
+            with open(main_conf, "w", encoding="utf-8") as fh:
+                fh.write(out.getvalue())
+
+            show_out = io.StringIO()
+            rc_show = bt_app.main(["general-show", main_conf], host, stdout=show_out, stderr=err)
+            self.assertEqual(rc_show, 0)
+            self.assertIn(f"KernelExperimental\tok\t{ISO}", show_out.getvalue())
+
+    def test_application_main_with_fake_port(self) -> None:
+        fake = _FakeBluetoothHost(roles=(False, "missing libwireplumber"), stdin_text=JOURNAL)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(bt_app.main(["wp-roles"], fake, stdout=out, stderr=err), 5)
+        self.assertIn("missing libwireplumber", err.getvalue())
+
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(bt_app.main(["lw-failure"], fake, stdout=out, stderr=err), 0)
+        self.assertTrue(out.getvalue().startswith("2026-11-11T14:11:58-03:00|"))
+
+        out, err = io.StringIO(), io.StringIO()
+        # No device-id command, as on main (only the watcher uses domain.device_id): a usage error.
+        self.assertEqual(bt_app.main(["device-id", MAC.lower()], fake, stdout=out, stderr=err), 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("usage", err.getvalue())
+
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(bt_app.main(["unknown"], fake, stdout=out, stderr=err), 2)
+        self.assertIn("usage", err.getvalue())
 
 
 if __name__ == "__main__":

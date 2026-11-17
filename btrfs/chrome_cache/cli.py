@@ -1,0 +1,169 @@
+"""chrome-cache's commands (status, plan, apply, off) and main()."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+import os
+import sys
+from btrfs.chrome_cache.adapters import (
+    RUNTIME_DIR,
+    current,
+    installed,
+    is_subvol,
+    old_cache,
+    allocated_bytes,
+    write_flags,
+)
+from btrfs.chrome_cache.domain import (
+    APP,
+    CACHE_SUBVOL_REL,
+    FLAGS_REL,
+    OLD_CACHE_REL,
+    decide,
+    inspect,
+    off_message,
+    size_text,
+    turn_off,
+)
+from cst_core.domain.errors import Refused
+
+
+def apply(home: str) -> tuple[str, str, bool]:
+    """(state, message, changed)."""
+    if not installed(home):
+        return "no-app", "Chrome Flatpak not installed: nothing to do", False
+    dfd, text, st = current(home, create=False)
+    try:
+        state, new, msg = decide(text)
+        if new is None:
+            return state, msg, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            assert dfd is not None
+            state, new, msg = decide(text)
+            if new is None:
+                return state, msg, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        return state, msg, True
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+def off(home: str) -> tuple[str, bool, bool]:
+    """(message, changed, still_set): STILL_SET when cache flags remain."""
+    dfd, text, st = current(home, create=False)
+    try:
+        new = turn_off(text)
+        if new is None:
+            return "already off: nothing changed", False, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            assert dfd is not None
+            new = turn_off(text)
+            if new is None:
+                return "already off: nothing changed", False, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        left = inspect(new)
+        return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+def plan_line(home: str) -> str:
+    if not installed(home):
+        return "not installed: nothing to do"
+    dfd, text, _ = current(home, create=False)
+    if dfd is not None:
+        os.close(dfd)
+    state, _, msg = decide(text)
+    return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
+
+
+def status(home: str) -> int:
+    print("Chrome (Flatpak): HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB")
+    inst = installed(home)
+    print(f"  Chrome Flatpak:        {('installed (' + inst + ')') if inst else 'not installed (nothing to do)'}")
+    rc = 0
+    try:
+        dfd, text, _ = current(home, create=False)
+        if dfd is not None:
+            os.close(dfd)
+        state, _, msg = decide(text)
+        if state == "absent":
+            msg = "absent" + ("; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" if inst else "")
+        elif state == "cap-missing":
+            msg = "the 512 MiB cap line is missing: 'snapshots chrome-cache apply' adds it back"
+        print(f"  ~/{FLAGS_REL}:")
+        print(f"                         {msg}")
+    except (Refused, OSError, ValueError) as e:
+        print(f"  ~/{FLAGS_REL}: NEEDS A LOOK: {e}")
+        state, rc = "?", 1
+    ram = os.path.join(RUNTIME_DIR, ".flatpak", APP, "tmp", "chrome-cache")
+    if os.path.isdir(ram):
+        print(f"  in RAM now:            {size_text(allocated_bytes(ram))} ({ram})")
+    http, code, profiles = old_cache(home)
+    sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
+    where = "" if sub else ", in /home snapshots"
+    if state in ("managed", "user-same") and http >= 1024**2:
+        print(f"  old on-disk HTTP cache: {size_text(http)} in {profiles} profile(s){where}. Quit Chrome")
+        print("                         (all windows), start it again, then delete it (never done automatically):")
+        print(f"                         rm -rf ~/{OLD_CACHE_REL}/*/Cache")
+    elif http:
+        print(f"  on-disk HTTP cache:    {size_text(http)} in {profiles} profile(s) (~/{OLD_CACHE_REL}/*/Cache)")
+    if code:
+        print(f"  Code Cache on disk:    {size_text(code)} (~/{OLD_CACHE_REL}/*/Code Cache; whether the flag")
+        print("                         moves it too is not verified: btrfs/SNAPSHOTS.md, section 3, Chrome)")
+    if sub:
+        print(f"  ~/{CACHE_SUBVOL_REL}: a nested subvolume from an earlier setup: harmless (left out")
+        print("                         of snapshots), no longer needed; to make it a plain folder again see")
+        print("                         btrfs/SNAPSHOTS.md, section 3, Chrome")
+    return rc
+
+
+def main(argv: Sequence[str]) -> int:
+    args = argv[1:]
+    cmd = args[0] if args else "status"
+    home = None
+    if "--home" in args:
+        i = args.index("--home")
+        home = args[i + 1] if i + 1 < len(args) else None
+    if cmd not in ("status", "plan", "apply", "off", "undo") or (("--home" in args) and not home):
+        print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)", file=sys.stderr)
+        return 2
+    home = os.path.realpath(home or os.path.expanduser("~"))
+    try:
+        if os.stat(home).st_uid != os.getuid():
+            print(f"chrome-cache: {home} is not yours", file=sys.stderr)
+            return 2
+    except OSError as e:
+        print(f"chrome-cache: {home}: {e}", file=sys.stderr)
+        return 2
+    try:
+        if cmd == "status":
+            return status(home)
+        if cmd == "plan":
+            print(plan_line(home))
+            return 0
+        if cmd == "apply":
+            state, msg, changed = apply(home)
+            print(
+                f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}"
+                if state != "no-app"
+                else f"{'kept:':<10} {msg}"
+            )
+            if changed:
+                print("           Takes effect when Chrome starts again (quit all its windows first).")
+            return 0
+        msg, changed, still_set = off(home)
+        print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
+        if changed and not still_set:
+            print("           Takes effect when Chrome starts again.")
+        return 0
+    except (Refused, OSError, ValueError) as e:
+        print(f"NEEDS A LOOK: chrome-cache: {e}", file=sys.stderr)
+        return 1

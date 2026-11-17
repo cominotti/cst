@@ -10,6 +10,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s toolchains/tests -t . -v
 """
 
+from __future__ import annotations
+
 import contextlib
 import fcntl
 import io
@@ -24,7 +26,10 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from toolchains.tests.test_prune_rust_build import NOW, TOOL, load  # noqa: E402
+from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
+from cst_core.domain.errors import Refused, Usage  # noqa: E402
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
+from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, _ToolchainsModule, load  # noqa: E402
 
 TOOLCHAINS = os.path.dirname(TOOL)
 REPO = os.path.dirname(TOOLCHAINS)
@@ -65,7 +70,7 @@ FAKE_SYSTEMCTL = FAKE_LOG + FAKE_ANSWERS
 class Scratch(unittest.TestCase):
     """A scratch home, a stub systemctl, and the program loaded as a module."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
         self.home = os.path.join(self.tmp, "home")
@@ -75,7 +80,7 @@ class Scratch(unittest.TestCase):
         with open(self.stub, "w") as f:
             f.write(FAKE_SYSTEMCTL)
         os.chmod(self.stub, 0o755)
-        self.env = {
+        self.env: dict[str, str] = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": self.home,
             "CST_TOOLCHAINS_HERE": "1",
@@ -88,7 +93,7 @@ class Scratch(unittest.TestCase):
         saved = {k: os.environ.get(k) for k in self.env if k not in ("PATH", "HOME")}
         os.environ.update({k: v for k, v in self.env.items() if k not in ("PATH", "HOME")})
 
-        def restore():
+        def restore() -> None:
             for k, v in saved.items():
                 if v is None:
                     os.environ.pop(k, None)
@@ -96,14 +101,15 @@ class Scratch(unittest.TestCase):
                     os.environ[k] = v
 
         self.addCleanup(restore)
-        self.m = load()
+        self.m: _ToolchainsModule = load()
+        self.addCleanup(self.m.restore)
         self.m.JOURNAL = False
         self.m.cargo_procs = lambda uid=None: []
 
     # The user manager refusing a call (or not answering: the same exit 1
     # from systemctl). The stub records every call, and fails the ones that
     # contain `word` with systemctl's own error text.
-    def failing_stub(self, word):
+    def failing_stub(self, word: str) -> str:
         stub = os.path.join(self.tmp, "systemctl-failing")
         with open(stub, "w") as f:
             f.write(
@@ -114,10 +120,10 @@ class Scratch(unittest.TestCase):
         os.chmod(stub, 0o755)
         return stub
 
-    def failing(self, word):
+    def failing(self, word: str) -> contextlib.AbstractContextManager[None]:
         return mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.failing_stub(word)})
 
-    def calls(self):
+    def calls(self) -> list[str]:
         try:
             with open(self.log) as f:
                 return [
@@ -128,29 +134,29 @@ class Scratch(unittest.TestCase):
         except FileNotFoundError:
             return []
 
-    def run_main(self, *args):
+    def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home])
+            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue() + err.getvalue()
 
-    def write(self, rel, text):
+    def write(self, rel: str, text: str) -> str:
         path = os.path.join(self.home, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(text)
         return path
 
-    def read(self, rel):
+    def read(self, rel: str) -> str:
         with open(os.path.join(self.home, rel)) as f:
             return f.read()
 
-    def csts_cargo_config(self):
+    def csts_cargo_config(self) -> None:
         self.write(".cargo/config.toml", OLD_CARGO % self.home)
 
 
 class CliTest(Scratch):
-    def test_parse(self):
+    def test_parse(self) -> None:
         p = self.m.parse_args
         self.assertEqual(p([])["cmd"], "help")
         self.assertEqual(p(["--help"])["cmd"], "help")
@@ -181,17 +187,17 @@ class CliTest(Scratch):
             with self.assertRaises(self.m.Usage, msg=bad):
                 p(bad)
 
-    def test_empty_home_never_means_the_real_home(self):
+    def test_empty_home_never_means_the_real_home(self) -> None:
         # `--home="$H"` with $H empty: exit 2 before anything is read or changed.
         for args in (["prune", "apply", "--home="], ["auto", "off", "--home="], ["config", "apply", "--home", ""]):
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                rc = self.m.main(args)
+                rc = self.m.main(args, HELP, TOOL)
             self.assertEqual(rc, 2, args)
             self.assertIn("--home needs a folder", err.getvalue())
         self.assertEqual(self.calls(), [])
 
-    def test_main_exit_codes(self):
+    def test_main_exit_codes(self) -> None:
         self.assertEqual(self.run_main("prune", "delete")[0], 2)
         rc, out = self.run_main("help")
         self.assertEqual(rc, 0)
@@ -202,10 +208,10 @@ class CliTest(Scratch):
 
 
 class SelectTest(Scratch):
-    def sel(self, *names):
+    def sel(self, *names: str) -> list[tuple[str, bool]]:
         return [(c.ID, named) for c, named in self.m.select_targets(list(names), self.m.Settings(self.home))]
 
-    def test_selection(self):
+    def test_selection(self) -> None:
         self.assertEqual(self.sel(), [("rust:build", False), ("python:uv", False)])
         self.assertEqual(self.sel("rust"), [("rust:build", True)])
         self.assertEqual(self.sel("python"), [("python:uv", True)])
@@ -221,7 +227,7 @@ class SelectTest(Scratch):
             with self.assertRaisesRegex(self.m.Usage, msg, msg=name):
                 self.sel(name)
 
-    def test_disabled_target(self):
+    def test_disabled_target(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_ENABLED=no\nPYTHON_UV_ENABLED=no\n")
         self.assertEqual(self.sel(), [])
         self.assertEqual(self.sel("rust:build"), [("rust:build", True)])
@@ -236,7 +242,7 @@ class SelectTest(Scratch):
 
 
 class DefaultsTest(Scratch):
-    def test_defaults_file_is_complete_and_marked(self):
+    def test_defaults_file_is_complete_and_marked(self) -> None:
         with open(DEFAULTS) as f:
             text = f.read()
         self.assertIn(self.m.MARKER, text)
@@ -260,20 +266,20 @@ class DefaultsTest(Scratch):
             },
         )
 
-    def test_every_target_is_documented(self):
+    def test_every_target_is_documented(self) -> None:
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:
             readme = f.read()
         for tid in list(self.m.TARGETS) + list(self.m.PLANNED):
             self.assertIn(f"`{tid}`", readme, tid)
 
-    def test_missing_defaults_stop_the_run(self):
+    def test_missing_defaults_stop_the_run(self) -> None:
         self.m.defaults_path = lambda: os.path.join(self.tmp, "nope.conf")
         with self.assertRaisesRegex(self.m.ConfigError, "missing"):
             self.m.Settings(self.home)
 
 
 class ConfigTest(Scratch):
-    def test_writes_the_old_lines_once(self):
+    def test_writes_the_old_lines_once(self) -> None:
         rc, out = self.run_main("config", "plan")
         self.assertEqual(rc, 0, out)
         self.assertIn("write", out)
@@ -292,7 +298,7 @@ class ConfigTest(Scratch):
         rc, out = self.run_main("status")
         self.assertIn("build-dir = CST's line", out)
 
-    def test_existing_settings_are_never_changed(self):
+    def test_existing_settings_are_never_changed(self) -> None:
         cargo = "[net]\ngit-fetch-with-cli = true\n[build]\njobs = 8\n"
         uv = 'native-tls = true\n[pip]\nindex-url = "x"\n'
         self.write(".cargo/config.toml", cargo)
@@ -313,7 +319,7 @@ class ConfigTest(Scratch):
         rc, out = self.run_main("config", "plan")
         self.assertIn("your own value", out)
 
-    def test_appends_after_a_missing_newline(self):
+    def test_appends_after_a_missing_newline(self) -> None:
         self.write(".cargo/config.toml", "[net]\noffline = false")
         self.write(".config/uv/uv.toml", "native-tls = true")
         rc, out = self.run_main("config", "apply")
@@ -322,7 +328,7 @@ class ConfigTest(Scratch):
         self.assertEqual(self.read(".config/uv/uv.toml"), "native-tls = true\n" + OLD_UV)
 
     @unittest.skipIf(os.getuid() == 0, "root writes into read-only folders")
-    def test_write_error_is_reported_and_the_other_setting_still_written(self):
+    def test_write_error_is_reported_and_the_other_setting_still_written(self) -> None:
         # ~/.cargo not writable (root-owned after a `sudo cargo`, say): no
         # traceback, exit 1, and uv.toml is still written.
         cargo_dir = os.path.join(self.home, ".cargo")
@@ -344,7 +350,7 @@ class SnapshotsSetupTest(Scratch):
     lines are still written (by the toolchains module), and the timer is
     turned on only when the user did not turn it off."""
 
-    def run_setup(self, prog="cst btrfs", env=None):
+    def run_setup(self, prog: str = "cst btrfs", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
             'runuser() { shift 3; "$@"; }\n'  # runuser -u USER -- CMD...: CMD as is
@@ -361,7 +367,7 @@ class SnapshotsSetupTest(Scratch):
             stdin=subprocess.DEVNULL,
         )
 
-    def test_setup_writes_the_same_lines_and_turns_the_timer_on(self):
+    def test_setup_writes_the_same_lines_and_turns_the_timer_on(self) -> None:
         r = self.run_setup()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
@@ -375,7 +381,7 @@ class SnapshotsSetupTest(Scratch):
         self.assertIn("build-dir already set", r.stdout)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
 
-    def test_setup_leaves_the_timer_off_after_auto_off(self):
+    def test_setup_leaves_the_timer_off_after_auto_off(self) -> None:
         self.csts_cargo_config()
         rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 0, out)
@@ -387,7 +393,7 @@ class SnapshotsSetupTest(Scratch):
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")))
 
-    def test_setup_note_when_auto_on_reports_a_problem(self):
+    def test_setup_note_when_auto_on_reports_a_problem(self) -> None:
         # After `auto off`, a stale file of the earlier cargo-gc is removed
         # but the daemon-reload fails: `auto on --unless-off` exits 1 on its
         # "left off" path. The NOTE must not claim the timer "was not turned
@@ -401,7 +407,7 @@ class SnapshotsSetupTest(Scratch):
         self.assertIn("NOTE: cst toolchains auto on --unless-off reported a problem (see above)", r.stderr)
         self.assertNotIn("was not turned on", r.stderr)
 
-    def test_preview_has_no_apply_hint(self):
+    def test_preview_has_no_apply_hint(self) -> None:
         # setup applies the settings itself after the confirmation: its
         # preview must not tell the user to run `config apply` by hand.
         rc, out = self.run_main("config", "plan")
@@ -439,7 +445,7 @@ class SnapshotsSetupTest(Scratch):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("    ok", r.stdout)
 
-    def test_hint_name_without_cst(self):
+    def test_hint_name_without_cst(self) -> None:
         r = subprocess.run(
             [
                 "bash",
@@ -458,10 +464,10 @@ class SnapshotsSetupTest(Scratch):
 
 
 class AutoTest(Scratch):
-    def unit(self, name):
+    def unit(self, name: str) -> str:
         return os.path.join(self.home, ".config/systemd/user", name)
 
-    def test_unit_files_and_copies(self):
+    def test_unit_files_and_copies(self) -> None:
         self.csts_cargo_config()
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
@@ -482,7 +488,8 @@ class AutoTest(Scratch):
             self.assertIn(line, service)
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
-        self.assertIn(self.m.MARKER, self.read(".local/lib/cst/cst-toolchains"))
+        with open(os.path.join(self.home, ".local/lib/cst/cst-toolchains"), "rb") as f:
+            self.assertIn(self.m.MARKER.encode(), f.read())
         self.assertEqual(self.calls(), ["--user daemon-reload", "--user enable --now cst-toolchains-prune.timer"])
         # The installed copy runs with its own defaults file (as the timer does).
         r = subprocess.run(
@@ -517,7 +524,7 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.exists(os.path.join(self.home, ".local/lib/cst/bt-ldac-watch")))
         self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/toolchains-auto.off")))
 
-    def test_refuses_without_a_target_to_run(self):
+    def test_refuses_without_a_target_to_run(self) -> None:
         # No cargo config: rust:build refuses; no uv on PATH: python:uv refuses.
         with mock.patch.dict(os.environ, {"PATH": self.tmp}):
             rc, out = self.run_main("auto", "on")
@@ -531,7 +538,7 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(self.unit("cst-toolchains-prune.timer")))
 
-    def stale(self, ours=True):
+    def stale(self, ours: bool = True) -> list[str]:
         mark = OLD_MARKER if ours else "# my own"
         paths = [
             self.write(".config/systemd/user/cst-cargo-build-gc.timer", f"{mark}: x\n[Timer]\n"),
@@ -543,7 +550,7 @@ class AutoTest(Scratch):
             paths.append(self.write(".local/state/cst/cargo-build-gc.json", "{}"))
         return paths
 
-    def test_stale_cargo_gc_is_removed_by_auto_on(self):
+    def test_stale_cargo_gc_is_removed_by_auto_on(self) -> None:
         self.csts_cargo_config()
         paths = self.stale()
         self.write(".config/cst/cargo-gc.conf", "MAX_IDLE=3d\n")
@@ -558,7 +565,7 @@ class AutoTest(Scratch):
         self.assertIn("left by the earlier `cst btrfs cargo-gc`", out)
         self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/cargo-gc.conf")))  # the user's
 
-    def test_stale_cargo_gc_is_removed_by_auto_off(self):
+    def test_stale_cargo_gc_is_removed_by_auto_off(self) -> None:
         paths = self.stale()
         rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 0, out)
@@ -572,7 +579,7 @@ class AutoTest(Scratch):
         for p in paths:
             self.assertFalse(os.path.exists(p), p)
 
-    def test_foreign_files_with_the_old_names_are_left_alone(self):
+    def test_foreign_files_with_the_old_names_are_left_alone(self) -> None:
         paths = self.stale(ours=False)
         rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 0, out)
@@ -588,10 +595,10 @@ class AutoTest(Scratch):
         ".local/lib/cst/toolchains.conf",
     )
 
-    def exists(self, rel):
+    def exists(self, rel: str) -> bool:
         return os.path.exists(os.path.join(self.home, rel))
 
-    def test_auto_off_removes_nothing_when_the_timer_cannot_be_stopped(self):
+    def test_auto_off_removes_nothing_when_the_timer_cannot_be_stopped(self) -> None:
         self.csts_cargo_config()
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
@@ -612,7 +619,7 @@ class AutoTest(Scratch):
             self.assertFalse(self.exists(rel), rel)
         self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
 
-    def test_auto_off_reports_a_failed_daemon_reload_and_still_cleans_up(self):
+    def test_auto_off_reports_a_failed_daemon_reload_and_still_cleans_up(self) -> None:
         self.csts_cargo_config()
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
@@ -628,7 +635,7 @@ class AutoTest(Scratch):
         self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
         self.assertIn("no longer pruned automatically", out)
 
-    def test_stale_timer_that_cannot_be_stopped_refuses_auto_on_and_off(self):
+    def test_stale_timer_that_cannot_be_stopped_refuses_auto_on_and_off(self) -> None:
         self.csts_cargo_config()
         paths = self.stale()
         for args in (("auto", "on"), ("auto", "off")):
@@ -643,7 +650,7 @@ class AutoTest(Scratch):
         self.assertFalse(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))  # auto on stopped early
         self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))  # so did auto off
 
-    def test_stale_files_with_a_failed_daemon_reload_give_a_nonzero_exit(self):
+    def test_stale_files_with_a_failed_daemon_reload_give_a_nonzero_exit(self) -> None:
         # What snapshots setup runs after `auto off`: the stale files go, the
         # failed reload is reported, and the exit code says so (snapshots
         # setup prints a NOTE for it).
@@ -658,7 +665,7 @@ class AutoTest(Scratch):
         for p in paths:
             self.assertFalse(os.path.exists(p), p)
 
-    def test_auto_off_stops_both_timers_before_it_removes_stale_files(self):
+    def test_auto_off_stops_both_timers_before_it_removes_stale_files(self) -> None:
         # Only the service of the earlier cargo-gc is left (not its timer),
         # and the user manager cannot be reached: no file may go before the
         # manager has said that the timer is stopped.
@@ -686,7 +693,7 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.exists(stale))
         self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
 
-    def orphan(self):
+    def orphan(self) -> str:
         """What `auto off` left before it checked its `disable`: the timer
         still running (SYSTEMCTL_ACTIVE), its files gone, and the link that
         enabled it pointing at nothing."""
@@ -701,7 +708,7 @@ class AutoTest(Scratch):
         open(self.log, "w").close()
         return link
 
-    def test_auto_off_stops_a_timer_left_running_without_its_file(self):
+    def test_auto_off_stops_a_timer_left_running_without_its_file(self) -> None:
         link = self.orphan()
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
             rc, out = self.run_main("auto", "off")
@@ -718,7 +725,7 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), [])
         self.assertNotIn("stopped:", out)
 
-    def test_status_shows_a_timer_left_running_without_its_file(self):
+    def test_status_shows_a_timer_left_running_without_its_file(self) -> None:
         self.orphan()
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
             rc, out = self.run_main("status")
@@ -729,7 +736,7 @@ class AutoTest(Scratch):
         rc, out = self.run_main("status")
         self.assertIn("cst-toolchains-prune.timer: not installed", out)
 
-    def test_auto_off_removes_the_dangling_link_of_a_timer_that_no_longer_runs(self):
+    def test_auto_off_removes_the_dangling_link_of_a_timer_that_no_longer_runs(self) -> None:
         # The same leftover after a reboot: the timer is not running (is-active
         # exits 3), only the link is left. No stop; the link goes.
         link = self.orphan()
@@ -740,7 +747,7 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), ["--user daemon-reload"])
         self.assertFalse(os.path.lexists(link))
 
-    def test_auto_off_leaves_everything_when_an_orphan_timer_cannot_be_stopped(self):
+    def test_auto_off_leaves_everything_when_an_orphan_timer_cannot_be_stopped(self) -> None:
         link = self.orphan()
         with self.failing("stop"), mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
             rc, out = self.run_main("auto", "off")
@@ -750,7 +757,7 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.islink(link))
         self.assertFalse(self.exists(".config/cst/toolchains-auto.off"))
 
-    def test_auto_off_keeps_a_link_to_a_timer_file_that_is_there(self):
+    def test_auto_off_keeps_a_link_to_a_timer_file_that_is_there(self) -> None:
         # A timer of the same name that is not CST's: its file and its link stay.
         self.write(".config/systemd/user/cst-toolchains-prune.timer", "[Timer]\nOnCalendar=daily\n")
         link = os.path.join(self.home, ".config/systemd/user/timers.target.wants/cst-toolchains-prune.timer")
@@ -762,14 +769,14 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.islink(link))
         self.assertEqual(self.calls(), [])
 
-    def run_split(self, *args):
+    def run_split(self, *args: str) -> tuple[int, str, str]:
         """run_main, with stdout and stderr apart: warnings and errors go to stderr."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home])
+            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue(), err.getvalue()
 
-    def raw_calls(self):
+    def raw_calls(self) -> list[str]:
         """Every systemctl call, the questions (is-active, ...) too."""
         try:
             with open(self.log) as f:
@@ -777,7 +784,7 @@ class AutoTest(Scratch):
         except FileNotFoundError:
             return []
 
-    def test_auto_off_leaves_a_foreign_unit_file_and_program_copy_alone(self):
+    def test_auto_off_leaves_a_foreign_unit_file_and_program_copy_alone(self) -> None:
         # A service file and a program copy with CST's names that CST did not
         # write: auto off keeps them and says so on stderr; what is CST's goes.
         self.csts_cargo_config()
@@ -815,7 +822,34 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.exists(service))
         self.assertTrue(os.path.exists(prog))
 
-    def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self):
+    def test_auto_on_upgrades_a_plain_script_copy_to_the_zipapp(self) -> None:
+        # Older CST versions installed cst-toolchains as a plain script (it
+        # holds CST's marker): auto on replaces it with the zipapp, and a
+        # second run changes nothing. A foreign program is refused.
+        self.csts_cargo_config()
+        old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
+        prog = self.write(".local/lib/cst/cst-toolchains", old)
+        status = io.StringIO()
+        with contextlib.redirect_stdout(status):
+            tc_cli.cmd_status(self.home, NOW, False)
+        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
+        with open(prog, "rb") as f:
+            self.assertEqual(f.read(), build_python_zipapp(REPO, "toolchains/cst-toolchains"))
+        self.assertEqual(os.stat(prog).st_mode & 0o777, 0o755)
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
+        self.write(".local/lib/cst/cst-toolchains", "#!/bin/sh\necho mine\n")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not written by CST (or a symlink), left alone: ~/.local/lib/cst/cst-toolchains", out)
+        with open(prog) as f:
+            self.assertEqual(f.read(), "#!/bin/sh\necho mine\n")
+
+    def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self) -> None:
         # A running timer whose file is there but not CST's is not the
         # orphan that auto off stops: the manager is not even asked about it.
         self.write(".config/systemd/user/cst-toolchains-prune.timer", "[Timer]\nOnCalendar=daily\n")
@@ -826,7 +860,7 @@ class AutoTest(Scratch):
         self.assertNotIn("stopped:", out)
         self.assertTrue(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))
 
-    def test_auto_off_exits_1_when_the_reload_after_the_stale_files_fails(self):
+    def test_auto_off_exits_1_when_the_reload_after_the_stale_files_fails(self) -> None:
         # Only the earlier cargo-gc's files are there: the one daemon-reload
         # is remove_stale's, and its failure alone gives exit 1 (on stderr).
         paths = self.stale()
@@ -842,7 +876,7 @@ class AutoTest(Scratch):
         self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
         self.assertIn("no longer pruned automatically", out)
 
-    def test_stale_files_after_a_foreign_one_are_still_removed(self):
+    def test_stale_files_after_a_foreign_one_are_still_removed(self) -> None:
         # The earlier timer is not CST's (it comes first): it stays, is not
         # stopped, and every other stale file still goes.
         paths = self.stale()
@@ -859,7 +893,7 @@ class AutoTest(Scratch):
         self.assertIn("removed:   ~/.config/systemd/user/cst-cargo-build-gc.service", out)
         self.assertEqual(self.calls(), ["--user daemon-reload"])  # the service file went; no disable
 
-    def test_stale_files_reload_only_when_a_unit_file_was_removed(self):
+    def test_stale_files_reload_only_when_a_unit_file_was_removed(self) -> None:
         # The earlier cargo-gc's files without its unit files: removed, and
         # no daemon-reload (no unit changed), by auto off and by auto on.
         for args in (("auto", "off"), ("auto", "on", "--unless-off")):
@@ -874,7 +908,7 @@ class AutoTest(Scratch):
                 self.assertFalse(os.path.exists(p), (args, p))
             self.assertEqual(self.calls(), [], args)
 
-    def test_auto_off_removes_the_state_file_of_every_target(self):
+    def test_auto_off_removes_the_state_file_of_every_target(self) -> None:
         states = [self.m.state_path(self.home, tid) for tid in self.m.TARGETS]
         self.assertEqual(len(states), 2)
         for path in states:
@@ -888,7 +922,7 @@ class AutoTest(Scratch):
             self.assertFalse(os.path.exists(path), path)
         self.assertTrue(os.path.exists(other))
 
-    def test_auto_off_writes_the_off_file_with_mode_0644(self):
+    def test_auto_off_writes_the_off_file_with_mode_0644(self) -> None:
         old = os.umask(0o077)
         self.addCleanup(os.umask, old)
         rc, out = self.run_main("auto", "off")
@@ -896,14 +930,14 @@ class AutoTest(Scratch):
         mode = os.stat(os.path.join(self.home, ".config/cst/toolchains-auto.off")).st_mode
         self.assertEqual(stat.S_IMODE(mode), 0o644)
 
-    def hold_lock(self):
+    def hold_lock(self) -> None:
         path = os.path.join(self.home, ".local/state/cst/toolchains.lock")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         self.addCleanup(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    def test_auto_on_and_off_fail_while_another_run_holds_the_lock(self):
+    def test_auto_on_and_off_fail_while_another_run_holds_the_lock(self) -> None:
         self.csts_cargo_config()
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
@@ -925,7 +959,7 @@ class AutoTest(Scratch):
 
 
 class StatusTest(Scratch):
-    def test_status_sections(self):
+    def test_status_sections(self) -> None:
         self.csts_cargo_config()
         os.makedirs(os.path.join(self.home, ".cache/cargo-build/aa/0123456789abcd/debug"))
         # go's module cache moved into ~/Bulk by `cst btrfs bulk`: shown where it really is.
@@ -951,7 +985,17 @@ class StatusTest(Scratch):
         rc, out = self.run_main("status", "--brief")
         self.assertEqual(out.splitlines()[1], "rust:build: last prune: none recorded")
 
-    def test_bad_settings_are_shown(self):
+    def test_a_state_file_that_is_not_an_object_is_none_recorded(self) -> None:
+        # Intended change from main, where status --brief stopped with an AttributeError traceback
+        # (exit 1) on such a file: CST always writes an object, so anything else is no record.
+        self.write(".local/state/cst/toolchains-rust-build.json", "[1, 2]")
+        self.write(".local/state/cst/toolchains-python-uv.json", '"x"')
+        rc, out = self.run_main("status", "--brief")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("rust:build: last prune: none recorded", out)
+        self.assertIn("python:uv: last prune: none recorded", out)
+
+    def test_bad_settings_are_shown(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_MAX_TOTAL=150\n")
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
@@ -962,13 +1006,13 @@ class StatusTest(Scratch):
 
 
 class FrontendTest(Scratch):
-    def sh(self, *args, script=SETUP):
+    def sh(self, *args: str, script: str = SETUP) -> subprocess.CompletedProcess[str]:
         env = dict(self.env, CST_PROG="cst toolchains")
         return subprocess.run(
             ["bash", script, *args], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
         )
 
-    def test_help_and_usage(self):
+    def test_help_and_usage(self) -> None:
         r = self.sh("help")
         self.assertEqual(r.returncode, 0)
         self.assertIn("auto on [--unless-off]", r.stdout)
@@ -979,12 +1023,12 @@ class FrontendTest(Scratch):
         self.assertEqual(r.returncode, 2)
         self.assertIn("prune: plan or apply", r.stderr)
 
-    def test_runs_the_program_on_the_scratch_home(self):
+    def test_runs_the_program_on_the_scratch_home(self) -> None:
         r = self.sh("config", "apply", "--home", self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
 
-    def test_cst_knows_the_module(self):
+    def test_cst_knows_the_module(self) -> None:
         r = subprocess.run(
             [os.path.join(REPO, "cst"), "help"], check=False, capture_output=True, text=True, env=self.env
         )
@@ -995,10 +1039,69 @@ class FrontendTest(Scratch):
         self.assertEqual(r.returncode, 0)
         self.assertIn("toolchains-setup.sh", r.stdout)
 
-    def test_btrfs_has_no_cargo_gc_any_more(self):
+    def test_btrfs_has_no_cargo_gc_any_more(self) -> None:
         r = self.sh("cargo-gc", "plan", script=os.path.join(REPO, "btrfs-setup.sh"))
         self.assertEqual(r.returncode, 2)
         self.assertIn("Unknown command: cargo-gc", r.stderr)
+
+
+class PackageLayersTest(Scratch):
+    """The package's layers used directly: the rules in toolchains.domain,
+    the user manager through toolchains.adapters, the commands through
+    toolchains.cli (what the program's main() runs)."""
+
+    def test_domain_parses_and_decides(self) -> None:
+        a = tc_domain.parse_args(["status", "--brief"])
+        self.assertEqual((a["cmd"], a["brief"]), ("status", True))
+        with self.assertRaises(Usage):
+            tc_domain.parse_args(["prune", "bogus"])
+        old = tc_domain.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
+        old.size, old.activity = 100, NOW - 1e6
+        new = tc_domain.Folder("/tmp/build", "cc", "dddddddddddddd")
+        new.size, new.activity = 100, NOW - 60
+        pol = {"max_idle": 3600 * 48, "max_total": 150 * (1 << 30), "min_keep": 7200}
+        self.assertEqual(
+            [(f.key, action) for f, action, _ in tc_domain.decide([new, old], pol, NOW, {})],
+            [("aa/bbbbbbbbbbbbbb", "delete"), ("cc/dddddddddddddd", "keep")],
+        )
+
+    def test_cli_commands_run_on_the_scratch_home(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tc_cli.cmd_config(self.home, "apply"), 0)
+        self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
+        self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tc_cli.cmd_status(self.home, NOW, True), 0)
+            self.assertEqual(tc_cli.cmd_prune(self.home, NOW, "plan", []), 0)
+            self.assertEqual(tc_cli.cmd_config(self.home, "plan"), 0)
+            self.assertEqual(tc_cli.cmd_auto_on(self.home, NOW), 0)
+            self.assertEqual(tc_cli.cmd_auto_off(self.home, NOW), 0)
+
+    def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            self.assertEqual(tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
+        self.assertIsNone(tc_adapters.manager_path())
+        with self.failing("is-active"), self.assertRaises(Refused):
+            tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
+
+
+class ParseSizeTest(unittest.TestCase):
+    """MAX_TOTAL and friends: a number with its unit, or 0/off for no cap."""
+
+    def test_units_multiply(self) -> None:
+        self.assertEqual(tc_domain.parse_size("150G"), 150 << 30)
+        self.assertEqual(tc_domain.parse_size(" 1.5k "), 1536)
+        self.assertEqual(tc_domain.parse_size("2TiB"), 2 << 40)
+        self.assertEqual(tc_domain.parse_size("3mb"), 3 << 20)
+
+    def test_no_cap_is_zero(self) -> None:
+        for text in ("0", "0.0", "off", "none", "no", "OFF"):
+            self.assertEqual(tc_domain.parse_size(text), 0, text)
+
+    def test_a_bare_number_is_refused(self) -> None:
+        for text in ("150", "1x", "", "G"):
+            with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
+                tc_domain.parse_size(text)
 
 
 if __name__ == "__main__":

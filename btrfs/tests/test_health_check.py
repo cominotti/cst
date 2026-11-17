@@ -11,6 +11,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_health_check -v
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
@@ -46,7 +48,10 @@ FAILING = (
 
 
 class HealthCheckSmartTest(unittest.TestCase):
-    def setUp(self):
+    tmp: str
+    bin: str
+
+    def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="health-check-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
         self.bin = os.path.join(self.tmp, "bin")
@@ -60,21 +65,21 @@ class HealthCheckSmartTest(unittest.TestCase):
             "nvme", '[[ "$1" == smart-log ]] || exit 2\ncat "${FAKE}/smart/$(basename "$2")" 2>/dev/null || exit 1'
         )
 
-    def write(self, rel, text):
+    def write(self, rel: str, text: str) -> None:
         with open(os.path.join(self.tmp, rel), "w", encoding="utf-8") as f:
             f.write(text)
 
-    def stub(self, name, body):
+    def stub(self, name: str, body: str) -> None:
         path = os.path.join(self.bin, name)
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"#!/bin/bash\n{body}\n")
         os.chmod(path, 0o755)
 
-    def swaps(self, *lines):
+    def swaps(self, *lines: str) -> str:
         self.write("swaps", "Filename\tType\tSize\tUsed\tPriority\n" + "".join(l + "\n" for l in lines))
         return os.path.join(self.tmp, "swaps")
 
-    def run_lib(self, code):
+    def run_lib(self, code: str) -> str:
         env = {"PATH": f"{self.bin}:/usr/bin:/bin", "FAKE": self.tmp}
         r = subprocess.run(
             ["bash", "-c", f'. "$1"; {code}', "health-check-test", SCRIPT],
@@ -89,11 +94,11 @@ class HealthCheckSmartTest(unittest.TestCase):
         self.assertEqual(r.stderr, "")
         return r.stdout
 
-    def test_disk_under_encrypted_swap(self):
+    def test_disk_under_encrypted_swap(self) -> None:
         swaps = self.swaps("/dev/dm-2                               partition\t134217724\t0\t-2")
         self.assertEqual(self.run_lib(f'swap_disks "{swaps}" nvme0n1 nvme2n1'), "nvme1n1\n")
 
-    def test_files_zram_and_repeats_are_skipped(self):
+    def test_files_zram_and_repeats_are_skipped(self) -> None:
         swaps = self.swaps(
             "/dev/dm-2 partition 1 0 -2",
             "/dev/dm-3 partition 1 0 -3",
@@ -102,14 +107,14 @@ class HealthCheckSmartTest(unittest.TestCase):
         )
         self.assertEqual(self.run_lib(f'swap_disks "{swaps}"'), "nvme1n1\n")
 
-    def test_swap_on_a_member_disk_is_not_checked_twice(self):
+    def test_swap_on_a_member_disk_is_not_checked_twice(self) -> None:
         swaps = self.swaps("/dev/dm-0 partition 1 0 -2")
         self.assertEqual(self.run_lib(f'swap_disks "{swaps}" nvme0n1 nvme2n1'), "")
 
-    def test_no_swaps_file(self):
+    def test_no_swaps_file(self) -> None:
         self.assertEqual(self.run_lib(f'swap_disks "{self.tmp}/missing"'), "")
 
-    def test_failing_swap_disk_is_a_problem(self):
+    def test_failing_swap_disk_is_a_problem(self) -> None:
         self.write("smart/nvme1", FAILING)
         out = self.run_lib('smart_check nvme1n1 swap; printf "%s\\n" "${problems[@]}"')
         self.assertEqual(
@@ -121,7 +126,7 @@ class HealthCheckSmartTest(unittest.TestCase):
             ],
         )
 
-    def test_healthy_disk_and_member_label(self):
+    def test_healthy_disk_and_member_label(self) -> None:
         self.write("smart/nvme1", HEALTHY)
         self.write("smart/nvme0", FAILING.replace("12", "1"))
         out = self.run_lib(
@@ -131,7 +136,7 @@ class HealthCheckSmartTest(unittest.TestCase):
         self.assertEqual(lines[0], "n=3")
         self.assertIn("NVMe nvme0n1: media_errors=1", lines)  # member disks keep the old text
 
-    def test_hex_critical_warning(self):
+    def test_hex_critical_warning(self) -> None:
         # nvme-cli prints critical_warning in hex: 0x8 (read-only media) and
         # 0xa must count, not become "08" (a bash error) or "0".
         for raw, value in (("0x8", 8), ("0xa", 10), ("0", None), ("4", 4)):
@@ -147,11 +152,11 @@ class HealthCheckSmartTest(unittest.TestCase):
                 want = [f"NVMe nvme1n1 (swap): critical_warning={value}"] if value is not None else [""]
                 self.assertEqual(out.splitlines(), want)
 
-    def test_unreadable_smart_log_is_skipped(self):
+    def test_unreadable_smart_log_is_skipped(self) -> None:
         out = self.run_lib('smart_check nvme9n1 swap; echo "n=${#problems[@]}"')
         self.assertEqual(out, "n=0\n")
 
-    def test_main_checks_swap_disks_and_names_them_in_the_ok_line(self):
+    def test_main_checks_swap_disks_and_names_them_in_the_ok_line(self) -> None:
         with open(SCRIPT, encoding="utf-8") as f:
             text = f.read()
         main = text.split('if [[ "${BASH_SOURCE[0]}" != "$0" ]]', 1)[1]

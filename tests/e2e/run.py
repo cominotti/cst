@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Docker E2E orchestrator for cst (Layer 1 unprivileged systemd + Layer 2 privileged storage/cgroups)."""
 
+from __future__ import annotations
+
 import argparse
+from collections.abc import Mapping, Sequence
 import datetime
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
 import unittest
-from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 E2E_DIR = Path(__file__).resolve().parent
@@ -43,15 +46,21 @@ Tier 1 (unprivileged) needs no opt-in.
 """
 
 
-def privileged_allowed(flag, environ=None):
+def privileged_allowed(flag: bool, environ: Mapping[str, str] | None = None) -> bool:
     """True when tier 2 may run: --allow-privileged, or CST_E2E_ALLOW_PRIVILEGED=1."""
     environ = os.environ if environ is None else environ
     return bool(flag) or environ.get(PRIVILEGED_OPT_IN_ENV, "").strip() == "1"
 
 
-def run(cmd, *, check=True, env=None, capture=False):
+def run(
+    cmd: Sequence[str],
+    *,
+    check: bool = True,
+    env: Mapping[str, str] | None = None,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        cmd,
+        list(cmd),
         cwd=str(REPO_ROOT),
         env=env,
         check=check,
@@ -60,8 +69,8 @@ def run(cmd, *, check=True, env=None, capture=False):
     )
 
 
-def host_lsm_security_opts():
-    opts = []
+def host_lsm_security_opts() -> list[str]:
+    opts: list[str] = []
     if Path("/sys/fs/selinux/enforce").exists():
         opts.extend(["--security-opt", "label=disable"])
     apparmor = Path("/sys/module/apparmor/parameters/enabled")
@@ -73,7 +82,7 @@ def host_lsm_security_opts():
     return opts
 
 
-def docker_build(tag, dockerfile, *, force=False):
+def docker_build(tag: str, dockerfile: Path, *, force: bool = False) -> None:
     if not force:
         check = run(["docker", "image", "inspect", tag], check=False, capture=True)
         if check.returncode == 0:
@@ -89,7 +98,7 @@ def docker_build(tag, dockerfile, *, force=False):
     run(cmd)
 
 
-def wait_systemd_ready(container, *, user="tester", timeout_s=45):
+def wait_systemd_ready(container: str, *, user: str = "tester", timeout_s: float = 45) -> None:
     deadline = time.monotonic() + timeout_s
     last_sys = ""
     while time.monotonic() < deadline:
@@ -129,7 +138,7 @@ def wait_systemd_ready(container, *, user="tester", timeout_s=45):
     raise RuntimeError(f"{container}: user@{user} manager failed to reach running state")
 
 
-def dump_logs(containers, out_dir):
+def dump_logs(containers: Sequence[str], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for c in containers:
         for label, cmd in (
@@ -144,17 +153,19 @@ def dump_logs(containers, out_dir):
             )
 
 
-def load_suite(filename):
+def load_suite(filename: str) -> unittest.TestSuite:
     import importlib.util
 
     path = SUITES_DIR / filename
     spec = importlib.util.spec_from_file_location(path.stem, str(path))
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return unittest.defaultTestLoader.loadTestsFromModule(mod)
 
 
-def run_tier1(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
+def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
     docker_build(IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", force=rebuild)
     docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", force=rebuild)
 
@@ -208,7 +219,7 @@ def run_tier1(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
         run(["docker", "network", "rm", net], check=False, capture=True)
 
 
-def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
+def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
     docker_build(IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", force=rebuild)
     docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", force=rebuild)
     docker_build(IMG_PRIV, E2E_DIR / "images" / "priv.Dockerfile", force=rebuild)
@@ -279,9 +290,9 @@ def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
         for c in (priv, nas):
             run(["docker", "rm", "-f", c], check=False, capture=True)
         run(["docker", "network", "rm", net], check=False, capture=True)
-        leaked = []
+        leaked: list[str] = []
         for _ in range(5):
-            leaked = []
+            leaked: list[str] = []
             for bf in Path("/sys/block").glob("loop*/loop/backing_file"):
                 try:
                     val = bf.read_text().strip()
@@ -296,7 +307,7 @@ def run_tier2(run_id, artifact_dir, *, rebuild=False, keep_logs=False):
             raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="CST Docker E2E test runner")
     parser.add_argument("--tier", action="append", type=int, choices=(1, 2), required=True)
     parser.add_argument("--keep-logs", action="store_true")

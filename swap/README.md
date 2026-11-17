@@ -228,7 +228,14 @@ What `apply` does, in order:
 7. **Verification**: the live settings against this folder, `swap0` active,
    `zram0` gone; `swapon --show`. Any `DIFF` makes `apply` end with an error.
 
-Files are written only when they differ, always atomically.
+Files are written only when they differ, always atomically. Each step's lines
+are printed while `apply` runs. A command that fails (`blockdev`,
+`systemctl`, `sysctl`) stops `apply` there with that command's own message
+and exit status (128+N when signal N killed it, as from bash); the steps
+before it stay done. A closed pipe (`cst swap status | head`) stops it
+quietly. `/etc/fstab` and
+`/etc/crypttab` are read and rewritten byte for byte: the lines that are not
+CST's come back exactly as they were, also bytes that are not UTF-8.
 
 ---
 
@@ -410,12 +417,14 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `tmpfiles/zswap.conf` | `/etc/tmpfiles.d/zswap.conf` |
 | `sysctl/99-swap-tuning.conf` | `/etc/sysctl.d/99-swap-tuning.conf` |
 | `units/machine.slice.d-50-memory-low.conf` | `/etc/systemd/system/machine.slice.d/50-memory-low.conf` |
-| `swap-lib.bash` | sourced by `swap-setup.sh`: markers, file comparison, atomic writes |
-| `swap-status` | the live part of `status` and `plan` (Python, read-only) |
+| `domain.py` | pure swap domain model, hardware identity (`SwapHardwareSpec`), parsing, and metrics |
+| `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
+| `application.py` / `presenter.py` / `cli.py` | pure `plan`, `status`, and `apply` use cases (apply hands each event to a callback as it happens); the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder |
 
-The crypttab and fstab lines, the partition's PARTUUID and its size are set
-at the top of `swap-setup.sh`.
+The swap partition's PARTUUID (`partuuid`), device name (`name`), and expected
+size (`expected_size_bytes`) are set on `SwapHardwareSpec` in `swap/domain.py`.
+Shared file/marker helpers and system ports live in `../cst_core/`.
 
 ---
 

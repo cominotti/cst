@@ -75,7 +75,15 @@ The modules are independent. You can use one without the other. A **module**
 (also called a frontend) is one script that installs, shows and removes a
 group of parts; the parts live in the folder next to it. Each module also
 works on its own (`bash btrfs-setup.sh status` is the same as
-`cst btrfs status`), but its messages then show its own name.
+`cst btrfs status`), but its messages then show its own name. `cst MODULE`
+hands over to the module's script (it replaces itself with it, as `exec`
+does): Ctrl-C, signals and the exit status are the module's own. `cst status`
+and `cst doctor` run each script in the foreground, as a shell does: Ctrl-C
+reaches the script, and `cst` stops with it only if the script stops (a
+signal sent to the script alone, or Ctrl-\, stops only the script). Of cst's own
+settings a module only sees `CST_PROG` (its name in hints), and `CST_NAME`
+after the sudo re-run of `cst status` (so hints keep the name); its locale
+(`LC_CTYPE`) is the caller's, unchanged.
 
 **How to call it.** The first time, run it from the CST folder:
 
@@ -385,11 +393,24 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | `cst toolchains` | Yes | Override retention or size limits in `~/.config/cst/toolchains.conf` (defaults in [`toolchains/toolchains.conf`](toolchains/toolchains.conf)). |
 | `cst bluetooth` | Yes, once you set your headset's MAC | Put `DEVICE=AA:BB:CC:DD:EE:FF` (and optional `LDAC_QUALITY`, `LE_AUDIO`, `BEARER`) in `~/.config/cst/bluetooth.conf` (defaults in [`bluetooth/bluetooth.conf`](bluetooth/bluetooth.conf)), or pass `--device`. |
 | `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (or in [`cpu-setup.sh`](cpu-setup.sh) / [`cpu/game-profile`](cpu/game-profile)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. The limits of `cst cpu quiet` come from this machine's idle baseline: take your own reading and set them with its flags or `QUIET_*` variables ([cpu/README.md, section 11.1](cpu/README.md#111-is-the-machine-quiet-quiet)). |
-| `cst swap` | Needs your swap partition's UUID and size | In [`swap-setup.sh`](swap-setup.sh), set `DISK_SWAP_PARTUUID` and `DISK_SWAP_SIZE_BYTES` to match your dedicated swap partition, and adjust `MemoryLow=` in [`swap/units/machine.slice.d-50-memory-low.conf`](swap/units/machine.slice.d-50-memory-low.conf) (or zswap's pool cap in [`swap/tmpfiles/zswap.conf`](swap/tmpfiles/zswap.conf)). |
+| `cst swap` | Needs your swap partition's UUID and size | In [`swap/domain.py`](swap/domain.py), set `SwapHardwareSpec` defaults (`partuuid` and `expected_size_bytes`) to match your dedicated swap partition, and adjust `MemoryLow=` in [`swap/units/machine.slice.d-50-memory-low.conf`](swap/units/machine.slice.d-50-memory-low.conf) (or zswap's pool cap in [`swap/tmpfiles/zswap.conf`](swap/tmpfiles/zswap.conf)). |
 | `cst btrfs` | Btrfs root on Fedora Silverblue / Workstation | Health checks, stall monitoring, writeback sysctls, automatic reclaim, snapshots and `~/Bulk` discover the root btrfs UUID dynamically. Check `EXPECTED_OPTS` in [`btrfs-setup.sh`](btrfs-setup.sh) if your mount options differ (e.g. single-disk btrfs without `degraded`), and pass `--host` / `--port` / `--user` / `--path` to `cst btrfs snapshots nas setup`. |
 
 ## Other files in this folder
 
+- `cst_core/`: shared kernel (`domain/`), port protocols (`ports/`), host adapters
+  (`adapters/`), shared use cases (`application/`), the Python CLI dispatcher
+  (`cli.py`) behind `cst`, and the installer (`installer.py`).
+- `cst-install.bash`: how every module installs its files. The list of what is
+  installed where, with which mode, is one table, `INSTALL_MANIFEST` in
+  `cst_core/domain/install.py`. A file is written only when it changed, and the
+  output says `unchanged:` or `written:` per file. A symbolic link to a file
+  that already holds the wanted content counts as unchanged and stays a link;
+  a write replaces the link, never the file it points to. The Python helpers are
+  installed as **zipapps**: one file at the usual path (for example
+  `/usr/local/sbin/docker-gc`) that holds the program and the CST code it
+  imports, so it runs without this folder. `cst_core/installer.py plan SRC...`
+  (or `--module btrfs`) shows what an install would write, without writing.
 - `cst-link.bash`: the helper that `cst btrfs install` and `cst cpu install`
   use to create the link `~/.local/bin/cst` ([The `cst` command](#the-cst-command)).
 - `fix-anaconda-webui-btrfs-compress.sh`: a one-time helper for **installing**

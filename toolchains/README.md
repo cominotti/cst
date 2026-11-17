@@ -120,7 +120,7 @@ The installed Rust toolchains are not a target: `status` only reports them
 The planned ones are **not implemented yet**: nothing is deleted there, and
 naming one (`cst toolchains prune plan go:mod`) says so. `status` lists them
 with where they are now. Adding one is a small step: a new class in
-`cst-toolchains` (it says which methods), its keys in `toolchains.conf`, and
+`cli.py` (`Target` says which methods), its keys in `toolchains.conf`, and
 a line in this table.
 
 ## 5. Settings
@@ -693,15 +693,20 @@ run deletes the rest as a leftover). Whatever is left is done by the next
 runs. A manual `prune apply` has the same budget.
 `auto on` writes, as your user:
 
-- `~/.local/lib/cst/cst-toolchains` (a copy of `toolchains/cst-toolchains`)
-  and `~/.local/lib/cst/toolchains.conf` (a copy of the defaults), so that the
-  timer does not depend on this working copy. `auto on` again updates them
-  after a change in CST;
+- `~/.local/lib/cst/cst-toolchains` (`toolchains/cst-toolchains` built as a
+  zipapp: the program with the `toolchains` and `cst_core` packages it
+  imports, the same bytes `cst_core/installer.py` writes) and
+  `~/.local/lib/cst/toolchains.conf` (a copy of the defaults, read next to the
+  program), so that the timer does not depend on this working copy. `auto on`
+  again updates them after a change in CST, also a plain-script copy an older
+  CST version wrote;
 - `~/.config/systemd/user/cst-toolchains-prune.service` and `.timer`.
 
 All of them start with (or contain) `# managed-by: toolchains-setup.sh (CST)`;
 files without that line are never overwritten or removed. Each run saves its
-summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`).
+summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`). A
+summary that is not a JSON object (edited by hand, say) counts as none
+recorded.
 
 **Coming from `cst btrfs cargo-gc`.** The first version of this cleanup was
 `cst btrfs cargo-gc` (timer `cst-cargo-build-gc.timer`, settings
@@ -777,7 +782,10 @@ hand if you want them gone.
 
 | File | What it is |
 |---|---|
-| `cst-toolchains` | The program (Python): `status`, `prune`, `auto`, `config`, the targets and the toolchains report. Its `help` explains the details. |
+| `cst-toolchains` | The program (`status`, `prune`, `auto`, `config`): only the bootstrap and a `main()` that runs `cli.py`; its docstring is the `help`. `auto on` installs it at `~/.local/lib/cst/cst-toolchains` for the user timer, as a zipapp with the packages it imports (Python standard library only). |
+| `domain.py` | The rules, no I/O: names and paths, the settings syntax, the pruning decision (`decide`), the unit files (rendered through `cst_core`), the cargo, uv and sccache texts, the command line (`parse_args`). |
+| `adapters.py` | The host: output lines (journal-aware), the build folders on disk, the processes that use them, cargo, git, uv, rustup, sccache, `systemctl --user`, the files written in the home folder, and `Program` (where the running program and the files next to it are). |
+| `cli.py` | The commands: the settings, the targets (`Target`, `RustBuild`, `PythonUv`), `status`, `prune`, `auto on/off`, `config`, and `main()`. |
 | `toolchains.conf` | The default settings. |
 | `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
 | `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v`, or all of CST with `python3 -I -B -m unittest` from the repository folder. |

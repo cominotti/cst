@@ -1,5 +1,8 @@
 """Docker Layer 2 E2E suite: --privileged loopback btrfs RAID1, DinD, cgroups v2, Polkit, virsh."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 import glob
 import os
 import shlex
@@ -7,7 +10,15 @@ import subprocess
 import unittest
 
 
-def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text=None):
+def docker_exec(
+    container: str,
+    cmd: Sequence[str],
+    *,
+    check: bool = True,
+    user: str = "root",
+    env: Mapping[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     full = ["docker", "exec"]
     if input_text is not None:
         full.append("-i")
@@ -25,7 +36,7 @@ def docker_exec(container, cmd, *, check=True, user="root", env=None, input_text
     return p
 
 
-def exec_bash(container, script, *, check=True):
+def exec_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return docker_exec(container, ["bash", "-euo", "pipefail", "-c", script], check=check)
 
 
@@ -343,7 +354,7 @@ echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after inst
 """
 
 
-def as_tester_bash(container, script, *, check=True):
+def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
         "runuser -u tester -- env "
@@ -355,8 +366,8 @@ def as_tester_bash(container, script, *, check=True):
     return exec_bash(container, cmd, check=check)
 
 
-def read_host_guard_snapshot():
-    snap = {}
+def read_host_guard_snapshot() -> dict[str, str]:
+    snap: dict[str, str] = {}
     paths = [
         "/proc/sys/vm/dirty_bytes",
         "/proc/sys/vm/dirty_background_bytes",
@@ -379,10 +390,10 @@ def read_host_guard_snapshot():
 class Tier2StorageCpuE2ETest(unittest.TestCase):
     PRIV_CONTAINER = os.environ["CST_E2E_PRIV_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
-    HOST_GUARD_BEFORE = {}
+    HOST_GUARD_BEFORE: dict[str, str] = {}
 
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.HOST_GUARD_BEFORE = read_host_guard_snapshot()
         exec_bash(
             cls.PRIV_CONTAINER,
@@ -390,12 +401,12 @@ class Tier2StorageCpuE2ETest(unittest.TestCase):
         )
 
     @classmethod
-    def tearDownClass(cls):
+    def tearDownClass(cls) -> None:
         after = read_host_guard_snapshot()
         if after != cls.HOST_GUARD_BEFORE:
             raise AssertionError(f"HOST ISOLATION BREACH! Before={cls.HOST_GUARD_BEFORE}, After={after}")
 
-    def test_01_loop_btrfs_raid1_and_host_shadows_active(self):
+    def test_01_loop_btrfs_raid1_and_host_shadows_active(self) -> None:
         """Loopback RAID1 covers /sysroot, /var, /var/home and shadow bind-mounts protect host kernel."""
         out = exec_bash(
             self.PRIV_CONTAINER,
@@ -418,7 +429,7 @@ class Tier2StorageCpuE2ETest(unittest.TestCase):
         ).stdout
         self.assertIn("UUID=", out)
 
-    def test_02_btrfs_install_stall_monitor_scrub_and_reclaim(self):
+    def test_02_btrfs_install_stall_monitor_scrub_and_reclaim(self) -> None:
         """cst btrfs install --no-below configures systemd units, reclaim/dirty_bytes on loop UUID, and scrubs."""
         loop_uuid = exec_bash(self.PRIV_CONTAINER, "cat /run/e2e-loop-uuid").stdout.strip()
         exec_bash(
@@ -438,7 +449,7 @@ class Tier2StorageCpuE2ETest(unittest.TestCase):
             """,
         )
 
-    def test_03_btrfs_snapshots_convert_hourly_automount_and_nas(self):
+    def test_03_btrfs_snapshots_convert_hourly_automount_and_nas(self) -> None:
         """btrfs-snapshot convert, hourly, top.automount, real restic+SFTP NAS upload, and purge work on RAID1."""
         pub = exec_bash(
             self.PRIV_CONTAINER,
@@ -517,8 +528,8 @@ EOF
             dev0="$(head -n1 /run/e2e-loop-devs)"
             mount -o "$opts" "$dev0" /var/mnt/btrfs-top
             findmnt -rn -M /var/mnt/btrfs-top >/dev/null
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot /usr/local/sbin/btrfs-snapshot
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot-core /usr/local/sbin/btrfs-snapshot-core
+            # The installer writes btrfs-snapshot-core as the zipapp a real install makes.
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
 
             /usr/local/sbin/btrfs-snapshot convert
             btrfs subvolume show /var/home/tester/Workspace >/dev/null
@@ -545,7 +556,7 @@ EOF
             """,
         )
 
-    def test_03a_snapshots_drop_cache_folders(self):
+    def test_03a_snapshots_drop_cache_folders(self) -> None:
         """Cache folders (CACHEDIR.TAG) leave each new snapshot: plan, apply, second run, knob off,
         skip list, recovery of an interrupted snapshot, a foreign writable entry, upgrade, purge."""
         out = exec_bash(
@@ -577,8 +588,8 @@ EOF
                 mount -o "$opts" "$(head -n1 /run/e2e-loop-devs)" "$TOP"
             fi
             trap 'umount "$TOP" 2>/dev/null || true' EXIT
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot "$RT"
-            install -m 0755 /opt/cst-rw/btrfs/btrfs-snapshot-core "$CORE"
+            # $RT and $CORE are the manifest's dests; the core goes in as its zipapp.
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
             # test_03 made these subvolumes; ~/Workspace is a source of its own.
             btrfs subvolume show "$WS" >/dev/null
             btrfs subvolume show "$H/.cache" >/dev/null
@@ -811,7 +822,7 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             if line.startswith("METADATA"):
                 print(f"\ntest_03a: {line}")
 
-    def test_04_btrfs_bulk_real_subvolume_and_nocow(self):
+    def test_04_btrfs_bulk_real_subvolume_and_nocow(self) -> None:
         """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep."""
         as_tester_bash(
             self.PRIV_CONTAINER,
@@ -840,7 +851,7 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             """,
         )
 
-    def test_05_dind_docker_volumes_nocow_builds_slice_and_docker_gc(self):
+    def test_05_dind_docker_volumes_nocow_builds_slice_and_docker_gc(self) -> None:
         """DinD on btrfs + systemd cgroups configures builds.slice with NOCOW volumes and docker-gc."""
         exec_bash(
             self.PRIV_CONTAINER,
@@ -866,7 +877,7 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             """,
         )
 
-    def test_05a_docker_volumes_nocow_migrate_postponed_and_boot_order(self):
+    def test_05a_docker_volumes_nocow_migrate_postponed_and_boot_order(self) -> None:
         """docker-volumes-nocow migrate on loopback btrfs: postponed while docker.service is active; a CoW volume
         rewritten NOCOW with the same data; run when its unit and docker.service start in one transaction; Docker
         installed after install without /etc/btrfs-setup; and install re-scheduling an affected machine."""
@@ -875,7 +886,7 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             if line.startswith("E2E-NOCOW"):
                 print(f"\ntest_05a: {line}")
 
-    def test_06_cpu_cgroups_game_profile_watchdog_polkit_and_vm_pin(self):
+    def test_06_cpu_cgroups_game_profile_watchdog_polkit_and_vm_pin(self) -> None:
         """cpu install, cgroup v2 weights/IOWeight, game-profile on/off, Polkit check, vm-pin XML plan, and uninstall."""
         exec_bash(
             self.PRIV_CONTAINER,

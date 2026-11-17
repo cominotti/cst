@@ -187,8 +187,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `libvirt` group, or an equivalent polkit rule. `domcapabilities` is asked
   only when a VM lacks one of the disables. No `virsh`, no permission,
   libvirt not running, no VM: `info` or `ok`, never `WARN`. The hardware
-  and image folder checks load `vm/cst-vm` of the same CST copy (no second
-  copy of its rules) and read the folders' inode flags with an ioctl; they
+  and image folder checks import the `vm` package of the same CST copy (no
+  second copy of its rules) and read the folders' inode flags with an ioctl; they
   run no extra command.
 - The `cpu` check reads `/run/cpu-setup/game.state`, `game.intended` and
   `manual` (the by-hand mark, which picks the fix command), and `TARGET_USER` in `/etc/cpu-setup/cpu-setup.conf` (all world-readable),
@@ -210,7 +210,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `core-writable` (world-readable, written by the hourly snapshot run) and
   `TOP`/`SNAP_DIR_NAME` from `/etc/btrfs-setup/snapshots.conf` for the path in
   its fix line. It never opens the snapshot folder (root-only) and runs no
-  command.
+  command. The names of those two files come from the `btrfs.snapshot`
+  package of the same CST copy (what btrfs-snapshot-core writes).
 - The Docker NOCOW check reads `/var/lib/docker-volumes-nocow/postponed`
   (world-readable, written by `docker-volumes-nocow` at boot). It never opens
   Docker's folders (root-only) and runs no command.
@@ -330,7 +331,7 @@ that already accounts for the QEMU version, the kernel and the processor
 the names that are both offered and in the list of `cst cpu vm-pin` count.
 The list is `VM_CPU_DISABLE` in `/etc/cpu-setup/cpu-setup.conf` when that
 line exists (empty switches the check off, on purpose), else
-`CPU_DISABLE_DEFAULT` in `cpu/vm-pin`.
+`CPU_DISABLE_DEFAULT` in `cpu/domain.py` (the list `cst cpu vm-pin` uses).
 
 **Virtualization packages changed.** A Fedora upgrade brings a new QEMU,
 libvirt, UEFI firmware and TPM emulator at once, and the guest sees new
@@ -491,19 +492,38 @@ indexer) and `session.slice` (gnome-shell) are known and not reported. The
 user manager looked at is your own, or, when the doctor runs as root, the
 `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
 
-## 9. Adding a check
+## 9. Adding a check and internal layout
 
-Each check is a small function in `cst-doctor`, registered with
-`@check("area")`. It gets the `Host` (how to run a query and where host
-files are) and yields `Result(status, message, fix)`. Areas are printed in
-the order their first check was registered. A check that crashes becomes
+The code is split into four layers under `doctor/`:
+
+- `doctor/domain.py`: pure domain model, rules, parsers and formatting (no
+  filesystem I/O or subprocess calls).
+- `doctor/ports.py`: port protocols (`DoctorHostPort`, `CheckFn`, `VmToolsPort`).
+- `doctor/adapters.py`: `Host` adapter (direct or `flatpak-spawn --host` /
+  `/run/host`; it also opens, lists and stats the host's files for the
+  checks, and knows where the CST checkout is) and `VmTools` (the knobs and
+  the image folder probe of `vm.adapters`).
+- `doctor/application.py`: host probes, check implementations, `CHECKS` registry
+  and `run_checks`. No direct I/O: files and commands go through
+  `DoctorHostPort` (`tests/test_architecture.py` checks it).
+- `doctor/presenter.py`: `render`, the report as text.
+- `doctor/cli.py`: the command line: arguments, the `Host`, the VM checks
+  wired with `VmTools`, the report.
+- `doctor/cst-doctor`: the entry point: only the bootstrap and a `main()` that
+  runs `cli.py`.
+
+Each check is a small function in `doctor/application.py`, registered with
+`@check("area")`. It gets a `DoctorHostPort` (how to run a query and where
+host files are) and yields `Result(status, message, fix)`. Areas are printed
+in the order their first check was registered. A check that crashes becomes
 one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 
-`cst-doctor` is one of the typed modules (docs/dev-tools.md, "The typed
-list"): every function has type annotations, so a new check reads
-`def check_name(host: Host) -> Iterator[Result]:`, and
+All `doctor/` modules (including `doctor/tests/test_doctor.py`) are on the
+typed list ([docs/dev-tools.md](../docs/dev-tools.md), "The typed list"): every
+function has type annotations, so a new check reads
+`def check_name(host: DoctorHostPort) -> Iterator[Result]:`, and
 `invowk cmd test types` (ty and ruff's ANN rules) fails until it does.
 
 ## 10. Tests

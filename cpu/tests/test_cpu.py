@@ -9,10 +9,12 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s cpu/tests -t . -v
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+import contextlib
 import csv
 import difflib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -20,11 +22,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 import unittest.mock
 import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
+
+from cpu import adapters as cpu_adapters, cli as cpu_cli, domain as cpu_domain  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU = os.path.dirname(HERE)
@@ -55,39 +60,36 @@ SAMPLE_DOMAIN_XML = """\
 """
 
 
-def load_module(name, path):
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    spec = importlib.util.spec_from_loader(name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
 class VmPinTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load_module("vm_pin", VM_PIN)
+    def setUp(self) -> None:
+        self.m = cpu_domain
 
-    def test_pins_vcpus_emulator_and_topology(self):
+    def test_pins_vcpus_emulator_and_topology(self) -> None:
         out = self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23")
         self.assertIn("xmlns:libosinfo=", out)
         self.assertNotIn("ns0:", out)
         root = ET.fromstring(out)
         vcpu = root.find("vcpu")
+        assert vcpu is not None
         self.assertEqual(vcpu.text, "12")
         self.assertEqual(vcpu.attrib, {"placement": "static"})
         topo = root.find("cpu/topology")
+        assert topo is not None
         self.assertEqual(topo.get("cores"), "12")
         self.assertEqual(topo.get("sockets"), "1")
         self.assertEqual(topo.get("threads"), "1")
         tune = root.find("cputune")
-        self.assertEqual(tune.find("shares").text, "1024")
+        assert tune is not None
+        shares = tune.find("shares")
+        assert shares is not None
+        self.assertEqual(shares.text, "1024")
         pins = [(el.get("vcpu"), el.get("cpuset")) for el in tune.findall("vcpupin")]
         self.assertEqual(pins, [(str(i), "12-23") for i in range(12)])
         emupin = tune.findall("emulatorpin")
         self.assertEqual(len(emupin), 1)
         self.assertEqual(emupin[0].get("cpuset"), "12-23")
 
-    def test_a_default_namespace_in_metadata_does_not_move_domain(self):
+    def test_a_default_namespace_in_metadata_does_not_move_domain(self) -> None:
         xml = SAMPLE_DOMAIN_XML.replace("<metadata>", "<metadata><app xmlns='http://example.com/app/1'/>", 1)
         self.assertIn("example.com/app/1", xml)
         root = ET.fromstring(self.m.pinned(xml, 12, "12-23"))
@@ -96,7 +98,7 @@ class VmPinTest(unittest.TestCase):
         again = self.m.pinned(self.m.pinned(xml, 12, "12-23"), 12, "12-23")  # ns0: on the way back
         self.assertEqual(ET.fromstring(again).tag, "domain")
 
-    def test_inserts_cputune_when_absent_and_is_idempotent(self):
+    def test_inserts_cputune_when_absent_and_is_idempotent(self) -> None:
         minimal = "<domain><name>vm</name><vcpu>8</vcpu></domain>\n"
         first = self.m.pinned(minimal, 4, "8-11")
         second = self.m.pinned(first, 4, "8-11")
@@ -109,25 +111,26 @@ class VmPinTest(unittest.TestCase):
 class VmPinCpuFeaturesTest(unittest.TestCase):
     """The CET/MBEC features vm-pin keeps disabled on host-passthrough."""
 
-    def setUp(self):
-        self.m = load_module("vm_pin", VM_PIN)
+    def setUp(self) -> None:
+        self.m = cpu_domain
         self.names = self.m.CPU_DISABLE_DEFAULT.split()
 
-    def features(self, out):
+    def features(self, out: str) -> list[tuple[str | None, str | None]]:
         return [(f.get("name"), f.get("policy")) for f in ET.fromstring(out).findall("cpu/feature")]
 
-    def test_default_list(self):
+    def test_default_list(self) -> None:
         self.assertEqual(self.names, ["cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry-load-cet"])
 
-    def test_self_closing_cpu(self):
+    def test_self_closing_cpu(self) -> None:
         xml = "<domain><name>vm</name><vcpu>4</vcpu><cpu mode='host-passthrough' check='none'/></domain>\n"
         out = self.m.pinned(xml, 4, "8-11", self.names)
         self.assertEqual(self.features(out), [(n, "disable") for n in self.names])
         cpu = ET.fromstring(out).find("cpu")
+        assert cpu is not None
         self.assertEqual(cpu.get("check"), "none")
         self.assertEqual(cpu.get("mode"), "host-passthrough")
 
-    def test_topology_and_other_features_kept(self):
+    def test_topology_and_other_features_kept(self) -> None:
         out = self.m.pinned(
             SAMPLE_DOMAIN_XML.replace(
                 '<topology sockets="1" dies="1" clusters="1" cores="24" threads="1"/>',
@@ -139,11 +142,12 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             self.names,
         )
         cpu = ET.fromstring(out).find("cpu")
+        assert cpu is not None
         self.assertEqual(cpu[0].tag, "topology")
         self.assertEqual(cpu[0].get("cores"), "12")
         self.assertEqual(self.features(out), [("invtsc", "require")] + [(n, "disable") for n in self.names])
 
-    def test_existing_feature_switched_in_place(self):
+    def test_existing_feature_switched_in_place(self) -> None:
         xml = (
             "<domain><name>vm</name><vcpu>4</vcpu><cpu mode='host-passthrough'>"
             "<feature policy='require' name='vmx-mbec'/><feature policy='disable' name='cet-ss'/>"
@@ -152,14 +156,14 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
         out = self.m.pinned(xml, 4, "8-11", self.names)
         got = self.features(out)
         self.assertEqual(got[:2], [("vmx-mbec", "disable"), ("cet-ss", "disable")])
-        self.assertEqual(sorted(n for n, _ in got), sorted(self.names))
+        self.assertEqual(sorted(n for n, _ in got if n is not None), sorted(self.names))
         self.assertTrue(all(p == "disable" for _, p in got))
 
-    def test_idempotent(self):
+    def test_idempotent(self) -> None:
         once = self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names)
         self.assertEqual(self.m.pinned(once, 12, "12-23", self.names), once)
 
-    def test_other_modes_untouched(self):
+    def test_other_modes_untouched(self) -> None:
         for cpu in (
             "<cpu mode='host-model' check='partial'/>",
             "<cpu mode='custom'><model>Skylake</model><feature policy='require' name='cet-ss'/></cpu>",
@@ -169,26 +173,43 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             base = self.m.pinned(xml, 4, "8-11")
             self.assertEqual(self.m.pinned(xml, 4, "8-11", self.names), base, cpu)
 
-    def test_empty_knob_untouched(self):
+    def test_empty_knob_untouched(self) -> None:
         self.assertEqual(
             self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", []), self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23")
         )
         self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", "".split())), [])
 
-    def test_conf_knob_read(self):
+    def test_conf_knob_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "w") as f:
                 f.write("VM_NAME='x'\nVM_CPU_DISABLE=''\n")
-            self.m.CONF = p
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), [])
-            with open(p, "w") as f:
-                f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
-            self.m.CONF = os.path.join(tmp, "absent")
-            self.assertEqual(self.m.conf()["VM_CPU_DISABLE"].split(), self.names)
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), [])
+                with open(p, "w") as f:
+                    f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
+            with unittest.mock.patch.object(cpu_adapters, "CONF", os.path.join(tmp, "absent")):
+                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), self.names)
 
-    def test_messages(self):
+    def test_undecodable_bytes_are_replaced(self) -> None:
+        # Intended change from main, where vm-pin and cpu-watch stopped with a UnicodeDecodeError
+        # traceback: a non-UTF-8 byte in cpu-setup.conf, or in a mapped file's name in
+        # /proc/PID/maps (the kernel does not escape it), no longer stops the program.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "wb") as f:
+                f.write(b"VM_VCPUS=8\n# caf\xe9\n")
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                self.assertEqual(cpu_adapters.conf()["VM_VCPUS"], "8")
+            maps = os.path.join(tmp, "maps")
+            with open(maps, "wb") as f:
+                f.write(
+                    b"7f00 r-xp 0 00:00 1 /home/u/caf\xe9/lib.so\n7f01 r-xp 0 00:00 2 /usr/lib/libgamemodeauto.so.0\n"
+                )
+            self.assertIn("libgamemode", cpu_adapters.read_text(maps, ""))
+
+    def test_messages(self) -> None:
         root = ET.fromstring(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names))
         self.assertIn("CPU features disabled: cet-ss", self.m.features_note(root, self.names))
         self.assertIn("not managed", self.m.features_note(root, []))
@@ -199,13 +220,10 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
 
 
 class CpuWatchTest(unittest.TestCase):
-    def setUp(self):
-        self.m = load_module("cpu_watch", CPU_WATCH)
-
-    def test_pressure_fields_watch_and_quiet_read(self):
+    def test_pressure_fields_watch_and_quiet_read(self) -> None:
         # One parser of the pressure line format: watch's totals and quiet's avg10.
         text = "some avg10=1.25 avg60=0.50 avg300=0.10 total=123456\nfull avg10=0.75 avg60=0.00 avg300=0.00 total=789\n"
-        f = self.m.pressure_field
+        f = cpu_domain.pressure_field
         self.assertEqual((f(text, "some", "avg10"), f(text, "full", "avg10")), ("1.25", "0.75"))
         self.assertEqual((f(text, "some", "total"), f(text, "full", "total")), ("123456", "789"))
         self.assertIsNone(f("some avg10=x avg60=0.00 total=1\n", "some", "avg10"))
@@ -215,10 +233,12 @@ class CpuWatchTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu.pressure")
             with open(p, "w") as fh:
                 fh.write(text)
-            self.assertEqual((self.m.pressure_total(p, "some"), self.m.pressure_total(p, "full")), (123456, 789))
-            self.assertIsNone(self.m.pressure_total(os.path.join(tmp, "missing"), "some"))
+            self.assertEqual(
+                (cpu_adapters.pressure_total(p, "some"), cpu_adapters.pressure_total(p, "full")), (123456, 789)
+            )
+            self.assertIsNone(cpu_adapters.pressure_total(os.path.join(tmp, "missing"), "some"))
 
-    def test_frametimes_and_lows(self):
+    def test_frametimes_and_lows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "mangohud.csv")
             with open(p, "w", newline="") as f:
@@ -228,15 +248,17 @@ class CpuWatchTest(unittest.TestCase):
                 for ft in [10.0] * 99 + [20.0]:
                     w.writerow(["100", str(ft), "50"])
                 w.writerow(["bad", "not-a-number", "0"])
-            ft = self.m.frametimes(p)
+            ft = cpu_adapters.frametimes(p)
             self.assertEqual(len(ft), 100)
-            avg_fps, low1, low01 = self.m.lows(ft)
+            res = cpu_domain.lows(ft)
+            assert res is not None
+            avg_fps, low1, low01 = res
             self.assertAlmostEqual(avg_fps, 1000 / 10.1, places=2)
             self.assertAlmostEqual(low1, 50.0, places=2)
             self.assertAlmostEqual(low01, 50.0, places=2)
-            self.assertIsNone(self.m.lows([]))
+            self.assertIsNone(cpu_domain.lows([]))
 
-    def test_summarize_with_and_without_game(self):
+    def test_summarize_with_and_without_game(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run = os.path.join(tmp, "20261111T120000-baseline")
             os.makedirs(run)
@@ -260,7 +282,7 @@ class CpuWatchTest(unittest.TestCase):
                 w.writerow(fields)
                 w.writerow([1.0, 1, 1234, 25.0, 2.0, 40, 10.0, 5200, 3800, 2.5, 4.0])
                 w.writerow([2.0, 1, 1234, 35.0, 3.0, 60, 12.0, 5400, 4000, 3.5, 6.0])
-            s = self.m.summarize(run)
+            s = cpu_adapters.summarize(run)
             self.assertIn("20261111T120000-baseline", s)
             self.assertIn("game wait   3.0% (max   3.5%)", s)
             self.assertIn("mem stall       5 ms", s)
@@ -271,7 +293,7 @@ class CpuWatchTest(unittest.TestCase):
                 w = csv.writer(f)
                 w.writerow(fields)
                 w.writerow([1.0, 0, "", "", "", "", 5.0, 5000, 3600, 0.0, 0.0])
-            s_nogame = self.m.summarize(run)
+            s_nogame = cpu_adapters.summarize(run)
             self.assertIn("no game found", s_nogame)
             self.assertIn("profile off", s_nogame)
 
@@ -281,9 +303,16 @@ class FakeProc:
     at a time: CPU busy share, MB written, each pressure's avg10, game profile."""
 
     HZ_CPUS = 2400  # jiffies per second over all CPUs (100 Hz x 24)
-    IDLE = {"cpu": 3.0, "writes": 2.5, "cpu-pressure": 0.3, "io-pressure": 1.4, "memory-pressure": 0.0, "game": False}
+    IDLE: dict[str, Any] = {
+        "cpu": 3.0,
+        "writes": 2.5,
+        "cpu-pressure": 0.3,
+        "io-pressure": 1.4,
+        "memory-pressure": 0.0,
+        "game": False,
+    }
 
-    def __init__(self, root):
+    def __init__(self, root: str) -> None:
         self.root = root
         self.game_state = os.path.join(root, "run", "game.state")
         os.makedirs(os.path.join(root, "pressure"))
@@ -293,7 +322,7 @@ class FakeProc:
         self.kib = 7_000_000
         self.set(self.IDLE)
 
-    def set(self, sec):
+    def set(self, sec: Mapping[str, Any]) -> None:
         """Write the files as they read after a second like `sec`."""
         busy = round(self.HZ_CPUS * sec["cpu"] / 100)
         self.jiffies[0] += busy  # user, which counts guest too
@@ -322,27 +351,31 @@ class QuietTest(unittest.TestCase):
     """`cpu-watch quiet`: fake /proc files, a fake clock and sleep (each sleep
     is one second: the fake files advance by that second)."""
 
-    def setUp(self):
-        self.m = load_module("cpu_watch", CPU_WATCH)
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.proc = FakeProc(self.tmp.name)
 
-    def run_quiet(self, argv, second=lambda i: {}, env=None):
+    def run_quiet(
+        self,
+        argv: Sequence[str],
+        second: Callable[[int], Mapping[str, Any]] = lambda i: {},
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[int, str, int]:
         """second(i) -> what differs from an idle machine in second i (1, 2, ...).
         Returns (exit code, output, number of sleeps)."""
         clock, sleeps = [1000.0], []
 
-        def sleep(d):
+        def sleep(d: float) -> None:
             sleeps.append(d)
             clock[0] += d
             self.proc.set({**FakeProc.IDLE, **second(len(sleeps))})
 
         out = io.StringIO()
         with unittest.mock.patch("sys.stderr", io.StringIO()):  # "waiting up to ..."
-            rc = self.m.quiet(
+            rc = cpu_cli.quiet(
                 argv,
-                sample=lambda: self.m.quiet_sample(
+                sample=lambda: cpu_adapters.quiet_sample(
                     proc=self.proc.root, game_state=self.proc.game_state, clock=lambda: clock[0]
                 ),
                 sleep=sleep,
@@ -352,7 +385,7 @@ class QuietTest(unittest.TestCase):
             )
         return rc, out.getvalue(), len(sleeps)
 
-    def test_idle_window_is_quiet_with_each_value_beside_its_limit(self):
+    def test_idle_window_is_quiet_with_each_value_beside_its_limit(self) -> None:
         rc, out, n = self.run_quiet([])
         self.assertEqual((rc, n), (0, 60))  # 60 s by default: 61 readings
         lines = out.splitlines()
@@ -366,8 +399,8 @@ class QuietTest(unittest.TestCase):
         self.assertRegex(lines[6], r"^quiet \(60 s, \S+ \S+ to \S+ \S+\)$")
         self.assertEqual(len(lines), 7)
 
-    def test_each_test_fails_alone_with_its_value(self):
-        cases = [
+    def test_each_test_fails_alone_with_its_value(self) -> None:
+        cases: list[tuple[str, float | bool, str]] = [
             ("cpu", 12.0, "CPU busy         12.00 %      limit < 10 %      FAIL"),
             ("cpu", 10.0, "CPU busy         10.00 %      limit < 10 %      FAIL"),  # "below" is strict
             ("cpu-pressure", 6.0, "CPU pressure     6.00 %       limit < 5 %       FAIL"),
@@ -394,28 +427,28 @@ class QuietTest(unittest.TestCase):
                 self.assertEqual(out.count(" ok\n"), 5)
                 self.assertRegex(out.splitlines()[-1], rf"^NOT quiet: {labels[key]} \(10 s, ")
 
-    def test_the_verdict_matches_the_printed_value(self):
+    def test_the_verdict_matches_the_printed_value(self) -> None:
         # 2399 busy jiffies of 24000: 9.996 %, printed as 10.00 %, so it fails "< 10".
         rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {"cpu": 10.0 if i < 10 else 239 / 24})
         self.assertEqual(rc, 1)
         self.assertIn("  CPU busy         10.00 %      limit < 10 %      FAIL\n", out)
 
-    def test_ctrl_c_exits_130_without_a_result(self):
-        def interrupted(d):
+    def test_ctrl_c_exits_130_without_a_result(self) -> None:
+        def interrupted(d: float) -> None:
             raise KeyboardInterrupt
 
         out, err = io.StringIO(), io.StringIO()
         with unittest.mock.patch("sys.stderr", err):
-            rc = self.m.quiet(
+            rc = cpu_cli.quiet(
                 ["--for", "5"],
-                sample=lambda: self.m.quiet_sample(proc=self.proc.root, game_state=self.proc.game_state),
+                sample=lambda: cpu_adapters.quiet_sample(proc=self.proc.root, game_state=self.proc.game_state),
                 sleep=interrupted,
                 out=out,
                 environ={},
             )
         self.assertEqual((rc, out.getvalue(), err.getvalue()), (130, "", "quiet: interrupted\n"))
 
-    def test_window_means_let_a_short_burst_through(self):
+    def test_window_means_let_a_short_burst_through(self) -> None:
         # One second of a 10 s window at 50 % CPU and 40 MB written: the means
         # are 5 % and 4 MB/s, below the limits (a commit or a snapshot, not a build).
         rc, out, _ = self.run_quiet(
@@ -425,7 +458,7 @@ class QuietTest(unittest.TestCase):
         self.assertIn("CPU busy         5.00 %", out)
         self.assertIn("disk writes      4.00 MB/s", out)
 
-    def test_pressure_is_the_mean_of_each_seconds_avg10(self):
+    def test_pressure_is_the_mean_of_each_seconds_avg10(self) -> None:
         # avg10 at 2 % in 5 of 10 seconds: mean 1 %, which fails the memory limit
         # (< 1 %) and passes the IO one.
         sec = lambda i: (
@@ -438,7 +471,7 @@ class QuietTest(unittest.TestCase):
         t = {x["name"]: x for x in r["tests"]}
         self.assertEqual((t["memory-pressure"]["value"], t["io-pressure"]["value"]), (1.0, 1.0))
 
-    def test_wait_slides_the_noisy_seconds_out(self):
+    def test_wait_slides_the_noisy_seconds_out(self) -> None:
         noisy = lambda i: {"cpu": 90.0} if i <= 3 else {}
         rc, out, n = self.run_quiet(["--for", "5"], noisy)
         self.assertEqual((rc, n), (1, 5))  # without --wait: one window
@@ -450,22 +483,27 @@ class QuietTest(unittest.TestCase):
         self.assertRegex(out.splitlines()[-1], r"^quiet \(5 s, .*, after waiting 8 s\)$")
         self.assertEqual(out.count("CPU busy"), 1)  # one result, not one per second
 
-    def test_wait_times_out(self):
+    def test_wait_times_out(self) -> None:
         rc, out, n = self.run_quiet(["--for", "3", "--wait", "10"], lambda i: {"writes": 50.0})
         self.assertEqual((rc, n), (1, 10))
         self.assertRegex(out.splitlines()[-1], r"^NOT quiet: disk writes \(3 s, .*, after waiting 10 s\)$")
         self.assertIn("disk writes      50.00 MB/s   limit < 10 MB/s   FAIL", out)
 
-    def test_game_profile_on_for_one_second_breaks_the_window(self):
+    def test_game_profile_on_for_one_second_breaks_the_window(self) -> None:
         rc, out, _ = self.run_quiet(["--for", "10"], lambda i: {"game": i == 7})
         self.assertEqual(rc, 1)
         self.assertIn("game profile     on in 1 of 11 readings limit off         FAIL", out)
         self.assertIn("NOT quiet: game profile", out)
 
-    def test_unreadable_file_is_not_quiet_with_the_reason(self):
+    def test_unreadable_file_is_not_quiet_with_the_reason(self) -> None:
         os.remove(os.path.join(self.proc.root, "pressure", "io"))
         orig = self.proc.set
-        self.proc.set = lambda sec: (orig(sec), os.remove(os.path.join(self.proc.root, "pressure", "io")))
+
+        def set_without_io(sec: Mapping[str, Any]) -> None:
+            orig(sec)
+            os.remove(os.path.join(self.proc.root, "pressure", "io"))
+
+        self.proc.set = set_without_io
         path = os.path.join(self.proc.root, "pressure", "io")
         rc, out, n = self.run_quiet(["--for", "5"])
         self.assertEqual((rc, n), (1, 5))
@@ -478,10 +516,10 @@ class QuietTest(unittest.TestCase):
         rc, out, n = self.run_quiet(["--for", "5", "--wait", "2h"])
         self.assertEqual((rc, n), (1, 5))
 
-    def test_unparsable_files_are_not_quiet(self):
+    def test_unparsable_files_are_not_quiet(self) -> None:
         orig = self.proc.set
 
-        def broken(sec):
+        def broken(sec: Mapping[str, Any]) -> None:
             orig(sec)
             with open(os.path.join(self.proc.root, "stat"), "w") as f:
                 f.write("intr 1 2 3\n")
@@ -503,7 +541,7 @@ class QuietTest(unittest.TestCase):
         self.assertIsNone(t["cpu"]["value"])
         self.assertEqual(t["io-pressure"]["value"], 1.4)
 
-    def test_json(self):
+    def test_json(self) -> None:
         rc, out, _ = self.run_quiet(["--for", "4", "--json"], lambda i: {"cpu": 20.0})
         self.assertEqual(rc, 1)
         r = json.loads(out)  # only the JSON on stdout
@@ -519,7 +557,7 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(r["tests"][4]["value"], 2.5)
         self.assertRegex(r["start"], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
 
-    def test_limits_from_flags_and_the_environment(self):
+    def test_limits_from_flags_and_the_environment(self) -> None:
         busy = lambda i: {"cpu": 12.0, "writes": 6.0, "memory-pressure": 1.2, "io-pressure": 5.5, "cpu-pressure": 5.5}
         env = {
             "QUIET_CPU_PCT": "20",
@@ -552,8 +590,8 @@ class QuietTest(unittest.TestCase):
         )
         self.assertEqual(rc, 1)
 
-    def test_usage_errors_exit_2_before_sampling(self):
-        for argv, env in [
+    def test_usage_errors_exit_2_before_sampling(self) -> None:
+        cases: list[tuple[list[str], dict[str, str]]] = [
             (["--for", "0"], {}),
             (["--for", "1.5"], {}),
             (["--for"], {}),
@@ -567,12 +605,13 @@ class QuietTest(unittest.TestCase):
             (["watch"], {}),
             ([], {"QUIET_IO_PSI": "zero"}),
             ([], {"QUIET_CPU_PCT": "0"}),
-        ]:
+        ]
+        for argv, env in cases:
             with self.subTest(argv=argv, env=env):
-                taken = []
+                taken: list[int] = []
                 err = io.StringIO()
                 with unittest.mock.patch("sys.stderr", err):
-                    rc = self.m.quiet(
+                    rc = cpu_cli.quiet(
                         argv,
                         sample=lambda taken=taken: taken.append(1),
                         sleep=lambda d: None,
@@ -582,10 +621,12 @@ class QuietTest(unittest.TestCase):
                 self.assertEqual((rc, taken), (2, []))
                 self.assertTrue(err.getvalue().startswith("quiet: "), err.getvalue())
 
-    def test_duration(self):
-        self.assertEqual([self.m.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")], [120, 90, 1800, 7200, 5400])
+    def test_duration(self) -> None:
+        self.assertEqual(
+            [cpu_domain.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")], [120, 90, 1800, 7200, 5400]
+        )
 
-    def test_command_line_dispatch(self):
+    def test_command_line_dispatch(self) -> None:
         r = subprocess.run(
             [sys.executable, "-I", "-B", CPU_WATCH, "quiet", "--for", "0"],
             check=False,
@@ -605,7 +646,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
     the environment on). A copy of the script whose container markers are
     temporary files, with fake python3 and flatpak-spawn on PATH."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         t = self.tmp.name
@@ -614,13 +655,15 @@ class SetupQuietDispatchTest(unittest.TestCase):
         self.marker = os.path.join(t, "containerenv")
         with open(SETUP) as f:
             src = f.read()
-        line = next(l for l in src.splitlines() if l.startswith("in_container()"))
+        line = next(ln for ln in src.splitlines() if ln.startswith("in_container()"))
         patched = line.replace("/run/.containerenv", self.marker).replace("/.dockerenv", self.marker + "2")
         self.assertNotEqual(line, patched)
         self.script = os.path.join(t, "cst", "cpu-setup.sh")
         with open(self.script, "w") as f:
             f.write(src.replace(line, patched))
         open(os.path.join(t, "cst", "cpu", "cpu-watch"), "w").close()
+        # Sourced at the top of cpu-setup.sh (only its install commands use it).
+        shutil.copy(os.path.join(REPO, "cst-install.bash"), os.path.join(t, "cst", "cst-install.bash"))
         self.log = os.path.join(t, "log")
         for name in ("python3", "flatpak-spawn"):
             p = os.path.join(t, "bin", name)
@@ -628,7 +671,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
                 f.write(f'#!/bin/bash\necho "{name} $*" >>"{self.log}"\n')
             os.chmod(p, 0o755)
 
-    def run_setup(self, *args, env=None):
+    def run_setup(self, *args: str, env: Mapping[str, str] | None = None) -> tuple[int, list[str], str]:
         r = subprocess.run(
             ["bash", self.script, *args],
             check=False,
@@ -644,12 +687,12 @@ class SetupQuietDispatchTest(unittest.TestCase):
             os.remove(self.log)
         return r.returncode, log, r.stderr
 
-    def test_host_runs_the_checkouts_cpu_watch(self):
+    def test_host_runs_the_checkouts_cpu_watch(self) -> None:
         watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
         rc, log, err = self.run_setup("quiet", "--for", "5", env={"QUIET_CPU_PCT": "20"})
-        self.assertEqual((rc, log), (0, [f"python3 -I {watch} quiet --for 5"]), err)
+        self.assertEqual((rc, log), (0, [f"python3 -I -B {watch} quiet --for 5"]), err)
 
-    def test_container_runs_it_on_the_host_with_the_limits(self):
+    def test_container_runs_it_on_the_host_with_the_limits(self) -> None:
         open(self.marker, "w").close()
         watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
         rc, log, err = self.run_setup(
@@ -661,22 +704,22 @@ class SetupQuietDispatchTest(unittest.TestCase):
                 0,
                 [
                     f"flatpak-spawn --host --env=QUIET_CPU_PCT=20 --env=QUIET_WRITE_MBPS=8 "
-                    f"python3 -I {watch} quiet --wait 2h --json"
+                    f"python3 -I -B {watch} quiet --wait 2h --json"
                 ],
             ),
             err,
         )
         # No limit set: nothing extra (an empty list under set -u).
         rc, log, err = self.run_setup("quiet")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} quiet"]), err)
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} quiet"]), err)
         rc, log, err = self.run_setup("report")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} report"]), err)
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} report"]), err)
 
-    def test_container_hands_over_every_limit_cpu_watch_reads(self):
+    def test_container_hands_over_every_limit_cpu_watch_reads(self) -> None:
         # The list in cpu-setup.sh must follow cpu-watch's QUIET_LIMITS: a limit
         # added there but not here would be dropped inside a toolbox.
         open(self.marker, "w").close()
-        envs = [lim.env for lim in load_module("cpu_watch", CPU_WATCH).QUIET_LIMITS]
+        envs = [lim.env for lim in cpu_domain.QUIET_LIMITS]
         self.assertTrue(envs)
         rc, log, err = self.run_setup("quiet", env={v: str(i + 1) for i, v in enumerate(envs)})
         self.assertEqual(rc, 0, err)
@@ -684,7 +727,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
         for i, v in enumerate(envs):
             self.assertIn(f" --env={v}={i + 1} ", log[0])
 
-    def test_help_lists_quiet(self):
+    def test_help_lists_quiet(self) -> None:
         r = subprocess.run(
             ["bash", SETUP, "help"], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
         )
@@ -692,7 +735,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
 
 
 class GameProfileAndCliTest(unittest.TestCase):
-    def test_expand_cpus(self):
+    def test_expand_cpus(self) -> None:
         cmd = 'sed -n \'/^expand_cpus()/,/^}/p\' "$1" > "$2" && . "$2" && expand_cpus \'0-3,6,12-14\''
         with tempfile.TemporaryDirectory() as tmp:
             fn_file = os.path.join(tmp, "fn.bash")
@@ -705,7 +748,7 @@ class GameProfileAndCliTest(unittest.TestCase):
             )
             self.assertEqual(r.stdout.strip(), "0 1 2 3 6 12 13 14")
 
-    def test_off_reverts_in_reverse_order_and_cleans_state(self):
+    def test_off_reverts_in_reverse_order_and_cleans_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = os.path.join(tmp, "run")
             os.makedirs(run_dir)
@@ -767,7 +810,7 @@ off
                 ],
             )
 
-    def test_override_files_of_fixed_and_transient_units(self):
+    def test_override_files_of_fixed_and_transient_units(self) -> None:
         # systemd writes `set-property --runtime` of a transient unit (scopes,
         # systemd-run's run-*.service) into its transient folder: 'off' must
         # delete that file, or the unit keeps the setting until it ends.
@@ -797,13 +840,15 @@ ctl_file usr flatpak-session-helper.service AllowedCPUs
             r.stderr,
         )
 
-    def test_machine_slice_dropin_has_cpu_and_io_weight(self):
+    def test_machine_slice_dropin_has_cpu_and_io_weight(self) -> None:
         dropin = os.path.join(CPU, "units", "machine.slice.d-10-cpu-setup.conf")
         with open(dropin) as f:
             lines = [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
         self.assertEqual(lines, ["[Slice]", "CPUWeight=50", "IOWeight=50"])
 
-    def _run_game_profile_on_off(self, vm_weight, prior_io_weight=None):
+    def _run_game_profile_on_off(
+        self, vm_weight: str, prior_io_weight: str | None = None
+    ) -> tuple[str, list[str], bool, str]:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = os.path.join(tmp, "run")
             ctrl_dir = os.path.join(tmp, "ctrl")
@@ -893,7 +938,7 @@ test ! -e {intended_file!r}
             io_file_exists_after = os.path.exists(os.path.join(ctrl_dir, "sys", "machine.slice.d", "50-IOWeight.conf"))
             return state_after_on, actions, io_file_exists_after, intended_after_on
 
-    def test_on_and_off_machine_slice_io_weight(self):
+    def test_on_and_off_machine_slice_io_weight(self) -> None:
         # Numeric VM_WEIGHT reused for IOWeight, no prior runtime override.
         state_on, actions, io_exists, intended = self._run_game_profile_on_off("25", prior_io_weight=None)
         self.assertIn("prop sys machine.slice IOWeight new -", state_on)
@@ -918,7 +963,7 @@ test ! -e {intended_file!r}
         self.assertIn("ctl sys set-property --runtime machine.slice IOWeight=80", actions_idle)
         self.assertTrue(io_exists_idle)
 
-    def test_setup_help_and_unknown_command(self):
+    def test_setup_help_and_unknown_command(self) -> None:
         r = subprocess.run(
             ["bash", SETUP, "help"],
             env={**os.environ, "CST_PROG": "cst cpu"},
@@ -934,11 +979,11 @@ test ! -e {intended_file!r}
         )
         self.assertEqual(bad.returncode, 2)
 
-    def test_e_cores_missing_returns_empty_cleanly(self):
+    def test_e_cores_missing_returns_empty_cleanly(self) -> None:
         # On uniform CPUs without /sys/devices/cpu_atom/cpus, e_cores() must exit 0 under set -e.
         with open(SETUP) as f:
             src = f.read()
-        line = next(l for l in src.splitlines() if l.startswith("e_cores()"))
+        line = next(line_text for line_text in src.splitlines() if line_text.startswith("e_cores()"))
         fn = line.replace("/sys/devices/cpu_atom/cpus", "/nonexistent/cpu_atom/cpus")
         r = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", f'{fn}\necores="$(e_cores)"\nprintf \'<%s>\' "$ecores"'],
@@ -1002,7 +1047,7 @@ systemctl() { echo "systemctl $*" >>"${ACTIONS}"; }
 class GameProfileFake(unittest.TestCase):
     """game-profile's functions with a fake systemd and a fake cgroup tree."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-cpu-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
         self.run_dir = os.path.join(self.tmp, "run")
@@ -1024,18 +1069,18 @@ class GameProfileFake(unittest.TestCase):
             self.set_now("sys", u, MemoryLow="0")
         self.set_now("usr", "user.slice", CPUWeight="30")
 
-    def set_now(self, mgr, unit, **props):
+    def set_now(self, mgr: str, unit: str, **props: str) -> None:
         d = os.path.join(self.store, mgr, unit)
         os.makedirs(d, exist_ok=True)
         for k, v in props.items():
             with open(os.path.join(d, k), "w") as f:
                 f.write(v + "\n")
 
-    def now(self, mgr, unit, prop):
+    def now(self, mgr: str, unit: str, prop: str) -> str:
         with open(os.path.join(self.store, mgr, unit, prop)) as f:
             return f.read().strip()
 
-    def run_profile(self, body):
+    def run_profile(self, body: str) -> tuple[str, list[str]]:
         """game-profile's functions with a fake systemd, then BODY; returns
         (stdout, actions)."""
         open(self.actions, "w").close()
@@ -1080,7 +1125,7 @@ gamemode_pid() {{ [[ -e {self.tmp!r}/gamemode-pids/"$1" ]]; }}
         with open(self.actions) as f:
             return r.stdout, f.read().splitlines()
 
-    def read(self, path):
+    def read(self, path: str) -> str:
         with open(path) as f:
             return f.read()
 
@@ -1090,14 +1135,14 @@ class GameProfileDriftTest(GameProfileFake):
     game profile (a daemon-reload or uresourced undoing a setting while the
     profile is on)."""
 
-    def test_baseline_dropins_sort_before_the_runtime_overrides(self):
+    def test_baseline_dropins_sort_before_the_runtime_overrides(self) -> None:
         # systemd reads drop-ins in file-name order (byte order) and the last
         # one read wins: the baseline must come first, so that the 50-<Prop>
         # files of `systemctl set-property --runtime` win after a reload.
         with open(SETUP) as f:
             src = f.read()
-        name = next(l.split("=", 1)[1] for l in src.splitlines() if l.startswith("DROPIN_NAME="))
-        old = next(l.split("=", 1)[1].split()[0] for l in src.splitlines() if l.startswith("OLD_DROPIN_NAME="))
+        name = next(line.split("=", 1)[1] for line in src.splitlines() if line.startswith("DROPIN_NAME="))
+        old = next(line.split("=", 1)[1].split()[0] for line in src.splitlines() if line.startswith("OLD_DROPIN_NAME="))
         self.assertEqual(name, "10-cpu-setup.conf")
         self.assertTrue(os.path.exists(os.path.join(CPU, "units", f"machine.slice.d-{name}")))
         overrides = [
@@ -1130,7 +1175,7 @@ toolbox_dropin; helper_dropin; toolbox_dropin 50-cpu-setup.conf
             r.stderr,
         )
 
-    def test_install_and_uninstall_remove_the_old_name(self):
+    def test_install_and_uninstall_remove_the_old_name(self) -> None:
         home = os.path.join(self.tmp, "home")
         unit_dir = os.path.join(self.tmp, "etc-systemd")
         old = [
@@ -1177,7 +1222,7 @@ remove_old_dropins
         self.assertIn("usys daemon-reload", install)
         self.assertIn("remove_old_dropins", uninstall)
 
-    def test_uninstall_removes_leftover_memorylow_dropins(self):
+    def test_uninstall_removes_leftover_memorylow_dropins(self) -> None:
         rt = os.path.join(self.tmp, "run-systemd-system")
         left = [
             os.path.join(rt, "user.slice.d", "zz-cst-game.conf"),
@@ -1204,7 +1249,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         self.assertTrue(os.path.exists(keep))
         self.assertEqual(r.stdout.count("removed"), 2, r.stdout)
 
-    def test_on_records_what_systemd_reads_back_and_not_for_scopes(self):
+    def test_on_records_what_systemd_reads_back_and_not_for_scopes(self) -> None:
         out, actions = self.run_profile("on\nsetp usr app-flatpak-com.valvesoftware.Steam-1.scope MemoryLow=16G")
         intended = self.read(self.intended)
         self.assertIn("prop sys machine.slice CPUWeight 10 10\n", intended)
@@ -1218,7 +1263,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         for line in self.read(self.state).splitlines():
             self.assertLessEqual(len(line.split()), 6, line)
 
-    def test_failed_set_property_records_no_intended_value(self):
+    def test_failed_set_property_records_no_intended_value(self) -> None:
         self.run_profile(
             'ctl() { echo "ctl $*" >>"${ACTIONS}"; [[ "$2" != set-property ]]; }\n'
             ': >"${STATE}"; : >"${INTENDED}"\nsetp sys machine.slice CPUWeight=10'
@@ -1226,7 +1271,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         self.assertEqual(self.read(self.intended), "")
         self.assertIn("prop sys machine.slice CPUWeight new -", self.read(self.state))
 
-    def test_tick_repairs_drift_without_touching_the_state_and_off_restores(self):
+    def test_tick_repairs_drift_without_touching_the_state_and_off_restores(self) -> None:
         # IOWeight had a runtime override of its own before the profile.
         self.set_now("sys", "machine.slice", IOWeight="80")
         os.makedirs(os.path.join(self.ctrl, "sys", "machine.slice.d"))
@@ -1279,7 +1324,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         for p in (self.state, self.intended, self.manual):
             self.assertFalse(os.path.exists(p), p)
 
-    def test_cgroup_file_drift_is_rewritten(self):
+    def test_cgroup_file_drift_is_rewritten(self) -> None:
         cg = os.path.join(self.tmp, "cpuset.cpus")
         with open(cg, "w") as f:
             f.write("8-23\n")
@@ -1297,7 +1342,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         self.assertEqual(out, "")
         self.assertFalse(os.path.exists(cg))
 
-    def test_unloaded_unit_and_empty_readback_are_not_repaired(self):
+    def test_unloaded_unit_and_empty_readback_are_not_repaired(self) -> None:
         with open(self.state, "w") as f:
             f.write("prop sys builds.slice CPUWeight new -\nprop usr app.slice MemoryZSwapWriteback new -\n")
         with open(self.intended, "w") as f:
@@ -1308,7 +1353,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         self.assertEqual([a for a in actions if "set-property" in a], [])
         self.assertEqual(out, "")
 
-    def test_old_format_state_is_tolerated(self):
+    def test_old_format_state_is_tolerated(self) -> None:
         # Switched on by a version without game.intended: no comparison at all.
         with open(self.state, "w") as f:
             f.write("prop sys machine.slice CPUWeight new -\nprop sys user.slice MemoryLow new -\n")
@@ -1330,7 +1375,7 @@ remove_game_dropins   # again: nothing left, no error under set -e
         self.assertIn("systemctl daemon-reload", actions)
         self.assertFalse(os.path.exists(self.state))
 
-    def test_state_shows_drift_per_property(self):
+    def test_state_shows_drift_per_property(self) -> None:
         self.run_profile("on")
         out, _ = self.run_profile("state_drift")
         self.assertEqual(out, "  drift: none (every setting the profile made still holds)\n")
@@ -1350,7 +1395,7 @@ class GameProfileEscapesTest(GameProfileFake):
     the profile is on, picked up by tick, reverted by off. And the MemoryLow
     drop-ins that win over uresourced's at a daemon-reload."""
 
-    def cg(self, *parts, procs=()):
+    def cg(self, *parts: str, procs: Sequence[int] = ()) -> str:
         d = os.path.join(self.ucg, *parts)
         os.makedirs(d, exist_ok=True)
         if procs:
@@ -1358,7 +1403,7 @@ class GameProfileEscapesTest(GameProfileFake):
                 f.write("".join(f"{p}\n" for p in procs))
         return d
 
-    def tree(self, delegated=False):
+    def tree(self, delegated: bool = False) -> None:
         with open(os.path.join(self.ucg, "cgroup.subtree_control"), "w") as f:
             f.write("cpuset cpu memory pids\n" if delegated else "cpu memory pids\n")
         for d in (
@@ -1377,10 +1422,10 @@ class GameProfileEscapesTest(GameProfileFake):
         ):
             self.cg(*d.split("/"))
 
-    def sets(self, actions):
+    def sets(self, actions: Sequence[str]) -> list[str]:
         return [a for a in actions if "set-property" in a]
 
-    def test_on_makes_the_other_boxes_idle_and_records_only_slices(self):
+    def test_on_makes_the_other_boxes_idle_and_records_only_slices(self) -> None:
         self.tree()
         out, actions = self.run_profile("on")
         sets = self.sets(actions)
@@ -1414,7 +1459,7 @@ class GameProfileEscapesTest(GameProfileFake):
             sorted(out.split()), ["background.slice", "cpu.slice", "lushtext.slice", "run-r1a2.scope", "run-u7.service"]
         )
 
-    def test_with_cpuset_delegated_they_also_leave_the_game_cpus(self):
+    def test_with_cpuset_delegated_they_also_leave_the_game_cpus(self) -> None:
         self.tree(delegated=True)
         _, actions = self.run_profile("on")
         sets = self.sets(actions)
@@ -1422,7 +1467,7 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertIn("ctl usr set-property --runtime run-u7.service CPUWeight=idle AllowedCPUs=12-23", sets)
         self.assertIn("ctl usr set-property --runtime user.slice AllowedCPUs=12-23", sets)
 
-    def test_a_box_with_the_game_in_it_is_left_alone(self):
+    def test_a_box_with_the_game_in_it_is_left_alone(self) -> None:
         self.tree()
         self.cg("app.slice", "run-r9.scope", procs=(4242,))
         self.cg("games.slice", "run-u3.service", procs=(77, 4243))
@@ -1434,7 +1479,7 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertFalse([a for a in sets if "run-r9.scope" in a or "games.slice" in a], sets)
         self.assertIn("ctl usr set-property --runtime lushtext.slice CPUWeight=idle", sets)
 
-    def test_tick_picks_up_new_boxes_once(self):
+    def test_tick_picks_up_new_boxes_once(self) -> None:
         self.tree()
         self.run_profile("on")
         open(self.manual, "w").close()
@@ -1462,7 +1507,7 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertEqual(self.sets(actions), [])
         self.assertEqual(self.read(self.state), grown)
 
-    def test_off_reverts_them_and_tolerates_units_that_are_gone(self):
+    def test_off_reverts_them_and_tolerates_units_that_are_gone(self) -> None:
         self.tree()
         self.run_profile("on")
         ctrl = os.path.join(self.ctrl, "usr")
@@ -1477,7 +1522,7 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertIn("ctl usr daemon-reload", actions)
         self.assertFalse(os.path.exists(self.state))
 
-    def test_upgrade_while_on_from_the_previous_version(self):
+    def test_upgrade_while_on_from_the_previous_version(self) -> None:
         # Switched on by the previous version: game.state and game.intended
         # in the same format, but no zz- drop-ins and no other boxes handled.
         self.run_profile("on")
@@ -1504,7 +1549,7 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertFalse(os.path.exists(self.state))
         self.assertFalse(os.path.exists(self.unit_runtime))
 
-    def test_a_slice_with_its_own_override_gets_it_back_and_drift_is_repaired(self):
+    def test_a_slice_with_its_own_override_gets_it_back_and_drift_is_repaired(self) -> None:
         self.tree()
         # Someone had set lushtext.slice to weight 50 at run time before the game.
         own = os.path.join(self.ctrl, "usr", "lushtext.slice.d", "50-CPUWeight.conf")
@@ -1528,26 +1573,26 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertEqual(self.now("usr", "lushtext.slice", "CPUWeight"), "50")
         self.assertTrue(os.path.exists(own))
 
-    def test_on_writes_the_memorylow_dropins_and_off_removes_them(self):
+    def test_on_writes_the_memorylow_dropins_and_off_removes_them(self) -> None:
         self.run_profile("on")
         files = {
             u: os.path.join(self.unit_runtime, f"{u}.d", "zz-cst-game.conf")
             for u in ("user.slice", "user-999999.slice", "user@999999.service")
         }
         for u, f in files.items():
-            lines = [l for l in self.read(f).splitlines() if not l.startswith("#")]
+            lines = [line for line in self.read(f).splitlines() if not line.startswith("#")]
             self.assertEqual(lines, ["[Service]" if u.endswith(".service") else "[Slice]", "MemoryLow=16G"], u)
         _, actions = self.run_profile("off")
         self.assertIn("systemctl daemon-reload", actions)
         for f in files.values():
             self.assertFalse(os.path.exists(os.path.dirname(f)), f)
 
-    def test_on_sets_memorylow_live_without_a_reload(self):
+    def test_on_sets_memorylow_live_without_a_reload(self) -> None:
         _, actions = self.run_profile("on")
         self.assertIn("ctl sys set-property --runtime user-999999.slice MemoryLow=16G", actions)
         self.assertFalse([a for a in actions if "daemon-reload" in a], actions)
 
-    def test_off_without_state_still_removes_leftover_dropins(self):
+    def test_off_without_state_still_removes_leftover_dropins(self) -> None:
         d = os.path.join(self.unit_runtime, "user-999999.slice.d")
         os.makedirs(d)
         with open(os.path.join(d, "zz-cst-game.conf"), "w") as f:
@@ -1564,7 +1609,7 @@ class GameProfileEscapesTest(GameProfileFake):
         _, actions = self.run_profile("off")
         self.assertEqual(actions, [])
 
-    def test_tick_with_the_profile_off_removes_leftover_dropins(self):
+    def test_tick_with_the_profile_off_removes_leftover_dropins(self) -> None:
         d = os.path.join(self.unit_runtime, "user@999999.service.d")
         os.makedirs(d)
         open(os.path.join(d, "zz-cst-game.conf"), "w").close()
@@ -1574,6 +1619,154 @@ class GameProfileEscapesTest(GameProfileFake):
         self.assertIn("were still there: removed them", out)
         out, actions = self.run_profile("gamemode_client() { return 1; }\ntick")
         self.assertEqual((out, actions), ("", []))
+
+
+class VmPinCliTest(unittest.TestCase):
+    """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
+
+    CONF = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": "cet-ss cet-ibt"}
+
+    def run_vm_pin(self, argv: list[str], xml: str) -> tuple[int, str, list[tuple[str, ...]]]:
+        calls: list[tuple[str, ...]] = []
+
+        def fake_virsh(*args: str, check: bool = True) -> str:
+            calls.append(args)
+            if args[0] == "dumpxml":
+                return xml
+            if args[0] == "domstate":
+                return "shut off\n"
+            return ""
+
+        out = io.StringIO()
+        with (
+            unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
+            unittest.mock.patch.object(cpu_cli, "conf", lambda: dict(self.CONF)),
+            contextlib.redirect_stdout(out),
+        ):
+            rc = cpu_cli.vm_pin(argv, doc="DOC")
+        return rc, out.getvalue(), calls
+
+    def test_conf_reads_the_settings_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "w") as f:
+                f.write("VM_NAME='box'\nVM_VCPUS=8\nBUILD_CPUS=4-7,9\nVM_CPU_DISABLE=\"cet-ss\"\nTARGET_USER=alice\n")
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                c = cpu_adapters.conf()
+        self.assertEqual(
+            (c["VM_NAME"], c["VM_VCPUS"], c["BUILD_CPUS"], c["VM_CPU_DISABLE"], c["TARGET_USER"]),
+            ("box", "8", "4-7,9", "cet-ss", "alice"),
+        )
+
+    def test_plan_prints_the_diff_and_is_idempotent(self) -> None:
+        rc, out, calls = self.run_vm_pin(["plan"], SAMPLE_DOMAIN_XML)
+        self.assertEqual(rc, 0)
+        self.assertIn("+++ pinned", out)
+        self.assertIn("Plan only. Apply with: cst cpu vm-pin apply", out)
+        self.assertEqual(calls, [("dumpxml", "--inactive", "--security-info", "win11-devbox")])
+        after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", ["cet-ss", "cet-ibt"])
+        rc, out, _ = self.run_vm_pin(["plan", "win11-devbox"], after)
+        self.assertEqual(rc, 0)
+        self.assertIn("win11-devbox: already 12 vCPUs pinned to 12-23; CPU features disabled: cet-ss cet-ibt.", out)
+
+    def test_status_reports_the_features(self) -> None:
+        rc, out, calls = self.run_vm_pin(["status", "box"], SAMPLE_DOMAIN_XML)
+        self.assertEqual(rc, 0)
+        self.assertIn("box: shut off", out)
+        self.assertIn("NOT disabled yet: cet-ss cet-ibt", out)
+        self.assertEqual(calls[0], ("domstate", "box"))
+        after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", ["cet-ss", "cet-ibt"])
+        _, out, _ = self.run_vm_pin(["status"], after)
+        self.assertIn("; disabled: cet-ss cet-ibt", out)
+
+    def test_refuses_vcpu_tied_elements_and_unknown_actions(self) -> None:
+        bad_xml = "<domain><name>win11-devbox</name><vcpu>4</vcpu><cputune><vcpusched/></cputune></domain>"
+        with self.assertRaisesRegex(SystemExit, "has <cputune/vcpusched>: adjust it by hand"):
+            self.run_vm_pin(["plan"], bad_xml)
+        rc, out, calls = self.run_vm_pin(["bogus"], SAMPLE_DOMAIN_XML)
+        self.assertEqual((rc, out, calls), (2, "DOC\n", []))
+
+    def test_virsh_adapter(self) -> None:
+        ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=ok) as run:
+            self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox"), "<domain/>")
+        self.assertEqual(run.call_args.args[0], ["virsh", "-c", "qemu:///system", "dumpxml", "win11-devbox"])
+        fail = subprocess.CompletedProcess(["virsh"], 1, "partial", "boom")
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=fail):
+            with self.assertRaisesRegex(SystemExit, "virsh dumpxml win11-devbox: boom"):
+                cpu_adapters.virsh("dumpxml", "win11-devbox")
+            self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox", check=False), "partial")
+
+
+class CpuWatchCliTest(unittest.TestCase):
+    """cpu-watch's numbers and command line, on the package (cpu.domain, cpu.cli)."""
+
+    def test_frame_lows_and_quiet_args(self) -> None:
+        res = cpu_domain.lows([10.0, 20.0])
+        assert res is not None
+        self.assertAlmostEqual(res[0], 1000.0 / 15.0, places=2)
+        self.assertIsNone(cpu_domain.lows([]))
+        seconds, wait, as_json, limits = cpu_domain.quiet_args(["--for", "5", "--json"], {"QUIET_CPU_PCT": "15"})
+        self.assertEqual((seconds, wait, as_json, limits["cpu"]), (5, None, True, 15.0))
+
+    def test_dispatch(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cpu_cli.cpu_watch(["quiet", "--for", "0"], doc="DOC"), 2)
+        self.assertIn("quiet: --for: a whole number of seconds", err.getvalue())
+        for argv in ([], ["bogus"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cpu_cli.cpu_watch(argv, doc="DOC"), 2)
+            self.assertEqual(out.getvalue(), "DOC\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with unittest.mock.patch.object(cpu_cli, "RUNS", tmp), contextlib.redirect_stdout(out):
+                self.assertEqual(cpu_cli.cpu_watch(["report"], doc="DOC"), 0)
+        self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
+
+
+class QuietNumbersTest(unittest.TestCase):
+    """cpu-watch quiet: its command line, its CPU busy number and vm-pin's feature rule, case by case."""
+
+    def test_quiet_args(self) -> None:
+        q = cpu_domain.quiet_args
+        seconds, wait, as_json, limits = q([], {"QUIET_CPU_PCT": ""})
+        self.assertEqual((seconds, wait, as_json), (60, None, False))
+        self.assertEqual(limits, {lim.name: lim.default for lim in cpu_domain.QUIET_LIMITS})  # "" = the default
+        seconds, wait, as_json, limits = q(
+            ["--json", "--for", "1", "--wait", "2m", "--io-pressure", "2.5", "--write-mbps", "40"], {}
+        )
+        self.assertEqual((seconds, wait, as_json, limits["io-pressure"], limits["writes"]), (1, 120.0, True, 2.5, 40.0))
+        self.assertEqual(q(["--for", "12", "--cpu", "3"], {})[0], 12)
+        for argv in (
+            ["--for"],
+            ["--for", "0"],
+            ["--for", "1.5"],
+            ["--cpu"],
+            ["--cpu", "0"],
+            ["--json", "--wait"],
+            ["-x"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                q(argv, {})
+        with self.assertRaises(ValueError):
+            q([], {"QUIET_CPU_PCT": "-1"})
+
+    def test_busy_pct(self) -> None:
+        window = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
+        self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 750 / 9)  # 900 ticks, 150 idle
+        window = [{"v": {"cpu": (7, 3)}}, {"v": {"cpu": (17, 3)}}]
+        self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 100.0)
+        for end in (1000, 999):
+            with self.subTest(end=end), self.assertRaises(ValueError):
+                cpu_domain.busy_pct([{"v": {"cpu": (1000, 600)}}, {"v": {"cpu": (end, 600)}}], "cpu")
+
+    def test_disable_features_only_for_host_passthrough(self) -> None:
+        for mode in ("maximum", "host-model", "custom"):
+            root = ET.fromstring(f"<domain><cpu mode='{mode}'/></domain>")
+            cpu_domain.disable_features(root, ["cet-ss"])
+            self.assertEqual(root.findall("cpu/feature"), [], mode)
 
 
 if __name__ == "__main__":

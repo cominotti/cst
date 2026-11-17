@@ -92,4 +92,4 @@ if [[ ${EUID} -eq 0 ]]; then
 fi
 
 # The program checks the rest of the command line (exit 2 on a mistake).
-CST_PROG="${PROG}" exec python3 -I "${TOOL}" "${cmd}" "$@"
+CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"

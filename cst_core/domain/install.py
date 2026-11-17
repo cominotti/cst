@@ -1,0 +1,220 @@
+"""Declarative installation manifest and executable inventory for CST."""
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Final, Literal
+
+from cst_core.domain.values import OctalMode
+
+type Owner = Literal["root", "user"]
+type ArtifactKind = Literal["python-entry", "shell", "unit", "data"]
+
+
+@dataclass(frozen=True, slots=True)
+class InstallEntry:
+    """One repository artifact installed onto a host or user account."""
+
+    src: str
+    dest: str
+    mode: OctalMode
+    owner: Owner
+    kind: ArtifactKind
+    runner: Owner
+
+    @property
+    def module(self) -> str:
+        """The CST module (top-level folder) this file belongs to."""
+        return self.src.split("/", 1)[0]
+
+    @property
+    def is_template(self) -> bool:
+        """True for `*.in` sources: installed with every @KEY@ replaced."""
+        return self.src.endswith(".in")
+
+
+_OWNERS: Final[Mapping[str, Owner]] = {"root": "root", "user": "user"}
+_KINDS: Final[Mapping[str, ArtifactKind]] = {
+    "python-entry": "python-entry",
+    "shell": "shell",
+    "unit": "unit",
+    "data": "data",
+}
+
+
+def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
+    """The entries of a manifest table, in order.
+
+    One row per file: `src dest mode owner kind runner`, separated by blanks;
+    `mode` is octal; `#` starts a comment. A malformed row raises ValueError.
+    """
+    entries: list[InstallEntry] = []
+    for number, raw in enumerate(table.splitlines(), 1):
+        fields = raw.split("#", 1)[0].split()
+        if not fields:
+            continue
+        try:
+            src, dest, mode, owner, kind, runner = fields
+            entries.append(
+                InstallEntry(src, dest, OctalMode(int(mode, 8)), _OWNERS[owner], _KINDS[kind], _OWNERS[runner])
+            )
+        except (ValueError, KeyError) as exc:
+            raise ValueError(f"manifest row {number}: {raw.strip()!r}: {exc}") from None
+    return tuple(entries)
+
+
+# What `install` writes: every installable file of the repository, once.
+# runner: the account that runs or reads the installed file.
+INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = parse_manifest(
+    r"""
+# src                                               dest                                                          mode owner kind          runner
+# btrfs: Python helpers (self-contained zipapps)
+btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root
+btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root
+btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root
+btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user
+btrfs/docker-gc                                     /usr/local/sbin/docker-gc                                     755  root  python-entry  root
+btrfs/docker-volumes-nocow                          /usr/local/sbin/docker-volumes-nocow                          755  root  python-entry  root
+# btrfs: standalone shell helpers
+btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  shell         root
+btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify                                  755  root  shell         root
+btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root
+btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-alerts                             755  root  shell         user
+# btrfs: systemd units and data
+btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root
+btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root
+btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root
+btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root
+btrfs/units/btrfs-scrub-weekly.service              /etc/systemd/system/btrfs-scrub-weekly.service                644  root  unit          root
+btrfs/units/btrfs-scrub-weekly.timer                /etc/systemd/system/btrfs-scrub-weekly.timer                  644  root  unit          root
+btrfs/units/btrfs-snapshot-nas.service              /etc/systemd/system/btrfs-snapshot-nas.service                644  root  unit          root
+btrfs/units/btrfs-snapshot-nas.timer                /etc/systemd/system/btrfs-snapshot-nas.timer                  644  root  unit          root
+btrfs/units/btrfs-snapshot.service                  /etc/systemd/system/btrfs-snapshot.service                    644  root  unit          root
+btrfs/units/btrfs-snapshot.timer                    /etc/systemd/system/btrfs-snapshot.timer                      644  root  unit          root
+btrfs/units/btrfs-stall-alert.service               /etc/systemd/system/btrfs-stall-alert.service                 644  root  unit          root
+btrfs/units/btrfs-stall-monitor.service             /etc/systemd/system/btrfs-stall-monitor.service               644  root  unit          root
+btrfs/units/btrfs-subvol-convert.service            /etc/systemd/system/btrfs-subvol-convert.service              644  root  unit          root
+btrfs/units/docker-gc-recorder.service              /etc/systemd/system/docker-gc-recorder.service                644  root  unit          root
+btrfs/units/docker-gc.service                       /etc/systemd/system/docker-gc.service                         644  root  unit          root
+btrfs/units/docker-gc.timer                         /etc/systemd/system/docker-gc.timer                           644  root  unit          root
+btrfs/units/docker-volumes-nocow.service            /etc/systemd/system/docker-volumes-nocow.service              644  root  unit          root
+btrfs/units/user/cst-pending-alerts.service         /etc/systemd/user/cst-pending-alerts.service                  644  root  unit          user
+btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-btrfs\x2dtop.mount                644  root  unit          root
+btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root
+btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root
+btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root
+# cpu
+cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root
+cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user
+cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  shell         root
+cpu/units/builds.slice                              /etc/systemd/system/builds.slice                              644  root  unit          root
+cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root
+cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root
+cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root
+cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root
+cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root
+cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user
+cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root
+# bluetooth
+bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user
+# swap
+swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root
+swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root
+swap/units/machine.slice.d-50-memory-low.conf       /etc/systemd/system/machine.slice.d/50-memory-low.conf        644  root  unit          root
+# toolchains
+toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user
+toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user
+toolchains/toolchains.conf                          ~/.local/lib/cst/toolchains.conf                              644  user  data          user
+# vm
+vm/cst-vm                                           /usr/local/sbin/cst-vm                                        755  root  python-entry  root
+"""
+)
+
+SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
+    """
+bluetooth-setup.sh
+btrfs-setup.sh
+btrfs/btrfs-degraded-boot-setup.sh
+btrfs/setup-bulk.bash
+btrfs/setup-snapshots.bash
+cpu-setup.sh
+cst
+cst-install.bash
+cst-link.bash
+swap-setup.sh
+toolchains-setup.sh
+vm-setup.sh
+""".split()
+)
+
+CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
+    """
+.github/scripts/pin_invowk.py
+bluetooth/bt-helper
+btrfs/btrfs-stall-watch
+btrfs/chrome-cache
+btrfs/tests/realbtrfs-snapshot-core.sh
+cst_core/cli.py
+cst_core/installer.py
+doctor/cst-doctor
+fix-anaconda-webui-btrfs-compress.sh
+swap/cli.py
+tests/mutation/cst-mutation
+tests/uv-dev
+""".split()
+)
+
+
+# Repository files that look installable (a config or data file next to a
+# module) but are read from the checkout only, with the reason.
+CHECKOUT_ONLY_FILES: Final[Mapping[str, str]] = {
+    "bluetooth/bluetooth.conf": "defaults read by bluetooth-setup.sh from the checkout; never copied",
+}
+
+
+def manifest_by_src() -> Mapping[str, InstallEntry]:
+    """Return mapping of repo-relative source paths to manifest entries."""
+    return {entry.src: entry for entry in INSTALL_MANIFEST}
+
+
+def manifest_by_dest() -> Mapping[str, InstallEntry]:
+    """Return mapping of installed destination paths to manifest entries."""
+    return {entry.dest: entry for entry in INSTALL_MANIFEST}
+
+
+def python_entry_srcs() -> tuple[InstallEntry, ...]:
+    """Return all Python helper entries packaged as standalone zipapps."""
+    return tuple(entry for entry in INSTALL_MANIFEST if entry.kind == "python-entry")
+
+
+def expand_dest(dest: str, home: str | None) -> str:
+    """The destination with a leading `~/` replaced by `home` (a user-owned entry)."""
+    if dest == "~" or dest.startswith("~/"):
+        if not home:
+            raise ValueError(f"{dest}: a home folder is needed for this destination")
+        return home.rstrip("/") + dest[1:]
+    return dest
+
+
+def render_template(text: str, values: Mapping[str, str]) -> str:
+    """`text` with every @KEY@ replaced literally by its value, ending in one newline.
+
+    Same result as the shell render it replaces (`$(<file)` drops the trailing
+    newlines, printf adds one back).
+    """
+    for key, value in values.items():
+        text = text.replace(f"@{key}@", value)
+    return text.rstrip("\n") + "\n"
+
+
+def select_entries(
+    entries: Sequence[InstallEntry],
+    *,
+    module: str | None = None,
+    kind: ArtifactKind | None = None,
+) -> tuple[InstallEntry, ...]:
+    """The entries of one module and/or one kind, in manifest order."""
+    return tuple(
+        entry
+        for entry in entries
+        if (module is None or entry.module == module) and (kind is None or entry.kind == kind)
+    )
