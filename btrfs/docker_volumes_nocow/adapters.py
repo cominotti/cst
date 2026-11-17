@@ -20,7 +20,7 @@ from btrfs.docker_volumes_nocow.domain import (
     daemon_args,
     service_wait_reason,
 )
-from cst_core.adapters.files import write_atomic
+from cst_core.adapters.files import CounterFile, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
@@ -237,6 +237,7 @@ class NocowStateFiles:
 
     def __init__(self, paths: NocowPaths) -> None:
         self.paths = paths
+        self.counter = CounterFile(paths.attempts)
 
     def flag_exists(self) -> bool:
         return os.path.exists(self.paths.flag)
@@ -258,23 +259,16 @@ class NocowStateFiles:
         os.remove(self.paths.flag)
 
     def attempts(self) -> int:
-        try:
-            with open(self.paths.attempts) as f:
-                return int(f.read())
-        except OSError, ValueError:
-            return 0
+        return self.counter.count()
 
     def save_attempts(self, count: int) -> None:
-        write_atomic(self.paths.attempts, str(count), mode=0o644)
+        self.counter.save(count)
 
     def remove_attempts(self) -> None:
-        os.remove(self.paths.attempts)
+        self.counter.remove()
 
     def forget_attempts(self) -> None:
-        try:
-            os.remove(self.paths.attempts)
-        except OSError:
-            pass  # none: nothing to forget
+        self.counter.forget()
 
     def boot_id(self) -> str:
         try:

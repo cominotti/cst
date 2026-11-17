@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
 """The rules of btrfs-bulk, with no I/O: the items that move into ~/Bulk
-(Item, ITEMS), the CACHEDIR.TAG text, the size thresholds and texts, and
-Steam's file formats (VDF text, libraryfolders.vdf and appmanifest rules).
+(Item, ITEMS), the home being handled (Ctx) and the program's paths
+(BulkPaths), the CACHEDIR.TAG text, the size thresholds and texts, the
+records of the journals, and Steam's file formats (VDF text, the
+libraryfolders.vdf edits and the appmanifest rules).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 from typing import NoReturn
+from typing import NotRequired
+from typing import TypedDict
 import os
 import re
 
@@ -101,6 +106,23 @@ class Unexpected(Exception):
     """A state this tool does not change by itself."""
 
 
+class BadSettings(Exception):
+    """bulk.conf has a line that is not a plain KEY=VALUE: main() stops the
+    run with exit 1 and the message on stderr. At boot, main() also sends it
+    as an alert (nobody reads the boot console); lines names each bad line
+    (file and line number)."""
+
+    def __init__(self, lines: str) -> None:
+        super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
+        self.lines = lines
+
+
+class NoUser(Exception):
+    """As root, neither --user NAME nor BULK_USER names whose home it is (or
+    it names root): main() stops the run with exit 1 and the message on
+    stderr. Root must never guess whose home it moves."""
+
+
 KEEP_HEADER = (
     "# Managed by btrfs-setup.sh bulk keep/unkeep (CST): ~/Bulk items kept in /home\n"
     "# by choice (one item id per line; '#' starts a comment). bulk apply leaves them alone.\n"
@@ -136,10 +158,6 @@ def kept_text(item: Item, detail: str) -> str:
     return where
 
 
-# Ids whose problem in the last apply() lies inside ~/Bulk only: the in-place
-# +C rewrite of a folder already linked into ~/Bulk failed or was refused
-# before it wrote a journal (no free space, a copy check, foreign entries).
-BULK_ONLY: set[str] = set()
 STATE_TEXT = {
     "ok": "ok",
     "mkdir": "create the folder",
@@ -189,7 +207,7 @@ TOOL_DIR = re.compile(r"(SteamLinuxRuntime|Proton|Steamworks Shared)")
 TOOL_NAME = re.compile(r"(Steam Linux Runtime|Proton\b|Steamworks Common Redistributables)")
 # The keys a libraryfolders.vdf entry may have besides "path" and "apps".
 LF_KEYS = ("label", "contentid", "totalsize", "update_clean_bytes_tally", "time_last_update_verified")
-DECIMAL = re.compile(r"[0-9]+")
+DECIMAL = re.compile(r"\d+", re.ASCII)
 MAKE_DEFAULT = (
     "Once, by hand, so new games go there too: Steam > Settings > Storage > pick ~/Bulk/steam\n"
     "  in the drive list > '...' > Make default. (This tool never touches config/config.vdf,\n"
@@ -201,12 +219,116 @@ class SteamRunning(Exception):
     """Steam (or something of it) runs: nothing is changed."""
 
 
+# A parsed VDF file: every value is a string or a block of more.
+type Vdf = dict[str, VdfValue]
+type VdfValue = str | Vdf
+
+
 def dec(s: object) -> bool:
     return isinstance(s, str) and DECIMAL.fullmatch(s) is not None
 
 
 # ---- VDF (Valve's text KeyValues): pure functions, no I/O ----
-def vdf_parse(data: bytes) -> dict[str, Any]:
+class VdfText:
+    """The strict parser of vdf_parse over one decoded text; p is an offset in it."""
+
+    def __init__(self, text: str) -> None:
+        self.text, self.n = text, len(text)
+
+    def bad(self, p: int, what: str) -> NoReturn:
+        line = self.text.count("\n", 0, p) + 1
+        col = p - (self.text.rfind("\n", 0, p) + 1) + 1
+        raise Unexpected(f"{what} at line {line}, column {col}")
+
+    def ws(self, p: int) -> int:
+        while p < self.n and self.text[p] in " \t\r\n":
+            p += 1
+        return p
+
+    def token_error(self, p: int) -> NoReturn:
+        text = self.text
+        if text.startswith("//", p):
+            self.bad(p, "a comment")
+        if text[p] == "#":
+            self.bad(p, "a #include/#base directive")
+        if text[p] == "[":
+            self.bad(p, "a [$condition]")
+        if text[p] == "{":
+            self.bad(p, "a '{' without a key")
+        self.bad(p, f"unquoted text {text[p]!r}")
+
+    def string(self, p: int) -> tuple[str, int]:
+        text, n = self.text, self.n
+        start, out = p, []
+        p += 1
+        while True:
+            if p >= n or text[p] == "\n":
+                self.bad(start, "an unterminated string")
+            c = text[p]
+            if c == '"':
+                return "".join(out), p + 1
+            if c == "\\":
+                if p + 1 < n and text[p + 1] in '\\"':
+                    out.append(text[p + 1])
+                    p += 2
+                    continue
+                self.bad(p, "an unsupported escape")
+            out.append(c)
+            p += 1
+
+    def pair(self, p: int, depth: int) -> tuple[int, str, VdfValue, int]:
+        kp = p
+        key, p = self.string(p)
+        p = self.ws(p)
+        if p >= self.n:
+            self.bad(kp, "a key without a value")
+        if self.text[p] == '"':
+            val, p = self.string(p)
+        elif self.text[p] == "{":
+            val, p = self.obj(p + 1, depth + 1, p)
+        else:
+            self.token_error(p)
+        return kp, key, val, p
+
+    def obj(self, p: int, depth: int, open_at: int) -> tuple[Vdf, int]:
+        if depth > 32:
+            self.bad(open_at, "nesting too deep")
+        d: Vdf = {}
+        while True:
+            p = self.ws(p)
+            if p >= self.n:
+                self.bad(open_at, "an unbalanced '{'")
+            if self.text[p] == "}":
+                return d, p + 1
+            if self.text[p] != '"':
+                self.token_error(p)
+            kp, key, val, p = self.pair(p, depth)
+            if key in d:
+                self.bad(kp, f"a duplicate key {key!r}")
+            d[key] = val
+
+    def document(self) -> Vdf:
+        """The one root key and its block, nothing after it."""
+        text, n = self.text, self.n
+        p = self.ws(0)
+        if p >= n:
+            raise Unexpected("empty")
+        if text[p] == "}":
+            self.bad(p, "an unbalanced '}'")
+        if text[p] != '"':
+            self.token_error(p)
+        _, key, val, p = self.pair(p, 0)
+        if not isinstance(val, dict):
+            raise Unexpected("the root key has no '{ }' block")
+        p = self.ws(p)
+        if p < n:
+            if text[p] == "}":
+                self.bad(p, "an unbalanced '}'")
+            self.bad(p, "trailing data")
+        return {key: val}
+
+
+def vdf_parse(data: bytes) -> Vdf:
     """Strict parser: quoted strings, braces, whitespace, the escapes \\\\ and
     \\". Anything else (unquoted text, comments, #include/#base, [$COND],
     other escapes, duplicate keys, unbalanced braces, trailing data, NUL,
@@ -217,97 +339,10 @@ def vdf_parse(data: bytes) -> dict[str, Any]:
         text = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise Unexpected(f"not UTF-8 (byte {e.start})") from None
-    n = len(text)
-
-    def bad(p: int, what: str) -> NoReturn:
-        line = text.count("\n", 0, p) + 1
-        col = p - (text.rfind("\n", 0, p) + 1) + 1
-        raise Unexpected(f"{what} at line {line}, column {col}")
-
-    def ws(p: int) -> int:
-        while p < n and text[p] in " \t\r\n":
-            p += 1
-        return p
-
-    def token_error(p: int) -> NoReturn:
-        if text.startswith("//", p):
-            bad(p, "a comment")
-        if text[p] == "#":
-            bad(p, "a #include/#base directive")
-        if text[p] == "[":
-            bad(p, "a [$condition]")
-        if text[p] == "{":
-            bad(p, "a '{' without a key")
-        bad(p, f"unquoted text {text[p]!r}")
-
-    def string(p: int) -> tuple[str, int]:
-        start, out = p, []
-        p += 1
-        while True:
-            if p >= n or text[p] == "\n":
-                bad(start, "an unterminated string")
-            c = text[p]
-            if c == '"':
-                return "".join(out), p + 1
-            if c == "\\":
-                if p + 1 < n and text[p + 1] in '\\"':
-                    out.append(text[p + 1])
-                    p += 2
-                    continue
-                bad(p, "an unsupported escape")
-            out.append(c)
-            p += 1
-
-    def pair(p: int, depth: int) -> tuple[int, str, str | dict[str, Any], int]:
-        kp = p
-        key, p = string(p)
-        p = ws(p)
-        if p >= n:
-            bad(kp, "a key without a value")
-        if text[p] == '"':
-            val, p = string(p)
-        elif text[p] == "{":
-            val, p = obj(p + 1, depth + 1, p)
-        else:
-            token_error(p)
-        return kp, key, val, p
-
-    def obj(p: int, depth: int, open_at: int) -> tuple[dict[str, Any], int]:
-        if depth > 32:
-            bad(open_at, "nesting too deep")
-        d: dict[str, Any] = {}
-        while True:
-            p = ws(p)
-            if p >= n:
-                bad(open_at, "an unbalanced '{'")
-            if text[p] == "}":
-                return d, p + 1
-            if text[p] != '"':
-                token_error(p)
-            kp, key, val, p = pair(p, depth)
-            if key in d:
-                bad(kp, f"a duplicate key {key!r}")
-            d[key] = val
-
-    p = ws(0)
-    if p >= n:
-        raise Unexpected("empty")
-    if text[p] == "}":
-        bad(p, "an unbalanced '}'")
-    if text[p] != '"':
-        token_error(p)
-    _, key, val, p = pair(p, 0)
-    if not isinstance(val, dict):
-        raise Unexpected("the root key has no '{ }' block")
-    p = ws(p)
-    if p < n:
-        if text[p] == "}":
-            bad(p, "an unbalanced '}'")
-        bad(p, "trailing data")
-    return {key: val}
+    return VdfText(text).document()
 
 
-def vdf_dump(tree: Mapping[str, Any]) -> bytes:
+def vdf_dump(tree: Mapping[str, VdfValue]) -> bytes:
     """Steam's own layout: tab indent, "k"<tab><tab>"v", braces on their own
     lines, a newline at the end."""
     out: list[str] = []
@@ -315,7 +350,7 @@ def vdf_dump(tree: Mapping[str, Any]) -> bytes:
     def esc(s: str) -> str:
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
-    def walk(d: Mapping[str, Any], ind: str) -> None:
+    def walk(d: Mapping[str, VdfValue], ind: str) -> None:
         for k, v in d.items():
             if isinstance(v, dict):
                 out.append(f'{ind}"{esc(k)}"\n{ind}{{\n')
@@ -328,7 +363,7 @@ def vdf_dump(tree: Mapping[str, Any]) -> bytes:
     return "".join(out).encode()
 
 
-def vdf_load(data: bytes) -> dict[str, Any]:
+def vdf_load(data: bytes) -> Vdf:
     """vdf_parse, plus the round-trip guard: the file must be exactly what
     vdf_dump would write, so writing it back changes only what we change."""
     tree = vdf_parse(data)
@@ -337,22 +372,25 @@ def vdf_load(data: bytes) -> dict[str, Any]:
     return tree
 
 
-def acf_app(tree: Mapping[str, Any], appid: str) -> dict[str, str]:
+def acf_app(tree: Vdf, appid: str) -> dict[str, str]:
     """Checks of appmanifest_<appid>.acf (parsed, never written)."""
-    if list(tree) != ["AppState"] or not isinstance(tree["AppState"], dict):
+    a = tree.get("AppState")
+    if list(tree) != ["AppState"] or not isinstance(a, dict):
         raise Unexpected("not an 'AppState' manifest")
-    a = tree["AppState"]
+    checked: dict[str, str] = {}
     for k in ("appid", "name", "StateFlags", "installdir", "SizeOnDisk"):
-        if not isinstance(a.get(k), str):
+        v = a.get(k)
+        if not isinstance(v, str):
             raise Unexpected(f"the manifest lacks {k!r}")
-    if a["appid"] != appid:
-        raise Unexpected(f"the manifest says appid {a['appid']!r}")
-    d = a["installdir"]
+        checked[k] = v
+    if checked["appid"] != appid:
+        raise Unexpected(f"the manifest says appid {checked['appid']!r}")
+    d = checked["installdir"]
     if not d or any(x in d for x in ("/", "\\", "..", "\0")) or d == ".":
         raise Unexpected(f"odd installdir {d!r}")
     busy = []
-    if a["StateFlags"] != "4":
-        busy.append(f"StateFlags {a['StateFlags']}, not 4 (fully installed)")
+    if checked["StateFlags"] != "4":
+        busy.append(f"StateFlags {checked['StateFlags']}, not 4 (fully installed)")
     if a.get("StagingSize", "0") != "0":
         busy.append(f"StagingSize {a['StagingSize']}")
     for x, y in (("BytesDownloaded", "BytesToDownload"), ("BytesStaged", "BytesToStage")):
@@ -360,7 +398,7 @@ def acf_app(tree: Mapping[str, Any], appid: str) -> dict[str, str]:
             busy.append(f"{x} {a.get(x)} of {a.get(y)}")
     if a.get("ScheduledAutoUpdate", "0") != "0":
         busy.append("an update is scheduled")
-    return {"name": a["name"], "installdir": d, "mid": "; ".join(busy)}
+    return {"name": checked["name"], "installdir": d, "mid": "; ".join(busy)}
 
 
 def is_tool(appid: str, name: str, installdir: str) -> str:
@@ -383,3 +421,401 @@ def hms(seconds: float) -> str:
 
 
 STEAM_USAGE = "usage: btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"
+
+
+@dataclass(frozen=True, slots=True)
+class SteamArgs:
+    """btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME], parsed."""
+
+    sub: str
+    ids: tuple[str, ...]
+    user_args: tuple[str, ...]
+    allow_copy: bool
+
+
+def parse_steam_args(args: Sequence[str]) -> SteamArgs | tuple[str, ...]:
+    """The steam command's arguments, or the lines for stderr (exit 2)."""
+    sub = args[0] if args else ""
+    ids: list[str] = []
+    user_args: tuple[str, ...] = ()
+    i = 1
+    allow_copy = False
+    while i < len(args):
+        a = args[i]
+        if a == "--copy":
+            allow_copy = True
+            i += 1
+            continue
+        if a == "--app" and i + 1 < len(args) and DECIMAL.fullmatch(args[i + 1]) and len(args[i + 1]) <= 10:
+            ids.append(str(int(args[i + 1])))
+        elif a == "--user" and i + 1 < len(args):
+            user_args = (a, args[i + 1])
+        else:
+            value = f" {args[i + 1]!r}" if a == "--app" and i + 1 < len(args) else ""
+            return (f"btrfs-bulk steam: bad argument {a!r}{value}", STEAM_USAGE)
+        i += 2
+    if sub not in ("plan", "apply"):
+        return (STEAM_USAGE,)
+    return SteamArgs(sub, tuple(ids), user_args, allow_copy)
+
+
+def split_user_args(args: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(the other arguments, ["--user", NAME] or [])."""
+    if "--user" in args:
+        i = args.index("--user")
+        return list(args[:i]) + list(args[i + 2 :]), list(args[i : i + 2])
+    return list(args), []
+
+
+# ---- the home being handled, the program's paths ----
+@dataclass(frozen=True, slots=True)
+class Ctx:
+    """Whose home: home is its real path (symlinks resolved), uid the
+    owner's id (None: the user running this program, asked when needed)."""
+
+    home: str
+    uid: int | None = None
+
+    @property
+    def bulk(self) -> str:
+        return os.path.join(self.home, "Bulk")
+
+    def target(self, item: Item) -> str:
+        return os.path.join(self.bulk, item.target)
+
+    def link(self, item: Item) -> str | None:
+        return os.path.join(self.home, item.link) if item.link else None
+
+    def short(self, path: str) -> str:
+        return "~" + path[len(self.home) :] if path.startswith(self.home + "/") else path
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BulkPaths:
+    """Where btrfs-bulk keeps its settings and state; under() puts them into
+    other folders (tests and dry runs; never as root)."""
+
+    etc: str = "/etc/btrfs-setup"
+    conf: str = "/etc/btrfs-setup/bulk.conf"
+    flag: str = "/etc/btrfs-setup/bulk-at-boot"
+    keep: str = "/etc/btrfs-setup/bulk-keep"
+    convert_plan: str = "/etc/btrfs-setup/convert-plan"
+    snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
+    notify: str = NOTIFY
+    state: str = "/var/lib/btrfs-bulk"
+    attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
+    lock: str = "/run/btrfs-snapshot.lock"  # shared with btrfs-snapshot
+
+    @classmethod
+    def under(cls, *, etc: str, state: str, lock: str, notify: str = NOTIFY) -> BulkPaths:
+        """The same files in the folders etc and state, the lock at lock."""
+        return cls(
+            etc=etc,
+            conf=os.path.join(etc, "bulk.conf"),
+            flag=os.path.join(etc, "bulk-at-boot"),
+            keep=os.path.join(etc, "bulk-keep"),
+            convert_plan=os.path.join(etc, "convert-plan"),
+            snapshots_conf=os.path.join(etc, "snapshots.conf"),
+            notify=notify,
+            state=state,
+            attempts=os.path.join(state, "boot-attempts"),
+            lock=lock,
+        )
+
+
+def present[T](value: T | None, what: str) -> T:
+    """value, which the steps before have set; a TypeError if they have not
+    (what the old code raised one step later, using the None)."""
+    if value is None:
+        raise TypeError(f"{what} is not set")
+    return value
+
+
+# ---- the journals (root-owned JSON in BulkPaths.state; read back by any later version) ----
+# The field order of these TypedDicts was chosen so that no eight lines repeat
+# another record (tests/test_duplication.py, type 2): reordering them can fail
+# that gate. JSON keys do not depend on it.
+class ItemJournal(TypedDict):
+    """journal-<id>.json of one item's move. kind: copy | subvol."""
+
+    kind: str
+    src: str
+    target: str
+    new: str
+    stamp2: NotRequired[int]
+    bulk_only: NotRequired[bool]
+    old: str
+    stamp: int
+    conflict: NotRequired[bool]
+    undo: NotRequired[bool]
+    link: str | None
+    finishing: NotRequired[bool]
+
+
+class SteamPart(TypedDict):
+    """One part of a Steam game that moves (the game folder, its workshop
+    content and file, the manifest). mode: reflink | copy."""
+
+    name: str
+    kind: str
+    src: str
+    mode: NotRequired[str]
+    dst: str
+    bytes: NotRequired[int]
+    new: str
+    sample: NotRequired[str]
+    old: str
+
+
+class SteamJournal(TypedDict):
+    """journal-steam-<appid>.json. phase: prepared | switching | switched | finishing."""
+
+    kind: str
+    appid: str
+    src_lib: str
+    dst_lib: str
+    size: str
+    stamp2: NotRequired[int]
+    contentid: str
+    stamp: int
+    phase: str
+    parts: list[SteamPart]
+    conflict: bool
+    undo: bool
+
+
+class SteamApp(TypedDict):
+    """One app of the plan: state move | ok | skip | update | look."""
+
+    id: str
+    name: str
+    state: str
+    parts: list[SteamPart]
+    why: str
+    size: str
+    bytes: int
+    copy_bytes: int
+    reflink_bytes: int
+    nocow_files: int
+    nocow_sample: str
+
+
+class VdfPair(TypedDict):
+    """Both libraryfolders.vdf as read (raw, mtime) and the tree they hold."""
+
+    files: list[str]
+    tree: Vdf
+    repair: bool
+    raw: list[bytes]
+    ts: str
+    backed_up: bool
+    mtime: list[int]
+
+
+class FileRead(TypedDict):
+    """A regular file read as the user: its bytes (also as base64), mtime (ns), mode and owner."""
+
+    b64: str
+    data: bytes
+    mtime: int
+    mode: int
+    uid: int
+
+
+class SteamSurvey(TypedDict):
+    """Everything steam plan prints and steam apply needs."""
+
+    fatal: str
+    running: list[str]
+    nothing: bool
+    space: str
+    copy: bool
+    S: VdfPair | None
+    apps: list[SteamApp]
+    idx: str | None
+    copy_bytes: int
+    cid: str | None
+    free: int
+
+
+# ---- libraryfolders.vdf: the checks and edits (pure; resolve is os.path.realpath) ----
+def vdf_block(value: VdfValue | None, what: str) -> Vdf:
+    """value as a block; Unexpected when it is a string (lf_validate has
+    ruled that out for every tree the edits below get)."""
+    if not isinstance(value, dict):
+        raise Unexpected(f"{what} is not a block")
+    return value
+
+
+def vdf_text(value: VdfValue | None, what: str) -> str:
+    """value as a string; Unexpected when it is a block."""
+    if not isinstance(value, str):
+        raise Unexpected(f"{what} is not a value")
+    return value
+
+
+def vdf_copy(tree: Vdf) -> Vdf:
+    """A deep copy (blocks copied, strings shared)."""
+    return {k: v if isinstance(v, str) else vdf_copy(v) for k, v in tree.items()}
+
+
+def lf_libraries(tree: Vdf) -> Vdf:
+    """The "libraryfolders" block of a checked tree."""
+    return vdf_block(tree.get("libraryfolders"), "libraryfolders")
+
+
+def lf_check_apps(idx: str, v: VdfValue) -> None:
+    """The apps block of library IDX: decimal app ids and sizes."""
+    if not isinstance(v, dict):
+        raise Unexpected(f"library {idx}: 'apps' is not a block")
+    for a, s in v.items():
+        if not (dec(a) and dec(s)):
+            raise Unexpected(f"library {idx}: app {a!r} {s!r} is not decimal")
+
+
+def lf_check_key(idx: str, k: str, v: VdfValue) -> None:
+    """One key of library IDX's entry."""
+    if k == "apps":
+        lf_check_apps(idx, v)
+    elif k == "path":
+        if not isinstance(v, str) or not os.path.isabs(v):
+            raise Unexpected(f"library {idx}: 'path' is not an absolute path")
+    elif k in LF_KEYS:
+        if not isinstance(v, str):
+            raise Unexpected(f"library {idx}: {k!r} is a block, not a value")
+    else:
+        raise Unexpected(f"library {idx}: unknown key {k!r}")
+
+
+def lf_check_entry(idx: str, e: VdfValue) -> str:
+    """Library IDX's entry, checked; its path."""
+    if not isinstance(e, dict):
+        raise Unexpected(f"library {idx} is not a block")
+    for k, v in e.items():
+        lf_check_key(idx, k, v)
+    if "path" not in e or "apps" not in e:
+        raise Unexpected(f"library {idx} lacks 'path' or 'apps'")
+    return vdf_text(e["path"], f"library {idx}: 'path'")
+
+
+def lf_check_apart(real: Sequence[tuple[str, str]]) -> None:
+    """No two libraries (number, resolved path) are one folder, or one inside the other."""
+    for i, (ia, a) in enumerate(real):
+        for ib, b in real[i + 1 :]:
+            if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                raise Unexpected(f"libraries {ia} and {ib} are the same folder, or one is inside the other")
+
+
+def lf_validate(tree: Vdf, resolve: Callable[[str], str]) -> Vdf:
+    """Schema of libraryfolders.vdf; returns its "libraryfolders" dict."""
+    lf = tree.get("libraryfolders")
+    if list(tree) != ["libraryfolders"] or not isinstance(lf, dict):
+        raise Unexpected("the top level is not exactly one 'libraryfolders' block")
+    if not lf or list(lf) != [str(i) for i in range(len(lf))]:
+        raise Unexpected(f"library numbers are not 0, 1, 2... in order: {', '.join(lf) or 'none'}")
+    lf_check_apart([(idx, resolve(lf_check_entry(idx, e))) for idx, e in lf.items()])
+    return lf
+
+
+def lf_index(tree: Vdf, path: str, resolve: Callable[[str], str]) -> str | None:
+    """The number of the entry whose path is the same folder as PATH, or
+    None. Compared after resolving symlinks, like lf_validate does, so that
+    /home/u/Bulk/steam and /var/home/u/Bulk/steam (Silverblue: /home is a
+    symlink to /var/home) count as one library, not two."""
+    want = resolve(path)
+    for idx, e in lf_libraries(tree).items():
+        if resolve(vdf_text(vdf_block(e, f"library {idx}").get("path"), f"library {idx}: 'path'")) == want:
+            return idx
+    return None
+
+
+def lf_with_library(tree: Vdf, path: str, contentid: str, resolve: Callable[[str], str]) -> Vdf:
+    """TREE with an entry for PATH appended (a new tree); unchanged if listed."""
+    new = vdf_copy(tree)
+    if lf_index(tree, path, resolve) is None:
+        lf = lf_libraries(new)
+        lf[str(max(int(i) for i in lf) + 1)] = {
+            "path": path,
+            "label": "",
+            "contentid": contentid,
+            "totalsize": "0",
+            "update_clean_bytes_tally": "0",
+            "time_last_update_verified": "0",
+            "apps": {},
+        }
+    return new
+
+
+def lf_place_app(tree: Vdf, appid: str, lib_path: str, size: str, resolve: Callable[[str], str]) -> Vdf:
+    """A new tree where APPID is listed only under LIB_PATH's entry (with
+    SIZE, the string as it was); idempotent."""
+    new = vdf_copy(tree)
+    idx = lf_index(new, lib_path, resolve)
+    if idx is None:
+        raise Unexpected(f"{lib_path} is not a library in libraryfolders.vdf")
+    for i, e in lf_libraries(new).items():
+        apps = vdf_block(vdf_block(e, f"library {i}").get("apps"), f"library {i}: 'apps'")
+        if i == idx:
+            if apps.get(appid) != size:
+                apps[appid] = size
+        else:
+            apps.pop(appid, None)
+    return new
+
+
+def lf_apps(tree: Vdf, idx: str) -> Vdf:
+    """The apps block of library IDX of a checked tree."""
+    return vdf_block(vdf_block(lf_libraries(tree).get(idx), f"library {idx}").get("apps"), f"library {idx}: 'apps'")
+
+
+# ---- texts ----
+def row_text(name: str, text: str) -> str:
+    """One line of plan/status; a long name gets its own line."""
+    if len(name) > 56:
+        return f"  {name}\n  {'':<56} {text}"
+    return f"  {name:<56} {text}"
+
+
+def describe_paths(ctx: Ctx, item: Item) -> str:
+    t = ctx.short(ctx.target(item))
+    return f"~/{item.link} -> {t}" if item.link else t
+
+
+def conflict_text(ctx: Ctx, j: ItemJournal) -> str:
+    return (
+        f"written to on both sides during the move: compare {ctx.short(j['old'])} (the old "
+        f"tree) with {ctx.short(j['target'])} (in use now), copy what you need into the "
+        f"second, delete the first, then run bulk apply again"
+        + ("; both inside ~/Bulk, no data of it in /home: snapshots do not wait for it" if j.get("bulk_only") else "")
+    )
+
+
+def steam_nocow_files(ctx: Ctx, a: SteamApp) -> str:
+    """'K file(s) ... have +C (NOCOW), for example PATH' for a game with a
+    real copy."""
+    k = a["nocow_files"]
+    return (
+        f"{k} file{'s' if k != 1 else ''} in it ha{'ve' if k != 1 else 's'} +C (NOCOW), for example "
+        f"{ctx.short(a['nocow_sample'])}"
+    )
+
+
+def steam_move_lines(ctx: Ctx, a: SteamApp, allow_copy: bool) -> list[str]:
+    """What plan says about a game that moves: reflink, real copy, or both."""
+    c, r = a["copy_bytes"], a["reflink_bytes"]
+    out: list[str] = []
+    if r or not c:
+        out.append(f"move {gib(r)} (reflink, no data written)")
+    if c:
+        out.extend(
+            [
+                f"copy {gib(c)} byte by byte: {steam_nocow_files(ctx, a)};",
+                "btrfs cannot reflink those, so the folders holding them are rewritten into COW ~/Bulk/steam",
+                "(gaining checksums and compression)",
+            ]
+        )
+        if not allow_copy:
+            out.append("add --copy to allow it")
+    if len(out) > 1 and r:
+        out[0] += " and"
+    return out

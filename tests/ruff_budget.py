@@ -55,7 +55,6 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs tests FBT001": 16,
     "btrfs tests FBT002": 11,
     "btrfs/bulk BLE001": 1,
-    "btrfs/bulk C901": 9,
     "btrfs/bulk FBT001": 12,
     "btrfs/bulk FBT002": 6,
     "btrfs/chrome_cache FBT001": 2,

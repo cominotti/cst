@@ -42,7 +42,7 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.08,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.90,
+    "python type-2 W=8 duplicated %": 0.87,
     "shell W=5 duplicated %": 0.46,
     "same-name definitions in >1 file": 0,
 }
@@ -64,12 +64,11 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "label": "a Docker volume's label vs a toolchain cache's display label",
     # Types with the same short name in different programs.
     "Episode": "the daemon's live episode object vs the report's record of it (a TypedDict)",
-    "Host": "the snapshot run's host adapter vs doctor's read-only host adapter (different ports)",
-    "Program": "the installed bulk helper vs the installed cst-toolchains: what each program knows of itself",
+    "Host": "the snapshot run's host adapter vs doctor's read-only host adapter vs bulk's HostPort "
+    "(btrfs-snapshot's busy check, Steam's processes, the alert): different ports",
     "Result": "a snapshot step's outcome vs a doctor check line",
     "Stop": "bt-ldac-watch's signal flag vs the vm backup's cancellation",
     # The same word, different measurements or rules.
-    "is_subvol": "bulk also checks the btrfs magic; chrome-cache only needs the subvolume inode",
     "gib": "each program's display threshold, both over cst_core format_bytes_gib_mib",
     "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused); "
     "both over cst_core ByteSize (parse, parse_iec)",

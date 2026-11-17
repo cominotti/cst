@@ -373,6 +373,37 @@ def write_atomic(
         _relabel(abs_path)
 
 
+class CounterFile:
+    """A small count kept in a file of its own (how many boots tried a step):
+    0 when the file is absent or holds no number; saved atomically and
+    durably (the file and its folder), so a hang or a hard reset right after
+    still counts."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def count(self) -> int:
+        try:
+            with open(self.path) as f:
+                return int(f.read())
+        except OSError, ValueError:
+            return 0
+
+    def save(self, count: int) -> None:
+        write_atomic(self.path, str(count), mode=0o644)
+
+    def remove(self) -> None:
+        """Remove the file (FileNotFoundError when there is none)."""
+        os.remove(self.path)
+
+    def forget(self) -> None:
+        """Remove the file if there is one."""
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass  # none: nothing to forget
+
+
 def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
     """The installer's write: write_atomic, durable, owned by root as root (and relabelled)."""
     write_atomic(dest, content, mode=mode, owner="root")

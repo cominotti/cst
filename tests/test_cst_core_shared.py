@@ -26,6 +26,7 @@ from unittest import mock
 from cst_core import adapters as core_adapters, ports as core_ports
 from cst_core.adapters import files as core_files, nocow
 from cst_core.adapters.files import (
+    CounterFile,
     ensure_dir,
     is_masked_unit,
     owned_file_state_at,
@@ -48,6 +49,7 @@ from cst_core.domain.text import (
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
+from tests.probes import assert_replaced_durably, recorded_fsyncs
 from toolchains import domain as tc_domain
 from vm import domain as vm_domain
 
@@ -348,6 +350,45 @@ class AdaptersTest(unittest.TestCase):
         os.symlink(p, self.path("link"))
         with self.assertRaises(OSError):
             nocow.inode_flags(self.path("link"))
+
+
+class CounterFileTest(unittest.TestCase):
+    """CounterFile: the boot counter of btrfs-bulk and docker-volumes-nocow."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-counter-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "attempts")
+        self.counter = CounterFile(self.path)
+
+    def test_absent_or_not_a_number_counts_as_zero(self) -> None:
+        self.assertEqual(self.counter.count(), 0)
+        with open(self.path, "w") as f:
+            f.write("two")
+        self.assertEqual(self.counter.count(), 0)
+        os.remove(self.path)
+        os.mkdir(self.path)  # unreadable as a file
+        self.assertEqual(self.counter.count(), 0)
+
+    def test_save_is_durable_and_read_back(self) -> None:
+        with recorded_fsyncs() as synced:
+            self.counter.save(2)
+        assert_replaced_durably(self, self.path, synced)
+        self.assertEqual(self.counter.count(), 2)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), "2")
+
+    def test_remove_needs_a_counter_and_forget_does_not(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.counter.remove()
+        self.counter.forget()
+        self.counter.save(1)
+        self.counter.remove()
+        self.assertFalse(os.path.exists(self.path))
+        self.counter.save(1)
+        self.counter.forget()
+        self.assertFalse(os.path.exists(self.path))
 
 
 class WriteBytesAtomicTest(unittest.TestCase):
