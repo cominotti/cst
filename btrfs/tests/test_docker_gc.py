@@ -342,8 +342,8 @@ class DomainTest(unittest.TestCase):
             containers=(),
             volumes=(),
             images=(
-                ImageDrop("sha256:aaaaaaaaaaaaaaaaaa", (), 999, 0, protected=False),
-                ImageDrop("sha256:b", ("registry/x:1",), 5_000_000, 0, protected=True),
+                ImageDrop("sha256:aaaaaaaaaaaaaaaaaa", protected=False, size=999),
+                ImageDrop("sha256:b", protected=True, tags=("registry/x:1",), size=5_000_000),
             ),
             held=0,
             recorder_ok=True,
@@ -360,7 +360,7 @@ class DomainTest(unittest.TestCase):
         )
 
     def test_plan_lines_cut_long_lists_unless_full(self) -> None:
-        plan = GcPlan((), tuple(f"v{i}" for i in range(5)), (), 0, True, NOW)
+        plan = GcPlan((), tuple(f"v{i}" for i in range(5)), (), recorder_ok=True, at=NOW)
         lines = gc_domain.plan_lines(plan, GcSettings())
         self.assertEqual(lines[1:5], ["orphaned anonymous volumes: 5", "  v0", "  v1", "  v2"])
         self.assertIn("  (lists truncated; 'docker-gc cleanup-now' shows everything before asking)", lines)
@@ -396,7 +396,7 @@ class ApplicationTest(unittest.TestCase):
 
     def test_a_failed_build_cache_prune_is_logged_and_counted(self) -> None:
         self.f.docker.prune = failed("Error response from daemon: busy\n")
-        plan = GcPlan((), (), (), 0, True, 0)
+        plan = GcPlan((), (), (), recorder_ok=True, at=0)
         self.assertEqual(self.f.gc.apply(plan), 1)
         self.assertEqual(self.f.console.lines, ["<4>could not prune the build cache: Error response from daemon: busy"])
         self.assertEqual(self.f.docker.calls, [("prune", "336")])
@@ -433,7 +433,7 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(self.f.docker.calls[-2:], [("rm image", "alpine:old"), ("prune", "336")])
 
     def test_remove_image_rechecks_before_removing(self) -> None:
-        img = ImageDrop("sha256:a", ("a:1", "a:2"), 1, 0, protected=False)
+        img = ImageDrop("sha256:a", protected=False, tags=("a:1", "a:2"), size=1)
         self.f.docker.listed_containers = [container("x", image="sha256:a")]
         self.assertEqual(self.f.gc.remove_image(img, NOW), "now used by a container")
         self.f.docker.listed_containers = []
@@ -681,7 +681,16 @@ class StateFilesTest(unittest.TestCase):
         with open(self.files.paths.last_used) as f:
             self.assertEqual(f.read(), '{"since": 5, "images": {"sha256:a": 7.5}, "heartbeat": 9}')
         self.assertEqual(self.files.load_state(), GcState(since=5, images={"sha256:a": 7.5}, heartbeat=9))
-        for text in ("not json", "[]", '{"since": "x", "images": {}}', '{"since": 1, "images": []}'):
+        for text in (
+            "not json",
+            "[]",
+            '{"since": "x", "images": {}}',
+            '{"since": 1, "images": []}',
+            # A value that is not a time: the whole file counts as unreadable (recorded from now,
+            # so nothing is removed for KEEP_IMAGE_DAYS), never as an image without a use.
+            '{"since": 1, "images": {"sha256:a": 5, "sha256:b": "x"}, "heartbeat": 2}',
+            '{"since": 1, "images": {}, "heartbeat": null}',
+        ):
             with self.subTest(text=text):
                 self.write("last-used.json", text)
                 self.assertEqual(self.files.load_state().images, {})

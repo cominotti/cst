@@ -192,10 +192,10 @@ class ImageDrop:
     """An unused image a run removes: when it was last used, and whether its registry is protected."""
 
     id: str
+    protected: bool  # no default: a protected image must never pass as an ordinary one
     tags: tuple[str, ...] = ()
     size: int = 0
     used: float = 0
-    protected: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,9 +205,9 @@ class GcPlan:
     containers: tuple[ContainerDrop, ...]
     volumes: tuple[str, ...]
     images: tuple[ImageDrop, ...]
+    recorder_ok: bool  # no default: images are held back unless the recorder is known to run
+    at: float
     held: int = 0
-    recorder_ok: bool = True
-    at: float = 0
 
     def empty(self) -> bool:
         return not (self.containers or self.volumes or self.images)
@@ -342,7 +342,7 @@ def plan_gc(inputs: PlanInputs, settings: GcSettings, *, now: float, timed: bool
             held += 1
             continue
         drop_i.append(ImageDrop(id=im.id, tags=im.tags, size=im.size, used=used, protected=prot))
-    return GcPlan(split.drops, drop_v, tuple(drop_i), held, inputs.recorder_ok, now)
+    return GcPlan(split.drops, drop_v, tuple(drop_i), recorder_ok=inputs.recorder_ok, at=now, held=held)
 
 
 def plan_lines(p: GcPlan, settings: GcSettings, *, full: bool = False) -> list[str]:

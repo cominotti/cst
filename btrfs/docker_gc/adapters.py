@@ -255,9 +255,11 @@ class GcStateFiles:
             st = None
         if isinstance(st, dict):
             images, since = st.get("images"), _num(st.get("since"))
-            if isinstance(images, dict) and since is not None:
+            heartbeat = _num(st.get("heartbeat", 0))
+            if isinstance(images, dict) and since is not None and heartbeat is not None:
                 kept = {str(k): t for k, v in images.items() if (t := _num(v)) is not None}
-                return GcState(since=since, images=kept, heartbeat=_num(st.get("heartbeat")) or 0)
+                if len(kept) == len(images):  # a value that is not a time: not a state docker-gc wrote
+                    return GcState(since=since, images=kept, heartbeat=heartbeat)
         return GcState(since=time.time(), images={}, heartbeat=0)
 
     def save_state(self, state: GcState) -> None:
