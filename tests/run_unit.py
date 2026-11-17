@@ -28,9 +28,18 @@ process inherits a socket. A test that forgets stdin=subprocess.DEVNULL
 fails here every time, not only in some environments. The static side of
 the same rule is tests/test_subprocess_hygiene.py; the reason is written
 down in AGENTS.md.
+
+No test may reach sudo (or any setuid program that would make it root):
+where sudo needs no password (a toolbox) such a test would change the real
+machine and still pass. Before the tests start this runner sets the
+kernel's no_new_privs flag (prctl PR_SET_NO_NEW_PRIVS) on itself, which
+every child inherits and no child can clear: a setuid program then runs
+without its privileges, and sudo refuses to start. bwrap (the mutation
+test's sandbox) works under it; it sets the same flag itself.
 """
 
 from collections.abc import Sequence
+import ctypes
 import os
 import socket
 import sys
@@ -119,6 +128,20 @@ def skip_problems(skipped: Sequence[tuple[str, str]], *, git_checkout: bool = Tr
     ]
 
 
+# prctl(2): the option that sets the no_new_privs flag (linux/prctl.h).
+PR_SET_NO_NEW_PRIVS: Final = 38
+
+
+def forbid_privilege_gain() -> None:
+    """Set no_new_privs on this process (and so on every child): sudo and the
+    other setuid programs can no longer make a test root. Raises OSError
+    when the kernel refuses: a run that could reach sudo does not start."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, f"prctl(PR_SET_NO_NEW_PRIVS): {os.strerror(err)}")
+
+
 def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
     """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
     names = [a for a in args if a != "-v"]
@@ -137,6 +160,7 @@ def main(argv: Sequence[str]) -> int:
     os.chdir(repo)
     if repo not in sys.path:
         sys.path.insert(0, repo)
+    forbid_privilege_gain()
     ours, theirs = socket.socketpair()
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
