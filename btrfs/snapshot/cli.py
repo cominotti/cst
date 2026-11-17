@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def common(sp: argparse.ArgumentParser, policy: bool = True) -> None:
+    def common(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--snapdir", required=True, help="directory holding the snapshots")
         sp.add_argument(
             "--source",
@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="command named in messages to confirm a mass deletion",
         )
 
-    def caches(sp: argparse.ArgumentParser, exclude: bool = True) -> None:
+    def caches(sp: argparse.ArgumentParser, *, exclude: bool = True) -> None:
         if exclude:
             sp.add_argument(
                 "--exclude-caches",
@@ -177,7 +177,7 @@ def dispatch(args: argparse.Namespace, host: SnapshotHostPort | None, log: LogFn
         return status
     if args.cmd == "finish":
         return cmd_finish(options, machine, tz)
-    return cmd_snapshot_or_prune(options, machine, tz, create=(args.cmd == "snapshot"))
+    return cmd_snapshot_or_prune(options, machine, tz, create=args.cmd == "snapshot")
 
 
 def main(argv: Sequence[str] | None = None, host: SnapshotHostPort | None = None) -> int:

@@ -11,6 +11,7 @@ the answers of list, caches and latest.
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Sequence
 from typing import Literal
@@ -391,11 +392,23 @@ class Result:
             self.status = status
 
 
-def process_source(run: Run, src: Source, create: bool) -> Result:
-    args = run.options
+def process_source(run: Run, src: Source, *, create: bool) -> Result:
+    """One source of a snapshot or prune run: the snapshot (CREATE), then the deletions."""
     res = Result(src.name)
-    dry = args.dry_run
-    would = "would " if dry else ""
+    first = first_scan(run, src, res)
+    if first is None:
+        return res
+    info, scan = first
+    extra: list[Snap] = []
+    if create:
+        scan = create_step(run, src, info, scan, res, extra)
+        if scan is None:
+            return res
+    return prune_step(run, src, info, scan, extra, res)
+
+
+def first_scan(run: Run, src: Source, res: Result) -> tuple[SubvolInfo, Scan] | None:
+    """The source and its snapshots (None, with RES failed, when either cannot be read)."""
     try:
         info = run.source_info(src)
     except ParseError as e:
@@ -403,85 +416,106 @@ def process_source(run: Run, src: Source, create: bool) -> Result:
         res.worse(EXIT_ERROR)
         res.note = "source unreadable"
         run.mark_unscanned()
-        return res
+        return None
     try:
         scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
     except ParseError as e:
         run.log(3, f"{src.name}: {e}; nothing done")
         res.worse(EXIT_ERROR)
         run.mark_unscanned()
-        return res
+        return None
     run.note_writable(scan)
     for path, why in scan.unverifiable:
         run.log(4, f"{src.name}: cannot verify {path}: {why}")
+    return info, scan
+
+
+def creation_reason(run: Run, info: SubvolInfo, newest: Snap | None) -> str | None:
+    """Why the source gets a new snapshot now (None: it is unchanged since NEWEST)."""
+    if run.options.force:
+        return "forced"
+    if newest is None:
+        return "no snapshot yet"
+    if info["generation"] > newest.cgen:
+        return f"changed (generation {info['generation']} > {newest.cgen} of {newest.entry})"
+    newest_epoch = wall_to_epoch(newest.wall, run.tz)
+    if run.now - newest_epoch > SAFETY_NET:
+        return f"newest snapshot {newest.entry} is older than 24 h"
+    if run.now < newest_epoch - CLOCK_SLACK and run.ntp_problem() is None:
+        # Named while the clock ran ahead. A correctly named snapshot becomes
+        # the newest by generation, which lets deletions resume.
+        return f"newest snapshot {newest.entry} is dated in the future"
+    return None
+
+
+def create_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, res: Result, extra: list[Snap]) -> Scan | None:
+    """Create the source's new snapshot when it is due and the clock allows it.
+
+    Returns the scan the deletions decide on (a fresh one after a creation),
+    or None when that scan failed (no deletions then). A dry run adds the
+    snapshot it would create to EXTRA."""
     newest = newest_of(scan.owned)
-    extra: list[Snap] = []
+    reason = creation_reason(run, info, newest)
+    if reason is None:
+        assert newest is not None
+        run.log(6, f"{src.name}: unchanged since {newest.entry}; no new snapshot")
+        return scan
+    problem, notes = run.creation_check(newest)
+    if problem:
+        run.log(4, f"{src.name}: not creating a snapshot: {problem}")
+        res.worse(EXIT_REFUSED)
+        res.note = "clock"
+        return scan
+    for level, note in notes:
+        run.log(level, f"{src.name}: {note}")
+    wall = epoch_to_wall(run.now, run.tz).replace(second=0, microsecond=0)
+    entry = free_name(run.host, run.snapdir, src.name, wall)
+    dest = os.path.join(run.snapdir, entry)
+    if run.options.dry_run:
+        extra.append(would_create(run, src, info, scan, wall, dest, reason))
+        res.created = entry
+        return scan
+    if not create_snapshot(run, src, info, dest, entry, reason):
+        res.worse(EXIT_ERROR)
+        return scan
+    res.created = entry
+    return scan_after_creation(run, src, info, dest, entry, res)
 
-    if create:
-        reason = None
-        if args.force:
-            reason = "forced"
-        elif newest is None:
-            reason = "no snapshot yet"
-        elif info["generation"] > newest.cgen:
-            reason = f"changed (generation {info['generation']} > {newest.cgen} of {newest.entry})"
-        elif run.now - wall_to_epoch(newest.wall, run.tz) > SAFETY_NET:
-            reason = f"newest snapshot {newest.entry} is older than 24 h"
-        elif run.now < wall_to_epoch(newest.wall, run.tz) - CLOCK_SLACK and run.ntp_problem() is None:
-            # Named while the clock ran ahead. A correctly named snapshot becomes
-            # the newest by generation, which lets deletions resume.
-            reason = f"newest snapshot {newest.entry} is dated in the future"
-        if reason is None:
-            assert newest is not None
-            run.log(6, f"{src.name}: unchanged since {newest.entry}; no new snapshot")
-        else:
-            problem, notes = run.creation_check(newest)
-            if problem:
-                run.log(4, f"{src.name}: not creating a snapshot: {problem}")
-                res.worse(EXIT_REFUSED)
-                res.note = "clock"
-            else:
-                for level, note in notes:
-                    run.log(level, f"{src.name}: {note}")
-                wall = epoch_to_wall(run.now, run.tz).replace(second=0, microsecond=0)
-                entry = free_name(run.host, run.snapdir, src.name, wall)
-                dest = os.path.join(run.snapdir, entry)
-                if dry:
-                    run.log(5, f"{src.name}: would create {dest} ({reason})")
-                    if args.exclude_caches:
-                        preview_drop(run, src)
-                    # The real snapshot's "Gen at creation" is the running transaction:
-                    # above the source's generation and every existing snapshot's.
-                    cgen = max([info["generation"]] + [s.cgen for s in scan.owned]) + 1
-                    parsed_entry = parse_snapshot_name(src.name, entry)
-                    assert parsed_entry is not None
-                    extra.append(
-                        Snap(
-                            entry=entry,
-                            wall=wall,
-                            seq=parsed_entry[1],
-                            path=dest,
-                            cgen=cgen,
-                            virtual=True,
-                        )
-                    )
-                    res.created = entry
-                elif create_snapshot(run, src, info, dest, entry, reason):
-                    res.created = entry
-                    try:
-                        scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
-                    except ParseError as e:
-                        run.log(3, f"{src.name}: {e}; no deletions")
-                        res.worse(EXIT_ERROR)
-                        run.mark_unscanned()
-                        return res
-                    run.note_writable(scan)
-                    if not any(s.entry == entry for s in scan.owned):
-                        run.log(3, f"{src.name}: created {dest} but it does not pass the ownership check")
-                        res.worse(EXIT_ERROR)
-                else:
-                    res.worse(EXIT_ERROR)
 
+def would_create(
+    run: Run, src: Source, info: SubvolInfo, scan: Scan, wall: dt.datetime, dest: str, reason: str
+) -> Snap:
+    """Dry run: log the snapshot a real run would create, and return it (virtual) for the decisions."""
+    entry = os.path.basename(dest)
+    run.log(5, f"{src.name}: would create {dest} ({reason})")
+    if run.options.exclude_caches:
+        preview_drop(run, src)
+    # The real snapshot's "Gen at creation" is the running transaction:
+    # above the source's generation and every existing snapshot's.
+    cgen = max([info["generation"]] + [s.cgen for s in scan.owned]) + 1
+    parsed_entry = parse_snapshot_name(src.name, entry)
+    assert parsed_entry is not None
+    return Snap(entry=entry, wall=wall, seq=parsed_entry[1], path=dest, cgen=cgen, virtual=True)
+
+
+def scan_after_creation(run: Run, src: Source, info: SubvolInfo, dest: str, entry: str, res: Result) -> Scan | None:
+    """The snapshots again, with the one just created (None, with RES failed, when the scan fails)."""
+    try:
+        scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
+    except ParseError as e:
+        run.log(3, f"{src.name}: {e}; no deletions")
+        res.worse(EXIT_ERROR)
+        run.mark_unscanned()
+        return None
+    run.note_writable(scan)
+    if not any(s.entry == entry for s in scan.owned):
+        run.log(3, f"{src.name}: created {dest} but it does not pass the ownership check")
+        res.worse(EXIT_ERROR)
+    return scan
+
+
+def prune_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, extra: Sequence[Snap], res: Result) -> Result:
+    """The deletions the policy and the safeguards allow (none when a guard refuses them)."""
     decisions, doomed, refusal = run.decide(src, scan, extra)
     res.kept = sum(1 for d in decisions if d.action == "keep" and not d.snap.virtual)
     if not doomed:
@@ -493,14 +527,17 @@ def process_source(run: Run, src: Source, create: bool) -> Result:
         res.worse(EXIT_REFUSED)
         res.kept += len(doomed)
         return res
-    if dry:
+    if run.options.dry_run:
         for d in doomed:
-            run.log(5, f"{src.name}: {would}delete {d.snap.path} ({d.reason})")
+            run.log(5, f"{src.name}: would delete {d.snap.path} ({d.reason})")
         res.deleted = len(doomed)
         return res
+    return delete_doomed(run, src, info, doomed, res)
 
-    # Right before deleting: list again, decide again, and keep only what both
-    # passes agree on (same UUID); then re-check each one just before its delete.
+
+def delete_doomed(run: Run, src: Source, info: SubvolInfo, doomed: Sequence[Decision], res: Result) -> Result:
+    """Right before deleting: list again, decide again, and keep only what both
+    passes agree on (same UUID); then re-check each one just before its delete."""
     run.forget_pins()
     try:
         fresh = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
@@ -516,31 +553,40 @@ def process_source(run: Run, src: Source, create: bool) -> Result:
         return res
     fresh_uuids = {d.snap.uuid for d in fresh_doomed}
     for d in doomed:
-        s = d.snap
-        if s.uuid not in fresh_uuids:
-            run.log(5, f"{src.name}: {s.entry} is no longer due after re-listing; kept")
-            res.kept += 1
-            continue
-        # Pins are re-read before every deletion; a pin is protection, not a fault.
-        run.forget_pins()
-        if run.is_pinned(s.path):
-            run.log(5, f"{src.name}: {s.entry} was pinned meanwhile; kept")
-            res.kept += 1
-            continue
-        problem = recheck(run, s, info["uuid"])
-        if problem:
-            run.log(4, f"{src.name}: not deleting {s.path}: {problem}")
-            res.worse(EXIT_REFUSED)
-            res.kept += 1
-            continue
-        rc, _, err = run.btrfs.delete(SubvolPath(s.path))
-        if rc != 0:
-            run.log(3, f"{src.name}: deleting {s.path} failed (rc={rc}): {err.strip()}; stopping deletions")
-            res.worse(EXIT_ERROR)
+        if not delete_one(run, src, d, info["uuid"], fresh_uuids, res):
             break
-        run.log(5, f"{src.name}: deleted {s.path} ({d.reason})")
-        res.deleted += 1
     return res
+
+
+def delete_one(run: Run, src: Source, d: Decision, source_uuid: str, fresh_uuids: Collection[str], res: Result) -> bool:
+    """Delete D's snapshot unless the re-listing, a pin or the re-check keeps it.
+
+    Counts it in RES; False when the delete failed (the deletions stop)."""
+    s = d.snap
+    if s.uuid not in fresh_uuids:
+        run.log(5, f"{src.name}: {s.entry} is no longer due after re-listing; kept")
+        res.kept += 1
+        return True
+    # Pins are re-read before every deletion; a pin is protection, not a fault.
+    run.forget_pins()
+    if run.is_pinned(s.path):
+        run.log(5, f"{src.name}: {s.entry} was pinned meanwhile; kept")
+        res.kept += 1
+        return True
+    problem = recheck(run, s, source_uuid)
+    if problem:
+        run.log(4, f"{src.name}: not deleting {s.path}: {problem}")
+        res.worse(EXIT_REFUSED)
+        res.kept += 1
+        return True
+    rc, _, err = run.btrfs.delete(SubvolPath(s.path))
+    if rc != 0:
+        run.log(3, f"{src.name}: deleting {s.path} failed (rc={rc}): {err.strip()}; stopping deletions")
+        res.worse(EXIT_ERROR)
+        return False
+    run.log(5, f"{src.name}: deleted {s.path} ({d.reason})")
+    res.deleted += 1
+    return True
 
 
 def recheck(run: Run, snap: Snap, source_uuid: str) -> str | None:
@@ -631,7 +677,7 @@ def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str
 
 
 def seal(
-    run: Run, src: Source, dest: str, entry: str, source_uuid: str, created: bool
+    run: Run, src: Source, dest: str, entry: str, source_uuid: str, *, created: bool
 ) -> Literal["sealed", "left", "error"]:
     """The second half of a snapshot taken writable: drop its cache folders
     (with --exclude-caches), make it read-only, check that it is, and take
@@ -641,14 +687,14 @@ def seal(
     changed only once ours_writable() proves it is ours. Returns "sealed",
     "left" (not ours: untouched, still listed) or "error"."""
     problem, ro = ours_writable(run, src, dest, entry, source_uuid)
+    if problem and not created:
+        run.log(
+            4,
+            f"{src.name}: {entry} is listed in {run.state_file(UNFINISHED_FILE)} but is {problem}; "
+            f"left alone - check it, then remove its line from that file",
+        )
+        return "left"
     if problem:
-        if not created:
-            run.log(
-                4,
-                f"{src.name}: {entry} is listed in {run.state_file(UNFINISHED_FILE)} but is {problem}; "
-                f"left alone - check it, then remove its line from that file",
-            )
-            return "left"
         run.log(
             3,
             f"{src.name}: cannot check {dest} after creating it: {problem}; its cache folders stay, "
@@ -656,29 +702,41 @@ def seal(
         )
     elif ro is False and run.options.exclude_caches:
         drop_caches(run, src, dest, entry)
-    if ro is not True:
-        rc, _, err = run.btrfs.set_readonly(SubvolPath(dest))  # the snapshot this run checked or made
-        if rc != 0:
-            run.log(
-                3,
-                f"{src.name}: making {dest} read-only failed (rc={rc}): {err.strip()}; it stays listed in "
-                f"{run.state_file(UNFINISHED_FILE)} and the next run tries again",
-            )
-            run.writable.add(entry)
-            return "error"
-        ro_state: bool | str
-        try:
-            ro_state = run.btrfs.readonly(SubvolPath(dest))
-        except ParseError as e:
-            ro_state = f"cannot check: {e}"
-        if ro_state is not True:
-            run.log(
-                3,
-                f"{src.name}: {dest} is not read-only after setting it ({ro_state}); it stays listed in "
-                f"{run.state_file(UNFINISHED_FILE)} and the next run tries again",
-            )
-            run.writable.add(entry)
-            return "error"
+    if ro is not True and not make_readonly(run, src, dest, entry):
+        return "error"
+    forget_sealed(run, src, entry)
+    return "sealed"
+
+
+def make_readonly(run: Run, src: Source, dest: str, entry: str) -> bool:
+    """Set DEST read-only and check that it is (False, logged and kept on the lists, when not)."""
+    rc, _, err = run.btrfs.set_readonly(SubvolPath(dest))  # the snapshot this run checked or made
+    if rc != 0:
+        run.log(
+            3,
+            f"{src.name}: making {dest} read-only failed (rc={rc}): {err.strip()}; it stays listed in "
+            f"{run.state_file(UNFINISHED_FILE)} and the next run tries again",
+        )
+        run.writable.add(entry)
+        return False
+    ro_state: bool | str
+    try:
+        ro_state = run.btrfs.readonly(SubvolPath(dest))
+    except ParseError as e:
+        ro_state = f"cannot check: {e}"
+    if ro_state is not True:
+        run.log(
+            3,
+            f"{src.name}: {dest} is not read-only after setting it ({ro_state}); it stays listed in "
+            f"{run.state_file(UNFINISHED_FILE)} and the next run tries again",
+        )
+        run.writable.add(entry)
+        return False
+    return True
+
+
+def forget_sealed(run: Run, src: Source, entry: str) -> None:
+    """ENTRY is read-only now: off the unfinished list and off the doctor's record."""
     try:
         run.list_remove(UNFINISHED_FILE, entry)
     except OSError as e:
@@ -687,16 +745,15 @@ def seal(
             f"{src.name}: cannot update {run.state_file(UNFINISHED_FILE)} "
             f"({err_text(e)}); the next run finds {entry} read-only and forgets it",
         )
-    # Read-only now: off the doctor's record too. Snapshot and prune runs
-    # rewrite it from run.writable at the end; a `finish` run (as in purge)
-    # writes no new record, so a stale line would read as a foreign entry.
+    # Snapshot and prune runs rewrite the doctor's record from run.writable at
+    # the end; a `finish` run (as in purge) writes no new record, so a stale
+    # line would read as a foreign entry.
     run.writable.discard(entry)
     if run.options.cmd == "finish":
         try:
             run.list_remove(WRITABLE_FILE, entry)
         except OSError as e:
             run.log(4, f"cannot update {run.state_file(WRITABLE_FILE)}: {err_text(e)}")
-    return "sealed"
 
 
 def report_walk(log: LogFn, src: Source, where: str, walk: CacheWalk, verb: str) -> None:
@@ -718,7 +775,8 @@ def drop_caches(run: Run, src: Source, dest: str, entry: str) -> None:
     is logged as an error and simply stays in the snapshot."""
     try:
         walk = run.host.walk_caches(dest, src.skips, "drop")
-    except Exception as e:  # noqa: BLE001 - whatever breaks here, the snapshot must still end read-only
+    # Whatever breaks here, the snapshot must still end read-only.
+    except Exception as e:  # noqa: BLE001
         run.log(
             3,
             f"{src.name}: dropping the cache folders from {entry} failed ({type(e).__name__}: {e}); "
@@ -767,41 +825,53 @@ def finish_unfinished(run: Run) -> int:
     status = EXIT_OK
     infos: dict[str, str | None] = {}
     for entry in entries:
-        src = next((s for s in run.options.sources if "/" not in entry and name_regex(s.name).fullmatch(entry)), None)
-        if src is None:
-            run.log(
-                4,
-                f"{entry!r} is listed in {path} but is no snapshot name of "
-                f"{', '.join(s.name for s in run.options.sources)}; left alone",
-            )
-            continue
-        dest = os.path.join(run.snapdir, entry)
-        if run.host.kind(dest) == "missing":
-            if run.options.dry_run:
-                run.log(6, f"{src.name}: would forget {entry} (listed in {path}, never created)")
-                continue
-            run.log(6, f"{src.name}: {entry} (listed in {path}) was never created; forgotten")
-            try:
-                run.list_remove(UNFINISHED_FILE, entry)
-            except OSError as e:
-                run.log(4, f"cannot update {path}: {err_text(e)}")
-            continue
-        if src.name not in infos:
-            try:
-                infos[src.name] = run.source_info(src)["uuid"]
-            except ParseError as e:
-                infos[src.name] = None
-                run.log(4, f"{src.name}: cannot read source {src.path}: {e}; its interrupted snapshots wait")
-        source_uuid = infos[src.name]
-        if source_uuid is None:
-            continue
-        if run.options.dry_run:
-            run.log(5, f"{src.name}: would finish {entry}, left writable by an interrupted run")
-            continue
-        run.log(4, f"{src.name}: finishing {entry}, left writable by an interrupted run")
-        if seal(run, src, dest, entry, source_uuid, created=False) == "error":
+        if finish_entry(run, entry, infos) == "error":
             status = EXIT_ERROR
     return status
+
+
+def finish_entry(run: Run, entry: str, infos: dict[str, str | None]) -> Literal["sealed", "left", "error"]:
+    """One line of the unfinished list (INFOS: each source's UUID, read once per run; None: unreadable)."""
+    path = run.state_file(UNFINISHED_FILE)
+    src = next((s for s in run.options.sources if "/" not in entry and name_regex(s.name).fullmatch(entry)), None)
+    if src is None:
+        run.log(
+            4,
+            f"{entry!r} is listed in {path} but is no snapshot name of "
+            f"{', '.join(s.name for s in run.options.sources)}; left alone",
+        )
+        return "left"
+    dest = os.path.join(run.snapdir, entry)
+    if run.host.kind(dest) == "missing":
+        forget_missing(run, src, entry)
+        return "left"
+    if src.name not in infos:
+        try:
+            infos[src.name] = run.source_info(src)["uuid"]
+        except ParseError as e:
+            infos[src.name] = None
+            run.log(4, f"{src.name}: cannot read source {src.path}: {e}; its interrupted snapshots wait")
+    source_uuid = infos[src.name]
+    if source_uuid is None:
+        return "left"
+    if run.options.dry_run:
+        run.log(5, f"{src.name}: would finish {entry}, left writable by an interrupted run")
+        return "left"
+    run.log(4, f"{src.name}: finishing {entry}, left writable by an interrupted run")
+    return seal(run, src, dest, entry, source_uuid, created=False)
+
+
+def forget_missing(run: Run, src: Source, entry: str) -> None:
+    """ENTRY is listed as unfinished but was never created: off the list."""
+    path = run.state_file(UNFINISHED_FILE)
+    if run.options.dry_run:
+        run.log(6, f"{src.name}: would forget {entry} (listed in {path}, never created)")
+        return
+    run.log(6, f"{src.name}: {entry} (listed in {path}) was never created; forgotten")
+    try:
+        run.list_remove(UNFINISHED_FILE, entry)
+    except OSError as e:
+        run.log(4, f"cannot update {path}: {err_text(e)}")
 
 
 def check_snapdir(host: SnapshotHostPort, snapdir: str) -> None:
@@ -825,33 +895,51 @@ def locked(args: RunOptions, machine: Machine, body: Callable[[], int]) -> int:
         release()
 
 
-def cmd_snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, create: bool) -> int:
-    return locked(args, machine, lambda: snapshot_or_prune(args, machine, tz, create))
+def cmd_snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, *, create: bool) -> int:
+    return locked(args, machine, lambda: snapshot_or_prune(args, machine, tz, create=create))
 
 
-def snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, create: bool) -> int:
-    run = Run(args, machine, tz)
-    log = machine.log
-    status = finish_unfinished(run)
-    results = [process_source(run, src, create) for src in args.sources]
+# The journal priority of a run's summary line, by its exit status.
+SUMMARY_LEVEL = {EXIT_OK: 5, EXIT_REFUSED: 4, EXIT_ERROR: 3}
+SUMMARY_WORD = {EXIT_OK: "ok", EXIT_REFUSED: "blocked by a safety check", EXIT_ERROR: "error"}
+
+
+def overall_status(status: int, results: Iterable[Result]) -> int:
+    """The run's exit status: an error beats a refusal beats ok (STATUS: finishing the leftovers)."""
     for r in results:
         if r.status == EXIT_ERROR or (r.status == EXIT_REFUSED and status == EXIT_OK):
             status = r.status
-    parts: list[str] = []
-    for r in results:
-        what = f"created {r.created}" if r.created else ("no new snapshot" if create else "")
-        bits = [b for b in (what, f"deleted {r.deleted}", f"kept {r.kept}", r.note) if b]
-        parts.append(f"{r.name}: " + ", ".join(bits))
-    word = {EXIT_OK: "ok", EXIT_REFUSED: "blocked by a safety check", EXIT_ERROR: "error"}[status]
+    return status
+
+
+def summary_part(r: Result, *, create: bool) -> str:
+    """One source's part of the summary line."""
+    if r.created:
+        what = f"created {r.created}"
+    elif create:
+        what = "no new snapshot"
+    else:
+        what = ""
+    bits = [b for b in (what, f"deleted {r.deleted}", f"kept {r.kept}", r.note) if b]
+    return f"{r.name}: " + ", ".join(bits)
+
+
+def snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, *, create: bool) -> int:
+    run = Run(args, machine, tz)
+    log = machine.log
+    status = finish_unfinished(run)
+    results = [process_source(run, src, create=create) for src in args.sources]
+    status = overall_status(status, results)
     log(
-        5 if status == EXIT_OK else 4 if status == EXIT_REFUSED else 3,
+        SUMMARY_LEVEL[status],
         f"{'dry run ' if args.dry_run else ''}{'snapshot' if create else 'prune'} summary: "
-        + "; ".join(parts)
-        + f"; result: {word}",
+        + "; ".join(summary_part(r, create=create) for r in results)
+        + f"; result: {SUMMARY_WORD[status]}",
     )
-    if not args.dry_run:
-        run.record_writable()
-    if status == EXIT_OK and not args.dry_run:
+    if args.dry_run:
+        return status
+    run.record_writable()
+    if status == EXIT_OK:
         try:
             run.record_success()
         except OSError as e:
@@ -862,70 +950,71 @@ def snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, create:
 def cmd_list(args: RunOptions, machine: Machine, tz: dt.tzinfo) -> tuple[int, Listing]:
     """Every snapshot of each source with its decision (changes nothing)."""
     run = Run(args, machine, tz)
-    log = machine.log
-    out: list[SourceListing] = []
-    status = EXIT_OK
     try:
         unfinished = set(run.read_list(UNFINISHED_FILE))
     except OSError:
         unfinished = set()
-    for src in args.sources:
-        policy = format_policy(src.policy)
-        try:
-            info = run.source_info(src)
-        except ParseError as e:
-            log(3, f"{src.name}: cannot read source {src.path}: {e}")
-            out.append(SourceListing(src.name, src.path, policy, error=str(e)))
-            status = EXIT_ERROR
-            continue
-        try:
-            scan = scan_snapshots(machine.host, run.btrfs, run.snapdir, src.name, info["uuid"])
-        except ParseError as e:
-            log(3, f"{src.name}: {e}")
-            out.append(SourceListing(src.name, src.path, policy, error=str(e)))
-            status = EXIT_ERROR
-            continue
-        decisions, doomed, refusal = run.decide(src, scan)
-        newest = newest_of(scan.owned)
-        ignored: list[tuple[str, str]] = []
-        writable = set(scan.writable)
-        for p, r in scan.ignored:
-            entry_name = os.path.basename(p)
-            if p in writable and entry_name in unfinished:
-                problem, _ = ours_writable(run, src, p, entry_name, info["uuid"])
-                r += (
-                    ", left by an interrupted run: the next run finishes it"
-                    if problem is None
-                    else f", listed as left by an interrupted run but {problem}: left alone"
-                )
-            ignored.append((p, r))
-        out.append(
-            SourceListing(
-                src.name,
-                src.path,
-                policy,
-                uuid=info["uuid"],
-                generation=info["generation"],
-                changed=newest is None or info["generation"] > newest.cgen,
-                decisions=tuple(decisions),
-                ignored=tuple(ignored),
-                unverifiable=tuple(scan.unverifiable),
-                deletions_blocked=refusal,
-            )
-        )
+    out = [list_source(run, src, unfinished) for src in args.sources]
+    status = EXIT_ERROR if any(s.error is not None for s in out) else EXIT_OK
     return status, Listing(run.snapdir, int(run.now), tuple(out))
+
+
+def list_source(run: Run, src: Source, unfinished: Collection[str]) -> SourceListing:
+    """One source of `list` (with its error when it or its snapshot folder cannot be read)."""
+    policy = format_policy(src.policy)
+    try:
+        info = run.source_info(src)
+    except ParseError as e:
+        run.log(3, f"{src.name}: cannot read source {src.path}: {e}")
+        return SourceListing(src.name, src.path, policy, error=str(e))
+    try:
+        scan = scan_snapshots(run.host, run.btrfs, run.snapdir, src.name, info["uuid"])
+    except ParseError as e:
+        run.log(3, f"{src.name}: {e}")
+        return SourceListing(src.name, src.path, policy, error=str(e))
+    decisions, _, refusal = run.decide(src, scan)
+    newest = newest_of(scan.owned)
+    return SourceListing(
+        src.name,
+        src.path,
+        policy,
+        uuid=info["uuid"],
+        generation=info["generation"],
+        changed=newest is None or info["generation"] > newest.cgen,
+        decisions=tuple(decisions),
+        ignored=tuple(ignored_entries(run, src, scan, info["uuid"], unfinished)),
+        unverifiable=tuple(scan.unverifiable),
+        deletions_blocked=refusal,
+    )
+
+
+def ignored_entries(
+    run: Run, src: Source, scan: Scan, source_uuid: str, unfinished: Collection[str]
+) -> list[tuple[str, str]]:
+    """SCAN's ignored entries, those an interrupted run left writable said so."""
+    ignored: list[tuple[str, str]] = []
+    writable = set(scan.writable)
+    for p, r in scan.ignored:
+        entry_name = os.path.basename(p)
+        if p in writable and entry_name in unfinished:
+            problem, _ = ours_writable(run, src, p, entry_name, source_uuid)
+            if problem is None:
+                r += ", left by an interrupted run: the next run finishes it"
+            else:
+                r += f", listed as left by an interrupted run but {problem}: left alone"
+        ignored.append((p, r))
+    return ignored
 
 
 def cmd_finish(args: RunOptions, machine: Machine, tz: dt.tzinfo) -> int:
     """Only the recovery of interrupted snapshots (btrfs-snapshot purge runs it
     first, so they become ours and are deleted too)."""
     status = locked(args, machine, lambda: finish_unfinished(Run(args, machine, tz)))
-    if status == EXIT_BUSY:
-        return status
-    machine.log(
-        5 if status == EXIT_OK else 3,
-        f"{'dry run ' if args.dry_run else ''}finish summary: result: {'ok' if status == EXIT_OK else 'error'}",
-    )
+    if status != EXIT_BUSY:
+        machine.log(
+            5 if status == EXIT_OK else 3,
+            f"{'dry run ' if args.dry_run else ''}finish summary: result: {'ok' if status == EXIT_OK else 'error'}",
+        )
     return status
 
 
@@ -992,27 +1081,40 @@ def scan_snapshots(host: SnapshotHostPort, btrfs: BtrfsPort, snapdir: str, name:
         if not pattern.fullmatch(entry):
             continue
         path = os.path.join(snapdir, entry)
-        parsed = parse_snapshot_name(name, entry)
-        if parsed is None:
-            ignored.append((path, "invalid date in the name"))
+        found = scan_entry(host, btrfs, path, name, entry, source_uuid)
+        if isinstance(found, Snap):
+            owned.append(found)
             continue
-        kind = host.kind(path)
-        if kind != "subvol":
-            ignored.append((path, "not a subvolume" if kind != "symlink" else "symlink"))
+        verdict, why = found
+        if verdict == "unverifiable":
+            unverifiable.append((path, why))
             continue
-        try:
-            info = btrfs.show(SubvolPath(path))  # host.kind said so
-            ro = btrfs.readonly(SubvolPath(path))
-        except ParseError as e:
-            unverifiable.append((path, str(e)))
-            continue
-        if not ro:
-            ignored.append((path, "not read-only"))
+        ignored.append((path, why))
+        if verdict == "writable":
             writable.append(path)
-            continue
-        other = other_parent(info, source_uuid) if source_uuid is not None else None
-        if other:
-            ignored.append((path, other))
-            continue
-        owned.append(Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"]))
     return Scan(owned, ignored, unverifiable, writable)
+
+
+def scan_entry(
+    host: SnapshotHostPort, btrfs: BtrfsPort, path: str, name: str, entry: str, source_uuid: str | None
+) -> Snap | tuple[Literal["ignored", "writable", "unverifiable"], str]:
+    """The snapshot at PATH (its ENTRY named like NAME's) when it is ours, else why not:
+    ignored (not ours, never touched; "writable": not read-only), or
+    unverifiable (could be ours: it blocks deletions)."""
+    parsed = parse_snapshot_name(name, entry)
+    if parsed is None:
+        return "ignored", "invalid date in the name"
+    kind = host.kind(path)
+    if kind != "subvol":
+        return "ignored", "not a subvolume" if kind != "symlink" else "symlink"
+    try:
+        info = btrfs.show(SubvolPath(path))  # host.kind said so
+        ro = btrfs.readonly(SubvolPath(path))
+    except ParseError as e:
+        return "unverifiable", str(e)
+    if not ro:
+        return "writable", "not read-only"
+    other = other_parent(info, source_uuid) if source_uuid is not None else None
+    if other:
+        return "ignored", other
+    return Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"])
