@@ -160,7 +160,8 @@ def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAss
     A line is blank, a # comment, or `[export ]KEY=VALUE [# comment]` with
     KEY [A-Za-z_][A-Za-z0-9_]* and VALUE one of: '...' (literal), "..."
     (without $, ` or \\), or one unquoted word (without blanks, quotes, $, `,
-    \\, ; & | < > ( ), or a ~ bash would expand). Every other line is a
+    \\, ; & | < > ( ), a ~ bash would expand, or after `export` a { bash
+    would brace-expand). Every other line is a
     problem (SettingsProblem, with its line number) and sets nothing: never a
     guessed value. With bash_sourced (cpu-setup.conf, snapshots.conf, which
     bash also sources) the values are exactly bash's. bash_sourced=False is

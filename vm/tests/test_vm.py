@@ -1563,9 +1563,14 @@ class PackageTest(unittest.TestCase):
 
     def test_main_dispatch(self) -> None:
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch("sys.stdout", out):
+        helped: list[bool] = []
+        with (
+            mock.patch("sys.stdout", out),
+            # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+            mock.patch.object(vm_adapters, "restore_default_signals", lambda: helped.append(True)),
+        ):
             self.assertEqual(vm_cli.main(["help"], doc="DOC", entry_file=TOOL), 0)
-        self.assertEqual(out.getvalue(), "DOC\n")
+        self.assertEqual((out.getvalue(), helped), ("DOC\n", [True]))
         with mock.patch("sys.stderr", err):
             self.assertEqual(vm_cli.main(["bogus"], doc="DOC", entry_file=TOOL), 2)
         self.assertIn("unknown command 'bogus'", err.getvalue())
