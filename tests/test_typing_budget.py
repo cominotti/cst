@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Typing budget: `Any` and `cast()` may only go down.
+"""Typing budget: `Any` and `cast()` may not go above their entries.
 
 ruff's ANN401 already refuses `Any` as a whole annotation, so what is left
 hides inside generics (`dict[str, Any]`, `Mapping[str, Any]`,
@@ -13,9 +13,10 @@ repository:
   Any`, an alias, `typing.Any`), also inside string annotations;
 - `cast`: every call of `typing.cast`.
 
-ANY_BUDGETS and CAST_BUDGETS hold today's counts. A change that adds one
-fails; a change that removes some writes the lower number (the failure
-prints the measured table). Type the value instead: a TypedDict for a
+ANY_BUDGETS and CAST_BUDGETS hold the highest counts allowed. A change that
+adds one over its entry fails (the failure prints the measured table); a
+change that removes some passes, and `invowk cmd fix budgets` lowers the
+entries later. Type the value instead: a TypedDict for a
 record read from JSON, a frozen dataclass for one built in code, a
 `type Json = ...` alias for arbitrary JSON, isinstance narrowing instead of
 a cast.

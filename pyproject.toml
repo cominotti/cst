@@ -71,7 +71,7 @@ select = ["F", "B", "UP", "E9", "PLW1510"]
 
 [tool.ruff.lint.mccabe]
 # For C901, which is not selected above: tests/ruff_budget.py counts the
-# functions over this complexity per package, a budget that only goes down.
+# functions over this complexity per package, a budget never above its entry.
 max-complexity = 15
 
 # ---- ty ---------------------------------------------------------------------
@@ -251,6 +251,7 @@ include = [
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
     "tests/e2e/test_run_guard.py",
+    "tests/fix_budgets.py",
     "tests/license_headers.py",
     "tests/mutation/__init__.py",
     "tests/mutation/cst-mutation",
@@ -271,6 +272,7 @@ include = [
     "tests/test_docs.py",
     "tests/test_duplication.py",
     "tests/test_entrypoints.py",
+    "tests/test_fix_budgets.py",
     "tests/test_install.py",
     "tests/test_install_record.py",
     "tests/test_license_headers.py",

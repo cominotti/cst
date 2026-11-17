@@ -21,15 +21,15 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   commands; in the modules without an application layer (all but swap,
   doctor, cst_core, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow and
   btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
-  size of each one so that layer only shrinks: new logic goes into domain
-  (pure) or adapters (I/O), or into an application layer with ports.
+  size of each one: new logic goes into domain (pure) or adapters (I/O),
+  or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
   application, adapters, presenter, wiring, cli or entry. A module with
-  none is in UNLAYERED_ALLOWED with its reason; that table only shrinks.
+  none is in UNLAYERED_ALLOWED with its reason; nothing is added there.
 - The I/O a module does itself outside its adapters ("hard I/O": the lines
   direct_io_problems reports, with print, sys.stdout/stderr/argv/exit and
   argparse allowed, the bootstrap left out) has a budget per package and
-  layer, IO_BUDGETS, that only goes down (tests/budgets.py). Moving code to
+  layer, IO_BUDGETS, that it may not go above (tests/budgets.py). Moving code to
   an adapter lowers it; moving it from cli.py into another unlayered module
   does not hide it.
 - A package in HEXAGONAL_PACKAGES has a cli.py and a presenter.py with no
@@ -46,10 +46,14 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   (PRIMITIVE_LITERALS: the container markers, flatpak-spawn, the libvirt
   URI, LC_ALL, restorecon, systemd-escape). Other modules use them through
   cst_core; today's other sites have a budget per package
-  (PRIMITIVE_BUDGETS, LITERAL_BUDGETS) that only goes down.
+  (PRIMITIVE_BUDGETS, LITERAL_BUDGETS) that they may not go above.
 - Every public top-level name of cst_core's shared layers has a production
   user outside its file; CORE_NAMES_WITHOUT_USER lists the exceptions with
-  their reason, and only shrinks.
+  their reason, and nothing is added there.
+- Every table above fails only when the code is above it: a count over its
+  budget, a module or name missing from its allow-list. An entry the code
+  no longer needs passes; `invowk cmd fix budgets` (tests/fix_budgets.py)
+  lowers the counts and deletes those entries, and never raises or adds one.
 
 Standard library only.
 """
@@ -107,8 +111,8 @@ ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset()
 ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
-# Code lines of each package's cli.py (cli_code_lines), a ceiling that only goes down (see the
-# module docstring). A new cli.py is added here on purpose.
+# Code lines of each package's cli.py (cli_code_lines), a ceiling (see the module
+# docstring; a missing entry is 0). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 89,
@@ -131,7 +135,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
 ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_core/route.py"})
 
 # Package modules with no role yet, and why. Each holds use cases and their
-# I/O together; splitting one into its layers removes its line. Only shrinks.
+# I/O together; splitting one into its layers removes its line. Never grows.
 UNLAYERED_ALLOWED: Final[dict[str, str]] = {
     "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
     "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
@@ -155,7 +159,7 @@ WIRING_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.execvp", "s
 IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wiring", "cli", "entry", "unlayered"})
 
 # Hard I/O lines per "<package> <role>" (see the module docstring and
-# tests/budgets.py). Only goes down; a missing key is 0.
+# tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
     "btrfs/chrome_cache cli": 7,
@@ -214,7 +218,7 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
 }
 
 # Calls of a primitive outside its owners, per "<package> <primitive>"
-# (tests/budgets.py). Only goes down.
+# (tests/budgets.py). Never above; a missing key is 0.
 PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
     "btrfs/bulk os.fsync": 3,
@@ -235,7 +239,7 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
 }
 
 # Uses of a primitive's literal outside its owners (docstrings aside), per
-# "<package> <literal>". Only goes down.
+# "<package> <literal>". Never above; a missing key is 0.
 LITERAL_BUDGETS: Final[dict[str, int]] = {
     "bluetooth LC_ALL": 1,
     "btrfs/bulk restorecon": 1,
@@ -254,7 +258,7 @@ CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/
 # Public top-level names of those layers with no production user outside
 # their file ("path:name" -> why). Adopt the name where a module keeps its
 # own copy, make it private when only its file uses it, or delete it; then
-# remove its line. Only shrinks.
+# remove its line (or let `invowk cmd fix budgets` do it). Never grows.
 CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
@@ -674,6 +678,35 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     ]
 
 
+def cli_sizes() -> dict[str, int]:
+    """Code lines (cli_code_lines) of every package's cli.py: what CLI_CEILINGS caps."""
+    return {rel: cli_code_lines(_read(rel)) for rel in production_python() if rel.endswith("/cli.py")}
+
+
+def unlayered_modules() -> set[str]:
+    """The package modules with no role: what UNLAYERED_ALLOWED must name."""
+    return {rel for rel in package_modules() if module_role(rel) is None}
+
+
+def measure_io() -> dict[str, int]:
+    """Hard I/O lines per "<package> <role>" over the repository: what IO_BUDGETS caps."""
+    return io_measure({rel: _read(rel) for rel in package_modules()})
+
+
+def measure_primitives() -> tuple[dict[str, int], dict[str, int]]:
+    """(primitive calls, primitive literals) outside their owners: what PRIMITIVE_BUDGETS and LITERAL_BUDGETS cap."""
+    sources = {rel: _read(rel) for rel in production_python()}
+    return (
+        primitive_measure(sources, primitive_calls, PRIMITIVE_OWNERS),
+        primitive_measure(sources, primitive_literals, PRIMITIVE_LITERALS),
+    )
+
+
+def core_names_missing_a_user() -> set[str]:
+    """ "path:name" of the cst_core shared names without a user: what CORE_NAMES_WITHOUT_USER must name."""
+    return set(core_names_without_user({rel: _read(rel) for rel in production_python()}))
+
+
 # Modules that still load a monolith by its path (SourceFileLoader); each
 # stage that turns the monolith into a package import removes its line.
 PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset()
@@ -816,18 +849,13 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(wired, [], "files wired in (or gone) since: remove them from ORPHAN_ALLOWED_FILES")
 
     def test_cli_modules_do_not_grow(self) -> None:
-        sizes: dict[str, int] = {}
-        for rel in production_python():
-            if rel.endswith("/cli.py"):
-                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
-                    sizes[rel] = cli_code_lines(fh.read())
-        self.assertEqual(sorted(sizes), sorted(CLI_CEILINGS), "every package cli.py has a ceiling, and only those")
-        over = [
-            f"{rel}: {n} lines, ceiling {CLI_CEILINGS[rel]}"
-            for rel, n in sorted(sizes.items())
-            if n > CLI_CEILINGS[rel]
-        ]
-        self.assertEqual(over, [], "cli.py grew: put new logic in domain, application (with ports) or adapters")
+        over = budget_problems(cli_sizes(), CLI_CEILINGS, "code lines")
+        self.assertEqual(
+            over,
+            [],
+            "cli.py grew: put new logic in domain, application (with ports) or adapters "
+            "(a new cli.py gets its CLI_CEILINGS entry on purpose)",
+        )
         self.assertEqual(
             cli_code_lines('"""Doc."""\nimport os\nfrom a import (\n    b,\n)\n\n\ndef f():\n    return 1\n'), 2
         )
@@ -849,17 +877,14 @@ class ArchitectureGateTest(unittest.TestCase):
                 self.assertEqual(module_role(rel), role)
 
     def test_every_package_module_has_a_role(self) -> None:
-        files = package_modules()
-        unlayered = sorted(rel for rel in files if module_role(rel) is None)
-        problems = [rel for rel in unlayered if rel not in UNLAYERED_ALLOWED]
+        problems = sorted(unlayered_modules() - set(UNLAYERED_ALLOWED))
         self.assertEqual(
             problems,
             [],
             "modules with no role: name them domain.py, ports.py, application.py, adapters.py, presenter.py, "
             "wiring.py or cli.py (or put them in such a folder):\n" + "\n".join(problems),
         )
-        stale = sorted(set(UNLAYERED_ALLOWED) - set(unlayered))
-        self.assertEqual(stale, [], "these have a role now (or are gone): remove them from UNLAYERED_ALLOWED")
+        # An entry whose module has a role now (or is gone) passes; `invowk cmd fix budgets` deletes it.
 
     def test_cli_allowed_names_are_not_io(self) -> None:
         src = (
@@ -892,7 +917,7 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])
 
     def test_io_budgets(self) -> None:
-        measured = io_measure({rel: _read(rel) for rel in package_modules()})
+        measured = measure_io()
         problems = budget_problems(measured, IO_BUDGETS, "hard I/O lines")
         self.assertEqual(
             problems,
@@ -999,9 +1024,8 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(primitive_literals(src, "x.py"), [(4, "LC_ALL"), (4, "flatpak-spawn"), (4, "qemu:///system")])
 
     def test_primitives_have_one_owner(self) -> None:
-        sources = {rel: _read(rel) for rel in production_python()}
-        calls = primitive_measure(sources, primitive_calls, PRIMITIVE_OWNERS)
-        lits = primitive_measure(sources, primitive_literals, PRIMITIVE_LITERALS)
+        calls, lits = measure_primitives()
+        sources = set(production_python())
         problems = budget_problems(calls, PRIMITIVE_BUDGETS, "calls") + budget_problems(
             lits, LITERAL_BUDGETS, "literals"
         )
@@ -1020,15 +1044,13 @@ class ArchitectureGateTest(unittest.TestCase):
                     self.assertIn(rel, sources, "an owner that does not exist")
 
     def test_core_names_have_a_user(self) -> None:
-        missing = core_names_without_user({rel: _read(rel) for rel in production_python()})
-        new = [name for name in missing if name not in CORE_NAMES_WITHOUT_USER]
+        new = sorted(core_names_missing_a_user() - set(CORE_NAMES_WITHOUT_USER))
         self.assertEqual(
             new,
             [],
             "public cst_core names nothing outside their file uses: use them, make them private or delete them",
         )
-        stale = sorted(set(CORE_NAMES_WITHOUT_USER) - set(missing))
-        self.assertEqual(stale, [], "these have a user now (or are gone): remove them from CORE_NAMES_WITHOUT_USER")
+        # An entry with a user now (or gone) passes; `invowk cmd fix budgets` deletes it.
         self.assertEqual(
             core_names_without_user(
                 {

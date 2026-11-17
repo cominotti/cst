@@ -132,6 +132,28 @@ cmds: [
 		}]
 	},
 	{
+		name:        "fix budgets"
+		category:    "check"
+		description: "List the budget, ceiling and allow-list entries the code is below (dry run); with --apply, lower them to the measured values (tests/fix_budgets.py; never raises or adds an entry; RUFF_BUDGETS is measured through uv)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		flags: [
+			{name: "apply", type: "bool", default_value: "false", description: "Rewrite the tables instead of only listing the entries"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				if [[ "${INVOWK_FLAG_APPLY:-false}" == "true" ]]; then
+					exec python3 -I -B tests/fix_budgets.py --apply
+				fi
+				exec python3 -I -B tests/fix_budgets.py
+				"""}
+		}]
+	},
+	{
 		name:        "test lint"
 		category:    "test"
 		description: "Run bash -n and shellcheck on every shell file of the checkout (the list tests/shell_files.py prints)"

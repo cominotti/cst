@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Duplication ratchet: copied code in production may only go down.
+"""Duplication ceilings: copied code in production may not go above them.
 
-CEILINGS holds today's measurements (tests/duplication.py says how each is
-taken). A change that copies code over a ceiling fails here; a change that
-removes copies lowers the ceiling to the new number in the same change, so
-the copies cannot come back. The run prints the numbers measured.
+CEILINGS holds the highest value allowed for each measurement
+(tests/duplication.py says how each is taken). A change that copies code
+over a ceiling fails here; a value below its ceiling passes, and
+`invowk cmd fix budgets` lowers the ceilings to the measured values (never
+raising one), so the copies cannot come back once it has run. The run prints
+the numbers measured.
 
 Where the hexagonal conversion left them (main before it, same method):
 - python type 1, W=8, cross-file lines: 0 (main: 0);
@@ -38,7 +40,7 @@ from tests.repo_files import REPO
 from tests.shell_files import shell_files
 from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
-# One table: metric -> ceiling. Lower a number when a change brings it down.
+# One table: metric -> ceiling. `invowk cmd fix budgets` lowers a number the code is below.
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.08,
     "python type-1 W=8 cross-file lines": 0,
@@ -47,7 +49,8 @@ CEILINGS: Final[dict[str, float]] = {
     "same-name definitions in >1 file": 0,
 }
 
-# Names that several files may define, and why.
+# Names that several files may define, and why. An entry no longer defined
+# twice passes; `invowk cmd fix budgets` deletes it.
 # Each was compared body to body: none is a copy of another (a copy goes to
 # cst_core instead). Most are the same verb in different programs.
 ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
@@ -88,7 +91,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 # Shell functions that several shell files may define, and why. A copy of a
 # helper is listed as one, with where it should live once; the installed
 # programs (btrfs-notify, btrfs-snapshot, cpu/game-profile) run without the
-# checkout and cannot source a file of it.
+# checkout and cannot source a file of it. An entry no longer defined twice
+# passes; `invowk cmd fix budgets` deletes it.
 ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
     "cpuset_delegated": "cpu-setup.sh's check and the installed cpu/game-profile's, which cannot source the checkout",
@@ -116,6 +120,16 @@ def without_declared_copies(source: str) -> str:
     return without_protocol_bodies(without_bootstrap(source))
 
 
+def same_names_defined() -> set[str]:
+    """The top-level names defined in more than one production file, and "main": what ALLOWED_SAME_NAMES may name."""
+    return {*same_name_definitions(REPO, production_python(), ["main"]), "main"}
+
+
+def shell_same_names_defined() -> set[str]:
+    """The shell functions defined in more than one shell file: what ALLOWED_SHELL_SAME_NAMES may name."""
+    return set(shell_same_name_definitions(REPO, _shell_files(), []))
+
+
 def measure() -> dict[str, float]:
     """The current value of every metric in CEILINGS."""
     prod = production_python()
@@ -140,7 +154,7 @@ class DuplicationRatchetTest(unittest.TestCase):
             print(f"  {key:<38} {measured[key]:>8} / {ceiling}", file=sys.stderr)
         over = {k: (measured[k], c) for k, c in CEILINGS.items() if measured[k] > c}
         self.assertEqual(over, {}, "duplication went up (measured, ceiling); share the code instead of copying it")
-        self.assertEqual(set(measured), set(CEILINGS))
+        self.assertEqual(set(measured), set(CEILINGS), "one ceiling per measurement")
 
     def test_type1_finds_a_copied_block_and_type2_a_renamed_copy(self) -> None:
         body = "".join(f"    x{i} = f(a, {i})\n" for i in range(8))
@@ -216,17 +230,10 @@ class DuplicationRatchetTest(unittest.TestCase):
             {},
             "a shell function defined in several files: share it, or add it to ALLOWED_SHELL_SAME_NAMES with the reason",
         )
-        stale = sorted(set(ALLOWED_SHELL_SAME_NAMES) - set(every))
-        self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SHELL_SAME_NAMES")
 
     def test_shell_function_names(self) -> None:
         src = "f() {\n  :\n}\nfunction g {\n:\n}\n  h_2 ()\n{ :; }\nfunction k() { :; }\necho x() # not one\n"
         self.assertEqual(shell_function_names(src), {"f", "g", "h_2", "k"})
-
-    def test_every_allowed_name_is_still_defined_twice(self) -> None:
-        defined = same_name_definitions(REPO, production_python(), ["main"])
-        stale = sorted(set(ALLOWED_SAME_NAMES) - set(defined) - {"main"})
-        self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SAME_NAMES")
 
     def test_same_name_definitions_skip_allowed_names(self) -> None:
         names = same_name_definitions(REPO, production_python(), ALLOWED_SAME_NAMES)

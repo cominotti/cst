@@ -36,7 +36,7 @@ replace them.
       [cst-new-helper](../cst-new-helper/SKILL.md).
 - [ ] New logic goes into `domain` (pure) or `adapters` (I/O), not into
       `cli.py`: `CLI_CEILINGS` in `tests/test_architecture.py` caps each
-      `cli.py` and only goes down.
+      `cli.py` (never raised; `invowk cmd fix budgets` lowers it).
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of

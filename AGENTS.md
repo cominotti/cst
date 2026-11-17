@@ -122,6 +122,7 @@ invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
 invowk cmd test license                       # the license header gate only (tests/test_license_headers.py)
 invowk cmd fix license [--apply]              # list the files without the SPDX line; --apply adds it
+invowk cmd fix budgets [--apply]              # list the budget and ceiling entries the code is below; --apply lowers them
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
@@ -133,6 +134,12 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
+- Budgets and ceilings (`IO_BUDGETS`, `RUFF_BUDGETS`, `CEILINGS`, the
+  allow-lists, ...) fail only when the code is above an entry: never above;
+  lowered with `invowk cmd fix budgets`. A change that removes something
+  need not edit them; run `invowk cmd fix budgets --apply` when you want the
+  lower numbers recorded. It never raises an entry or adds one; raising one
+  by hand needs its reason in the pull request.
 - `tests/run_unit.py` lists every skipped test with its reason and fails on a
   skip that `EXPECTED_SKIPS` there does not name (only skips that depend on
   the machine: a tool, root, the file system). Never add a skip there to get a

@@ -103,19 +103,19 @@ repository:
 - **Ruff budgets** (`tests/ruff_budget.py`, the end of `test pylint`): rules
   with hits not fixed yet, which therefore cannot be in `select`, are counted
   per package with `--ignore-noqa` (a `# noqa` does not hide a hit) and
-  compared with `RUFF_BUDGETS`, which only goes down: `BLE001` (blind
+  compared with `RUFF_BUDGETS`, which they may not go above: `BLE001` (blind
   `except Exception`), `SLF001` (a private member used outside its class;
   production code only), `FBT001`/`FBT002` (a bool positional parameter:
   make it keyword-only) and `C901` (a function over
   `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
   SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
   measures. A second ruff run fails on any `# noqa` that suppresses nothing
-  (`RUF100`). When a budget fails, the script prints the measured table to
-  paste in; see [tests/budgets.py](../tests/budgets.py) for how budgets work.
+  (`RUF100`). When a budget fails, the script prints the measured table;
+  see [tests/budgets.py](../tests/budgets.py) for how budgets work.
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
   `Any` (inside generics: `ANN401` already refuses it as a whole
   annotation) and `cast()` are counted per package and layer, the tests
-  apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which only go down. Type the
+  apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which they may not go above. Type the
   value instead: a `TypedDict` for a record read from JSON, a frozen
   dataclass for one built in code, `isinstance` narrowing instead of a cast.
 - **The format check** (`ruff format --check`, the second part of

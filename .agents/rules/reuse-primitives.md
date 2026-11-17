@@ -61,7 +61,7 @@ one place only.
   (`/run/.containerenv`, `/.dockerenv`, `flatpak-spawn`, `qemu:///system`,
   `LC_ALL`, `restorecon`, `systemd-escape`). A call or a literal anywhere
   else counts against its package's budget (`PRIMITIVE_BUDGETS`,
-  `LITERAL_BUDGETS`), which only goes down: a new copy fails. Every public
+  `LITERAL_BUDGETS`), which it may not go above: a new copy fails. Every public
   name of cst_core's shared layers must have a user outside its file
   (`CORE_NAMES_WITHOUT_USER` lists today's exceptions).
 
