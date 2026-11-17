@@ -526,7 +526,7 @@ def record_result(
     state, detail = classified
     log, name = b.out.log, describe_paths(b.ctx, item)
     if res == "ok":
-        record_done(b, item, classified, done, kept)
+        note_item_done(b, item, classified, done, kept)
     elif res == "busy":
         deferred.append(item.id)
         log(f"{'busy:':<10} {name}: moved at the next boot, before login")
@@ -546,7 +546,7 @@ def record_result(
         log(f"NEEDS A LOOK: {name}: {why} (nothing touched)")
 
 
-def record_done(b: Bulk, item: Item, classified: tuple[str, str], done: set[str], kept: set[str]) -> None:
+def note_item_done(b: Bulk, item: Item, classified: tuple[str, str], done: set[str], kept: set[str]) -> None:
     """record_result for an item act() brought in place: in done once classify agrees; logged unless it was already."""
     state, detail = classified
     after, _ = classify(b, item, done, kept)
