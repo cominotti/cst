@@ -397,13 +397,8 @@ def prune_convert_plan(ctx: Ctx) -> None:
     keep = [ln for ln in lines if ln.startswith("#") or not ln.strip() or ln.split(maxsplit=1)[-1].strip() not in drop]
     if keep != lines:
         # Encoded as it was read: in the locale's encoding (open()'s default).
-        write_atomic(
-            CONVERT_PLAN,
-            locale_bytes("".join(keep)),
-            mode=0o644,
-            durable=False,
-            relabel=False,
-        )
+        # Durable (file and folder): the boot conversion acts on it.
+        write_atomic(CONVERT_PLAN, locale_bytes("".join(keep)), mode=0o644, relabel=False)
         log("  convert-plan: dropped the paths that now live in ~/Bulk")
 
 

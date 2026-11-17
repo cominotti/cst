@@ -350,13 +350,14 @@ def read_index(path: str | None = None) -> list[dict[str, Any]]:
 
 
 def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -> None:
-    """Atomically (temporary file + rename), mode 0644, folder 0755."""
+    """Atomically (temporary file + rename), mode 0644, folder 0755; durable
+    (the file and the folder fsynced): a lost index hides a finished backup."""
     path = path or INDEX
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
     text = json.dumps({"version": 1, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
-    write_atomic(path, text, mode=0o644, durable=False, relabel=False)
+    write_atomic(path, text, mode=0o644, relabel=False)
 
 
 def flag_state(flags: int | None) -> bool | None:

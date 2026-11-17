@@ -1731,5 +1731,28 @@ class NotUtf8OutputTest(unittest.TestCase):
             self.assertEqual(vm_adapters.virsh("domstate", "win"), (0, "shut \ufffd off\n", ""))
 
 
+class IndexDurableTest(unittest.TestCase):
+    """write_index: the file and its folder are fsynced (a lost index hides a finished backup)."""
+
+    def test_file_and_folder_fsynced(self) -> None:
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-index-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        index = os.path.join(tmp, "lib-cst", "vm-backups.json")
+        synced: list[str] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+            real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", fsync):
+            vm_adapters.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
+        folder = os.path.dirname(index)
+        temps = [i for i, p in enumerate(synced) if p.startswith(os.path.join(folder, ".vm-backups.json."))]
+        self.assertEqual(len(temps), 1, synced)  # the new bytes, before the rename
+        self.assertIn(folder, synced[temps[0] + 1 :], synced)  # the rename's folder entry
+        self.assertEqual(vm_adapters.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
+
+
 if __name__ == "__main__":
     unittest.main()

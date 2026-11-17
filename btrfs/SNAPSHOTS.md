@@ -1815,6 +1815,11 @@ After `snapshots setup`:
 | `~/.local/lib/cst/cst-toolchains`, `~/.local/lib/cst/toolchains.conf`, `~/.config/systemd/user/cst-toolchains-prune.{service,timer}` | the hourly pruning of `~/.cache/cargo-build` ([section 4](#pruning-of-cargos-build-folders-in-cachecargo-build)), written by `cst toolchains auto on` for your user (not if you ran `cst toolchains auto off` before: that leaves `~/.config/cst/toolchains-auto.off`); its last run in `~/.local/state/cst/toolchains-rust-build.json` |
 | `~/.var/app/com.google.Chrome/config/chrome-flags.conf` | the comment and the two cache lines of [section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume) (only if Chrome's Flatpak is installed) |
 
+When `bulk` changes `convert-plan`, `bulk-at-boot` or `bulk-keep`, the file is
+replaced atomically and written to disk (fsync of the file and its folder)
+at once: after a power loss it holds the old or the new list, never a part,
+and a change already reported is not lost.
+
 After `snapshots nas setup`, in addition:
 
 | Path | What |

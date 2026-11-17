@@ -298,8 +298,9 @@ def note_postponed(why: str) -> None:
         boots += 1
     os.makedirs(os.path.dirname(POSTPONED), exist_ok=True)
     record = {"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
-    # 0644: cst doctor reads it as the user.
-    write_atomic(POSTPONED, json.dumps(record) + "\n", mode=0o644, durable=False, relabel=False)
+    # 0644: cst doctor reads it as the user. Durable (file and folder fsynced): a
+    # boot counter, like the attempts counter; a reset must not lose a boot.
+    write_atomic(POSTPONED, json.dumps(record) + "\n", mode=0o644, relabel=False)
 
 
 def clear_postponed() -> None:

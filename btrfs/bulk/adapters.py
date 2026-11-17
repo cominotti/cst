@@ -825,7 +825,8 @@ def flag_add(ident: str) -> None:
 def write_flag(ids: Sequence[str]) -> None:
     if ids:
         os.makedirs(ETC, mode=0o755, exist_ok=True)
-        write_atomic(FLAG, "".join(i + "\n" for i in ids), mode="umask", durable="file", relabel=False)
+        # Durable (file and folder): the next boot acts on it.
+        write_atomic(FLAG, "".join(i + "\n" for i in ids), mode="umask", relabel=False)
     else:
         try:
             os.remove(FLAG)
@@ -866,7 +867,8 @@ def edit_keep(add: Sequence[str], remove: Collection[str]) -> None:
     have = {ln.split("#", 1)[0].strip() for ln in lines}
     lines += [i + "\n" for i in add if i not in have]
     os.makedirs(ETC, mode=0o755, exist_ok=True)
-    write_atomic(KEEP, "".join(lines), mode=0o644, durable="file", relabel=False)  # UTF-8, surrogateescape
+    # UTF-8, surrogateescape; durable (file and folder): apply and the boot step act on it.
+    write_atomic(KEEP, "".join(lines), mode=0o644, relabel=False)
 
 
 # ---- Steam: journal (journal-steam-<appid>.json) and the move ----

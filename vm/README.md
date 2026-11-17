@@ -129,7 +129,8 @@ folders are mode 0700, owned by root). Each source keeps its full path under
 The backup also writes `/var/lib/cst/vm-backups.json` (mode 0644): a list
 of the backups with the VM, time, path, mode, package versions and
 deployment, and **no secrets**. `cst vm list`, `cst vm status` and
-`cst doctor` read it as your user.
+`cst doctor` read it as your user. It is replaced atomically and written to
+disk (fsync) at once, so a power loss right after a backup cannot hide it.
 
 The VM must be **shut off** (`virsh domstate` says `shut off`). Only then
 are the disk, the UEFI variables and the TPM state consistent with each

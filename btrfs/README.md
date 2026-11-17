@@ -642,7 +642,8 @@ docker volume rm <name>         # or one volume by name
 - A postponed boot sends no alert, so it is recorded instead, when there was
   work to do (a scheduled migration, or a volumes folder without `+C`):
   `/var/lib/docker-volumes-nocow/postponed` keeps the latest reason, the time
-  and how many boots were held back (counted once per boot). `status` shows
+  and how many boots were held back (counted once per boot; written to disk
+  with fsync, like the count of attempts). `status` shows
   it as `migration postponed at N boot(s) in a row, last ...: <reason>`, and
   `cst doctor` reports it (`WARN` from two boots on; see
   [../doctor/README.md, section 6.2](../doctor/README.md#62-docker-volumes-nocow-migration-postponed)).

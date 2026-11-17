@@ -1633,6 +1633,47 @@ class BulkTest(BulkBase):
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
 
 
+class StateFilesDurableTest(BulkBase):
+    """bulk-at-boot, bulk-keep and convert-plan decide what the boot step and
+    apply do: each is replaced with its file and its folder fsynced."""
+
+    def synced_by(self, write: Callable[[], object]) -> list[str]:
+        """The paths fsynced while write() runs, in order."""
+        synced: list[str] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+            real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", fsync):
+            write()
+        return synced
+
+    def assert_durable(self, path: str, synced: list[str]) -> None:
+        folder = os.path.realpath(os.path.dirname(path))
+        prefix = os.path.join(folder, "." + os.path.basename(path) + ".")
+        temps = [i for i, p in enumerate(synced) if p.startswith(prefix)]
+        self.assertEqual(len(temps), 1, synced)  # the new bytes, before the rename
+        self.assertIn(folder, synced[temps[0] + 1 :], synced)  # the rename's folder entry
+
+    def test_bulk_at_boot(self) -> None:
+        self.assert_durable(self.m.FLAG, self.synced_by(lambda: bulk_adapters.write_flag(["apps"])))
+        with open(self.m.FLAG) as f:
+            self.assertEqual(f.read(), "apps\n")
+
+    def test_bulk_keep(self) -> None:
+        self.assert_durable(self.m.KEEP, self.synced_by(lambda: self.m.edit_keep(["apps"], [])))
+        self.assertEqual(bulk_adapters.read_keep(), ({"apps"}, []))
+
+    def test_convert_plan(self) -> None:
+        with open(self.m.CONVERT_PLAN, "w") as f:
+            f.write(f"# header\ncopy {self.H('.android/avd')}\ncopy {self.H('Workspace')}\n")
+        self.assert_durable(self.m.CONVERT_PLAN, self.synced_by(self.apply))
+        with open(self.m.CONVERT_PLAN) as f:
+            self.assertEqual(f.read(), f"# header\ncopy {self.H('Workspace')}\n")
+
+
 class GibTest(unittest.TestCase):
     """bulk shows GiB from a tenth of a GiB on (old data worth pointing out), else whole MiB."""
 
