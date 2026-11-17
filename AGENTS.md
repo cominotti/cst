@@ -121,6 +121,10 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
+- `tests/run_unit.py` lists every skipped test with its reason and fails on a
+  skip that `EXPECTED_SKIPS` there does not name (only skips that depend on
+  the machine: a tool, root, the file system). Never add a skip there to get a
+  green run.
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
   ([docs/dev-tools.md, "Mutation testing"](docs/dev-tools.md#mutation-testing-optional)).
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the

@@ -39,6 +39,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Usage
+from btrfs.tests.test_snapshot_runtime import shell_function
 from vm import adapters as vm_adapters, domain as vm_domain
 
 sys.dont_write_bytecode = True
@@ -47,6 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VM_DIR = os.path.dirname(HERE)
 TOOL = os.path.join(VM_DIR, "cst-vm")
 REPO = os.path.dirname(VM_DIR)
+SNAPSHOT_RUNTIME = os.path.join(REPO, "btrfs", "btrfs-snapshot")
 UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
 STAMP = "20261108T010640Z"
@@ -915,9 +917,88 @@ class ShutOffAndRefusalTest(Nas):
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u normal -a cst-vm Weekly VM backup")])
 
 
+class SharedRepositoryTest(Nas):
+    """cst-vm's NAS backup and the /home NAS backup of btrfs/btrfs-snapshot share one restic repository."""
+
+    def test_both_backups_give_restic_the_same_repository_password_and_cache(self) -> None:
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        vm_calls = self.restic_calls()
+        vm_env = vm_calls[1]["env"]
+        os.remove(os.path.join(self.fix, "restic.log"))
+        # btrfs-snapshot's nas and nas_maintain, run for real with the same
+        # settings and the same fake restic; the steps around them are stubs
+        # (nas_pin failing ends the backup part after `restic unlock`).
+        script = "\n".join(
+            [
+                "set -Euo pipefail",
+                'log() { echo "<$1>btrfs-snapshot: $2"; }',
+                'nas_stale_alert() { echo "stale: $*"; }',
+                "alert() { :; }; clear_alert() { :; }; nas_summary() { :; }",
+                "nas_unmount() { return 0; }; nas_reachable() { return 0; }; nas_pin() { return 1; }",
+                "due() { return 1; }",
+                "time_left() { echo $(( NAS_DEADLINE - $(date +%s) )); }",
+                *(
+                    shell_function(SNAPSHOT_RUNTIME, name)
+                    for name in (
+                        "duration_s",
+                        "restic_run",
+                        "nas_repo_ready",
+                        "nas_repo_records",
+                        "nas",
+                        "nas_maintain",
+                    )
+                ),
+                'RESTIC_RUN_ENV=(); NAS_REPO_ID=""',
+                'NAS_ENABLED=1 NAS_PATH="$1" RESTIC_PASSWORD="$2" RESTIC_CACHE="$3" NAS_SSH_ALIAS="$4"',
+                'STATE="$5" NAS_LOCK="$5/nas.lock" NAS_TIMEOUT=6h NAS_RESTIC_HOST=sophia',
+                "NAS_KEEP_DAILY=14 NAS_KEEP_WEEKLY=8 NAS_KEEP_MONTHLY=12 NAS_USER=u NAS_HOST=h NAS_PORT=22",
+                "NAS_PRUNE_EVERY_DAYS=7 NAS_CHECK_EVERY_DAYS=30 NAS_CHECK_SUBSET=5%",
+                "nas",
+                "NAS_DEADLINE=$(( $(date +%s) + 3600 ))",
+                "nas_maintain",
+            ]
+        )
+        state = os.path.join(self.tmp, "snapshot-state")
+        os.makedirs(state)
+        b = subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "_",
+                "/volume1/restic",
+                self.password,
+                os.path.join(self.tmp, "cache"),
+                vm_domain.NAS_SSH_ALIAS,
+                state,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual(b.returncode, 0, b.stdout + b.stderr)
+        home_calls = self.restic_calls()
+        self.assertEqual([c["args"][0] for c in home_calls], ["cat", "unlock", "forget"], b.stdout + b.stderr)
+        for call in home_calls:
+            self.assertEqual(call["env"], vm_env, call["args"])
+        # Each forgets only its own tag: the VM backups are never in the /home job's groups.
+        forget = home_calls[2]["args"]
+        self.assertEqual(forget[forget.index("--tag") + 1], "btrfs-setup")
+        vm_forget = next(c["args"] for c in vm_calls if c["args"][0] == "forget")
+        self.assertEqual(vm_forget[vm_forget.index("--tag") + 1], "cst-vm,vm:win")
+
+
 class ConstantsTest(unittest.TestCase):
-    def test_nas_constants_match_btrfs_snapshot(self) -> None:
-        with open(os.path.join(REPO, "btrfs", "btrfs-snapshot")) as f:
+    def test_nas_default_paths_match_btrfs_snapshot(self) -> None:
+        # The defaults themselves: btrfs-snapshot cannot run unprivileged (its
+        # settings, password and lock are root paths), so this one check still
+        # reads its assignments. It goes when btrfs-snapshot is converted to
+        # Python and imports these values.
+        with open(SNAPSHOT_RUNTIME) as f:
             text = f.read()
 
         def shell(name: str) -> str:
@@ -929,8 +1010,6 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(shell("RESTIC_PASSWORD"), "/etc/btrfs-setup/restic-password")
         self.assertEqual(shell("RESTIC_CACHE"), "/var/cache/btrfs-snapshot-restic")
         self.assertEqual(shell("CONF"), "/etc/btrfs-setup/snapshots.conf")
-        # The /home job forgets only its own tag: the VM backups are never in its groups.
-        self.assertIn("--tag btrfs-setup --keep-daily", text)
 
     def test_forget_args_are_scoped(self) -> None:
         a = vm_domain.forget_args("win", "sophia", 4, 3)

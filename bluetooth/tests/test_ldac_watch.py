@@ -12,7 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +24,7 @@ from unittest import mock
 sys.dont_write_bytecode = True
 
 from bluetooth import domain as bt_domain, ldac_watch
-from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, HelperModule, load_helper, shell_functions
+from bluetooth.tests.test_bluetooth import MAC, WATCH, HelperModule, load_helper, shell_functions
 
 DEV = "0A_1B_2C_3D_4E_5F"
 
@@ -813,11 +812,46 @@ systemctl() {
 
 
 class ScriptTest(unittest.TestCase):
-    def test_setup_mentions_the_watcher_everywhere(self) -> None:
-        with open(SETUP) as f:
-            sh = f.read()
-        for name in ("lw_install", "lw_remove", "lw_report"):
-            self.assertRegex(sh, re.compile(rf"^\s+{name}$", re.M), name)
+    def run_steps(self, body: str, *functions: str) -> list[str]:
+        """Run bluetooth-setup.sh's `functions` with the watcher's steps (and what they call) as stubs."""
+        tmp = tempfile.mkdtemp(prefix="bt-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        log = os.path.join(tmp, "log")
+        main_conf = os.path.join(tmp, "main.conf")
+        with open(main_conf, "w") as f:
+            f.write("[General]\n")
+        stubs = f"""
+set -Eeuo pipefail
+step() {{ echo "STEP $*" >>"$LOG"; }}
+lw_install() {{ step lw_install; }}; lw_remove() {{ step lw_remove; }}; lw_report() {{ step lw_report; }}
+lw_plan() {{ :; }}; lw_ours_present() {{ return 1; }}; die() {{ echo "DIE $*"; exit 1; }}
+item() {{ :; }}; section() {{ :; }}; helper() {{ :; }}; wp_word() {{ :; }}; wp_label() {{ :; }}; wp_note() {{ :; }}
+le_report() {{ :; }}; le_others_report() {{ :; }}; oldest_backup() {{ return 1; }}
+LW_UNIT=cst-bt-ldac48.service; MAIN_CONF={main_conf}; WP_CONF={tmp}/none-wp; LE_CONF={tmp}/none-le
+WP_STATE=ok; LEGACY=0; BEARER_STATE=none; BEARER=le; LE_AUDIO=on; DEVICE_MAC=AA:BB:CC:DD:EE:FF
+WP_MARKER=m; OLD_WP_MARKER=o; CHECK=1; TMP={tmp}/tmp
+"""
+        proc = subprocess.run(
+            ["bash", "-c", stubs + shell_functions(*functions) + body],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": log},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        if not os.path.exists(log):
+            return []
+        with open(log) as f:
+            return [x.split()[1] for x in f.read().splitlines()]
+
+    def test_every_command_reaches_the_watcher(self) -> None:
+        # apply installs the watcher when LDAC_RATE is set and removes it when not;
+        # plan and status report it; revert removes it.
+        self.assertEqual(self.run_steps("LW_WANT=1; apply_watcher\n", "apply_watcher"), ["lw_install"])
+        self.assertEqual(self.run_steps("LW_WANT=0; apply_watcher\n", "apply_watcher"), ["lw_remove"])
+        self.assertEqual(self.run_steps("files_report\n", "files_report"), ["lw_report"])
+        self.assertEqual(self.run_steps("revert || true\n", "revert"), ["lw_remove"])
 
     def run_apply(self, restart_rc: int, bearer: str = "set") -> ApplyRun:
         """apply() with every step a stub; DO_RESTARTS_RC is what the
