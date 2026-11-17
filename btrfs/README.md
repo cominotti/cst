@@ -1040,7 +1040,9 @@ own checks:
   - Fedora's own rule `64-btrfs.rules` still works the way this part expects.
     If a Fedora update changed it, it stops with `UPSTREAM CHANGED: ...` and
     changes nothing.
-- It writes its files first, then runs a self-test: every disk must show as
+- It checks the new udev rule with `udevadm verify` before it writes
+  anything: a rule that fails leaves nothing written.
+- It writes its files, then runs a self-test: every disk must show as
   ready. If the self-test fails, a **newly written** rule is removed again and
   the initramfs is **not** changed. The other helper files stay in `/etc`;
   without the rule they do nothing.

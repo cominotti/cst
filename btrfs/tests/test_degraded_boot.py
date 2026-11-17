@@ -678,11 +678,16 @@ next_overlay || :
         self.assertEqual(len(lines), 5, r.stdout)
         self.assertTrue(all(line.startswith("unchanged: ") for line in lines), r.stdout)
 
-    def test_rule_that_fails_udevadm_verify_is_not_written(self) -> None:
+    def test_rule_that_fails_udevadm_verify_leaves_nothing_written(self) -> None:
+        """The rule is verified before the helper and the units are written: a bad one writes nothing."""
+        before = self.tree()
         r = self.write_files(env={"FAKE_VERIFY_RC": "1"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("ERROR: udevadm verify failed for the generated rule", r.stderr)
-        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(self.tree(), before)
+        self.assertFalse(os.path.exists(self.at("/etc")))
+        self.assertEqual(self.read("verified.rules"), EXPECTED_RULE)
 
     # ---------------------------------------------------------- self-test --
     def selftest(

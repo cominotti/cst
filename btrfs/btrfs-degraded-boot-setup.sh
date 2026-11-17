@@ -61,6 +61,7 @@
 #     system with `degraded` in the next-boot rootflags, and unless upstream
 #     64-btrfs.rules (booted and next boot) still has the ID_BTRFS_READY /
 #     SYSTEMD_READY=0 semantics this rule builds on.
+#   * The generated rule passes `udevadm verify` before anything is written.
 #   * After writing, the udev self-test must show every root fs member ready;
 #     otherwise the new rule is removed and no rpm-ostree change is made.
 #   * A new deployment is only created when the tracked file set changes, or
@@ -372,6 +373,42 @@ for up in "${UPSTREAM_RULE}" "${NEXT_ROOT}${UPSTREAM_RULE}"; do
 done
 
 # ------------------------------------------------------------------ files ---
+# The rule first: one that fails `udevadm verify` stops the install before
+# anything is written.
+rule_tmp="$(mktemp)"
+trap 'rm -f "${rule_tmp}"' EXIT
+cat >"${rule_tmp}" <<EOF
+# ${OURS_MARK} (CST). Do not edit.
+#
+# btrfs last resort for the root filesystem ${UUID}. Runs after the upstream
+# ${UPSTREAM_RULE}, which imports ID_BTRFS_READY and sets
+# SYSTEMD_READY=0 while the fs is incomplete:
+#   complete   -> stop btrfs-last-resort@<uuid>.timer
+#   incomplete -> start that timer (45 s after the first member appeared the
+#                 service re-checks and may create the flag)
+#   incomplete + flag /run/btrfs-allow-degraded/<uuid> -> SYSTEMD_READY=1, so
+#                 the fs can be mounted with -o degraded
+
+SUBSYSTEM!="block", GOTO="btrfs_last_resort_end"
+ACTION=="remove", GOTO="btrfs_last_resort_end"
+ENV{ID_FS_TYPE}!="btrfs", GOTO="btrfs_last_resort_end"
+ENV{ID_FS_UUID}!="${UUID}", GOTO="btrfs_last_resort_end"
+# Never override device-mapper's own "not ready" (suspended / rules disabled).
+ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}=="1", GOTO="btrfs_last_resort_end"
+ENV{DM_SUSPENDED}=="1", GOTO="btrfs_last_resort_end"
+ENV{.DM_SUSPENDED}=="1", GOTO="btrfs_last_resort_end"
+
+ENV{ID_BTRFS_READY}=="1", RUN+="/usr/bin/systemctl --no-block stop btrfs-last-resort@\$env{ID_FS_UUID}.timer", GOTO="btrfs_last_resort_end"
+# Only act on this event's result from 64-btrfs.rules.
+ENV{ID_BTRFS_READY}!="0", GOTO="btrfs_last_resort_end"
+TEST=="/run/btrfs-allow-degraded/\$env{ID_FS_UUID}", ENV{SYSTEMD_READY}="1", GOTO="btrfs_last_resort_end"
+RUN+="/usr/bin/systemctl --no-block start btrfs-last-resort@\$env{ID_FS_UUID}.timer"
+
+LABEL="btrfs_last_resort_end"
+EOF
+udevadm verify --resolve-names=never --no-style "${rule_tmp}" >/dev/null ||
+    die "udevadm verify failed for the generated rule"
+
 write_if_changed "${HELPER}" 0755 <<'HELPER'
 #!/usr/bin/bash
 #
@@ -668,39 +705,6 @@ ExecStart=/usr/bin/bash ${HELPER} --record
 WantedBy=multi-user.target
 EOF
 
-rule_tmp="$(mktemp)"
-trap 'rm -f "${rule_tmp}"' EXIT
-cat >"${rule_tmp}" <<EOF
-# ${OURS_MARK} (CST). Do not edit.
-#
-# btrfs last resort for the root filesystem ${UUID}. Runs after the upstream
-# ${UPSTREAM_RULE}, which imports ID_BTRFS_READY and sets
-# SYSTEMD_READY=0 while the fs is incomplete:
-#   complete   -> stop btrfs-last-resort@<uuid>.timer
-#   incomplete -> start that timer (45 s after the first member appeared the
-#                 service re-checks and may create the flag)
-#   incomplete + flag /run/btrfs-allow-degraded/<uuid> -> SYSTEMD_READY=1, so
-#                 the fs can be mounted with -o degraded
-
-SUBSYSTEM!="block", GOTO="btrfs_last_resort_end"
-ACTION=="remove", GOTO="btrfs_last_resort_end"
-ENV{ID_FS_TYPE}!="btrfs", GOTO="btrfs_last_resort_end"
-ENV{ID_FS_UUID}!="${UUID}", GOTO="btrfs_last_resort_end"
-# Never override device-mapper's own "not ready" (suspended / rules disabled).
-ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}=="1", GOTO="btrfs_last_resort_end"
-ENV{DM_SUSPENDED}=="1", GOTO="btrfs_last_resort_end"
-ENV{.DM_SUSPENDED}=="1", GOTO="btrfs_last_resort_end"
-
-ENV{ID_BTRFS_READY}=="1", RUN+="/usr/bin/systemctl --no-block stop btrfs-last-resort@\$env{ID_FS_UUID}.timer", GOTO="btrfs_last_resort_end"
-# Only act on this event's result from 64-btrfs.rules.
-ENV{ID_BTRFS_READY}!="0", GOTO="btrfs_last_resort_end"
-TEST=="/run/btrfs-allow-degraded/\$env{ID_FS_UUID}", ENV{SYSTEMD_READY}="1", GOTO="btrfs_last_resort_end"
-RUN+="/usr/bin/systemctl --no-block start btrfs-last-resort@\$env{ID_FS_UUID}.timer"
-
-LABEL="btrfs_last_resort_end"
-EOF
-udevadm verify --resolve-names=never --no-style "${rule_tmp}" >/dev/null ||
-    die "udevadm verify failed for the generated rule"
 rule_was_present=0
 if [[ -e "${RULE}" ]]; then
     rule_was_present=1
