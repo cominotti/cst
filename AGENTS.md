@@ -105,18 +105,20 @@ these two folders, for Claude Code.
 Run from the repository root.
 
 ```
-python3 -I -B tests/run_unit.py -v            # all unit tests, socket as stdin (what CI runs)
-python3 -B -m unittest vm.tests.test_vm -v    # one module; or vm.tests.test_vm.PartsTest.test_disks_nvram_tpm
+invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, unit (what CI runs)
+invowk cmd test unit                          # all unit tests, socket as stdin (tests/run_unit.py)
+invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
+invowk cmd test arch                          # the static gates only (seconds)
+invowk cmd test docs                          # the docs gate only
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
-invowk validate cst.invowkmod && invowk audit cst.invowkmod
+invowk cmd fmt                                # ruff format, then ruff's safe fixes
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
 
-- Before a pull request, run `tests/run_unit.py`, `test lint`, `test pylint`,
-  `test types` and `invowk validate`/`invowk audit`, and `test e2e tier1` when
+- Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
@@ -132,7 +134,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   setting that switches a file or a rule off: fix the code.
   `tests/test_python_files.py` fails on each
   ([docs/dev-tools.md, "What each gate checks"](docs/dev-tools.md#what-each-gate-checks)).
-- A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
+- Run one module with `invowk cmd test module NAME`: a bare `python3 -m unittest NAME` skips the socket-stdin gate (see "Test gotchas"). Either way the full suite still has to pass.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
 - CI runs the unit tests as a non-root user named `ci`. Tests must not depend on the developer's home or groups.
 

@@ -36,8 +36,8 @@ Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
 Both commands take `--keep_logs` (keep the journald/systemd logs in
 `tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).
-`invowk cmd test all` runs the fast gates (`test unit`, `test lint`, `test pylint`,
-`test types`), then both tiers.
+`invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
+`test lint`, `test pylint`, `test types`, `test unit`), then both tiers.
 
 ## Tier 2 needs an explicit opt-in
 

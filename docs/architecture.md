@@ -90,7 +90,7 @@ It prints ok/info/WARN/ERROR lines.
 
 ## CI
 
-CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks.
+CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: the fast-gates job runs `invowk cmd ci audit` (the JSON report and the job summary) and then `invowk cmd check`, the same task people and agents run; the nightly workflow runs the same two. A pull request that changes only Markdown still runs the fast gates (the docs gate is in the unit suite); only the E2E tiers are skipped.
 
 - `invowk` is pinned by SHA256 and verified with cosign in `.github/actions/setup-invowk`.
 - Change the version with `invowk cmd ci pin-invowk <tag>`, not by editing the hashes.

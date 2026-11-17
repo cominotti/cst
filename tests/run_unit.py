@@ -1,7 +1,13 @@
 #!/usr/bin/python3 -I
 """Run the unit tests with a socket as stdin (a run-time gate).
 
-Use: python3 -I -B tests/run_unit.py [-v]   (from the repository root)
+Use: python3 -I -B tests/run_unit.py [-v] [--gates | NAME...]   (from anywhere)
+
+With no NAME it runs every unit test of the checkout. A NAME is a test
+module, class or method as unittest names it (vm.tests.test_vm,
+vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
+runs one that way, so the socket gate below still applies. `--gates` runs
+the static gate modules only (GATE_MODULES: `invowk cmd test arch`).
 
 bash reads ~/.bashrc even for `bash -c` when SHLVL is unset and stdin is a
 socket: it takes that for a start by sshd/rshd. A test that runs bash with
@@ -20,7 +26,36 @@ from collections.abc import Sequence
 import os
 import socket
 import sys
+from typing import Final
 import unittest
+
+# The static gates: tests that read the repository (layers, budgets,
+# entry points, the manifest, the Python and shell lists, docs), not the
+# behaviour of a module. Seconds instead of minutes.
+GATE_MODULES: Final = (
+    "tests.test_architecture",
+    "tests.test_bytecode",
+    "tests.test_distribution",
+    "tests.test_docs",
+    "tests.test_duplication",
+    "tests.test_entrypoints",
+    "tests.test_python_files",
+    "tests.test_repo_paths",
+    "tests.test_subprocess_hygiene",
+    "tests.test_typing_budget",
+)
+
+
+def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
+    """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
+    names = [a for a in args if a != "-v"]
+    if names == ["--gates"]:
+        return unittest.defaultTestLoader.loadTestsFromNames(GATE_MODULES)
+    if any(n.startswith("-") for n in names):
+        raise SystemExit(f"run_unit: unknown option in {' '.join(names)} (use -v, --gates or test names)")
+    if names:
+        return unittest.defaultTestLoader.loadTestsFromNames(names)
+    return unittest.defaultTestLoader.discover(repo)
 
 
 def main(argv: Sequence[str]) -> int:
@@ -33,7 +68,7 @@ def main(argv: Sequence[str]) -> int:
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
     sys.stdin = open(0, closefd=False)
-    suite = unittest.defaultTestLoader.discover(repo)
+    suite = load(repo, argv)
     result = unittest.TextTestRunner(verbosity=verbosity).run(suite)
     ours.close()
     return 0 if result.wasSuccessful() else 1

@@ -10,6 +10,51 @@ depends_on: {
 
 cmds: [
 	{
+		// The one entry point for people, agents and CI (fast-gates and nightly run it).
+		name:        "check"
+		category:    "check"
+		description: "Run every fast gate: invowk validate and audit, test lint, test pylint, test types, test unit (the docs gate is in the unit suite)"
+		depends_on: {
+			tools: [
+				{alternatives: ["invowk"]},
+				{alternatives: ["shellcheck", "toolbox"]},
+				{alternatives: ["uv"]},
+			]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "20m"
+			script: {content: """
+				set -euo pipefail
+				# Each gate by its own task (one copy of each script list and step).
+				invowk validate cst.invowkmod
+				invowk audit --severity low cst.invowkmod
+				invowk cmd test lint
+				invowk cmd test pylint
+				invowk cmd test types
+				invowk cmd test unit
+				"""}
+		}]
+	},
+	{
+		name:        "fmt"
+		category:    "check"
+		description: "Format every Python file (ruff format), then apply ruff's safe fixes (ruff check --fix), through uv (tests/uv-dev)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				tests/uv-dev ruff format
+				tests/uv-dev ruff check --fix
+				"""}
+		}]
+	},
+	{
 		name:        "test unit"
 		category:    "test"
 		description: "Run all unit tests (with a socket as stdin, see tests/run_unit.py) without generating __pycache__"
@@ -17,6 +62,42 @@ cmds: [
 			platforms: [{name: "linux"}]
 			runtimes: [{name: "native"}]
 			script: {content: "python3 -I -B tests/run_unit.py -v"}
+		}]
+	},
+	{
+		name:        "test arch"
+		category:    "test"
+		description: "Run the static gate modules only (tests/run_unit.py --gates: architecture, budgets, entry points, manifest, Python and shell lists, docs)"
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "python3 -I -B tests/run_unit.py -v --gates"}
+		}]
+	},
+	{
+		name:        "test module"
+		category:    "test"
+		description: "Run one unit test module, class or method through tests/run_unit.py (so the socket-stdin gate still applies)"
+		args: [
+			{name: "name", description: "A unittest name, e.g. vm.tests.test_vm or vm.tests.test_vm.PartsTest.test_disks_nvram_tpm", required: true},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				exec python3 -I -B tests/run_unit.py -v "${INVOWK_ARG_NAME}"
+				"""}
+		}]
+	},
+	{
+		name:        "test docs"
+		category:    "test"
+		description: "Run the docs gate alone (tests/test_docs.py: links and anchors, the AGENTS.md index, skills and rules)"
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "python3 -I -B tests/run_unit.py -v tests.test_docs"}
 		}]
 	},
 	{
@@ -175,7 +256,7 @@ cmds: [
 	{
 		name:        "test all"
 		category:    "test"
-		description: "Run the fast gates (test unit, lint, pylint, types), then the Docker Layer 1 and Docker Layer 2 E2E suites (Layer 2 needs --allow_privileged or CST_E2E_ALLOW_PRIVILEGED=1)"
+		description: "Run the fast gates (check), then the Docker Layer 1 and Docker Layer 2 E2E suites (Layer 2 needs --allow_privileged or CST_E2E_ALLOW_PRIVILEGED=1)"
 		depends_on: {
 			tools: [
 				{alternatives: ["invowk"]},
@@ -201,15 +282,31 @@ cmds: [
 				[[ "${INVOWK_FLAG_ALLOW_PRIVILEGED:-false}" == "true" ]] && e2e_args+=(--allow-privileged)
 				# Stop before the long unit and lint runs if tier 2 is not allowed here.
 				python3 -I -B tests/e2e/run.py "${e2e_args[@]}" --check-only
-				# The fast gates, by running their own tasks (one copy of each
-				# script list and gate step, the one CI runs).
-				invowk cmd test unit
-				invowk cmd test lint
-				invowk cmd test pylint
-				invowk cmd test types
+				# The fast gates: the same task CI runs.
+				invowk cmd check
 				[[ "${INVOWK_FLAG_KEEP_LOGS:-false}" == "true" ]] && e2e_args+=(--keep-logs)
 				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && e2e_args+=(--rebuild)
 				python3 -I -B tests/e2e/run.py "${e2e_args[@]}"
+				"""}
+		}]
+	},
+	{
+		name:        "ci audit"
+		category:    "ci"
+		description: "Run invowk audit --severity low as JSON into a report file, and add its summary to the GitHub job summary when there is one (.github/scripts/audit_summary.py)"
+		flags: [
+			{name: "report", default_value: "audit-report.json", description: "Where to write the JSON report (relative to the top of the checkout, or absolute)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				report="${INVOWK_FLAG_REPORT:-audit-report.json}"
+				rc=0
+				invowk audit --format json --severity low cst.invowkmod > "${report}" || rc=$?
+				python3 -I -B .github/scripts/audit_summary.py "${report}" "${rc}"
+				exit "${rc}"
 				"""}
 		}]
 	},

@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   static-gates:
-    name: Validate, Audit, Lint & Unit (Fedora 45)
+    name: Validate, Audit, Lint, Types & Unit (Fedora 45)
     runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:45
@@ -30,19 +30,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Same reason as in ci.yml: the checkout belongs to root, the gates run as ci.
+      - name: Let the ci user's git read the checkout
+        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
+
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk
 
-      - name: Validate invowk module
-        run: runuser -u ci -- env "PATH=${PATH}" invowk validate cst.invowkmod
+      # The same uv pin as ci.yml (version and archive SHA256); move both together.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.0'
+          checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
+          enable-cache: 'false'
 
-      - name: Audit invowk module security
-        run: |
-          set -euo pipefail
-          rc=0
-          runuser -u ci -- env "PATH=${PATH}" invowk audit --format json --severity low cst.invowkmod > audit-report.json || rc=$?
-          python3 .github/scripts/audit_summary.py audit-report.json "${rc}"
-          exit "${rc}"
+      - name: Audit invowk module security (JSON report)
+        # As root, like the summary step it replaces: the report goes into the
+        # checkout and the summary into GITHUB_STEP_SUMMARY, which the ci user cannot write.
+        run: invowk cmd ci audit
 
       - name: Upload invowk audit report
         if: always()
@@ -53,11 +59,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Run shell syntax and ShellCheck gate
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test lint
-
-      - name: Run unit tests
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test unit
+      - name: Run the fast gates (invowk cmd check)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
   # The E2E tiers need Docker, loop devices and the btrfs kernel module, so
   # they run on the Ubuntu host runner. Only the tiers run here; the static
