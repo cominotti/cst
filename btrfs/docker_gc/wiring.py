@@ -15,29 +15,24 @@ from cst_core.adapters import SubprocessCommandRunner, SystemClockAdapter
 from cst_core.adapters.runtime import restore_default_signals as _restore_default_signals
 
 
-def gc_env() -> Mapping[str, str]:
-    """This process's environment, read when asked."""
-    return os.environ
-
-
 def settings_from(env: Mapping[str, str]) -> GcSettings:
     """KEEP_CONTAINER_DAYS, KEEP_IMAGE_DAYS, KEEP_BUILD_CACHE_DAYS, DOCKER_GC_PROTECT and
     DOCKER_GC_FLUSH (the unit's Environment=); a value that is not a number stops the program."""
+    d = GcSettings()  # the defaults
+    protect = env.get("DOCKER_GC_PROTECT")
     return GcSettings(
-        keep_container_days=int(env.get("KEEP_CONTAINER_DAYS", 7)),
-        keep_image_days=int(env.get("KEEP_IMAGE_DAYS", 14)),
-        keep_build_cache_days=int(env.get("KEEP_BUILD_CACHE_DAYS", 14)),
-        protected=protected_registries(env.get("DOCKER_GC_PROTECT", "registry.example.com")),
-        flush_seconds=int(env.get("DOCKER_GC_FLUSH", 30)),
+        keep_container_days=int(env.get("KEEP_CONTAINER_DAYS", d.keep_container_days)),
+        keep_image_days=int(env.get("KEEP_IMAGE_DAYS", d.keep_image_days)),
+        keep_build_cache_days=int(env.get("KEEP_BUILD_CACHE_DAYS", d.keep_build_cache_days)),
+        protected=d.protected if protect is None else protected_registries(protect),
+        flush_seconds=int(env.get("DOCKER_GC_FLUSH", d.flush_seconds)),
     )
 
 
 def paths_from(env: Mapping[str, str]) -> GcPaths:
     """The state and runtime folders (DOCKER_GC_STATE and DOCKER_GC_RUNTIME: tests)."""
-    return GcPaths(
-        state_dir=env.get("DOCKER_GC_STATE", "/var/lib/docker-gc"),
-        run_dir=env.get("DOCKER_GC_RUNTIME", "/run/docker-gc"),
-    )
+    d = GcPaths()  # the defaults
+    return GcPaths(state_dir=env.get("DOCKER_GC_STATE", d.state_dir), run_dir=env.get("DOCKER_GC_RUNTIME", d.run_dir))
 
 
 def quiet_sigpipe() -> None:
@@ -47,7 +42,7 @@ def quiet_sigpipe() -> None:
 
 def build_docker_gc(env: Mapping[str, str] | None = None) -> DockerGc:
     """docker-gc's use cases over the real docker, state files, host and terminal."""
-    values = gc_env() if env is None else env
+    values = os.environ if env is None else env
     runner = SubprocessCommandRunner()
     return DockerGc(
         settings_from(values),

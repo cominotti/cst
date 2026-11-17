@@ -13,6 +13,8 @@ import stat
 
 from btrfs.docker_volumes_nocow.domain import (
     DAEMON_JSON,
+    NEW_SUFFIX,
+    OLD_MARK,
     NocowPaths,
     TreeScan,
     daemon_args,
@@ -22,11 +24,6 @@ from cst_core.adapters.files import write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
-
-
-def nocow_log(prio: int, msg: str) -> None:
-    """One journal line per message, "<prio>docker-volumes-nocow: msg"."""
-    journal_log(prio, msg, tag="docker-volumes-nocow")
 
 
 def configured_root(path: str) -> str | None:
@@ -174,14 +171,14 @@ class LocalVolumeTree:
             if not os.path.isdir(d) or os.path.islink(d):
                 continue
             data = os.path.join(d, "_data")
-            olds = sorted(x for x in os.listdir(d) if x.startswith("_data.cow-old-"))
+            olds = sorted(x for x in os.listdir(d) if x.startswith("_data" + OLD_MARK))
             if not os.path.lexists(data) and olds:
                 # Died between the two renames: the original goes back.
                 os.rename(os.path.join(d, olds[-1]), data)
                 olds = olds[:-1]
                 yield name
             if os.path.isdir(data):
-                for x in olds + [x for x in os.listdir(d) if x == "_data.nocow-new"]:
+                for x in olds + [x for x in os.listdir(d) if x == "_data" + NEW_SUFFIX]:
                     shutil.rmtree(os.path.join(d, x), ignore_errors=True)
 
     def make_twin(self, data: str, new: str) -> None:
@@ -370,7 +367,7 @@ class DockerDaemons:
         r = self._runner.run(
             ["systemctl", "show", "-P", "ActiveState", "docker.service"], stdin="inherit", decode_errors="strict"
         )
-        if r.cause is not None and r.fault != "timeout":
+        if r.cause is not None:
             return f"cannot ask systemd about docker.service ({r.cause})"
         return service_wait_reason(r.returncode, r.stdout.strip())
 
@@ -411,7 +408,7 @@ class NocowOutput:
         print(line)
 
     def log(self, prio: int, msg: str) -> None:
-        nocow_log(prio, msg)
+        journal_log(prio, msg, tag="docker-volumes-nocow")
 
     def notify(self, title: str, body: str) -> None:
         checked(

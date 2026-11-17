@@ -5,6 +5,7 @@ systemctl and /proc/uptime, the terminal and the journal."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 import json
 import os
 import signal
@@ -32,15 +33,15 @@ from cst_core.domain.text import is_yes
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
+# The counts of last-run.json, in RunSummary's order after its time.
+SUMMARY_COUNTS = ("containers", "volumes", "images", "image_bytes", "failed")
 EVENTS_ARGV = ("docker", "events", "--format", "{{json .}}", "--filter", "type=container", "--filter", "type=image")
 
 
 # ---- docker's JSON, read without trusting its shape ---------------------------------
 def _obj(value: object) -> dict[str, object]:
     """value when it is a JSON object, else an empty one (Docker's null)."""
-    if not isinstance(value, dict):
-        return {}
-    return {str(k): v for k, v in value.items()}
+    return value if isinstance(value, dict) else {}
 
 
 def _str(value: object) -> str:
@@ -229,8 +230,9 @@ class DockerCli:
             if event is None:
                 continue
             image_id = sink.resolve(event)
-            with lock:
-                sink.use(image_id)
+            if image_id:  # an event that names no image is not a use
+                with lock:
+                    sink.use(image_id)
         with lock:
             sink.finish()
         rc = proc.wait()
@@ -256,16 +258,15 @@ class GcStateFiles:
         if isinstance(st, dict):
             images, since = st.get("images"), _num(st.get("since"))
             heartbeat = _num(st.get("heartbeat", 0))
+            # a value that is not a time: not a state docker-gc wrote
             if isinstance(images, dict) and since is not None and heartbeat is not None:
-                kept = {str(k): t for k, v in images.items() if (t := _num(v)) is not None}
-                if len(kept) == len(images):  # a value that is not a time: not a state docker-gc wrote
-                    return GcState(since=since, images=kept, heartbeat=heartbeat)
+                if all(_num(v) is not None for v in images.values()):
+                    return GcState(since=since, images=images, heartbeat=heartbeat)
         return GcState(since=time.time(), images={}, heartbeat=0)
 
     def save_state(self, state: GcState) -> None:
         os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
-        data = {"since": state.since, "images": dict(state.images), "heartbeat": state.heartbeat}
-        write_atomic(self.paths.last_used, json.dumps(data), mode="umask", durable="file", relabel=False)
+        write_atomic(self.paths.last_used, json.dumps(asdict(state)), mode="umask", durable="file", relabel=False)
 
     def load_summary(self) -> RunSummary | None:
         try:
@@ -274,29 +275,17 @@ class GcStateFiles:
         except OSError, ValueError:
             return None
         lr = _obj(lr)
-        nums = {k: _num(lr.get(k)) for k in ("at", "containers", "volumes", "images", "image_bytes", "failed")}
-        at, containers, volumes, images = nums["at"], nums["containers"], nums["volumes"], nums["images"]
-        image_bytes, failed = nums["image_bytes"], nums["failed"]
-        if at is None or containers is None or volumes is None or images is None:
+        at = _num(lr.get("at"))
+        counts = [n for k in SUMMARY_COUNTS if (n := _num(lr.get(k))) is not None]
+        if at is None or len(counts) < len(SUMMARY_COUNTS):
             return None
-        if image_bytes is None or failed is None:
-            return None
-        return RunSummary(at, int(containers), int(volumes), int(images), int(image_bytes), int(failed))
+        containers, volumes, images, image_bytes, failed = (int(n) for n in counts)
+        return RunSummary(at, containers, volumes, images, image_bytes, failed)
 
     def save_summary(self, summary: RunSummary) -> None:
         """LAST_RUN, replaced atomically (it was rewritten in place): what status shows of the last run."""
         os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
-        data = {
-            "at": summary.at,
-            "containers": summary.containers,
-            "volumes": summary.volumes,
-            "images": summary.images,
-            "image_bytes": summary.image_bytes,
-            "failed": summary.failed,
-            "before": dict(summary.before),
-            "after": dict(summary.after),
-        }
-        write_atomic(self.paths.last_run, json.dumps(data), mode="umask", durable=False, relabel=False)
+        write_atomic(self.paths.last_run, json.dumps(asdict(summary)), mode="umask", durable=False, relabel=False)
 
     def take_run_lock(self) -> bool:
         """The run lock, held (its fd open) until the process ends."""

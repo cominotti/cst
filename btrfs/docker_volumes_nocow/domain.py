@@ -12,6 +12,10 @@ MARGIN = 20 * 1024**3  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
 GAVE_UP = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
 DAEMON_JSON = "/etc/docker/daemon.json"
+# Beside a volume's _data during its migration: the NOCOW copy being made, and the
+# original between the two renames (followed by the time it was moved aside).
+NEW_SUFFIX = ".nocow-new"
+OLD_MARK = ".cow-old-"
 
 
 @dataclass(frozen=True, slots=True)

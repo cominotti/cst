@@ -63,6 +63,13 @@ class Recording:
     def save(self) -> None:
         self._gc.state.save_state(self.snapshot())
 
+    def begin(self) -> None:
+        """The first save, before the stream: the heartbeat now; the next one is due from now."""
+        self.heartbeat = self._gc.clock.now()
+        self.save()  # also fixes "since" on the very first start
+        self.dirty = False
+        self.last_beat = self._gc.clock.now()
+
     # ---- EventSink -------------------------------------------------------
     def started(self) -> None:
         self._gc.console.log(6, "recording image use from docker events")
@@ -147,10 +154,7 @@ class DockerGc:
         # Whatever happened while no recorder ran: every container counts as a use.
         for c in self.docker.containers():
             rec.note(c.image_id, c.last_use(self.clock.now()))
-        rec.heartbeat = self.clock.now()
-        rec.save()  # also fixes "since" on the very first start
-        rec.dirty = False
-        rec.last_beat = self.clock.now()
+        rec.begin()
         end = self.docker.follow_events(rec, every=self.settings.flush_seconds)
         if end.stopped or end.returncode < 0:
             return 0
@@ -248,9 +252,9 @@ class DockerGc:
         if dry:
             self.console.say("(dry run: nothing removed)")
             return
-        before = dict(self.docker.disk_usage())
+        before = self.docker.disk_usage()
         failed = self.apply(p)
-        after = dict(self.docker.disk_usage())
+        after = self.docker.disk_usage()
         summary = RunSummary(
             at=p.at,
             containers=len(p.containers),

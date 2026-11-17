@@ -345,10 +345,14 @@ def plan_gc(inputs: PlanInputs, settings: GcSettings, *, now: float, timed: bool
     return GcPlan(split.drops, drop_v, tuple(drop_i), recorder_ok=inputs.recorder_ok, at=now, held=held)
 
 
+# How many containers, volumes and images a plan lists when it is not shown in full.
+SHOWN_CONTAINERS, SHOWN_VOLUMES, SHOWN_IMAGES = 10, 3, 15
+
+
 def plan_lines(p: GcPlan, settings: GcSettings, *, full: bool = False) -> list[str]:
     """The plan as docker-gc shows it (status, a run, cleanup-now); full: no list cut short."""
     now = p.at
-    lc, lv, li = (None, None, None) if full else (10, 3, 15)
+    lc, lv, li = (None, None, None) if full else (SHOWN_CONTAINERS, SHOWN_VOLUMES, SHOWN_IMAGES)
     out = [f"ephemeral containers stopped for {settings.keep_container_days}+ days: {len(p.containers)}"]
     out += [
         f"  {c.name:32} {c.image[:60]}  (stopped {int((now - c.ended) // DAY)} days ago)" for c in p.containers[:lc]
@@ -362,7 +366,9 @@ def plan_lines(p: GcPlan, settings: GcSettings, *, full: bool = False) -> list[s
         name = i.tags[0] if i.tags else "<untagged> " + i.id[7:19]
         mark = "  [protected registry]" if i.protected else ""
         out.append(f"  {format_bytes_decimal(i.size):>9}  {name[:80]}  (last use {day(i.used)}){mark}")
-    if not full and (len(p.containers) > 10 or len(p.volumes) > 3 or len(p.images) > 15):
+    if not full and (
+        len(p.containers) > SHOWN_CONTAINERS or len(p.volumes) > SHOWN_VOLUMES or len(p.images) > SHOWN_IMAGES
+    ):
         out.append("  (lists truncated; 'docker-gc cleanup-now' shows everything before asking)")
     if p.held:
         why = "the recorder is not running" if not p.recorder_ok else "protected registry: cleanup-now only"
