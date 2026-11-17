@@ -50,8 +50,8 @@ adapters has a budget per package and layer that it may not go above
 
 ## The composition root: `wiring.py`
 
-In a package with an application layer, one module puts the program
-together: `<pkg>/wiring.py`. It is the only place that
+In a package of the full profile (see "Package profile" below), one module
+puts the program together: `<pkg>/wiring.py`. It is the only place that
 
 - reads the process environment (`os.environ`: `CST_PROG`, what a shell
   wrapper hands over, the test overrides), and turns it into values for the
@@ -78,8 +78,16 @@ module, use `os.environ`, `sys.executable` and `os.execvp` without them
 counting as I/O; anything else it does (files, commands) counts in its
 package's `IO_BUDGETS` like everywhere else. cst_core's `wiring.py` serves
 its programs: `cst` (`cli.py`), the installer and the module router
-(`route.py`). Every package converted from now on follows the same split
-and joins `HEXAGONAL_PACKAGES`.
+(`route.py`). A package that gets an application layer follows the same
+split and joins `HEXAGONAL_PACKAGES`.
+
+A package of the light profile (not in `HEXAGONAL_PACKAGES`) has no
+`wiring.py`: its `cli.py` `main` is the composition root. It builds the
+adapters and may read the environment (`LIGHT_CLI_ALLOWED`: reads of
+`os.environ` and `os.getenv`) without them counting as I/O. A write to
+`os.environ`, the `sudo`/`runuser` re-exec and `sys.executable` still
+count in its `IO_BUDGETS`; a program that re-runs itself gets a
+`wiring.py` and the full profile's rule.
 
 ## Most helpers are Python scripts with no `.py` extension
 
@@ -109,7 +117,7 @@ All of them run in the unit suite:
 - `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
   - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table nothing is added to;
   - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
-  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides (see "The composition root" above);
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides, and `LIGHT_CLI_ALLOWED` what the `cli.py` of a light package may (see "The composition root" above);
   - no module imports a private name (`_x`) from another module of the repository;
   - each shared primitive has an owner in cst_core (`PRIMITIVE_OWNERS`: `subprocess`, `os.replace`, `os.fsync`, temporary files, `fcntl.flock`, the NOCOW ioctl), and so do the literals that betray a copy of one (`PRIMITIVE_LITERALS`); a call or a literal outside its owner counts against its package's budget (`PRIMITIVE_BUDGETS`, `LITERAL_BUDGETS`), docstrings aside;
   - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons; nothing is added to it).

@@ -37,7 +37,12 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   adapters import an adapter. The composition point is where a program
   reads its environment, its own executable and re-runs itself through
   sudo or runuser: WIRING_ALLOWED names what a wiring.py may use for that
-  without it counting as hard I/O (no other module gets it).
+  without it counting as hard I/O (no other module of such a package gets it).
+- A package not in HEXAGONAL_PACKAGES and without a wiring.py has the
+  light profile (domain, adapters, cli; docs/architecture.md, "Package
+  profile"): its cli.py is its composition root and may read the environment (LIGHT_CLI_ALLOWED: reads
+  of os.environ, os.getenv) without it counting; a write to os.environ
+  (env_write_lines), the re-exec and sys.executable still count.
 - No module imports a private name (`_x`) from another module of the
   repository: a name another module needs is public.
 - Shared primitives have one owner each (PRIMITIVE_OWNERS: running a
@@ -59,7 +64,7 @@ Standard library only.
 """
 
 import ast
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 import os
 from typing import Final, Literal
 import unittest
@@ -154,6 +159,17 @@ CLI_ALLOWED: Final[frozenset[str]] = frozenset(
 # commands and the rest of os still count as hard I/O there.
 WIRING_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.execvp", "sys.executable"})
 
+# What the cli.py of a light-profile package (one not in HEXAGONAL_PACKAGES:
+# domain, adapters and cli, no wiring.py) may use besides CLI_ALLOWED: its
+# main is the composition root, so it may read the environment. Writes to it
+# (env_write_lines), the re-exec and sys.executable still count; in a
+# full-profile package only wiring.py reads the environment.
+LIGHT_CLI_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.getenv"})
+# Methods of os.environ that change it.
+ENV_WRITERS: Final[frozenset[str]] = frozenset(
+    {"pop", "popitem", "setdefault", "update", "clear", "__setitem__", "__delitem__", "__ior__"}
+)
+
 # The roles whose hard I/O has a budget. adapters do I/O by design; domain
 # and application have none (test_repository_layers_obey_hexagonal_boundaries).
 IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wiring", "cli", "entry", "unlayered"})
@@ -163,14 +179,14 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
     "btrfs/chrome_cache cli": 7,
-    "btrfs/stall_monitord cli": 3,
+    "btrfs/stall_monitord cli": 1,
     "btrfs/stall_monitord unlayered": 50,
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
-    "cpu cli": 36,
+    "cpu cli": 35,
     "cst_core entry": 1,
-    "toolchains cli": 57,
-    "vm cli": 82,
+    "toolchains cli": 54,
+    "vm cli": 80,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
@@ -474,12 +490,65 @@ def cli_code_lines(source: str) -> int:
     )
 
 
-def hard_io_lines(source: str, rel: str) -> list[int]:
-    """The lines where a module does I/O itself (CLI_ALLOWED aside, and WIRING_ALLOWED in a wiring.py; the bootstrap left out)."""
+def env_write_lines(source: str, rel: str) -> list[int]:
+    """Lines that change os.environ: an item set or deleted, or a method of ENV_WRITERS called."""
+    tree = ast.parse(source, filename=rel)
+    bound = _bindings(tree)
+
+    def is_environ(node: ast.expr) -> bool:
+        name = _dotted(node)
+        if name is None:
+            return False
+        head, _, rest = name.partition(".")
+        return head in bound and (f"{bound[head]}.{rest}" if rest else bound[head]) == "os.environ"
+
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value):
+            lines.add(node.lineno)
+        elif isinstance(node, ast.AugAssign) and is_environ(node.target):
+            lines.add(node.lineno)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ENV_WRITERS
+            and is_environ(node.func.value)
+        ):
+            lines.add(node.lineno)
+    return sorted(lines)
+
+
+def light_cli_modules(rels: Collection[str], full: Collection[str]) -> set[str]:
+    """The cli.py files among `rels` that are a light package's composition root.
+
+    Light: the package is not in `full` (HEXAGONAL_PACKAGES) and has no wiring.py among `rels`.
+    """
+    return {
+        rel
+        for rel in rels
+        if module_role(rel) == "cli" and package_of(rel) not in full and f"{package_of(rel)}/wiring.py" not in rels
+    }
+
+
+def hard_io_lines(source: str, rel: str, *, light_cli: bool = False) -> list[int]:
+    """The lines where a module does I/O itself (the bootstrap left out).
+
+    CLI_ALLOWED is allowed everywhere; WIRING_ALLOWED too in a wiring.py. With
+    `light_cli` (a light package's cli.py, see light_cli_modules) a cli.py may
+    also read the environment (LIGHT_CLI_ALLOWED); its writes still count.
+    """
     blanked = source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)  # same line numbers
-    allowed = CLI_ALLOWED | WIRING_ALLOWED if module_role(rel) == "wiring" else CLI_ALLOWED
-    found = direct_io_problems(blanked, rel, allowed)
-    return sorted({int(p.split(":")[1]) for p in found})
+    light = light_cli and module_role(rel) == "cli"
+    if module_role(rel) == "wiring":
+        allowed = CLI_ALLOWED | WIRING_ALLOWED
+    elif light:
+        allowed = CLI_ALLOWED | LIGHT_CLI_ALLOWED
+    else:
+        allowed = CLI_ALLOWED
+    found = {int(p.split(":")[1]) for p in direct_io_problems(blanked, rel, allowed)}
+    if light:
+        found |= set(env_write_lines(blanked, rel))
+    return sorted(found)
 
 
 def _read(rel: str) -> str:
@@ -492,15 +561,16 @@ def package_modules() -> list[str]:
     return [rel for rel in production_python() if "/" in rel and not rel.startswith(".")]
 
 
-def io_measure(sources: dict[str, str]) -> dict[str, int]:
-    """Hard I/O lines per "<package> <role>" for the budgeted roles."""
+def io_measure(sources: dict[str, str], full: Collection[str] = HEXAGONAL_PACKAGES) -> dict[str, int]:
+    """Hard I/O lines per "<package> <role>" for the budgeted roles (`full`: the full-profile packages)."""
+    light = light_cli_modules(set(sources), full)
     out: dict[str, int] = {}
     for rel, source in sources.items():
         role = module_role(rel) or "unlayered"
         if role not in IO_BUDGETED_ROLES:
             continue
         key = f"{package_of(rel)} {role}"
-        out[key] = out.get(key, 0) + len(hard_io_lines(source, rel))
+        out[key] = out.get(key, 0) + len(hard_io_lines(source, rel, light_cli=rel in light))
     return out
 
 
@@ -896,6 +966,9 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertTrue(direct_io_problems(src, "pkg/application.py"), "the inner layers still refuse them")
         bad = "import os\nimport sys\ndef main():\n    sys.stdin.read()\n    return os.environ['A']\n"
         self.assertEqual(hard_io_lines(bad, "pkg/cli.py"), [4, 5])
+        self.assertEqual(
+            hard_io_lines(bad, "pkg/cli.py", light_cli=True), [4], "a light cli.py may read the environment"
+        )
 
     def test_only_a_wiring_module_may_read_the_environment_and_re_run_itself(self) -> None:
         src = (
@@ -906,12 +979,74 @@ class ArchitectureGateTest(unittest.TestCase):
         )
         self.assertEqual(hard_io_lines(src, "pkg/wiring.py"), [])
         self.assertEqual(hard_io_lines(src, "pkg/cli.py"), [4, 6, 8])
+        self.assertEqual(
+            hard_io_lines(src, "pkg/cli.py", light_cli=True),
+            [6, 8],
+            "a light cli.py reads, but writes and re-execs count",
+        )
         self.assertEqual(hard_io_lines(src, "pkg/presenter.py"), [4, 6, 8])
         self.assertEqual(hard_io_lines(src, "pkg/sub/thing.py"), [4, 6, 8])
         # Everything else still counts in a wiring.py: files, commands, the rest of os.
         other = "import os\nimport subprocess\ndef f():\n    open('x')\n    subprocess.run(['a'])\n    os.getcwd()\n"
         self.assertEqual(hard_io_lines(other, "pkg/wiring.py"), [2, 4, 5, 6])
-        self.assertEqual(io_measure({"vm/wiring.py": src, "vm/cli.py": src}), {"vm wiring": 0, "vm cli": 3})
+        # A package with a wiring.py reads its environment there, whatever HEXAGONAL_PACKAGES says.
+        self.assertEqual(
+            io_measure({"vm/wiring.py": src, "vm/cli.py": src}, full=frozenset()), {"vm wiring": 0, "vm cli": 3}
+        )
+
+    def test_a_light_cli_may_read_the_environment(self) -> None:
+        src = (
+            "import os\nimport sys\nfrom os import environ\n"
+            "def main():\n    a = os.environ.get('A')\n    b = os.getenv('B')\n"
+            "    c = environ['C']\n    d = os.environ if a else {}\n    return a, b, c, d\n"
+        )
+        self.assertEqual(hard_io_lines(src, "vm/cli.py", light_cli=True), [], "reads in a light package's cli.py")
+        self.assertEqual(io_measure({"vm/cli.py": src}, full=frozenset()), {"vm cli": 0})
+        # In a full-profile package only wiring.py reads the environment.
+        self.assertEqual(hard_io_lines(src, "vm/cli.py"), [3, 5, 6, 8])
+        self.assertEqual(io_measure({"vm/cli.py": src}, full={"vm"}), {"vm cli": 4})
+        self.assertEqual(hard_io_lines(src, "vm/wiring.py"), [6])  # os.getenv is not in WIRING_ALLOWED
+        # Only the cli.py of a light package: its other modules still count a read.
+        self.assertEqual(hard_io_lines(src, "vm/thing.py", light_cli=True), [3, 5, 6, 8])
+        self.assertEqual(
+            io_measure({"vm/cli.py": src, "vm/thing.py": src}, full=frozenset()), {"vm cli": 0, "vm unlayered": 4}
+        )
+        # Writes, the re-exec and sys.executable still count in a light cli.
+        writes = (
+            "import os\nimport sys\nfrom os import environ\n"
+            "def main():\n    os.environ['A'] = '1'\n    environ.pop('B', None)\n"
+            "    del os.environ['C']\n    os.environ.update({'D': '1'})\n    os.environ.setdefault('E', '')\n"
+            "    os.putenv('F', '1')\n    os.execvp('sudo', [sys.executable])\n    os.environ |= {}\n"
+        )
+        self.assertEqual(hard_io_lines(writes, "vm/cli.py", light_cli=True), [5, 6, 7, 8, 9, 10, 11, 12])
+        self.assertEqual(env_write_lines(writes, "vm/cli.py"), [5, 6, 7, 8, 9, 12])
+
+    def test_a_light_package_is_not_pushed_into_the_full_profile(self) -> None:
+        light = {
+            "vm/domain.py": "from dataclasses import dataclass\n@dataclass(frozen=True, slots=True)\nclass Plan:\n    x: int\n",
+            "vm/adapters.py": "import os\ndef listing(p):\n    return os.listdir(p)\n",
+            "vm/cli.py": "import os\nimport sys\nfrom vm.adapters import listing\n"
+            "def main():\n    print(listing(os.environ.get('HOME', '/')))\n    sys.exit(0)\n",
+        }
+        # No ports, application, wiring or presenter: nothing counts against it ...
+        self.assertEqual(io_measure(light, full=frozenset()), {"vm cli": 0})
+        for rel in ("vm/domain.py",):
+            self.assertEqual(architecture_problems(light[rel], rel, "domain"), [])
+        # ... and it does not meet the full profile, so it is never told to join HEXAGONAL_PACKAGES.
+        self.assertTrue(hexagonal_problems("vm", "vm/wiring.py", light))
+        # Its domain is still held pure and its cli.py's other I/O still counts.
+        self.assertTrue(architecture_problems("import os\nX = os.listdir('.')\n", "vm/domain.py", "domain"))
+        self.assertEqual(io_measure({"vm/cli.py": "import os\nos.listdir('.')\n"}, full=frozenset()), {"vm cli": 1})
+        # A package with a wiring.py is judged by the full rule: an environment read in its cli.py
+        # keeps it from being "ready" for HEXAGONAL_PACKAGES.
+        wired = {
+            "vm/wiring.py": "import os\nfrom vm.adapters import listing\ndef build():\n    return listing\n",
+            "vm/adapters.py": light["vm/adapters.py"],
+            "vm/cli.py": "import os\nfrom vm.wiring import build\ndef main():\n    return build()(os.environ.get('A'))\n",
+        }
+        self.assertEqual(
+            hexagonal_problems("vm", "vm/wiring.py", wired), ["vm/cli.py:4: does I/O itself (move it into an adapter)"]
+        )
 
     def test_the_bootstrap_is_not_counted(self) -> None:
         self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])
