@@ -23,8 +23,7 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from cst_core.adapters import write_bytes_atomic
-from cst_core.adapters.files import owned_file_state_at
+from cst_core.adapters.files import owned_file_state_at, write_bytes_atomic
 from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes

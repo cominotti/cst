@@ -15,12 +15,12 @@ from unittest import mock
 
 from cst_core.adapters import (
     HostExecutionContext,
-    LocalFileSystemAdapter,
     SubprocessCommandRunner,
     SystemClockAdapter,
     SystemctlAdapter,
 )
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
+from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import restore_lc_ctype
 from cst_core.cli import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage

@@ -1621,5 +1621,29 @@ class PackageTest(unittest.TestCase):
         self.assertFalse(vm_domain.is_cst_vm_program(b'#!/bin/sh\n"""cst-vm:'))
 
 
+class VmLockTest(unittest.TestCase):
+    def test_lock_folder_and_pid_file_are_readable_under_a_077_umask(self) -> None:
+        # PRIM-03: `sudo cst vm backup --nas` keeps a user's 077 umask; /run/cst-vm came out 0700 and the
+        # lock 0600, so cst doctor (not root) could not read the pid and called a running backup's
+        # overlay "left behind".
+        tmp = tempfile.mkdtemp(prefix="cst-vm-lock-")
+        self.addCleanup(shutil.rmtree, tmp)
+        run_dir = os.path.join(tmp, "run", "cst-vm")
+        old = os.umask(0o077)
+        try:
+            with mock.patch.object(vm_adapters, "RUN_DIR", run_dir), vm_adapters.VmLock("win") as lock:
+                self.assertEqual(os.stat(run_dir).st_mode & 0o7777, 0o755)
+                self.assertEqual(os.stat(os.path.dirname(run_dir)).st_mode & 0o7777, 0o755)
+                self.assertEqual(os.stat(lock.path).st_mode & 0o7777, 0o644)
+                with open(lock.path) as f:
+                    self.assertEqual(f.read(), f"{os.getpid()}\n")  # the pid is in the flocked file itself
+                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters.VmLock("win"):
+                    pass
+        finally:
+            os.umask(old)
+        with open(lock.path) as f:
+            self.assertEqual(f.read(), "", "the pid is cleared when the lock is released")
+
+
 if __name__ == "__main__":
     unittest.main()

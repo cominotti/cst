@@ -3,7 +3,7 @@
 import os
 import stat
 
-from cst_core.adapters import write_bytes_atomic
+from cst_core.adapters.files import write_bytes_atomic
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
 from cst_core.ports import WriteFailed

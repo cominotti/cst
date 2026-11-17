@@ -6,17 +6,19 @@ checked against the timers the vm and toolchains programs write today, so
 those modules can switch to it without changing a byte.
 """
 
+import contextlib
 import io
 import os
 import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from cst_core import adapters as core_adapters
-from cst_core.adapters import nocow
-from cst_core.adapters.files import owned_file_state_at, read_bytes, read_int, read_text
+from cst_core.adapters import files as core_files, nocow
+from cst_core.adapters.files import ensure_dir, owned_file_state_at, read_bytes, read_int, read_text
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
@@ -147,6 +149,45 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
 
+    def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
+        # PRIM-07: "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
+        superscript_two, arabic_three = chr(0xB2).encode(), chr(0x663).encode()
+        for i, data in enumerate((b"--5", superscript_two, b"-", b"", b"1.5", b"+3", b"\xff", arabic_three)):
+            with self.subTest(data=data):
+                self.assertEqual(read_int(self.path(f"bad{i}", data), -1), -1)
+        self.assertEqual(read_int(self.path("ok", b"  12 \n")), 12)
+
+    def test_the_two_text_readers_keep_their_decode_policies(self) -> None:
+        # Lenient (files.read_text): bad bytes become U+FFFD. Byte-transparent
+        # (LocalFileSystemAdapter.read_text, for files written back): every byte survives a round trip.
+        p = self.path("mixed", b"a\xffb\r\nc\n")
+        self.assertEqual(read_text(p), "a" + chr(0xFFFD) + "b\nc\n")
+        fs = core_files.LocalFileSystemAdapter()
+        text = fs.read_text(p)
+        self.assertEqual(text, "a" + chr(0xDCFF) + "b\r\nc\n")
+        assert text is not None
+        out = self.path("out")
+        fs.write_atomic(out, text)
+        with open(out, "rb") as fh:
+            self.assertEqual(fh.read(), b"a\xffb\r\nc\n")
+
+    def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
+        existing = self.path("existing")
+        os.mkdir(existing, 0o700)
+        target = os.path.join(existing, "a", "b")
+        old = os.umask(0o077)
+        try:
+            created = ensure_dir(target, 0o755)
+            self.assertEqual(ensure_dir(target, 0o755), [], "a second call creates nothing")
+        finally:
+            os.umask(old)
+        self.assertEqual(created, [os.path.join(existing, "a"), target])
+        for d in created:
+            self.assertEqual(os.stat(d).st_mode & 0o7777, 0o755, d)
+        self.assertEqual(os.stat(existing).st_mode & 0o7777, 0o700, "an existing folder was changed")
+        with self.assertRaises(FileExistsError):
+            ensure_dir(self.path("file", b"x"), 0o755)
+
     def test_owned_file_state_at(self) -> None:
         ours = self.path("ours", b"#!/x\nMARK v1\n")
         theirs = self.path("theirs", b"#!/x\nv1\n")
@@ -197,6 +238,29 @@ class AdaptersTest(unittest.TestCase):
         assert fd2 is not None
         os.close(fd2)
 
+    def test_a_lock_file_it_creates_gets_exactly_the_mode(self) -> None:
+        # PRIM-03: under a 077 umask (sudo keeps a user's) the 0644 lock cst doctor reads came out 0600.
+        lock = self.path("pid.lock")
+        old = os.umask(0o077)
+        try:
+            fd = take_lock(lock, wait=False, mode=0o644)
+        finally:
+            os.umask(old)
+        assert fd is not None
+        os.close(fd)
+        self.assertEqual(os.stat(lock).st_mode & 0o7777, 0o644)
+        os.chmod(lock, 0o600)
+        fd = take_lock(lock, wait=False, mode=0o644)  # an existing file keeps its mode
+        assert fd is not None
+        os.close(fd)
+        self.assertEqual(os.stat(lock).st_mode & 0o7777, 0o600)
+        # A dangling link without nofollow: created through it, as before (no endless retry).
+        os.symlink(self.path("lock-target"), self.path("dangling"))
+        fd = take_lock(self.path("dangling"), wait=False, nofollow=False)
+        assert fd is not None
+        os.close(fd)
+        self.assertTrue(os.path.exists(self.path("lock-target")))
+
     def test_nocow_sets_and_clears_only_its_bit(self) -> None:
         p = self.path("img", b"")
         flags = {"v": 0x80}  # another attribute that must stay
@@ -237,7 +301,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
         os.symlink(target, dest)
         old = os.umask(0o077)
         try:
-            core_adapters.write_bytes_atomic(dest, b"new", mode=0o755)
+            core_files.write_bytes_atomic(dest, b"new", mode=0o755)
         finally:
             os.umask(old)
         self.assertFalse(os.path.islink(dest))
@@ -248,17 +312,85 @@ class WriteBytesAtomicTest(unittest.TestCase):
         self.assertEqual(os.stat(dest).st_mode & 0o7777, 0o755)
         self.assertEqual(sorted(os.listdir(os.path.dirname(dest))), ["dest"])  # no temporary file left
 
+    def restorecon(self, dest: str, rc: int, err: str) -> tuple[list[list[str]], str]:
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, rc, "", err)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(core_files.os, "geteuid", return_value=0),
+            mock.patch.object(core_files.os, "chown"),
+            mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
+            mock.patch.object(core_files.subprocess, "run", side_effect=run),
+            contextlib.redirect_stderr(stderr),
+        ):
+            core_files.write_bytes_atomic(dest, b"x")
+        return calls, stderr.getvalue()
+
     def test_as_root_restorecon_gets_the_path_as_an_operand(self) -> None:
         dest = os.path.join(self.tmp, "-odd")
-        calls: list[list[str]] = []
-        with (
-            mock.patch.object(core_adapters.os, "geteuid", return_value=0),
-            mock.patch.object(core_adapters.os, "chown"),
-            mock.patch.object(core_adapters.shutil, "which", return_value="/usr/sbin/restorecon"),
-            mock.patch.object(core_adapters.subprocess, "run", side_effect=lambda argv, **_: calls.append(argv)),
-        ):
-            core_adapters.write_bytes_atomic(dest, b"x")
+        calls, err = self.restorecon(dest, 0, "")
         self.assertEqual(calls, [["/usr/sbin/restorecon", "-F", "--", dest]])
+        self.assertEqual(err, "")
+
+    def test_a_failed_restorecon_is_reported(self) -> None:
+        # PRIM-08: its result was dropped.
+        dest = os.path.join(self.tmp, "f")
+        _, err = self.restorecon(dest, 255, "restorecon: lstat(f) failed: Permission denied\n")
+        self.assertEqual(
+            err,
+            f"warning: restorecon {dest}: restorecon: lstat(f) failed: Permission denied "
+            "(its SELinux label may be wrong)\n",
+        )
+        with open(dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"x")
+
+    def test_a_link_at_dest_is_never_removed_before_the_rename(self) -> None:
+        # PRIM-08: dest was unlinked first, a moment with no file at all.
+        target = os.path.join(self.tmp, "target")
+        with open(target, "wb") as fh:
+            fh.write(b"keep")
+        dest = os.path.join(self.tmp, "dest")
+        os.symlink(target, dest)
+        with mock.patch.object(core_files.os, "unlink", side_effect=AssertionError("unlink called")):
+            core_files.write_bytes_atomic(dest, b"new", mode=0o644)
+        self.assertFalse(os.path.islink(dest))
+
+    def test_new_folders_get_exactly_0755_under_a_077_umask(self) -> None:
+        dest = os.path.join(self.tmp, "new", "sub", "f")
+        old = os.umask(0o077)
+        try:
+            core_files.write_bytes_atomic(dest, b"x", mode=0o644)
+        finally:
+            os.umask(old)
+        for d in (os.path.join(self.tmp, "new"), os.path.dirname(dest)):
+            self.assertEqual(os.stat(d).st_mode & 0o7777, 0o755, d)
+
+
+class ForceSymlinkAndRunnerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-fsl-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_force_symlink_replaces_by_rename(self) -> None:
+        link = os.path.join(self.tmp, "zram.conf")
+        with open(link, "w") as fh:
+            fh.write("old\n")
+        fs = core_files.LocalFileSystemAdapter()
+        # PRIM-08: unlink then symlink left a moment with nothing at the path.
+        with mock.patch.object(core_files.os, "unlink", side_effect=AssertionError("unlink called")):
+            fs.force_symlink("/dev/null", link)
+            fs.force_symlink("/dev/zero", link)
+        self.assertEqual(os.readlink(link), "/dev/zero")
+        self.assertEqual(os.listdir(self.tmp), ["zram.conf"], "a temporary link was left")
+
+    def test_runner_decodes_bytes_that_are_not_utf8(self) -> None:
+        # PRIM-04 (decode part): printf '\\377abc' raised UnicodeDecodeError out of run().
+        res = core_adapters.SubprocessCommandRunner().run(["printf", "\\377abc"])
+        self.assertEqual((res.returncode, res.stdout), (0, chr(0xFFFD) + "abc"))
 
 
 class ParseAssignmentsTest(unittest.TestCase):

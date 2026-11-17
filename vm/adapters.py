@@ -23,7 +23,7 @@ from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import nocow as inode_attrs
-from cst_core.adapters.files import read_text
+from cst_core.adapters.files import ensure_dir, read_text
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
@@ -397,7 +397,8 @@ class VmLock:
         self.fd: int | None = None
 
     def __enter__(self) -> VmLock:
-        os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+        # 0755 and 0644 exactly, whatever the umask (sudo keeps a user's 077): cst doctor reads the pid.
+        ensure_dir(RUN_DIR, 0o755)
         fd = take_lock(self.path, wait=False, mode=0o644, nofollow=False)
         if fd is None:
             raise Refused(f"another NAS backup of this VM is running ({self.path})")
