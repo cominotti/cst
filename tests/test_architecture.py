@@ -33,7 +33,10 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   does not hide it.
 - A package in HEXAGONAL_PACKAGES has a cli.py and a presenter.py with no
   hard I/O at all, and only its composition point (wiring.py) and its
-  adapters import an adapter.
+  adapters import an adapter. The composition point is where a program
+  reads its environment, its own executable and re-runs itself through
+  sudo or runuser: WIRING_ALLOWED names what a wiring.py may use for that
+  without it counting as hard I/O (no other module gets it).
 - No module imports a private name (`_x`) from another module of the
   repository: a name another module needs is public.
 - Shared primitives have one owner each (PRIMITIVE_OWNERS: running a
@@ -115,9 +118,9 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 158,
     "cpu/cli.py": 245,
-    "cst_core/cli.py": 22,
+    "cst_core/cli.py": 10,
     "doctor/cli.py": 35,
-    "swap/cli.py": 112,
+    "swap/cli.py": 99,
     "toolchains/cli.py": 1897,
     "vm/cli.py": 1288,
 }
@@ -142,6 +145,12 @@ CLI_ALLOWED: Final[frozenset[str]] = frozenset(
     {"print", "sys.stdout", "sys.stderr", "sys.argv", "sys.exit", "argparse"}
 )
 
+# What a wiring.py (a package's composition point) may use besides
+# CLI_ALLOWED: the environment, the Python running it (to start itself
+# again) and the exec that replaces it with sudo or runuser. Files,
+# commands and the rest of os still count as hard I/O there.
+WIRING_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.execvp", "sys.executable"})
+
 # The roles whose hard I/O has a budget. adapters do I/O by design; domain
 # and application have none (test_repository_layers_obey_hexagonal_boundaries).
 IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wiring", "cli", "entry", "unlayered"})
@@ -161,10 +170,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
     "cpu cli": 36,
-    "cst_core cli": 3,
     "cst_core entry": 3,
-    "doctor cli": 1,
-    "swap cli": 3,
     "toolchains cli": 57,
     "vm cli": 82,
 }
@@ -172,7 +178,11 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # Packages whose cli.py and presenter.py do no I/O, and their composition
 # point: the one module, besides the adapters, that imports adapters and
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
-HEXAGONAL_PACKAGES: Final[dict[str, str]] = {}
+HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
+    "cst_core": "cst_core/wiring.py",
+    "doctor": "doctor/wiring.py",
+    "swap": "swap/wiring.py",
+}
 
 
 # A shared primitive -> the cst_core modules that own it. Anywhere else, a
@@ -472,9 +482,10 @@ def cli_code_lines(source: str) -> int:
 
 
 def hard_io_lines(source: str, rel: str) -> list[int]:
-    """The lines where a module does I/O itself (CLI_ALLOWED aside, the bootstrap left out)."""
+    """The lines where a module does I/O itself (CLI_ALLOWED aside, and WIRING_ALLOWED in a wiring.py; the bootstrap left out)."""
     blanked = source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)  # same line numbers
-    found = direct_io_problems(blanked, rel, CLI_ALLOWED)
+    allowed = CLI_ALLOWED | WIRING_ALLOWED if module_role(rel) == "wiring" else CLI_ALLOWED
+    found = direct_io_problems(blanked, rel, allowed)
     return sorted({int(p.split(":")[1]) for p in found})
 
 
@@ -871,6 +882,22 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertTrue(direct_io_problems(src, "pkg/application.py"), "the inner layers still refuse them")
         bad = "import os\nimport sys\ndef main():\n    sys.stdin.read()\n    return os.environ['A']\n"
         self.assertEqual(hard_io_lines(bad, "pkg/cli.py"), [4, 5])
+
+    def test_only_a_wiring_module_may_read_the_environment_and_re_run_itself(self) -> None:
+        src = (
+            "import os\nimport sys\n"
+            "def env():\n    return os.environ\n"
+            "def again(argv):\n    os.execvp('sudo', [sys.executable, *argv])\n"
+            "def pop():\n    return os.environ.pop('X', '')\n"
+        )
+        self.assertEqual(hard_io_lines(src, "pkg/wiring.py"), [])
+        self.assertEqual(hard_io_lines(src, "pkg/cli.py"), [4, 6, 8])
+        self.assertEqual(hard_io_lines(src, "pkg/presenter.py"), [4, 6, 8])
+        self.assertEqual(hard_io_lines(src, "pkg/sub/thing.py"), [4, 6, 8])
+        # Everything else still counts in a wiring.py: files, commands, the rest of os.
+        other = "import os\nimport subprocess\ndef f():\n    open('x')\n    subprocess.run(['a'])\n    os.getcwd()\n"
+        self.assertEqual(hard_io_lines(other, "pkg/wiring.py"), [2, 4, 5, 6])
+        self.assertEqual(io_measure({"vm/wiring.py": src, "vm/cli.py": src}), {"vm wiring": 0, "vm cli": 3})
 
     def test_the_bootstrap_is_not_counted(self) -> None:
         self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])

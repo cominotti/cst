@@ -517,8 +517,10 @@ The code is split into four layers under `doctor/`:
   `Host` and kept here, not on the host port. No direct I/O: files and commands go through
   `DoctorHostPort` (`tests/test_architecture.py` checks it).
 - `doctor/presenter.py`: `render`, the report as text.
-- `doctor/cli.py`: the command line: arguments, the `Host`, the VM checks
-  wired with `VmTools`, the report.
+- `doctor/cli.py`: the command line: arguments, the VM checks wired with the
+  VM tools, the report.
+- `doctor/wiring.py`: the composition root: the environment, the signals, the
+  `Host` (with the checkout the doctor runs from) and `VmTools`.
 - `doctor/cst-doctor`: the entry point: only the bootstrap and a `main()` that
   runs `cli.py`.
 

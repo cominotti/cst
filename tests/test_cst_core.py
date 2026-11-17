@@ -28,6 +28,7 @@ from cst_core.adapters import (
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
+from cst_core import wiring as core_wiring
 from cst_core.application.dispatch import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
@@ -886,6 +887,46 @@ class CstCommandTest(unittest.TestCase):
             with self.subTest(caller=caller):
                 proc = self._run(script, "swap", env={**path, **caller})
                 self.assertEqual(proc.stdout, f"LC_CTYPE={seen}\n", proc.stderr)
+
+
+class CoreWiringTest(unittest.TestCase):
+    """cst_core/wiring.py: what cst and the installer take from the process."""
+
+    def test_the_installer_builds_payloads_from_this_checkout(self) -> None:
+        self.assertIsNotNone(core_wiring.install_service())
+
+    def test_the_dispatcher_takes_and_removes_what_the_wrapper_hands_over(self) -> None:
+        handed = {"CST_DIR": "/nonexistent-dir", "CST_SELF": "/nonexistent-dir/cst", "CST_ARG0": "./cst"}
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {**handed, "PATH": "/nonexistent"}, clear=True):
+            dispatcher = core_wiring.cst_dispatcher(
+                fallback_root="/fallback",
+                stdout=io.StringIO(),
+                stderr=err,
+            )
+            self.assertEqual(dict(os.environ), {"PATH": "/nonexistent"}, "the modules do not inherit them")
+        self.assertEqual(dispatcher.dispatch(["nope"]), 2)
+        self.assertTrue(err.getvalue().startswith("./cst: unknown command or module 'nope'\n"), err.getvalue())
+        self.assertIn("vm         the libvirt VM", err.getvalue())
+        self.assertIn("(not in this copy)", err.getvalue(), "CST_DIR names the folder of the modules")
+
+    def test_without_the_wrapper_the_checkout_of_cli_py_and_argv0(self) -> None:
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True),
+            mock.patch.object(sys, "argv", ["/some/cst-link"]),
+        ):
+            dispatcher = core_wiring.cst_dispatcher(
+                fallback_root="/fallback",
+                stdout=out,
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(dispatcher.dispatch(["help"]), 0)
+        self.assertNotIn("(not in this copy)", out.getvalue(), "this checkout holds every module")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True), mock.patch.object(sys, "argv", []):
+            core_wiring.cst_dispatcher(fallback_root="/fallback", stdout=io.StringIO(), stderr=err).dispatch(["nope"])
+        self.assertTrue(err.getvalue().startswith("cst: unknown command or module 'nope'\n"), err.getvalue())
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ from doctor import (
     cli as doc_cli,
     domain as doc_domain,
     presenter as doc_presenter,
+    wiring as doc_wiring,
 )
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.domain.errors import Usage
@@ -2393,6 +2394,27 @@ class NotUtf8OutputTest(Scratch):
         host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="0"))
         self.assertEqual(host.run(["printf", "\\377abc"]), (0, "\ufffdabc", ""))
         self.assertEqual(host.virsh(read_only=True).domains(), ["win\ufffd"])
+
+
+class DoctorWiringTest(unittest.TestCase):
+    """doctor/wiring.py: what cst doctor takes from the process (the composition root)."""
+
+    def test_the_host_knows_the_checkout_the_doctor_runs_from(self) -> None:
+        env = {"PATH": "/usr/bin:/bin", "CST_DOCTOR_CONTAINER": "0"}
+        host = doc_wiring.host(env, os.path.join(DOCTOR_DIR, "cst-doctor"))
+        self.assertEqual(host.repo_path("cst"), os.path.join(os.path.realpath(REPO), "cst"))
+        nowhere = doc_wiring.host(env, "/nonexistent/doctor/cst-doctor")
+        self.assertEqual(nowhere.repo_path("cst"), "/nonexistent-cst-checkout/cst")
+
+    def test_main_reads_the_environment_when_asked(self) -> None:
+        for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CST_PROG": "my doctor"}, clear=True):
+            rc = doc_cli.main(
+                ["help"], doc="usage: doctor [--brief]", entry_file=os.path.join(DOCTOR_DIR, "cst-doctor"), out=out
+            )
+        self.assertEqual((rc, out.getvalue()), (0, "usage: my doctor [--brief]\n"))
 
 
 if __name__ == "__main__":

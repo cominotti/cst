@@ -7,10 +7,11 @@ points, the package layout and the static gates. The rules for changing the code
 
 ## `cst` only dispatches
 
-`cst` delegates to `cst_core/cli.py`, which only wires: the use case is
+`cst` delegates to `cst_core/cli.py`, which hands argv to the use case
 `CstDispatcher` (`cst_core/application/dispatch.py`), over `cst_core/domain/dispatch.py`
 and `CstDispatchPort`, implemented by `cst_core/adapters/dispatch.py` (which also
-answers `which` and `realpath`).
+answers `which` and `realpath`); `cst_core/wiring.py` builds it (see "The
+composition root" below).
 
 - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
 - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives only in `cst_core/domain/dispatch.py`; `cst` itself is a short bash wrapper that runs `cst_core/cli.py`.
@@ -40,6 +41,34 @@ each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
 adapters has a budget per package and layer that only goes down
 (`IO_BUDGETS`, see "Static gates beyond lint and types" below).
 
+## The composition root: `wiring.py`
+
+In a package with an application layer, one module puts the program
+together: `<pkg>/wiring.py`. It is the only place that
+
+- reads the process environment (`os.environ`: `CST_PROG`, what a shell
+  wrapper hands over, the test overrides), and turns it into values for the
+  use cases (a frozen settings value, or plain arguments);
+- looks up the program itself: `sys.argv[0]`, `sys.executable`, its own
+  path (to run it again);
+- re-runs the program as another user: the `sudo` or `runuser` re-exec;
+- imports the package's adapters (and cst_core's) and builds them.
+
+`cli.py` only parses argv, calls `wiring` and one use case, and renders
+the answer (with the presenter). A function in `cli.py` that tests call
+with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
+the caller passes none, it asks `wiring` for the real ones.
+
+`tests/test_architecture.py` enforces it for the packages in
+`HEXAGONAL_PACKAGES` (swap, doctor and cst_core today): their `cli.py` and
+`presenter.py` do no I/O and import no adapter, and only `wiring.py` and
+the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other
+module, use `os.environ`, `sys.executable` and `os.execvp` without them
+counting as I/O; anything else it does (files, commands) counts in its
+package's `IO_BUDGETS` like everywhere else. cst_core's `wiring.py` serves
+its programs: `cst` (`cli.py`) and the installer. Every package converted from now on follows the same split
+and joins `HEXAGONAL_PACKAGES`.
+
 ## Most helpers are Python scripts with no `.py` extension
 
 Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-toolchains`.
@@ -68,7 +97,7 @@ All of them run in the unit suite:
 - `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
   - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table that only shrinks;
   - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
-  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so);
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides (see "The composition root" above);
   - no module imports a private name (`_x`) from another module of the repository;
   - each shared primitive has an owner in cst_core (`PRIMITIVE_OWNERS`: `subprocess`, `os.replace`, `os.fsync`, temporary files, `fcntl.flock`, the NOCOW ioctl), and so do the literals that betray a copy of one (`PRIMITIVE_LITERALS`); a call or a literal outside its owner counts against its package's budget (`PRIMITIVE_BUDGETS`, `LITERAL_BUDGETS`), docstrings aside;
   - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons, only shrinks).
