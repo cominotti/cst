@@ -917,6 +917,9 @@ file as in [btrfs/SNAPSHOTS.md, section 6](../btrfs/SNAPSHOTS.md#6-how-to-restor
 python3 -I -B -m unittest discover -s vm/tests -t . -v
 ```
 
+This runs the vm tests only. The whole suite, the way CI runs it, is
+`python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)).
+
 `virsh`, `cp`, `rpm` and `rpm-ostree` are stubs that log their calls; the
 backup folder, the index and the swtpm folder are scratch paths. The tests
 check the paths taken from the definition, the refusals (running VM, block

@@ -58,6 +58,88 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
     return exec_bash(container, cmd, check=check)
 
 
+# tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
+# (sourced by every step) and the fake deployment, boot entry and overlay.
+DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+DEGRADED_BOOT_FAKES = (
+    f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
+    + r"""export E2E_CSUM=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+
+# The fakes are exported bash functions: the setup script resets PATH, and
+# nothing in /usr/bin is replaced. rpm-ostree keeps its tracked list in
+# $W/tracked and rebuilds the one deployment's overlay (a tar.gz here, read
+# back by the cpio fake) after every initramfs-etc call.
+rpm-ostree() {
+    echo "rpm-ostree $*" >>"$E2E_W/calls"
+    local a
+    case "$1" in
+        kargs) echo "root=UUID=$E2E_UUID rootflags=subvol=root,degraded rd.luks.uuid=luks-11111111-2222-3333-4444-555555555555" ;;
+        status)
+            python3 -I -c 'import json, sys
+tracked = [p for p in open(sys.argv[1]).read().splitlines() if p]
+d = {"osname": "e2e", "checksum": sys.argv[2], "serial": 0, "booted": True, "version": "45.e2e", "initramfs-etc": tracked}
+print(json.dumps({"deployments": [d]}))' "$E2E_W/tracked" "$E2E_CSUM" ;;
+        initramfs-etc)
+            shift
+            for a in "$@"; do
+                case "$a" in
+                    --track=*) echo "${a#--track=}" >>"$E2E_W/tracked" ;;
+                    --untrack=*) { grep -vxF "${a#--untrack=}" "$E2E_W/tracked" || true; } >"$E2E_W/tracked.new"; mv "$E2E_W/tracked.new" "$E2E_W/tracked" ;;
+                    --force-sync) ;;
+                    *) return 64 ;;
+                esac
+            done
+            rm -f /boot/ostree/initramfs-overlays/e2e.img
+            if [[ -s "$E2E_W/tracked" ]]; then
+                sed 's|^/||' "$E2E_W/tracked" | tar -czf /boot/ostree/initramfs-overlays/e2e.img -C / -T -
+            fi ;;
+        *) return 64 ;;
+    esac
+}
+cpio() { tar -xf -; }
+findmnt() {
+    case "$*" in
+        "-rn -o FSTYPE --target /sysroot") echo btrfs ;;
+        "-rn -o UUID --target /sysroot") echo "$E2E_UUID" ;;
+        *) command findmnt "$@" ;;
+    esac
+}
+btrfs() {
+    [[ "$1 $2" == "filesystem show" ]] || return 64
+    printf 'Label: none  uuid: %s\n\tTotal devices 2 FS bytes used 1.00GiB\n' "$E2E_UUID"
+}
+lsblk() { printf 'e2e0 btrfs %s\ne2e1 btrfs %s\nloop0 ext4 x\n' "$E2E_UUID" "$E2E_UUID"; }
+# udevd does not run in the container: only verify is real.
+udevadm() {
+    echo "udevadm $*" >>"$E2E_W/calls"
+    case "$1" in
+        verify) command udevadm "$@" ;;
+        control) ;;
+        test) echo "Reading rules file: /etc/udev/rules.d/65-btrfs-last-resort.rules" ;;
+        info) echo ID_BTRFS_READY=1 ;;
+        *) return 64 ;;
+    esac
+}
+export -f rpm-ostree cpio findmnt btrfs lsblk udevadm
+"""
+)
+
+DEGRADED_BOOT_PREPARE = (
+    f". {DEGRADED_BOOT_DIR}/fakes.bash\n"
+    + r"""D="/ostree/deploy/e2e/deploy/$E2E_CSUM.0"
+mkdir -p "$D/usr/lib/udev/rules.d" "/ostree/boot.1/e2e/$E2E_CSUM" /boot/loader/entries /boot/ostree/initramfs-overlays
+cp /usr/lib/udev/rules.d/64-btrfs.rules "$D/usr/lib/udev/rules.d/"
+ln -sfn "../../../deploy/e2e/deploy/$E2E_CSUM.0" "/ostree/boot.1/e2e/$E2E_CSUM/0"
+printf 'title e2e\noptions root=UUID=%s rootflags=subvol=root,degraded ostree=/ostree/boot.1/e2e/%s/0\ninitrd /ostree/e2e/initramfs.img /ostree/initramfs-overlays/e2e.img\n' \
+    "$E2E_UUID" "$E2E_CSUM" >/boot/loader/entries/ostree-1-e2e.conf
+touch /run/ostree-booted
+: >"$E2E_W/tracked"
+: >"$E2E_W/calls"
+"""
+)
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
@@ -1044,3 +1126,99 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_13_degraded_boot_install_cycle(self) -> None:
+        """`cst btrfs degraded-boot` with the real systemd and the real udevadm
+        verify: install writes the rule, the units and the helper, enables the
+        record unit and tracks the four files in the initramfs; the generated
+        rule passes `udevadm verify` and the units `systemd-analyze verify`;
+        a second install writes nothing and makes no rpm-ostree change;
+        `status` changes nothing and ends in "verdict: OK"; uninstall removes
+        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        the udevd parts of udevadm (udevd does not run here) are exported bash
+        functions, because the script resets PATH: nothing in /usr/bin is
+        replaced. The fake rpm-ostree keeps one booted deployment (no staged
+        one) with a boot entry and a tar.gz overlay under /boot."""
+        c = self.SYSTEMD_CONTAINER
+        w = DEGRADED_BOOT_DIR
+        uuid = DEGRADED_BOOT_UUID
+        files = (
+            "/etc/udev/rules.d/65-btrfs-last-resort.rules",
+            "/etc/systemd/system/btrfs-last-resort@.service",
+            "/etc/systemd/system/btrfs-last-resort@.timer",
+            "/etc/btrfs-degraded-boot/btrfs-last-resort",
+        )
+        record = "/etc/systemd/system/btrfs-degraded-boot-record.service"
+        synced = "/etc/btrfs-degraded-boot/initramfs-synced.sha256"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
+            rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
+                /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record}
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        docker_exec(
+            c, ["bash", "-c", f"rm -rf {w} && mkdir -p {w} && cat >{w}/fakes.bash"], input_text=DEGRADED_BOOT_FAKES
+        )
+        exec_bash(c, DEGRADED_BOOT_PREPARE)
+
+        def step(script: str) -> str:
+            return exec_bash(c, f". {w}/fakes.bash\n{script}").stdout
+
+        def calls() -> list[str]:
+            return exec_bash(c, f"cat {w}/calls").stdout.splitlines()
+
+        first = step("/opt/cst-rw/cst btrfs degraded-boot")
+        for dest in (*files, record, synced):
+            self.assertIn(f"written:   {dest}\n", first)
+        self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--track={f}" for f in files) + "\n", first)
+        self.assertIn("verdict:          OK", first)
+        modes = step(f"stat -c '%a %U %n' {' '.join(files)} {record}").splitlines()
+        self.assertEqual(modes, [f"{'755' if f.endswith('last-resort') else '644'} root {f}" for f in (*files, record)])
+        self.assertEqual(step("systemctl is-enabled btrfs-degraded-boot-record.service").strip(), "enabled")
+
+        # The install already ran the real `udevadm verify` on the rule it
+        # wrote (it stops when verify fails), so this needs no skip.
+        with self.subTest("udevadm verify on the installed rule"):
+            out = exec_bash(c, f"udevadm verify --resolve-names=never --no-style {files[0]}").stdout
+            self.assertIn("Success: 1", out)
+        # Without --recursive-errors=no, verify exits 0 on an unknown key (only a
+        # warning); with it, any problem in the named units fails.
+        with self.subTest("systemd-analyze verify on the installed units"):
+            exec_bash(
+                c,
+                f"systemd-analyze verify --recursive-errors=no btrfs-last-resort@{uuid}.timer btrfs-last-resort@{uuid}.service "
+                "btrfs-degraded-boot-record.service",
+            )
+
+        n = len(calls())
+        second = step("/opt/cst-rw/cst btrfs degraded-boot")
+        self.assertNotIn("written:", second)
+        self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
+        self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+
+        sums = f"sha256sum {' '.join(files)} {record} {synced}"
+        before = step(sums)
+        n = len(calls())
+        status = step("/opt/cst-rw/cst btrfs degraded-boot status")
+        self.assertIn(
+            "verdict:          OK - an NVMe failure at boot would mount degraded after 45 s and alert", status
+        )
+        self.assertEqual(step(sums), before)
+        self.assertEqual([x for x in calls()[n:] if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
+
+        gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
+        self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
+        self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
+        left = step(
+            f"for f in {' '.join(files)} {record} {synced} /etc/btrfs-degraded-boot; do [[ ! -e $f ]] || echo $f; done"
+        )
+        self.assertEqual(left, "")
+        self.assertEqual(step(f"cat {w}/tracked"), "")
+        self.assertNotEqual(
+            exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0
+        )

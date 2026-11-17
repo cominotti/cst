@@ -791,7 +791,7 @@ hand if you want them gone.
 | `cli.py` | The commands: the settings, the targets (`Target`, `RustBuild`, `PythonUv`), `status`, `prune`, `auto on/off`, `config`, and `main()`. |
 | `toolchains.conf` | The default settings. |
 | `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
-| `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v`, or all of CST with `python3 -I -B -m unittest` from the repository folder. |
+| `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)). |
 
 ## 13. Glossary
 
