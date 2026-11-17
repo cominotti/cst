@@ -9,7 +9,7 @@ are not part of CST: nothing installed on the machine uses them.
 | Tool | What it does here | Pinned in |
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
-| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations in the typed modules. Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
+| [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations (every Python file). Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
@@ -21,7 +21,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 
 ```
 invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
-invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on the typed list
+invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/domain.py
@@ -84,8 +84,8 @@ repository:
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
   (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
-  own (`ruff check --select ANN`), and the typed list below limits it to the
-  typed modules.
+  own (`ruff check --select ANN`), on every Python file (see "ANN applies
+  to every file" below).
 - **`PLW1510`: every `subprocess.run` passes `check=`.** Without it, a
   command that fails (exit status not 0) does not stop the program, and
   nothing in the code says whether that was meant. At a new call site write:
@@ -133,16 +133,17 @@ repository:
   (`[tool.ruff.format] exclude`): ruff would also format the Python code
   blocks in them, which are short examples wrapped to read well next to the
   text around them, not code that runs.
-- **The typed list**: the `"!{...}" = ["ANN"]` entry of
-  `[tool.ruff.lint.per-file-ignores]`. ANN is ignored everywhere except the
-  files in the braces, whose functions must all have type annotations. Their
-  record dicts are `TypedDict` classes, so ty can check the keys read with
-  `[]` and the value types (not the keys read with `.get()`, nor whether a
-  key read with `[]` is `NotRequired`). Every Python file in the repository is
-  now in both the typed list and the ty gate.
-  Add a new file inside the braces of that one entry: no other per-file-ignores
-  entry may ignore ANN, since ruff would then skip ANN for the typed files
-  too and still report "All checks passed".
+- **ANN applies to every file**: every function of every Python file has
+  type annotations. Record dicts are `TypedDict` classes, so ty can check the
+  keys read with `[]` and the value types (not the keys read with `.get()`,
+  nor whether a key read with `[]` is `NotRequired`). Nothing switches ANN
+  off: `tests/test_python_files.py` fails on a
+  `[tool.ruff.lint.per-file-ignores]` (or `extend-per-file-ignores`) entry,
+  or a `[tool.ruff.lint] ignore`/`extend-ignore`, that names an ANN rule or
+  `ALL`, since ruff would then skip those files and still report "All checks
+  passed". A new file needs no list edit for ANN. (Until 2026-11 a one-line
+  `"!{...}" = ["ANN"]` entry named every typed file; every file had joined it,
+  and each parallel change conflicted on that one line.)
 - **The ty gate, `[tool.ty.src] include`**: every Python file ty reports
   nothing on. `error-on-warning` is on, so a warning fails it too. Every
   Python file joins it; never remove one, or add an ignore comment, to
@@ -150,7 +151,7 @@ repository:
 - **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the historical exclusion set,
   now empty (`frozenset()`). Every Python file in the repository is in the ty
   gate (`[tool.ty.src] include`), so every new file has to join both the ty
-  gate and the typed list directly. The set sits in the test, not in
+  gate directly. The set sits in the test, not in
   `pyproject.toml`, so that adding a file to it would be a visible edit of the
   test. Never add one.
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`

@@ -576,9 +576,9 @@ side). A check that crashes becomes one `ERROR` line; the others still run. A ch
 only read files and run query commands. Modules can add their own checks
 here later.
 
-All `doctor/` modules (including `doctor/tests/test_doctor.py`) are on the
-typed list ([docs/dev-tools.md](../docs/dev-tools.md), "The typed list"): every
-function has type annotations, so a new check reads
+All `doctor/` modules (including `doctor/tests/test_doctor.py`), like every
+Python file, are under ruff's annotation rules ([docs/dev-tools.md](../docs/dev-tools.md),
+"ANN applies to every file"): every function has type annotations, so a new check reads
 `def check_name(host: DoctorHostPort) -> Iterator[Result]:`, and
 `invowk cmd test types` (ty and ruff's ANN rules) fails until it does.
 

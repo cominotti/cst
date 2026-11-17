@@ -43,9 +43,10 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       `CHECKOUT_ONLY_EXECUTABLES` instead; `tests/test_distribution.py`
       fails on a file in neither.
 - [ ] `pyproject.toml`: the entry in `[tool.ruff] extend-include`; every new
-      Python file (tests too) in `[tool.ty.src] include` and in the
-      `"!{...}" = ["ANN"]` typed entry. `tests/test_python_files.py` checks
-      it; `NOT_YET_CLEAN` stays empty; no ignore comments.
+      Python file (tests too) in `[tool.ty.src] include`, fully annotated
+      (ruff's ANN rules apply to every file; no per-file-ignores entry may
+      switch them off). `tests/test_python_files.py` checks it;
+      `NOT_YET_CLEAN` stays empty; no ignore comments.
 - [ ] `HELP_MODES` in `tests/test_distribution.py`: an argv that returns
       before the program touches the machine, and its exit status.
 - [ ] The same entry in the `entries` table of

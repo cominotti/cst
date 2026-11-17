@@ -124,7 +124,7 @@ invowk cmd test license                       # the license header gate only (te
 invowk cmd fix license [--apply]              # list the files without the SPDX line; --apply adds it
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
-invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
+invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
@@ -144,8 +144,9 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean and strictly annotated: it is
-  listed in `[tool.ty.src] include` and in the `!{...} = ["ANN"]` entry of
-  `pyproject.toml`, and an extensionless helper also in `extend-include`.
+  listed in `[tool.ty.src] include` of `pyproject.toml`, and an
+  extensionless helper also in `extend-include`. ruff's annotation rules
+  (ANN) apply to every file: no per-file-ignores entry ignores them.
   No ignore comments, nothing added to `NOT_YET_CLEAN`, no `[tool.ty]`
   setting that switches a file or a rule off: fix the code.
   `tests/test_python_files.py` fails on each

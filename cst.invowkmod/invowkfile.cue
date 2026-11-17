@@ -183,7 +183,7 @@ cmds: [
 	{
 		name:        "test types"
 		category:    "test"
-		description: "Run ty on the ty gate list and ruff's annotation rules (ANN) on the typed list, through uv (tests/uv-dev)"
+		description: "Run ty on the ty gate list and ruff's annotation rules (ANN) on every Python file, through uv (tests/uv-dev)"
 		depends_on: {
 			tools: [{alternatives: ["uv"]}]
 		}
