@@ -45,7 +45,7 @@ while IFS= read -r -d '' e; do printf 'ENV %s\n' "$e"; done </proc/$$/environ
 printf 'END\n'
 case "${FAKE_MODE:-}" in
     kill) kill -TERM $$ ;;
-    trap) trap 'echo cleanup done; exit 130' INT; echo started; sleep 10 & wait $! ;;
+    trap) trap 'kill $! 2>/dev/null; echo cleanup done; exit 130' INT; echo started; sleep 10 >/dev/null 2>&1 & wait $! ;;
     pipe) yes | head -n 1; echo "pipe=${PIPESTATUS[*]}" ;;
 esac
 exit "${FAKE_RC:-0}"

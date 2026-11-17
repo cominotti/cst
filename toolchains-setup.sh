@@ -58,8 +58,8 @@
 set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-# The routing (read, user or root commands; flatpak-spawn from a toolbox,
-# the runuser re-run) is ROUTING in cst_core/domain/dispatch.py, run by
+# The routing (every command changes only the caller's files: as root, the
+# runuser re-run as SUDO_USER) is ROUTING in cst_core/domain/dispatch.py, run by
 # cst_core/route.py, which prints the help above. CST_SELF and CST_ARG0: this
 # script and the name it was started with; CST_LC_CTYPE: the caller's
 # LC_CTYPE, which Python changes at start under a C locale.

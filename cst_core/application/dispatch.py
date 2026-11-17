@@ -20,6 +20,7 @@ from cst_core.domain.dispatch import (
     format_cst_usage,
     route_command,
     script_help,
+    step_down_argv,
 )
 from cst_core.ports import CstDispatchPort, ModuleRoutePort
 
@@ -86,30 +87,8 @@ class CstDispatcher:
         user = env.get("SUDO_USER", "")
         if self._port.euid() == 0 and user and user != "root":
             uid, home = self._port.user_passwd(user)
-            return self._port.run_passthrough(
-                [
-                    "runuser",
-                    "-u",
-                    user,
-                    "--",
-                    "env",
-                    "-u",
-                    "XDG_STATE_HOME",
-                    "-u",
-                    "SUDO_USER",
-                    f"HOME={home}",
-                    f"USER={user}",
-                    f"LOGNAME={user}",
-                    f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                    f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-                    f"CST_PROG={self._cst_name} doctor",
-                    "python3",
-                    "-I",
-                    "-B",
-                    doctor,
-                    *args,
-                ]
-            )
+            then = [f"CST_PROG={self._cst_name} doctor", "python3", "-I", "-B", doctor, *args]
+            return self._port.run_passthrough(step_down_argv(user, uid, home, unset=("XDG_STATE_HOME",), then=then))
         env["CST_PROG"] = f"{self._cst_name} doctor"
         return self._port.run_passthrough(["python3", "-I", "-B", doctor, *args], env=env)
 
@@ -280,14 +259,6 @@ class ModuleRouter:
         except KeyError:
             self._port.say("err", f"{self._prog}: ERROR: SUDO_USER={user}: no such user\n")
             return 1
-        unset = [word for name in (*self._routing.user_unset, "SUDO_USER") for word in ("-u", name)]
-        session = [
-            f"HOME={home}",
-            f"USER={user}",
-            f"LOGNAME={user}",
-            f"XDG_RUNTIME_DIR=/run/user/{uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-        ]
         handed = [f"CST_PROG={self._s.cst_prog}"] if self._s.cst_prog else []
-        argv = ["runuser", "-u", user, "--", "env", *unset, *session, *handed, self._s.script, cmd, *rest]
-        return self._port.exec_replace(argv)
+        then = [*handed, self._s.script, cmd, *rest]
+        return self._port.exec_replace(step_down_argv(user, uid, home, unset=self._routing.user_unset, then=then))

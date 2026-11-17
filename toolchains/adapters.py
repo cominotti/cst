@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, on_host_argv
 from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
@@ -955,7 +955,7 @@ def systemctl_cmd(*args: str) -> list[str]:
     if stub:
         return [stub, "--user", *args]
     cmd = ["systemctl", "--user", *args]
-    return ["flatpak-spawn", "--host", *cmd] if in_container() else cmd
+    return on_host_argv(cmd, {}) if in_container() else cmd
 
 
 def systemctl_env() -> dict[str, str]:

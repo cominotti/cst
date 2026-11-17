@@ -232,6 +232,20 @@ def route_command(routing: ModuleRouting, cmd: str, rest: Sequence[str], prog: s
     return Routed("run", route.privilege)
 
 
+def step_down_argv(user: str, uid: int, home: str, *, unset: Sequence[str], then: Sequence[str]) -> list[str]:
+    """runuser to user (from root) with the session variables a login of that user sets; env removes
+    unset and SUDO_USER first, then takes then (more assignments, and the command)."""
+    drop = [word for name in (*unset, "SUDO_USER") for word in ("-u", name)]
+    session = [
+        f"HOME={home}",
+        f"USER={user}",
+        f"LOGNAME={user}",
+        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+    ]
+    return ["runuser", "-u", user, "--", "env", *drop, *session, *then]
+
+
 def script_help(script_text: str, prog: str) -> str:
     """A setup script's help: its header from line 2 to the first empty line (the license
     line left out, "# " taken off), then the usage line. What

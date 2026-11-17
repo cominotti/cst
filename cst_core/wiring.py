@@ -9,15 +9,15 @@ and print its answer.
 
 import os
 import sys
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter, default_ctrl_c, ignore_quit
-from cst_core.adapters.install import LocalInstallTarget
 from cst_core.adapters.runtime import checkout_root, undo_python_start
-from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
-from cst_core.application.install import InstallService
 from cst_core.domain.dispatch import ROUTING
+
+if TYPE_CHECKING:
+    from cst_core.application.install import InstallService
 
 
 def start_cst() -> None:
@@ -82,7 +82,12 @@ def cst_dispatcher(*, fallback_root: str, stdout: TextIO, stderr: TextIO) -> Cst
 
 def install_service() -> InstallService | None:
     """The installer's use case over this machine's files, building payloads from this
-    checkout (None: it runs from no checkout)."""
+    checkout (None: it runs from no checkout). Its modules are imported here, so cst and the
+    router do not load them."""
+    from cst_core.adapters.install import LocalInstallTarget
+    from cst_core.adapters.zipapp import entry_payload
+    from cst_core.application.install import InstallService
+
     root = checkout_root(__file__)
     if root is None:
         return None

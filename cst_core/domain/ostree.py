@@ -4,7 +4,9 @@
 The deployments are rpm-ostree's JSON objects as they come (many keys of
 many types), read with .get where they are used. The bash copies of this
 query (btrfs-setup.sh, btrfs/setup-snapshots.bash, btrfs/btrfs-health-check,
-btrfs/btrfs-degraded-boot-setup.sh) stay until those scripts are Python.
+btrfs/btrfs-degraded-boot-setup.sh) stay until those scripts are Python;
+vm's booted_deployment (vm/adapters.py) keeps its own reading, which answers
+None on any failure, until the vm conversion.
 """
 
 from collections.abc import Callable
@@ -43,8 +45,9 @@ def _parse_status(text: str) -> OstreeStatus:
     """Read the JSON of `rpm-ostree status --json`.
 
     Raises ValueError (not JSON), KeyError (no "deployments") or TypeError
-    (not an object, or "deployments" is not a list), with the text Python
-    gives each.
+    (not an object, or "deployments" cannot be iterated), with the text
+    Python gives each. A "deployments" string or object is iterated: none of
+    its items is an object, so it reads as no deployments (as doctor always did).
     """
     data = json.loads(text)
     deps = [d for d in data["deployments"] if isinstance(d, dict)]

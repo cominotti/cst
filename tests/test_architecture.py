@@ -121,7 +121,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 10,
     "doctor/cli.py": 35,
     "swap/cli.py": 99,
-    "toolchains/cli.py": 1897,
+    "toolchains/cli.py": 1896,
     "vm/cli.py": 1288,
 }
 
@@ -246,7 +246,7 @@ LITERAL_BUDGETS: Final[dict[str, int]] = {
     "cpu qemu:///system": 1,
     "doctor flatpak-spawn": 1,
     "doctor qemu:///system": 1,
-    "toolchains flatpak-spawn": 4,
+    "toolchains flatpak-spawn": 1,
     "vm qemu:///system": 3,
     "vm restorecon": 2,
 }
