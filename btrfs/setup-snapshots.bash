@@ -222,6 +222,8 @@ snap_conf_set() {   # KEY=VALUE...
     fi
     if [[ -e "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}"; then
         rm -f "${tmp}"
+        # Same content: only a drifted mode is put back (doctor and cst vm read it as a user).
+        [[ "$(stat -c %a "${SNAP_CONF}")" == 644 ]] || chmod 0644 "${SNAP_CONF}"
         return 0
     fi
     install -d -m 0755 "$(dirname "${SNAP_CONF}")"

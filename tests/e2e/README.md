@@ -26,9 +26,9 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_13`: `cst btrfs degraded-boot` with fakes for rpm-ostree, findmnt, btrfs, lsblk and the udevd part of udevadm: a `plan` that says what install would write and run and changes nothing, install, `udevadm verify` on the rule and `systemd-analyze verify` on the units, a second install that writes nothing and changes no deployment (and a `plan` with nothing left to do), a `status` that changes nothing, a typo in a unit (a drop-in with an unknown key) that stops an install before any deployment change, and an uninstall that removes everything.
 - `test_14`: the shipped `btrfs-stall-monitor.service` (daemon swapped for a sleep) keeps its runtime folder, where alerts wait, across a restart; `stop` removes it.
 - `test_15`: `cst toolchains auto off` removes the user timer's stamp in `~/.local/share/systemd/timers`.
-- `test_16`: every unit CST installs (the manifest, staged by the real installer) or generates (`tests/unit_files.py`: cst-vm, cst-toolchains, the LDAC watcher, the degraded-boot setup) passes `systemd-analyze verify` with no output under `--root` of the stage, and `systemd-analyze security --offline` of each service stays at its entry in `SECURITY_CEILINGS` (only goes down).
-
+- `test_16`: every unit CST installs (the manifest, staged by the real installer) or generates (`tests/unit_files.py`: cst-vm, cst-toolchains, the LDAC watcher, the degraded-boot setup) passes `systemd-analyze verify` with no output under `--root` of the stage, and `systemd-analyze security --offline` of each service is at most its entry in `SECURITY_CEILINGS` (`--threshold`; an entry only goes down).
 - `test_17`: a `snapshots.conf` an older CST wrote with `printf %q` (`a\ b`): `cst btrfs snapshots nas disable` rewrites it in quotes with the same values as bash reads them, cst_core's reader finds no problem, and a second run leaves the file as it is.
+- `test_18`: a unit `systemctl mask` left (a link to `/dev/null`) stays masked: `cst vm backup-timer on` (system manager) and `cst toolchains auto on` (user manager) refuse, write nothing and `status` says masked; once unmasked, `backup-timer on` works and `off` removes everything.
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 

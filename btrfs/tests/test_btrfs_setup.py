@@ -434,6 +434,17 @@ class SnapshotsConfTest(unittest.TestCase):
         self.assertNotEqual(self.raw(), before)
         self.assertEqual(oct(os.stat(self.conf).st_mode & 0o777), "0o644")
 
+    def test_an_unchanged_file_gets_its_mode_back(self) -> None:
+        """Same content, mode changed by hand: the mode goes back to 0644 (as the old writer's
+        install -m 0644 did on every run); the file itself is not rewritten."""
+        self.set_values({"NAS_ENABLED": "1"})
+        os.chmod(self.conf, 0o600)
+        before = os.stat(self.conf)
+        self.set_values({"NAS_ENABLED": "1"})
+        after = os.stat(self.conf)
+        self.assertEqual(oct(after.st_mode & 0o777), "0o644")
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+
     def test_an_old_writer_file_reads_as_bash_reads_it_and_is_rewritten_in_quotes(self) -> None:
         # The upgrade: the fixture comes from the old writer and real bash printf %q, every byte
         # 1..255 and the tricky values, written in either locale and rewritten in either.

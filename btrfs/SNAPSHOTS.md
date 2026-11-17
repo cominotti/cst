@@ -1837,7 +1837,8 @@ quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
 file) and CST's Python programs (`cst doctor`, `cst vm`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
-is written only when its content changes.
+is written only when its content changes; a mode changed by hand goes back
+to 0644 (everyone may read it).
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
 `K=$'a\tb'`). `cst doctor` and `cst vm` read those lines as bash does, so
