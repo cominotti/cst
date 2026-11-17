@@ -66,7 +66,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         "copy_bytes": 0,
         "free": 0,
     }
-    src, T = steam_roots(ctx)
+    _, T = steam_roots(ctx)
     try:
         kept, _ = b.state.read_keep()
     except OSError as e:

@@ -471,13 +471,10 @@ def split_user_args(args: Sequence[str]) -> tuple[list[str], list[str]]:
 @dataclass(frozen=True, slots=True)
 class Ctx:
     """Whose home: home is its real path (symlinks resolved), uid the
-    owner's id (None: the user running this program, asked when needed);
-    separate: every change in it runs in a child process of its own that
-    dropped to the user (a run as root)."""
+    owner's id (None: the user running this program, asked when needed)."""
 
     home: str
     uid: int | None = None
-    separate: bool = False
 
     @property
     def bulk(self) -> str:

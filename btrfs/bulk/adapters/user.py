@@ -701,8 +701,9 @@ class UserFiles:
             if bad := self.u_verify_content(p["src"], p["new"], label, p.get("bytes", 0)):
                 raise RuntimeError(f"copy check failed for {p['src']}: the content of {bad} differs")
 
-    def steam_prepare(self, parts: Sequence[SteamPart], *, idle: bool) -> int:
-        return as_user(self.pw, self.home, self.u_steam_prepare, parts, idle)
+    def steam_prepare(self, parts: Sequence[SteamPart]) -> int:
+        # idle: only a child of its own (pw set) may lower its own priority.
+        return as_user(self.pw, self.home, self.u_steam_prepare, parts, self.pw is not None)
 
     def u_steam_drop_news(self, j: SteamJournal | PartsOnly) -> bool:
         for p in j["parts"]:

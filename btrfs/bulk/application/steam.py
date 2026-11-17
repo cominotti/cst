@@ -19,7 +19,6 @@ from btrfs.bulk.domain import (
     MARGIN,
     STEAM_ROOT,
     Ctx,
-    FileRead,
     SteamApp,
     SteamJournal,
     SteamPart,
@@ -56,10 +55,6 @@ def steam_roots(ctx: Ctx) -> tuple[str, str]:
     return os.path.join(ctx.home, STEAM_ROOT), os.path.join(ctx.bulk, "steam")
 
 
-def read_file(b: Bulk, path: str) -> FileRead | None:
-    return b.user.read(path)
-
-
 def steam_read_pair(b: Bulk, settle: Callable[[Vdf], Vdf] | None = None) -> VdfPair | None:
     """Both libraryfolders.vdf, parsed and checked. They must be identical,
     except that SETTLE (a function tree -> tree: what an interrupted run of
@@ -77,7 +72,7 @@ def steam_read_pair(b: Bulk, settle: Callable[[Vdf], Vdf] | None = None) -> VdfP
     mtime: list[int] = []
     trees: list[Vdf] = []
     for f in files:
-        r = read_file(b, f)
+        r = b.user.read(f)
         if r is None:
             raise Unexpected(f"{ctx.short(f)} is missing")
         try:
@@ -118,7 +113,7 @@ def steam_marker(b: Bulk, library: str) -> str | None:
         return None
     if k != "other":
         raise Unexpected(f"{ctx.short(mk)} is a {'symlink' if k == 'link' else 'folder'}")
-    r = read_file(b, mk)
+    r = b.user.read(mk)
     if r is None:
         return None
     if r["uid"] != ctx_uid(b):
@@ -211,7 +206,7 @@ def app_in_main_library(b: Bulk, pair: VdfPair, appid: str, app: SteamApp) -> di
         app["why"] = "not installed in the main library"
         return None
     try:
-        r = read_file(b, mpath)
+        r = b.user.read(mpath)
         if r is None:
             raise Unexpected("is missing")
         info = acf_app(vdf_parse(r["data"]), appid)
@@ -372,7 +367,7 @@ def steam_workshop_check(b: Bulk, parts: Sequence[SteamPart], appid: str) -> str
         if p["name"] != "workshop-acf":
             continue
         try:
-            r = read_file(b, p["src"])
+            r = b.user.read(p["src"])
             if r is None:
                 raise Unexpected("is missing")
             t = vdf_parse(r["data"])
@@ -584,7 +579,7 @@ def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
     try:
         for d in sorted({posixpath.relpath(os.path.dirname(p["dst"]), T) for p in parts}):
             user.mkdirs(T, d, nocow=False)
-        j["stamp"] = user.steam_prepare(parts, idle=ctx.separate)
+        j["stamp"] = user.steam_prepare(parts)
         j["stamp2"] = user.clock(parts[-1]["new"])
         state.jwrite(ident, j)
         why = steam_race_guard(b, j)  # the last moment before the switch
