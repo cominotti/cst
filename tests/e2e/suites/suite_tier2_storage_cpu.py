@@ -1452,10 +1452,9 @@ EOF
             for f in "${units[@]/#//etc/systemd/system/}"; do test -f "$f"; done
             out="$(cst btrfs docker-gc status 2>&1)" || { show "status after disable" "$out"; exit 1; }
             show "status after disable" "$out"
-            # Not one exact line: is-enabled prints "disabled" and exits 1, so the "|| echo off" fallback of
-            # btrfs-setup.sh adds "off" on a line of its own (a known bug, left for its fix to tighten this).
-            grep -q '^timer disabled' <<<"$out"
-            grep -qF 'recorder inactive' <<<"$out"
+            # One exact first line (an older btrfs-setup.sh added "off" on a line of its own).
+            [[ "$(head -n 1 <<<"$out")" == 'timer disabled, recorder inactive' ]]
+            if grep -qx 'off.*' <<<"$out"; then echo "status printed a second timer state" >&2; exit 1; fi
             out="$(cst btrfs status 2>&1)" || { show "btrfs status" "$out"; exit 1; }
             grep -qxF '  off (/opt/cst-rw/cst btrfs docker-gc enable)' <<<"$out"   # "${PROG} docker-gc enable"
 
