@@ -32,9 +32,9 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
-from tests.package_view import PackageView  # noqa: E402
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
+from cst_core.adapters.zipapp import build_python_zipapp
+from tests.package_view import PackageView
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
 
 sys.dont_write_bytecode = True
 

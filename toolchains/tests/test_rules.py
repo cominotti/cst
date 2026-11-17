@@ -41,7 +41,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from toolchains.tests.test_prune_rust_build import NOW, Base, H  # noqa: E402
+from toolchains.tests.test_prune_rust_build import NOW, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
 # A fake cargo: `metadata ... --manifest-path M` answers with a build folder

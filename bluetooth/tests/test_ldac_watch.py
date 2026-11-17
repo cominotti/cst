@@ -24,8 +24,8 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from bluetooth import domain as bt_domain, ldac_watch  # noqa: E402
-from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, HelperModule, load_helper, shell_functions  # noqa: E402
+from bluetooth import domain as bt_domain, ldac_watch
+from bluetooth.tests.test_bluetooth import MAC, SETUP, WATCH, HelperModule, load_helper, shell_functions
 
 DEV = "0A_1B_2C_3D_4E_5F"
 

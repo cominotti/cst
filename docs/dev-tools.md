@@ -19,7 +19,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ## Running them
 
 ```
-invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), then ruff format --check: every Python file
+invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on the typed list
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
@@ -89,7 +89,25 @@ repository:
   Turning one into `check=True` changes behaviour: do it in its own pull
   request, with a test. ruff does not lint the Python examples in Markdown
   files; write `check=` in them by hand.
-- **The format check** (`ruff format --check`, the second half of
+- **Ruff budgets** (`tests/ruff_budget.py`, the end of `test pylint`): rules
+  with hits not fixed yet, which therefore cannot be in `select`, are counted
+  per package with `--ignore-noqa` (a `# noqa` does not hide a hit) and
+  compared with `RUFF_BUDGETS`, which only goes down: `BLE001` (blind
+  `except Exception`), `SLF001` (a private member used outside its class;
+  production code only), `FBT001`/`FBT002` (a bool positional parameter:
+  make it keyword-only) and `C901` (a function over
+  `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
+  SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
+  measures. A second ruff run fails on any `# noqa` that suppresses nothing
+  (`RUF100`). When a budget fails, the script prints the measured table to
+  paste in; see [tests/budgets.py](../tests/budgets.py) for how budgets work.
+- **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
+  `Any` (inside generics: `ANN401` already refuses it as a whole
+  annotation) and `cast()` are counted per package and layer, the tests
+  apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which only go down. Type the
+  value instead: a `TypedDict` for a record read from JSON, a frozen
+  dataclass for one built in code, `isinstance` narrowing instead of a cast.
+- **The format check** (`ruff format --check`, the second part of
   `test pylint`): every Python file must already look the way `ruff format`
   writes it. Lines are up to 120 characters (`line-length` in `[tool.ruff]`;
   ruff does not split long strings or comments), and the rest is ruff's
@@ -126,11 +144,16 @@ repository:
   test. Never add one.
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`
   exists at the top of the repository (ty would read it instead of
-  `pyproject.toml`), when `[tool.ty]` sets anything but `src.include` and
-  `terminal.error-on-warning` (such as `src.exclude`, `overrides`, a rule
-  set to `"ignore"`, or `analysis.allowed-unresolved-imports`), when
-  `error-on-warning` is not `true`, and when a ty-gated file has a
-  `ty: ignore` or `type: ignore` comment.
+  `pyproject.toml`), when `[tool.ty]` sets anything but `src.include`,
+  `terminal.error-on-warning` and rules raised to `"error"` (such as
+  `src.exclude`, `overrides`, a rule set to `"warn"` or `"ignore"`, or
+  `analysis.allowed-unresolved-imports`), when `error-on-warning` is not
+  `true`, and when a ty-gated file has a `ty: ignore` or `type: ignore`
+  comment.
+- **`[tool.ty.rules]`** raises rules that are warnings or off by default to
+  errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
+  `possibly-missing-import` and `possibly-unresolved-reference`. A rule may
+  be added there only at `"error"`.
 
 ## Mutation testing (optional)
 

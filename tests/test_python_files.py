@@ -13,8 +13,9 @@ never be linted. This test derives the Python files from the repository
   NOT_YET_CLEAN, which is an edit of this file that review can see;
 - nothing else takes a file or a diagnostic out of ty's check: no ty.toml
   (ty would read it instead of pyproject.toml), no [tool.ty] setting other
-  than src.include and terminal.error-on-warning (which must be true), and
-  no ignore comment in a ty-gated file;
+  than src.include, terminal.error-on-warning (which must be true) and
+  rules raised to "error" (rules.<name> = "error"; "warn" or "ignore"
+  fails), and no ignore comment in a ty-gated file;
 - the typed list (the "!{...}" ANN entry of [tool.ruff.lint.per-file-ignores],
   whose functions must all be annotated) names only files of the ty gate, and
   no other entry ignores ANN (that would switch it off for the typed files).
@@ -151,6 +152,14 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
     names: set[str] = set()
     for table, value in ty.items():
         names |= {f"{table}.{key}" for key in value} if isinstance(value, dict) else {table}
+    rules = ty.get("rules", {})
+    for name, level in sorted(rules.items()) if isinstance(rules, dict) else ():
+        names.discard(f"rules.{name}")
+        if level != "error":
+            out.append(
+                f'[tool.ty] rules.{name} = {level!r}: a rule may only be raised to "error" here; '
+                "a lower level takes its diagnostics out of the gate"
+            )
     for name in sorted(names - TY_SETTINGS):
         out.append(
             f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take files or "
@@ -275,7 +284,6 @@ class PythonFilesTest(unittest.TestCase):
         for name, bad in (
             ("src.exclude", conf(src={"include": ["a.py"], "exclude": ["a.py"]})),
             ("overrides", conf(overrides=[{"include": ["a.py"], "rules": {"all": "ignore"}}])),
-            ("rules.invalid-assignment", conf(rules={"invalid-assignment": "ignore"})),
             ("analysis.allowed-unresolved-imports", conf(analysis={"allowed-unresolved-imports": ["x"]})),
         ):
             with self.subTest(name=name):
@@ -285,6 +293,19 @@ class PythonFilesTest(unittest.TestCase):
                         f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take "
                         "files or diagnostics out of ty's check; allow it in TY_SETTINGS of "
                         "tests/test_python_files.py only once it is known not to"
+                    ],
+                )
+        # A rule may be raised to "error", never lowered.
+        self.assertEqual(ty_setting_problems(conf(rules={"division-by-zero": "error"}), ["a.py"]), [])
+        for level in ("warn", "ignore", "info"):
+            with self.subTest(level=level):
+                self.assertEqual(
+                    ty_setting_problems(
+                        conf(rules={"division-by-zero": "error", "invalid-assignment": level}), ["a.py"]
+                    ),
+                    [
+                        f"[tool.ty] rules.invalid-assignment = {level!r}: a rule may only be raised to "
+                        '"error" here; a lower level takes its diagnostics out of the gate'
                     ],
                 )
         for terminal in ({"error-on-warning": False}, {}):

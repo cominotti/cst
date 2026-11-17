@@ -32,9 +32,9 @@ DEFAULTS = os.path.join(BT, "bluetooth.conf")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from bluetooth import adapters as bt_adapters, cli as bt_app, domain as bt_domain  # noqa: E402
-from bluetooth.adapters import LocalBluetoothHostAdapter  # noqa: E402
-from bluetooth.domain import classify_other_fragments  # noqa: E402
+from bluetooth import adapters as bt_adapters, cli as bt_app, domain as bt_domain
+from bluetooth.adapters import LocalBluetoothHostAdapter
+from bluetooth.domain import classify_other_fragments
 from tests.script_loader import load_script
 
 ISO = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"

@@ -30,7 +30,7 @@ import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 
-from cpu import adapters as cpu_adapters, cli as cpu_cli, domain as cpu_domain  # noqa: E402
+from cpu import adapters as cpu_adapters, cli as cpu_cli, domain as cpu_domain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU = os.path.dirname(HERE)

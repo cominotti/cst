@@ -27,6 +27,8 @@ class _PinInvowkModule(Protocol):
     parse_checksums: Callable[[str], dict[str, str]]
     case_line: Callable[[str, str, str, str], str]
 
+    def download(self, url: str, dest: Path, attempts: int = 3) -> None: ...
+
     def run(self, tag: str, skip_cosign: bool) -> list[str]: ...
 
 
@@ -51,6 +53,11 @@ class PinInvowkTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="pin-invowk-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_download_with_no_attempt_left_fails_with_pin_error(self) -> None:
+        # No attempt runs, so nothing is downloaded; the error names the URL.
+        with self.assertRaisesRegex(pin.PinError, "download failed"):
+            pin.download("https://example.invalid/x", self.tmp / "x", 0)
 
     def test_binary_sha256_reads_the_single_invowk(self) -> None:
         archive = self.tmp / "a.tar.gz"

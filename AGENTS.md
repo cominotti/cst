@@ -108,7 +108,7 @@ Run from the repository root.
 python3 -I -B tests/run_unit.py -v            # all unit tests, socket as stdin (what CI runs)
 python3 -B -m unittest vm.tests.test_vm -v    # one module; or vm.tests.test_vm.PartsTest.test_disks_nvram_tpm
 invowk cmd test lint                          # bash -n + shellcheck -S warning (falls back to the devbox toolbox)
-invowk cmd test pylint                        # ruff check + ruff format --check on every Python file (through uv)
+invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
 invowk validate cst.invowkmod && invowk audit cst.invowkmod
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in

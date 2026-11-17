@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
-import fcntl  # noqa: F401 - preimported environment check
+import fcntl
 import io
 import json
 import os
@@ -25,7 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time  # noqa: F401
+import time
 import types
 import unittest
 import zoneinfo

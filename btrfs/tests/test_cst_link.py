@@ -21,8 +21,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from btrfs.chrome_cache.domain import FLAG_DIR, FLAG_SIZE  # noqa: E402
-from btrfs.snapshot.domain import parse_policy, policy_max_kept  # noqa: E402
+from btrfs.chrome_cache.domain import FLAG_DIR, FLAG_SIZE
+from btrfs.snapshot.domain import parse_policy, policy_max_kept
 
 LIB = os.path.join(REPO, "cst-link.bash")
 CST = os.path.join(REPO, "cst")

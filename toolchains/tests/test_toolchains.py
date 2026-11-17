@@ -27,10 +27,10 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
-from cst_core.domain.errors import Refused, Usage  # noqa: E402
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
-from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load  # noqa: E402
+from cst_core.adapters.zipapp import build_python_zipapp
+from cst_core.domain.errors import Refused, Usage
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load
 
 TOOLCHAINS = os.path.dirname(TOOL)
 REPO = os.path.dirname(TOOLCHAINS)
