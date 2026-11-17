@@ -39,6 +39,7 @@ Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 - `test_04`: `~/Bulk`: the subvolume, the links, NOCOW, keep and unkeep.
 - `test_05`, `test_05a`: Docker-in-Docker, `builds.slice` and docker-gc; the Docker volumes NOCOW migration with a stub `docker.service`: postponed while it is active, with nothing touched; a copy-on-write volume rewritten with the same data, `+C` everywhere and no leftovers; still run when its unit and `docker.service` start in one transaction, as at boot, with the `ActiveState` the helper saw printed in the log.
 - `test_06`: cgroups v2 (the game profile's weights also after a `daemon-reload`, its `zz-cst-game.conf` drop-ins, and `uninstall` removing one left behind), Polkit, and `cpu-vm-pin`.
+- `test_07`: `cst btrfs install --no-below` on a machine a version named f44-tools set up: its alerts folder (an alert keeps its name and time; a newer copy already in the new folder wins), its reader and enabled global user unit, and below's drop-in move to the new names; the old folder is a link until the second install removes it; a third install writes nothing (every file `unchanged:`, the same files); `uninstall` leaves none of the old names.
 
 Both commands take `--keep_logs` (keep the journald/systemd logs in
 `tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).

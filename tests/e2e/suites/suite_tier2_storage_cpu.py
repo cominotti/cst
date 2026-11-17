@@ -968,3 +968,123 @@ EOF
             ! systemctl is-active -q cpu-game-watchdog.timer
             """,
         )
+
+    def test_07_btrfs_install_moves_the_f44_tools_names_and_a_rerun_changes_nothing(self) -> None:
+        """`cst btrfs install --no-below` on a machine that a version named
+        f44-tools set up: its alerts folder (an alert, and one the new folder
+        already holds a newer copy of), its reader and global user unit
+        (enabled) and below's drop-in move to the new names; the old folder
+        becomes a link that the second install removes; a third install writes
+        nothing (every file `unchanged:`, the same files before and after);
+        `uninstall` leaves none of the old names."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_07 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            old=/var/lib/f44-alerts
+            new=/var/lib/cst-alerts
+            old_unit=/etc/systemd/user/f44-pending-alerts.service
+            wants=/etc/systemd/user/graphical-session.target.wants/f44-pending-alerts.service
+            old_reader=/usr/local/bin/f44-pending-alerts
+            old_dropin=/etc/systemd/system/below.service.d/10-f44-tools.conf
+            new_dropin=/etc/systemd/system/below.service.d/10-cst.conf
+            alert=1700000000-e2e-old.alert
+            dup=1700000001-e2e-dup.alert
+            cleanup() {
+                systemctl --global disable f44-pending-alerts.service 2>/dev/null || true
+                rm -rf "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin"
+                rm -f "$new/pending/$alert" "$new/pending/$dup"
+            }
+            trap cleanup EXIT
+            show() { sed "s/^/test_07 $1: /" <<<"$2" >&2; }   # the CI log
+            gone() {
+                local f
+                for f in "$@"; do
+                    if [[ -e "$f" || -L "$f" ]]; then echo "still there: $f" >&2; return 1; fi
+                done
+            }
+            # What install and uninstall may change, one line per file or link.
+            files() {
+                find /etc/systemd/system /etc/systemd/user /etc/sysctl.d /etc/tmpfiles.d /usr/local/sbin \
+                    /usr/local/bin /home/tester/.local/bin \( -type f -o -type l \) \
+                    -printf '%p %m %U:%G %s %T@ %l\n' | sort
+            }
+
+            # A machine without CST's btrfs part (test_06 ends with an uninstall; this test does not rely on it).
+            cst btrfs uninstall >/dev/null
+            gone "$new_dropin" "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin"
+
+            # What a version named f44-tools left: its names (git history has no file of that version,
+            # so the unit is today's, renamed).
+            install -d -m 0755 "$old/pending" "$new/pending"
+            printf 'old alert\n' >"$old/pending/$alert"
+            touch -d '2026-01-02 03:04:05' "$old/pending/$alert"
+            printf 'stale copy\n' >"$old/pending/$dup"
+            printf 'newer copy\n' >"$new/pending/$dup"
+            sed 's/cst-pending-alerts/f44-pending-alerts/g; s|/var/lib/cst-alerts|/var/lib/f44-alerts|g' \
+                /opt/cst-rw/btrfs/units/user/cst-pending-alerts.service >"$old_unit"
+            systemctl --global enable f44-pending-alerts.service
+            [[ -L "$wants" ]]
+            printf '#!/bin/sh\nexit 0\n' >"$old_reader"
+            chmod 0755 "$old_reader"
+            install -d -m 0755 "$(dirname "$old_dropin")"
+            printf '[Service]\n# e2e: the drop-in of a version named f44-tools\n' >"$old_dropin"
+
+            # 1. The upgrade.
+            out="$(cst btrfs install --no-below 2>&1)" || { show "first install" "$out"; exit 1; }
+            show "first install" "$out"
+            grep -qxF "moved:     $old -> $new (alerts kept for the next login; the old name is a link until the next install)" \
+                <<<"$out"
+            [[ "$(cat "$new/pending/$alert")" == "old alert" ]]
+            [[ "$(stat -c %Y "$new/pending/$alert")" == "$(date -d '2026-01-02 03:04:05' +%s)" ]]
+            [[ "$(cat "$new/pending/$dup")" == "newer copy" ]]   # the new folder's copy wins
+            [[ -L "$old" && "$(readlink "$old")" == "$new" ]]
+            gone "$old_unit" "$wants" "$old_reader" "$old_dropin"
+            # --no-below: the old drop-in is renamed, not dropped.
+            grep -qxF '# e2e: the drop-in of a version named f44-tools' "$new_dropin"
+            [[ "$(systemctl --global is-enabled cst-pending-alerts.service)" == enabled ]]
+            systemctl is-active btrfs-stall-monitor.service
+
+            # 2. The second install removes the link left for an old btrfs-notify, and writes no file.
+            out="$(cst btrfs install --no-below 2>&1)" || { show "second install" "$out"; exit 1; }
+            show "second install" "$out"
+            grep -qxF "removed:   $old (link left by the previous install)" <<<"$out"
+            gone "$old"
+            if grep -E '^(written:|moved:|linked:)' <<<"$out"; then echo "the second install wrote a file" >&2; exit 1; fi
+
+            # 3. A third install changes nothing: every file unchanged, no link made or removed.
+            before="$(files)"
+            out="$(cst btrfs install --no-below 2>&1)" || { show "third install" "$out"; exit 1; }
+            show "third install" "$out"
+            if grep -E '^(written:|moved:|linked:|removed)|^Created symlink|^Removed ' <<<"$out"; then
+                echo "the third install changed something" >&2
+                exit 1
+            fi
+            for dest in /usr/local/sbin/btrfs-health-check /usr/local/sbin/btrfs-notify \
+                /usr/local/sbin/btrfs-stall-monitord /usr/local/bin/btrfs-stall-report \
+                /usr/local/sbin/docker-volumes-nocow /usr/local/bin/cst-pending-alerts \
+                /etc/systemd/system/btrfs-health-check.service /etc/systemd/system/btrfs-health-check.timer \
+                /etc/systemd/system/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.timer \
+                /etc/systemd/system/btrfs-stall-monitor.service /etc/systemd/system/btrfs-stall-alert.service \
+                /etc/systemd/system/docker-volumes-nocow.service /etc/systemd/user/cst-pending-alerts.service \
+                /etc/sysctl.d/90-btrfs-writeback.conf /etc/tmpfiles.d/btrfs-automatic-reclaim.conf \
+                /home/tester/.local/bin/btrfs-stall-report; do
+                grep -qxF "unchanged: $dest" <<<"$out" || { echo "no 'unchanged: $dest'" >&2; exit 1; }
+            done
+            after="$(files)"
+            if [[ "$after" != "$before" ]]; then
+                diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+                exit 1
+            fi
+
+            # 4. Undo: none of the old names, nor the drop-in they became.
+            cst btrfs uninstall >/dev/null
+            gone "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin" "$new_dropin" \
+                /etc/systemd/system/btrfs-stall-monitor.service /usr/local/sbin/btrfs-stall-monitord
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
