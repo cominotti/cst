@@ -118,7 +118,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 165,
     "doctor/cli.py": 35,
     "swap/cli.py": 112,
-    "toolchains/cli.py": 1910,
+    "toolchains/cli.py": 1897,
     "vm/cli.py": 1288,
 }
 

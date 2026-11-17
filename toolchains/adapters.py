@@ -55,6 +55,7 @@ from toolchains.domain import (
     RUST_TOOLS,
     SCAN_SKIP,
     SCCACHE_DIR_REL,
+    SCCACHE_STATS,
     STATE_DIR_REL,
     TOOL_FILE_DIRS,
     TOOL_FILE_MAX,
@@ -893,6 +894,13 @@ def rustup_default(home: str, rh: str) -> str:
         return ""
     words = r.stdout.split() if r.returncode == 0 else []
     return words[0] if words else ""
+
+
+def sccache_stats(exe: str, env: Mapping[str, str]) -> dict[str, str]:
+    """The fields of `EXE --show-stats` in ENV (stderr dropped, within 5 s);
+    {} when it did not run or failed. Output that is not UTF-8 raises."""
+    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout", decode_errors="strict")
+    return dict(SCCACHE_STATS.findall(r.stdout)) if r.cause is None and r.returncode == 0 else {}
 
 
 def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str], bool]:
