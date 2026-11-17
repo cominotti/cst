@@ -36,6 +36,7 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
+from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 
 sys.dont_write_bytecode = True
@@ -1721,10 +1722,7 @@ class NotUtf8OutputTest(unittest.TestCase):
     def test_run_and_virsh(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-vm-bytes-")
         self.addCleanup(shutil.rmtree, tmp)
-        stub = os.path.join(tmp, "virsh")
-        with open(stub, "w") as f:
-            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'shut \\xff off\\n')\n")
-        os.chmod(stub, 0o755)
+        bytes_program(tmp, "virsh", b"shut \xff off\n")
         printf = ["printf", "\\377abc"]
         self.assertEqual(vm_adapters.run(printf), (0, "\ufffdabc", ""))
         with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
@@ -1738,19 +1736,9 @@ class IndexDurableTest(unittest.TestCase):
         tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-index-"))
         self.addCleanup(shutil.rmtree, tmp)
         index = os.path.join(tmp, "lib-cst", "vm-backups.json")
-        synced: list[str] = []
-        real_fsync = os.fsync
-
-        def fsync(fd: int) -> None:
-            synced.append(os.readlink(f"/proc/self/fd/{fd}"))
-            real_fsync(fd)
-
-        with mock.patch.object(os, "fsync", fsync):
+        with recorded_fsyncs() as synced:
             vm_adapters.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
-        folder = os.path.dirname(index)
-        temps = [i for i, p in enumerate(synced) if p.startswith(os.path.join(folder, ".vm-backups.json."))]
-        self.assertEqual(len(temps), 1, synced)  # the new bytes, before the rename
-        self.assertIn(folder, synced[temps[0] + 1 :], synced)  # the rename's folder entry
+        assert_replaced_durably(self, index, synced)
         self.assertEqual(vm_adapters.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
 
 

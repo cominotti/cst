@@ -60,6 +60,7 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from cst_core.adapters import nocow as core_nocow
 from tests.package_view import PackageView
+from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
@@ -1840,20 +1841,9 @@ class PostponedDurableTest(PostponeBase):
         os.makedirs(os.path.join(self.proc, "sys/kernel/random"), exist_ok=True)
         with open(os.path.join(self.proc, "sys/kernel/random/boot_id"), "w") as f:
             f.write("b1\n")
-        synced: list[str] = []
-        real_fsync = os.fsync
-
-        def fsync(fd: int) -> None:
-            synced.append(os.readlink(f"/proc/self/fd/{fd}"))
-            real_fsync(fd)
-
-        with mock.patch.object(os, "fsync", fsync):
+        with recorded_fsyncs() as synced:
             self.call(nocow_cli.migrate)
-        folder = os.path.realpath(os.path.dirname(self.postponed))
-        prefix = os.path.join(folder, "." + os.path.basename(self.postponed) + ".")
-        temps = [i for i, p in enumerate(synced) if p.startswith(prefix)]
-        self.assertEqual(len(temps), 1, synced)
-        self.assertIn(folder, synced[temps[0] + 1 :], synced)
+        assert_replaced_durably(self, self.postponed, synced)
         self.assertTrue(os.path.exists(self.postponed))
 
 

@@ -31,6 +31,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
 from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from tests.probes import bytes_program
 from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load
 
 TOOLCHAINS = os.path.dirname(TOOL)
@@ -1349,11 +1350,7 @@ class NotUtf8OutputTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def stub(self, name: str, out: bytes) -> str:
-        path = os.path.join(self.tmp, name)
-        with open(path, "w") as f:
-            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write({out!r})\n")
-        os.chmod(path, 0o755)
-        return path
+        return bytes_program(self.tmp, name, out)
 
     def test_replaced(self) -> None:
         env = {"PATH": "/usr/bin:/bin"}

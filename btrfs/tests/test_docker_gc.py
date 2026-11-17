@@ -33,6 +33,7 @@ from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.docker_gc import cli as gc_cli
 from btrfs.docker_gc import domain as gc_domain
 from tests.package_view import PackageView
+from tests.probes import bytes_program
 
 sys.dont_write_bytecode = True
 
@@ -345,10 +346,7 @@ class NotUtf8OutputTest(unittest.TestCase):
     def test_replaced(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-gc-bytes-")
         self.addCleanup(shutil.rmtree, tmp)
-        stub = os.path.join(tmp, "docker")
-        with open(stub, "w") as f:
-            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'img\\xff\\n')\n")
-        os.chmod(stub, 0o755)
+        bytes_program(tmp, "docker", b"img\xff\n")
         with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
             self.assertEqual(gc_adapters.docker("image", "ls", "-q").stdout, "img\ufffd\n")
 

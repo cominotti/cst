@@ -58,6 +58,7 @@ from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
+from tests.probes import bytes_program
 from vm import adapters as vm_adapters
 
 
@@ -2388,8 +2389,7 @@ class NotUtf8OutputTest(Scratch):
     """Host.run and Host.virsh: bytes that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
 
     def test_run_and_virsh(self) -> None:
-        with open(os.path.join(self.bin, "virsh"), "w") as f:
-            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'win\\xff\\n')\n")
+        bytes_program(self.bin, "virsh", b"win\xff\n")
         host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="0"))
         self.assertEqual(host.run(["printf", "\\377abc"]), (0, "\ufffdabc", ""))
         self.assertEqual(host.virsh(read_only=True).domains(), ["win\ufffd"])

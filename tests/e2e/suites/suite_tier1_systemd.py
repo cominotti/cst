@@ -1859,14 +1859,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             trap 'echo "test_35 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             U=/etc/systemd/system
             stamp=/var/lib/systemd/timers/stamp-e2e-dt.timer
-            printf '%s
-' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' \
+            printf '%s\n' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' \
                 >"$U/e2e-dt.service"
-            printf '%s
-' '[Unit]' 'Description=e2e disable_timers' '[Timer]' 'OnCalendar=yearly' 'Persistent=true' \
+            printf '%s\n' '[Unit]' 'Description=e2e disable_timers' '[Timer]' 'OnCalendar=yearly' 'Persistent=true' \
                 '[Install]' 'WantedBy=timers.target' >"$U/e2e-dt.timer"
-            printf '%s
-' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'ExecStart=/bin/sleep infinity' \
+            printf '%s\n' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'ExecStart=/bin/sleep infinity' \
                 '[Install]' 'WantedBy=multi-user.target' >"$U/e2e-dt-other.service"
             systemctl daemon-reload
             systemctl enable --now e2e-dt.timer e2e-dt-other.service
