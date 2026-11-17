@@ -765,7 +765,13 @@ def live_scrub_limits(host: DoctorHostPort) -> str:
 @check("btrfs")
 def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
     """The weekly scrub's speed limit: SCRUB_LIMIT, the service's drop-in, sysfs now."""
-    setting, problem = scrub_limit_setting(parse_shell_assignments(read_text(host, host.path(SNAP_CONF), 65536)))
+    # The whole file with its line ends, as bash reads it ("\r" is part of a value there).
+    try:
+        with host.open_bytes(host.path(SNAP_CONF)) as f:
+            conf = f.read().decode("utf-8", "replace")
+    except OSError:
+        conf = ""
+    setting, problem = scrub_limit_setting(parse_shell_assignments(conf))
     if problem:
         yield Result(
             WARN,

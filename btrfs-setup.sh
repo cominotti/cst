@@ -330,6 +330,7 @@ SCRUB_LINE_RE="^SCRUB_LIMIT=('([^']*)'|\"([^\"\$\`\\]*)\"|([^[:space:]'\"\$\`\\;
 scrub_limit_setting() {
     local conf="${1:-${BTRFS_CONF}}" line rest value="" n=0
     [[ -e "${conf}" ]] || return 0
+    [[ -f "${conf}" && -r "${conf}" ]] || { echo "${conf}: cannot read it" >&2; return 1; }
     while IFS= read -r line || [[ -n "${line}" ]]; do
         n=$((n + 1))
         rest="${line#"${line%%[![:blank:]]*}"}"
@@ -731,6 +732,7 @@ docker_gc() {
                 --purge) purge=1 ;;
                 *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
             esac
+            (( $# <= 1 )) || { echo "docker-gc disable: unknown argument '${2}' (only --purge)" >&2; exit 2; }
             # While the unit files are still there: clean needs the timer loaded.
             disable_timers "${DOCKER_GC_UNITS[@]}"
             if (( ! purge )); then

@@ -22,9 +22,11 @@ from cst_core.ports import CommandResult, CommandRunnerPort
 STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")  # override: tests
 LAST_USED = os.path.join(STATE_DIR, "last-used.json")
 LAST_RUN = os.path.join(STATE_DIR, "last-run.json")
-# In the state folder: the one place the sandboxed units may write (StateDirectory=), and
-# shared with runs outside them (cleanup-now, run --dry-run).
-LOCK = os.path.join(STATE_DIR, "run.lock")
+# In docker-gc.service's RuntimeDirectory= (kept after the run): with the state folder, the
+# places the sandboxed unit may write. Shared with runs outside it (cleanup-now,
+# run --dry-run), which make the folder; a tmpfs, so they leave no file in the state folder.
+RUN_DIR = os.environ.get("DOCKER_GC_RUNTIME", "/run/docker-gc")  # override: tests
+LOCK = os.path.join(RUN_DIR, "run.lock")
 KEEP_CONTAINER_DAYS = int(os.environ.get("KEEP_CONTAINER_DAYS", 7))
 KEEP_IMAGE_DAYS = int(os.environ.get("KEEP_IMAGE_DAYS", 14))
 KEEP_BUILD_CACHE_DAYS = int(os.environ.get("KEEP_BUILD_CACHE_DAYS", 14))

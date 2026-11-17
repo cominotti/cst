@@ -1465,19 +1465,23 @@ list). It needs a terminal.
 - `docker-gc.service`, `docker-gc.timer` and `docker-gc-recorder.service` in
   `/etc/systemd/system`;
 - its state in `/var/lib/docker-gc`: `last-used.json` (the recorder's
-  record), `last-run.json` and `run.lock` (one run at a time, shared by the
-  weekly run, `run` and `cleanup-now`).
+  record) and `last-run.json`;
+- the run lock `/run/docker-gc/run.lock` (one run at a time, shared by the
+  weekly run, `run` and `cleanup-now`; in RAM, gone at the next boot, so
+  `run --dry-run` and `cleanup-now` add nothing to `/var/lib/docker-gc`).
 
 Both services run sandboxed: no capabilities, the whole file system read-only
 except `/var/lib/docker-gc` (`ProtectSystem=strict` with
-`StateDirectory=docker-gc`), `/root` read-only (the docker CLI reads its
+`StateDirectory=docker-gc`) and, for the weekly run, `/run/docker-gc`
+(`RuntimeDirectory=docker-gc`, kept after the run so that a `cleanup-now`
+holding the lock keeps its file), `/root` read-only (the docker CLI reads its
 settings there), only Unix sockets (`/run/docker.sock`, systemd), and the
 usual kernel and system-call limits. `docker builder prune` runs the buildx
 plugin, which keeps its state in `~/.docker/buildx`: the weekly run points it
 to `/var/lib/docker-gc/buildx` instead (`BUILDX_CONFIG`), so it uses the
 default builder (the Docker daemon's own build cache) even if root picked
 another one with `docker buildx use`. As root they still own
-`/run/docker.sock` and `/var/lib/docker-gc`, so they need no capability.
+`/run/docker.sock`, `/var/lib/docker-gc` and `/run/docker-gc`, so they need no capability.
 `systemd-analyze security docker-gc-recorder.service` rates them about 2.1
 (it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
 until `enable` installs the new program, an old installed copy and
@@ -1986,7 +1990,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`; no I/O. `adapters.py`: the `Host` (commands, clock, directory entries; tests replace it), the btrfs commands, the scan of the snapshot folder, the cache-folder walk, the local time zone, and the safeguards (they resolve pinned paths on the filesystem). `cli.py`: one `Run` per invocation, the run lock, the argument parser and `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain.py`: the items (`Item`, `ITEMS`), the CACHEDIR.TAG text, sizes and texts, and Steam's file formats (VDF, `libraryfolders.vdf`, app manifests); no I/O. `adapters.py`: settings and state paths, btrfs and the filesystem (subvolumes, +C, mounts, busy files, copies), the child process that runs as the user (`Ctx`, `as_user`) and the steps it runs (`u_*`), the journals, the boot flag, the keep list, the run lock, and where `btrfs-snapshot` is (`snapshot_program()`: the checkout's copy from a checkout, the installed one from the zipapp). `steam.py`: one game's move into `~/Bulk/steam` with its journal and recovery. `items.py`: each item's state, its move and link, recovery, `apply`, the plan/status report. `cli.py`: `steam plan/apply`, `keep/unkeep`, `boot`, `main()`. |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the one line of `plan` (`plan_line`). `cli.py`: `status`, `apply`, `off` and `main()`. |
-| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines, the run lock (cst_core's `log` and `take_lock`) and the last checks before an image is removed (`remove_image`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
+| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines, the run lock (cst_core's `log` and `take_lock`) and the last checks before an image is removed (`remove_image`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | No rule of its own without I/O, so no `domain.py`. `adapters.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`), their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the postponed record, SELinux labels, the journal lines. `cli.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark`, `status` and `main()`. |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and keys, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`), the episode being recorded (`Episode`); no I/O. `adapters.py`: reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines and the `Writer` thread of the log files. `monitor.py`: the sampling loop (`Monitor`: probes, samples, episodes, hung and busy tasks, the kernel log, alerts). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain.py`: the record formats, the wait categories and hints, classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift), the open episode, the verdict lines and number formats; no I/O. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, below and the container names. `analysis.py`: `analyse()`, one window's coverage, totals, categories, episodes and events (it reads the clock, and runs below when asked). `cli.py`: the text report, the arguments and `main()`. |

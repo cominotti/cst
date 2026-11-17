@@ -14,7 +14,7 @@ RestartSec=10
 Nice=10
 # Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so
 # no capability), `systemctl is-active` and writes in /var/lib/docker-gc (its
-# state and the run lock), the one writable place (StateDirectory=).
+# state), the one writable place (StateDirectory=). It takes no run lock.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict

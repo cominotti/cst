@@ -36,7 +36,7 @@ from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
-from doctor.domain import scrub_limit_setting
+from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 
 # The log says, for each clean, whether the unit file was still there.
 STUBS = """
@@ -237,11 +237,13 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertNotIn(f"rm -rf {state}", self.calls())
 
     def test_docker_gc_disable_refuses_an_unknown_argument(self) -> None:
-        body = "\n".join([*self.docker_gc_body(), "(docker_gc disable --all) && exit 9 || echo rc=$?"])
-        r = self.run_bash(body)
-        self.assertIn("rc=2", r.stdout)
-        self.assertIn("only --purge", r.stderr)
-        self.assertEqual(self.calls(), [])
+        for args in ("--all", "--purge --dry-run"):
+            with self.subTest(args=args):
+                body = "\n".join([*self.docker_gc_body(), f"(docker_gc disable {args}) && exit 9 || echo rc=$?"])
+                r = self.run_bash(body)
+                self.assertIn("rc=2", r.stdout)
+                self.assertIn("only --purge", r.stderr)
+                self.assertEqual(self.calls(), [])
 
     def docker_gc_status(self, enabled: str, rc: int) -> str:
         # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
@@ -647,15 +649,20 @@ function /usr/local/sbin/btrfs-snapshot { echo "btrfs-snapshot $*"; }
         self.assertNotIn("older CST", r.stdout)
 
 
+def service_lines(unit: str) -> list[str]:
+    """The [Service] lines of btrfs/units/UNIT as shipped, without blanks and comments."""
+    with open(os.path.join(BTRFS, "units", unit)) as f:
+        text = f.read()
+    m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    assert m is not None, text
+    return [ln for ln in m.group(1).splitlines() if ln and not ln.startswith("#")]
+
+
 class StallMonitorUnitTest(unittest.TestCase):
     """btrfs/units/btrfs-stall-monitor.service as shipped."""
 
     def service_lines(self) -> list[str]:
-        with open(os.path.join(BTRFS, "units", "btrfs-stall-monitor.service")) as f:
-            text = f.read()
-        m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
-        assert m is not None, text
-        return [ln for ln in m.group(1).splitlines() if ln and not ln.startswith("#")]
+        return service_lines("btrfs-stall-monitor.service")
 
     def test_journal_lines_carry_the_daemon_name(self) -> None:
         # Not python3, the program systemd starts.
@@ -677,16 +684,19 @@ class DockerGcUnitsTest(unittest.TestCase):
     UNITS = ("docker-gc-recorder.service", "docker-gc.service")
 
     def service(self, name: str) -> dict[str, list[str]]:
-        with open(os.path.join(BTRFS, "units", name)) as f:
-            text = f.read()
-        m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
-        assert m is not None, text
         keys: dict[str, list[str]] = {}
-        for ln in m.group(1).splitlines():
-            if ln and not ln.startswith("#"):
-                k, _, v = ln.partition("=")
-                keys.setdefault(k, []).append(v)
+        for ln in service_lines(name):
+            k, _, v = ln.partition("=")
+            keys.setdefault(k, []).append(v)
         return keys
+
+    def test_both_have_the_same_sandbox(self) -> None:
+        # The block is written out in each unit (systemd has no include): a setting added to
+        # one only shows here. What differs is the job, and the weekly run's lock folder.
+        own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "Nice", "IOSchedulingClass"}
+        own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
+        recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
+        self.assertEqual(recorder, weekly)
 
     def test_both_run_sandboxed_with_no_capability(self) -> None:
         for name in self.UNITS:
@@ -710,17 +720,23 @@ class DockerGcUnitsTest(unittest.TestCase):
             self.service("docker-gc.service").get("Environment"), ["BUILDX_CONFIG=/var/lib/docker-gc/buildx"]
         )
 
-    def test_the_paths_docker_gc_writes_are_the_units_state_directory(self) -> None:
+    def test_the_paths_docker_gc_writes_are_the_units_state_and_runtime_directories(self) -> None:
         for name in self.UNITS:
             with self.subTest(unit=name):
                 s = self.service(name)
                 self.assertEqual(s.get("StateDirectory"), ["docker-gc"])
                 self.assertNotIn("ReadWritePaths", s)
-        state = "/var/lib/docker-gc"
         if os.environ.get("DOCKER_GC_STATE") is None:
-            self.assertEqual(gc_adapters.STATE_DIR, state)
-        for path in (gc_adapters.LOCK, gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
+            self.assertEqual(gc_adapters.STATE_DIR, "/var/lib/docker-gc")
+        for path in (gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
             self.assertEqual(os.path.dirname(path), gc_adapters.STATE_DIR, path)
+        # The run lock: only the weekly run takes it (the recorder does not). Kept after the run
+        # (Preserve=), so a cleanup-now that holds it then does not lose its file.
+        if os.environ.get("DOCKER_GC_RUNTIME") is None:
+            self.assertEqual(gc_adapters.LOCK, "/run/docker-gc/run.lock")
+        gc = self.service("docker-gc.service")
+        self.assertEqual((gc.get("RuntimeDirectory"), gc.get("RuntimeDirectoryPreserve")), (["docker-gc"], ["yes"]))
+        self.assertNotIn("RuntimeDirectory", self.service("docker-gc-recorder.service"))
 
 
 SCRUB_CASES: list[tuple[str, str | None]] = [
@@ -848,6 +864,23 @@ class ScrubLimitTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
         r = self.bash('install_scrub_limit ""')
         self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file whatever its mode")
+    def test_an_unreadable_settings_file_is_refused_not_read_as_no_limit(self) -> None:
+        # Read as "no limit", install would remove a drop-in that the setting asks for.
+        self.write_conf("SCRUB_LIMIT=1G\n")
+        os.chmod(self.conf, 0)
+        r = self.bash('scrub_limit_setting && echo "rc=0"')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("rc=0", r.stdout)
+        self.assertIn(f"{self.conf}: cannot read it", r.stderr)
+
+    def test_doctor_reads_the_limit_back_from_the_drop_in_bash_writes(self) -> None:
+        for limit in ("1G", "500m", "750K"):
+            with self.subTest(limit=limit):
+                r = self.bash(f"scrub_limit_dropin {limit}")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(scrub_dropin_limit(r.stdout), limit)
 
     def test_no_setting_writes_no_drop_in(self) -> None:
         r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')

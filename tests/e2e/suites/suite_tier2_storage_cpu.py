@@ -1498,6 +1498,10 @@ EOF
             for f in "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp" /var/lib/docker-gc; do
                 if [[ -e "$f" ]]; then echo "purge left $f" >&2; exit 1; fi
             done
+            # A dry run after the purge adds nothing to the state folder (the lock is in /run/docker-gc).
+            out="$(cst btrfs docker-gc run --dry-run 2>&1)" || { show "dry run after purge" "$out"; exit 1; }
+            grep -qF '(dry run: nothing removed)' <<<"$out"
+            if [[ -e /var/lib/docker-gc ]]; then echo "the dry run made /var/lib/docker-gc" >&2; exit 1; fi
             for u in "${units[@]}"; do
                 [[ "$(systemctl show -P LoadState "$u")" == not-found ]]
                 [[ "$(systemctl is-active "$u" 2>/dev/null || true)" != active ]]
@@ -1856,7 +1860,8 @@ echo E2E-OK
         image use it saw in `docker events` (an image imported offline, then
         tagged) to last-used.json; `cst btrfs docker-gc run` starts
         docker-gc.service, which ends in success, takes its lock in
-        /var/lib/docker-gc and writes last-run.json with no failed step
+        /run/docker-gc (its RuntimeDirectory, kept after the run) and writes
+        last-run.json with no failed step
         (the build-cache prune runs buildx, whose state is in
         /var/lib/docker-gc/buildx). A runner booted less than
         10 minutes ago would make the run skip itself (MIN_UPTIME): then, and
@@ -1892,6 +1897,8 @@ echo E2E-OK
                 [[ "$(systemctl show -P CapabilityBoundingSet "$u")" == "" ]]
                 [[ "$(systemctl show -P StateDirectory "$u")" == docker-gc ]]
             done
+            [[ "$(systemctl show -P RuntimeDirectory docker-gc.service)" == docker-gc ]]
+            [[ "$(systemctl show -P RuntimeDirectory docker-gc-recorder.service)" == "" ]]
             for _ in $(seq 1 30); do
                 [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] && break
                 sleep 1
@@ -1936,7 +1943,8 @@ echo E2E-OK
             # Every step worked under the sandbox: a failed removal or build-cache prune is only counted.
             python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(d["failed"] != 0)' \
                 "$state/last-run.json" || { cat "$state/last-run.json" >&2; journal docker-gc.service; exit 1; }
-            test -f "$state/run.lock"
+            test -f /run/docker-gc/run.lock
+            test ! -e "$state/run.lock"
             test ! -e /run/docker-gc.lock
             echo E2E-OK
             """,

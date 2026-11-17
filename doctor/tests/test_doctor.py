@@ -677,6 +677,18 @@ class BtrfsTest(Scratch):
             out,
         )
 
+    def test_a_scrub_limit_line_ending_in_cr_warns_as_install_refuses_it(self) -> None:
+        # Line ends kept, as bash reads them: the CR is part of the value, which install refuses.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        self.assertIn("WARN   /etc/btrfs-setup/snapshots.conf line 1: SCRUB_LIMIT=1G", out)
+        self.assertIn("`cst btrfs install` refuses to run until it is fixed", out)
+
+    def test_a_bad_scrub_limit_line_has_the_files_own_line_number(self) -> None:
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\n")
+        scrub = [ln for ln in out.splitlines() if "`cst btrfs install` refuses to run until it is fixed" in ln]
+        self.assertEqual(len(scrub), 1, out)
+        self.assertIn("snapshots.conf line 3: SCRUB_LIMIT=$X", scrub[0])
+
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
         self.assertIn(
