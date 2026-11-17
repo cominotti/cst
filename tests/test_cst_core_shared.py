@@ -602,14 +602,9 @@ STRICT_TABLE: tuple[tuple[str, str | None], ...] = (
 )
 
 
-class _Container:
-    """ContainerProbePort double: inside a container or not."""
-
-    def __init__(self, *, inside: bool) -> None:
-        self.inside = inside
-
-    def is_container(self) -> bool:
-        return self.inside
+def _container(*, inside: bool) -> core_adapters.HostExecutionContext:
+    """A HostExecutionContext that sees a container, or not."""
+    return core_adapters.HostExecutionContext(exists=lambda _path: inside)
 
 
 class _Recorder:
@@ -644,7 +639,7 @@ class CommandRunnerTest(unittest.TestCase):
         # Only the arguments an option sets: a caller's test double that takes
         # a fixed set of arguments keeps working when the caller moves here.
         argv, kw = self.recorded(
-            core_adapters.SubprocessCommandRunner(_Container(inside=False)), lambda r: r.run(["cmd", "arg"])
+            core_adapters.SubprocessCommandRunner(_container(inside=False)), lambda r: r.run(["cmd", "arg"])
         )
         self.assertEqual(argv, ["cmd", "arg"])
         want: dict[str, object] = {
@@ -703,6 +698,16 @@ class CommandRunnerTest(unittest.TestCase):
         _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"]))
         self.assertNotIn("env", kw, "no option: the command inherits our environment")
 
+    def test_a_missing_cwd_is_a_command_that_could_not_start(self) -> None:
+        # subprocess raises FileNotFoundError naming the folder: the program was found.
+        tmp = tempfile.mkdtemp(prefix="cst-runner-")
+        self.addCleanup(shutil.rmtree, tmp)
+        gone = os.path.join(tmp, "gone")
+        r = core_adapters.SubprocessCommandRunner().run([self.py, "-c", "pass"], cwd=gone)
+        self.assertEqual((r.returncode, r.fault), (126, "unstartable"))
+        self.assertIsInstance(r.cause, FileNotFoundError)
+        self.assertIn(gone, r.stderr)
+
     def test_cwd_new_session_and_nice(self) -> None:
         runner = core_adapters.SubprocessCommandRunner()
         tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-runner-"))
@@ -744,7 +749,7 @@ class CommandRunnerTest(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="cst-runner-")
         self.addCleanup(shutil.rmtree, tmp)
         missing = os.path.join(tmp, "nope")
-        inside = core_adapters.SubprocessCommandRunner(_Container(inside=True), words=words)
+        inside = core_adapters.SubprocessCommandRunner(_container(inside=True), words=words)
         rec = _Recorder()
         rec_fault: list[str] = []
 
@@ -761,7 +766,7 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(
             (r.returncode, r.stderr, r.fault, r.argv[0]), (127, f"{missing}: missing", "missing", "flatpak-spawn")
         )
-        runner = core_adapters.SubprocessCommandRunner(_Container(inside=False), words=words)
+        runner = core_adapters.SubprocessCommandRunner(_container(inside=False), words=words)
         with self.assertRaises(core_ports.CommandFailed) as stop:
             runner.run([missing], check=True)
         self.assertEqual((stop.exception.returncode, stop.exception.stderr), (127, f"{missing}: missing"))
@@ -780,8 +785,8 @@ class CommandRunnerTest(unittest.TestCase):
             self.assertEqual(core_adapters.SubprocessCommandRunner().run(show).stdout, "process None\n")
 
     def test_on_host_wraps_only_inside_a_container(self) -> None:
-        inside = core_adapters.SubprocessCommandRunner(_Container(inside=True))
-        outside = core_adapters.SubprocessCommandRunner(_Container(inside=False))
+        inside = core_adapters.SubprocessCommandRunner(_container(inside=True))
+        outside = core_adapters.SubprocessCommandRunner(_container(inside=False))
         argv, kw = self.recorded(inside, lambda r: r.run(["cmd", "arg"], on_host=True, locale_c=True, env={"K": "v"}))
         # The host command does not get flatpak-spawn's environment: the settings go in --env.
         self.assertEqual(argv, ["flatpak-spawn", "--host", "--env=LC_ALL=C", "--env=K=v", "cmd", "arg"])
@@ -844,9 +849,14 @@ class VirshAdapterTest(unittest.TestCase):
         self.assertEqual(virsh.domains(), ["a", "b"])
         self.assertIsNone(virsh.dumpxml("x", inactive=True))
 
+    def test_a_ctx_with_a_runner_is_refused(self) -> None:
+        # The runner decides on_host; a ctx next to it would be ignored.
+        with self.assertRaises(ValueError):
+            core_adapters.SubprocessVirshAdapter(runner=_RecordingRunner(), ctx=_container(inside=True))
+
     def test_in_a_container_virsh_runs_on_the_host_in_the_c_locale(self) -> None:
         rec = _Recorder()
-        virsh = core_adapters.SubprocessVirshAdapter(ctx=_Container(inside=True))
+        virsh = core_adapters.SubprocessVirshAdapter(ctx=_container(inside=True))
         with mock.patch.object(subprocess, "run", rec):
             virsh.call("domstate", "vm1")
         self.assertEqual(

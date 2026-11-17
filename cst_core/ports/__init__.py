@@ -9,8 +9,8 @@ from cst_core.domain.install import OnDisk
 
 
 # Why a command did not run to its end: not found (exit status 127), found
-# but could not start (126: no permission, not an executable), or stopped at
-# its timeout (124).
+# but could not start (126: no permission, not an executable, its cwd
+# folder missing), or stopped at its timeout (124).
 type CommandFault = Literal["missing", "unstartable", "timeout"]
 
 # The command's stdin: /dev/null (nothing of ours leaks into it), or ours.
@@ -88,7 +88,11 @@ class CommandRunnerPort(Protocol):
     - new_session: the command runs in a session of its own (a Ctrl-C or a
       closed terminal does not reach it);
     - on_host: inside a container, run it on the host (flatpak-spawn --host,
-      with env and locale_c passed as --env); on the host, as is;
+      with env and locale_c passed as --env); on the host, as is. The --env
+      values are on flatpak-spawn's command line (ps shows them): no secrets
+      there. base_env, timeout, nice and new_session then act on the local
+      flatpak-spawn process, not on the host command (a timeout stops
+      flatpak-spawn; the host command may run on);
     - stdin, output, decode_errors: see StdinMode, OutputMode, DecodeErrors;
     - nice: added to the command's niceness before it starts.
     """

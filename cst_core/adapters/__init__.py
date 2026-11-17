@@ -198,7 +198,11 @@ class SubprocessCommandRunner:
         try:
             proc = subprocess.run(cmd, check=False, **kw)
         except FileNotFoundError as exc:
-            return _fault_result(cmd, "missing", exc)
+            # The cwd folder is missing (subprocess names it): the program may exist, it could not start there.
+            fault: CommandFault = (
+                "unstartable" if exc.filename is not None and exc.filename == kw.get("cwd") else "missing"
+            )
+            return _fault_result(cmd, fault, exc)
         except subprocess.TimeoutExpired as exc:
             msg = f"timed out after {timeout}s" if timeout is not None else "command timed out"
             return _fault_result(cmd, "timeout", exc, _decode_stream(exc.stdout), _decode_stream(exc.stderr) or msg)
@@ -296,7 +300,8 @@ class SubprocessVirshAdapter:
     on_host: inside a container, virsh runs on the host (flatpak-spawn --host);
     read_only: -r, for the queries libvirt answers on a read-only connection;
     decode_errors: what the runner does with output that is not UTF-8.
-    ctx only builds the default runner (the runner decides on_host).
+    ctx only builds the default runner (the runner decides on_host): a ctx
+    next to a runner is refused, since it would be ignored.
     """
 
     def __init__(
@@ -309,6 +314,8 @@ class SubprocessVirshAdapter:
         read_only: bool = False,
         decode_errors: DecodeErrors = "replace",
     ) -> None:
+        if runner is not None and ctx is not None:
+            raise ValueError("SubprocessVirshAdapter: ctx only builds the default runner; give the runner its ctx")
         self._uri = uri
         self._runner = SubprocessCommandRunner(ctx) if runner is None else runner
         self._on_host = on_host
