@@ -7,8 +7,10 @@ points, the package layout and the static gates. The rules for changing the code
 
 ## `cst` only dispatches
 
-`cst` delegates to `cst_core/cli.py`
-(`CstDispatcher`, backed by `cst_core/domain/dispatch.py` and `CstDispatchPort`).
+`cst` delegates to `cst_core/cli.py`, which only wires: the use case is
+`CstDispatcher` (`cst_core/application/dispatch.py`), over `cst_core/domain/dispatch.py`
+and `CstDispatchPort`, implemented by `cst_core/adapters/dispatch.py` (which also
+answers `which` and `realpath`).
 
 - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
 - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives only in `cst_core/domain/dispatch.py`; `cst` itself is a short bash wrapper that runs `cst_core/cli.py`.

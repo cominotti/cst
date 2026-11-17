@@ -221,6 +221,14 @@ class CstDispatchPort(Protocol):
 
     def user_passwd(self, user: str) -> tuple[int, str]: ...
 
+    def which(self, name: str, path: str | None) -> str | None:
+        """Where PATH (path; None: the default) finds the program name, or None."""
+        ...
+
+    def realpath(self, path: str) -> str:
+        """path with every link resolved."""
+        ...
+
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         """Run argv in the foreground (bash's semantics for signals); its exit status."""
         ...
