@@ -22,6 +22,7 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1809,6 +1810,27 @@ class VmHardwareTest(VmTest):
 
 
 class CommandLineTest(Scratch):
+    def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
+        # pr-a preexisting #12: `cst doctor | head -1` ended in "Exception ignored ... BrokenPipeError"
+        # (exit 120). The doctor only reads: it now ends on SIGPIPE, silently (its help too).
+        for args in ([], ["help"]):
+            with self.subTest(args=args):
+                r, w = os.pipe()
+                os.close(r)
+                try:
+                    p = subprocess.run(
+                        ["python3", "-I", TOOL, *args],
+                        check=False,
+                        env=self.env,
+                        stdout=w,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        timeout=60,
+                    )
+                finally:
+                    os.close(w)
+                self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
     def test_usage_and_help(self) -> None:
         r = self.run_tool("--bogus")
         self.assertEqual(r.returncode, 2)

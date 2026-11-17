@@ -542,6 +542,7 @@ class BulkTest(BulkBase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 0)  # no flag: nothing to do
 
+    @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
     def test_root_reads_bulk_user_with_the_one_settings_reader(self) -> None:
         # PRIM-01: a hand-rolled reader took "BULK_USER=" lines only, quotes stripped by hand; a
         # value bash would expand ended in a KeyError traceback from pwd as root.

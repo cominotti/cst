@@ -1075,6 +1075,11 @@ class TimerTest(Nas):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn(f"{cpu} line 1: VM_NAME=$HOSTNAME: $", r.stderr)
         self.assertEqual(self.calls(), [])
+        # The way back is never blocked: off reads no setting; it prints the lines and turns the timer off.
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
+        self.assertIn("Off: cst-vm-backup@win.timer", r.stdout)
 
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:

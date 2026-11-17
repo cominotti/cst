@@ -51,7 +51,6 @@ from vm.adapters import (
     VmLock,
     blklist,
     booted_deployment,
-    check_conf,
     conf_number,
     confirm,
     cpu_disable_list,
@@ -71,6 +70,7 @@ from vm.adapters import (
     notify,
     on_signal,
     package_versions,
+    prepare_command,
     precreate_nocow,
     probe_dir,
     qcow2_backing_file,
@@ -1455,9 +1455,9 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         print(doc)
         return 0
     try:
+        prepare_command(cmd, a["sub"], a["nas"])
         if cmd == "list":
             return cmd_list(vm)
-        check_conf(cmd, a["sub"], a["nas"])
         if cmd == "nocow":
             return cmd_nocow_plan(a["root"]) if a["sub"] == "plan" else cmd_nocow_apply()
         vm = vm or default_vm()
@@ -1467,8 +1467,8 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
             return cmd_tune(vm, a["sub"] == "apply", a["guest_virtio"])
         if cmd == "backup-timer":
             return cmd_timer(a["sub"], vm, entry_file)
+        safe_output()  # a closed terminal or pipe never cuts a backup or its cleanup short
         if a["nas"]:
-            safe_output()
             return cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
         return cmd_backup(vm, a["full"])
     except (Refused, Stop) as e:

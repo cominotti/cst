@@ -10,7 +10,7 @@ import os
 import sys
 from typing import TextIO
 
-from cst_core.adapters.runtime import checkout_root
+from cst_core.adapters.runtime import checkout_root, restore_default_signals
 from doctor import application as app
 from doctor.adapters import Host, VmTools
 from cst_core.domain.errors import Usage
@@ -28,10 +28,8 @@ def wired_checks(vm: VmToolsPort) -> list[tuple[str, CheckFn]]:
     def check_vm_image_dirs(host: DoctorHostPort) -> Iterator[Result]:
         return app.check_vm_image_dirs(host, vm_tools=vm)
 
-    wired: dict[CheckFn, CheckFn] = {
-        app.check_vm_hardware: check_vm_hardware,
-        app.check_vm_image_dirs: check_vm_image_dirs,
-    }
+    wired: dict[CheckFn, CheckFn] = {app.check_vm_hardware: check_vm_hardware}
+    wired[app.check_vm_image_dirs] = check_vm_image_dirs
     return [(area, wired.get(fn, fn)) for area, fn in app.CHECKS]
 
 
@@ -47,6 +45,7 @@ def main(
     env = os.environ if env is None else env
     stdout = sys.stdout if out is None else out
     prog = env.get("CST_PROG") or NAME
+    restore_default_signals()  # read-only, help too: `cst doctor | head` ends quietly (pr-a preexisting #12)
     try:
         cmd, brief = parse_args(argv)
     except Usage as e:

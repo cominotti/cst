@@ -9,7 +9,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import pwd
 import re
 import shutil
 import stat
@@ -38,6 +37,7 @@ from toolchains.adapters import (
     find_manifests,
     find_worktrees,
     in_container,
+    output_mode,
     manager_path,
     measure,
     metadata_env,
@@ -49,6 +49,7 @@ from toolchains.adapters import (
     release,
     remove_tree,
     resolve_root,
+    run_context,
     run_idle,
     rustup_default,
     rustup_home,
@@ -2173,6 +2174,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
+    output_mode(a["cmd"], a["action"])
     if a["cmd"] == "help":
         print(doc)
         return 0
@@ -2189,8 +2191,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         except OSError as e:
             print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)
             return 1
-    home = os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if a["home"] is None else a["home"])
-    now = float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time())  # override: tests
+    home, now = run_context(a["home"])
     cmd, action = a["cmd"], a["action"]
     try:
         if cmd == "status":

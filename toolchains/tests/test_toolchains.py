@@ -17,6 +17,7 @@ import fcntl
 import io
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1128,6 +1129,43 @@ class ParseSizeTest(unittest.TestCase):
         for text in ("150", "1x", "", "G"):
             with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
                 tc_domain.parse_size(text)
+
+
+class ClosedPipeTest(Scratch):
+    def test_status_and_plans_stop_quietly_on_a_closed_pipe(self) -> None:
+        # pr-a preexisting #12: `cst toolchains status | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). The read-only commands now end on SIGPIPE, silently.
+        # Only what needs no fake of this process (the subprocess sees none): help and the brief status.
+        env = {**self.env, "PATH": "/usr/bin:/bin"}
+        for args in (("help",), ("status", "--brief")):
+            with self.subTest(args=args):
+                r, w = os.pipe()
+                os.close(r)
+                try:
+                    p = subprocess.run(
+                        ["/usr/bin/python3", "-I", TOOL, *args, "--home", self.home],
+                        check=False,
+                        env=env,
+                        stdout=w,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        timeout=60,
+                    )
+                finally:
+                    os.close(w)
+                self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+    def test_only_the_commands_that_read_get_sigpipe_back(self) -> None:
+        restored: list[tuple[str, str | None]] = []
+        for cmd, action in (("help", None), ("status", None), ("prune", "plan"), ("config", "plan")):
+            with mock.patch.object(
+                tc_adapters, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
+            ):
+                tc_adapters.output_mode(cmd, action)
+        self.assertEqual(restored, [("help", None), ("status", None), ("prune", "plan"), ("config", "plan")])
+        with mock.patch.object(tc_adapters, "restore_default_signals", side_effect=AssertionError("restored")):
+            for cmd, action in (("prune", "apply"), ("config", "apply"), ("auto", "on"), ("auto", "off")):
+                tc_adapters.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT, GAME_STATE, QUIET_LIMITS, URI, lows, pressure_field
 from cst_core.adapters.files import read_text
+from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 CONF = "/etc/cpu-setup/cpu-setup.conf"
@@ -38,6 +39,23 @@ def conf(*, refuse: bool = False) -> dict[str, str]:
         print(text, file=sys.stderr)
     vals.update(parsed.values)
     return vals
+
+
+def vm_pin_settings(action: str) -> dict[str, str]:
+    """conf() for a vm-pin action. apply refuses problem lines and keeps
+    Python's SIGPIPE handling (its temporary XML file is removed in a
+    finally); status and plan print them and, since they only read, get
+    SIGPIPE back at its default: `cst cpu vm-pin plan | head` ends quietly."""
+    settings = conf(refuse=action == "apply")
+    if action != "apply":
+        restore_default_signals()
+    return settings
+
+
+def recorded_runs(names: Sequence[str]) -> list[str]:
+    """The runs named (relative to RUNS, or absolute), else the last ten recorded."""
+    named = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in names]
+    return named or sorted(glob.glob(os.path.join(RUNS, "*")))[-10:]
 
 
 def virsh(*args: str, check: bool = True) -> str:

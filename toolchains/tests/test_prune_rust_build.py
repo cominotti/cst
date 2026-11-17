@@ -163,6 +163,8 @@ def load() -> _ToolchainsModule:
     The program is the checkout's cst-toolchains (what main() would be told)."""
     tc_adapters.Program.entry_file = TOOL
     view = PackageView(tc_cli, tc_adapters, tc_domain)
+    # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
+    view.restore_default_signals = lambda: None
     return cast("_ToolchainsModule", cast("object", view))
 
 

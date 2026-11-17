@@ -812,8 +812,12 @@ class MigrateTest(Base):
             rc, out = self.call(nocow_cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         folder = os.path.dirname(self.flag)
-        # Then the attempts counter (write_atomic): its temporary file and its folder.
         self.assertEqual(synced[:3], [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
+        # Then, and only then, the attempts counter (write_atomic): its temporary file, then its folder.
+        counter = os.path.dirname(self.attempts)
+        self.assertEqual(len(synced), 5, synced)
+        self.assertTrue(synced[3][0].startswith(os.path.join(counter, ".attempts.")), synced[3])
+        self.assertEqual(synced[4][0], counter)
 
     def test_flag_not_durable_leaves_the_folder_copy_on_write(self) -> None:
         # fsync fails (an I/O error): treated like a flag that cannot be written.

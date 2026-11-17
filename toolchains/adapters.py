@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from cst_core.adapters.files import owned_file_state_at, write_atomic
-from cst_core.adapters.runtime import program_path
+from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
 from toolchains.domain import (
@@ -917,6 +918,24 @@ def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str]
 
 def in_container() -> bool:
     return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+
+
+def run_context(home: str | None) -> tuple[str, float]:
+    """(the home folder to work on: --home or the user's, now: CST_TOOLCHAINS_NOW in tests)."""
+    return (
+        os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if home is None else home),
+        float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time()),
+    )
+
+
+def output_mode(cmd: str, action: str | None) -> None:
+    """A command that only reads (help, status, prune plan, config plan) gets
+    SIGPIPE back at its default, so `cst toolchains status | head` ends
+    quietly. The ones that change files (prune, auto, config apply) keep
+    Python's handling: a closed pipe never cuts their lock release or file
+    writes short."""
+    if cmd in ("help", "status") or action == "plan":
+        restore_default_signals()
 
 
 def systemctl_cmd(*args: str) -> list[str]:

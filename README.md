@@ -411,7 +411,7 @@ everything with `plan`, `status` or `doctor` before changing anything:
   a `--set` that no template of the call uses is refused too (a misspelt key):
   both are usage errors, and nothing is written. One rule for a symbolic link
   at a destination, used by the installer, `cst vm backup-timer`,
-  `cst toolchains auto on` and `cst bluetooth`: in a home folder (`~/...`) a
+  `cst toolchains auto on` and `cst bluetooth` (for its LDAC watcher program): in a home folder (`~/...`) a
   link to a file that already holds the wanted content counts as unchanged
   and stays a link (a dotfiles manager's link), and one to other content is
   judged as that file would be; at a root destination a link is always

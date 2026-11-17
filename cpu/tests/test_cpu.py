@@ -19,6 +19,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1640,7 +1641,7 @@ class VmPinCliTest(unittest.TestCase):
         out = io.StringIO()
         with (
             unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
-            unittest.mock.patch.object(cpu_cli, "conf", lambda refuse=False: dict(self.CONF)),
+            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", lambda action: dict(self.CONF)),
             contextlib.redirect_stdout(out),
         ):
             rc = cpu_cli.vm_pin(argv, doc="DOC")
@@ -1755,9 +1756,50 @@ class CpuWatchCliTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), "DOC\n")
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
-            with unittest.mock.patch.object(cpu_cli, "RUNS", tmp), contextlib.redirect_stdout(out):
+            restored: list[bool] = []
+            with (
+                unittest.mock.patch.object(cpu_cli, "RUNS", tmp),
+                unittest.mock.patch.object(cpu_adapters, "RUNS", tmp),
+                # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+                unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append(True)),
+                contextlib.redirect_stdout(out),
+            ):
                 self.assertEqual(cpu_cli.cpu_watch(["report"], doc="DOC"), 0)
+            self.assertEqual(restored, [True])
         self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
+
+
+class ClosedPipeTest(unittest.TestCase):
+    def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
+        # pr-a preexisting #12: `cst cpu watch report | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). A read-only report now ends on SIGPIPE, silently.
+        tool = os.path.join(REPO, "cpu", "cpu-watch")
+        with tempfile.TemporaryDirectory() as home:
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                p = subprocess.run(
+                    ["/usr/bin/python3", "-I", tool, "report"],
+                    check=False,
+                    stdout=w,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    env={"PATH": "/usr/bin:/bin", "HOME": home},
+                    timeout=60,
+                )
+            finally:
+                os.close(w)
+        self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+    def test_vm_pin_restores_sigpipe_only_for_what_only_reads(self) -> None:
+        restored: list[str] = []
+        with (
+            unittest.mock.patch.object(cpu_adapters, "conf", lambda refuse=False: {"refuse": str(refuse)}),
+            unittest.mock.patch.object(cpu_adapters, "restore_default_signals", lambda: restored.append("x")),
+        ):
+            for action in ("status", "plan", "apply"):
+                self.assertEqual(cpu_adapters.vm_pin_settings(action), {"refuse": str(action == "apply")})
+        self.assertEqual(restored, ["x", "x"], "apply (a temp file removed in a finally) must keep Python's handling")
 
 
 class QuietNumbersTest(unittest.TestCase):

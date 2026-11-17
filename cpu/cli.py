@@ -22,13 +22,13 @@ import time
 from typing import Any, TextIO
 import xml.etree.ElementTree as ET
 
+from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import is_yes
 from cpu.adapters import (
     CG,
     RUNS,
     build_cgroups,
-    conf,
     cpus_of,
     find_game,
     game_cgroup,
@@ -36,9 +36,11 @@ from cpu.adapters import (
     mean_mhz,
     pressure_total,
     quiet_sample,
+    recorded_runs,
     summarize,
     usage_usec,
     virsh,
+    vm_pin_settings,
 )
 from cpu.domain import (
     GAME_STATE,
@@ -55,7 +57,7 @@ from cpu.domain import (
 def vm_pin(argv: Sequence[str], doc: str) -> int:
     """`cpu-vm-pin plan|apply|status [VM]` (argv without the program name); doc is its help."""
     action = argv[0] if len(argv) > 0 else "status"
-    c = conf(refuse=action == "apply")
+    c = vm_pin_settings(action)
     name = argv[1] if len(argv) > 1 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
     disable = c["VM_CPU_DISABLE"].split()
@@ -241,9 +243,8 @@ def watch(argv: Sequence[str]) -> int:
 
 
 def report(argv: Sequence[str]) -> int:
-    runs = [os.path.join(RUNS, r) if not os.path.isabs(r) else r for r in argv] or sorted(
-        glob.glob(os.path.join(RUNS, "*"))
-    )[-10:]
+    restore_default_signals()  # a read-only report: `cst cpu watch report | head` ends quietly
+    runs = recorded_runs(argv)
     if not runs:
         print(f"no runs in {RUNS}; record one with: cst cpu watch -l <label> [-- <cmd>]")
         return 0

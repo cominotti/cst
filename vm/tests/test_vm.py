@@ -20,6 +20,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -392,6 +393,32 @@ class BackupTest(Scratch):
         self.assertIn(f"sudo cp --reflink=auto -a {dest}/files{self.disk} {self.disk}", r.stdout)
         self.assertIn("not against losing the disks", r.stdout)
         self.assertNotIn("s3cret", r.stdout + r.stderr)
+
+    def test_read_only_commands_stop_quietly_on_a_closed_pipe_and_a_backup_does_not(self) -> None:
+        # pr-a preexisting #12: `cst vm status | head -1` ended in "Exception ignored ... BrokenPipeError",
+        # exit 120. A read-only command now dies of SIGPIPE, silently, as a shell tool does.
+        def closed_pipe(*args: str) -> subprocess.CompletedProcess[bytes]:
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                return subprocess.run(
+                    ["python3", "-I", TOOL, *args],
+                    check=False,
+                    env=self.env,
+                    stdout=w,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                )
+            finally:
+                os.close(w)
+
+        p = closed_pipe("status", "win")
+        self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+        # A local backup keeps going with nowhere to print, and leaves a complete backup.
+        p = closed_pipe("backup", "win")
+        self.assertEqual((p.returncode, p.stderr), (0, b""))
+        self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
 
     def test_index_drops_removed_backups(self) -> None:
         os.makedirs(os.path.dirname(self.index))
@@ -1542,9 +1569,16 @@ class PackageTest(unittest.TestCase):
             self.assertEqual(vm_cli.main(["bogus"], doc="DOC", entry_file=TOOL), 2)
         self.assertIn("unknown command 'bogus'", err.getvalue())
         out = io.StringIO()
-        with patch_vm("read_index", lambda path=None: []), mock.patch("sys.stdout", out):
+        restored: list[bool] = []
+        with (
+            patch_vm("read_index", lambda path=None: []),
+            mock.patch("sys.stdout", out),
+            # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+            mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
+        ):
             self.assertEqual(vm_cli.main(["list", "win"], doc="DOC", entry_file=TOOL), 0)
         self.assertIn("no VM backups of win", out.getvalue())
+        self.assertEqual(restored, [True], "a read-only command keeps Python's SIGPIPE handling")
 
     def test_virsh_runs_with_the_c_locale(self) -> None:
         recorded: list[tuple[list[str], bool, str]] = []

@@ -762,8 +762,14 @@ Python reads, also allows blanks around `=` (`VM_NOCOW = 0`). A line that is
 not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
 a backtick or a backslash outside single quotes, an unclosed quote) sets
 nothing and is named with its line number: `status` and the `plan`s print it
-and go on; `backup`, `tune apply`, `nocow apply` and `backup-timer on|off`
-refuse to start until it is fixed (a default never stands in for it).
+and go on; `backup`, `tune apply`, `nocow apply` and `backup-timer on`
+refuse to start until it is fixed (a default never stands in for it);
+`backup-timer off` prints it and still turns the timer off.
+
+The commands that only read (`status`, `list`, the `plan`s, `backup-timer
+status`, `help`) end quietly when their reader goes away (`cst vm status |
+head -1`). A backup never stops because its terminal or pipe went away: what
+it cannot print is dropped, and it finishes, or cleans up, as usual.
 
 ### 10.8 If a backup left an overlay
 

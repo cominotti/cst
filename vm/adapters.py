@@ -25,6 +25,7 @@ from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.files import ensure_dir, read_text
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
@@ -139,7 +140,7 @@ def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
     wins. bash_sourced: cpu-setup.conf and snapshots.conf, which bash sources
     too, read exactly as bash reads them; vm.conf (only Python reads it) also
     accepts blanks around = (`VM_NOCOW = 0`), as cst-vm always did. A line
-    that is not an assignment sets nothing (check_conf reports it).
+    that is not an assignment sets nothing (prepare_command reports it).
     Undecodable bytes are replaced (main's cst-vm stopped with a traceback)."""
     return dict(parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).values)
 
@@ -154,21 +155,28 @@ def conf_files(cmd: str, sub: str | None, nas: bool) -> list[tuple[str, bool]]:
     return files
 
 
-def check_conf(cmd: str, sub: str | None, nas: bool) -> None:
-    """Problem lines of the settings files a command reads: a command that
-    changes the machine (backup, tune/nocow apply, backup-timer on/off)
-    refuses to start (a default must never stand in for a line that says
-    something else); the others print them on stderr and go on."""
+def prepare_command(cmd: str, sub: str | None, nas: bool) -> None:
+    """Before a cst-vm command runs. Problem lines of the settings files it
+    reads: a command that changes the machine with them (backup, tune/nocow
+    apply, backup-timer on) refuses to start, since a default must never
+    stand in for a line that says something else; the others print them on
+    stderr and go on (backup-timer off too: it reads no setting, and it is
+    the way back). A command that only reads (status, list, the plans,
+    backup-timer status) also gets SIGPIPE back at its default, so `| head`
+    ends it quietly; commands that change the machine keep Python's handling
+    (backup: SafeStream), so a closed pipe never cuts their cleanup short."""
     found = []
     for path, bash_sourced in conf_files(cmd, sub, nas):
         problems = parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).problems
         if problems:
             found.append(describe_problems(path, problems))
-    if not found:
-        return
-    if cmd == "backup" or sub in ("apply", "on", "off"):
+    changes = cmd == "backup" or sub in ("apply", "on", "off")
+    if found and changes and sub != "off":
         raise Refused("\n".join(found) + "\nFix these lines first; nothing was changed.")
-    print("\n".join(found), file=sys.stderr)
+    if found:
+        print("\n".join(found), file=sys.stderr)
+    if not changes:
+        restore_default_signals()
 
 
 def conf_number(key: str, path: str | None = None) -> int:
