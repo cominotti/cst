@@ -19,7 +19,8 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core and btrfs/docker_gc) it still does I/O directly. CLI_CEILINGS caps the
+  doctor, cst_core, btrfs/docker_gc and btrfs/docker_volumes_nocow) it
+  still does I/O directly. CLI_CEILINGS caps the
   size of each one so that layer only shrinks: new logic goes into domain
   (pure) or adapters (I/O), or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
@@ -113,7 +114,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/bulk/cli.py": 404,
     "btrfs/chrome_cache/cli.py": 125,
     "btrfs/docker_gc/cli.py": 23,
-    "btrfs/docker_volumes_nocow/cli.py": 193,
+    "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/snapshot/cli.py": 1069,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 158,
@@ -162,7 +163,6 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk cli": 9,
     "btrfs/bulk unlayered": 107,
     "btrfs/chrome_cache cli": 7,
-    "btrfs/docker_volumes_nocow cli": 39,
     "btrfs/snapshot cli": 10,
     "btrfs/stall_monitord cli": 3,
     "btrfs/stall_monitord unlayered": 50,
@@ -179,6 +179,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
+    "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
     "swap": "swap/wiring.py",
@@ -225,7 +226,6 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "btrfs/chrome_cache os.fsync": 1,
     "btrfs/docker_gc subprocess.Popen": 1,
     "btrfs/docker_volumes_nocow os.fsync": 1,
-    "btrfs/docker_volumes_nocow subprocess.run": 5,
     "btrfs/stall_monitord subprocess.Popen": 1,
     "btrfs/stall_report subprocess.run": 3,
     "cpu subprocess.Popen": 1,

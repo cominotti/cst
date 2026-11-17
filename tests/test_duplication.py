@@ -42,7 +42,7 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.09,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.92,
+    "python type-2 W=8 duplicated %": 0.91,
     "shell W=5 duplicated %": 0.47,
     "same-name definitions in >1 file": 0,
 }
@@ -54,11 +54,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "main": "every program has its own main(): the entry point convention",
     # Subcommands and use cases: each program's own verb, different work.
     "apply": "the apply step of bulk items and chrome-cache: different machines changes",
-    "status": "the status subcommand of chrome-cache and docker-volumes-nocow",
     "cmd_list": "`btrfs-snapshot-core list` vs `cst-vm list`",
     "cmd_status": "`cst-toolchains status` vs `cst-vm status`",
-    "migrate": "bulk moves a folder into ~/Bulk; docker-volumes-nocow re-creates a volume NOCOW",
-    "recover": "bulk finishes an interrupted move; docker-volumes-nocow an interrupted volume copy",
     "report": "bulk's per-item report vs cpu-watch's run comparison",
     "run": "bluetooth's and vm's bindings over cst_core's SubprocessCommandRunner (their own options and words)",
     "parse_args": "each program's own argv grammar (doctor, toolchains, vm)",
@@ -72,7 +69,6 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "Result": "a snapshot step's outcome vs a doctor check line",
     "Stop": "bt-ldac-watch's signal flag vs the vm backup's cancellation",
     # The same word, different measurements or rules.
-    "free_bytes": "statvfs free space of a folder vs btrfs's estimated free space of the Docker volumes",
     "is_subvol": "bulk also checks the btrfs magic; chrome-cache only needs the subvolume inode",
     "gib": "each program's display threshold, both over cst_core format_bytes_gib_mib",
     "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused); "
