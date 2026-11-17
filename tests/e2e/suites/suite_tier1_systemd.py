@@ -1832,3 +1832,77 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_35_disable_timers_one_missing_unit_does_not_keep_the_others(self) -> None:
+        """btrfs-setup.sh's disable_timers (the snapshots, NAS and docker-gc
+        disable paths, and uninstall) with the real systemd: a Persistent=
+        timer and a service, both enabled and running, and a unit that does
+        not exist in between. Both are disabled and stopped, the timer's
+        last run (its stamp) is forgotten, the missing unit says nothing, and
+        it returns 0, also when run again. A control first runs the one
+        `systemctl disable --now` for all three that it made before: it must
+        fail and leave a real unit enabled or running (the problem fixed)."""
+        units = "/etc/systemd/system"
+        names = ("e2e-dt.timer", "e2e-dt.service", "e2e-dt-other.service")
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"systemctl disable --now {' '.join(names)} 2>/dev/null || true; "
+            f"rm -f {' '.join(f'{units}/{n}' for n in names)} /var/lib/systemd/timers/stamp-e2e-dt.timer; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_35 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            U=/etc/systemd/system
+            stamp=/var/lib/systemd/timers/stamp-e2e-dt.timer
+            printf '%s
+' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' \
+                >"$U/e2e-dt.service"
+            printf '%s
+' '[Unit]' 'Description=e2e disable_timers' '[Timer]' 'OnCalendar=yearly' 'Persistent=true' \
+                '[Install]' 'WantedBy=timers.target' >"$U/e2e-dt.timer"
+            printf '%s
+' '[Unit]' 'Description=e2e disable_timers' '[Service]' 'ExecStart=/bin/sleep infinity' \
+                '[Install]' 'WantedBy=multi-user.target' >"$U/e2e-dt-other.service"
+            systemctl daemon-reload
+            systemctl enable --now e2e-dt.timer e2e-dt-other.service
+            systemctl is-active -q e2e-dt.timer
+            systemctl is-active -q e2e-dt-other.service
+            if [[ ! -e "$stamp" ]]; then
+                echo "no $stamp after the timer started: the check below would prove nothing" >&2
+                exit 1
+            fi
+            # The two functions as btrfs-setup.sh defines them.
+            eval "$(sed -n '/^forget_timer_state() {/,/^}/p; /^disable_timers() {/,/^}/p' /opt/cst-rw/btrfs-setup.sh)"
+            declare -F disable_timers forget_timer_state >/dev/null
+            UNIT_DIR="$U"
+            # Control: the one call for all three that disable_timers made before.
+            if systemctl disable --now e2e-dt.timer e2e-dt-missing.timer e2e-dt-other.service 2>/dev/null; then
+                echo "one disable for all three did not fail on the missing unit" >&2
+                exit 1
+            fi
+            left=0
+            for u in e2e-dt.timer e2e-dt-other.service; do
+                if [[ "$(systemctl is-enabled "$u" || true)" == enabled ]] || systemctl is-active -q "$u"; then left=1; fi
+            done
+            (( left )) || { echo "one disable for all three still disabled and stopped both: no old problem" >&2; exit 1; }
+            systemctl enable --now e2e-dt.timer e2e-dt-other.service
+            err="$(disable_timers e2e-dt.timer e2e-dt-missing.timer e2e-dt-other.service 2>&1 >/dev/null)"
+            [[ -z "$err" ]] || { echo "disable_timers said: $err" >&2; exit 1; }
+            for u in e2e-dt.timer e2e-dt-other.service; do
+                state="$(systemctl is-enabled "$u" || true)"
+                [[ "$state" == disabled ]] || { echo "$u is $state" >&2; exit 1; }
+                if systemctl is-active -q "$u"; then echo "$u still active" >&2; exit 1; fi
+            done
+            [[ ! -e "$stamp" ]] || { echo "the timer's last run was not forgotten" >&2; exit 1; }
+            # A second run: units already disabled are no failure either.
+            err="$(disable_timers e2e-dt.timer e2e-dt-missing.timer e2e-dt-other.service 2>&1 >/dev/null)"
+            [[ -z "$err" ]] || { echo "a second disable_timers said: $err" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

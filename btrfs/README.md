@@ -764,7 +764,10 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   The last run that systemd keeps for a timer (`/var/lib/systemd/timers/stamp-*`)
   goes too: `systemctl clean --what=state` while the timer is still loaded. So
   does the stamp of `btrfs-scrub-monthly.timer`, a timer of older versions (that
-  one also at `install`);
+  one also at `install`). Each unit is disabled on its own (as by `docker-gc
+  disable` and `snapshots disable`): a unit that is not there is skipped
+  quietly, and one that fails to stop is named in a `WARNING:` line while the
+  others still go;
 - the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
   section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed scripts in `/usr/local/sbin` and `/usr/local/bin`, and the

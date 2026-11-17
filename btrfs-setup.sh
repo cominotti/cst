@@ -282,14 +282,22 @@ forget_timer_state() {
     done
 }
 
-# disable_timers UNIT...: `systemctl disable --now` of every UNIT in one
-# call (a failure ignored: a unit that is not there), then the last runs of
-# the timers among them forgotten (forget_timer_state), while their files
-# are still there. The paths that turn a feature off use it;
-# stop_monitoring goes unit by unit instead (one missing unit must not stop
-# the others from being stopped).
+# disable_timers UNIT...: `systemctl disable --now` of each UNIT on its
+# own (one call for all of them failed as a whole when one was missing,
+# and left the others enabled or running), then the last runs of the timers among
+# them forgotten (forget_timer_state), while their files are still there.
+# A unit with no file in UNIT_DIR is not there: its failure is expected and
+# says nothing. Any other failure is reported on stderr with systemctl's
+# reason, and the others still go; it returns 0, so the caller goes on
+# (the paths that turn a feature off, and uninstall).
 disable_timers() {
-    systemctl disable --now "$@" 2>/dev/null || true
+    local u out
+    for u in "$@"; do
+        if ! out="$(systemctl disable --now "${u}" 2>&1)" && [[ -e "${UNIT_DIR}/${u}" ]]; then
+            out="${out##*$'\n'}"
+            echo "WARNING: could not disable ${u}: ${out:-systemctl failed}" >&2
+        fi
+    done
     forget_timer_state "$@"
 }
 
@@ -794,15 +802,11 @@ docker_gc() {
     esac
 }
 
-# stop_monitoring: the first step of uninstall. One by one: a missing unit
-# must not stop the others from being stopped. The timers' last runs are
-# forgotten while their files are still there.
+# stop_monitoring: the first step of uninstall (disable_timers: one unit at
+# a time, then the timers' last runs forgotten while their files are still
+# there).
 stop_monitoring() {
-    local unit
-    for unit in "${TIMERS[@]}" btrfs-stall-monitor.service; do
-        systemctl disable --now "${unit}" 2>/dev/null || true
-    done
-    forget_timer_state "${TIMERS[@]}"
+    disable_timers "${TIMERS[@]}" btrfs-stall-monitor.service
     systemctl stop btrfs-stall-alert.service 2>/dev/null || true
 }
 
