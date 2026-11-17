@@ -436,6 +436,202 @@ sys.exit(os.waitstatus_to_exitcode(status))
 """
 
 
+# test_20, test_21: runs a command on a new pseudo-terminal (`cst vm tune
+# apply` and `nocow apply` ask [y/N] and refuse without a terminal) with
+# argv[1] typed ahead: input() reads it at the question. Prints what the
+# command printed; exits with its code.
+PTY_ANSWER_DRIVER = r"""
+import os
+import pty
+import sys
+
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)  # exec failed: never run the loop below in the child
+os.write(fd, sys.argv[1].encode() + b"\n")  # typed ahead: input() reads it at the prompt
+out = bytearray()
+while True:
+    try:
+        data = os.read(fd, 4096)
+    except OSError:  # EIO: the command ended and closed the terminal
+        break
+    if not data:
+        break
+    out += data
+_, status = os.waitpid(pid, 0)
+sys.stdout.write(out.decode(errors="replace").replace("\r\n", "\n"))
+sys.exit(os.waitstatus_to_exitcode(status))
+"""
+
+# test_20: a Linux guest (its libosinfo id) with the hardware `cst vm tune`
+# changes: a SATA disk with the plain driver and an e1000e network card, a
+# CD-ROM it leaves alone, and a VNC password (8 characters, the most VNC
+# takes) that only the --security-info dump shows. type='qemu': the
+# container has no /dev/kvm.
+VM_TUNE_DOMAIN = """<domain type='qemu'>
+  <name>e2e-tune</name>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
+      <libosinfo:os id="http://fedoraproject.org/fedora/41"/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit='MiB'>512</memory>
+  <vcpu placement='static'>2</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type></os>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/images/e2e-tune.qcow2'/>
+      <target dev='sda' bus='sata'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <mac address='52:54:00:e2:e2:01'/>
+      <source network='default'/>
+      <model type='e1000e'/>
+    </interface>
+    <graphics type='vnc' port='-1' autoport='yes' passwd='e2esecr8'/>
+  </devices>
+</domain>
+"""
+
+# test_20: plan, apply (refused without a terminal, answered no, then yes), a
+# second run, status and the restore of the saved definition, against the real
+# virtqemud (qemu:///system, the URI cst vm always uses).
+VM_TUNE_SCRIPT = r"""
+set -E
+trap 'echo "test_20 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+w=/var/tmp/e2e-vm-tune
+vm=e2e-tune
+defs="$w/backups/$vm/definitions"
+V() { virsh -c qemu:///system "$@"; }
+dump() { V dumpxml --inactive "$vm"; }
+secret() { V dumpxml --inactive --security-info "$vm"; }
+# cst vm as root, with the backup folder and settings file of the test (CST_VM_*).
+vmc() { CST_VM_BACKUP_DIR="$w/backups" CST_VM_CONF="$w/vm.conf" /opt/cst-rw/cst vm "$@"; }
+# tune apply on a pseudo-terminal (it asks [y/N]), answering $1.
+drive() {
+    CST_VM_BACKUP_DIR="$w/backups" CST_VM_CONF="$w/vm.conf" \
+        /usr/bin/python3 -I "$w/pty-answer.py" "$1" /opt/cst-rw/cst vm tune apply "$vm"
+}
+show() { sed "s/^/test_20 $1: /" <<<"$2" >&2; }   # the CI log
+same() {   # same LABEL FILE: the inactive definition is still FILE
+    dump >"$w/now.xml"
+    cmp -s "$w/now.xml" "$2" && return 0
+    echo "test_20 $1 changed the definition:" >&2
+    diff "$2" "$w/now.xml" >&2 || true
+    return 1
+}
+saved() { find "$defs" -maxdepth 1 -name '*.before-tune.xml' 2>/dev/null | wc -l; }
+no_secret() {   # no_secret LABEL TEXT: the graphics password is never printed
+    if grep -qF e2esecr8 <<<"$2"; then echo "test_20 $1 printed the graphics password" >&2; return 1; fi
+}
+
+V define "$w/$vm.xml" >/dev/null
+dump >"$w/d0.xml"
+secret >"$w/s0.xml"
+grep -qF "passwd='e2esecr8'" "$w/s0.xml"
+if grep -qF e2esecr8 "$w/d0.xml"; then echo "the plain dump holds the password" >&2; exit 1; fi
+
+# 1. plan: the changes, as a diff; nothing defined, nothing saved.
+out="$(vmc tune plan "$vm")"
+show plan "$out"
+no_secret plan "$out"
+for c in "disk sda: cache (default) -> none" "disk sda: io (default) -> native" \
+    "disk sda: discard (default) -> unmap" "disk sda: detect_zeroes (default) -> unmap" \
+    "add a virtio-scsi controller (index 0)" "disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)" \
+    "network card 52:54:00:e2:e2:01: e1000e -> virtio (same MAC)"; do
+    grep -qxF "  change: $c" <<<"$out"
+done
+[[ "$(grep -c '^  change: ' <<<"$out")" == 7 ]]
+grep -qxF "+      <target dev=\"sda\" bus=\"scsi\" />" <<<"$out"
+grep -qF "Plan only. Apply with: " <<<"$out"
+same plan "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+out="$(vmc status "$vm")"
+grep -qE '^  hardware: 7 difference\(s\) from tune: .* vm tune plan$' <<<"$out"
+
+# 2. apply without a terminal: refused before anything is saved or defined.
+if out="$(vmc tune apply "$vm" </dev/null 2>&1)"; then echo "apply ran without a terminal" >&2; exit 1; fi
+grep -qF "apply asks for confirmation: run it in a terminal" <<<"$out"
+same "apply without a terminal" "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+
+# 3. answered no.
+out="$(drive n)"
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer ends the prompt's line
+same "apply answered no" "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+
+# 4. answered yes: the old definition (with its secrets) saved 0600, then defined.
+out="$(drive y)"
+show apply "$out"
+no_secret apply "$out"
+grep -qF "Defined. Effective at the next start of $vm." <<<"$out"
+if grep -qF "libvirt changed the definition again" <<<"$out"; then echo "libvirt changed the tuned definition" >&2; exit 1; fi
+[[ "$(saved)" == 1 ]]
+f="$(find "$defs" -name '*.before-tune.xml')"
+[[ "$(stat -c '%U %a' "$f")" == "root 600" ]]
+[[ "$(stat -c '%a' "$defs")" == 700 ]]
+cmp "$f" "$w/s0.xml"
+dump >"$w/d1.xml"
+python3 -I - "$w/d1.xml" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+disks = {d.find("target").get("dev"): d for d in root.iter("disk")}
+want = {"cache": "none", "io": "native", "discard": "unmap", "detect_zeroes": "unmap"}
+drv = disks["sda"].find("driver").attrib
+assert {k: drv.get(k) for k in want} == want, drv
+assert disks["sda"].find("target").get("bus") == "scsi", ET.tostring(disks["sda"])
+assert disks["sdb"].find("target").get("bus") == "sata", "the CD-ROM was moved"
+models = [c.get("model") for c in root.iter("controller") if c.get("type") == "scsi"]
+assert models == ["virtio-scsi"], models
+nic = root.find("devices/interface")
+assert nic.find("model").get("type") == "virtio", ET.tostring(nic)
+assert nic.find("mac").get("address") == "52:54:00:e2:e2:01", ET.tostring(nic)
+PY
+secret | grep -qF "passwd='e2esecr8'"   # the graphics password survived the define
+
+# 5. a second run changes nothing: plan and apply say so, apply asks nothing.
+out="$(vmc tune plan "$vm")"
+show "plan after apply" "$out"
+grep -qxF "$vm: disks and network card already as /opt/cst-rw/cst vm tune recommends." <<<"$out"
+if grep -q '^  change: ' <<<"$out"; then echo "plan after apply still has changes" >&2; exit 1; fi
+out="$(vmc tune apply "$vm" </dev/null)"
+grep -qxF "$vm: disks and network card already as /opt/cst-rw/cst vm tune recommends." <<<"$out"
+same "second apply" "$w/d1.xml"
+[[ "$(saved)" == 1 ]]
+out="$(vmc status "$vm")"
+grep -qxF "  hardware: disks and network card as tune recommends" <<<"$out"
+
+# 6. undo: defining the saved file gives back the old definition.
+V define "$f" >/dev/null
+same "the restore of the saved definition" "$w/d0.xml"
+out="$(vmc status "$vm")"
+grep -qE '^  hardware: 7 difference\(s\) from tune: ' <<<"$out"
+
+# 7. a knob set to no leaves its part out.
+printf 'VM_TUNE_NIC=no\n' >"$w/vm.conf"
+out="$(vmc tune plan "$vm")"
+grep -qxF "  skipped by $w/vm.conf: VM_TUNE_NIC=no" <<<"$out"
+if grep -q '^  change: network card' <<<"$out"; then echo "VM_TUNE_NIC=no still changes the network card" >&2; exit 1; fi
+[[ "$(grep -c '^  change: ' <<<"$out")" == 6 ]]
+same "plan with VM_TUNE_NIC=no" "$w/d0.xml"
+echo E2E-OK
+"""
+
+
 def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
@@ -2159,4 +2355,39 @@ assert d["samples"] >= 1, d["samples"]
             echo E2E-OK
             """,
         ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_20_vm_tune_plan_apply_second_run_and_restore(self) -> None:
+        """`cst vm tune` against the real virtqemud (qemu:///system), on a
+        defined Linux guest with a SATA disk and an e1000e network card.
+        `plan` prints the seven changes and the diff and changes nothing
+        (the inactive definition byte for byte, no backup folder); `status`
+        counts the differences. `apply` without a terminal refuses, answered
+        no changes nothing; answered yes it saves the old definition (the
+        --security-info dump, mode 0600, in a 0700 folder), defines the new
+        one (virtio-scsi controller, the disk on it with cache, io, discard
+        and detect_zeroes, the network card virtio with the same MAC, the
+        CD-ROM left on SATA) and the VNC password survives; libvirt keeps
+        the result as it is. The password is never printed. A second plan
+        and apply say there is nothing to do, apply asks nothing and saves
+        nothing; `status` agrees. Defining the saved file restores the old
+        definition byte for byte. VM_TUNE_NIC=no leaves the network card out.
+        The libvirt qemu driver needs no /dev/kvm to define a type='qemu'
+        guest; no VM is started."""
+        w = "/var/tmp/e2e-vm-tune"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "virsh -c qemu:///system undefine e2e-tune >/dev/null 2>&1 || true; "
+            f"rm -rf {w}; "
+            "systemctl stop virtqemud.service virtqemud.socket virtqemud-ro.socket virtqemud-admin.socket || true",
+            check=False,
+        )
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        for name, text in (("e2e-tune.xml", VM_TUNE_DOMAIN), ("pty-answer.py", PTY_ANSWER_DRIVER)):
+            docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/{name}"], input_text=text)
+        exec_bash(
+            self.PRIV_CONTAINER, "systemctl start virtqemud.service && virsh -c qemu:///system list --all >/dev/null"
+        )
+        out = exec_bash(self.PRIV_CONTAINER, VM_TUNE_SCRIPT).stdout
         self.assertIn("E2E-OK", out)

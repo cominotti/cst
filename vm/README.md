@@ -987,6 +987,10 @@ the clone fails without the pre-created NOCOW destination. `PackageTest`
 in `vm/tests/test_vm.py` covers the settings, the parsing, the dispatch, the
 virsh wrapper and the timer units in-process.
 
+The Docker E2E tests ([tests/e2e/README.md](../tests/e2e/README.md), tier 2)
+run the commands for real. `test_20`: `tune plan`, `apply` and a second run
+against the real `virtqemud`, then the restore of the saved definition.
+
 ## 13. Python module layout
 
 The Python code inside `vm/` (standard library only at run time):
