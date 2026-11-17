@@ -160,6 +160,17 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.svc.mark(self.ROOT, "m:t")
         self.assertEqual(self.record.writes, writes, "a run that changes nothing rewrote the record")
 
+    def test_a_recorded_file_edited_on_disk_is_rewritten_and_recorded_again(self) -> None:
+        # The bytes on disk decide, never the record: an edited installed file is written back.
+        list(self.svc.install([self.a], InstallRequest()))
+        self.svc.mark(self.ROOT, "m:t")
+        self.target.files["/usr/local/sbin/a"] = (b"A\n# edited\n", 0o755)
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["written:   /usr/local/sbin/a"])
+        self.assertEqual(self.target.files["/usr/local/sbin/a"], (b"A\n", 0o755))
+        rec = self.record.doc()
+        self.assertEqual(rec.files["/usr/local/sbin/a"].sha256, hashlib.sha256(b"A\n").hexdigest())
+        self.assertEqual(rec.components, {"m:t": "pending"})
+
     def test_files_from_before_the_record_are_adopted(self) -> None:
         self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
         self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["unchanged: /usr/local/sbin/a"])

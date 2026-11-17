@@ -1262,8 +1262,11 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
             grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
                 {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
-            {installer} install --root {stage} --owner root {sets} | grep -qxF "written:   $f" ||
-                {{ echo "a second install did not restore the edited file" >&2; exit 1; }}
+            # Captured first: under pipefail, `install | grep -q` fails when grep stops reading at the
+            # match and the installer, still printing, ends on SIGPIPE (141).
+            restore="$({installer} install --root {stage} --owner root {sets})"
+            grep -qxF "written:   $f" <<<"$restore" ||
+                {{ echo "a second install did not restore the edited file: $restore" >&2; exit 1; }}
             {installer} check --root {stage} --owner root {sets}
             {installer} remove --root {stage} --component btrfs:docker-gc
             [[ ! -e "$f" ]] || {{ echo "remove --component left $f" >&2; exit 1; }}
