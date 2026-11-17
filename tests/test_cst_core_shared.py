@@ -16,6 +16,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -793,6 +794,19 @@ class ShellAssignmentsTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         return r.stdout
+
+    def test_old_ansi_c_line_without_closing_quote_fails_fast(self) -> None:
+        # Forty \NNNN escapes and no closing quote: with a backtracking regex each
+        # escape could be cut three ways (\1|111, \11|11, \111|1), which took
+        # minutes; the possessive form fails at once and reports the line.
+        line = "NAS_PATH=$'" + "\\1111" * 40 + "\n"
+        started = time.perf_counter()
+        parsed = parse_snapshots_conf(line)
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertEqual(parsed.entries, ())
+        self.assertEqual([p.line for p in parsed.problems], [1])
+        # The same escapes with the closing quote: bash takes up to three octal digits.
+        self.assertEqual(parse_snapshots_conf("K=$'\\1111'\n").entries[0].value, "\x491")
 
 
 if __name__ == "__main__":
