@@ -1623,3 +1623,210 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             """,
         ).stdout
         self.assertIn("E2E-OK-TOOLCHAINS", out)
+
+    def test_25_snapshots_chrome_cache_apply_and_off(self) -> None:
+        """`cst btrfs snapshots chrome-cache` (as root through sudo's
+        variables, the tool itself run as the user by runuser) on Chrome's
+        flags file: without the Flatpak, apply writes nothing; `status`
+        changes nothing; `apply` adds the marker and the two flags after the
+        user's own line, in a file the user owns; a second `apply` leaves the
+        file as it is; `off` removes the two flags and keeps a marker that a
+        later `apply` respects; a second `off` changes nothing; the marker of
+        a version named f44-tools counts as ours (`apply` keeps it, `off`
+        removes its flags)."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_25 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            H=/home/tester
+            app_dir=$H/.local/share/flatpak/app/com.google.Chrome
+            var_dir=$H/.var/app/com.google.Chrome
+            conf=$var_dir/config/chrome-flags.conf
+            rel=.var/app/com.google.Chrome/config/chrome-flags.conf
+            cleanup() { rm -rf "$app_dir" "$var_dir"; }
+            trap cleanup EXIT
+            show() { sed "s/^/test_25 $1: /" <<<"$2" >&2; }   # the CI log
+            file_state() { stat -c '%i %Y %s %U:%G %a' "$conf"; sha256sum <"$conf"; }
+            same() {   # same LABEL BEFORE
+                [[ "$(file_state)" == "$2" ]] && return 0
+                echo "$1 changed $conf:" >&2
+                cat "$conf" >&2
+                return 1
+            }
+            cc() {   # cc ACTION: the command's output (also to the CI log)
+                local out
+                out="$(cst btrfs snapshots chrome-cache "$1" 2>&1)" || { show "$1" "$out"; return 1; }
+                show "$1" "$out"
+                printf '%s\n' "$out"
+            }
+            no_flags() {
+                if grep -qE '^--disk-cache-(dir|size)=' "$conf"; then echo "cache flags left:" >&2; cat "$conf" >&2; return 1; fi
+            }
+            [[ ! -e "$app_dir" && ! -e "$var_dir" ]]
+
+            # 0. Chrome's Flatpak not installed: nothing written.
+            out="$(cc apply)"
+            grep -qxF 'kept:      Chrome Flatpak not installed: nothing to do' <<<"$out"
+            [[ ! -e "$var_dir" ]]
+
+            # Chrome installed for the user (the folder flatpak makes), and a flag line of the user's own.
+            runuser -u tester -- mkdir -p "$app_dir/current/active" "$(dirname "$conf")"
+            runuser -u tester -- sh -c 'printf "%s\n" --enable-features=E2eUserFlag >"$1"' sh "$conf"
+
+            # 1. status changes nothing.
+            before="$(file_state)"
+            out="$(cc status)"
+            grep -qxF '  Chrome Flatpak:        installed (user)' <<<"$out"
+            grep -qF "absent; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" <<<"$out"
+            same status "$before"
+
+            # 2. apply: the user's line first, then the marker and the two flags; the file stays the user's.
+            out="$(cc apply)"
+            grep -qxF "written:   ~/$rel: add the cache flags (sandbox /tmp, at most 512 MiB)" <<<"$out"
+            [[ "$(head -n1 "$conf")" == --enable-features=E2eUserFlag ]]
+            grep -q '^# btrfs-setup.sh (CST) chrome-cache: ' "$conf"
+            grep -qx -- '--disk-cache-dir=/tmp/chrome-cache' "$conf"
+            grep -qx -- '--disk-cache-size=536870912' "$conf"
+            [[ "$(wc -l <"$conf")" == 4 ]]
+            [[ "$(stat -c %U:%G "$conf")" == tester:tester ]]
+            grep -qxF '                         flags present (managed by CST)' <<<"$(cc status)"
+
+            # 3. A second apply leaves the file as it is.
+            applied="$(file_state)"
+            out="$(cc apply)"
+            grep -qxF "kept:      ~/$rel: flags present (managed by CST)" <<<"$out"
+            same "a second apply" "$applied"
+
+            # 4. off: the flags go, the user's line stays, an "off" marker stays.
+            out="$(cc off)"
+            grep -qxF "written:   ~/$rel: off: our flag lines removed (your other lines kept); setup will not add them again" \
+                <<<"$out"
+            no_flags
+            [[ "$(head -n1 "$conf")" == --enable-features=E2eUserFlag ]]
+            grep -q '^# btrfs-setup.sh (CST) chrome-cache off: ' "$conf"
+            [[ "$(wc -l <"$conf")" == 2 ]]
+            [[ "$(stat -c %U:%G "$conf")" == tester:tester ]]
+
+            # 5. A second off, and an apply after off, change nothing.
+            off_state="$(file_state)"
+            out="$(cc off)"
+            grep -qxF "kept:      ~/$rel: already off: nothing changed" <<<"$out"
+            same "a second off" "$off_state"
+            out="$(cc apply)"
+            grep -qxF "kept:      ~/$rel: off by your choice (marker without the flags): nothing added" <<<"$out"
+            same "apply after off" "$off_state"
+
+            # 6. Upgrade: the flags under the marker of a version named f44-tools are ours.
+            runuser -u tester -- sh -c 'printf "%s\n" --enable-features=E2eUserFlag \
+                "# btrfs-setup.sh (f44-tools) chrome-cache: HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB." \
+                --disk-cache-dir=/tmp/chrome-cache --disk-cache-size=536870912 >"$1"' sh "$conf"
+            old="$(file_state)"
+            out="$(cc apply)"
+            grep -qxF "kept:      ~/$rel: flags present (managed by CST)" <<<"$out"
+            same "apply on the f44-tools marker" "$old"
+            out="$(cc off)"
+            grep -qF "written:   ~/$rel: off: our flag lines removed" <<<"$out"
+            no_flags
+            [[ "$(head -n1 "$conf")" == --enable-features=E2eUserFlag ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_26_btrfs_watch_saves_the_report_of_a_run(self) -> None:
+        """`cst btrfs watch` as the user, with the installed btrfs-stall-report
+        and an empty recording folder (a recorder that wrote nothing yet):
+        usage errors exit 2 and `--list` says no runs, without the report
+        program it exits 1 and records nothing; a run passes on the
+        command's exit status (3), keeps its output in workload.log (and on
+        the terminal), saves the report of its window (NO DATA here, after the
+        wait for the recorder runs out) as report.txt and report.json, and
+        adds a line to runs.tsv that `--list` shows."""
+        work = "/var/tmp/e2e-watch"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            if [ -e {work}/made-report ]; then rm -f /usr/local/bin/btrfs-stall-report; fi
+            if [ -e {work}/made-log ]; then rmdir /var/log/btrfs-stall-monitor; fi
+            rm -rf {work}
+            """,
+            check=False,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rm -rf {work} && install -d -m 0755 {work}
+            if [ ! -e /usr/local/bin/btrfs-stall-report ]; then
+                touch {work}/made-report
+                /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-stall-report >/dev/null
+            fi
+            if [ ! -d /var/log/btrfs-stall-monitor ]; then
+                touch {work}/made-log
+                # As the unit's LogsDirectory= makes it (Group=wheel, mode 0750); tester is in wheel.
+                install -d -m 0750 -o root -g wheel /var/log/btrfs-stall-monitor
+            fi
+            install -d -m 0777 {work}/state
+            """,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_26 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C XDG_STATE_HOME=/var/tmp/e2e-watch/state
+            base=$XDG_STATE_HOME/btrfs-stall-watch
+            cst=/opt/cst-rw/cst
+            show() { sed "s/^/test_26 $1: /" <<<"$2" >&2; }   # the CI log
+            fails() {   # fails RC CMD...: CMD exits RC; its output on stdout
+                local want="$1" rc=0 out
+                shift
+                out="$("$@" 2>&1)" || rc=$?
+                [[ "$rc" == "$want" ]] || { echo "exit $rc, not $want: $*" >&2; printf '%s\n' "$out" >&2; return 1; }
+                printf '%s\n' "$out"
+            }
+
+            # 1. Usage errors and --list before any run: nothing recorded.
+            grep -qF 'cst btrfs watch [-l LABEL] -- command [args...]' <<<"$(fails 2 "$cst" btrfs watch)"
+            grep -qxF 'Unknown option: --bogus (use -- before the command)' <<<"$(fails 2 "$cst" btrfs watch --bogus)"
+            grep -qxF 'Invalid duration: soon' <<<"$(fails 2 "$cst" btrfs watch --duration soon)"
+            [[ "$("$cst" btrfs watch --list)" == "no runs yet" ]]
+            # 2. Without the report program (not on PATH): exit 1, nothing recorded.
+            out="$(fails 1 env PATH=/usr/bin:/bin "$cst" btrfs watch -- true)"
+            grep -qxF "btrfs-stall-report not found: install with 'cst btrfs install' (on the host)" <<<"$out"
+            [[ ! -e "$base" ]]
+
+            # 3. A run.
+            before="$(date +%s)"
+            out="$(fails 3 "$cst" btrfs watch -l 'e2e label' -- sh -c 'echo e2e-out; echo e2e-err >&2; exit 3')"
+            after="$(date +%s)"
+            show run "$out"
+            [[ "$(wc -l <"$base/runs.tsv")" == 2 ]]
+            [[ "$(head -n1 "$base/runs.tsv")" == $'start\tend\texit\tlabel\tdir' ]]
+            IFS=$'\t' read -r _ _ r_exit r_label r_dir < <(sed -n 2p "$base/runs.tsv")
+            [[ "$r_exit" == 3 && "$r_label" == "e2e label" ]]
+            [[ "$r_dir" == "$base"/* && -d "$r_dir" ]]
+            grep -qxF e2e-out "$r_dir/workload.log"
+            grep -qxF e2e-err "$r_dir/workload.log"
+            grep -qxF e2e-out <<<"$out"
+            grep -qxF "=== btrfs-stall-report for 'e2e label' ($r_dir) ===" <<<"$out"
+            grep -q '^verdict  NO DATA for this window' "$r_dir/report.txt"
+            python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+w, c = d["window"], d["coverage"]
+lo, hi = float(sys.argv[2]), float(sys.argv[3])
+assert lo <= w["since"] <= hi, w
+assert w["since"] < w["until"] <= hi + 1, w
+assert c["last_sample"] is None and d["samples"] == 0, c
+' "$r_dir/report.json" "$before" "$after"
+            list="$("$cst" btrfs watch --list)"
+            show list "$list"
+            grep -qF 'e2e label' <<<"$list"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
