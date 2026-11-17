@@ -617,10 +617,10 @@ class CstCommandTest(unittest.TestCase):
         self.assertIn("==== doctor", out)
         self.assertNotIn("Traceback", err)
 
-    def test_status_stops_when_a_module_dies_of_ctrl_c(self) -> None:
-        cst = _cst_copy(self.tmp, "echo started\nsleep 10\n")
+    def _status_signalled(self, module: str, sig: int) -> tuple[str, str, int]:
+        """cst status, with sig sent to its whole process group (as the terminal sends Ctrl-C) once the module started."""
         proc = subprocess.Popen(
-            [cst, "status"],
+            [_cst_copy(self.tmp, module), "status"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
@@ -631,11 +631,24 @@ class CstCommandTest(unittest.TestCase):
         assert proc.stdout is not None
         while proc.stdout.readline() not in ("started\n", ""):
             pass
-        os.killpg(proc.pid, signal.SIGINT)
+        os.killpg(proc.pid, sig)
         out, err = proc.communicate(timeout=30)
+        return out, err, proc.returncode
+
+    def test_status_stops_when_a_module_dies_of_ctrl_c(self) -> None:
+        out, err, rc = self._status_signalled("echo started\nsleep 10\n", signal.SIGINT)
         self.assertNotIn("==== doctor", out)
         self.assertNotIn("Traceback", err)
-        self.assertEqual(proc.returncode, -signal.SIGINT)
+        self.assertEqual(rc, -signal.SIGINT)
+
+    def test_status_goes_on_after_ctrl_backslash(self) -> None:
+        # bash ignores SIGQUIT itself: a module killed by Ctrl-\ failed, and main's status went on.
+        # (bash ignores it too until the exec: the module says "started" from the program it became.)
+        module = "exec /usr/bin/python3 -I -c 'import time; print(\"started\", flush=True); time.sleep(10)'\n"
+        out, err, rc = self._status_signalled(module, signal.SIGQUIT)
+        self.assertIn("==== doctor", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(rc, 1)
 
     def test_status_goes_on_when_only_the_module_got_ctrl_c(self) -> None:
         # bash dies with a foreground command's SIGINT only when it got the signal too (Ctrl-C reaches
@@ -693,13 +706,17 @@ class CstCommandTest(unittest.TestCase):
         self.assertIn("pipe=141 0", proc.stdout)
 
     def test_a_module_sees_only_cst_prog_from_cst(self) -> None:
-        script = 'echo "PROG=$CST_PROG NAME=${CST_NAME-unset} SELF=${CST_SELF-unset} DIR=${CST_DIR-unset} ARG0=${CST_ARG0-unset}"\n'
+        script = (
+            'echo "PROG=$CST_PROG NAME=${CST_NAME-unset} SELF=${CST_SELF-unset} DIR=${CST_DIR-unset}'
+            ' ARG0=${CST_ARG0-unset} LC=${CST_LC_CTYPE-unset}"\n'
+        )
         proc = self._run(script, "swap")
         cst = os.path.join(self.tmp, "cst")
-        self.assertEqual(proc.stdout, f"PROG={cst} swap NAME=unset SELF=unset DIR=unset ARG0=unset\n", proc.stderr)
+        unset = "SELF=unset DIR=unset ARG0=unset LC=unset"
+        self.assertEqual(proc.stdout, f"PROG={cst} swap NAME=unset {unset}\n", proc.stderr)
         # A name the caller set (sudo's `env CST_NAME=...`) is kept, as before.
         proc = self._run(script, "swap", env={**_CLEAN_ENV, "CST_NAME": "cst"})
-        self.assertEqual(proc.stdout, "PROG=cst swap NAME=cst SELF=unset DIR=unset ARG0=unset\n", proc.stderr)
+        self.assertEqual(proc.stdout, f"PROG=cst swap NAME=cst {unset}\n", proc.stderr)
 
     def test_a_module_gets_the_caller_s_lc_ctype(self) -> None:
         # Under a C locale Python sets LC_CTYPE=C.UTF-8 in its own environment (PEP 538); the bash cst

@@ -10,8 +10,9 @@ import sys
 from cst_core.domain.errors import shell_exit_status
 
 # The signals a bash script waiting for a foreground command leaves to that
-# command: the command may handle them (a cleanup trap), and bash dies with
-# the same signal only if the command died of it.
+# command: the command may handle them (a cleanup trap). bash dies of SIGINT
+# only if it got it too and the command died of it; SIGQUIT bash ignores
+# itself, so a command killed by it is only a failure (128+3).
 _FOREGROUND_SIGNALS = (signal.SIGINT, signal.SIGQUIT)
 
 
@@ -49,9 +50,9 @@ class LocalCstDispatchAdapter:
         """Run `argv` in the foreground on the terminal's streams, as bash runs a command; its exit status.
 
         While it runs, Ctrl-C and Ctrl-\\ go to the command only (it may handle
-        them). If it died of one of them and cst got that signal too (Ctrl-C
-        reaches both), cst dies of the same signal, as bash does; otherwise a
-        fatal signal N gives 128+N.
+        them). If it died of SIGINT and cst got it too (Ctrl-C reaches both),
+        cst dies of SIGINT, as bash does; otherwise a fatal signal N gives
+        128+N (Ctrl-\\ included: bash ignores SIGQUIT itself).
         """
         previous = {sig: signal.getsignal(sig) for sig in _FOREGROUND_SIGNALS}
         received: set[int] = set()
@@ -70,9 +71,9 @@ class LocalCstDispatchAdapter:
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
-        if -rc in received:
-            signal.signal(-rc, signal.SIG_DFL)
-            os.kill(os.getpid(), -rc)
+        if -rc == signal.SIGINT and signal.SIGINT in received:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGINT)
         return shell_exit_status(rc)
 
     def exec_replace(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
