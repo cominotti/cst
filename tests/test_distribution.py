@@ -270,9 +270,8 @@ class DistributionGateTest(unittest.TestCase):
         main_file = os.path.join(dest, "__main__.py")
         probe = (
             f"import sys; sys.path.insert(0, {dest!r})\n"
-            "from btrfs.bulk.adapters import Program, snapshot_program\n"
-            f"Program.entry_file = {main_file!r}\n"
-            "print(snapshot_program())"
+            "from btrfs.bulk.wiring import Wiring\n"
+            f"print(Wiring.from_environment({main_file!r}).snapshot_program())"
         )
         r = subprocess.run(
             [SYSTEM_PYTHON, "-I", "-c", probe],

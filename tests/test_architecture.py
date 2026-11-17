@@ -19,7 +19,7 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core, btrfs/docker_gc, btrfs/docker_volumes_nocow and
+  doctor, cst_core, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow and
   btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
   size of each one so that layer only shrinks: new logic goes into domain
   (pure) or adapters (I/O), or into an application layer with ports.
@@ -111,7 +111,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # module docstring). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
-    "btrfs/bulk/cli.py": 404,
+    "btrfs/bulk/cli.py": 105,
     "btrfs/chrome_cache/cli.py": 125,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
@@ -134,8 +134,6 @@ ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_
 # I/O together; splitting one into its layers removes its line. Only shrinks.
 UNLAYERED_ALLOWED: Final[dict[str, str]] = {
     "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
-    "btrfs/bulk/items.py": "the move and recovery of ~/Bulk items: the journal steps with their file I/O",
-    "btrfs/bulk/steam.py": "the Steam library move: pure VDF edits, the journal steps and the copies together",
     "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
     "btrfs/stall_report/analysis.py": "the report's analysis of the recorded episodes, with a few reads of its own",
 }
@@ -160,8 +158,6 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Only goes down; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
-    "btrfs/bulk cli": 9,
-    "btrfs/bulk unlayered": 107,
     "btrfs/chrome_cache cli": 7,
     "btrfs/stall_monitord cli": 3,
     "btrfs/stall_monitord unlayered": 50,
@@ -177,6 +173,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # point: the one module, besides the adapters, that imports adapters and
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
+    "btrfs/bulk": "btrfs/bulk/wiring.py",
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
     "btrfs/snapshot": "btrfs/snapshot/wiring.py",

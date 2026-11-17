@@ -1,0 +1,205 @@
+# SPDX-License-Identifier: MPL-2.0
+"""What btrfs-bulk asks of the rest of the machine: btrfs-snapshot (the
+busy check, the conversion of a plain ~/Bulk, its space limits), Steam's
+processes, the desktop alert, the clock; its output; who runs it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from collections.abc import Sequence
+import os
+import pwd
+import re
+import secrets
+import stat
+import subprocess
+import time
+
+from btrfs.bulk.adapters.machine import HomeTree, kind, log
+from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
+
+
+def is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def lookup_user(name: str) -> pwd.struct_passwd:
+    """The account NAME (KeyError: none)."""
+    return pwd.getpwnam(name)
+
+
+def default_home() -> str:
+    return os.path.expanduser("~")
+
+
+def real_path(path: str) -> str:
+    return os.path.realpath(path)
+
+
+class Output:
+    """OutputPort on stdout: log lines are flushed at once (the journal of the
+    boot service, a long run), plan/status lines are not."""
+
+    def log(self, msg: str) -> None:
+        log(msg)
+
+    def say(self, line: str) -> None:
+        print(line)
+
+
+class Host:
+    """HostPort. snapshot_program: btrfs-snapshot's path, asked when needed."""
+
+    def __init__(
+        self,
+        paths: BulkPaths,
+        tree: HomeTree,
+        snapshot_program: Callable[[], str],
+        proc: str = PROC,
+        run_user: str = RUN_USER,
+    ) -> None:
+        self.paths, self.tree, self.snapshot_program = paths, tree, snapshot_program
+        self.proc, self.run_user = proc, run_user
+
+    def busy_paths(self, paths: Sequence[str], home: str) -> set[str]:
+        """The subset of PATHS some process uses (open file, cwd, root, binary,
+        mapped file, or a container's bind mount of the path, of something below
+        it, or of a folder between it and HOME, e.g. -v ~/.m2:/root/.m2), from
+        btrfs-snapshot's own detection. If it cannot be asked, all are busy."""
+        if not paths:
+            return set()
+        try:
+            r = subprocess.run(
+                ["bash", self.snapshot_program(), "busy", "--home", home, *paths],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log(f"  cannot check open files ({e}): treated as busy")
+            return set(paths)
+        if r.returncode != 0:
+            log(f"  cannot check open files ({r.stderr.strip()[:200]}): treated as busy")
+            return set(paths)
+        return {line for line in r.stdout.splitlines() if line}
+
+    def convert_bulk_dir(self, bulk: str) -> list[str]:
+        """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
+        subvolume (its convert_one: reflink clone + switch, busy -> later)."""
+        r = subprocess.run(
+            ["bash", self.snapshot_program(), "convert-one", bulk], check=False, capture_output=True, text=True
+        )
+        return (r.stdout + r.stderr).splitlines()
+
+    def steam_running(self, ctx: Ctx) -> list[str]:
+        """Why Steam seems to run (empty: it does not). Every process of the
+        host (a Flatpak's processes are visible there too), Flatpak instances of
+        Steam, and Steam's own pid files."""
+        proc = self.proc
+        why: list[str] = []
+        try:
+            pids = [p for p in os.listdir(proc) if p.isdigit()]
+        except OSError:
+            pids = []
+        for pid in pids:
+            try:
+                with open(os.path.join(proc, pid, "comm")) as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            try:
+                exe = os.readlink(os.path.join(proc, pid, "exe"))
+            except OSError:
+                exe = ""
+            exe = exe.removesuffix(" (deleted)")
+            if (
+                comm in ("steam", "steamwebhelper", "steam.sh")
+                or comm.startswith("pressure-vessel")
+                or exe.endswith(("/ubuntu12_32/steam", "/ubuntu12_64/steamwebhelper", "/ubuntu12_32/reaper"))
+            ):
+                why.append(f"process {pid} ({comm})")
+        try:
+            uids = os.listdir(self.run_user)
+        except OSError:
+            uids = []
+        for uid in uids:
+            base = os.path.join(self.run_user, uid, ".flatpak")
+            try:
+                insts = os.listdir(base)
+            except OSError:
+                continue
+            for inst in insts:
+                try:
+                    with open(os.path.join(base, inst, "info")) as f:
+                        info = f.read()
+                    with open(os.path.join(base, inst, "pid")) as f:
+                        pid = f.read().strip()
+                except OSError:
+                    continue
+                if (
+                    f"\nname={STEAM_APP}\n" in "\n" + info + "\n"
+                    and pid.isdigit()
+                    and os.path.exists(os.path.join(proc, pid))
+                ):
+                    why.append(f"Flatpak instance {inst} (pid {pid})")
+        for rel in (".steam/steam.pid", ".var/app/com.valvesoftware.Steam/.steam/steam.pid"):
+            if (
+                self.tree.chain(ctx.home, os.path.dirname(rel)) != "ok"
+                or kind(os.path.join(ctx.home, rel)) != "other"
+                or not stat.S_ISREG(os.lstat(os.path.join(ctx.home, rel)).st_mode)
+            ):
+                continue
+            try:
+                with open(os.path.join(ctx.home, rel)) as f:
+                    pid = f.read(32).strip()
+                with open(os.path.join(proc, pid, "comm")) as f:
+                    comm = f.read().strip()
+            except OSError, ValueError:
+                continue
+            if pid.isdigit() and comm.startswith("steam"):
+                why.append(f"~/{rel} names the live process {pid}")
+        return sorted(set(why))
+
+    def snapshot_guard(self) -> dict[str, int]:
+        """btrfs-snapshot's space guard, in bytes: {'pause': no new /home
+        snapshot at or below it, 'resume': they come back only above it,
+        'emergency': at or below it the hourly run purges most of the snapshot
+        history}. Read the way btrfs-snapshot gets them, so the two cannot drift
+        apart: its defaults (snapshot_program()), then snapshots.conf in the
+        settings folder, which overrides them (a plain KEY=NUMBER line, quotes
+        allowed; the last one wins). The built-in defaults if neither can be
+        read. btrfs-snapshot measures btrfs' "Free (estimated)", this program
+        statvfs: close, not the same, so MARGIN stays on top."""
+        vals = {"pause": 250, "resume": 270, "emergency": 150}
+        names = {
+            "pause": "SKIP_AT_OR_BELOW_GIB",
+            "resume": "RESUME_ABOVE_GIB",
+            "emergency": "EMERGENCY_AT_OR_BELOW_GIB",
+        }
+        for path in (self.snapshot_program(), self.paths.snapshots_conf):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read(1 << 20)
+            except OSError:
+                continue
+            for key, name in names.items():
+                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.M)
+                if found:
+                    vals[key] = int(found[-1][1])
+        return {k: v * BIG for k, v in vals.items()}
+
+    def alert(self, title: str, body: str) -> None:
+        log(f"<4>btrfs-bulk: {title}: {body}")
+        notify = self.paths.notify
+        if os.access(notify, os.X_OK):
+            subprocess.run(
+                [notify, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True
+            )
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def new_contentid(self) -> str:
+        return str(secrets.randbits(63) or 1)
