@@ -132,6 +132,13 @@ def markdown_files(files: Iterable[str]) -> list[str]:
 def link_problems(repo: str, files: Sequence[str]) -> list[str]:
     """One line per relative link or anchor that does not resolve."""
     known = set(files)
+    headings: dict[str, set[str]] = {}
+
+    def heading_ids(dest: str) -> set[str]:
+        if dest not in headings:
+            headings[dest] = anchors(read(repo, dest))
+        return headings[dest]
+
     problems: list[str] = []
     for rel in markdown_files(files):
         for no, target in link_targets(read(repo, rel)):
@@ -143,7 +150,7 @@ def link_problems(repo: str, files: Sequence[str]) -> list[str]:
                 problems.append(f"{rel}:{no}: {target}: outside the repository")
             elif dest not in known and not os.path.isdir(os.path.join(repo, dest)):
                 problems.append(f"{rel}:{no}: {target}: no such file or folder in the repository")
-            elif anchor and dest.endswith(".md") and anchor not in anchors(read(repo, dest)):
+            elif anchor and dest.endswith(".md") and anchor not in heading_ids(dest):
                 problems.append(f"{rel}:{no}: {target}: no heading with the id #{anchor} in {dest}")
     return problems
 
@@ -189,7 +196,7 @@ def frontmatter(text: str) -> dict[str, str]:
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
-            fields[key.strip()] = value.strip()
+            fields[key.strip()] = value
     return {}
 
 

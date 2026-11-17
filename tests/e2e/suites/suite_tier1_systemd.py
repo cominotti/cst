@@ -60,9 +60,11 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
-DEGRADED_BOOT_FAKES = r"""export E2E_W=/var/tmp/e2e-degraded-boot
-export E2E_UUID=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0
-export E2E_CSUM=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+DEGRADED_BOOT_FAKES = (
+    f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
+    + r"""export E2E_CSUM=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 # The fakes are exported bash functions: the setup script resets PATH, and
 # nothing in /usr/bin is replaced. rpm-ostree keeps its tracked list in
@@ -121,9 +123,11 @@ udevadm() {
 }
 export -f rpm-ostree cpio findmnt btrfs lsblk udevadm
 """
+)
 
-DEGRADED_BOOT_PREPARE = r""". /var/tmp/e2e-degraded-boot/fakes.bash
-D="/ostree/deploy/e2e/deploy/$E2E_CSUM.0"
+DEGRADED_BOOT_PREPARE = (
+    f". {DEGRADED_BOOT_DIR}/fakes.bash\n"
+    + r"""D="/ostree/deploy/e2e/deploy/$E2E_CSUM.0"
 mkdir -p "$D/usr/lib/udev/rules.d" "/ostree/boot.1/e2e/$E2E_CSUM" /boot/loader/entries /boot/ostree/initramfs-overlays
 cp /usr/lib/udev/rules.d/64-btrfs.rules "$D/usr/lib/udev/rules.d/"
 ln -sfn "../../../deploy/e2e/deploy/$E2E_CSUM.0" "/ostree/boot.1/e2e/$E2E_CSUM/0"
@@ -133,6 +137,7 @@ touch /run/ostree-booted
 : >"$E2E_W/tracked"
 : >"$E2E_W/calls"
 """
+)
 
 
 class Tier1SystemdE2ETest(unittest.TestCase):
@@ -1135,8 +1140,8 @@ EOF
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
         one) with a boot entry and a tar.gz overlay under /boot."""
         c = self.SYSTEMD_CONTAINER
-        w = "/var/tmp/e2e-degraded-boot"
-        uuid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        w = DEGRADED_BOOT_DIR
+        uuid = DEGRADED_BOOT_UUID
         files = (
             "/etc/udev/rules.d/65-btrfs-last-resort.rules",
             "/etc/systemd/system/btrfs-last-resort@.service",

@@ -48,7 +48,10 @@ DOCTOR_FIXTURES: Final = os.path.join(REPO, "doctor", "tests", "fixtures")
 
 UUID: Final = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DISPATCH: Final = 'case "${1:-}" in'
-SECTION: Final = re.compile(r"^# -+ (guards|files|self-test|initramfs overlay) -+$", re.M)
+# The section comments of the install path. "guards" is only cut off: it
+# ends the prelude, and no test runs it (the tier 1 test does).
+SECTIONS: Final = ("guards", "files", "self-test", "initramfs overlay")
+SECTION: Final = re.compile(r"^# -+ (" + "|".join(map(re.escape, SECTIONS)) + r") -+$", re.M)
 
 RULE: Final = "/etc/udev/rules.d/65-btrfs-last-resort.rules"
 SERVICE: Final = "/etc/systemd/system/btrfs-last-resort@.service"
@@ -79,7 +82,7 @@ OLD_FILES=("${CONF_DIR}/upstream-64-btrfs.rules.sha256")
 """
 REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.M))
 # Settings of the prelude that name no file.
-NOT_PATHS: Final = frozenset({"PATH", "RECORD_UNIT", "OURS_MARK"})
+NOT_PATHS: Final = frozenset({"RECORD_UNIT", "OURS_MARK"})
 
 # Fedora's /usr/lib/udev/rules.d/64-btrfs.rules, whose semantics the rule
 # builds on (the script refuses to install when they change).
@@ -220,7 +223,7 @@ def script_parts() -> dict[str, str]:
         raise AssertionError(f"expected one {DISPATCH!r} in {SCRIPT}")
     marks = list(SECTION.finditer(text))
     names = [m.group(1) for m in marks]
-    if names != ["guards", "files", "self-test", "initramfs overlay"]:
+    if tuple(names) != SECTIONS:
         raise AssertionError(f"unexpected section comments in {SCRIPT}: {names}")
     parts = {"prelude": text[: text.index(DISPATCH)]}
     ends = [m.start() for m in marks[1:]] + [len(text)]
