@@ -20,7 +20,7 @@ one place only.
 
 | Need | Use | Notes |
 |---|---|---|
-| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. |
+| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. A command whose answers are parsed runs in the C locale: `c_locale(env)` (`cst_core.adapters`), not an `LC_ALL` literal. |
 | Host or toolbox, run on the host | `HostExecutionContext` (`cst_core.adapters`), `ExecutionContextPort` | Root commands refuse inside a toolbox ([docs/architecture.md](../../docs/architecture.md#toolbox-vs-host)). |
 | systemd | `SystemdPort` (`cst_core.ports`), `SystemctlAdapter` (`cst_core.adapters`) | |
 | libvirt | `VirshPort` (`cst_core.ports`), `SubprocessVirshAdapter` (`cst_core.adapters`) | |
@@ -41,7 +41,7 @@ one place only.
 | libvirt XML | `cst_core.domain.libvirt_xml.keep_prefixes` | |
 | NOCOW | `cst_core.adapters.nocow`: `set_nocow`, `inode_flags` | |
 | The program's own path, the checkout, a sibling program, the installed bytes | `cst_core.adapters.runtime`: `checkout_root`, `program_path`, `program_argv`, `sibling_program`, `install_payload` | Never compute paths from `__file__` by hand. |
-| Signals and locale at start | `cst_core.adapters.runtime`: `restore_default_signals`, `restore_lc_ctype` | `restore_default_signals` (SIGPIPE back to its default) only in `cst`, the installer, `cst swap` and commands that only read: `cst doctor`, `btrfs-stall-report`, `cst vm` status/list/plans, `cst toolchains` status/plans, `cst cpu vm-pin` status/plan, `cpu-watch report` and its help, `docker-gc status` and `run --dry-run`, `chrome-cache status` and `plan`. Never in a command with cleanup (a backup, a prune, bulk, snapshots, the daemons): a closed pipe must not cut the cleanup short. `restore_lc_ctype` gives the modules `cst` runs the caller's LC_CTYPE back. |
+| Signals and locale at start | `cst_core.adapters.runtime`: `restore_default_signals`, `undo_python_start` | `restore_default_signals` (SIGPIPE back to its default) only in `cst`, the installer, `cst swap` and commands that only read: `cst doctor`, `btrfs-stall-report`, `cst vm` status/list/plans, `cst toolchains` status/plans, `cst cpu vm-pin` status/plan, `cpu-watch report` and its help, `docker-gc status` and `run --dry-run`, `chrome-cache status` and `plan`. Never in a command with cleanup (a backup, a prune, bulk, snapshots, the daemons): a closed pipe must not cut the cleanup short. `undo_python_start` (in `cst`, `cst swap` and the installer) also gives the commands they run the caller's LC_CTYPE back. |
 | How `cst` runs a module | `cst_core.adapters.dispatch` (`LocalCstDispatchAdapter`) | `exec`, or in the foreground with bash's signal rules. |
 | Zipapps, import analysis | `cst_core.adapters.zipapp`, `cst_core.domain.imports` | |
 | The installer's use case | `cst_core.application.install` (`InstallService`) | |
