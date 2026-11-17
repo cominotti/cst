@@ -46,8 +46,11 @@ GATE_MODULES: Final = (
     "tests.test_entrypoints",
     "tests.test_python_files",
     "tests.test_repo_paths",
+    "tests.test_ruff_budget",
+    "tests.test_run_unit",
     "tests.test_subprocess_hygiene",
     "tests.test_typing_budget",
+    "tests.test_unit_contract",
 )
 
 

@@ -1222,3 +1222,87 @@ EOF
         self.assertNotEqual(
             exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0
         )
+
+    # systemd-analyze security's exposure of every service CST installs or
+    # generates, on its 0-100 scale (--threshold takes it so: 25 = 2.5). Only
+    # goes down: a hardened unit lowers its line in the same change.
+    SECURITY_CEILINGS: dict[str, int] = {
+        "btrfs-bulk-boot.service": 94,
+        "btrfs-degraded-boot-record.service": 94,
+        "btrfs-health-check.service": 94,
+        "btrfs-last-resort@e2e.service": 94,
+        "btrfs-scrub-weekly.service": 94,
+        "btrfs-snapshot-nas.service": 94,
+        "btrfs-snapshot.service": 94,
+        "btrfs-stall-alert.service": 94,
+        "btrfs-stall-monitor.service": 25,
+        "btrfs-subvol-convert.service": 94,
+        "cpu-game.service": 94,
+        "cpu-game-watchdog.service": 94,
+        "cst-vm-backup@e2e.service": 94,
+        "docker-gc-recorder.service": 94,
+        "docker-gc.service": 94,
+        "docker-volumes-nocow.service": 94,
+    }
+
+    def test_16_units_pass_systemd_analyze_verify_and_security(self) -> None:
+        """Every unit CST installs (the manifest, staged by the real installer
+        as in test_11) or generates (tests/unit_files.py: cst-vm, cst-toolchains,
+        the LDAC watcher, the degraded-boot setup) passes `systemd-analyze
+        verify` with no output, under --root of the stage so that ExecStart=
+        paths resolve to the staged programs. A command a unit names outside
+        /usr/local gets an empty executable in the stage only when the real one
+        exists here, so a wrong path still fails. User units are checked by the
+        system manager's parser (verify has no --root for --user). Then
+        `systemd-analyze security --offline` of every service stays at or under
+        its SECURITY_CEILINGS entry, and equal to it (lower the entry when a unit
+        gets better). Drop-ins (below, machine.slice, user@.service) are not
+        units of their own and are not verified here."""
+        c = self.SYSTEMD_CONTAINER
+        stage = "/var/tmp/e2e-units"
+        # Commands of packages the tier 1 image does not install: staged even so.
+        not_in_image = "/usr/sbin/btrfs"
+        self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        exec_bash(
+            c,
+            f"""
+            rm -rf {stage} && install -d -m 0755 {stage}
+            {installer} install --root {stage} --owner root {sets} >/dev/null
+            /usr/bin/python3 -I -B /opt/cst-rw/tests/unit_files.py write {stage} >/dev/null
+            cd {stage}/etc/systemd
+            grep -rhoE '^Exec[A-Za-z]*=[-@:+!|]*/[^ ]+' system user | sed -E 's/^[^=]+=[-@:+!|]*//' | sort -u |
+            while read -r p; do
+                case "$p" in /usr/local/*) continue ;; esac
+                if [[ ( -x "$p" || " {not_in_image} " == *" $p "* ) && ! -e "{stage}$p" ]]; then
+                    install -d "{stage}$(dirname "$p")" && install -m 0755 /dev/null "{stage}$p"
+                fi
+            done
+            for f in user/*; do cp "$f" "system/user-check-$(basename "$f")"; done
+            """,
+        )
+        names = exec_bash(
+            c,
+            f"cd {stage}/etc/systemd/system && for f in *; do [[ -f $f ]] || continue; "
+            'n="$f"; [[ "$n" == *@.* ]] && n="${n/@./@e2e.}"; echo "$n"; done',
+        ).stdout.split()
+        self.assertIn("btrfs-snapshot.service", names)
+        self.assertIn("cst-vm-backup@e2e.service", names)
+        self.assertIn("user-check-cst-bt-ldac48.service", names)
+        verify = f"systemd-analyze verify --man=no --recursive-errors=no --root={stage} "
+        v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in names), check=False)
+        self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))
+        services = sorted(n for n in names if n.endswith(".service") and not n.startswith("user-check-"))
+        self.assertEqual(services, sorted(self.SECURITY_CEILINGS), "every service has a SECURITY_CEILINGS entry")
+        for name in services:
+            with self.subTest(unit=name):
+                ceiling = self.SECURITY_CEILINGS[name]
+                s = exec_bash(
+                    c,
+                    f"systemd-analyze security --offline=yes --root={stage} --threshold={ceiling} {shlex.quote(name)}",
+                    check=False,
+                )
+                self.assertEqual(s.returncode, 0, f"exposure above {ceiling / 10}:\n{s.stdout[-600:]}")
+                score = s.stdout.rsplit("Overall exposure level for", 1)[-1].split(":", 1)[1].split()[0]
+                self.assertEqual(round(float(score) * 10), ceiling, f"{name} is now {score}: lower its entry")

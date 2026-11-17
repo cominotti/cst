@@ -24,6 +24,7 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_11`: the real installer writes the whole install manifest (staged, as root and as the user), a second run changes nothing, and every Python program runs its help from `/` with no import error.
 - `test_12`: `cst vm backup-timer on` installs the zipapp, the service and the timer; a second `on` writes nothing; `off` removes everything.
 - `test_13`: `cst btrfs degraded-boot` with fakes for rpm-ostree, findmnt, btrfs, lsblk and the udevd part of udevadm: install, `udevadm verify` on the rule and `systemd-analyze verify` on the units, a second install that writes nothing and changes no deployment, a `status` that changes nothing, and an uninstall that removes everything.
+- `test_16`: every unit CST installs (the manifest, staged by the real installer) or generates (`tests/unit_files.py`: cst-vm, cst-toolchains, the LDAC watcher, the degraded-boot setup) passes `systemd-analyze verify` with no output under `--root` of the stage, and `systemd-analyze security --offline` of each service stays at its entry in `SECURITY_CEILINGS` (only goes down).
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
