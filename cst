@@ -48,8 +48,11 @@ set -Eeuo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 DIR="$(dirname "${SELF}")"
 
-# cst_core/cli.py takes these three and removes them from the environment
-# the modules get. It also picks the name to show in hints: CST_NAME when set
-# (kept across sudo), "cst" when that is this script in PATH (also through a
-# symlink), else the path it was started with.
-CST_SELF="${SELF}" CST_DIR="${DIR}" CST_ARG0="$0" exec /usr/bin/python3 -I -B "${DIR}/cst_core/cli.py" "$@"
+# cst_core/cli.py takes these four and removes them from the environment
+# the modules get. CST_LC_CTYPE is the caller's LC_CTYPE ("" when unset,
+# "=VALUE" when set), which Python changes at start under a C locale; cli.py
+# puts it back for the modules. cli.py also picks the name to show in hints:
+# CST_NAME when set (kept across sudo), "cst" when that is this script in PATH
+# (also through a symlink), else the path it was started with.
+CST_SELF="${SELF}" CST_DIR="${DIR}" CST_ARG0="$0" CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" \
+    exec /usr/bin/python3 -I -B "${DIR}/cst_core/cli.py" "$@"

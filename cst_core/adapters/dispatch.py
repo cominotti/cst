@@ -49,16 +49,18 @@ class LocalCstDispatchAdapter:
         """Run `argv` in the foreground on the terminal's streams, as bash runs a command; its exit status.
 
         While it runs, Ctrl-C and Ctrl-\\ go to the command only (it may handle
-        them). If it died of one of them, cst dies of the same signal, as bash
-        does; another fatal signal N gives 128+N.
+        them). If it died of one of them and cst got that signal too (Ctrl-C
+        reaches both), cst dies of the same signal, as bash does; otherwise a
+        fatal signal N gives 128+N.
         """
         previous = {sig: signal.getsignal(sig) for sig in _FOREGROUND_SIGNALS}
+        received: set[int] = set()
         # A Python-level handler, not SIG_IGN: the command must not inherit an
         # ignored signal (exec resets a handler to the default, not an ignore).
         # A signal cst itself started with ignored stays ignored, as in bash.
         for sig, handler in previous.items():
             if handler is not signal.SIG_IGN:
-                signal.signal(sig, lambda _sig, _frame: None)
+                signal.signal(sig, lambda got, _frame: received.add(got))
         try:
             try:
                 proc = subprocess.Popen(list(argv), env=None if env is None else dict(env))
@@ -68,7 +70,7 @@ class LocalCstDispatchAdapter:
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
-        if -rc in _FOREGROUND_SIGNALS and previous[signal.Signals(-rc)] is not signal.SIG_IGN:
+        if -rc in received:
             signal.signal(-rc, signal.SIG_DFL)
             os.kill(os.getpid(), -rc)
         return shell_exit_status(rc)

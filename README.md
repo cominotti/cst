@@ -79,9 +79,11 @@ works on its own (`bash btrfs-setup.sh status` is the same as
 hands over to the module's script (it replaces itself with it, as `exec`
 does): Ctrl-C, signals and the exit status are the module's own. `cst status`
 and `cst doctor` run each script in the foreground, as a shell does: Ctrl-C
-reaches the script, and `cst` stops with it only if the script stops. Of
-cst's own settings a module only sees `CST_PROG` (its name in hints), and
-`CST_NAME` after the sudo re-run of `cst status` (so hints keep the name).
+reaches the script, and `cst` stops with it only if the script stops (a
+signal sent to the script alone stops only the script). Of cst's own
+settings a module only sees `CST_PROG` (its name in hints), and `CST_NAME`
+after the sudo re-run of `cst status` (so hints keep the name); its locale
+(`LC_CTYPE`) is the caller's, unchanged.
 
 **How to call it.** The first time, run it from the CST folder:
 

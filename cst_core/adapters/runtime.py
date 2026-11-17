@@ -67,6 +67,23 @@ def install_payload(src_rel: str, main_file: str) -> bytes:
     return build_python_zipapp(root, src_rel)
 
 
+def restore_lc_ctype(handed_over: str | None) -> None:
+    """Put the caller's LC_CTYPE back into the environment that cst's modules get.
+
+    Under a C or POSIX locale Python sets LC_CTYPE=C.UTF-8 in its own
+    environment at start (PEP 538), and every program cst runs would inherit
+    it; the bash cst passed the caller's LC_CTYPE on as it was. The cst
+    wrapper hands it over as "" (it was unset) or "=VALUE"; None (cli.py run
+    without the wrapper) leaves the environment as it is.
+    """
+    if handed_over is None:
+        return
+    if handed_over.startswith("="):
+        os.environ["LC_CTYPE"] = handed_over[1:]
+    else:
+        os.environ.pop("LC_CTYPE", None)
+
+
 def restore_default_signals() -> None:
     """Undo what Python changes at start: SIGPIPE (and SIGXFSZ) ignored.
 

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from cst_core.adapters import (
     HostExecutionContext,
@@ -20,6 +21,7 @@ from cst_core.adapters import (
     SystemctlAdapter,
 )
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
+from cst_core.adapters.runtime import restore_lc_ctype
 from cst_core.cli import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
@@ -493,6 +495,17 @@ class LocalCstDispatchAdapterTest(unittest.TestCase):
         self.assertEqual(port.run_passthrough(["bash", "-c", "kill -TERM $$"], env=env), 143)
         self.assertEqual(port.run_passthrough(["bash", "-c", "exit 3"], env=env), 3)
 
+    def test_restore_lc_ctype(self) -> None:
+        for handed_over, before, after in (
+            (None, {"LC_CTYPE": "C.UTF-8"}, "C.UTF-8"),  # cli.py run without the wrapper: left alone
+            ("", {"LC_CTYPE": "C.UTF-8"}, None),
+            ("=C", {"LC_CTYPE": "C.UTF-8"}, "C"),
+            ("=", {}, ""),
+        ):
+            with self.subTest(handed_over=handed_over), mock.patch.dict(os.environ, before, clear=True):
+                restore_lc_ctype(handed_over)
+                self.assertEqual(os.environ.get("LC_CTYPE"), after)
+
     def test_a_command_that_cannot_start(self) -> None:
         port = LocalCstDispatchAdapter()
         missing = os.path.join(tempfile.gettempdir(), "cst-no-such-program")
@@ -624,6 +637,15 @@ class CstCommandTest(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertEqual(proc.returncode, -signal.SIGINT)
 
+    def test_status_goes_on_when_only_the_module_got_ctrl_c(self) -> None:
+        # bash dies with a foreground command's SIGINT only when it got the signal too (Ctrl-C reaches
+        # both); a SIGINT sent to the module alone is that module's failure, and main's status went on.
+        proc = self._run("echo started\nkill -INT $$\necho not reached\n", "status")
+        self.assertIn("started", proc.stdout)
+        self.assertNotIn("not reached", proc.stdout)
+        self.assertIn("==== doctor", proc.stdout)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+
     def test_ctrl_c_ignored_by_cst_s_caller_stays_ignored(self) -> None:
         # bash keeps a signal ignored at its start ignored for the commands it runs (`nohup`-style callers).
         cst = _cst_copy(self.tmp, "echo started\nsleep 0.5\necho after\n")
@@ -678,6 +700,22 @@ class CstCommandTest(unittest.TestCase):
         # A name the caller set (sudo's `env CST_NAME=...`) is kept, as before.
         proc = self._run(script, "swap", env={**_CLEAN_ENV, "CST_NAME": "cst"})
         self.assertEqual(proc.stdout, "PROG=cst swap NAME=cst SELF=unset DIR=unset ARG0=unset\n", proc.stderr)
+
+    def test_a_module_gets_the_caller_s_lc_ctype(self) -> None:
+        # Under a C locale Python sets LC_CTYPE=C.UTF-8 in its own environment (PEP 538); the bash cst
+        # handed the caller's LC_CTYPE on as it was, unset included.
+        script = 'echo "LC_CTYPE=${LC_CTYPE-unset}"\n'
+        path = {"PATH": "/usr/bin:/bin"}
+        for caller, seen in (
+            ({}, "unset"),
+            ({"LANG": "C"}, "unset"),
+            ({"LC_CTYPE": "C"}, "C"),
+            ({"LC_CTYPE": ""}, ""),
+            ({"LC_CTYPE": "C.UTF-8"}, "C.UTF-8"),
+        ):
+            with self.subTest(caller=caller):
+                proc = self._run(script, "swap", env={**path, **caller})
+                self.assertEqual(proc.stdout, f"LC_CTYPE={seen}\n", proc.stderr)
 
 
 if __name__ == "__main__":
