@@ -1044,8 +1044,9 @@ EOF
             old_reader=/usr/local/bin/f44-pending-alerts
             old_dropin=/etc/systemd/system/below.service.d/10-f44-tools.conf
             new_dropin=/etc/systemd/system/below.service.d/10-cst.conf
-            alert=1700000000-e2e-old.alert
-            dup=1700000001-e2e-dup.alert
+            # Names as btrfs-notify makes them (32 hex characters); cst-pending-alerts only shows such names.
+            alert=0123456789abcdef0123456789abcdef.alert
+            dup=fedcba9876543210fedcba9876543210.alert
             cleanup() {
                 systemctl --global disable f44-pending-alerts.service 2>/dev/null || true
                 rm -rf "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin"
@@ -1076,7 +1077,10 @@ EOF
             # so the unit is today's, renamed).
             install -d -m 0755 "$old/pending" "$new/pending"
             printf 'old alert\n' >"$old/pending/$alert"
-            touch -d '2026-01-02 03:04:05' "$old/pending/$alert"
+            # An hour old: btrfs-notify drops pending alerts older than 7 days (by mtime) whenever it runs,
+            # and the install's health check runs it.
+            touch -d '1 hour ago' "$old/pending/$alert"
+            alert_mtime="$(stat -c %Y "$old/pending/$alert")"
             printf 'stale copy\n' >"$old/pending/$dup"
             printf 'newer copy\n' >"$new/pending/$dup"
             sed 's/cst-pending-alerts/f44-pending-alerts/g; s|/var/lib/cst-alerts|/var/lib/f44-alerts|g' \
@@ -1094,7 +1098,7 @@ EOF
             grep -qxF "moved:     $old -> $new (alerts kept for the next login; the old name is a link until the next install)" \
                 <<<"$out"
             [[ "$(cat "$new/pending/$alert")" == "old alert" ]]
-            [[ "$(stat -c %Y "$new/pending/$alert")" == "$(date -d '2026-01-02 03:04:05' +%s)" ]]
+            [[ "$(stat -c %Y "$new/pending/$alert")" == "$alert_mtime" ]]   # moved, not rewritten
             [[ "$(cat "$new/pending/$dup")" == "newer copy" ]]   # the new folder's copy wins
             [[ -L "$old" && "$(readlink "$old")" == "$new" ]]
             gone "$old_unit" "$wants" "$old_reader" "$old_dropin"
@@ -1287,7 +1291,8 @@ EOF
             out="$(cst btrfs snapshots disable 2>&1)" || { show disable "$out"; exit 1; }
             show disable "$out"
             grep -qxF 'Hourly snapshots and the NAS backup are stopped; existing snapshots are kept.' <<<"$out"
-            grep -qxF 'Delete them all with: cst btrfs snapshots disable --purge' <<<"$out"
+            # PROG: cst sets CST_PROG to the path it was started by, plus the module.
+            grep -qxF 'Delete them all with: /opt/cst-rw/cst btrfs snapshots disable --purge' <<<"$out"
             grep -qF "Note: ~/Bulk items wait for the next boot (avd ) and are still moved" <<<"$out"
             for u in btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service; do
                 [[ "$(systemctl is-enabled "$u" || true)" == disabled ]]
@@ -1452,7 +1457,7 @@ EOF
             grep -q '^timer disabled' <<<"$out"
             grep -qF 'recorder inactive' <<<"$out"
             out="$(cst btrfs status 2>&1)" || { show "btrfs status" "$out"; exit 1; }
-            grep -qxF '  off (cst btrfs docker-gc enable)' <<<"$out"
+            grep -qxF '  off (/opt/cst-rw/cst btrfs docker-gc enable)' <<<"$out"   # "${PROG} docker-gc enable"
 
             # 4. A second disable changes nothing.
             before="$(state)"
