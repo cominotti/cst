@@ -505,7 +505,8 @@ The code is split into four layers under `doctor/`:
   filesystem I/O or subprocess calls).
 - `doctor/ports.py`: port protocols (`DoctorHostPort`, `CheckFn`, `VmToolsPort`).
 - `doctor/adapters.py`: `Host` adapter (direct or `flatpak-spawn --host` /
-  `/run/host`; its commands go through cst_core's `SubprocessCommandRunner`
+  `/run/host`, as cst_core's `HostExecutionContext` detects, unless
+  `CST_DOCTOR_CONTAINER` says; its commands go through cst_core's `SubprocessCommandRunner`
   with `on_host`, and virsh through cst_core's `SubprocessVirshAdapter` over
   the same runner (`Host.virsh`), in the doctor's own words for a command
   that is missing or does not answer; it also opens, lists and stats the
@@ -513,12 +514,14 @@ The code is split into four layers under `doctor/`:
   the image folder probe of `vm.adapters`).
 - `doctor/application.py`: host probes, check implementations, `CHECKS` registry
   and `run_checks`, and `DoctorFacts`: what several checks ask (rpm-ostree with
-  every deployment, the libvirt domains, each VM's definition), asked once per
+  every deployment, through cst_core's one query `cst_core.domain.ostree`, the libvirt domains, each VM's definition), asked once per
   `Host` and kept here, not on the host port. No direct I/O: files and commands go through
   `DoctorHostPort` (`tests/test_architecture.py` checks it).
 - `doctor/presenter.py`: `render`, the report as text.
-- `doctor/cli.py`: the command line: arguments, the `Host`, the VM checks
-  wired with `VmTools`, the report.
+- `doctor/cli.py`: the command line: arguments, the VM checks wired with the
+  VM tools, the report.
+- `doctor/wiring.py`: the composition root: the environment, the signals, the
+  `Host` (with the checkout the doctor runs from) and `VmTools`.
 - `doctor/cst-doctor`: the entry point: only the bootstrap and a `main()` that
   runs `cli.py`.
 

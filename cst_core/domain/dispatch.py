@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Domain model and formatting for the top-level `cst` module dispatcher."""
+"""Domain model and formatting for the top-level `cst` module dispatcher, and the
+routing table of the modules whose setup script is a shim (vm, toolchains)."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,3 +115,150 @@ def format_cst_usage(present_modules: Mapping[str, bool]) -> str:
         state = "" if present_modules.get(spec.name, False) else " (not in this copy)"
         lines.append(f"  {spec.name:<10} {spec.about}{state}")
     return "\n".join(lines)
+
+
+# ---- Routing a module's command to its program (vm-setup.sh, toolchains-setup.sh) ----
+#
+# A module whose setup script is a shim (cst_core/route.py runs the route):
+# which of its commands only read, which change the caller's files, which
+# need root, and what each one execs. The privileges:
+#   read     as the caller; in a toolbox, on the host through flatpak-spawn
+#            (without it, from the container, after a note)
+#   user     changes the caller's files only (the program calls sudo itself
+#            for the rest): on the host, as the caller
+#   root     on the host; as a user, the script runs again through sudo
+#   as-user  the caller's own files: as root (sudo, or `cst status`), the
+#            script runs again as SUDO_USER through runuser
+type _Privilege = Literal["read", "user", "root", "as-user"]
+
+# What the help options of every module are.
+HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
+
+
+@dataclass(frozen=True, slots=True)
+class _Route:
+    """How one command runs. root_with: an argument after the command that makes it a root command."""
+
+    privilege: _Privilege
+    root_with: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandRoutes:
+    """A command's route, or its subcommands' (then usage is the error for any other; {prog} is filled in)."""
+
+    route: _Route | None = None
+    subcommands: Mapping[str, _Route] | None = None
+    usage: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleRouting:
+    """A shim module's routing table.
+
+    program: the program, relative to the CST folder. container_override:
+    the variable that says "1" (in a toolbox) or "0" (on the host) instead
+    of the detection (tests). user_reason: why an as-user command refuses
+    root without a SUDO_USER. user_unset: what the step down to SUDO_USER
+    removes from the environment besides SUDO_USER.
+    """
+
+    program: str
+    commands: Mapping[str, _CommandRoutes]
+    container_override: str = ""
+    user_reason: str = ""
+    user_unset: tuple[str, ...] = ()
+
+
+_READ: Final = _Route("read")
+_ROOT: Final = _Route("root")
+_AS_USER: Final = _CommandRoutes(_Route("as-user"))
+
+ROUTING: Final[Mapping[str, ModuleRouting]] = {
+    "vm": ModuleRouting(
+        program="vm/cst-vm",
+        commands={
+            "list": _CommandRoutes(_READ),
+            "status": _CommandRoutes(_READ),
+            "tune": _CommandRoutes(
+                subcommands={"plan": _READ, "apply": _ROOT},
+                usage="Usage: {prog} tune plan|apply [VM] [--guest-has-virtio]",
+            ),
+            "nocow": _CommandRoutes(
+                subcommands={"plan": _Route("read", root_with="--root"), "apply": _Route("user")},
+                usage="Usage: {prog} nocow plan [--root] | nocow apply",
+            ),
+            "backup-timer": _CommandRoutes(
+                subcommands={"status": _READ, "on": _ROOT, "off": _ROOT},
+                usage="Usage: {prog} backup-timer on|off|status [VM]",
+            ),
+            "backup": _CommandRoutes(_ROOT),
+        },
+        container_override="CST_VM_CONTAINER",
+    ),
+    "toolchains": ModuleRouting(
+        program="toolchains/cst-toolchains",
+        commands={"status": _AS_USER, "prune": _AS_USER, "auto": _AS_USER, "config": _AS_USER},
+        user_reason="toolchain caches and settings belong to your user",
+        user_unset=("XDG_CONFIG_HOME",),
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Routed:
+    """What to do with a command line: help (exit 0), a usage error (message, exit 2), or run with privilege."""
+
+    action: Literal["help", "usage", "unknown", "run"]
+    privilege: _Privilege = "read"
+    message: str = ""
+
+
+def route_command(routing: ModuleRouting, cmd: str, rest: Sequence[str], prog: str) -> Routed:
+    """Where cmd (an empty one is help) and its arguments go, as the setup script decided."""
+    if cmd in HELP_WORDS:
+        return Routed("help")
+    found = routing.commands.get(cmd)
+    if found is None:
+        return Routed("unknown", message=f"Unknown command: {cmd}")
+    route = found.route
+    if found.subcommands is not None:
+        route = found.subcommands.get(rest[0] if rest else "")
+        if route is None:
+            return Routed("usage", message=found.usage.format(prog=prog))
+    assert route is not None, cmd
+    if route.root_with and route.root_with in rest:
+        return Routed("run", "root")
+    return Routed("run", route.privilege)
+
+
+def step_down_argv(user: str, uid: int, home: str, *, unset: Sequence[str], then: Sequence[str]) -> list[str]:
+    """runuser to user (from root) with the session variables a login of that user sets; env removes
+    unset and SUDO_USER first, then takes then (more assignments, and the command)."""
+    drop = [word for name in (*unset, "SUDO_USER") for word in ("-u", name)]
+    session = [
+        f"HOME={home}",
+        f"USER={user}",
+        f"LOGNAME={user}",
+        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+    ]
+    return ["runuser", "-u", user, "--", "env", *drop, *session, *then]
+
+
+def script_help(script_text: str, prog: str) -> str:
+    """A setup script's help: its header from line 2 to the first empty line (the license
+    line left out, "# " taken off), then the usage line. What
+    `sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' | sed 's/^# \\{0,1\\}//'` printed."""
+    out: list[str] = []
+    lines = script_text.split("\n")
+    if script_text.endswith("\n"):
+        lines.pop()  # the newline ends the last line; it starts no empty one
+    for number, line in enumerate(lines, start=1):
+        if number < 2:
+            continue
+        if "SPDX-License-Identifier:" not in line:
+            out.append(line[2:] if line.startswith("# ") else line[1:] if line.startswith("#") else line)
+        if number > 2 and not line:
+            break
+    return "\n".join(out) + f"\nUsage: {prog} <command> [args]\n"

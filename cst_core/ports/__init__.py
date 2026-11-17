@@ -238,6 +238,37 @@ class CstDispatchPort(Protocol):
         ...
 
 
+class ModuleRoutePort(Protocol):
+    """What routing a module's command (cst_core/route.py) needs from the host."""
+
+    def environ(self) -> Mapping[str, str]: ...
+
+    def euid(self) -> int: ...
+
+    def is_container(self) -> bool: ...
+
+    def user_passwd(self, user: str) -> tuple[int, str]:
+        """(uid, home) of user; KeyError for an unknown one."""
+        ...
+
+    def exec_on_host(self, argv: Sequence[str], *, settings: Mapping[str, str]) -> int | None:
+        """From a container: replace this process with argv run on the host (flatpak-spawn
+        --host, settings as --env); None when there is no flatpak-spawn on PATH."""
+        ...
+
+    def read_text(self, path: str) -> str:
+        """A file's bytes as text (the file system's encoding, every byte kept)."""
+        ...
+
+    def say(self, stream: Literal["out", "err"], text: str) -> None:
+        """Write text (encoded back the same way) to stdout or stderr, at once."""
+        ...
+
+    def exec_replace(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
+        """Replace this process with argv (bash's exec); returns only when argv cannot start."""
+        ...
+
+
 class SystemdPort(Protocol):
     """Manages systemd units and path escaping."""
 

@@ -7,10 +7,11 @@ points, the package layout and the static gates. The rules for changing the code
 
 ## `cst` only dispatches
 
-`cst` delegates to `cst_core/cli.py`, which only wires: the use case is
+`cst` delegates to `cst_core/cli.py`, which hands argv to the use case
 `CstDispatcher` (`cst_core/application/dispatch.py`), over `cst_core/domain/dispatch.py`
 and `CstDispatchPort`, implemented by `cst_core/adapters/dispatch.py` (which also
-answers `which` and `realpath`).
+answers `which` and `realpath`); `cst_core/wiring.py` builds it (see "The
+composition root" below).
 
 - `cst MODULE ...` runs `<module>-setup.sh` with `CST_PROG="cst MODULE"` so that help text reads `cst MODULE`.
 - The module metadata (`MODULES`, `MODULE_BY_NAME`) lives only in `cst_core/domain/dispatch.py`; `cst` itself is a short bash wrapper that runs `cst_core/cli.py`.
@@ -18,7 +19,11 @@ answers `which` and `realpath`).
 
 ## Each module has two parts
 
-- The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status.
+- The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status. Three are shims over Python:
+  `swap-setup.sh` runs `swap/cli.py`; `vm-setup.sh` and `toolchains-setup.sh` run `cst_core/route.py`, which
+  routes each command by the table `ROUTING` next to `MODULES` in `cst_core/domain/dispatch.py` (read, user,
+  root or as-user: flatpak-spawn from a toolbox, the toolbox refusal, the sudo or runuser re-run of the script)
+  and execs the module's program; the script's header comment stays its help.
 - The parts it installs live in the `<module>/` folder: helper programs, systemd `units/`, `sysctl/`, `tmpfiles/` and udev rules.
 - **`INSTALL_MANIFEST` (`cst_core/domain/install.py`) is the one list of installed files**: one row per file in a text table (source, destination, mode, owner, kind and who runs it), read by `parse_manifest`. A setup script never copies a file itself: it sources `cst-install.bash` and calls `cst_install SRC...` (root files), `cst_install_as USER SRC...` (files in a home, written by a process running as that user) or `cst_install_text DEST MODE [USER]` (generated text; `btrfs/btrfs-degraded-boot-setup.sh` writes its generated files this way too, and its plan mode asks `cst_install_text_plan` with the same arguments). They run `cst_core/installer.py` on `/usr/bin/python3`, which writes a file only when its content, mode or (as root) root ownership differs, atomically, and prints `unchanged: DEST` or `written:   DEST` as it goes (a failed write: `cannot write DEST: REASON`, exit 1). A template's `@KEY@` without a `--set`, or a `--set` no template uses, is a usage error (exit 2, nothing written). A link at a destination follows one rule (`cst_core.domain.install.link_read_through`, also used by `owned_file_state_at`): replaced at a root destination, judged by its target in a home; a write replaces the link, never the file it points to. `cst vm backup-timer` and `cst toolchains auto on` follow the same rule (`owned_file_state_at`), with one exception for their unit files: a link to `/dev/null` there is a `systemctl mask`, which they never undo (`unit_file_state_at`: `on` refuses, `status` says `masked`, `off` leaves it). `installer.py plan` (`text-plan` for generated text) shows the same without writing. Destinations come from the manifest only (there is no override); every destination and the staging `--root` must be plain absolute paths (`cst_core.domain.files.checked_path`). The few paths a setup script still keeps in a variable for `status` and `uninstall` (`SYSCTL_FILE`, `PENDING_READER`, ...) must name the same files, and the lists of programs to remove come from `cst_installed_dests`.
 - A `python-entry` is installed as a **zipapp**: one file holding the entry as `__main__.py`, and every repository package it imports (the static import closure); nothing else. Same path, same mode, shebang `#!/usr/bin/python3 -I`; its bytes are reproducible. Anything that compares an installed copy with the repository compares with these built bytes (`installer.py payload SRC`, `cst_core.adapters.runtime.install_payload`), never with the source file. A `*.in` source is a template: `--set KEY=VALUE` fills its `@KEY@`.
@@ -39,6 +44,38 @@ each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
 `application` (with ports) or `adapters` (I/O). The I/O left outside the
 adapters has a budget per package and layer that only goes down
 (`IO_BUDGETS`, see "Static gates beyond lint and types" below).
+
+## The composition root: `wiring.py`
+
+In a package with an application layer, one module puts the program
+together: `<pkg>/wiring.py`. It is the only place that
+
+- reads the process environment (`os.environ`: `CST_PROG`, what a shell
+  wrapper hands over, the test overrides), and turns it into values for the
+  use cases (a frozen settings value, or plain arguments);
+- looks up the program itself: `sys.argv[0]`, `sys.executable`, its own
+  path (to run it again);
+- re-runs the program as another user: the `sudo` or `runuser` re-exec
+  (in cst_core, running a script again as root or as `SUDO_USER` is the use
+  case itself: `CstDispatcher` and the module router's `ModuleRouter` build
+  those command lines in the application layer, and the port execs them);
+- imports the package's adapters (and cst_core's) and builds them.
+
+`cli.py` only parses argv, calls `wiring` and one use case, and renders
+the answer (with the presenter). A function in `cli.py` that tests call
+with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
+the caller passes none, it asks `wiring` for the real ones.
+
+`tests/test_architecture.py` enforces it for the packages in
+`HEXAGONAL_PACKAGES` (swap, doctor and cst_core today): their `cli.py` and
+`presenter.py` do no I/O and import no adapter, and only `wiring.py` and
+the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other
+module, use `os.environ`, `sys.executable` and `os.execvp` without them
+counting as I/O; anything else it does (files, commands) counts in its
+package's `IO_BUDGETS` like everywhere else. cst_core's `wiring.py` serves
+its programs: `cst` (`cli.py`), the installer and the module router
+(`route.py`). Every package converted from now on follows the same split
+and joins `HEXAGONAL_PACKAGES`.
 
 ## Most helpers are Python scripts with no `.py` extension
 
@@ -68,7 +105,7 @@ All of them run in the unit suite:
 - `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
   - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table that only shrinks;
   - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
-  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so);
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides (see "The composition root" above);
   - no module imports a private name (`_x`) from another module of the repository;
   - each shared primitive has an owner in cst_core (`PRIMITIVE_OWNERS`: `subprocess`, `os.replace`, `os.fsync`, temporary files, `fcntl.flock`, the NOCOW ioctl), and so do the literals that betray a copy of one (`PRIMITIVE_LITERALS`); a call or a literal outside its owner counts against its package's budget (`PRIMITIVE_BUDGETS`, `LITERAL_BUDGETS`), docstrings aside;
   - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons, only shrinks).
@@ -82,7 +119,10 @@ All of them run in the unit suite:
 
 ## Toolbox vs host
 
-The scripts detect a container through `/run/.containerenv` or `/.dockerenv`.
+The scripts detect a container through `/run/.containerenv` or `/.dockerenv`. In Python
+one class does it, `HostExecutionContext` (`cst_core.adapters`); the `cst` dispatcher,
+doctor's `Host` and toolchains ask it (`PRIMITIVE_LITERALS` keeps the markers out of
+every other module).
 
 - Inside one, read-only commands still work, sometimes by moving to the host with `flatpak-spawn --host`.
 - Root commands refuse to run there. Keep that split when adding commands.

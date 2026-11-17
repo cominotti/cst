@@ -78,86 +78,10 @@
 set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-SRC="$(dirname "${SELF}")/vm"
-TOOL="${SRC}/cst-vm"
-
-# Shown in the help and in hints: "cst vm" when run through the cst command
-# (it sets CST_PROG), else the name this script was started with.
-PROG="${CST_PROG:-$0}"
-
-usage() {
-    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
-    echo "Usage: ${PROG} <command> [args]"
-}
-in_container() {
-    case "${CST_VM_CONTAINER:-}" in 1) return 0 ;; 0) return 1 ;; esac   # override: tests
-    [[ -e /run/.containerenv || -e /.dockerenv ]]
-}
-
-cmd="${1:-help}"
-[[ $# -gt 0 ]] && shift
-orig_args=("${cmd}" "$@")
-
-# Read-only commands run as the user; "user" commands change only the
-# user's files and call sudo themselves for the rest; "root" ones re-run
-# through sudo.
-sub="${1:-}"
-mode="root"
-case "${cmd}" in
-    help|-h|--help) usage; exit 0 ;;
-    list|status) mode="read" ;;
-    tune)
-        case "${sub}" in
-            plan) mode="read" ;;
-            apply) ;;
-            *) echo "Usage: ${PROG} tune plan|apply [VM] [--guest-has-virtio]" >&2; exit 2 ;;
-        esac ;;
-    nocow)
-        case "${sub}" in
-            plan) mode="read"; for a in "$@"; do [[ "${a}" == --root ]] && mode="root"; done ;;
-            apply) mode="user" ;;
-            *) echo "Usage: ${PROG} nocow plan [--root] | nocow apply" >&2; exit 2 ;;
-        esac ;;
-    backup-timer)
-        case "${sub}" in
-            status) mode="read" ;;
-            on|off) ;;
-            *) echo "Usage: ${PROG} backup-timer on|off|status [VM]" >&2; exit 2 ;;
-        esac ;;
-    backup) ;;
-    *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
-esac
-
-case "${mode}" in
-    read)
-        # Read-only, as any user: the index is world-readable and libvirt's
-        # system connection answers the user's queries (libvirt group or polkit rule).
-        if in_container; then
-            if command -v flatpak-spawn >/dev/null 2>&1; then
-                exec flatpak-spawn --host "--env=CST_PROG=${PROG}" python3 -I -B "${TOOL}" "${cmd}" "$@"
-            fi
-            # A container without a way to the host (CI, plain podman/docker):
-            # answer from here, which degrades to info lines.
-            echo "(cannot reach the host from this container: showing what is visible here)"
-        fi
-        CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
-        ;;
-esac
-
-# ---- commands that change the host ------------------------------------------------
-if in_container; then
-    echo "'${PROG} ${orig_args[*]}' must run on the host, not inside a toolbox/container." >&2
-    echo "In a host terminal: ${PROG} ${orig_args[*]}" >&2
-    exit 1
-fi
-if [[ "${mode}" == user ]]; then
-    CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
-fi
-if [[ ${EUID} -ne 0 ]]; then
-    # sudo resets the environment: CST_PROG is handed over explicitly.
-    if [[ -n "${CST_PROG:-}" ]]; then
-        exec sudo -- env "CST_PROG=${CST_PROG}" "${SELF}" "${orig_args[@]}"
-    fi
-    exec sudo -- "${SELF}" "${orig_args[@]}"
-fi
-CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
+# The routing (read, user or root commands; flatpak-spawn from a toolbox,
+# the sudo re-run) is ROUTING in cst_core/domain/dispatch.py, run by
+# cst_core/route.py, which prints the help above. CST_SELF and CST_ARG0: this
+# script and the name it was started with; CST_LC_CTYPE: the caller's
+# LC_CTYPE, which Python changes at start under a C locale.
+CST_SELF="${SELF}" CST_ARG0="$0" CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" \
+    exec /usr/bin/python3 -I -B "$(dirname "${SELF}")/cst_core/route.py" vm "$@"

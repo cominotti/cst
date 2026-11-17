@@ -997,6 +997,14 @@ created through sudo, and a second run as root and as the user.
 
 The Python code inside `vm/` (standard library only at run time):
 
+- `vm-setup.sh` (at the top of CST): its header comment is the help of
+  `cst vm`; the rest is a shim that runs `cst_core/route.py vm`. The router
+  (`ROUTING` in `cst_core/domain/dispatch.py`, tests in
+  `tests/test_module_routing.py`) prints the help or a usage error, and
+  execs `cst-vm`: as the user for `list`, `status`, `backup-timer status`,
+  `tune plan` and `nocow plan` without `--root` (from a toolbox on the host through
+  flatpak-spawn), on the host only for the rest, which first runs the
+  script again through sudo (`nocow apply` stays the user's).
 - `vm/cst-vm`: the entry point (its docstring is the help); it only hands
   argv to `vm/cli.py`. Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
   `backup-timer on`).

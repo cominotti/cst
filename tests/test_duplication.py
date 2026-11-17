@@ -100,7 +100,7 @@ ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
     "cpuset_delegated": "cpu-setup.sh's check and the installed cpu/game-profile's, which cannot source the checkout",
     "die": "each script's own error exit with its own program name",
-    "in_container": "a copy in four setup scripts: the same toolbox check; to share in a sourced file",
+    "in_container": "a copy in three setup scripts: the same toolbox check; to share in a sourced file",
     "install_all": "the install step of btrfs-setup.sh and of cpu-setup.sh: different files",
     "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
     "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",

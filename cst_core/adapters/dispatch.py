@@ -8,8 +8,11 @@ import shutil
 import signal
 import subprocess
 import sys
+from typing import Literal
 
+from cst_core.adapters import HostExecutionContext, can_spawn_on_host, on_host_argv
 from cst_core.domain.errors import shell_exit_status
+from cst_core.ports import ContainerProbePort
 
 # The signals a bash script waiting for a foreground command leaves to that
 # command: the command may handle them (a cleanup trap). bash dies of SIGINT
@@ -29,6 +32,13 @@ def ignore_quit() -> None:
         signal.signal(signal.SIGQUIT, lambda _sig, _frame: None)
 
 
+def default_ctrl_c() -> None:
+    """Ctrl-C ends this process the way it ended the bash script it replaces (killed by
+    SIGINT, no KeyboardInterrupt traceback). A Ctrl-C ignored by the caller stays ignored."""
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 def _start_failure(argv: Sequence[str], exc: OSError) -> int:
     """Report a command that could not start, as bash does: 127 when it is not found, else 126."""
     print(f"{argv[0]}: {exc.strerror}", file=sys.stderr, flush=True)
@@ -38,13 +48,17 @@ def _start_failure(argv: Sequence[str], exc: OSError) -> int:
 class LocalCstDispatchAdapter:
     """Concrete `CstDispatchPort` backed by the host OS, with bash's exec and foreground semantics."""
 
+    def __init__(self, probe: ContainerProbePort | None = None) -> None:
+        """probe: host or container (None: HostExecutionContext, the one detection)."""
+        self._probe = HostExecutionContext() if probe is None else probe
+
     def is_file(self, path: str) -> bool:
         """Return True when `path` exists as a regular file."""
         return os.path.isfile(path)
 
     def is_container(self) -> bool:
         """Return True inside a Podman toolbox or Docker container."""
-        return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+        return self._probe.is_container()
 
     def euid(self) -> int:
         """Return effective user ID."""
@@ -66,6 +80,24 @@ class LocalCstDispatchAdapter:
     def realpath(self, path: str) -> str:
         """os.path.realpath."""
         return os.path.realpath(path)
+
+    def exec_on_host(self, argv: Sequence[str], *, settings: Mapping[str, str]) -> int | None:
+        """exec argv on the host through flatpak-spawn (with settings), or None when it is not on PATH."""
+        if not can_spawn_on_host(os.environ.get("PATH")):
+            return None
+        return self.exec_replace(on_host_argv(argv, settings))
+
+    def read_text(self, path: str) -> str:
+        """The file's bytes, decoded as the file system's names are (every byte kept)."""
+        with open(path, "rb") as fh:
+            return os.fsdecode(fh.read())
+
+    def say(self, stream: Literal["out", "err"], text: str) -> None:
+        """text encoded back as read_text decoded it, written to stdout or stderr and flushed."""
+        out = sys.stdout if stream == "out" else sys.stderr
+        out.flush()
+        out.buffer.write(os.fsencode(text))
+        out.buffer.flush()
 
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         """Run `argv` in the foreground on the terminal's streams, as bash runs a command; its exit status.

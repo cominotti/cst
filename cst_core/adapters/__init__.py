@@ -4,6 +4,7 @@
 from collections.abc import Callable, Mapping, Sequence
 import functools
 import os
+import shutil
 import subprocess
 import time
 from typing import TypedDict
@@ -115,6 +116,21 @@ def _fault_result(
 type _FaultWords = Callable[[Sequence[str], CommandResult, float | None], CommandResult]
 
 
+def on_host_argv(argv: Sequence[str], settings: Mapping[str, str]) -> list[str]:
+    """argv run on the host from a container (flatpak-spawn --host), with settings (--env=K=V).
+
+    The host command does not get flatpak-spawn's own environment, only the
+    settings named here; they are on flatpak-spawn's command line (ps shows
+    them): never a secret.
+    """
+    return ["flatpak-spawn", "--host", *[f"--env={k}={v}" for k, v in settings.items()], *argv]
+
+
+def can_spawn_on_host(path: str | None) -> bool:
+    """flatpak-spawn is on path (None: the default PATH), as `command -v flatpak-spawn` tells."""
+    return shutil.which("flatpak-spawn", path=path) is not None
+
+
 class SubprocessCommandRunner:
     """CommandRunnerPort backed by subprocess.run with explicit stdin handling.
 
@@ -146,8 +162,7 @@ class SubprocessCommandRunner:
             return list(argv)
         if unset:
             raise ValueError("unset cannot reach a command run on the host from a container")
-        passed = [f"--env={k}={v}" for k, v in _additions(env, locale_c=locale_c).items()]
-        return ["flatpak-spawn", "--host", *passed, *argv]
+        return on_host_argv(argv, _additions(env, locale_c=locale_c))
 
     def run(
         self,

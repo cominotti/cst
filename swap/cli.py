@@ -13,17 +13,11 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
     _cst_sys.path.insert(0, _cst_root)
 
 from collections.abc import Callable, Mapping, Sequence
-import os
 import sys
 from typing import NoReturn, TextIO
 
-
-from cst_core.adapters.runtime import checkout_root, lc_ctype_handover, program_path, undo_python_start
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
-from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
-from swap.adapters import LinuxSwapSystemAdapter
-from swap.application import SwapApplicationService, SwapEnvironment
+from swap import wiring
 from swap.presenter import run_command
 
 _HELP_TEXT = """\
@@ -66,10 +60,6 @@ def format_usage(prog: str) -> str:
     return f"\n{_HELP_TEXT}\n\nUsage: {prog} <command> [args]\n"
 
 
-def _sudo_reexec(argv: list[str]) -> NoReturn:
-    os.execvp("sudo", argv)
-
-
 def execute_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -83,7 +73,7 @@ def execute_cli(
 ) -> int:
     """Parse arguments, enforce host/root preconditions, and dispatch swap use cases."""
     args = list(sys.argv[1:] if argv is None else argv)
-    env_map = os.environ if env is None else env
+    env_map = wiring.swap_env() if env is None else env
     stdout = sys.stdout if out is None else out
     stderr = sys.stderr if err is None else err
     prog = env_map.get("CST_PROG") or "cst swap"
@@ -113,33 +103,22 @@ def execute_cli(
         stderr.write(format_usage(prog))
         return 2
 
-    exec_ctx = HostExecutionContext() if ctx is None else ctx
+    exec_ctx = wiring.execution_context() if ctx is None else ctx
     if want_root:
         if exec_ctx.is_container():
             print(f"'{prog} {' '.join(orig_args)}' must run on the host, not inside a toolbox/container.", file=stderr)
             return 1
         if not exec_ctx.is_root():
-            reexec = _sudo_reexec if elevate is None else elevate
-            python = [sys.executable, "-I", "-B", program_path(__file__)]
-            reexec(["sudo", "--", "env", f"CST_PROG={prog}", lc_ctype_handover(), *python, *orig_args])
+            reexec = wiring.sudo_reexec if elevate is None else elevate
+            reexec(wiring.sudo_rerun_argv(prog, orig_args))
 
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    file_sys = LocalFileSystemAdapter() if fs is None else fs
-    systemd = SystemctlAdapter(cmd_runner)
-    swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
-    swap_env = SwapEnvironment(
-        src_dir=os.path.join(checkout_root(__file__) or _cst_root, "swap"),
-        etc_dir=exec_ctx.etc_dir(),
-        cpu_run_dir=exec_ctx.host_run_dir("cpu-setup"),
-        prog=prog,
-    )
-    service = SwapApplicationService(swap_env, file_sys, systemd, swap_system)
+    service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root)
     return run_command(cmd, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
 
 
 def main() -> int:
     """CLI entrypoint returning process exit status."""
-    undo_python_start()  # SIGPIPE at its default (a closed pipe stops it quietly), the caller's LC_CTYPE
+    wiring.start_swap()
     return execute_cli()
 
 

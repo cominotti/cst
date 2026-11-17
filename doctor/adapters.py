@@ -7,8 +7,8 @@ import pwd
 import time
 from typing import Any, BinaryIO, TextIO
 
-from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter
-from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SubprocessVirshAdapter
+from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, ViewPath
 from vm import adapters as vm_adapters
 
@@ -16,9 +16,13 @@ from vm import adapters as vm_adapters
 class Host:
     """How to reach the host: directly, or from a toolbox (flatpak-spawn
     --host for commands, /run/host for files). Tests set CST_DOCTOR_CONTAINER
-    (1 or 0), CST_DOCTOR_ROOT (the host's / for files) and CST_DOCTOR_NOW."""
+    (1 or 0), CST_DOCTOR_ROOT (the host's / for files) and CST_DOCTOR_NOW.
+    Without CST_DOCTOR_CONTAINER, probe tells (None: HostExecutionContext,
+    cst_core's one host-or-toolbox detection)."""
 
-    def __init__(self, env: Mapping[str, str] | None = None, repo: str = "") -> None:
+    def __init__(
+        self, env: Mapping[str, str] | None = None, repo: str = "", *, probe: ContainerProbePort | None = None
+    ) -> None:
         env = os.environ if env is None else env
         # The commands run with this environment (its PATH finds them), not
         # with the process's: a test's stub folder reaches every command.
@@ -32,7 +36,7 @@ class Host:
         if forced in ("0", "1"):
             self.container = forced == "1"
         else:
-            self.container = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+            self.container = (HostExecutionContext() if probe is None else probe).is_container()
         self.root = env.get("CST_DOCTOR_ROOT") or ("/run/host" if self.container else "/")
         self.now = float(env.get("CST_DOCTOR_NOW") or time.time())
         self.uid = os.getuid()

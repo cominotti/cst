@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+from cst_core.adapters import on_host_argv
 from cst_core.adapters.files import read_bytes, read_text, write_atomic
 from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
@@ -2137,9 +2138,8 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         # From a toolbox, the processes of other containers cannot be
         # inspected: the same program runs on the host (same home path).
         try:
-            os.execvp(
-                "flatpak-spawn", ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", *program_argv(entry_file), *argv]
-            )
+            spawn = on_host_argv([*program_argv(entry_file), *argv], {"CST_PROG": PROG})
+            os.execvp(spawn[0], spawn)
         except OSError as e:
             print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)
             return 1

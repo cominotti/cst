@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: MPL-2.0
 """The `cst doctor` command line: argv to the checks, the report to a stream.
 
-A driving adapter: it builds the Host (the machine, or the host seen from a
-toolbox), wires the checks that reuse the vm package (VmTools), runs them
-all and prints the report.
+It takes the Host (the machine, or the host seen from a toolbox) and the VM
+tools from doctor/wiring.py, wires the checks that reuse the vm package,
+runs them all and prints the report.
 """
 
 from collections.abc import Iterator, Mapping, Sequence
-import os
 import sys
 from typing import TextIO
 
-from cst_core.adapters.runtime import checkout_root, restore_default_signals
-from doctor import application as app
-from doctor.adapters import Host, VmTools
+from doctor import application as app, wiring
 from cst_core.domain.errors import Usage
 from doctor.domain import NAME, Result, parse_args
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
@@ -43,10 +40,10 @@ def main(
     env: Mapping[str, str] | None = None,
 ) -> int:
     """Run `cst doctor [--brief] | help`; exit 0 all ok/info, 1 a WARN or ERROR, 2 usage."""
-    env = os.environ if env is None else env
+    env = wiring.doctor_env() if env is None else env
     stdout = sys.stdout if out is None else out
     prog = env.get("CST_PROG") or NAME
-    restore_default_signals()  # read-only, help too: `cst doctor | head` ends quietly
+    wiring.start_doctor()  # read-only, help too: `cst doctor | head` ends quietly
     try:
         cmd, brief = parse_args(argv)
     except Usage as e:
@@ -55,5 +52,5 @@ def main(
     if cmd == "help":
         print(doc.replace("doctor [--brief]", f"{prog} [--brief]", 1), file=stdout)
         return 0
-    host = Host(env, repo=checkout_root(entry_file) or "")
-    return render(app.run_checks(host, wired_checks(VmTools())), brief, stdout, host.container, prog)
+    host = wiring.host(env, entry_file)
+    return render(app.run_checks(host, wired_checks(wiring.vm_tools())), brief, stdout, host.container, prog)

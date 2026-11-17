@@ -27,6 +27,7 @@ from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
+from swap import wiring as swap_wiring
 import swap.domain as D
 from swap.domain import (
     DEBUG_HELP,
@@ -1405,6 +1406,58 @@ class SwapLocaleHandoverTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     execute_cli(["apply"], env={"CST_PROG": "cst swap"}, ctx=ctx, elevate=_fake_elevate)
                 self.assertEqual(called[-1][:5], ["sudo", "--", "env", "CST_PROG=cst swap", setting])
+
+
+class SwapWiringTest(unittest.TestCase):
+    """swap/wiring.py: what cst swap takes from the process (the composition root)."""
+
+    def test_the_sudo_rerun_starts_swap_cli_again(self) -> None:
+        called: list[list[str]] = []
+
+        def _fake_elevate(argv: list[str]) -> NoReturn:
+            called.append(argv)
+            raise SystemExit(99)
+
+        ctx = _FakeContext(container=False, root=False, etc_dir="/nonexistent", run_dir="/nonexistent")
+        with mock.patch.dict(os.environ, {"LC_CTYPE": "C"}, clear=True), self.assertRaises(SystemExit):
+            execute_cli(["status", "--root"], env={"CST_PROG": "cst swap"}, ctx=ctx, elevate=_fake_elevate)
+        cli = os.path.realpath(os.path.join(SWAP, "cli.py"))
+        self.assertEqual(
+            called,
+            [
+                [
+                    "sudo",
+                    "--",
+                    "env",
+                    "CST_PROG=cst swap",
+                    "CST_LC_CTYPE==C",
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    cli,
+                    "status",
+                    "--root",
+                ]
+            ],
+        )
+
+    def test_the_environment_is_read_when_asked(self) -> None:
+        with mock.patch.dict(os.environ, {"CST_PROG": "my swap"}, clear=True):
+            out = io.StringIO()
+            self.assertEqual(execute_cli(["help"], out=out, err=io.StringIO()), 0)
+        self.assertIn("Usage: my swap <command> [args]", out.getvalue())
+
+    def test_the_desired_files_come_from_this_checkout(self) -> None:
+        ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")
+        self.assertEqual(
+            swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere"),
+            SwapEnvironment(
+                src_dir=os.path.join(os.path.realpath(REPO), "swap"),
+                etc_dir="/x/etc",
+                cpu_run_dir="/x/run/cpu-setup",
+                prog="cst swap",
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -24,7 +24,11 @@ replace them.
       See [docs/architecture.md, "Toolbox vs host"](../../../docs/architecture.md#toolbox-vs-host).
 - [ ] It goes through the module's entry point (`<module>-setup.sh` or the
       package's `cli.py`) and its help text uses `CST_PROG`. A new module also
-      needs a row in `MODULES` in `cst_core/domain/dispatch.py`.
+      needs a row in `MODULES` in `cst_core/domain/dispatch.py`. For vm and
+      toolchains, whose scripts are shims, a new command (or subcommand) needs
+      its row in `ROUTING` (same file): read, user, root or as-user, which
+      decides the toolbox refusal and the sudo or runuser re-run; and a line
+      in the script's header comment, which is its help.
 - [ ] Every file it installs is a row of `INSTALL_MANIFEST`
       (`cst_core/domain/install.py`), written with `cst_install`,
       `cst_install_as` or `cst_install_text`, removed with the list from

@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import fcntl
 import io
+import json
 import os
 import re
 import select
@@ -15,11 +16,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Literal
 import unittest
 from unittest import mock
 
 from cst_core.adapters import (
     HostExecutionContext,
+    can_spawn_on_host,
+    on_host_argv,
     SubprocessCommandRunner,
     SubprocessVirshAdapter,
     SystemClockAdapter,
@@ -28,8 +32,10 @@ from cst_core.adapters import (
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
-from cst_core.application.dispatch import CstDispatcher
-from cst_core.domain.dispatch import MODULES, format_cst_usage
+from cst_core import wiring as core_wiring
+from cst_core.domain.ostree import OstreeStatus, query_status
+from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
+from cst_core.domain.dispatch import MODULES, ROUTING, Routed, format_cst_usage, route_command, script_help
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import (
@@ -886,6 +892,387 @@ class CstCommandTest(unittest.TestCase):
             with self.subTest(caller=caller):
                 proc = self._run(script, "swap", env={**path, **caller})
                 self.assertEqual(proc.stdout, f"LC_CTYPE={seen}\n", proc.stderr)
+
+
+class OstreeQueryTest(unittest.TestCase):
+    """cst_core.domain.ostree: the one `rpm-ostree status --json` query, in the words doctor always used."""
+
+    @staticmethod
+    def _answer(rc: int, out: str, err: str = "") -> tuple[list[list[str]], OstreeStatus | str]:
+        calls: list[list[str]] = []
+
+        def run(argv: list[str]) -> tuple[int, str, str]:
+            calls.append(argv)
+            return rc, out, err
+
+        return calls, query_status(run)
+
+    def test_the_query_and_its_failures(self) -> None:
+        calls, got = self._answer(1, "", "error: no daemon\nmore\n")
+        self.assertEqual(calls, [["rpm-ostree", "status", "--json"]])
+        self.assertEqual(got, "rpm-ostree status --json failed: error: no daemon")
+        self.assertEqual(self._answer(3, "")[1], "rpm-ostree status --json failed: exit 3")
+        prefix = "rpm-ostree status --json: unreadable output "
+        for out, why in (
+            ("{", "(Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"),
+            ("{}", "('deployments')"),
+            ("[]", "(list indices must be integers or slices, not str)"),
+            ('"x"', "(string indices must be integers, not 'str')"),
+            ('{"deployments": null}', "('NoneType' object is not iterable)"),
+            ('{"deployments": 5}', "('int' object is not iterable)"),
+        ):
+            with self.subTest(out=out):
+                self.assertEqual(self._answer(0, out)[1], prefix + why)
+
+    def test_booted_and_pending(self) -> None:
+        booted = {"booted": True, "osname": "fedora", "checksum": "b"}
+        staged = {"osname": "fedora", "checksum": "s", "staged": True}
+        other = {"osname": "other", "checksum": "o"}
+        rollback = {"osname": "fedora", "checksum": "r"}
+        cases = (
+            ([staged, booted], staged),  # staged: listed first
+            ([rollback, booted], rollback),  # after rpm-ostree rollback: first, not staged
+            ([other, booted, rollback], None),  # another osname first: the booted one is the next boot
+            ([booted, rollback], None),
+        )
+        for deps, pending in cases:
+            with self.subTest(deps=deps):
+                got = self._answer(0, json.dumps({"deployments": ["junk", *deps, 3]}))[1]
+                assert isinstance(got, OstreeStatus), got
+                self.assertEqual(got.deployments, deps, "only the objects, in order")
+                self.assertEqual(got.booted, booted)
+                self.assertEqual(got.pending, pending)
+        got = self._answer(0, json.dumps({"deployments": [staged, rollback]}))[1]
+        assert isinstance(got, OstreeStatus), got
+        self.assertEqual((got.booted, got.pending), (None, staged), "no booted one: the first of any osname")
+        got = self._answer(0, '{"deployments": []}')[1]
+        self.assertEqual(got, OstreeStatus([], None, None))
+
+
+class HostDetectionTest(unittest.TestCase):
+    """One host-or-toolbox detection (HostExecutionContext), injected where a module asks."""
+
+    class _Probe:
+        def __init__(self, *, container: bool) -> None:
+            self.container = container
+
+        def is_container(self) -> bool:
+            return self.container
+
+    def test_the_dispatcher_asks_the_probe(self) -> None:
+        for container in (True, False):
+            self.assertIs(LocalCstDispatchAdapter(self._Probe(container=container)).is_container(), container)
+        markers = {"/run/.containerenv"}
+        ctx = HostExecutionContext(exists=lambda p: p in markers)
+        self.assertTrue(LocalCstDispatchAdapter(ctx).is_container())
+        markers.clear()
+        self.assertFalse(LocalCstDispatchAdapter(ctx).is_container())
+
+
+class _FakeRoutePort:
+    """ModuleRoutePort over plain values: what the router says and execs is recorded."""
+
+    def __init__(
+        self,
+        *,
+        euid: int = 1000,
+        container: bool = False,
+        spawn: bool = True,
+        env: Mapping[str, str] | None = None,
+        script_text: str = "#!/bin/bash\n# SPDX-License-Identifier: MPL-2.0\n#\n# x-setup.sh  help\n\nset -e\n",
+    ) -> None:
+        self._euid, self._container, self._spawn, self._text = euid, container, spawn, script_text
+        self._env = {"PATH": "/usr/bin"} if env is None else dict(env)
+        self.said: list[tuple[str, str]] = []
+        self.execs: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def environ(self) -> Mapping[str, str]:
+        return self._env
+
+    def euid(self) -> int:
+        return self._euid
+
+    def is_container(self) -> bool:
+        return self._container
+
+    def user_passwd(self, user: str) -> tuple[int, str]:
+        if user != "alice":
+            raise KeyError(user)
+        return 1234, "/home/alice"
+
+    def exec_on_host(self, argv: Sequence[str], *, settings: Mapping[str, str]) -> int | None:
+        if not self._spawn:
+            return None
+        self.execs.append((["flatpak-spawn", *argv], dict(settings)))
+        return 0
+
+    def read_text(self, path: str) -> str:
+        return self._text
+
+    def say(self, stream: Literal["out", "err"], text: str) -> None:
+        self.said.append((stream, text))
+
+    def exec_replace(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
+        self.execs.append((list(argv), None if env is None else dict(env)))
+        return 0
+
+
+class ModuleRouterTest(unittest.TestCase):
+    """cst_core's routing table and ModuleRouter (what vm-setup.sh and toolchains-setup.sh run)."""
+
+    @staticmethod
+    def _router(
+        module: str, port: _FakeRoutePort, *, cst_prog: str = "cst x", container: str = "", sudo_user: str = ""
+    ) -> ModuleRouter:
+        settings = RouteSettings(
+            script="/c/x-setup.sh", arg0="./x-setup.sh", cst_prog=cst_prog, container=container, sudo_user=sudo_user
+        )
+        return ModuleRouter(port=port, routing=ROUTING[module], settings=settings)
+
+    def test_route_command(self) -> None:
+        vm = ROUTING["vm"]
+        self.assertEqual(route_command(vm, "help", [], "p").action, "help")
+        self.assertEqual(route_command(vm, "nope", [], "p"), Routed("unknown", message="Unknown command: nope"))
+        self.assertEqual(
+            route_command(vm, "tune", ["x"], "cst vm"),
+            Routed("usage", message="Usage: cst vm tune plan|apply [VM] [--guest-has-virtio]"),
+        )
+        for args, privilege in (
+            (["list"], "read"),
+            (["tune", "plan"], "read"),
+            (["tune", "apply"], "root"),
+            (["nocow", "plan"], "read"),
+            (["nocow", "plan", "w", "--root"], "root"),
+            (["nocow", "apply", "--root"], "user"),
+            (["backup-timer", "status"], "read"),
+            (["backup-timer", "off"], "root"),
+            (["backup"], "root"),
+        ):
+            with self.subTest(args=args):
+                self.assertEqual(route_command(vm, args[0], args[1:], "p"), Routed("run", privilege))
+        for cmd in ("status", "prune", "auto", "config"):
+            self.assertEqual(route_command(ROUTING["toolchains"], cmd, ["x"], "p"), Routed("run", "as-user"))
+        self.assertEqual(route_command(ROUTING["toolchains"], "list", [], "p").action, "unknown")
+
+    def test_script_help_is_what_the_header_sed_printed(self) -> None:
+        text = "#!/x\n# SPDX-License-Identifier: MPL-2.0\n#\n# a  b\n#c\n#   d\nnot a comment\n\nlater\n"
+        self.assertEqual(script_help(text, "p"), "\na  b\nc\n  d\nnot a comment\n\nUsage: p <command> [args]\n")
+        self.assertEqual(
+            script_help("#!/x\n# one", "p"), "one\nUsage: p <command> [args]\n", "no empty line: to the end"
+        )
+        # The header runs to the end of a file that ends with a newline: no blank line before Usage (as sed).
+        self.assertEqual(script_help("#!/x\n# one\n# two\n", "p"), "one\ntwo\nUsage: p <command> [args]\n")
+        self.assertEqual(script_help("#!/x\n# one\n\n", "p"), "one\n\nUsage: p <command> [args]\n")
+        for module in ROUTING:
+            script = os.path.join(REPO_ROOT, f"{module}-setup.sh")
+            sed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' \"$1\" | sed 's/^# \\{0,1\\}//'",
+                    "_",
+                    script,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+            with open(script, encoding="utf-8") as fh:
+                self.assertEqual(script_help(fh.read(), "q"), sed.stdout + "Usage: q <command> [args]\n")
+
+    def test_help_unknown_and_usage(self) -> None:
+        port = _FakeRoutePort()
+        self.assertEqual(self._router("vm", port).route([]), 0)
+        self.assertEqual(port.said, [("out", "\nx-setup.sh  help\n\nUsage: cst x <command> [args]\n")])
+        port = _FakeRoutePort()
+        self.assertEqual(self._router("vm", port, cst_prog="").route(["nope"]), 2)
+        self.assertEqual(port.said[0][1].split("\n", 1)[0], "Unknown command: nope")
+        self.assertTrue(port.said[0][1].endswith("Usage: ./x-setup.sh <command> [args]\n"))
+        port = _FakeRoutePort(container=True)
+        self.assertEqual(self._router("vm", port).route(["backup-timer", ""]), 2)
+        self.assertEqual(port.said, [("err", "Usage: cst x backup-timer on|off|status [VM]\n")])
+        self.assertEqual(port.execs, [])
+
+    def test_read_runs_the_program_or_spawns_it_on_the_host(self) -> None:
+        program = ["python3", "-I", "-B", "/c/vm/cst-vm", "status", "w"]
+        port = _FakeRoutePort(env={"PATH": "/p", "A": "1"})
+        self._router("vm", port).route(["status", "w"])
+        self.assertEqual(port.execs, [(program, {"PATH": "/p", "A": "1", "CST_PROG": "cst x"})])
+        for container, detected in (("1", False), ("", True)):
+            port = _FakeRoutePort(container=detected)
+            self._router("vm", port, container=container).route(["status", "w"])
+            self.assertEqual(port.execs, [(["flatpak-spawn", *program], {"CST_PROG": "cst x"})])
+        port = _FakeRoutePort(container=True, spawn=False)
+        self._router("vm", port).route(["status", "w"])
+        self.assertEqual(
+            port.said, [("out", "(cannot reach the host from this container: showing what is visible here)\n")]
+        )
+        self.assertEqual(port.execs, [(program, {"PATH": "/usr/bin", "CST_PROG": "cst x"})])
+        port = _FakeRoutePort(container=True)
+        self._router("vm", port, container="0").route(["status", "w"])
+        self.assertEqual(port.execs[0][0], program, "the override says host")
+
+    def test_changing_commands(self) -> None:
+        port = _FakeRoutePort(container=True)
+        self.assertEqual(self._router("vm", port).route(["nocow", "apply"]), 1)
+        self.assertEqual(
+            port.said,
+            [
+                (
+                    "err",
+                    "'cst x nocow apply' must run on the host, not inside a toolbox/container.\n"
+                    "In a host terminal: cst x nocow apply\n",
+                )
+            ],
+        )
+        port = _FakeRoutePort()
+        self._router("vm", port).route(["backup", "w"])
+        self.assertEqual(port.execs, [(["sudo", "--", "env", "CST_PROG=cst x", "/c/x-setup.sh", "backup", "w"], None)])
+        port = _FakeRoutePort()
+        self._router("vm", port, cst_prog="").route(["backup"])
+        self.assertEqual(port.execs, [(["sudo", "--", "/c/x-setup.sh", "backup"], None)])
+        port = _FakeRoutePort(euid=0)
+        self._router("vm", port, cst_prog="").route(["backup"])
+        self.assertEqual(
+            port.execs,
+            [(["python3", "-I", "-B", "/c/vm/cst-vm", "backup"], {"PATH": "/usr/bin", "CST_PROG": "./x-setup.sh"})],
+        )
+        port = _FakeRoutePort()
+        self._router("vm", port).route(["nocow", "apply"])
+        self.assertEqual(port.execs[0][0][:4], ["python3", "-I", "-B", "/c/vm/cst-vm"], "user: no sudo")
+
+    def test_as_user(self) -> None:
+        port = _FakeRoutePort()
+        self._router("toolchains", port).route(["status"])
+        self.assertEqual(
+            port.execs,
+            [
+                (
+                    ["python3", "-I", "-B", "/c/toolchains/cst-toolchains", "status"],
+                    {"PATH": "/usr/bin", "CST_PROG": "cst x"},
+                )
+            ],
+        )
+        port = _FakeRoutePort(euid=0)
+        self._router("toolchains", port, sudo_user="alice").route(["prune", "plan"])
+        self.assertEqual(
+            port.execs,
+            [
+                (
+                    [
+                        "runuser", "-u", "alice", "--", "env", "-u", "XDG_CONFIG_HOME", "-u", "SUDO_USER",
+                        "HOME=/home/alice", "USER=alice", "LOGNAME=alice", "XDG_RUNTIME_DIR=/run/user/1234",
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1234/bus", "CST_PROG=cst x",
+                        "/c/x-setup.sh", "prune", "plan",
+                    ],
+                    None,
+                )
+            ],
+        )  # fmt: skip
+        for user in ("", "root"):
+            port = _FakeRoutePort(euid=0)
+            self.assertEqual(self._router("toolchains", port, sudo_user=user).route(["status"]), 1)
+            self.assertEqual(
+                port.said,
+                [
+                    (
+                        "err",
+                        "cst x: ERROR: run it from your user account (needs SUDO_USER): "
+                        "toolchain caches and settings belong to your user\n",
+                    )
+                ],
+            )
+        port = _FakeRoutePort(euid=0)
+        self.assertEqual(self._router("toolchains", port, sudo_user="bob").route(["status"]), 1)
+        self.assertEqual(port.said, [("err", "cst x: ERROR: SUDO_USER=bob: no such user\n")])
+        self.assertEqual(port.execs, [])
+
+    def test_the_router_starts_with_ctrl_c_as_bash_had_it(self) -> None:
+        for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGPIPE, signal.SIGXFSZ):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
+        for before, after in ((signal.default_int_handler, signal.SIG_DFL), (signal.SIG_IGN, signal.SIG_IGN)):
+            signal.signal(signal.SIGINT, before)
+            with mock.patch.dict(os.environ, {"CST_LC_CTYPE": ""}):
+                core_wiring.start_router()
+            self.assertIs(signal.getsignal(signal.SIGINT), after)
+        self.assertIs(signal.getsignal(signal.SIGPIPE), signal.SIG_DFL)
+
+    def test_the_adapter_keeps_every_byte_and_spawns_only_with_flatpak_spawn(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-route-adapter-")
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "s")
+        with open(path, "wb") as fh:
+            fh.write(b"caf\xe9 \xc3\xa9\n")
+        port = LocalCstDispatchAdapter()
+        text = port.read_text(path)
+        self.assertEqual(os.fsencode(text), b"caf\xe9 \xc3\xa9\n")
+        self.assertEqual(on_host_argv(["a", "b"], {"K": "v w"}), ["flatpak-spawn", "--host", "--env=K=v w", "a", "b"])
+        self.assertFalse(can_spawn_on_host(tmp))
+        os.symlink("/bin/true", os.path.join(tmp, "flatpak-spawn"))
+        self.assertTrue(can_spawn_on_host(tmp))
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertIsNone(port.exec_on_host(["x"], settings={}))
+
+
+class CoreWiringTest(unittest.TestCase):
+    """cst_core/wiring.py: what cst and the installer take from the process."""
+
+    def test_the_router_needs_the_shim_it_routes_for(self) -> None:
+        # Without CST_SELF (route.py run by hand, not by vm-setup.sh or toolchains-setup.sh) there is
+        # no script to print the help of or to run again: a usage error, not a traceback or ./vm/cst-vm.
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True):
+            self.assertIsNone(core_wiring.module_router("vm"))
+        env = {"PATH": "/usr/bin:/bin"}
+        for args in (["vm", "help"], ["toolchains", "status"], ["nope"], []):
+            with self.subTest(args=args):
+                p = subprocess.run(
+                    [sys.executable, "-I", "-B", os.path.join(REPO_ROOT, "cst_core", "route.py"), *args],
+                    env=env,
+                    cwd=tempfile.gettempdir(),
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                )
+                self.assertEqual((p.returncode, p.stdout), (2, ""), p.stderr)
+                self.assertTrue(p.stderr.startswith("usage: route.py MODULE [ARGS...]"), p.stderr)
+
+    def test_the_installer_builds_payloads_from_this_checkout(self) -> None:
+        self.assertIsNotNone(core_wiring.install_service())
+
+    def test_the_dispatcher_takes_and_removes_what_the_wrapper_hands_over(self) -> None:
+        handed = {"CST_DIR": "/nonexistent-dir", "CST_SELF": "/nonexistent-dir/cst", "CST_ARG0": "./cst"}
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {**handed, "PATH": "/nonexistent"}, clear=True):
+            dispatcher = core_wiring.cst_dispatcher(
+                fallback_root="/fallback",
+                stdout=io.StringIO(),
+                stderr=err,
+            )
+            self.assertEqual(dict(os.environ), {"PATH": "/nonexistent"}, "the modules do not inherit them")
+        self.assertEqual(dispatcher.dispatch(["nope"]), 2)
+        self.assertTrue(err.getvalue().startswith("./cst: unknown command or module 'nope'\n"), err.getvalue())
+        self.assertIn("vm         the libvirt VM", err.getvalue())
+        self.assertIn("(not in this copy)", err.getvalue(), "CST_DIR names the folder of the modules")
+
+    def test_without_the_wrapper_the_checkout_of_cli_py_and_argv0(self) -> None:
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True),
+            mock.patch.object(sys, "argv", ["/some/cst-link"]),
+        ):
+            dispatcher = core_wiring.cst_dispatcher(
+                fallback_root="/fallback",
+                stdout=out,
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(dispatcher.dispatch(["help"]), 0)
+        self.assertNotIn("(not in this copy)", out.getvalue(), "this checkout holds every module")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True), mock.patch.object(sys, "argv", []):
+            core_wiring.cst_dispatcher(fallback_root="/fallback", stdout=io.StringIO(), stderr=err).dispatch(["nope"])
+        self.assertTrue(err.getvalue().startswith("cst: unknown command or module 'nope'\n"), err.getvalue())
 
 
 if __name__ == "__main__":

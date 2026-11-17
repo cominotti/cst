@@ -810,6 +810,7 @@ hand if you want them gone.
 | `cli.py` | The commands: the settings, the targets (`Target`, `RustBuild`, `PythonUv`), `status`, `prune`, `auto on/off`, `config`, and `main()`. |
 | `toolchains.conf` | The default settings. |
 | `rustc-wrapper` | The opt-in sccache wrapper (POSIX sh) that `config apply` copies to `~/.local/libexec/cst/` ([section 6](#sccache-opt-in)). |
+| `../toolchains-setup.sh` | The module script: its header comment is the help; the rest is a shim that runs `cst_core/route.py toolchains`, which prints the help or a usage error and execs the program, as root first running the script again as `SUDO_USER` through runuser (the routing table: `ROUTING` in `cst_core/domain/dispatch.py`; tests: `tests/test_module_routing.py`). |
 | `tests/` | Unit tests (no root, no systemd, scratch homes only): `python3 -I -B -m unittest discover -s toolchains/tests -t . -v` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)). |
 
 ## 13. Glossary
