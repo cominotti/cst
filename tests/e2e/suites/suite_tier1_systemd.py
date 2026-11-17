@@ -2060,3 +2060,87 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         )
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_73_setup_scripts_route_as_real_root(self) -> None:
+        """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
+        scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
+        toolchains steps down to SUDO_USER through the real runuser (tester's HOME, USER,
+        XDG_RUNTIME_DIR; SUDO_USER and XDG_CONFIG_HOME dropped); without a SUDO_USER (or
+        with root) it refuses with exit 1; vm's root commands refuse in a toolbox."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            d=$(mktemp -d /var/tmp/e2e-route.XXXXXX)
+            trap 'rm -rf "$d"' EXIT
+            cp /opt/cst-rw/vm-setup.sh /opt/cst-rw/toolchains-setup.sh "$d/"
+            cp -a /opt/cst-rw/cst_core "$d/"
+            find "$d/cst_core" -name __pycache__ -prune -exec rm -rf {} +
+            mkdir "$d/vm" "$d/toolchains"
+            fake='import os, sys
+e = os.environ
+print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get("XDG_RUNTIME_DIR"),
+      e.get("CST_PROG"), "SUDO_USER" in e, "XDG_CONFIG_HOME" in e, *sys.argv[1:], sep="|")'
+            printf '%s\n' "$fake" >"$d/vm/cst-vm"
+            printf '%s\n' "$fake" >"$d/toolchains/cst-toolchains"
+            chmod -R a+rX "$d"
+            cd /
+            uid=$(id -u tester)
+            got=$(env -u USER -u LOGNAME -u XDG_RUNTIME_DIR HOME=/root CST_PROG="cst vm" CST_VM_CONTAINER=0 \
+                bash "$d/vm-setup.sh" backup w --full)
+            [[ "$got" == "RAN|0|/root|None|None|None|cst vm|False|False|backup|w|--full" ]] \
+                || { echo "vm as root: $got" >&2; exit 1; }
+            got=$(SUDO_USER=tester XDG_CONFIG_HOME=/root/.config CST_PROG="cst toolchains" \
+                bash "$d/toolchains-setup.sh" status --brief)
+            [[ "$got" == "RAN|$uid|/home/tester|tester|tester|/run/user/$uid|cst toolchains|False|False|status|--brief" ]] \
+                || { echo "toolchains as root: $got" >&2; exit 1; }
+            got=$(env -u CST_PROG SUDO_USER=tester bash "$d/toolchains-setup.sh" status)
+            [[ "$got" == "RAN|$uid|/home/tester|tester|tester|/run/user/$uid|$d/toolchains-setup.sh|False|False|status" ]] \
+                || { echo "toolchains as root, no CST_PROG: $got" >&2; exit 1; }
+            for who in "" root; do
+                rc=0
+                got=$(SUDO_USER="$who" CST_PROG="cst toolchains" bash "$d/toolchains-setup.sh" status 2>&1) || rc=$?
+                [[ $rc == 1 && "$got" == "cst toolchains: ERROR: run it from your user account (needs SUDO_USER): toolchain caches and settings belong to your user" ]] \
+                    || { echo "toolchains, SUDO_USER='$who': exit $rc: $got" >&2; exit 1; }
+            done
+            rc=0
+            got=$(CST_PROG="cst vm" CST_VM_CONTAINER=1 bash "$d/vm-setup.sh" backup w 2>&1) || rc=$?
+            [[ $rc == 1 && "$got" == *"'cst vm backup w' must run on the host, not inside a toolbox/container."* ]] \
+                || { echo "vm in a toolbox: exit $rc: $got" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
+        """In a container with /.dockerenv (no override), cst vm's commands that change the
+        host refuse before sudo, with the host command to type (cst is not on PATH there:
+        it names itself /opt/cst/cst)."""
+        for subcmd in ("backup w --nas", "tune apply w", "nocow apply", "backup-timer on w"):
+            p = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    *self.SECURITY_OPTS,
+                    "-e",
+                    "E2E_KEEP_DOCKERENV=1",
+                    "-v",
+                    f"{self.CST_ROOT_MOUNT}:/opt/cst:ro",
+                    "--entrypoint",
+                    "bash",
+                    self.IMAGE,
+                    "-c",
+                    f"/opt/cst/cst vm {subcmd}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertEqual(p.stdout, "")
+            self.assertEqual(
+                p.stderr,
+                f"'/opt/cst/cst vm {subcmd}' must run on the host, not inside a toolbox/container.\n"
+                f"In a host terminal: /opt/cst/cst vm {subcmd}\n",
+            )

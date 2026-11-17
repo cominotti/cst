@@ -67,6 +67,11 @@ GATE_MODULES: Final = (
 )
 
 
+# The root routes of the setup scripts run in a user namespace (unshare -r).
+_USERNS: Final = (
+    "needs an unprivileged user namespace (unshare -r: off in CI's container; tier 1 test_73 runs it as root)"
+)
+
 # Skips that depend on the machine the tests run on: test id (or the id of
 # its class) -> why. tests/test_run_unit.py checks that each one still names
 # a test.
@@ -90,6 +95,9 @@ EXPECTED_SKIPS: Final[dict[str, str]] = {
     "tests.test_install.InstallerCliTest": "needs /usr/bin/python3; one test not as root",
     "tests.test_install.BashLibraryTest": "needs /usr/bin/python3",
     "tests.test_install.LocalTargetTest.test_a_write_that_fails_names_the_destination": "not as root",
+    "tests.test_module_routing.ToolchainsRoutingTest.test_as_root_it_runs_again_as_the_sudo_user": _USERNS,
+    "tests.test_module_routing.ToolchainsRoutingTest.test_as_root_without_a_sudo_user_it_refuses": _USERNS,
+    "tests.test_module_routing.VmRoutingTest.test_as_root_the_program_runs_directly": _USERNS,
     "toolchains.tests.test_prune_rust_build.ScanRobustTest.test_unreadable_top_folder_is_reported": "not as root",
     "toolchains.tests.test_prune_rust_build.CargoTieTest.test_real_cargo_metadata": "needs cargo (not in CI)",
     "toolchains.tests.test_rules.OrphanTest.test_real_cargo_names_the_same_folder": "needs cargo and rustup (not in CI)",
