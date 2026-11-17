@@ -216,7 +216,14 @@ esac""",
     test) cat "${FAKE}/udev-test-$(basename "${@: -1}")" ;;
     info) cat "${FAKE}/udev-info-$(basename "${@: -1}")" ;;
 esac""",
-    "systemd-analyze": 'exit "${FAKE_ANALYZE_RC:-0}"',
+    # FAKE_UNIT_TYPO: a unit with an unknown key, as the real verify sees it:
+    # a warning, and a failure only with --recursive-errors=no.
+    "systemd-analyze": """if [[ -n "${FAKE_UNIT_TYPO:-}" ]]; then
+    echo "btrfs-last-resort@.service:12: Unknown key 'TimeoutStratSec' in section [Service], ignoring." >&2
+    [[ " $* " == *" --recursive-errors=no "* ]] && exit 1
+fi
+exit "${FAKE_ANALYZE_RC:-0}"
+""",
     "lsblk": 'cat "${FAKE}/lsblk"',
     # The overlay in these tests is a tar archive: what the script checks is
     # which files come out and their bytes, not the archive format.
@@ -717,7 +724,7 @@ next_overlay || :
             ],
         )
         self.assertIn(
-            f"systemd-analyze verify btrfs-last-resort@{UUID}.timer btrfs-last-resort@{UUID}.service "
+            f"systemd-analyze verify --recursive-errors=no btrfs-last-resort@{UUID}.timer btrfs-last-resort@{UUID}.service "
             "btrfs-degraded-boot-record.service",
             self.calls(),
         )
@@ -740,6 +747,15 @@ next_overlay || :
         self.assertEqual(r.returncode, 1)
         self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
         self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
+
+    def test_selftest_stops_on_a_typo_in_a_unit(self) -> None:
+        """systemd-analyze verify only warns about an unknown key unless --recursive-errors=no."""
+        r = self.selftest(ready={"dm-0": True, "dm-1": True}, env={"FAKE_UNIT_TYPO": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Unknown key 'TimeoutStratSec'", r.stderr)
+        self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
+        self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
+        self.assertNotIn("self-test: dm-0", r.stdout)
 
     # -------------------------------------------------- initramfs overlay --
     def overlay_step(self, *args: str, overlay: str = "") -> str:

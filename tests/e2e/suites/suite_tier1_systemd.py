@@ -1204,7 +1204,9 @@ EOF
         record unit and tracks the four files in the initramfs; the generated
         rule passes `udevadm verify` and the units `systemd-analyze verify`;
         a second install writes nothing and makes no rpm-ostree change;
-        `status` changes nothing and ends in "verdict: OK"; uninstall removes
+        `status` changes nothing and ends in "verdict: OK"; a typo in a unit
+        (an unknown key in a drop-in of the record unit) stops an install at
+        its `systemd-analyze verify`, before any rpm-ostree change; uninstall removes
         everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
@@ -1221,13 +1223,14 @@ EOF
         )
         record = "/etc/systemd/system/btrfs-degraded-boot-record.service"
         synced = "/etc/btrfs-degraded-boot/initramfs-synced.sha256"
+        typo = f"{record}.d"
         self.addCleanup(
             exec_bash,
             c,
             f"""
             systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
             rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
-                /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record}
+                /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record} {typo}
             systemctl daemon-reload
             """,
             check=False,
@@ -1281,6 +1284,19 @@ EOF
         )
         self.assertEqual(step(sums), before)
         self.assertEqual([x for x in calls()[n:] if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
+
+        # verify reads a unit's drop-ins with it; an unknown key there is only
+        # a warning unless the script passes --recursive-errors=no.
+        with self.subTest("a typo in a unit stops the install"):
+            step(f"mkdir -p {typo} && printf '[Service]\\nTimeoutStratSec=5\\n' >{typo}/e2e-typo.conf")
+            n = len(calls())
+            bad = exec_bash(c, f". {w}/fakes.bash\n/opt/cst-rw/cst btrfs degraded-boot", check=False)
+            self.assertNotEqual(bad.returncode, 0, bad.stdout)
+            self.assertIn("Unknown key 'TimeoutStratSec'", bad.stdout + bad.stderr)
+            self.assertIn("ERROR: systemd-analyze verify failed", bad.stdout + bad.stderr)
+            self.assertNotIn("self-test:", bad.stdout)
+            self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        step(f"rm -rf {typo} && systemctl daemon-reload")
 
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())

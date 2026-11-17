@@ -715,7 +715,9 @@ write_if_changed "${RULE}" 0644 <"${rule_tmp}"
 bash -n "${HELPER}" || die "syntax error in ${HELPER}"
 systemctl daemon-reload
 udevadm control --reload
-systemd-analyze verify "btrfs-last-resort@${UUID}.timer" "btrfs-last-resort@${UUID}.service" "${RECORD_UNIT}" ||
+# --recursive-errors=no: without it, verify only warns about a problem in
+# these units (an unknown key, a typo) and still exits 0.
+systemd-analyze verify --recursive-errors=no "btrfs-last-resort@${UUID}.timer" "btrfs-last-resort@${UUID}.service" "${RECORD_UNIT}" ||
     die "systemd-analyze verify failed"
 systemctl enable "${RECORD_UNIT}" 2>&1 | grep -v '^$' || true
 

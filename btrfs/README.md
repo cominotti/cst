@@ -1042,8 +1042,9 @@ own checks:
     changes nothing.
 - It checks the new udev rule with `udevadm verify` before it writes
   anything: a rule that fails leaves nothing written.
-- It writes its files, then runs a self-test: every disk must show as
-  ready. If the self-test fails, a **newly written** rule is removed again and
+- It writes its files, then runs a self-test: `systemd-analyze verify`
+  must find no problem in its units (a typo such as an unknown key stops it),
+  and every disk must show as ready. If the self-test fails, a **newly written** rule is removed again and
   the initramfs is **not** changed. The other helper files stay in `/etc`;
   without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
