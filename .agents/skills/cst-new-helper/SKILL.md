@@ -24,7 +24,9 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       layers (`PURE_MODULES`, `PURE_NAMES`), and every module must be
       reached from an entry point.
 - [ ] No module over 800 lines (`tests/test_module_size.py`): split by
-      command group or check area, not by layer.
+      command group or check area, not by layer. A big `cli.py` becomes
+      `cli/__init__.py` and `cli/<group>.py` (one `CLI_CEILINGS` entry,
+      `<package>/cli/`, for the folder).
 - [ ] A new `cli.py` gets its line in `CLI_CEILINGS` (same file).
 - [ ] Shared needs come from `cst_core`
       ([reuse-primitives](../../rules/reuse-primitives.md)), not a copy:

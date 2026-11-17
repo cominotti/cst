@@ -27,8 +27,9 @@ Standard library only.
 from collections.abc import Mapping
 
 # Folders that are a layer of a package, not a package of their own
-# (cst_core/adapters/files.py belongs to the package cst_core).
-LAYER_DIRS = frozenset({"domain", "ports", "application", "adapters"})
+# (cst_core/adapters/files.py belongs to the package cst_core, vm/cli/net.py
+# to vm).
+LAYER_DIRS = frozenset({"domain", "ports", "application", "adapters", "cli"})
 
 
 def is_test_file(rel: str) -> bool:

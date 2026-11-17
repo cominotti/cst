@@ -40,7 +40,8 @@ replace them.
       `application.py` (with `ports.py`) only for a use case with two or
       more machine-changing steps that must roll back or resume
       ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile));
-      no module over 800 lines (`tests/test_module_size.py`).
+      no module over 800 lines (`tests/test_module_size.py`; a big `cli.py`
+      becomes a `cli/` folder with one file per command group).
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of

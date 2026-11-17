@@ -37,7 +37,7 @@ composition root" below).
 Python packages follow Hexagonal Architecture with a pure core, in one of
 two profiles (next section): `domain.py` / `domain/` for pure rules and
 frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
-and subprocesses, `cli.py` for a program's commands, and, in the full
+and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` for use cases, `wiring.py` and `presenter.py`. Only swap,
 doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
@@ -111,17 +111,26 @@ uid checks), counted in
 **Size and cohesion.** No package module is over 800 lines
 (`tests/test_module_size.py`; today's larger modules are in `OVER_CAP`, each
 never above its entry). Split a big module by command group or check area,
-not by layer.
+not by layer. A big `cli.py` becomes a `cli/` folder, the same way
+`domain.py` becomes `domain/`: `cli/__init__.py` (the `main`) and one
+`cli/<group>.py` per command group. Every file in it has the cli role and
+its rules (in a light package each may read the environment, in a full one
+none does I/O), and `CLI_CEILINGS` caps the folder as a whole
+(`<package>/cli/`): the split moves the `<package>/cli.py` entry to that
+key by hand, at most its old value, and then moving code between the files
+changes nothing.
 
 **Gates and metrics.** Budgets, ceilings and allow-lists fail only when the
-code is above them; `invowk cmd fix budgets` lowers them to the measured
+code is above them (the sets that must stay empty, such as `NOT_YET_CLEAN`,
+and `LICENSE_EXEMPT`, each entry of which must match a file, still fail on
+an entry nothing needs); `invowk cmd fix budgets` lowers them to the measured
 values and never raises one. Never reshape code that moves or deletes data
 only to satisfy a metric (Sonar's cognitive complexity, the duplication
 measure).
 
 ## The composition root: `wiring.py`
 
-In a package of the full profile (see "Package profile" below), one module
+In a package of the full profile (see "Package profile" above), one module
 puts the program together: `<pkg>/wiring.py`. It is the only place that
 
 - reads the process environment (`os.environ`: `CST_PROG`, what a shell
@@ -198,7 +207,7 @@ All of them run in the unit suite:
 - `tests/test_bytecode.py`: every `python3 -I` that starts a CST program from the checkout (setup scripts, Python argv lists) passes `-B`, so no `__pycache__` lands in the checkout (as root it would be root's and block `git clean`); `-I -c` and `-I -` (inline code) are exempt.
 - `tests/test_docs.py`: every relative link and anchor in the Markdown files resolves; every document is in the AGENTS.md index; every skill in `.agents/skills` has a SKILL.md with its name and a description, every rule a description; `.claude/rules` and `.claude/skills` link to `.agents`.
 - `tests/test_license_headers.py`: every file of the checkout carries `SPDX-License-Identifier: MPL-2.0` once, in its comment syntax, on line 1 or right after a line that must stay first (shebang, `# shellcheck shell=`, XML declaration, `# syntax=`, Markdown frontmatter); the rules and `LICENSE_EXEMPT` (each entry matches a file and gives its reason) live in `tests/license_headers.py`, which also inserts the line (`invowk cmd fix license`). It also checks that the help printed from a script's header comment shows no license line and that every `.in` template renders with the line in its destination's syntax.
-- `tests/test_module_size.py`: no package module is over `MODULE_LINE_CAP` (800) physical lines; `OVER_CAP` names today's larger modules with their size, never above (`invowk cmd fix budgets` lowers an entry and deletes it once the module is at the cap or under it). A module that grows past the cap is split by command group or check area, not by layer ("Package profile" below).
+- `tests/test_module_size.py`: no package module is over `MODULE_LINE_CAP` (800) physical lines; `OVER_CAP` names today's larger modules with their size, never above (`invowk cmd fix budgets` lowers an entry and deletes it once the module is at the cap or under it). A module that grows past the cap is split by command group or check area, not by layer ("Package profile" above).
 - `tests/test_duplication.py`: a ratchet on copied code (Python type 1 and type 2 clones, shell clones, the same top-level name defined in several files, the same shell function defined in several shell files: `ALLOWED_SHELL_SAME_NAMES` holds each allowed one with its reason). Its `CEILINGS` fail only when a measurement is above them; `invowk cmd fix budgets` lowers them. The entry bootstrap and the bodies of `Protocol` classes are the same by design and are not counted; type 2 also leaves out declarations (the fields of a `@dataclass`, `TypedDict` or `NamedTuple`, and an `__init__` that only stores its parameters) and lines of literals only (type 1 still counts both). A left-out block is a barrier: no window runs across it. A name in `ALLOWED_SAME_NAMES` carries its reason; an entry that is no longer defined twice passes, and `invowk cmd fix budgets` deletes it.
 
 ## Toolbox vs host

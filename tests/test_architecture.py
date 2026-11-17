@@ -26,6 +26,10 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
 - Every package module has one role (`module_role`): domain, ports,
   application, adapters, presenter, wiring, cli or entry. A module with
   none is in UNLAYERED_ALLOWED with its reason; nothing is added there.
+  Like domain/, ports/ and adapters/, the cli role has a folder form for a
+  program with many commands: cli/__init__.py and one cli/<group>.py per
+  command group, every file with the cli role and its rules, and one
+  CLI_CEILINGS entry for the folder as a whole (cli_key).
 - The I/O a module does itself outside its adapters ("hard I/O": the lines
   direct_io_problems reports, with print, sys.stdout/stderr/argv/exit and
   argparse allowed, the bootstrap left out) has a budget per package and
@@ -117,7 +121,9 @@ ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
 # Code lines of each package's cli.py (cli_code_lines), a ceiling (see the module
-# docstring; a missing entry is 0). A new cli.py is added here on purpose.
+# docstring; a missing entry is 0). A new cli.py is added here on purpose. A
+# cli/ folder has one entry for all its files, "<package>/cli/" (cli_key), so
+# splitting a cli.py into it moves the entry and cannot raise the total.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 89,
@@ -323,6 +329,8 @@ def module_role(rel: str) -> ModuleRole | None:
     filename, dirs = parts[-1], parts[:-1]
     if filename == "adapters.py" or "adapters" in dirs:
         return "adapters"
+    if filename.endswith(".py") and "cli" in dirs:
+        return "cli"  # the folder form: cli/__init__.py and cli/<group>.py
     if not filename.endswith(".py") or filename == "__init__.py" or rel in ENTRY_MODULES:
         return "entry"
     named: dict[str, ModuleRole] = {"presenter.py": "presenter", "wiring.py": "wiring", "cli.py": "cli"}
@@ -753,9 +761,23 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     ]
 
 
+def cli_key(rel: str) -> str:
+    """The CLI_CEILINGS key of a cli module: a cli.py's own path, or "<package>/cli/" for each file of a cli/ folder."""
+    return rel if rel.endswith("/cli.py") else f"{package_of(rel)}/cli/"
+
+
+def cli_measure(sources: Mapping[str, str]) -> dict[str, int]:
+    """Code lines (cli_code_lines) of the cli modules among `sources`, per cli_key."""
+    out: dict[str, int] = {}
+    for rel, source in sources.items():
+        if module_role(rel) == "cli":
+            out[cli_key(rel)] = out.get(cli_key(rel), 0) + cli_code_lines(source)
+    return out
+
+
 def cli_sizes() -> dict[str, int]:
-    """Code lines (cli_code_lines) of every package's cli.py: what CLI_CEILINGS caps."""
-    return {rel: cli_code_lines(_read(rel)) for rel in production_python() if rel.endswith("/cli.py")}
+    """Code lines of every package's cli.py or cli/ folder: what CLI_CEILINGS caps."""
+    return cli_measure({rel: _read(rel) for rel in package_modules() if module_role(rel) == "cli"})
 
 
 def unlayered_modules() -> set[str]:
@@ -943,6 +965,9 @@ class ArchitectureGateTest(unittest.TestCase):
             ("swap/presenter.py", "presenter"),
             ("vm/wiring.py", "wiring"),
             ("vm/cli.py", "cli"),
+            ("vm/cli/__init__.py", "cli"),
+            ("vm/cli/domains.py", "cli"),
+            ("btrfs/bulk/cli/move.py", "cli"),
             ("vm/__init__.py", "entry"),
             ("vm/cst-vm", "entry"),
             ("cst_core/installer.py", "entry"),
@@ -950,6 +975,38 @@ class ArchitectureGateTest(unittest.TestCase):
         ):
             with self.subTest(rel=rel):
                 self.assertEqual(module_role(rel), role)
+
+    def test_a_cli_folder_is_one_cli_layer(self) -> None:
+        self.assertEqual(package_of("vm/cli/domains.py"), "vm")
+        self.assertEqual(package_of("btrfs/bulk/cli/__init__.py"), "btrfs/bulk")
+        self.assertEqual(cli_key("vm/cli.py"), "vm/cli.py")
+        self.assertEqual(cli_key("vm/cli/domains.py"), "vm/cli/")
+        body = "def f():\n    return 1\n"
+        # The files of a cli/ folder share one ceiling: moving code between them changes nothing.
+        self.assertEqual(
+            cli_measure(
+                {"vm/cli/__init__.py": body, "vm/cli/net.py": body * 2, "swap/cli.py": body, "vm/domain.py": body}
+            ),
+            {"vm/cli/": 6, "swap/cli.py": 2},
+        )
+        self.assertEqual(
+            budget_problems(cli_measure({"vm/cli/net.py": body * 3}), {"vm/cli.py": 6}, "code lines"),
+            ["vm/cli/: 6 code lines, budget 0: the change added 6"],
+            "a split needs its folder entry, by hand",
+        )
+        # Every file of the folder is a light package's composition root: reads count in none, writes in all.
+        reads = "import os\ndef main():\n    return os.environ.get('A')\n"
+        folder = {"vm/cli/__init__.py": reads, "vm/cli/net.py": reads, "vm/adapters.py": "import os\n"}
+        self.assertEqual(light_cli_modules(set(folder), frozenset()), {"vm/cli/__init__.py", "vm/cli/net.py"})
+        self.assertEqual(io_measure(folder, full=frozenset()), {"vm cli": 0})
+        self.assertEqual(io_measure(folder, full={"vm"}), {"vm cli": 2})
+        # The inner layers may not import it, and a full package's folder still does no I/O.
+        self.assertTrue(architecture_problems("from vm.cli.net import main\n", "vm/domain.py", "domain"))
+        wired = {"vm/wiring.py": "def build():\n    return 1\n", "vm/cli/net.py": "import os\nos.getcwd()\n"}
+        self.assertEqual(
+            hexagonal_problems("vm", "vm/wiring.py", wired),
+            ["vm/cli/net.py:2: does I/O itself (move it into an adapter)"],
+        )
 
     def test_every_package_module_has_a_role(self) -> None:
         problems = sorted(unlayered_modules() - set(UNLAYERED_ALLOWED))
@@ -1121,7 +1178,7 @@ class ArchitectureGateTest(unittest.TestCase):
             pkg
             for pkg, sources in by_package.items()
             if pkg not in HEXAGONAL_PACKAGES
-            and f"{pkg}/cli.py" in sources
+            and any(module_role(rel) == "cli" for rel in sources)
             and not hexagonal_problems(pkg, f"{pkg}/wiring.py", sources)
         )
         self.assertEqual(ready, [], "these packages follow the rules now: add them to HEXAGONAL_PACKAGES")
