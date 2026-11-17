@@ -439,9 +439,16 @@ everything with `plan`, `status` or `doctor` before changing anything:
   socket as stdin (the way CI runs them; see [AGENTS.md](AGENTS.md), "Test gotchas").
 - `AGENTS.md`: rules for changing this repository (for people and coding agents),
   an index of the module documents, the test and lint commands, how the code
-  fits together, and the test gotchas with the gates that enforce them. Coding
-  agents such as Claude Code and Codex read it by themselves; there is no
-  separate `CLAUDE.md`.
+  fits together, and the test gotchas with the gates that enforce them. It is
+  the entry point for coding agents such as Claude Code and Codex, which read
+  it by themselves; there is no separate `CLAUDE.md`.
+- `.agents/rules/`, `.agents/skills/`: the rules every agent follows on any
+  change (for example [refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md))
+  and the skills, checklists for one kind of task (`<name>/SKILL.md`, such as
+  [cst-new-command](.agents/skills/cst-new-command/SKILL.md)). `.claude/rules`
+  and `.claude/skills` are links to these two folders, so Claude Code and the
+  other agents read the same files. `tests/test_docs.py` checks them, the
+  links of every Markdown file, and that each document is in the AGENTS.md index.
 - `pyproject.toml`, `uv.lock`, `tests/uv-dev`, `tests/mutation/`, `docs/dev-tools.md`: the
   developer tools for the Python code (the ruff linter and formatter, the
   ty type checker and the cosmic-ray mutation tester), pinned and installed through uv for

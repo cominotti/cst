@@ -1,0 +1,59 @@
+---
+name: cst-refactor-parity
+description: "How to prove that a CST refactor changes no behaviour: the old code from git (git show main:path, git archive), the unchanged tests run on old and new code, a throwaway parity harness that runs both on the same inputs and compares output, exit codes, files and commands, and a review of the test diff. Use when moving, splitting, renaming or converting code (including shell to Python), when a pull request claims \"no behaviour change\", or when reviewing such a pull request."
+---
+
+# Proving a refactor changes nothing
+
+The rule is [refactor-vs-behaviour](../../rules/refactor-vs-behaviour.md).
+Use the base branch the pull request goes into (`main` below).
+
+## 1. Get the old code
+
+- One file: `git show main:path/to/file > "$tmp/old/file"`.
+- The whole tree: `mkdir "$tmp/old" && git archive main | tar -x -C "$tmp/old"`.
+  Keep temporary folders out of the checkout. Never `git stash`.
+
+## 2. Run the unchanged tests on both
+
+- `git diff main -- tests '*/tests/*'` shows the test diff. For a pure
+  refactor it is empty, or it only moves tests or changes an import.
+- Run the current tests on the new code, and the same test files on the old
+  tree (`python3 -I -B tests/run_unit.py` in `$tmp/old`, after copying the
+  new test files there when they only moved). Both pass.
+
+## 3. Review the test diff
+
+A refactor must not:
+
+- delete a test or an assertion, or add a skip;
+- loosen an assertion (`assertEqual` to `assertIn`, an exact string to a
+  pattern, a checked exit code to none);
+- change an expected output, exit code or file content.
+
+Each of these is a behaviour change: move it to its own commit, with a test
+that fails on the old code.
+
+## 4. A parity harness, when the tests do not cover enough
+
+A throwaway script in a temporary folder (not committed unless asked):
+
+- loads the old and the new program, with `load_script` from
+  `tests/script_loader.py` for an extensionless one, or runs both as
+  subprocesses with `/usr/bin/python3 -I` (bash with `stdin=subprocess.DEVNULL`);
+- gives both the same argv, environment, scratch `HOME` and root folder, and
+  the same fakes on `PATH` for `systemctl`, `virsh`, sudo and similar
+  tools, logging their calls;
+- covers every subcommand, bad arguments, and the fixtures the existing tests
+  already use;
+- compares stdout, stderr, the exit code, the files written (paths, bytes,
+  modes) and the logged commands, and prints every difference.
+
+The installed zipapp bytes (`cst_core/installer.py payload SRC`) can change
+in a refactor that moves imported code; what the program does must not.
+
+## 5. Write it down
+
+The pull request says which inputs the harness ran, what it compared, and
+the result. Each difference found is fixed in a separate behaviour commit,
+with a test that failed before.

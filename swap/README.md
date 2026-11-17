@@ -420,7 +420,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `domain.py` | pure swap domain model, hardware identity (`SwapHardwareSpec`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
 | `application.py` / `presenter.py` / `cli.py` | pure `plan`, `status`, and `apply` use cases (apply hands each event to a callback as it happens); the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
-| `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder |
+| `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 
 The swap partition's PARTUUID (`partuuid`), device name (`name`), and expected
 size (`expected_size_bytes`) are set on `SwapHardwareSpec` in `swap/domain.py`.

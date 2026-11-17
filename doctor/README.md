@@ -533,6 +533,9 @@ function has type annotations, so a new check reads
 python3 -I -B -m unittest discover -s doctor/tests -t . -v
 ```
 
+This runs the doctor tests only. The whole suite, the way CI runs it, is
+`python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)).
+
 The tests use fixture outputs of `rpm-ostree status --json` and
 `rpm-ostree db list` (`tests/fixtures/`), a fixture `/sys/fs/btrfs` tree
 built per test, fixture `systemctl show` answers and game profile records,
