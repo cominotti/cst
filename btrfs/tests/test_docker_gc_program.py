@@ -469,23 +469,21 @@ class RecordTest(unittest.TestCase):
         self.assertEqual((proc.returncode, out, err), (0, "", ""))
         self.check_state(start, time.time())
 
-    def test_a_recorder_down_for_a_while_restarts_the_clock(self) -> None:
-        self.p.recorded(OLD, {sha("8"): OLD}, OLD)
+    def test_a_recorder_that_was_running_keeps_its_clock(self) -> None:
+        # A fresh heartbeat: no time lost, so "since" and what was recorded stay. (The other
+        # branch, a recorder down for a while, depends on the uptime: test_docker_gc.RecordTest.)
         start = time.time()
+        self.p.recorded(OLD, {sha("8"): OLD}, start)
         rc, out, _ = self.p.run("record")
-        self.assertEqual(rc, 1)
-        self.assertEqual(
-            out,
-            "<5>docker-gc: recorder was down for a while: image clock restarted\n"
-            "<6>docker-gc: recording image use from docker events\n",
-        )
+        self.assertEqual((rc, out), (1, "<6>docker-gc: recording image use from docker events\n"))
         st = self.p.last_used()
-        since = st["since"]
-        assert isinstance(since, float)
-        self.assertGreaterEqual(since, start)
+        self.assertEqual(st["since"], OLD)
         images = st["images"]
         assert isinstance(images, dict)
         self.assertEqual(images[sha("8")], OLD)  # what was recorded is kept
+        beat = st["heartbeat"]
+        assert isinstance(beat, float)
+        self.assertGreaterEqual(beat, start)
 
 
 if __name__ == "__main__":
