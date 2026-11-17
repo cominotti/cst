@@ -503,9 +503,8 @@ snap_activate() {
 snap_disable() {
     local purge=0 unit f
     [[ "${1:-}" == --purge ]] && purge=1
-    systemctl disable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service 2>/dev/null || true
-    # Their last runs too (forget_timer_state, btrfs-setup.sh): an enable later starts afresh.
-    forget_timer_state btrfs-snapshot.timer btrfs-snapshot-nas.timer
+    # Their last runs too (disable_timers, btrfs-setup.sh): an enable later starts afresh.
+    disable_timers btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service
     rm -f "${SNAP_BOOT_FLAG}"
     # ~/Bulk is not part of the snapshots: its boot step stays (it also
     # finishes interrupted moves).
@@ -918,8 +917,7 @@ snap_nas() {
             fi
             ;;
         disable)
-            systemctl disable --now btrfs-snapshot-nas.timer 2>/dev/null || true
-            forget_timer_state btrfs-snapshot-nas.timer
+            disable_timers btrfs-snapshot-nas.timer
             snap_conf_set NAS_ENABLED=0
             echo "NAS backup disabled (the repository on the NAS and ${SNAP_RESTIC_PW} are kept)."
             ;;
