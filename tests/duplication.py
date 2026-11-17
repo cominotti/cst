@@ -11,7 +11,7 @@
   `fi`/`done`/... dropped, whitespace collapsed), type 1.
 - Concepts: top-level functions and classes defined under the same name in
   more than one production file (the usual sign of a helper copied instead
-  of shared).
+  of shared), and the same for shell functions across the shell files.
 
 The method is the one of the reference scripts the conversion was measured
 with, except for three things that make the numbers a little lower:
@@ -225,6 +225,30 @@ def same_name_definitions(repo: str, files: Iterable[str], allowed: Iterable[str
         for node in tree.body:
             if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name not in skip:
                 where[node.name].add(rel)
+    return {name: sorted(paths) for name, paths in sorted(where.items()) if len(paths) > 1}
+
+
+_SHELL_FUNCTION = re.compile(r"^\s*(?:function\s+([A-Za-z_][\w:-]*)\b|([A-Za-z_][\w:-]*)\s*\(\s*\))")
+
+
+def shell_function_names(source: str) -> set[str]:
+    """The functions a shell script defines (`name() {`, `function name`)."""
+    out: set[str] = set()
+    for line in source.splitlines():
+        m = _SHELL_FUNCTION.match(line)
+        if m:
+            out.add(m.group(1) or m.group(2))
+    return out
+
+
+def shell_same_name_definitions(repo: str, files: Iterable[str], allowed: Iterable[str]) -> dict[str, list[str]]:
+    """{name: files} for shell functions defined in more than one shell file (allowed names aside)."""
+    skip = set(allowed)
+    where: dict[str, set[str]] = defaultdict(set)
+    for rel in files:
+        with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
+            for name in shell_function_names(fh.read()) - skip:
+                where[name].add(rel)
     return {name: sorted(paths) for name, paths in sorted(where.items()) if len(paths) > 1}
 
 

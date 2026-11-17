@@ -35,11 +35,22 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   adapters import an adapter.
 - No module imports a private name (`_x`) from another module of the
   repository: a name another module needs is public.
+- Shared primitives have one owner each (PRIMITIVE_OWNERS: running a
+  command, replacing or syncing a file, temporary files, locks, the NOCOW
+  ioctl), and so do the literals that betray a copy of one
+  (PRIMITIVE_LITERALS: the container markers, flatpak-spawn, the libvirt
+  URI, LC_ALL, restorecon, systemd-escape). Other modules use them through
+  cst_core; today's other sites have a budget per package
+  (PRIMITIVE_BUDGETS, LITERAL_BUDGETS) that only goes down.
+- Every public top-level name of cst_core's shared layers has a production
+  user outside its file; CORE_NAMES_WITHOUT_USER lists the exceptions with
+  their reason, and only shrinks.
 
 Standard library only.
 """
 
 import ast
+from collections.abc import Callable, Mapping
 import os
 from typing import Final, Literal
 import unittest
@@ -161,6 +172,139 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # point: the one module, besides the adapters, that imports adapters and
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {}
+
+
+# A shared primitive -> the cst_core modules that own it. Anywhere else, a
+# call is a second implementation: use the owner's function or adapter.
+# "fcntl.ioctl" counts only with an FS_IOC_* request (the NOCOW flags).
+_RUNNER: Final = frozenset({"cst_core/adapters/__init__.py"})
+_FILES: Final = frozenset({"cst_core/adapters/files.py"})
+PRIMITIVE_OWNERS: Final[dict[str, frozenset[str]]] = {
+    "subprocess.run": _RUNNER,
+    "subprocess.Popen": _RUNNER | {"cst_core/adapters/dispatch.py"},
+    "subprocess.call": _RUNNER,
+    "subprocess.check_call": _RUNNER,
+    "subprocess.check_output": _RUNNER,
+    "os.replace": _FILES,
+    "os.fsync": _FILES,
+    "tempfile.mkstemp": _FILES,
+    "tempfile.NamedTemporaryFile": _FILES,
+    "fcntl.flock": frozenset({"cst_core/adapters/locks.py"}),
+    "fcntl.ioctl": frozenset({"cst_core/adapters/nocow.py"}),
+}
+
+# String literals that betray a re-implementation of a primitive -> owners.
+PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
+    "/run/.containerenv": _RUNNER,
+    "/.dockerenv": _RUNNER,
+    "flatpak-spawn": _RUNNER,
+    "qemu:///system": _RUNNER,
+    "LC_ALL": _RUNNER,
+    "restorecon": _FILES,
+    "systemd-escape": _RUNNER,
+}
+
+# Calls of a primitive outside its owners, per "<package> <primitive>"
+# (tests/budgets.py). Only goes down.
+PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
+    "bluetooth subprocess.Popen": 1,
+    "bluetooth subprocess.run": 1,
+    "btrfs/bulk os.fsync": 7,
+    "btrfs/bulk subprocess.Popen": 1,
+    "btrfs/bulk subprocess.run": 13,
+    "btrfs/chrome_cache os.fsync": 1,
+    "btrfs/docker_gc os.fsync": 1,
+    "btrfs/docker_gc os.replace": 1,
+    "btrfs/docker_gc subprocess.Popen": 1,
+    "btrfs/docker_gc subprocess.run": 2,
+    "btrfs/docker_volumes_nocow os.fsync": 1,
+    "btrfs/docker_volumes_nocow os.replace": 1,
+    "btrfs/docker_volumes_nocow subprocess.run": 5,
+    "btrfs/snapshot os.fsync": 2,
+    "btrfs/snapshot os.replace": 1,
+    "btrfs/snapshot subprocess.run": 1,
+    "btrfs/stall_monitord subprocess.Popen": 1,
+    "btrfs/stall_report subprocess.run": 3,
+    "cpu subprocess.Popen": 1,
+    "cpu subprocess.run": 2,
+    "cpu tempfile.NamedTemporaryFile": 1,
+    "cst_core subprocess.run": 1,
+    "doctor subprocess.run": 1,
+    "toolchains fcntl.flock": 3,
+    "toolchains os.replace": 1,
+    "toolchains subprocess.run": 6,
+    "toolchains tempfile.mkstemp": 1,
+    "vm os.replace": 1,
+    "vm subprocess.Popen": 1,
+    "vm subprocess.run": 2,
+    "vm tempfile.mkstemp": 2,
+}
+
+# Uses of a primitive's literal outside its owners (docstrings aside), per
+# "<package> <literal>". Only goes down.
+LITERAL_BUDGETS: Final[dict[str, int]] = {
+    "bluetooth LC_ALL": 1,
+    "btrfs/bulk restorecon": 1,
+    "btrfs/stall_report flatpak-spawn": 1,
+    "cpu qemu:///system": 1,
+    "cst_core /.dockerenv": 1,
+    "cst_core /run/.containerenv": 1,
+    "doctor /.dockerenv": 1,
+    "doctor /run/.containerenv": 1,
+    "doctor flatpak-spawn": 2,
+    "doctor qemu:///system": 1,
+    "toolchains /.dockerenv": 1,
+    "toolchains /run/.containerenv": 1,
+    "toolchains flatpak-spawn": 4,
+    "vm LC_ALL": 3,
+    "vm qemu:///system": 3,
+    "vm restorecon": 2,
+}
+
+# The cst_core layers whose public names are shared primitives.
+CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/adapters/", "cst_core/application/")
+
+# Public top-level names of those layers with no production user outside
+# their file ("path:name" -> why). Adopt the name where a module keeps its
+# own copy, make it private when only its file uses it, or delete it; then
+# remove its line. Only shrinks.
+CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
+    "cst_core/adapters/__init__.py:SystemClockAdapter": "the adapter of ClockPort; no program takes a clock through the port yet",
+    "cst_core/adapters/__init__.py:SubprocessVirshAdapter": "the adapter of VirshPort; cpu, vm and doctor still run virsh themselves",
+    "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
+    "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
+    "cst_core/adapters/nocow.py:FS_IOC_SETFLAGS": "an ioctl request used inside nocow.py and by its tests",
+    "cst_core/adapters/runtime.py:SYSTEM_PYTHON": "used inside runtime.py and by the tests",
+    "cst_core/adapters/runtime.py:running_archive": "used inside runtime.py and by the tests",
+    "cst_core/adapters/zipapp.py:ZIP_FIXED_TIME": "used only inside zipapp.py",
+    "cst_core/adapters/zipapp.py:ZIPAPP_SHEBANG": "used only inside zipapp.py",
+    "cst_core/adapters/zipapp.py:repo_packages": "used only inside zipapp.py",
+    "cst_core/adapters/zipapp.py:package_sources": "used only inside zipapp.py",
+    "cst_core/adapters/zipapp.py:import_closure": "used inside zipapp.py and by the tests",
+    "cst_core/adapters/zipapp.py:zipapp_members": "used only inside zipapp.py",
+    "cst_core/application/install.py:PayloadFn": "the type of InstallService's payload function, used only inside install.py",
+    "cst_core/domain/dispatch.py:ModuleSpec": "the record of MODULES, used only inside dispatch.py",
+    "cst_core/domain/dispatch.py:USAGE_HEADER": "used only inside dispatch.py (format_cst_usage)",
+    "cst_core/domain/imports.py:imported_modules": "read by the static gates in tests/ (code_graph, distribution)",
+    "cst_core/domain/imports.py:loads_code_by_path": "read by the static gates in tests/ (architecture, distribution)",
+    "cst_core/domain/install.py:parse_manifest": "builds INSTALL_MANIFEST inside install.py; the tests parse other tables with it",
+    "cst_core/domain/install.py:SETUP_ENTRYPOINTS": "read by the static gates in tests/",
+    "cst_core/domain/install.py:CHECKOUT_ONLY_EXECUTABLES": "read by the static gates in tests/",
+    "cst_core/domain/install.py:CHECKOUT_ONLY_FILES": "read by the static gates in tests/",
+    "cst_core/domain/install.py:manifest_by_dest": "no user: adopt it where a module looks a dest up by hand, or delete it",
+    "cst_core/domain/install.py:python_entry_srcs": "read by the static gates in tests/",
+    "cst_core/domain/plan.py:Ok": "a result type nothing returns yet: adopt it or delete it",
+    "cst_core/domain/plan.py:Err": "a result type nothing returns yet: adopt it or delete it",
+    "cst_core/domain/plan.py:Outcome": "a result type nothing returns yet: adopt it or delete it",
+    "cst_core/domain/text.py:Assignment": "the record parse_shell_assignments returns, used only inside text.py",
+    "cst_core/domain/values.py:KIB": "no user (MIB and GIB are the units in use)",
+    "cst_core/domain/values.py:MIB": "used by the tests only",
+    "cst_core/domain/values.py:Duration": "toolchains parses durations itself (parse_duration): adopt it there or delete it",
+    "cst_core/domain/values.py:CpuSet": "cpu parses CPU lists itself (cpus_of): adopt it there or delete it",
+    "cst_core/ports/__init__.py:HostPathPort": "a port no program takes yet: adopt it or delete it",
+    "cst_core/ports/__init__.py:ClockPort": "a port no program takes yet: adopt it or delete it",
+    "cst_core/ports/__init__.py:VirshPort": "a port no program takes yet (virsh runs in cpu, vm and doctor): adopt it or delete it",
+}
 
 
 def layer_role(rel: str) -> LayerRole | None:
@@ -435,6 +579,124 @@ def private_imports(source: str, rel: str) -> list[str]:
             if ours and alias.name.startswith("_") and not alias.name.startswith("__"):
                 problems.append(f"{rel}:{node.lineno}: imports the private name {alias.name} from {node.module}")
     return problems
+
+
+def _bindings(tree: ast.Module) -> dict[str, str]:
+    """Local name -> fully qualified name, for every import of a module."""
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound[alias.asname or alias.name.split(".", 1)[0]] = (
+                    alias.name if alias.asname else alias.name.split(".", 1)[0]
+                )
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def primitive_calls(source: str, rel: str) -> list[tuple[int, str]]:
+    """(line, primitive) for every call of a PRIMITIVE_OWNERS primitive, through aliases and from-imports."""
+    tree = ast.parse(source, filename=rel)
+    bound = _bindings(tree)
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _dotted(node.func)
+        if name is None:
+            continue
+        head, _, rest = name.partition(".")
+        if head not in bound:
+            continue
+        full = f"{bound[head]}.{rest}" if rest else bound[head]
+        if full not in PRIMITIVE_OWNERS:
+            continue
+        if full == "fcntl.ioctl" and not any(
+            "FS_IOC_" in (_dotted(arg) or "") for arg in node.args[1:2] if isinstance(arg, ast.expr)
+        ):
+            continue
+        out.append((node.lineno, full))
+    return sorted(out)
+
+
+def _docstrings(tree: ast.Module) -> set[int]:
+    """id() of the docstring constants of a module, its classes and its functions."""
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                out.add(id(first.value))
+    return out
+
+
+def primitive_literals(source: str, rel: str) -> list[tuple[int, str]]:
+    """(line, literal) for every string constant (docstrings aside) holding a PRIMITIVE_LITERALS literal."""
+    tree = ast.parse(source, filename=rel)
+    docs = _docstrings(tree)
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            out += [(node.lineno, lit) for lit in PRIMITIVE_LITERALS if lit in node.value]
+    return sorted(out)
+
+
+def primitive_measure(
+    sources: dict[str, str],
+    find: Callable[[str, str], list[tuple[int, str]]],
+    owners: Mapping[str, frozenset[str]],
+) -> dict[str, int]:
+    """Sites outside their owners per "<package> <primitive>"."""
+    out: dict[str, int] = {}
+    for rel, source in sources.items():
+        for _, what in find(source, rel):
+            if rel not in owners[what]:
+                key = f"{package_of(rel)} {what}"
+                out[key] = out.get(key, 0) + 1
+    return out
+
+
+def top_level_names(source: str, rel: str) -> list[str]:
+    """Public names a module defines at its top level (functions, classes, assignments, type aliases)."""
+    names: list[str] = []
+    for node in ast.parse(source, filename=rel).body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.append(node.name)
+        elif isinstance(node, ast.Assign):
+            names += [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.append(node.target.id)
+        elif isinstance(node, ast.TypeAlias):
+            names.append(node.name.id)
+    return [n for n in names if not n.startswith("_")]
+
+
+def referenced_names(source: str, rel: str) -> set[str]:
+    """Every name a module refers to: names, attributes and the names it imports."""
+    out: set[str] = set()
+    for node in ast.walk(ast.parse(source, filename=rel)):
+        if isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            out.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            out |= {alias.name for alias in node.names}
+    return out
+
+
+def core_names_without_user(sources: dict[str, str]) -> list[str]:
+    """ "path:name" of every public cst_core shared name no other production module refers to."""
+    refs = {rel: referenced_names(src, rel) for rel, src in sources.items()}
+    out: list[str] = []
+    for rel, src in sorted(sources.items()):
+        if not rel.startswith(CORE_SHARED_PREFIXES):
+            continue
+        for name in top_level_names(src, rel):
+            if not any(name in names for other, names in refs.items() if other != rel):
+                out.append(f"{rel}:{name}")
+    return out
 
 
 def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
@@ -723,6 +985,76 @@ class ArchitectureGateTest(unittest.TestCase):
                 "a.py:1: imports the private name _x from swap.domain",
                 "a.py:2: imports the private name _z from None",
             ],
+        )
+
+    def test_primitive_calls_are_resolved(self) -> None:
+        src = (
+            "import subprocess as sp\nfrom os import replace\nimport fcntl\nfrom tempfile import mkstemp\n"
+            "sp.run(['x'], check=False)\nreplace('a', 'b')\nfcntl.ioctl(fd, FS_IOC_SETFLAGS, b)\n"
+            "fcntl.ioctl(fd, SUBVOL_CREATE, b)\nmkstemp()\nrun(['y'])\n"
+        )
+        self.assertEqual(
+            primitive_calls(src, "x.py"),
+            [(5, "subprocess.run"), (6, "os.replace"), (7, "fcntl.ioctl"), (9, "tempfile.mkstemp")],
+        )
+        self.assertEqual(
+            primitive_measure({"vm/cli.py": src, "cst_core/adapters/files.py": src}, primitive_calls, PRIMITIVE_OWNERS),
+            {
+                "vm subprocess.run": 1,
+                "vm os.replace": 1,
+                "vm fcntl.ioctl": 1,
+                "vm tempfile.mkstemp": 1,
+                "cst_core subprocess.run": 1,
+                "cst_core fcntl.ioctl": 1,
+            },
+        )
+
+    def test_primitive_literals_skip_docstrings(self) -> None:
+        src = (
+            '"""Runs flatpak-spawn."""\ndef f():\n    """LC_ALL=C."""\n'
+            "    return ['flatpak-spawn', '--host'], {'LC_ALL': 'C'}, f'virsh -c qemu:///system {x}'\n"
+        )
+        self.assertEqual(primitive_literals(src, "x.py"), [(4, "LC_ALL"), (4, "flatpak-spawn"), (4, "qemu:///system")])
+
+    def test_primitives_have_one_owner(self) -> None:
+        sources = {rel: _read(rel) for rel in production_python()}
+        calls = primitive_measure(sources, primitive_calls, PRIMITIVE_OWNERS)
+        lits = primitive_measure(sources, primitive_literals, PRIMITIVE_LITERALS)
+        problems = budget_problems(calls, PRIMITIVE_BUDGETS, "calls") + budget_problems(
+            lits, LITERAL_BUDGETS, "literals"
+        )
+        self.assertEqual(
+            problems,
+            [],
+            "use the cst_core owner (PRIMITIVE_OWNERS, .agents/rules/reuse-primitives.md) instead of a copy; "
+            "measured tables:\nPRIMITIVE_BUDGETS:\n"
+            + format_table(calls)
+            + "\nLITERAL_BUDGETS:\n"
+            + format_table(lits),
+        )
+        for owners in (*PRIMITIVE_OWNERS.values(), *PRIMITIVE_LITERALS.values()):
+            for rel in owners:
+                with self.subTest(owner=rel):
+                    self.assertIn(rel, sources, "an owner that does not exist")
+
+    def test_core_names_have_a_user(self) -> None:
+        missing = core_names_without_user({rel: _read(rel) for rel in production_python()})
+        new = [name for name in missing if name not in CORE_NAMES_WITHOUT_USER]
+        self.assertEqual(
+            new,
+            [],
+            "public cst_core names nothing outside their file uses: use them, make them private or delete them",
+        )
+        stale = sorted(set(CORE_NAMES_WITHOUT_USER) - set(missing))
+        self.assertEqual(stale, [], "these have a user now (or are gone): remove them from CORE_NAMES_WITHOUT_USER")
+        self.assertEqual(
+            core_names_without_user(
+                {
+                    "cst_core/domain/a.py": "X = 1\n_P = 2\ndef used(): pass\nclass Lone: pass\ntype T = int\n",
+                    "vm/cli.py": "from cst_core.domain.a import used\nimport cst_core.domain.a as a\na.X\n",
+                }
+            ),
+            ["cst_core/domain/a.py:Lone", "cst_core/domain/a.py:T"],
         )
 
     def test_repository_layers_obey_hexagonal_boundaries(self) -> None:
