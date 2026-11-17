@@ -90,13 +90,15 @@ before changing that module.
 
 ## Agent rules and skills
 
-`.agents/rules/` holds rules for every change:
-[reuse-primitives](.agents/rules/reuse-primitives.md) and
-[refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md).
-`.agents/skills/` holds checklists for one kind of task: `cst-new-command`,
-`cst-new-helper`, `cst-shell-to-python` and `cst-refactor-parity`
-(`<name>/SKILL.md`). `.claude/rules` and `.claude/skills` link to these two
-folders, so Claude Code reads the same files as the other agents.
+Read the two rules in `.agents/rules/` before any change:
+[reuse-primitives](.agents/rules/reuse-primitives.md) (use what `cst_core`
+provides, never a copy) and
+[refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md) (one kind of
+change per commit, with its proof). `.agents/skills/` holds checklists for
+one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
+`cst-shell-to-python` and `cst-refactor-parity`; open the one whose
+description fits the task. `.claude/rules` and `.claude/skills` are links to
+these two folders, for Claude Code.
 
 ## Commands
 

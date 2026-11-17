@@ -1,7 +1,8 @@
 """The files of the repository, for the static gate tests.
 
-tests/test_repo_paths.py, tests/test_python_files.py and
-tests/test_subprocess_hygiene.py read every file of the checkout. They all
+tests/test_repo_paths.py, tests/test_python_files.py,
+tests/test_subprocess_hygiene.py and tests/test_docs.py read every file of
+the checkout. They all
 take the list from here, so that they handle a git failure the same way.
 """
 
