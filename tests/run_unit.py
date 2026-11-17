@@ -12,7 +12,9 @@ the static gate modules only (GATE_MODULES: `invowk cmd test arch`).
 Skipped tests: the run lists every skipped test with its reason, and fails
 on a skip that EXPECTED_SKIPS does not name. A skip there is one that
 depends on the machine (a tool, root, the file system); any other skip
-would turn a test off without anyone noticing.
+would turn a test off without anyone noticing. In a copy with no .git (a
+source tarball) the gates that read the repository skip themselves
+(tests/repo_files.py, NOT_A_CHECKOUT below), and those skips are expected.
 
 bash reads ~/.bashrc even for `bash -c` when SHLVL is unset and stdin is a
 socket: it takes that for a start by sshd/rshd. A test that runs bash with
