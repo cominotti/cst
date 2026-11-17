@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: MPL-2.0
-"""What btrfs-snapshot-core reads and changes on the machine: the Host
-(commands, clock, boot id, directory entries; tests replace it), the btrfs
-commands, the scan of a snapshot directory, the cache-folder walk (file
-descriptors only, no symlink followed), the local time zone, and the
-safeguards, which resolve pinned paths on the filesystem.
+"""What btrfs-snapshot-core reads and changes on the machine, behind the
+ports of btrfs/snapshot/ports.py: the Host (commands, clock, boot id,
+directory entries, the cache-folder walk with file descriptors only, no
+symlink followed; tests replace it), the btrfs commands, the state
+directory, the pin file (which resolves pinned paths on the filesystem),
+the run lock, the journal lines, and the local time zone.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Collection
-from collections.abc import Mapping
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, TextIO
 import dataclasses
 import datetime as dt
 import errno
@@ -23,34 +24,32 @@ from btrfs.snapshot.domain import (
     BOOT_ID_FILE,
     CACHE_SIGNATURE,
     CACHE_TAG,
-    CLOCK_SLACK,
     CMD_TIMEOUT,
-    Decision,
-    KEEP_NEWEST,
-    MIN_AGE,
-    ParseError,
-    Snap,
     WALK_PRUNE,
+    CacheDir,
+    CacheWalk,
+    ParseError,
     SubvolInfo,
     SubvolPath,
     err_text,
-    name_regex,
-    other_parent,
-    parse_snapshot_name,
     parse_subvolume_show,
-    plan,
-    wall_to_epoch,
 )
+from btrfs.snapshot.ports import SnapshotHostPort
 from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.files import locale_bytes, write_atomic
+from cst_core.adapters.journal import log as journal_log
+from cst_core.adapters.locks import take_lock
 from cst_core.ports import CommandRunnerPort
 
 
 # ---- time ----------------------------------------------------------------------------
-def local_tz(name: str | None = None) -> dt.tzinfo:
-    """The zone used for names and retention: --tz, else $TZ, else /etc/localtime."""
+def local_tz(name: str | None, tz_env: str) -> dt.tzinfo:
+    """The zone used for names and retention: --tz (NAME), else $TZ (TZ_ENV,
+    which wiring reads), else /etc/localtime. An unknown NAME raises
+    zoneinfo.ZoneInfoNotFoundError or ValueError, as zoneinfo does."""
     if name:
         return zoneinfo.ZoneInfo(name)
-    env = os.environ.get("TZ", "").lstrip(":")
+    env = tz_env.lstrip(":")
     if env:
         try:
             if env.startswith("/"):
@@ -66,104 +65,15 @@ def local_tz(name: str | None = None) -> dt.tzinfo:
         return dt.UTC
 
 
-def apply_safeguards(
-    decisions: list[Decision],
-    now: float,
-    tz: dt.tzinfo,
-    pins: Collection[str],
-) -> list[Decision]:
-    """The decisions with policy deletions turned into keeps for the 3 newest
-    (by generation and by name), anything younger than 24 h, and pinned paths."""
-    snaps = [d.snap for d in decisions]
-    protected: set[int] = set()
-    for key in (lambda s: (s.cgen, s.wall, s.seq), lambda s: (wall_to_epoch(s.wall, tz), s.seq)):
-        protected.update(id(s) for s in sorted(snaps, key=key, reverse=True)[:KEEP_NEWEST])
-    out: list[Decision] = []
-    for d in decisions:
-        s = d.snap
-        if d.action != "delete":
-            out.append(d)
-        elif id(s) in protected:
-            out.append(
-                dataclasses.replace(d, action="keep", reason=f"safeguard: one of the {KEEP_NEWEST} newest ({d.reason})")
-            )
-        elif now - wall_to_epoch(s.wall, tz) < MIN_AGE:
-            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: younger than 24 h ({d.reason})"))
-        elif is_pinned(s.path, pins):
-            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: pinned ({d.reason})"))
-        else:
-            out.append(d)
-    return out
-
-
-def is_pinned(path: str, pins: Collection[str]) -> bool:
-    if not path or not pins:
-        return False
-    return os.path.normpath(path) in pins or os.path.realpath(path) in pins
-
-
-def unexplained_deletions(
-    decisions: Sequence[Decision],
-    snaps: Sequence[Snap],
-    policy: Mapping[str, int | str],
-    tz: dt.tzinfo,
-    pins: Collection[str],
-    since: int | None,
-    ref: float | None = None,
-) -> list[Decision]:
-    """The deletions in DECISIONS (made now) that time passing does not explain.
-
-    A deletion is explained when the snapshot was kept at SINCE (the last
-    successful run: policy and safeguards replayed over the snapshots named up
-    to then) and is due at REF (the trusted current time; None = the time the
-    decisions were made). After the machine was off, whole days of hourly
-    snapshots age out at once and all of them are explained, so the circuit
-    breaker does not trip on them; a shrunken policy dooms snapshots that were
-    already due at SINCE, and a clock that jumped ahead of REF dooms snapshots
-    not yet due at REF - those stay unexplained. SINCE None: nothing is
-    explained (no successful run recorded)."""
-    doomed = [d for d in decisions if d.action == "delete" and not d.snap.virtual]
-    if since is None or not doomed:
-        return doomed
-    real = [s for s in snaps if not s.virtual]
-    before = [s for s in real if wall_to_epoch(s.wall, tz) <= since + CLOCK_SLACK]
-    kept_then = {
-        id(d.snap) for d in apply_safeguards(plan(before, since, policy, tz), since, tz, pins) if d.action == "keep"
-    }
-    if ref is None:
-        due_now = {id(d.snap) for d in doomed}
-    else:
-        due_now = {
-            id(d.snap) for d in apply_safeguards(plan(real, ref, policy, tz), ref, tz, pins) if d.action == "delete"
-        }
-    return [d for d in doomed if not (id(d.snap) in kept_then and id(d.snap) in due_now)]
+def known_zone(name: str) -> dt.tzinfo | None:
+    """The zone NAME (a --tz value), or None when zoneinfo does not know it."""
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except zoneinfo.ZoneInfoNotFoundError, ValueError:
+        return None
 
 
 # ---- cache folders ---------------------------------------------------------------------
-@dataclasses.dataclass
-class CacheDir:
-    rel: str  # path relative to the walked root
-    files: int = 0  # entries that are not folders (files, symlinks, ...)
-    size: int = 0  # apparent size of the regular files, bytes
-
-
-@dataclasses.dataclass
-class CacheWalk:
-    folders: list[CacheDir]  # tagged folders (dropped in "drop" mode)
-    kept: list[str]  # rel: tagged, but holding a skipped path, so kept and walked
-    skipped: list[str]  # rel: skip paths that exist (never entered)
-    problems: list[tuple[str, str]]  # (rel, text): what could not be read or deleted
-    seconds: float = 0.0
-
-    @property
-    def files(self) -> int:
-        return sum(c.files for c in self.folders)
-
-    @property
-    def size(self) -> int:
-        return sum(c.size for c in self.folders)
-
-
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 NOATIME = getattr(os, "O_NOATIME", 0)
 
@@ -230,7 +140,7 @@ def tree(
     still recognised as a cache (it stays when anything below could not be
     deleted). Returns a CacheDir; failures go to PROBLEMS (rel, text) and the
     rest goes on."""
-    out = CacheDir(rel)
+    files = size = 0
     before = len(problems)
     stack = [Level(top, name, rel)]
     while stack:
@@ -253,9 +163,9 @@ def tree(
                 except OSError as err:
                     problems.append((os.path.join(level.rel, e.name), err_text(err)))
                     continue
-                out.files += 1
+                files += 1
                 if stat.S_ISREG(st.st_mode):
-                    out.size += st.st_size
+                    size += st.st_size
                 if delete and not (is_top and e.name == CACHE_TAG):  # the top's tag goes last
                     try:
                         os.unlink(e.name, dir_fd=level.fd)
@@ -300,7 +210,7 @@ def tree(
                 # Not empty because something below could not go: already reported.
                 if not (failed and e.errno == errno.ENOTEMPTY):
                     problems.append((level.rel, f"cannot delete: {e.strerror}"))
-    return out
+    return CacheDir(rel, files, size)
 
 
 def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "drop"] = "count") -> CacheWalk:
@@ -367,8 +277,7 @@ def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "dr
     finally:
         for level in stack:
             os.close(level.fd)
-    result.seconds = time.monotonic() - start
-    return result
+    return dataclasses.replace(result, seconds=time.monotonic() - start)
 
 
 # The commands of a snapshot run: where it runs, never moved to the host.
@@ -429,7 +338,9 @@ class Host:
 
 
 class Btrfs:
-    def __init__(self, host: Host) -> None:
+    """The btrfs commands, run through a host (BtrfsPort)."""
+
+    def __init__(self, host: SnapshotHostPort) -> None:
         self.host = host
 
     def show(self, path: SubvolPath) -> SubvolInfo:
@@ -449,7 +360,7 @@ class Btrfs:
             return False
         raise ParseError(f"unexpected property output {value!r}")
 
-    def snapshot(self, source: SubvolPath, dest: str, readonly: bool = True) -> tuple[int, str, str]:
+    def snapshot(self, source: SubvolPath, dest: str, *, readonly: bool = True) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "snapshot"] + (["-r"] if readonly else []) + [source, dest])
 
     def set_readonly(self, path: SubvolPath) -> tuple[int, str, str]:
@@ -459,52 +370,97 @@ class Btrfs:
         return self.host.run(["btrfs", "subvolume", "delete", path])
 
 
-@dataclasses.dataclass
-class Scan:
-    owned: list[Snap]
-    ignored: list[tuple[str, str]]  # (path, reason): not ours, never touched
-    unverifiable: list[tuple[str, str]]  # (path, reason): could be ours, blocks deletions
-    writable: list[str] = dataclasses.field(default_factory=list)  # paths of the "not read-only" entries in ignored
+# ---- the state directory, the pin file, the run lock, the journal ----------------------
+class StateDir:
+    """The lists and the last-run record in --state-dir (StateStorePort)."""
 
+    def __init__(self, state_dir: str) -> None:
+        self.state_dir = state_dir
 
-def scan_snapshots(host: Host, btrfs: Btrfs, snapdir: str, name: str, source_uuid: str | None) -> Scan:
-    """Owned snapshots of one source. source_uuid None = skip the parent check (latest)."""
-    owned: list[Snap] = []
-    ignored: list[tuple[str, str]] = []
-    unverifiable: list[tuple[str, str]] = []
-    writable: list[str] = []
-    try:
-        entries = host.listdir(snapdir)
-    except FileNotFoundError:
-        return Scan(owned, ignored, unverifiable)
-    except OSError as e:
-        raise ParseError(f"cannot list {snapdir}: {e.strerror}") from None
-    pattern = name_regex(name)
-    for entry in entries:
-        if not pattern.fullmatch(entry):
-            continue
-        path = os.path.join(snapdir, entry)
-        parsed = parse_snapshot_name(name, entry)
-        if parsed is None:
-            ignored.append((path, "invalid date in the name"))
-            continue
-        kind = host.kind(path)
-        if kind != "subvol":
-            ignored.append((path, "not a subvolume" if kind != "symlink" else "symlink"))
-            continue
+    def path(self, name: str) -> str:
+        return os.path.join(self.state_dir, name)
+
+    def read_list(self, name: str) -> list[str]:
+        """The entries (one per line) of STATE/name; [] if it does not exist.
+        OSError if it cannot be read. Bytes that are not UTF-8 become U+FFFD
+        (such a line names no snapshot, so it is left alone with a warning)."""
         try:
-            info = btrfs.show(SubvolPath(path))  # host.kind said so
-            ro = btrfs.readonly(SubvolPath(path))
-        except ParseError as e:
-            unverifiable.append((path, str(e)))
-            continue
-        if not ro:
-            ignored.append((path, "not read-only"))
-            writable.append(path)
-            continue
-        other = other_parent(info, source_uuid) if source_uuid is not None else None
-        if other:
-            ignored.append((path, other))
-            continue
-        owned.append(Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"]))
-    return Scan(owned, ignored, unverifiable, writable)
+            with open(self.path(name), encoding="utf-8", errors="replace") as f:
+                return [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def write_list(self, name: str, entries: Sequence[str], *, sync_dir: bool = True) -> None:
+        """Replace STATE/name with ENTRIES, durably (fsync of the file and,
+        with SYNC_DIR, the folder); removed when ENTRIES is empty.
+        World-readable: cst doctor runs as the user."""
+        path = self.path(name)
+        if not entries:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        os.makedirs(self.state_dir, mode=0o755, exist_ok=True)
+        # 0644 whatever the umask (sudo keeps a user's 077).
+        # The locale's encoding, as the file object it used to write through (open()'s default).
+        text = locale_bytes("".join(f"{e}\n" for e in entries))
+        write_atomic(path, text, mode=0o644, durable=sync_dir or "file", relabel=False)
+
+    def read_record(self, name: str) -> str | None:
+        """STATE/name's text (the locale's encoding), stripped; None if it does not exist."""
+        try:
+            with open(self.path(name)) as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+
+
+class PinFile:
+    """The pin file (PinsPort): one path per line, each normalised and resolved."""
+
+    def __init__(self, pin_file: str) -> None:
+        self.pin_file = pin_file
+
+    def read(self) -> tuple[set[str], str | None]:
+        """(the pinned paths, problem or None); a file that breaks halfway keeps the lines read before."""
+        pins: set[str] = set()
+        try:
+            with open(self.pin_file) as f:
+                for raw in f:
+                    line = raw.strip()
+                    if line:
+                        pins.add(os.path.normpath(line))
+                        pins.add(os.path.realpath(line))
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeDecodeError) as e:
+            return pins, f"cannot read the pin file {self.pin_file}: {e}"
+        return pins, None
+
+    def covers(self, path: str, pins: Collection[str]) -> bool:
+        if not path or not pins:
+            return False
+        return os.path.normpath(path) in pins or os.path.realpath(path) in pins
+
+
+class RunLock:
+    """The run lock (RunLockPort): an flock on the lock file, never waited for."""
+
+    def acquire(self, path: str) -> Callable[[], None] | None:
+        fd = take_lock(path, wait=False)
+        if fd is None:
+            return None
+        return lambda: os.close(fd)
+
+
+class Log:
+    """btrfs-snapshot's journal lines ("<prio>btrfs-snapshot: msg") on the
+    stream main chose: stdout, or stderr for the commands whose stdout is
+    their answer (latest, caches, --json)."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+
+    def __call__(self, level: int, msg: str) -> None:
+        journal_log(level, msg, tag="btrfs-snapshot", stream=self.stream)

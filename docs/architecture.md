@@ -37,7 +37,7 @@ Python packages follow the Hexagonal Architecture + DDD layout
 `ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
 cases, `adapters.py` / `adapters/` for host I/O and subprocesses, `cli.py`
 for a program's commands). Only swap, doctor, `cst_core` and btrfs's
-docker-gc and docker-volumes-nocow have an application layer with ports; in the other packages `cli.py` orchestrates
+docker-gc, docker-volumes-nocow and snapshot have an application layer with ports; in the other packages `cli.py` orchestrates
 the commands and still does some I/O itself. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
@@ -67,8 +67,8 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, `btrfs/docker_gc` and
-`btrfs/docker_volumes_nocow` today): their `cli.py` and
+`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, `btrfs/docker_gc`,
+`btrfs/docker_volumes_nocow` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other
 module, use `os.environ`, `sys.executable` and `os.execvp` without them

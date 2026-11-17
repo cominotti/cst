@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The rules of btrfs-snapshot-core, with no I/O: retention policies and
-btrbk's schedule() (plan), snapshot names and wall-clock time, the circuit
-breaker's limits, and parsing of --source, --caches-skip, the state file and
-`btrfs subvolume show`.
+btrbk's schedule() (plan), the safeguards, snapshot names and wall-clock
+time, the circuit breaker's limits, parsing of --source, --caches-skip, the
+state file and `btrfs subvolume show`, and the values that cross the ports
+(Scan, CacheWalk) or reach the presenter (Listing, SourceCaches).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import NewType, TypedDict
 import dataclasses
 import datetime as dt
@@ -314,6 +316,76 @@ def is_mass_delete(count: int, owned: int) -> bool:
     return count > MASS_DELETE_MIN and count * 100 > owned * MASS_DELETE_PERCENT
 
 
+# ---- safeguards ----------------------------------------------------------------------
+def apply_safeguards(
+    decisions: list[Decision],
+    now: float,
+    tz: dt.tzinfo,
+    pinned: Collection[str],
+) -> list[Decision]:
+    """The decisions with policy deletions turned into keeps for the 3 newest
+    (by generation and by name), anything younger than 24 h, and the pinned
+    snapshots (PINNED: the paths of the snapshots a pin covers, as the pin
+    file's port resolved them)."""
+    snaps = [d.snap for d in decisions]
+    protected: set[int] = set()
+    for key in (lambda s: (s.cgen, s.wall, s.seq), lambda s: (wall_to_epoch(s.wall, tz), s.seq)):
+        protected.update(id(s) for s in sorted(snaps, key=key, reverse=True)[:KEEP_NEWEST])
+    out: list[Decision] = []
+    for d in decisions:
+        s = d.snap
+        if d.action != "delete":
+            out.append(d)
+        elif id(s) in protected:
+            out.append(
+                dataclasses.replace(d, action="keep", reason=f"safeguard: one of the {KEEP_NEWEST} newest ({d.reason})")
+            )
+        elif now - wall_to_epoch(s.wall, tz) < MIN_AGE:
+            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: younger than 24 h ({d.reason})"))
+        elif s.path and s.path in pinned:
+            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: pinned ({d.reason})"))
+        else:
+            out.append(d)
+    return out
+
+
+def unexplained_deletions(
+    decisions: Sequence[Decision],
+    snaps: Sequence[Snap],
+    policy: Mapping[str, int | str],
+    tz: dt.tzinfo,
+    pinned: Collection[str],
+    since: int | None,
+    ref: float | None = None,
+) -> list[Decision]:
+    """The deletions in DECISIONS (made now) that time passing does not explain.
+
+    A deletion is explained when the snapshot was kept at SINCE (the last
+    successful run: policy and safeguards replayed over the snapshots named up
+    to then) and is due at REF (the trusted current time; None = the time the
+    decisions were made). After the machine was off, whole days of hourly
+    snapshots age out at once and all of them are explained, so the circuit
+    breaker does not trip on them; a shrunken policy dooms snapshots that were
+    already due at SINCE, and a clock that jumped ahead of REF dooms snapshots
+    not yet due at REF - those stay unexplained. SINCE None: nothing is
+    explained (no successful run recorded)."""
+    doomed = [d for d in decisions if d.action == "delete" and not d.snap.virtual]
+    if since is None or not doomed:
+        return doomed
+    real = [s for s in snaps if not s.virtual]
+    before = [s for s in real if wall_to_epoch(s.wall, tz) <= since + CLOCK_SLACK]
+    kept_then = {
+        id(d.snap) for d in apply_safeguards(plan(before, since, policy, tz), since, tz, pinned) if d.action == "keep"
+    }
+    if ref is None:
+        due_now = {id(d.snap) for d in doomed}
+    else:
+        due_now = {
+            id(d.snap) for d in apply_safeguards(plan(real, ref, policy, tz), ref, tz, pinned) if d.action == "delete"
+        }
+    return [d for d in doomed if not (id(d.snap) in kept_then and id(d.snap) in due_now)]
+
+
 def err_text(e: BaseException) -> str:
     """An OSError's strerror, else the exception's text (ParseError, an OSError without one)."""
     return getattr(e, "strerror", None) or str(e)
@@ -461,3 +533,105 @@ def fmt_span(seconds: float) -> str:
 
 def fmt_epoch(epoch: float, tz: dt.tzinfo) -> str:
     return dt.datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+# ---- what the machine answers -----------------------------------------------------------
+@dataclasses.dataclass(frozen=True, slots=True)
+class Scan:
+    """The entries of a snapshot folder named like one source's snapshots."""
+
+    owned: list[Snap]
+    ignored: list[tuple[str, str]]  # (path, reason): not ours, never touched
+    unverifiable: list[tuple[str, str]]  # (path, reason): could be ours, blocks deletions
+    writable: list[str] = dataclasses.field(default_factory=list)  # paths of the "not read-only" entries in ignored
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CacheDir:
+    rel: str  # path relative to the walked root
+    files: int = 0  # entries that are not folders (files, symlinks, ...)
+    size: int = 0  # apparent size of the regular files, bytes
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CacheWalk:
+    folders: list[CacheDir]  # tagged folders (dropped in "drop" mode)
+    kept: list[str]  # rel: tagged, but holding a skipped path, so kept and walked
+    skipped: list[str]  # rel: skip paths that exist (never entered)
+    problems: list[tuple[str, str]]  # (rel, text): what could not be read or deleted
+    seconds: float = 0.0
+
+    @property
+    def files(self) -> int:
+        return sum(c.files for c in self.folders)
+
+    @property
+    def size(self) -> int:
+        return sum(c.size for c in self.folders)
+
+
+# ---- what a run was asked, and what list and caches answer ---------------------------------
+@dataclasses.dataclass(frozen=True, slots=True)
+class RunOptions:
+    """The checked command line of snapshot, prune, finish, list and caches."""
+
+    cmd: str
+    snapdir: str
+    sources: tuple[Source, ...]
+    pin_file: str = DEFAULT_PIN_FILE
+    state_dir: str = DEFAULT_STATE_DIR
+    assume_clock_ok: bool = False
+    list_hint: str = DEFAULT_LIST_HINT
+    confirm_hint: str = DEFAULT_CONFIRM_HINT
+    dry_run: bool = False
+    allow_mass_delete: bool = False
+    force: bool = False
+    exclude_caches: bool = False
+    lock: str = DEFAULT_LOCK
+    no_lock: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class LatestQuery:
+    """The checked command line of latest."""
+
+    snapdir: str
+    name: str
+    source_path: str | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SourceListing:
+    """One source in `list`: its snapshots with their decisions, or why it could not be read."""
+
+    name: str
+    source: str
+    policy: str
+    error: str | None = None
+    uuid: str = ""
+    generation: int = 0
+    changed: bool = False
+    decisions: tuple[Decision, ...] = ()
+    ignored: tuple[tuple[str, str], ...] = ()
+    unverifiable: tuple[tuple[str, str], ...] = ()
+    deletions_blocked: str | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Listing:
+    """What `list` answers."""
+
+    snapdir: str
+    now: int
+    sources: tuple[SourceListing, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SourceCaches:
+    """One source in `caches`: the walk of its cache folders, or why it could not be read."""
+
+    name: str
+    source: str
+    skips: tuple[str, ...]
+    error: str | None = None
+    walk: CacheWalk | None = None
