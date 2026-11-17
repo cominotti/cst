@@ -179,6 +179,131 @@ journal_named() {
 """
 
 
+# test_80: run as tester once the test has written main.conf and the settings
+# file: apply, a second apply, then le-audio on, on again and off. Each run ends with
+# the live checks, which fail in this container (no adapter, bluetoothd not
+# running): exit 1 with that error only.
+BT_SECOND_APPLY_SCRIPT = r"""
+set -E
+trap 'echo "test_80 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+H=/home/tester
+mac=00:11:22:33:44:55
+bt() { /opt/cst-rw/cst bluetooth "$@"; }
+wp="$H/.config/wireplumber/wireplumber.conf.d"
+rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+le="$wp/90-cst-le-audio-off.conf"
+unit="$H/.config/systemd/user/cst-bt-ldac48.service"
+watch="$H/.local/lib/cst/bt-ldac-watch"
+conf="$H/.config/cst/bluetooth.conf"
+# Each file apply manages, by inode, mtime and content, and the number of main.conf backups.
+files() {
+    local f
+    for f in /etc/bluetooth/main.conf "$rule" "$le" "$unit" "$watch" "$conf"; do
+        if [[ -e "$f" ]]; then echo "$(stat -c '%i %y' "$f") $(sha256sum <"$f" | cut -c1-16) $f"; else echo "absent $f"; fi
+    done
+    echo "backups: $(find /etc/bluetooth -maxdepth 1 -name 'main.conf.bak-*' | wc -l)"
+}
+same() {   # same LABEL BEFORE
+    [[ "$(files)" == "$2" ]] && return 0
+    printf 'test_80 %s changed files:\nbefore:\n%s\nafter:\n%s\n' "$1" "$2" "$(files)" >&2
+    return 1
+}
+show() { sed "s/^/test_80 $1: /" <<<"$2" >&2; }   # the CI log
+verify_failed_only() {   # verify_failed_only LABEL RC OUT: the live checks failed, nothing else
+    if [[ "$2" != 1 ]] || ! grep -qF "ERROR: verification found problems (see above)." <<<"$3" \
+        || ! grep -qF "no Bluetooth adapter in org.bluez" <<<"$3"; then
+        echo "test_80 $1: exit $2, not only the live checks failing" >&2
+        return 1
+    fi
+}
+roles() { python3 -I /opt/cst-rw/bluetooth/bt-helper wp-roles | cut -d'|' -f1; }
+wp_pid() { systemctl --user show -p MainPID --value wireplumber.service; }
+# step LABEL ARGS...: bt ARGS into $out, shown in the CI log, ending with only the live checks failing.
+step() {
+    local rc=0
+    out="$(bt "${@:2}" 2>&1)" || rc=$?
+    show "$1" "$out"
+    verify_failed_only "$1" "$rc" "$out"
+}
+no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change (every verb it uses)
+    if grep -E '^(adopted|backup|enabled|reconnect|removed|restart|restarted|restored|set|started|written): ' <<<"$2"; then
+        echo "test_80 $1 changed something" >&2
+        return 1
+    fi
+}
+systemctl --user is-active wireplumber.service
+
+# 1. apply (no restart: bluetoothd does not run here), then plan has nothing left.
+step apply apply --yes --no-restart
+for f in "$rule" "$le" "$unit" "$watch"; do [[ -f "$f" ]]; done
+grep -qxF "Experimental = true" /etc/bluetooth/main.conf
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan after apply" "$out"
+[[ "$rc" == 0 ]]
+grep -qxF "Nothing to do." <<<"$out"
+s1="$(files)"
+le_text="$(cat "$le")"
+
+# 2. a second apply changes nothing: no file written, no backup, no restart.
+pid="$(wp_pid)"
+step "second apply" apply --yes
+no_writes "second apply" "$out"
+grep -qxF "unchanged: /etc/bluetooth/main.conf (Experimental and KernelExperimental already set in [General])" <<<"$out"
+grep -qxF "unchanged: $rule" <<<"$out"
+grep -qxF "unchanged: LE Audio off" <<<"$out"
+grep -qxF "unchanged: cst-bt-ldac48.service enabled and active" <<<"$out"
+grep -qxF "none needed" <<<"$out"
+same "second apply" "$s1"
+[[ "$(wp_pid)" == "$pid" ]]
+
+# 3. le-audio without on/off only shows the setting.
+out="$(bt le-audio)"
+grep -qxF "LE Audio in PipeWire: off (~/.config/cst/bluetooth.conf)" <<<"$out"
+same "le-audio (show)" "$s1"
+
+# 4. le-audio on: the setting written (other lines kept), the drop-in removed,
+# WirePlumber restarted and reading the PipeWire default roles again.
+[[ "$(roles)" == classic ]]
+step "le-audio on" le-audio on --yes
+grep -qxF "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=on" <<<"$out"
+grep -qxF "removed:   $le (LE Audio on)" <<<"$out"
+grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"$out"
+[[ "$(cat "$conf")" == "$(printf 'DEVICE=%s\nLDAC_QUALITY=auto\nLDAC_RATE=48000\nLE_AUDIO=on' "$mac")" ]]
+[[ ! -e "$le" ]]
+[[ "$(roles)" == default ]]
+[[ "$(wp_pid)" != "$pid" ]]
+systemctl --user is-active wireplumber.service
+# Only the settings and the drop-in changed.
+diff <(grep -vF -e "$le" -e "$conf" <<<"$s1") <(files | grep -vF -e "$le" -e "$conf")
+bt plan >/dev/null 2>&1   # exit 0: nothing to do
+s2="$(files)"
+pid="$(wp_pid)"
+
+# 5. le-audio on again: nothing written, nothing restarted.
+step "le-audio on again" le-audio on --yes
+grep -qxF "unchanged: ~/.config/cst/bluetooth.conf already has LE_AUDIO=on" <<<"$out"
+grep -qxF "unchanged: LE Audio on (no drop-in)" <<<"$out"
+no_writes "le-audio on again" "$out"
+same "le-audio on again" "$s2"
+[[ "$(wp_pid)" == "$pid" ]]
+out="$(bt le-audio)"
+grep -qxF "LE Audio in PipeWire: on (~/.config/cst/bluetooth.conf)" <<<"$out"
+same "le-audio (show, on)" "$s2"
+
+# 6. le-audio off: the same drop-in back, the classic roles again.
+step "le-audio off" le-audio off --yes
+grep -qxF "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=off" <<<"$out"
+grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"$out"
+[[ "$(cat "$le")" == "$le_text" ]]
+[[ "$(roles)" == classic ]]
+[[ "$(wp_pid)" != "$pid" ]]
+grep -qxF "LE_AUDIO=off" "$conf"
+bt plan >/dev/null 2>&1   # exit 0: nothing to do
+echo E2E-OK
+"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
@@ -1902,4 +2027,36 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             echo E2E-OK
             """,
         ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
+        """bluetooth as tester with the real user manager, WirePlumber and
+        libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
+        the LE Audio drop-in and the LDAC watcher; `plan` then has nothing to
+        do (exit 0). A second `apply` (restarts allowed) changes nothing: the
+        same inode, mtime and content of each file, no new main.conf backup,
+        no restart of WirePlumber. `le-audio` alone only shows the setting.
+        `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
+        drop-in and restarts WirePlumber, whose roles are then the PipeWire
+        defaults; nothing else changes and `plan` exits 0. A second
+        `le-audio on` writes nothing and restarts nothing. `le-audio off`
+        puts the same drop-in back, restarts WirePlumber and the roles are the
+        classic ones again. `revert` afterwards."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -f /home/tester/.config/cst/bluetooth.conf",
+            check=False,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
+        )
+        as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            "mkdir -p /home/tester/.config/cst && printf 'DEVICE=00:11:22:33:44:55\\nLDAC_QUALITY=auto\\n"
+            "LDAC_RATE=48000\\nLE_AUDIO=off\\n' >/home/tester/.config/cst/bluetooth.conf",
+        )
+        out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
         self.assertIn("E2E-OK", out)

@@ -436,6 +436,366 @@ sys.exit(os.waitstatus_to_exitcode(status))
 """
 
 
+# test_20, test_21: runs a command on a new pseudo-terminal (`cst vm tune
+# apply` and `nocow apply` ask [y/N] and refuse without a terminal) with
+# argv[1] typed ahead: input() reads it at the question. The terminal echoes
+# the answer when it is typed, so it comes first in the output and the prompt's
+# line goes on with what the command prints next. Prints what the command
+# printed, without the terminal control strings (OSC, ESC ] ... BEL or ESC \)
+# that sudo's PAM session writes to the terminal (systemd's OSC 3008 context
+# markers); exits with its code, or kills it after 300 s. On a failure the output
+# goes to stderr too, so the test's log shows it.
+PTY_ANSWER_DRIVER = r"""
+import os
+import pty
+import re
+import select
+import sys
+import time
+
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)  # exec failed: never run the loop below in the child
+os.write(fd, sys.argv[1].encode() + b"\n")  # typed ahead: input() reads it at the prompt
+out = bytearray()
+deadline = time.monotonic() + 300
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.5)
+    if not ready:
+        continue
+    try:
+        data = os.read(fd, 4096)
+    except OSError:  # EIO: the command ended and closed the terminal
+        break
+    if not data:
+        break
+    out += data
+else:
+    os.kill(pid, 9)
+    out += b"\nE2E-PTY: no end after 300 s\n"
+_, status = os.waitpid(pid, 0)
+code = os.waitstatus_to_exitcode(status)
+text = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", b"", bytes(out)).decode(errors="replace").replace("\r\n", "\n")
+sys.stdout.write(text)
+if code != 0:  # the script stops at out="$(drive ...)" under set -e: the CI log gets the output from stderr
+    sys.stderr.write(text)
+sys.exit(code)
+"""
+
+# test_20: a Linux guest (its libosinfo id) with the hardware `cst vm tune`
+# changes: a SATA disk with the plain driver and an e1000e network card, a
+# CD-ROM it leaves alone, and a VNC password (8 characters, the most VNC
+# takes) that only the --security-info dump shows. type='qemu': the
+# container has no /dev/kvm.
+VM_TUNE_DOMAIN = """<domain type='qemu'>
+  <name>e2e-tune</name>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
+      <libosinfo:os id="http://fedoraproject.org/fedora/41"/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit='MiB'>512</memory>
+  <vcpu placement='static'>2</vcpu>
+  <os><type arch='x86_64' machine='q35'>hvm</type></os>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/images/e2e-tune.qcow2'/>
+      <target dev='sda' bus='sata'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <mac address='52:54:00:e2:e2:01'/>
+      <source network='default'/>
+      <model type='e1000e'/>
+    </interface>
+    <graphics type='vnc' port='-1' autoport='yes' passwd='e2esecr8'/>
+  </devices>
+</domain>
+"""
+
+# test_20: plan, apply (refused without a terminal, answered no, then yes), a
+# second run, status and the restore of the saved definition, against the real
+# virtqemud (qemu:///system, the URI cst vm always uses).
+VM_TUNE_SCRIPT = r"""
+set -E
+trap 'echo "test_20 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+w=/var/tmp/e2e-vm-tune
+vm=e2e-tune
+defs="$w/backups/$vm/definitions"
+V() { virsh -c qemu:///system "$@"; }
+dump() { V dumpxml --inactive "$vm"; }
+secret() { V dumpxml --inactive --security-info "$vm"; }
+# cst vm as root, with the backup folder and settings file of the test (CST_VM_*).
+vmc() { CST_VM_BACKUP_DIR="$w/backups" CST_VM_CONF="$w/vm.conf" /opt/cst-rw/cst vm "$@"; }
+# tune apply on a pseudo-terminal (it asks [y/N]), answering $1.
+drive() {
+    CST_VM_BACKUP_DIR="$w/backups" CST_VM_CONF="$w/vm.conf" \
+        /usr/bin/python3 -I "$w/pty-answer.py" "$1" /opt/cst-rw/cst vm tune apply "$vm"
+}
+show() { sed "s/^/test_20 $1: /" <<<"$2" >&2; }   # the CI log
+same() {   # same LABEL FILE: the inactive definition is still FILE
+    dump >"$w/now.xml"
+    cmp -s "$w/now.xml" "$2" && return 0
+    echo "test_20 $1 changed the definition:" >&2
+    diff "$2" "$w/now.xml" >&2 || true
+    return 1
+}
+saved() { find "$defs" -maxdepth 1 -name '*.before-tune.xml' 2>/dev/null | wc -l; }
+no_secret() {   # no_secret LABEL TEXT: the graphics password is never printed
+    if grep -qF e2esecr8 <<<"$2"; then echo "test_20 $1 printed the graphics password" >&2; return 1; fi
+}
+
+V define "$w/$vm.xml" >/dev/null
+dump >"$w/d0.xml"
+secret >"$w/s0.xml"
+grep -qF "passwd='e2esecr8'" "$w/s0.xml"
+if grep -qF e2esecr8 "$w/d0.xml"; then echo "the plain dump holds the password" >&2; exit 1; fi
+
+# 1. plan: the changes, as a diff; nothing defined, nothing saved.
+out="$(vmc tune plan "$vm")"
+show plan "$out"
+no_secret plan "$out"
+for c in "disk sda: cache (default) -> none" "disk sda: io (default) -> native" \
+    "disk sda: discard (default) -> unmap" "disk sda: detect_zeroes (default) -> unmap" \
+    "add a virtio-scsi controller (index 0)" "disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)" \
+    "network card 52:54:00:e2:e2:01: e1000e -> virtio (same MAC)"; do
+    grep -qxF "  change: $c" <<<"$out"
+done
+[[ "$(grep -c '^  change: ' <<<"$out")" == 7 ]]
+grep -qxF "+      <target dev=\"sda\" bus=\"scsi\" />" <<<"$out"
+grep -qF "Plan only. Apply with: " <<<"$out"
+same plan "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+out="$(vmc status "$vm")"
+grep -qE '^  hardware: 7 difference\(s\) from tune: .* vm tune plan$' <<<"$out"
+
+# 2. apply without a terminal: refused before anything is saved or defined.
+if out="$(vmc tune apply "$vm" </dev/null 2>&1)"; then echo "apply ran without a terminal" >&2; exit 1; fi
+grep -qF "apply asks for confirmation: run it in a terminal" <<<"$out"
+same "apply without a terminal" "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+
+# 3. answered no.
+out="$(drive n)"
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer was echoed first, when typed ahead
+same "apply answered no" "$w/d0.xml"
+[[ ! -e "$w/backups" ]]
+
+# 4. answered yes: the old definition (with its secrets) saved 0600, then defined.
+out="$(drive y)"
+show apply "$out"
+no_secret apply "$out"
+grep -qF "Defined. Effective at the next start of $vm." <<<"$out"
+if grep -qF "libvirt changed the definition again" <<<"$out"; then echo "libvirt changed the tuned definition" >&2; exit 1; fi
+[[ "$(saved)" == 1 ]]
+f="$(find "$defs" -name '*.before-tune.xml')"
+[[ "$(stat -c '%U %a' "$f")" == "root 600" ]]
+[[ "$(stat -c '%a' "$defs")" == 700 ]]
+cmp "$f" "$w/s0.xml"
+dump >"$w/d1.xml"
+python3 -I - "$w/d1.xml" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+disks = {d.find("target").get("dev"): d for d in root.iter("disk")}
+want = {"cache": "none", "io": "native", "discard": "unmap", "detect_zeroes": "unmap"}
+drv = disks["sda"].find("driver").attrib
+assert {k: drv.get(k) for k in want} == want, drv
+assert disks["sda"].find("target").get("bus") == "scsi", ET.tostring(disks["sda"])
+assert disks["sdb"].find("target").get("bus") == "sata", "the CD-ROM was moved"
+models = [c.get("model") for c in root.iter("controller") if c.get("type") == "scsi"]
+assert models == ["virtio-scsi"], models
+nic = root.find("devices/interface")
+assert nic.find("model").get("type") == "virtio", ET.tostring(nic)
+assert nic.find("mac").get("address") == "52:54:00:e2:e2:01", ET.tostring(nic)
+PY
+secret | grep -qF "passwd='e2esecr8'"   # the graphics password survived the define
+
+# 5. a second run changes nothing: plan and apply say so, apply asks nothing.
+out="$(vmc tune plan "$vm")"
+show "plan after apply" "$out"
+grep -qxF "$vm: disks and network card already as /opt/cst-rw/cst vm tune recommends." <<<"$out"
+if grep -q '^  change: ' <<<"$out"; then echo "plan after apply still has changes" >&2; exit 1; fi
+out="$(vmc tune apply "$vm" </dev/null)"
+grep -qxF "$vm: disks and network card already as /opt/cst-rw/cst vm tune recommends." <<<"$out"
+same "second apply" "$w/d1.xml"
+[[ "$(saved)" == 1 ]]
+out="$(vmc status "$vm")"
+grep -qxF "  hardware: disks and network card as tune recommends" <<<"$out"
+
+# 6. undo: defining the saved file gives back the old definition.
+V define "$f" >/dev/null
+same "the restore of the saved definition" "$w/d0.xml"
+out="$(vmc status "$vm")"
+grep -qE '^  hardware: 7 difference\(s\) from tune: ' <<<"$out"
+
+# 7. a knob set to no leaves its part out.
+printf 'VM_TUNE_NIC=no\n' >"$w/vm.conf"
+out="$(vmc tune plan "$vm")"
+grep -qxF "  skipped by $w/vm.conf: VM_TUNE_NIC=no" <<<"$out"
+if grep -q '^  change: network card' <<<"$out"; then echo "VM_TUNE_NIC=no still changes the network card" >&2; exit 1; fi
+[[ "$(grep -c '^  change: ' <<<"$out")" == 6 ]]
+same "plan with VM_TUNE_NIC=no" "$w/d0.xml"
+echo E2E-OK
+"""
+
+
+# test_21: `cst vm nocow` on the loop btrfs (/var and /var/home): the system
+# folder is a scratch path (CST_VM_SYSTEM_IMAGES) whose parent exists, the user
+# folders are tester's.
+VM_NOCOW_SCRIPT = r"""
+set -E
+trap 'echo "test_21 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+w=/var/tmp/e2e-vm-nocow
+H=/home/tester
+sys="$w/libvirt/images"
+sess="$H/.local/share/libvirt/images"
+boxes="$H/.local/share/gnome-boxes/images"
+flat="$H/.var/app/org.gnome.Boxes/data/gnome-boxes/images"
+# As tester, with the test's system folder and settings file (CST_VM_*).
+t() {
+    runuser -u tester -- env HOME="$H" USER=tester LOGNAME=tester PATH=/usr/bin:/bin \
+        CST_VM_SYSTEM_IMAGES="$sys" CST_VM_CONF="$w/vm.conf" "$@"
+}
+nocow() { t /opt/cst-rw/cst vm nocow "$@"; }
+# apply on a pseudo-terminal (it asks [y/N]), answering $1.
+drive() { t /usr/bin/python3 -I "$w/pty-answer.py" "$1" /opt/cst-rw/cst vm nocow apply; }
+# As root (the root-only folder is readable), for tester's folders (SUDO_USER).
+as_root() { SUDO_USER=tester CST_VM_SYSTEM_IMAGES="$sys" CST_VM_CONF="$w/vm.conf" /opt/cst-rw/cst vm nocow "$@"; }
+attrs() { lsattr -d "$1" | awk '{print $1}'; }
+has_c() { [[ "$(attrs "$1")" == *C* ]]; }
+# The flags of every folder and image, and whether the Flatpak tree exists.
+state() {
+    local p
+    for p in "$sys" "$sess" "$boxes" "$sess/old.qcow2"; do
+        if [[ -e "$p" ]]; then echo "$(attrs "$p") $p"; else echo "absent $p"; fi
+    done
+    if [[ -e "$H/.var/app/org.gnome.Boxes" ]]; then echo "present $H/.var/app/org.gnome.Boxes"; fi
+}
+same() {   # same LABEL BEFORE
+    [[ "$(state)" == "$2" ]] && return 0
+    printf 'test_21 %s changed the folders:\nbefore:\n%s\nafter:\n%s\n' "$1" "$2" "$(state)" >&2
+    return 1
+}
+show() { sed "s/^/test_21 $1: /" <<<"$2" >&2; }   # the CI log
+# The lines of plan's block for one folder (its header up to the next header).
+block() { awk -v h="$1  [" 'index($0, h) == 1 {on = 1; print; next} on && /^[^ ]/ {exit} on {print}' <<<"$2"; }
+
+rm -rf "$w/libvirt" "$w/vm.conf"
+mkdir -p "$w/libvirt"   # libvirt is installed (its folder exists), its images folder not yet
+t mkdir -p "$sess" "$boxes"
+t dd if=/dev/urandom of="$sess/old.qcow2" bs=1M count=4 status=none
+t touch "$sess/old2.qcow2.cow-old"
+for p in "$sess" "$boxes" "$sess/old.qcow2"; do
+    if has_c "$p"; then echo "$p has +C before apply: the test would prove nothing" >&2; exit 1; fi
+done
+before="$(state)"
+
+# 1. plan: what apply would do; changes nothing.
+out="$(nocow plan)"
+show plan "$out"
+grep -qxF "$sys  [libvirt qemu:///system: virt-manager, virsh]: not present" <<<"$out"
+grep -qxF "$flat  [GNOME Boxes (Flatpak)]: not present" <<<"$out"
+block "$sess" "$out" | grep -qF "  NOCOW mark (+C): no: "
+block "$sess" "$out" | grep -qF "  still copy-on-write: old.qcow2 "
+block "$sess" "$out" | grep -qF "chattr +C"
+block "$sess" "$out" | grep -qxF "  leftover of a conversion: old2.qcow2.cow-old (remove it once the VM booted well from the new file)"
+block "$boxes" "$out" | grep -qxF "  images: none"
+grep -qF "(folders: $sys (not created yet), $sess, $boxes)" <<<"$out"
+same plan "$before"
+
+# 2. apply without a terminal: refused, nothing changed.
+if out="$(nocow apply </dev/null 2>&1)"; then echo "apply ran without a terminal: $out" >&2; exit 1; fi
+grep -qF "apply asks for confirmation: run it in a terminal" <<<"$out"
+same "apply without a terminal" "$before"
+
+# 3. answered no: nothing changed.
+out="$(drive n)"
+show "apply, no" "$out"
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer was echoed first, when typed ahead
+same "apply answered no" "$before"
+
+# 4. answered yes: the system folder created as libvirt does it, through sudo, and every folder marked.
+out="$(drive y)"
+show apply "$out"
+# Today's wording, pinned: apply adds "(its mark is not readable as your user: set again,
+# harmless)" to a folder it is about to create, which has no mark to read yet (reported as
+# a wording bug; the fix drops that suffix here and changes this line).
+grep -qxF "  create (root:root 0711) and mark +C: $sys (sudo) (its mark is not readable as your user: set again, harmless)" <<<"$out"
+grep -qxF "  mark +C: $sess" <<<"$out"
+grep -qxF "  mark +C: $boxes" <<<"$out"
+grep -qF "  sudo install -d -o root -g root -m 0711 $sys" <<<"$out"   # on the line of the question
+grep -qxF "  sudo chattr +C $sys" <<<"$out"
+for p in "$sys" "$sess" "$boxes"; do
+    grep -qxF "  done: $p" <<<"$out"
+    has_c "$p"
+done
+[[ "$(stat -c '%U:%G %a' "$sys")" == "root:root 711" ]]
+[[ "$(stat -c '%U' "$sess")" == tester ]]
+# An existing image keeps its state; files created later get the mark.
+if has_c "$sess/old.qcow2"; then echo "apply converted an existing image" >&2; exit 1; fi
+[[ ! -e "$H/.var/app/org.gnome.Boxes" ]]   # a missing user folder is not created
+t touch "$sess/new.qcow2"
+has_c "$sess/new.qcow2"
+touch "$sys/new.img"
+has_c "$sys/new.img"
+rm -f "$sys/new.img"
+after="$(state)"
+
+# 5. plan as tester: the user folders marked, the old image still to convert,
+# the root-only folder unreadable (never "copy-on-write").
+out="$(nocow plan)"
+show "plan after apply" "$out"
+block "$sess" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+block "$boxes" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+block "$sess" "$out" | grep -qxF "  NOCOW images: new.qcow2"
+block "$sess" "$out" | grep -qF "  still copy-on-write: old.qcow2 "
+block "$sys" "$out" | grep -qF "  NOCOW mark (+C): not readable as your user (root-only folder): "
+grep -qF "(folders: $sys (mark not readable here: set again, harmless))" <<<"$out"
+same "plan after apply" "$after"
+
+# 6. As root everything is readable: nothing left to mark, and apply asks nothing.
+out="$(as_root plan --root)"
+show "plan --root" "$out"
+block "$sys" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+grep -qxF "No folder to mark." <<<"$out"
+out="$(as_root apply </dev/null)"
+show "second apply as root" "$out"
+grep -qxF "Every VM image folder present on btrfs already has the NOCOW mark (+C)." <<<"$out"
+same "second apply as root" "$after"
+
+# 7. A second apply as tester sets the mark again only on the folder it cannot read.
+out="$(drive y)"
+show "second apply as tester" "$out"
+grep -qxF "  mark +C: $sys (sudo) (its mark is not readable as your user: set again, harmless)" <<<"$out"
+if grep -qE "^  (create .*|mark )\+C: ($sess|$boxes)$" <<<"$out"; then echo "a second apply marked a user folder again" >&2; exit 1; fi
+grep -qxF "  done: $sys" <<<"$out"
+same "second apply as tester" "$after"
+
+# 8. VM_NOCOW=no: the folders are not managed; a new folder stays copy-on-write.
+printf 'VM_NOCOW=no\n' >"$w/vm.conf"
+t mkdir -p "$flat"
+out="$(nocow apply </dev/null)"
+grep -qxF "VM_NOCOW=no in $w/vm.conf: nothing to do." <<<"$out"
+out="$(nocow plan)"
+grep -qxF "VM_NOCOW=no in $w/vm.conf: the VM image folders are not managed." <<<"$out"
+if has_c "$flat"; then echo "VM_NOCOW=no marked a folder" >&2; exit 1; fi
+echo E2E-OK
+"""
+
+
 def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
@@ -2159,4 +2519,71 @@ assert d["samples"] >= 1, d["samples"]
             echo E2E-OK
             """,
         ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_20_vm_tune_plan_apply_second_run_and_restore(self) -> None:
+        """`cst vm tune` against the real virtqemud (qemu:///system), on a
+        defined Linux guest with a SATA disk and an e1000e network card.
+        `plan` prints the seven changes and the diff and changes nothing
+        (the inactive definition byte for byte, no backup folder); `status`
+        counts the differences. `apply` without a terminal refuses, answered
+        no changes nothing; answered yes it saves the old definition (the
+        --security-info dump, mode 0600, in a 0700 folder), defines the new
+        one (virtio-scsi controller, the disk on it with cache, io, discard
+        and detect_zeroes, the network card virtio with the same MAC, the
+        CD-ROM left on SATA) and the VNC password survives; libvirt keeps
+        the result as it is. The password is never printed. A second plan
+        and apply say there is nothing to do, apply asks nothing and saves
+        nothing; `status` agrees. Defining the saved file restores the old
+        definition byte for byte. VM_TUNE_NIC=no leaves the network card out.
+        The libvirt qemu driver needs no /dev/kvm to define a type='qemu'
+        guest; no VM is started."""
+        w = "/var/tmp/e2e-vm-tune"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "virsh -c qemu:///system undefine e2e-tune >/dev/null 2>&1 || true; "
+            f"rm -rf {w}; "
+            "systemctl stop virtqemud.service virtqemud.socket virtqemud-ro.socket virtqemud-admin.socket || true",
+            check=False,
+        )
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        for name, text in (("e2e-tune.xml", VM_TUNE_DOMAIN), ("pty-answer.py", PTY_ANSWER_DRIVER)):
+            docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/{name}"], input_text=text)
+        exec_bash(
+            self.PRIV_CONTAINER, "systemctl start virtqemud.service && virsh -c qemu:///system list --all >/dev/null"
+        )
+        out = exec_bash(self.PRIV_CONTAINER, VM_TUNE_SCRIPT).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_21_vm_nocow_plan_apply_second_run(self) -> None:
+        """`cst vm nocow` on the loop btrfs, as tester (sudo for the system
+        folder, as on the workstation). The system folder is missing (its
+        parent exists, as when libvirt is installed); the session folder holds
+        a copy-on-write image and a conversion leftover; the RPM Boxes folder
+        is empty; the Flatpak one is missing. `plan` lists each folder, the
+        image still copy-on-write with the commands to convert it and the
+        leftover, and changes nothing. `apply` without a terminal refuses,
+        answered no changes nothing; answered yes it creates the system
+        folder through sudo (root:root 0711) and sets +C on it and on the two
+        user folders; the existing image keeps no +C, files created later get
+        it, the missing Flatpak folder is not created. Afterwards plan as
+        tester shows the user folders marked and the root-only one not
+        readable (never "copy-on-write"); as root `plan --root` has no
+        folder to mark and a second `apply` asks nothing and changes
+        nothing; a second `apply` as tester sets the mark again only on the
+        root-only folder (the documented "set again, harmless").
+        VM_NOCOW=no leaves a new folder alone. There is no undo command
+        (the undo table of the top-level README says chattr -C by hand)."""
+        w = "/var/tmp/e2e-vm-nocow"
+        h = "/home/tester"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            f"rm -rf {w} {h}/.local/share/libvirt {h}/.local/share/gnome-boxes {h}/.var/app/org.gnome.Boxes",
+            check=False,
+        )
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/pty-answer.py"], input_text=PTY_ANSWER_DRIVER)
+        out = exec_bash(self.PRIV_CONTAINER, VM_NOCOW_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
