@@ -9,12 +9,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
-import locale
 import os
 import subprocess
 import time
 
-from cst_core.adapters.files import write_atomic
+from cst_core.adapters.files import locale_bytes, write_atomic
 from btrfs.bulk.adapters import (
     CONVERT_PLAN,
     Ctx,
@@ -400,7 +399,7 @@ def prune_convert_plan(ctx: Ctx) -> None:
         # Encoded as it was read: in the locale's encoding (open()'s default).
         write_atomic(
             CONVERT_PLAN,
-            "".join(keep).encode(locale.getpreferredencoding(False)),
+            locale_bytes("".join(keep)),
             mode=0o644,
             durable=False,
             relabel=False,

@@ -193,4 +193,7 @@ runs it as root on the real machine, and still passes.
 the kernel's no_new_privs flag (`prctl(PR_SET_NO_NEW_PRIVS)`), which every
 child inherits and none can clear. sudo then refuses to run, and such a test
 fails on every run. `NoPrivilegeGainTest` in `tests/test_run_unit.py`
-checks the flag. Never clear it or work around it.
+checks the flag. Never clear it or work around it. The flag reaches only
+the runner's children: a command handed to a daemon (`flatpak-spawn --host`,
+docker, `systemd-run`) does not inherit it, so a unit test never starts one
+of those either.

@@ -75,7 +75,7 @@ from btrfs.snapshot.domain import (
     snapshot_name,
     wall_to_epoch,
 )
-from cst_core.adapters.files import write_atomic
+from cst_core.adapters.files import locale_bytes, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Usage
@@ -140,7 +140,9 @@ class Run:
             return
         os.makedirs(self.args.state_dir, mode=0o755, exist_ok=True)
         # 0644 whatever the umask (sudo keeps a user's 077).
-        write_atomic(path, "".join(f"{e}\n" for e in entries), mode=0o644, durable=sync_dir or "file", relabel=False)
+        # The locale's encoding, as the file object it used to write through (open()'s default).
+        text = locale_bytes("".join(f"{e}\n" for e in entries))
+        write_atomic(path, text, mode=0o644, durable=sync_dir or "file", relabel=False)
 
     def list_add(self, name: str, entry: str) -> None:
         entries = self.read_list(name)

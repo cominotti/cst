@@ -506,6 +506,14 @@ class WriteAtomicTest(unittest.TestCase):
                 self.assertEqual(os.stat(self.dest).st_mode & 0o7777, os.stat(plain).st_mode & 0o7777)
             os.unlink(plain)
 
+    def test_locale_bytes_are_what_open_w_writes(self) -> None:
+        plain = os.path.join(self.tmp, "plain")
+        text = "a\nentry é\n"
+        with open(plain, "w") as fh:
+            fh.write(text)
+        with open(plain, "rb") as fh:
+            self.assertEqual(core_files.locale_bytes(text), fh.read())
+
     def test_the_umask_is_read_without_changing_it(self) -> None:
         old = os.umask(0o027)
         try:

@@ -109,7 +109,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 404,
     "btrfs/chrome_cache/cli.py": 125,
-    "btrfs/docker_gc/cli.py": 322,
+    "btrfs/docker_gc/cli.py": 320,
     "btrfs/docker_volumes_nocow/cli.py": 193,
     "btrfs/snapshot/cli.py": 1069,
     "btrfs/stall_monitord/cli.py": 11,
@@ -151,7 +151,7 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
     "btrfs/bulk cli": 9,
-    "btrfs/bulk unlayered": 109,
+    "btrfs/bulk unlayered": 107,
     "btrfs/chrome_cache cli": 7,
     "btrfs/docker_gc cli": 27,
     "btrfs/docker_volumes_nocow cli": 39,

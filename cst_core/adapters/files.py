@@ -14,6 +14,7 @@ Two text readers decode on purpose in two ways; do not merge them:
 from collections.abc import Callable
 import contextlib
 import errno
+import locale
 import os
 import re
 import shutil
@@ -273,6 +274,13 @@ def _umask() -> int:
     old = os.umask(0o022)
     os.umask(old)
     return old
+
+
+def locale_bytes(text: str) -> bytes:
+    """text encoded as open(path, "w") writes it: in the locale's encoding
+    (UTF-8 in Python's UTF-8 mode), strictly. For a writer moved onto
+    write_atomic that used to write through such a file object."""
+    return text.encode(locale.getpreferredencoding(False))
 
 
 def _fsync_dir(folder: str) -> None:
