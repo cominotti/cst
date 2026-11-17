@@ -1635,3 +1635,146 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_11_bulk_steam_plan_changes_nothing(self) -> None:
+        """`cst btrfs bulk steam plan` on a Steam (Flatpak) library built from
+        btrfs/tests/fixtures/steam (a game, Dota 2, and a tool, the Steam Linux
+        Runtime), after `bulk apply` made ~/Bulk/steam. flatpak itself is a
+        stand-in (the image has none): Steam installed, `override --user`
+        kept in a file. The plan lists the game as a reflink move, the tool as
+        skipped, ~/Bulk/steam as library 1 to add and the shader cache that
+        stays, exits 0 and changes nothing. With a process named steam
+        running, the plan says so, and `bulk steam apply` exits 5 with
+        nothing changed. A bad argument exits 2."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_11 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            as_tester() { runuser -u tester -- "$@"; }
+            H=/var/home/tester
+            app_root=$H/.var/app/com.valvesoftware.Steam
+            root=$app_root/.local/share/Steam
+            sa=$root/steamapps
+            T=$H/Bulk/steam
+            fx=/opt/cst-rw/btrfs/tests/fixtures/steam
+            real_root=/var/home/danilo/.var/app/com.valvesoftware.Steam/.local/share/Steam
+            fake=/usr/local/bin/flatpak
+            fp=/var/tmp/e2e-flatpak
+            steam_dir=/var/tmp/e2e-steam
+            steam_pid=""
+            made_T=0
+            cleanup() {
+                if [[ -n "$steam_pid" ]]; then kill "$steam_pid" 2>/dev/null || true; fi
+                rm -rf "$fake" "$fp" "$steam_dir" "$app_root"
+                if (( made_T )); then rmdir "$T" 2>/dev/null || true; fi
+            }
+            trap cleanup EXIT
+            show() { sed "s/^/test_11 $1: /" <<<"$2" >&2; }   # the CI log
+            state() {
+                { find "$root" "$T" /var/lib/btrfs-bulk /etc/btrfs-setup -printf '%p %y %m %U %s %T@ %l\n' 2>/dev/null ||
+                    true; } | sort
+                sha256sum "$root/config/libraryfolders.vdf" "$sa/libraryfolders.vdf"
+                cat "$fp/overrides"
+            }
+            same() {   # same LABEL BEFORE
+                local now
+                now="$(state)"
+                [[ "$now" == "$2" ]] && return 0
+                echo "$1 changed something:" >&2
+                diff <(printf '%s\n' "$2") <(printf '%s\n' "$now") >&2 || true
+                return 1
+            }
+
+            # flatpak: a stand-in. Steam is installed; other apps are not; overrides go to a file.
+            [[ ! -e "$fake" ]]
+            install -d -m 1777 "$fp"
+            : >"$fp/overrides"
+            chmod 0666 "$fp/overrides"
+            printf '%s\n' '#!/bin/bash' \
+                '# E2E stand-in for flatpak (test_11): Steam installed; override --user kept in a file.' \
+                "st=$fp/overrides" \
+                'case "$1" in' \
+                '    info) [[ "$2" == com.valvesoftware.Steam ]]; exit ;;' \
+                '    override)' \
+                '        [[ "$2" == --user && "${@: -1}" == com.valvesoftware.Steam ]] || exit 1' \
+                '        case "$3" in' \
+                '            --show) [[ -s "$st" ]] && printf "[Context]\nfilesystems=%s;\n" "$(paste -sd ";" "$st")"; exit 0 ;;' \
+                '            --filesystem=*) printf "%s\n" "${3#--filesystem=}" >>"$st"; exit 0 ;;' \
+                '        esac ;;' \
+                'esac' \
+                'echo "flatpak stand-in: unexpected arguments: $*" >&2' \
+                'exit 1' >"$fake"
+            chmod 0755 "$fake"
+
+            # The main Steam library, as the user: both libraryfolders.vdf, the two manifests, their files.
+            [[ ! -e "$app_root" ]]
+            as_tester mkdir -p "$root/config" "$sa/common/dota 2 beta/game/bin/linuxsteamrt64" \
+                "$sa/common/dota 2 beta/game/dota" "$sa/common/SteamLinuxRuntime_sniper" \
+                "$sa/workshop/content/570/128726494" "$sa/compatdata/570" "$sa/downloading" "$sa/temp" \
+                "$sa/workshop/downloads" "$sa/workshop/temp" "$sa/shadercache/570/fozpipelinesv6"
+            for f in "$root/config/libraryfolders.vdf" "$sa/libraryfolders.vdf"; do
+                sed "s|$real_root|$root|" "$fx/libraryfolders.vdf" | as_tester tee "$f" >/dev/null
+            done
+            for f in appmanifest_570.acf appmanifest_1628350.acf; do as_tester cp "$fx/$f" "$sa/$f"; done
+            as_tester cp "$fx/libraryfolder.vdf" "$root/libraryfolder.vdf"
+            as_tester cp "$fx/appworkshop_570.acf" "$sa/workshop/appworkshop_570.acf"
+            as_tester sh -c 'head -c 4M /dev/urandom >"$1/game/dota/pak01_dir.vpk"; echo elf >"$1/game/bin/linuxsteamrt64/dota2"' \
+                sh "$sa/common/dota 2 beta"
+            as_tester sh -c 'echo run >"$1/common/SteamLinuxRuntime_sniper/run"; echo item >"$1/workshop/content/570/128726494/item.vpk"; echo cache >"$1/shadercache/570/fozpipelinesv6/cache.foz"' \
+                sh "$sa"
+
+            # ~/Bulk/steam as `bulk apply` makes it (with the Flatpak's access to it).
+            if grep -qsx steam /etc/btrfs-setup/bulk-keep; then cst btrfs bulk unkeep steam >/dev/null; fi
+            [[ -e "$T" ]] || made_T=1
+            out="$(cst btrfs bulk apply 2>&1)" || { show "bulk apply" "$out"; exit 1; }
+            show "bulk apply" "$out"
+            test -d "$T"
+            grep -qxF "$H/Bulk/steam" "$fp/overrides" || grep -qxF /home/tester/Bulk/steam "$fp/overrides"
+
+            # 1. The plan.
+            before="$(state)"
+            out="$(cst btrfs bulk steam plan 2>&1)" || { show plan "$out"; exit 1; }
+            show plan "$out"
+            grep -qE '^  Steam running +no$' <<<"$out"
+            grep -qE '^  library ~/Bulk/steam +add as library 1 \(contentid new; both libraryfolders.vdf, backed up first\)$' \
+                <<<"$out"
+            grep -qE '^  570 Dota 2 +move .* \(reflink, no data written\)$' <<<"$out"
+            grep -qE '^  1628350 Steam Linux Runtime 3.0 \(sniper\) +skipped: a tool, not a game; move it with --app 1628350$' \
+                <<<"$out"
+            grep -qE '^  shader cache of 570 ' <<<"$out"
+            grep -qxF 'Dry run, nothing changed. Do it with: cst btrfs bulk steam apply (Steam closed)' <<<"$out"
+            same "bulk steam plan" "$before"
+            if compgen -G '/var/lib/btrfs-bulk/journal-steam-*' >/dev/null; then echo "plan left a journal" >&2; exit 1; fi
+
+            # 2. Steam running: the plan says so; apply does nothing and exits 5.
+            mkdir -p "$steam_dir"
+            cp /usr/bin/sleep "$steam_dir/steam"
+            runuser -u tester -- "$steam_dir/steam" 600 &
+            for _ in $(seq 1 50); do
+                steam_pid="$(pgrep -x -u tester steam || true)"
+                [[ -n "$steam_pid" ]] && break
+                sleep 0.1
+            done
+            [[ -n "$steam_pid" ]]
+            out="$(cst btrfs bulk steam plan 2>&1)" || { show "plan, Steam running" "$out"; exit 1; }
+            show "plan, Steam running" "$out"
+            grep -qE "^  Steam running +YES \(process $steam_pid \(steam\)\): close it" <<<"$out"
+            same "bulk steam plan with Steam running" "$before"
+            rc=0
+            out="$(cst btrfs bulk steam apply 2>&1)" || rc=$?
+            show "apply, Steam running" "$out"
+            [[ "$rc" == 5 ]]
+            grep -qF 'Steam is running: nothing done.' <<<"$out"
+            same "bulk steam apply with Steam running" "$before"
+
+            # 3. A bad argument.
+            rc=0
+            out="$(cst btrfs bulk steam bogus 2>&1)" || rc=$?
+            [[ "$rc" == 2 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
