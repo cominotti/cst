@@ -61,7 +61,7 @@ replace them.
 
 - [ ] What can go wrong after `apply` (drift, leftovers, a postponed step)
       gets a read-only check: [doctor/README.md](../../../doctor/README.md),
-      section 9 "Adding a check and internal layout", and a row in its
+      section 10 "Adding a check and internal layout", and a row in its
       section 2 table.
 - [ ] The module README changes in the same commit: the command, what it
       changes on the machine, its knobs, how to undo it.

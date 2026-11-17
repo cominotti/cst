@@ -10,7 +10,9 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.install import COMPONENTS, INSTALL_MANIFEST, InstallEntry, expand_dest
 from cst_core.domain.ostree import OstreeStatus, query_status
+from cst_core.domain.record import ROOT_RECORD, USER_RECORD_REL, InstallRecord, RecordedFile, RecordFormatError
 from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments, parse_snapshots_conf
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
@@ -31,6 +33,7 @@ from doctor.domain import (
     GAME_STATE,
     HEALTH_CHECK_HOST,
     INFO,
+    NOTIFY_HOST,
     MIRROR_COPIES,
     NOCOW_POSTPONED,
     NOCOW_WARN_BOOTS,
@@ -85,8 +88,10 @@ from doctor.domain import (
     virt_versions,
     ViewPath,
     host_join,
+    is_unit_file,
+    unit_exec_paths,
 )
-from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from doctor.ports import CheckFn, DoctorHostPort, InstalledFilesPort, VmToolsPort
 from swap.domain import parse_tmpfiles_params
 from vm.domain import guest_kind, tune_domain
 
@@ -443,10 +448,11 @@ def check_legacy_alerts(host: DoctorHostPort) -> Iterator[Result]:
 
 # ---- btrfs: chunk allocation ---------------------------------------------------------------------
 def unalloc_thresholds(host: DoctorHostPort, *, health_check_repo: str | None = None) -> tuple[int, int]:
-    """(warn_gib, crit_gib) from btrfs-health-check (the repository copy, else
-    the installed one), so both always agree; the defaults if neither reads."""
+    """(warn_gib, crit_gib) from btrfs-health-check: the installed copy (the one
+    that alerts), else the repository's; the defaults if neither reads. An
+    installed copy older than this checkout shows in the install area."""
     repo_path = host.repo_path(HEALTH_CHECK_SRC) if health_check_repo is None else ViewPath(health_check_repo)
-    for path in (repo_path, host.path(HEALTH_CHECK_HOST)):
+    for path in (host.path(HEALTH_CHECK_HOST), repo_path):
         try:
             with host.open_text(path) as f:
                 text = f.read(65536)
@@ -1564,6 +1570,209 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = 
             )
         if p["nocow"] and not cow:
             yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
+
+
+@check("vm")
+def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN when a VM's weekly NAS backup timer is on but btrfs-notify, which its failure alerts through,
+    is missing (cst btrfs uninstall removes it when snapshots are not set up)."""
+    try:
+        timers = sorted(n for n in host.listdir(host.path(VM_TIMER_WANTS)) if n.startswith("cst-vm-backup@"))
+    except OSError:
+        return
+    notify = host.path(NOTIFY_HOST)
+    if not timers or (host.isfile(notify) and host.stat(notify).st_mode & 0o111):
+        return
+    yield Result(
+        WARN,
+        f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM alerts nobody",
+        refresh(host, "btrfs:alerts"),
+    )
+
+
+# ---- install: what CST installed, against its record and this checkout ---------------------------
+def refresh(host: DoctorHostPort, component: str) -> str:
+    """The command that installs component's files again, as the hints name cst."""
+    cmd = COMPONENTS.get(component, "")
+    return f"{host.cst} {cmd.removeprefix('cst ')}" if cmd else ""
+
+
+@dataclass(slots=True)
+class _InstallFindings:
+    """What one record's files showed: problems as they come, the older files per component."""
+
+    results: list[Result] = field(default_factory=list)
+    older: dict[str, list[str]] = field(default_factory=dict)
+    fine: int = 0
+
+
+def _file_findings(
+    host: DoctorHostPort, files: InstalledFilesPort, dest: str, f: RecordedFile, home: str, out: _InstallFindings
+) -> None:
+    """One recorded file: missing, changed since CST installed it, not readable, mode or owner, older
+    than this checkout, the programs its unit runs."""
+    view = host.path(HostPath(dest))
+    fix = refresh(host, f.component)
+    try:
+        st = host.stat(view)
+    except FileNotFoundError:
+        out.results.append(Result(WARN, f"{dest}: missing (CST installed it, {f.component})", fix))
+        return
+    except OSError:
+        st = None
+    try:
+        sha: str | None = files.file_sha256(view)
+    except OSError:
+        sha = None
+    problem = False
+    if sha is None:
+        out.results.append(
+            Result(INFO, f"{dest}: not readable as your user (compared the record with this checkout only)")
+        )
+    elif sha != f.sha256:
+        out.results.append(Result(WARN, f"{dest}: changed since CST installed it ({f.component})", fix))
+        problem = True
+    if st is not None and st.st_mode & 0o7777 != f.mode:
+        out.results.append(Result(INFO, f"{dest}: mode {st.st_mode & 0o7777:04o}, CST installed it {f.mode:04o}"))
+        problem = True
+    if sha is not None and is_unit_file(dest):
+        problem = _unit_findings(host, view, dest, f, home, out) or problem
+    if _older(files, f):
+        out.older.setdefault(f.component, []).append(dest)
+    elif not problem:
+        out.fine += 1
+
+
+def _older(files: InstalledFilesPort, f: RecordedFile) -> bool:
+    """The record's bytes differ from what this checkout installs (a manifest file only; a template with
+    its recorded values; never a file its module renders itself, such as the sccache wrapper)."""
+    entry = next((e for e in INSTALL_MANIFEST if e.src == f.src), None)
+    if entry is None or (f.values is not None and not entry.is_template):
+        return False
+    want = files.desired_sha256(entry.src, f.values)
+    return want is not None and want != f.sha256
+
+
+def _unit_findings(
+    host: DoctorHostPort, view: ViewPath, dest: str, f: RecordedFile, home: str, out: _InstallFindings
+) -> bool:
+    """WARN for each CST program the unit runs that is not there, or not executable."""
+    try:
+        with host.open_text(view) as fh:
+            text = fh.read(65536)
+    except OSError:
+        return False
+    bad = False
+    for prog in unit_exec_paths(text, home):
+        p = host.path(HostPath(prog))
+        if not (host.isfile(p) and host.stat(p).st_mode & 0o111):
+            out.results.append(
+                Result(WARN, f"{dest} runs {prog}, which is missing or not executable", refresh(host, f.component))
+            )
+            bad = True
+    return bad
+
+
+def _record_results(
+    host: DoctorHostPort, files: InstalledFilesPort, rec: InstallRecord, where: str, home: str
+) -> Iterator[Result]:
+    """Every finding of one record (home: the user's, for %h in a user's units; "" for root's), then its
+    summary lines."""
+    out = _InstallFindings()
+    for component, state in sorted(rec.components.items()):
+        if state == "pending":
+            fix = refresh(host, component)
+            out.results.append(
+                Result(WARN, f"{component}: installed only in part (its last `{fix or component}` did not finish)", fix)
+            )
+    for dest, f in sorted(rec.files.items()):
+        _file_findings(host, files, dest, f, home, out)
+    yield from out.results
+    for component, dests in sorted(out.older.items()):
+        yield Result(
+            INFO,
+            f"{component}: {len(dests)} file(s) older than this checkout ({', '.join(dests[:3])}"
+            f"{', ...' if len(dests) > 3 else ''}): {refresh(host, component)} installs them again",
+        )
+    if out.fine:
+        yield Result(OK, f"{out.fine} file(s) as CST installed them ({where})")
+
+
+def _without_record(
+    host: DoctorHostPort, files: InstalledFilesPort, owner: str, recorded: frozenset[str] = frozenset()
+) -> Iterator[Result]:
+    """The components the record does not list (none: no record; installs from before it): each one's
+    installed files against this checkout, as INFO."""
+    by_component: dict[str, list[InstallEntry]] = {}
+    for e in INSTALL_MANIFEST:
+        if (
+            e.owner == owner
+            and e.component not in recorded
+            and not e.is_template
+            and e.src != "toolchains/rustc-wrapper"
+        ):
+            by_component.setdefault(e.component, []).append(e)
+    for component, entries in by_component.items():
+        found, differ = 0, []
+        for e in entries:
+            dest = expand_dest(e.dest, host.home)
+            try:
+                sha = files.file_sha256(host.path(HostPath(dest)))
+            except OSError:
+                continue
+            found += 1
+            if sha != files.desired_sha256(e.src, None):
+                differ.append(dest)
+        if differ:
+            yield Result(
+                INFO,
+                f"{component}: installed before the install record; {len(differ)} of {found} file(s) differ from "
+                f"this checkout ({', '.join(differ[:3])}{', ...' if len(differ) > 3 else ''}): "
+                f"{refresh(host, component)} installs them again and records them",
+            )
+
+
+@check("install")
+def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None = None) -> Iterator[Result]:
+    """The files CST installed (its install records): missing, changed since, partial installs, older
+    than this checkout, units whose programs are gone; without a record, the payload comparison."""
+    if installed is None:
+        return
+    for owner, path in (("root", HostPath(ROOT_RECORD)), ("user", host_join(host.home, USER_RECORD_REL))):
+        try:
+            rec = installed.record(host.path(path))
+        except RecordFormatError as e:
+            why = "written by a newer CST: update this checkout (git pull)" if e.newer else "it is no install record"
+            yield Result(WARN, f"{path}: {e}; {why}")
+            continue
+        except OSError as e:
+            yield Result(INFO, f"{path}: not readable as your user ({e.strerror or e})")
+            continue
+        if rec is None:
+            yield from _without_record(host, installed, owner)
+        else:
+            yield from _record_results(host, installed, rec, path, host.home if owner == "user" else "")
+            yield from _without_record(host, installed, owner, frozenset(f.component for f in rec.files.values()))
+
+
+def wired_checks(vm: VmToolsPort, installed: InstalledFilesPort | None = None) -> list[tuple[str, CheckFn]]:
+    """The registered checks, in order; the VM hardware and image-folder checks get vm, the install
+    area the install records and this checkout (installed)."""
+
+    def vm_hardware(host: DoctorHostPort) -> Iterator[Result]:
+        return check_vm_hardware(host, vm_tools=vm)
+
+    def vm_image_dirs(host: DoctorHostPort) -> Iterator[Result]:
+        return check_vm_image_dirs(host, vm_tools=vm)
+
+    def install(host: DoctorHostPort) -> Iterator[Result]:
+        return check_install(host, installed=installed)
+
+    wired: dict[CheckFn, CheckFn] = {}
+    for fn, bound in ((check_vm_hardware, vm_hardware), (check_vm_image_dirs, vm_image_dirs), (check_install, install)):
+        bound.__name__ = fn.__name__  # a crash names the check, as unwired
+        wired[fn] = bound
+    return [(area, wired.get(fn, fn)) for area, fn in CHECKS]
 
 
 def run_checks(host: DoctorHostPort, checks: Iterable[tuple[str, CheckFn]] | None = None) -> list[tuple[str, Result]]:

@@ -120,10 +120,10 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_report/cli.py": 158,
     "cpu/cli.py": 245,
     "cst_core/cli.py": 10,
-    "doctor/cli.py": 35,
+    "doctor/cli.py": 24,
     "swap/cli.py": 99,
-    "toolchains/cli.py": 1896,
-    "vm/cli.py": 1288,
+    "toolchains/cli.py": 1887,
+    "vm/cli.py": 1287,
 }
 
 

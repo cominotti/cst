@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Mapping
 import os
 from typing import Any, BinaryIO, Protocol, TextIO
 
+from cst_core.domain.record import InstallRecord
 from cst_core.ports import VirshPort
 from doctor.domain import HostPath, Result, ViewPath
 
@@ -22,6 +23,8 @@ class DoctorHostPort(Protocol):
     arch: str
     # The doctor's own XDG state folder (a path of this process: never mapped).
     state_home: ViewPath
+    # The home folder of the user it runs as, on the host (where that user's install record is).
+    home: HostPath
 
     def path(self, p: HostPath) -> ViewPath:
         """Map an absolute host path to this process's view (e.g. /run/host)."""
@@ -118,4 +121,22 @@ class VmToolsPort(Protocol):
 
     def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
         """What an image folder looks like (readable maps a path to where this process reads it)."""
+        ...
+
+
+class InstalledFilesPort(Protocol):
+    """The install records (cst_core.domain.record) and what this checkout would install now."""
+
+    def record(self, path: ViewPath) -> InstallRecord | None:
+        """The record at path; None when there is none. RecordFormatError when it is not one (newer:
+        written by a newer CST); OSError when it cannot be read."""
+        ...
+
+    def file_sha256(self, path: ViewPath) -> str:
+        """The sha256 of the file at path; OSError when it cannot be read."""
+        ...
+
+    def desired_sha256(self, src: str, values: Mapping[str, str] | None) -> str | None:
+        """The sha256 of what this checkout installs for src (a template rendered with values); None
+        when it cannot say (no checkout, no such source, a template without its values)."""
         ...

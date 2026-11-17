@@ -1254,6 +1254,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             echo '# edited' >>"$f"
             rc=0; {installer} check --root {stage} --owner root {sets} || rc=$?
             [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
+            # cst doctor, pointed at the stage, names it (its install area reads the stage's record).
+            doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
+                {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
             {installer} install --root {stage} --owner root {sets} | grep -qxF "written:   $f" ||
                 {{ echo "a second install did not restore the edited file" >&2; exit 1; }}
             {installer} check --root {stage} --owner root {sets}
@@ -1294,6 +1298,97 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                     )
                     self.assertNotRegex(p.stderr, r"ImportError|ModuleNotFoundError|Traceback", p.stderr)
                     self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+
+    # The --set values of the components with templates (as their setup commands pass them).
+    COMPONENT_SETS: Mapping[str, str] = {
+        "btrfs:core": "--set UUID=00000000-0000-0000-0000-000000000000",
+        "btrfs:top-mount": "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5",
+        "cpu:core": "--set USER=tester",
+        "cpu:docker-slice": "--set ALLOWED=AllowedCPUs=0",
+    }
+    # Components whose units run a program of another one (btrfs-stall-alert.service runs btrfs-notify):
+    # installed first, as btrfs-setup.sh install does, and removed after.
+    COMPONENT_NEEDS: Mapping[str, tuple[str, ...]] = {"btrfs:core": ("btrfs:alerts",)}
+
+    def test_19_every_component_full_cycle_on_the_container_root(self) -> None:
+        """Each component of the manifest, installed for real on the container's / (root's as root,
+        the user's as tester): plan changes nothing; install over a plain-script copy of each of its
+        Python programs (what CST installed before the zipapps) writes the zipapps and lists every
+        file in the install record; once marked done, cst doctor's install area has no WARN about it;
+        a second install changes nothing, the record included; remove --component removes the
+        files and their record lines. A component with a file already in place (another test's) is
+        skipped, so nothing of another test is removed. /usr/sbin/btrfs, which a btrfs unit runs and
+        the image lacks, is an empty program for the time of the test (as in test_16)."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        stub = "/usr/sbin/btrfs"
+        made_stub = exec_bash(c, f"[[ -e {stub} ]] || {{ install -m 0755 /dev/null {stub}; echo made; }}").stdout
+        if "made" in made_stub:
+            self.addCleanup(exec_bash, c, f"rm -f {stub}", check=False)
+        script = 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.domain.install import COMPONENTS; print(" ".join(COMPONENTS))'
+        components = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
+        self.assertIn("btrfs:core", components)
+        for comp in components:
+            with self.subTest(component=comp):
+                self._component_cycle(c, installer, comp)
+
+    def _component_cycle(self, c: str, installer: str, comp: str) -> None:
+        sets = self.COMPONENT_SETS.get(comp, "")
+        owner = exec_bash(c, f"{installer} dests --component {comp} | head -n 1").stdout.strip()
+        user = owner.startswith("~")
+        run = "runuser -u tester -- " if user else ""
+        home = "--home /home/tester" if user else ""
+        record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
+        dests = exec_bash(c, f"{installer} dests {home} --component {comp}").stdout.split()
+        present = exec_bash(c, " ".join(f"[[ ! -e {shlex.quote(d)} ]] || echo {shlex.quote(d)};" for d in dests)).stdout
+        if present.strip():
+            self.skipTest(f"{comp}: already there (another test's): {present.split()}")
+        cleanup = f"{run}{installer} remove {home} --component {comp} >/dev/null"
+        self.addCleanup(exec_bash, c, cleanup, check=False)
+        for need in self.COMPONENT_NEEDS.get(comp, ()):
+            exec_bash(c, f"{installer} install --component {need} >/dev/null")
+            self.addCleanup(exec_bash, c, f"{installer} remove --component {need} >/dev/null", check=False)
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            plan="$({run}{installer} plan {home} {sets} --component {comp})"
+            for d in {" ".join(shlex.quote(d) for d in dests)}; do
+                [[ ! -e "$d" ]] || {{ echo "plan wrote $d" >&2; exit 1; }}
+            done
+            [[ "$(grep -c '^would write: ' <<<"$plan")" == {len(dests)} ]] || {{ echo "plan: $plan" >&2; exit 1; }}
+            # What an older CST installed: each Python program as the plain script.
+            for s in $({installer} srcs --component {comp} --kind python-entry); do
+                d="$({installer} dests {home} "$s")"
+                {run}install -D -m 0755 "/opt/cst-rw/$s" "$d"
+            done
+            {run}{installer} install {home} {sets} --component {comp} >/dev/null
+            {run}{installer} mark {home} --component {comp} done
+            for s in $({installer} srcs --component {comp} --kind python-entry); do
+                d="$({installer} dests {home} "$s")"
+                /usr/bin/python3 -I -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$d" ||
+                    {{ echo "$d is still the plain script" >&2; exit 1; }}
+            done
+            before="$(sha256sum {record})"
+            again="$({run}{installer} install {home} {sets} --component {comp})"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
+            [[ "$(sha256sum {record})" == "$before" ]] || {{ echo "a second install changed the record" >&2; exit 1; }}
+            doc="$({run}env HOME={"/home/tester" if user else "/root"} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            # Only its install area: the other areas report on the container itself.
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            [[ -n "$inst" ]] || {{ echo "doctor has no install area: $doc" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e '{comp}' {" ".join(f"-e {shlex.quote(d)}" for d in dests)}; then
+                echo "doctor warns about {comp}" >&2; exit 1
+            fi
+            {run}{installer} remove {home} --component {comp} >/dev/null
+            for d in {" ".join(shlex.quote(d) for d in dests)}; do
+                [[ ! -e "$d" ]] || {{ echo "remove left $d" >&2; exit 1; }}
+            done
+            if grep -qF '"{comp}"' {record}; then echo "the record still lists {comp}" >&2; exit 1; fi
+            echo E2E-CYCLE-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CYCLE-OK", out)
 
     def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
         """`cst vm backup-timer on` with the real systemd: it installs cst-vm

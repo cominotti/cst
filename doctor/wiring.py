@@ -9,8 +9,8 @@ from collections.abc import Mapping
 import os
 
 from cst_core.adapters.runtime import checkout_root, restore_default_signals
-from doctor.adapters import Host, VmTools
-from doctor.ports import DoctorHostPort, VmToolsPort
+from doctor.adapters import Host, InstalledFiles, VmTools
+from doctor.ports import DoctorHostPort, InstalledFilesPort, VmToolsPort
 
 
 def doctor_env() -> Mapping[str, str]:
@@ -31,3 +31,8 @@ def host(env: Mapping[str, str], entry_file: str) -> DoctorHostPort:
 def vm_tools() -> VmToolsPort:
     """The vm package's checks of the VM hardware and image folders."""
     return VmTools()
+
+
+def installed_files(entry_file: str) -> InstalledFilesPort:
+    """The install records, and what the checkout entry_file runs from would install."""
+    return InstalledFiles(checkout_root(entry_file) or "")
