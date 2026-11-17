@@ -23,16 +23,16 @@ def ids(suite: unittest.TestSuite) -> set[str]:
 
 
 # A child that sets the flag the way the runner does, then reports it and,
-# when sudo is there, what sudo answers (it must refuse to run).
+# when sudo is there and the run is not root, what sudo answers (it must refuse to run).
 _NO_PRIVS_CHILD = """
-import shutil, subprocess, sys
+import os, shutil, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from tests.run_unit import forbid_privilege_gain
 forbid_privilege_gain()
 with open("/proc/self/status") as f:
     print(next(line for line in f if line.startswith("NoNewPrivs:")).split()[1])
 sudo = shutil.which("sudo")
-if sudo:
+if sudo and os.geteuid() != 0:  # root needs no setuid: sudo runs whatever the flag says
     done = subprocess.run([sudo, "-n", "true"], capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
     print(done.returncode)
 """
@@ -51,7 +51,7 @@ class NoPrivilegeGainTest(unittest.TestCase):
         )
         lines = done.stdout.split()
         self.assertEqual(lines[:1], ["1"], done.stdout + done.stderr)
-        if shutil.which("sudo"):
+        if shutil.which("sudo") and os.geteuid() != 0:
             self.assertNotEqual(lines[1:], ["0"], "sudo ran as root despite no_new_privs")
 
 

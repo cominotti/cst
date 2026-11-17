@@ -116,17 +116,16 @@ class DoctorFacts:
     dumpxml: dict[str, tuple[int, str, str]] = field(default_factory=dict)
 
 
-# id(host) -> (host, its facts). The host is kept with its facts, so its id
-# never names another Host while the entry is here.
-_FACTS: dict[int, tuple[DoctorHostPort, DoctorFacts]] = {}
+# host -> its facts. A host hashes by identity, so a new Host starts with none.
+_FACTS: dict[DoctorHostPort, DoctorFacts] = {}
 
 
 def facts(host: DoctorHostPort) -> DoctorFacts:
     """The facts of this Host (by identity: a new Host starts with none)."""
-    known = _FACTS.get(id(host))
-    if known is None or known[0] is not host:
-        known = _FACTS[id(host)] = (host, DoctorFacts())
-    return known[1]
+    known = _FACTS.get(host)
+    if known is None:
+        known = _FACTS[host] = DoctorFacts()
+    return known
 
 
 # ---- rpm-ostree ----------------------------------------------------------------------------------
@@ -1227,11 +1226,10 @@ def check_vm_settings(host: DoctorHostPort) -> Iterator[Result]:
 
 @check("vm")
 def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | None = None) -> Iterator[Result]:
-    booted, _, err = deployments(host)
+    (booted, _, err), deps = ostree_facts(host)
     if err or booted is None:
         yield Result(INFO, f"virtualization packages: not compared ({err or 'no booted deployment'})")
         return
-    deps = ostree_facts(host)[1]  # the booted one among them: it answered
     i = next(n for n, d in enumerate(deps) if d is booted)
     rb = next(((n, d) for n, d in enumerate(deps) if n > i and d.get("osname") == booted.get("osname")), None)
     if rb is None:
