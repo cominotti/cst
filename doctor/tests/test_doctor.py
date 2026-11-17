@@ -2053,6 +2053,22 @@ class ToolboxTest(Scratch):
         self.assertEqual(rc, 127)
         self.assertIn("flatpak-spawn", err)
 
+    def test_the_texts_of_a_command_that_did_not_run(self) -> None:
+        # What the checks show (first_line of err) when a query is missing, cannot start or hangs.
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="0"))
+        self.assertEqual(
+            host.run(["cst-no-such-command", "a"]),
+            (127, "", "cst-no-such-command: not found (No such file or directory)"),
+        )
+        with open(os.path.join(self.bin, "plain"), "w") as f:
+            f.write("not a program\n")
+        self.assertEqual(host.run(["plain"]), (126, "", "plain: Permission denied"))
+        with open(os.path.join(self.bin, "slow"), "w") as f:
+            f.write("#!/bin/sh\nexec sleep 5\n")
+        os.chmod(os.path.join(self.bin, "slow"), 0o755)
+        self.assertEqual(host.run(["slow", "x"], timeout=0.3), (124, "", "slow x: no answer within 0.3 s"))
+        self.assertEqual(doc_app.virsh_problem(*host.run(["slow"], timeout=0.3)[::2]), "slow: no answer within 0.3 s")
+
 
 class HermeticTest(Scratch):
     """No command the doctor starts may reach the real host: each one, and

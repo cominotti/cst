@@ -2475,5 +2475,19 @@ class RealTreeTests(CliTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.state, core.UNFINISHED_FILE)))
 
 
+class HostRunTest(unittest.TestCase):
+    """Host.run: (rc, stdout, stderr) in the C locale, and the texts of a command that did not run."""
+
+    def test_answers(self) -> None:
+        host = snap_adapters.Host()
+        show = [sys.executable, "-c", "import os, sys; print(os.environ['LC_ALL']); sys.exit(2)"]
+        self.assertEqual(host.run(show), (2, "C\n", ""))
+        self.assertEqual(host.run(["/nonexistent/cst-btrfs"]), (127, "", "/nonexistent/cst-btrfs: not found"))
+        with mock.patch.object(snap_adapters, "CMD_TIMEOUT", 0.3):
+            self.assertEqual(
+                host.run([sys.executable, "-c", "import time; time.sleep(5)"]), (124, "", "timed out after 0.3s")
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

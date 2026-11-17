@@ -1597,5 +1597,14 @@ class HexagonalArchitectureTest(unittest.TestCase):
         self.assertIn("usage", err.getvalue())
 
 
+class WatcherRunTest(unittest.TestCase):
+    """run(): the watcher's (exit status, stdout) of pw-dump and pactl, also when they did not run."""
+
+    def test_answers(self) -> None:
+        self.assertEqual(bt_adapters.run([sys.executable, "-c", "print('hi'); raise SystemExit(4)"]), (4, "hi\n"))
+        self.assertEqual(bt_adapters.run(["/nonexistent/cst-pactl"]), (127, ""))
+        self.assertEqual(bt_adapters.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3), (124, ""))
+
+
 if __name__ == "__main__":
     unittest.main()

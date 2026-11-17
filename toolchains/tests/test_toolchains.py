@@ -1311,5 +1311,34 @@ class ClosedPipeTest(Scratch):
                 tc_adapters.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
+class CommandFaultTextTest(unittest.TestCase):
+    """What cst-toolchains says when cargo, systemctl, rustup or sccache did not run."""
+
+    def test_texts(self) -> None:
+        missing = "/nonexistent/cst-cargo"
+        self.assertEqual(
+            tc_adapters.ask_cargo([missing, "metadata"], {"PATH": "/usr/bin:/bin"}, "/"),
+            (None, f"cargo metadata: [Errno 2] No such file or directory: '{missing}'"),
+        )
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": "/nonexistent/cst-systemctl"}):
+            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "")
+            with self.assertRaises(Refused) as stop:
+                tc_adapters.systemctl("start", "x.service", check=True)
+        self.assertEqual(
+            str(stop.exception),
+            "systemctl --user start x.service: [Errno 2] No such file or directory: '/nonexistent/cst-systemctl'",
+        )
+        tmp = tempfile.mkdtemp(prefix="cst-tc-fault-")
+        self.addCleanup(shutil.rmtree, tmp)
+        with mock.patch.object(tc_adapters.shutil, "which", return_value="/nonexistent/cst-rustup"):
+            self.assertEqual(tc_adapters.rustup_default(tmp, os.path.join(tmp, "rustup")), "")
+        with (
+            mock.patch.object(tc_cli.shutil, "which", return_value="/nonexistent/cst-sccache"),
+            mock.patch.object(tc_cli, "sccache_sockets", return_value=[os.path.join(tmp, "cst-sccache-abc.sock")]),
+            mock.patch.object(tc_cli, "socket_answers", return_value=True),
+        ):
+            self.assertIn("sccache server abc: no answer", tc_cli.sccache_status_lines(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()
