@@ -9,3 +9,6 @@
 
 # #16: ruff format at line length 120; it also added the format gate
 be3f0f97fe613b88ddc429e3e03cdf4d01249b76
+
+# #32: the SPDX-License-Identifier header line in every file (it also added the header gate and its fixer)
+9d53a9c84d8ad1f00f39158325bd3740ca35029f
