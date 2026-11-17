@@ -36,6 +36,7 @@ from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from doctor.domain import scrub_limit_setting
 
 # The log says, for each clean, whether the unit file was still there.
 STUBS = """
@@ -62,7 +63,7 @@ def assignment(name: str) -> str:
     """The line (or lines, for an array) that sets NAME at the top of btrfs-setup.sh."""
     with open(SETUP) as f:
         text = f.read()
-    m = re.search(rf"^{name}=(\(.*?\)|.*)$", text, re.M | re.S)
+    m = re.search(rf"^{name}=(\(.*?\)|[^\n]*)$", text, re.M | re.S)
     if m is None:
         raise AssertionError(f"{name}= not found in {SETUP}")
     return m.group(0)
@@ -720,6 +721,175 @@ class DockerGcUnitsTest(unittest.TestCase):
             self.assertEqual(gc_adapters.STATE_DIR, state)
         for path in (gc_adapters.LOCK, gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
             self.assertEqual(os.path.dirname(path), gc_adapters.STATE_DIR, path)
+
+
+SCRUB_CASES: list[tuple[str, str | None]] = [
+    # (snapshots.conf text, the limit both readers give; None: both refuse)
+    ("", ""),
+    ("SCRUB_LIMIT=1G\n", "1G"),
+    ("SCRUB_LIMIT='500M'\n", "500M"),
+    ('SCRUB_LIMIT="2g"\n', "2g"),
+    ("SCRUB_LIMIT=1G  # per device\n", "1G"),
+    ("SCRUB_LIMIT='1G'\t# quoted, then a comment\n", "1G"),
+    ("export SCRUB_LIMIT=1G\n", "1G"),
+    ("  SCRUB_LIMIT=750K\n", "750K"),
+    ("SCRUB_LIMIT=1G\nSCRUB_LIMIT=2T\n", "2T"),
+    ("SCRUB_LIMIT=0\n", ""),
+    ("SCRUB_LIMIT=\n", ""),
+    ("SCRUB_LIMIT=''\n", ""),
+    ("SCRUB_LIMIT= # none\n", ""),
+    ("#SCRUB_LIMIT=1G\n", ""),
+    ("SCRUB_LIMITS=fast\n", ""),
+    ("HOME_SUBVOL=home\nNAS_HOST=''\nSCRUB_LIMIT=1G # c\n", "1G"),
+    ("SCRUB_LIMIT=$X\n", None),
+    ('SCRUB_LIMIT="1$G"\n', None),
+    ("SCRUB_LIMIT=1\\G\n", None),
+    ("SCRUB_LIMIT = 1G\n", None),
+    ("SCRUB_LIMIT= 1G\n", None),
+    ("SCRUB_LIMIT=1G; touch x\n", None),
+    ("SCRUB_LIMIT=1G 2G\n", None),
+    ("SCRUB_LIMIT='1G'x\n", None),
+    ("SCRUB_LIMIT=1G\r\n", None),
+    ("SCRUB_LIMIT\n", None),
+    ("SCRUB_LIMIT=fast\n", None),
+    ("SCRUB_LIMIT=1.5G\n", None),
+    ("SCRUB_LIMIT=-1\n", None),
+    ("SCRUB_LIMIT=1G\nSCRUB_LIMIT=$(date)\n", None),
+]
+
+
+class ScrubLimitTest(unittest.TestCase):
+    """SCRUB_LIMIT (the weekly scrub's speed limit) in snapshots.conf: btrfs-setup.sh's
+    reader, the drop-in install writes from it, and what status shows."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-scrub-limit-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.conf = os.path.join(self.tmp, "snapshots.conf")
+        self.dropin = os.path.join(self.tmp, "units", "btrfs-scrub-weekly.service.d", "10-cst-limit.conf")
+
+    def bash(self, *lines: str) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                f'. "{REPO}/cst-install.bash"',
+                assignment("SCRUB_SIZE_RE"),
+                assignment("SCRUB_LINE_RE"),
+                f'BTRFS_CONF="{self.conf}"; SCRUB_DROPIN="{self.dropin}"; BTRFS_SYSFS="{self.tmp}/sys"',
+                *(shell_function(SETUP, f) for f in ("scrub_limit_setting", "scrub_limit_dropin")),
+                *(shell_function(SETUP, f) for f in ("install_scrub_limit", "status_scrub_limit")),
+                *lines,
+            ]
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": self.tmp, "LC_ALL": "C"},
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+
+    def write_conf(self, text: str) -> None:
+        with open(self.conf, "w", newline="") as f:
+            f.write(text)
+
+    def test_bash_and_doctor_read_scrub_limit_alike(self) -> None:
+        for text, want in SCRUB_CASES:
+            with self.subTest(conf=text):
+                if text:
+                    self.write_conf(text)
+                elif os.path.exists(self.conf):
+                    os.unlink(self.conf)
+                r = self.bash("scrub_limit_setting")
+                bash = r.stdout if r.returncode == 0 else None
+                setting, problem = scrub_limit_setting(parse_shell_assignments(text))
+                doctor = None if problem else setting
+                self.assertEqual((bash, doctor), (want, want), r.stderr)
+                if want is None:
+                    self.assertIn("SCRUB_LIMIT", r.stderr)
+                elif want:
+                    # The value bash itself gives when it sources the file (btrfs-snapshot does).
+                    sourced = subprocess.run(
+                        ["bash", "-c", '. "$1"; printf %s "$SCRUB_LIMIT"', "_", self.conf],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env={"PATH": "/usr/bin:/bin"},
+                        stdin=subprocess.DEVNULL,
+                    ).stdout
+                    self.assertEqual(sourced, want)
+
+    def test_install_writes_the_drop_in_for_a_limit_and_removes_it_for_none(self) -> None:
+        self.write_conf("SCRUB_LIMIT=1G\n")
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"written:   {self.dropin}", r.stdout)
+        with open(self.dropin) as f:
+            lines = [ln for ln in f.read().splitlines() if ln and not ln.startswith("#")]
+        self.assertEqual(
+            lines,
+            [
+                "[Service]",
+                "ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 1G /var",
+                # "-": a reset that fails does not turn a good scrub into a failed unit.
+                "ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var",
+            ],
+        )
+        self.assertEqual(os.stat(self.dropin).st_mode & 0o777, 0o644)
+        # A second install changes nothing.
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertIn(f"unchanged: {self.dropin}", r.stdout)
+        # No limit any more: the drop-in and its folder go; a second run finds nothing to do.
+        self.write_conf("SCRUB_LIMIT=0\n")
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
+        r = self.bash('install_scrub_limit ""')
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_no_setting_writes_no_drop_in(self) -> None:
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
+
+    def status(self) -> list[str]:
+        r = self.bash("status_scrub_limit 00000000-0000-0000-0000-000000000000")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.splitlines()
+
+    def test_status_compares_the_setting_with_the_service(self) -> None:
+        conf = self.conf
+        self.assertEqual(
+            self.status(),
+            [f"  setting: none (SCRUB_LIMIT in {conf}; none = full speed)", "  service: no limit, as set"],
+        )
+        self.write_conf("SCRUB_LIMIT='1G'\n")
+        self.assertEqual(self.status()[1], "  service: no limit, DIFFERS from the setting (run install)")
+        self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(
+            self.status(),
+            [f"  setting: 1G (SCRUB_LIMIT in {conf}; none = full speed)", "  service: 1G, as set"],
+        )
+        self.write_conf("SCRUB_LIMIT=$FAST\n")
+        out = self.status()
+        self.assertTrue(out[0].startswith(f"  setting: INVALID: {conf} line 1: "), out)
+        self.assertEqual(out[1], "  service: 1G (fix the setting, then run install)")
+
+    def test_status_shows_the_limit_sysfs_holds_now(self) -> None:
+        for devid, limit in (("1", 8388608), ("2", 0)):
+            d = os.path.join(self.tmp, "sys", "00000000-0000-0000-0000-000000000000", "devinfo", devid)
+            os.makedirs(d)
+            with open(os.path.join(d, "scrub_speed_max"), "w") as f:
+                f.write(f"{limit}\n")
+        self.assertEqual(self.status()[2], "  now in sysfs (bytes/s, 0 = no limit): device 1 8388608, device 2 0")
+
+    def test_the_weekly_timer_spaces_out_its_catch_up(self) -> None:
+        with open(os.path.join(BTRFS, "units", "btrfs-scrub-weekly.timer")) as f:
+            timer = f.read().splitlines()
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("RandomizedDelaySec=15min", timer)
 
 
 if __name__ == "__main__":

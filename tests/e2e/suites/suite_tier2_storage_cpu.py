@@ -1998,3 +1998,122 @@ assert d["samples"] >= 1, d["samples"]
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_15_scrub_speed_limit_is_set_for_the_run_and_reset_after(self) -> None:
+        """SCRUB_LIMIT on the loop RAID1 with the real btrfs and systemd:
+        `cst btrfs install` writes the drop-in (a second install changes
+        nothing), systemd merges it (ExecStartPre sets the limit, ExecStopPost
+        resets it) and the timer has RandomizedDelaySec=15min. A test drop-in
+        that sorts after CST's copies scrub_speed_max of each device while the
+        unit starts (a scrub of the small loop filesystem is too short to
+        sample from outside): the limit during the run, 0 after a good run and
+        after a failed one. A bad setting makes install stop with nothing
+        changed; no limit removes the drop-in, and a run then has none;
+        `uninstall` removes the drop-in. The machine is left as test_14 left
+        it (uninstalled, snapshots.conf as it was)."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_15 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            show() { sed "s/^/test_15 $1: /" <<<"$2" >&2; }   # the CI log
+            uuid="$(cat /run/e2e-loop-uuid)"
+            conf=/etc/btrfs-setup/snapshots.conf
+            svc=btrfs-scrub-weekly.service
+            dropin="/etc/systemd/system/$svc.d/10-cst-limit.conf"
+            probe="/run/systemd/system/$svc.d"
+            during=/run/e2e-scrub-during
+            devmax=("/sys/fs/btrfs/$uuid"/devinfo/*/scrub_speed_max)
+            (( ${#devmax[@]} == 2 ))
+            rm -f /run/e2e-snapshots.conf.orig
+            if [[ -e "$conf" ]]; then cp -a "$conf" /run/e2e-snapshots.conf.orig; fi
+            cleanup() {
+                rm -rf "$probe" "$during"
+                if [[ -e /run/e2e-snapshots.conf.orig ]]; then mv -f /run/e2e-snapshots.conf.orig "$conf"; else rm -f "$conf"; fi
+                cst btrfs uninstall >/dev/null 2>&1 || true
+                local f
+                for f in "${devmax[@]}"; do echo 0 >"$f" 2>/dev/null || true; done
+                systemctl daemon-reload
+                systemctl reset-failed "$svc" btrfs-health-check.service 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            limits() { tr '\n' ' ' <"$1"; }
+            now() { cat "${devmax[@]}" | tr '\n' ' '; }
+            set_limit() {   # set_limit LINE: the SCRUB_LIMIT line of snapshots.conf ("" = none)
+                mkdir -p "$(dirname "$conf")"
+                touch "$conf"
+                sed -i '/^SCRUB_LIMIT=/d' "$conf"
+                if [[ -n "$1" ]]; then printf '%s\n' "$1" >>"$conf"; fi
+            }
+            run_scrub() {   # run_scrub WANT: the unit's result
+                rm -f "$during"
+                systemctl start "$svc" || true
+                [[ "$(systemctl show -P Result "$svc")" == "$1" ]] ||
+                    { systemctl status --no-pager "$svc" >&2 || true; return 1; }
+            }
+
+            # 1. install with a limit, then the merged unit.
+            set_limit "SCRUB_LIMIT='8M'"
+            out="$(cst btrfs install --no-below 2>&1)" || { show install "$out"; exit 1; }
+            grep -qxF "written:   $dropin" <<<"$out"
+            [[ "$(systemctl show -P RandomizedDelayUSec btrfs-scrub-weekly.timer)" == 15min ]]
+            systemctl show -p ExecStartPre "$svc" | grep -qF 'argv[]=/usr/sbin/btrfs scrub limit -a -l 8M /var'
+            systemctl show -p ExecStopPost "$svc" | grep -qF 'argv[]=/usr/sbin/btrfs scrub limit -a -l 0 /var'
+            out="$(cst btrfs status 2>&1)" || { show status "$out"; exit 1; }
+            grep -qxF '  service: 8M, as set' <<<"$out"
+
+            # 2. A second install writes nothing new.
+            out="$(cst btrfs install --no-below 2>&1)" || { show "second install" "$out"; exit 1; }
+            grep -qxF "unchanged: $dropin" <<<"$out"
+
+            # 3. The limit during a good run, 0 after it.
+            mkdir -p "$probe"
+            printf '[Service]\nExecStartPre=/bin/sh -c "cat %s >%s"\n' "${devmax[*]}" "$during" >"$probe/20-e2e-probe.conf"
+            systemctl daemon-reload
+            run_scrub success
+            [[ "$(limits "$during")" == "8388608 8388608 " ]]
+            [[ "$(now)" == "0 0 " ]]
+
+            # 4. A failed run resets it too.
+            printf '[Service]\nExecStart=\nExecStart=/bin/false\n' >"$probe/30-e2e-fail.conf"
+            systemctl daemon-reload
+            run_scrub exit-code
+            [[ "$(limits "$during")" == "8388608 8388608 " ]]
+            [[ "$(now)" == "0 0 " ]]
+            rm -f "$probe/30-e2e-fail.conf"
+            systemctl daemon-reload
+            systemctl reset-failed "$svc"
+
+            # 5. A bad setting: install stops before it changes anything.
+            set_limit 'SCRUB_LIMIT=fast'
+            before="$(stat -c '%i %Y' "$dropin")"
+            rc=0
+            out="$(cst btrfs install --no-below 2>&1)" || rc=$?
+            show "install, bad setting" "$out"
+            [[ "$rc" == 1 ]]
+            grep -qF "SCRUB_LIMIT='fast' is not a size" <<<"$out"
+            if grep -q '^written:' <<<"$out"; then echo "install wrote a file" >&2; exit 1; fi
+            [[ "$(stat -c '%i %Y' "$dropin")" == "$before" ]]
+            grep -qF '  setting: INVALID:' <<<"$(cst btrfs status 2>&1)"
+
+            # 6. No limit: the drop-in goes, and a run has none.
+            set_limit ''
+            out="$(cst btrfs install --no-below 2>&1)" || { show "install, no limit" "$out"; exit 1; }
+            grep -qF "removed '$dropin'" <<<"$out"
+            test ! -e "$(dirname "$dropin")"
+            if systemctl show -p ExecStartPre "$svc" | grep -qF 'scrub limit'; then echo "a limit is still set" >&2; exit 1; fi
+            run_scrub success
+            [[ "$(limits "$during")" == "0 0 " ]]
+
+            # 7. uninstall removes the drop-in.
+            set_limit 'SCRUB_LIMIT=1G'
+            out="$(cst btrfs install --no-below 2>&1)" || { show "install again" "$out"; exit 1; }
+            test -f "$dropin"
+            out="$(cst btrfs uninstall 2>&1)" || { show uninstall "$out"; exit 1; }
+            test ! -e "$(dirname "$dropin")"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

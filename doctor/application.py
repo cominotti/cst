@@ -37,6 +37,8 @@ from doctor.domain import (
     ONE_DEVICE_FACTOR,
     RECLAIM_CONF,
     RESIZE_SLACK,
+    SCRUB_DROPIN,
+    SCRUB_UNIT,
     SNAP_CONF,
     SNAP_STATE,
     SNAP_UNFINISHED,
@@ -73,6 +75,8 @@ from doctor.domain import (
     pick_mount,
     pkg_names,
     read_intended,
+    scrub_dropin_limit,
+    scrub_limit_setting,
     unit_results,
     unpin_command,
     view_join,
@@ -735,6 +739,49 @@ def read_entries(host: DoctorHostPort, path: HostPath) -> list[str] | None:
         return []
     except OSError:
         return None
+
+
+def live_scrub_limits(host: DoctorHostPort) -> str:
+    """scrub_speed_max of every device of every mounted btrfs, as one phrase."""
+    sysfs = host.path(BTRFS_SYSFS)
+    limits: list[str] = []
+    try:
+        uuids = sorted(n for n in host.listdir(sysfs) if FS_UUID.match(n))
+    except OSError:
+        uuids = []
+    for uuid in uuids:
+        devinfo = view_join(sysfs, uuid, "devinfo")
+        try:
+            devids = sorted(host.listdir(devinfo), key=lambda d: (len(d), d))
+        except OSError:
+            continue
+        for devid in devids:
+            v = read_int(host, view_join(devinfo, devid, "scrub_speed_max"))
+            if v:
+                limits.append(f"{uuid[:8]} device {devid} {format_bytes_gib_mib(v)}/s")
+    return ", ".join(limits) if limits else "no limit on any device"
+
+
+@check("btrfs")
+def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
+    """The weekly scrub's speed limit: SCRUB_LIMIT, the service's drop-in, sysfs now."""
+    setting, problem = scrub_limit_setting(parse_shell_assignments(read_text(host, host.path(SNAP_CONF), 65536)))
+    if problem:
+        yield Result(
+            WARN,
+            f"{SNAP_CONF} {problem}: `cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
+        )
+    if not host.exists(host.path(SCRUB_UNIT)):
+        return
+    installed = scrub_dropin_limit(read_text(host, host.path(SCRUB_DROPIN), 4096))
+    if not problem and installed != setting:
+        yield Result(
+            WARN,
+            f"weekly scrub: speed limit {installed or 'none'} in the service but {setting or 'none'} in "
+            f"SCRUB_LIMIT of {SNAP_CONF}: run `cst btrfs install`",
+        )
+    limit = f"{installed} per device" if installed else "none (full speed; SCRUB_LIMIT, btrfs/README.md 4.3)"
+    yield Result(INFO, f"weekly scrub: speed limit {limit}; now in sysfs: {live_scrub_limits(host)}")
 
 
 @check("btrfs")

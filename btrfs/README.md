@@ -181,7 +181,7 @@ Unit files go to `/etc/systemd/system/`.
 | Part | Files | Runs when |
 |---|---|---|
 | Health check (4.2) | `/usr/local/sbin/btrfs-health-check`, `btrfs-health-check.service` + `.timer` | 2 min after boot, then every hour |
-| Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00 (or at the next boot if the PC was off) |
+| Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00, up to 15 min later (or after the next boot if the PC was off); speed limit: `SCRUB_LIMIT` |
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
 | Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
@@ -272,9 +272,42 @@ need that file, and by then the other copy may be bad too.
 Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
 only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
 so on this PC the scrub reads at the disks' full speed (see
-[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)). If the PC was off, it runs at the
-next boot. After the scrub, the health check runs at once. If the scrub fails,
-the health check also runs and alerts.
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)) unless you set a speed limit (below). If the PC was off, it runs after the
+next boot, up to 15 minutes later (`RandomizedDelaySec=15min`), so not in
+the first minutes after login. After the scrub, the health check runs at once.
+If the scrub fails, the health check also runs and alerts.
+
+**Speed limit (`SCRUB_LIMIT`).** A full-speed scrub reads both disks as fast
+as they go (here 4.5 GiB/s for 1.7 TiB in 6 minutes), which can stall builds
+running at the same time. btrfs has its own limit per device
+(`btrfs scrub limit`, sysfs `devinfo/<id>/scrub_speed_max`), which works with
+any IO scheduler. Set it in `/etc/btrfs-setup/snapshots.conf` (create the
+file if it is not there; other keys can stay out) and run `cst btrfs install`:
+
+```
+SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limit
+```
+
+- The default is **no limit**: choose the number after measuring (for
+  example a scrub during a build, with `cst btrfs report`). 1G per device
+  makes 1.7 TiB take about 30 minutes.
+- `install` writes the drop-in
+  `/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf`: it
+  sets the limit on every device before the scrub (`ExecStartPre`) and sets
+  it back to 0 after it (`ExecStopPost`, which also runs when the scrub
+  fails or is stopped; the kernel forgets the limit at the next mount anyway).
+  With no limit there is no drop-in, and `install` removes an old one.
+  `uninstall` removes it too.
+- The value is read with the same rules as `cst doctor` reads this file: a
+  plain size (digits, then K, M, G or T), as `SCRUB_LIMIT=1G`,
+  `SCRUB_LIMIT='1G'` or `SCRUB_LIMIT="1G"`. Any other form, or a value
+  that is not a size, makes `install` stop before it changes anything.
+- If setting the limit fails (a btrfs-progs without `scrub limit`), that
+  scrub does not run and the unit fails: it never runs at full speed by
+  mistake. The health check alerts when the last scrub gets too old.
+- `status` shows the setting, the limit the service sets and the value in
+  sysfs now; `cst doctor` shows the same as `info` and warns when the
+  setting and the service differ.
 
 To start one by hand (on the host):
 
@@ -671,6 +704,7 @@ Read-only. Sections:
 | `services and timers` | next/last runs of the timers; whether `btrfs-stall-monitor.service` and `below.service` are active |
 | `last health check` | the last result lines of the health check |
 | `last scrub` | start, status, duration, error summary |
+| `weekly scrub speed limit (per device)` | `SCRUB_LIMIT` (section 4.3), the limit the scrub service sets (`DIFFERS from the setting (run install)` when they do not match; `INVALID` with the line for a bad setting), and `scrub_speed_max` of each device in sysfs now (0 = no limit) |
 | `last fstrim` | the last trim results |
 | `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
@@ -730,6 +764,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   goes too: `systemctl clean --what=state` while the timer is still loaded. So
   does the stamp of `btrfs-scrub-monthly.timer`, a timer of older versions (that
   one also at `install`);
+- the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
+  section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed scripts in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher;
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called

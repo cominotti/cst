@@ -16,7 +16,8 @@
 #       * weekly fstrim: Fedora's own fstrim.timer, only made sure it is enabled
 #         (discard=async trims btrfs continuously; this covers /boot and the
 #         ESP, and is a safety net for btrfs)
-#       * health check (hourly) + weekly scrub, alerting on: missing member or
+#       * health check (hourly) + weekly scrub (speed limit per device:
+#         SCRUB_LIMIT in /etc/btrfs-setup/snapshots.conf, default none), alerting on: missing member or
 #         mixed chunk profiles, device error counters, fs forced read-only,
 #         kernel btrfs/IO errors, md RAID degraded, NVMe SMART warnings/wear,
 #         scrub errors/age, low unallocated space, automatic-reclaim failures,
@@ -181,6 +182,13 @@ TIMERS=(btrfs-health-check.timer btrfs-scrub-weekly.timer)
 OLD_UNITS=(btrfs-scrub-monthly.service btrfs-scrub-monthly.timer)
 # Where systemd keeps the last run of a Persistent= timer (stamp-<timer>).
 TIMER_STAMP_DIR=/var/lib/systemd/timers
+# The weekly scrub's speed limit per device: SCRUB_LIMIT in the btrfs settings
+# file (bash-sourced; also read by btrfs-snapshot, btrfs-health-check and
+# cst doctor). install turns it into a drop-in of the scrub service.
+BTRFS_CONF=/etc/btrfs-setup/snapshots.conf
+BTRFS_SYSFS=/sys/fs/btrfs
+SCRUB_SERVICE=btrfs-scrub-weekly.service
+SCRUB_DROPIN="${UNIT_DIR}/${SCRUB_SERVICE}.d/10-cst-limit.conf"
 # Mount options every btrfs mount of the root fs is expected to carry.
 EXPECTED_OPTS=(compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd)
 
@@ -307,6 +315,84 @@ check_syntax() {
     else
         bash -n "$1"
     fi
+}
+
+# scrub_limit_setting [FILE]: SCRUB_LIMIT of the btrfs settings file (default
+# BTRFS_CONF) on stdout: a size btrfs scrub limit takes (digits, then K, M, G
+# or T: per second, per device), or nothing for no limit (unset, empty or 0).
+# Read by cst_core's rules for bash-sourced files (cst doctor reads it the
+# same way, doctor.domain.scrub_limit_setting): '...', "..." without $ ` \,
+# or one plain word; an optional export; blanks and a # comment after it; the
+# last line wins. Fails, with the reason on stderr, when a SCRUB_LIMIT line
+# has any other form or the value is not such a size.
+SCRUB_SIZE_RE='^[0-9]+[KkMmGgTt]?$'
+SCRUB_LINE_RE="^SCRUB_LIMIT=('([^']*)'|\"([^\"\$\`\\]*)\"|([^[:space:]'\"\$\`\\;&|<>()]*))([[:blank:]]+#.*|[[:blank:]]*)$"
+scrub_limit_setting() {
+    local conf="${1:-${BTRFS_CONF}}" line rest value="" n=0
+    [[ -e "${conf}" ]] || return 0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        n=$((n + 1))
+        rest="${line#"${line%%[![:blank:]]*}"}"
+        if [[ "${rest}" =~ ^export[[:blank:]]+(.*)$ ]]; then rest="${BASH_REMATCH[1]}"; fi
+        [[ "${rest}" =~ ^SCRUB_LIMIT([^A-Za-z0-9_]|$) ]] || continue
+        if [[ ! "${rest}" =~ ${SCRUB_LINE_RE} ]]; then
+            echo "${conf} line ${n}: '${line}' is not a plain SCRUB_LIMIT=SIZE line" >&2
+            return 1
+        fi
+        value="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+    done <"${conf}"
+    if [[ -n "${value}" && "${value}" != 0 && ! "${value}" =~ ${SCRUB_SIZE_RE} ]]; then
+        echo "${conf}: SCRUB_LIMIT='${value}' is not a size such as 500M or 1G" >&2
+        return 1
+    fi
+    [[ "${value}" == 0 ]] || printf '%s' "${value}"
+}
+
+# scrub_limit_dropin LIMIT: the drop-in of the scrub service for that limit.
+scrub_limit_dropin() {
+    cat <<EOF
+# Managed by btrfs-setup.sh (CST), from SCRUB_LIMIT in ${BTRFS_CONF}.
+# btrfs's own limit works with any IO scheduler (IOSchedulingClass=idle
+# needs BFQ or Kyber). sysfs keeps it only until the next mount, and the
+# reset runs after every run, also a failed or stopped one.
+[Service]
+ExecStartPre=/usr/sbin/btrfs scrub limit -a -l $1 /var
+ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var
+EOF
+}
+
+# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none.
+install_scrub_limit() {
+    if [[ -n "$1" ]]; then
+        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644
+    elif [[ -e "${SCRUB_DROPIN}" ]]; then
+        rm -fv "${SCRUB_DROPIN}"
+        rmdir "$(dirname "${SCRUB_DROPIN}")" 2>/dev/null || true
+    fi
+}
+
+# status_scrub_limit: the setting, the drop-in, and the limit in sysfs now.
+status_scrub_limit() {
+    local uuid="$1" want have f live=()
+    if want="$(scrub_limit_setting 2>&1)"; then
+        echo "  setting: ${want:-none} (SCRUB_LIMIT in ${BTRFS_CONF}; none = full speed)"
+    else
+        echo "  setting: INVALID: ${want}"
+        want="?"
+    fi
+    have="$(sed -n 's|^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l \([^ ]*\) /var$|\1|p' "${SCRUB_DROPIN}" 2>/dev/null || true)"
+    if [[ "${want}" == "?" ]]; then
+        echo "  service: ${have:-no limit} (fix the setting, then run install)"
+    elif [[ "${want}" == "${have}" ]]; then
+        echo "  service: ${have:-no limit}, as set"
+    else
+        echo "  service: ${have:-no limit}, DIFFERS from the setting (run install)"
+    fi
+    for f in "${BTRFS_SYSFS}/${uuid}"/devinfo/*/scrub_speed_max; do
+        [[ -r "${f}" ]] && live+=("device $(basename "$(dirname "${f}")") $(cat "${f}")")
+    done
+    (( ${#live[@]} )) && echo "  now in sysfs (bytes/s, 0 = no limit): $(IFS=,; echo "${live[*]}" | sed 's/,/, /g')"
+    return 0
 }
 
 # sysval FILE: its content, or "?" when unreadable.
@@ -480,6 +566,8 @@ status() (
         grep -E 'btrfs-health-check:' | tail -n 3 | sed 's/^/  /'
     section "last scrub"
     btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | sed 's/^/  /'
+    section "weekly scrub speed limit (per device)"
+    status_scrub_limit "${uuid}"
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
         grep -E 'trimmed|Failed|failed' | tail -n 4 | sed 's/^/  /'
@@ -730,6 +818,7 @@ uninstall() {
     for unit in "${UNITS[@]}"; do
         rm -fv "${UNIT_DIR}/${unit}"
     done
+    install_scrub_limit ""
     mapfile -t dests < <(cst_installed_dests "${BINARIES[@]/#/btrfs/}")
     for dest in "${dests[@]}"; do
         rm -fv "${dest}"
@@ -777,7 +866,7 @@ uninstall() {
 
 # ---- install ---------------------------------------------------------------------
 install_all() {
-    local with_below=1 f u uuid arg below_pending staged_has_below
+    local with_below=1 f u uuid arg below_pending staged_has_below scrub_limit
     for arg in "$@"; do
         case "${arg}" in
             --no-below) with_below=0 ;;
@@ -795,10 +884,12 @@ install_all() {
     uuid="$(root_fs_uuid)"
     [[ "${uuid}" =~ ^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$ ]] ||
         { echo "unexpected root fs UUID '${uuid}'" >&2; exit 1; }
+    scrub_limit="$(scrub_limit_setting)" || { echo "install: nothing changed; fix SCRUB_LIMIT first." >&2; exit 1; }
 
     # Files.
     cst_install "${BINARIES[@]/#/btrfs/}"
     install_units "${UNITS[@]}"
+    install_scrub_limit "${scrub_limit}"
     install_pending_alerts
     cst_install btrfs/sysctl/90-btrfs-writeback.conf
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
