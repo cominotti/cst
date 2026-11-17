@@ -28,6 +28,11 @@ class _E2ERunModule(Protocol):
     host_lsm_security_opts: Callable[[], list[str]]
     selinux_type: Callable[[Path], str | None]
     host_selinux: Callable[..., bool]
+    run: Callable[..., object]
+    docker_build: Callable[..., None]
+    wait_systemd_ready: Callable[..., None]
+    load_suite: Callable[[str], unittest.TestSuite]
+    dump_logs: Callable[..., None]
 
     def checkout_label_problem(
         self, *, enforcing: bool, types: Mapping[str, str | None], repo: Path, label_disabled: bool = False
@@ -143,6 +148,23 @@ class CheckoutPreflightTest(unittest.TestCase):
         self.assertIn("label=disable", self.mod.host_lsm_security_opts())
         self.mod.host_selinux = lambda *a, **k: False
         self.assertNotIn("label=disable", self.mod.host_lsm_security_opts())
+
+    def test_tier1_suite_gets_the_security_options(self) -> None:
+        # test_01 starts containers of its own: they need label=disable too.
+        cmds: list[list[str]] = []
+        self.mod.run = lambda cmd, **k: cmds.append(list(cmd))
+        self.mod.docker_build = lambda *a, **k: None
+        self.mod.wait_systemd_ready = lambda *a, **k: None
+        self.mod.dump_logs = lambda *a, **k: None
+        self.mod.load_suite = lambda name: unittest.TestSuite()
+        self.mod.host_lsm_security_opts = lambda: ["--security-opt", "label=disable"]
+        self.enterContext(mock.patch.dict(os.environ, {}, clear=False))
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-e2e-tier1-")))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(self.mod.run_tier1("t", tmp))
+        self.assertEqual(os.environ.get("CST_E2E_SECURITY_OPTS"), "--security-opt label=disable")
+        systemd = next(c for c in cmds if "SYS_ADMIN" in c)
+        self.assertIn("label=disable", systemd)
 
     def test_selinux_type_of_a_label(self) -> None:
         path = Path("/w/cst-wt/cst")

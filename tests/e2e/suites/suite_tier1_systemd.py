@@ -145,6 +145,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
     IMAGE = os.environ["CST_E2E_SYSTEMD_IMAGE"]
     CST_ROOT_MOUNT = os.environ["CST_E2E_REPO_ROOT"]
+    # run.py's host_lsm_security_opts (label=disable where SELinux is on), for the containers test_01 starts.
+    SECURITY_OPTS = os.environ.get("CST_E2E_SECURITY_OPTS", "").split()
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -170,6 +172,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
                     "run",
                     "--rm",
                     *extra_flags,
+                    *self.SECURITY_OPTS,
                     "-e",
                     "E2E_KEEP_DOCKERENV=1",
                     "-v",

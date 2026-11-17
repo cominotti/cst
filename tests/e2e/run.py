@@ -280,6 +280,8 @@ def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         os.environ["CST_E2E_NAS_CONTAINER"] = nas
         os.environ["CST_E2E_SYSTEMD_IMAGE"] = IMG_SYSTEMD
         os.environ["CST_E2E_REPO_ROOT"] = str(REPO_ROOT)
+        # test_01 starts containers of its own on the checkout: the same options.
+        os.environ["CST_E2E_SECURITY_OPTS"] = " ".join(host_lsm_security_opts())
 
         suite = load_suite("suite_tier1_systemd.py")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
