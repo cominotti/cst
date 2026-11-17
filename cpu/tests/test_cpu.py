@@ -1732,6 +1732,31 @@ class VmPinCliTest(unittest.TestCase):
                 cpu_adapters.virsh("dumpxml", "win11-devbox")
             self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox", check=False), "partial")
 
+    def test_virsh_runs_in_the_c_locale_with_no_stdin_and_a_timeout(self) -> None:
+        # virsh translates its answers ("shut off" is "desligado" in pt_BR); vm-pin compares them.
+        ok = subprocess.CompletedProcess(["virsh"], 0, "running\n", "")
+        caller = {"LC_ALL": "pt_BR.UTF-8", "LANG": "pt_BR.UTF-8"}
+        with (
+            unittest.mock.patch.dict(os.environ, caller),
+            unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=ok) as run,
+        ):
+            self.assertEqual(cpu_adapters.virsh("domstate", "win11-devbox"), "running\n")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(kwargs["env"]["LANG"], "pt_BR.UTF-8", "the rest of the environment is the caller's")
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], cpu_adapters.VIRSH_TIMEOUT)
+        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_a_virsh_that_does_not_answer(self) -> None:
+        # check: the run stops with one line (no traceback); without check it goes on, as after a failure.
+        hang = subprocess.TimeoutExpired(["virsh"], cpu_adapters.VIRSH_TIMEOUT)
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", side_effect=hang):
+            with self.assertRaises(SystemExit) as stop:
+                cpu_adapters.virsh("domstate", "win11-devbox")
+            self.assertEqual(str(stop.exception.code), "virsh domstate win11-devbox: no answer within 60 s")
+            self.assertEqual(cpu_adapters.virsh("vcpucount", "win11-devbox", check=False), "")
+
 
 class CpuWatchCliTest(unittest.TestCase):
     """cpu-watch's numbers and command line, on the package (cpu.domain, cpu.cli)."""

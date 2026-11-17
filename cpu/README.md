@@ -837,6 +837,10 @@ Safety:
 
 - If the VM has `<cputune/vcpusched>`, `<cputune/cachetune>`, `<cpu/numa>` or
   `<vcpus>`, it stops: `... adjust it by hand (virsh edit ...); nothing changed`.
+- virsh runs in the C locale (its answers are compared, and it translates
+  them). A virsh call that gives no answer within 60 s stops the run with
+  `virsh ...: no answer within 60 s` (in `status`, a call after the VM
+  state leaves its line empty instead).
 - `apply` needs a terminal to ask. `y`/`Y` mean yes; so do `s`/`S`
   (`s` = "sim", Portuguese for yes). Anything else changes nothing.
 - Before the first apply, the old definition is saved to

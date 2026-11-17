@@ -7,6 +7,7 @@ import subprocess
 import time
 from typing import Any, BinaryIO, TextIO
 
+from cst_core.adapters import c_locale
 from doctor.domain import NAME, Deployment, OstreeAnswer
 from vm import adapters as vm_adapters
 
@@ -104,10 +105,14 @@ class Host:
         except KeyError:
             return None
 
-    def run(self, cmd: list[str], timeout: float = 60) -> tuple[int, str, str]:
+    def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
         """(rc, stdout, stderr) of a read-only query command on the host;
-        rc 127 when it cannot be started, 124 on a timeout."""
-        full = (["flatpak-spawn", "--host"] + cmd) if self.container else cmd
+        rc 127 when it cannot be started, 124 on a timeout. locale_c: LC_ALL=C
+        on top of the Host's environment; in a toolbox it goes through
+        flatpak-spawn --env (the host command does not get flatpak-spawn's own)."""
+        extra = c_locale() if locale_c else {}
+        spawn = ["flatpak-spawn", "--host", *(f"--env={k}={v}" for k, v in extra.items())]
+        full = (spawn + cmd) if self.container else cmd
         try:
             p = subprocess.run(
                 full,
@@ -116,7 +121,7 @@ class Host:
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
-                env=dict(self.env),
+                env={**self.env, **extra},
             )
         except FileNotFoundError as e:
             return 127, "", f"{full[0]}: not found ({e.strerror})"

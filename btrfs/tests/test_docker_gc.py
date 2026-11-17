@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from typing import Any
 from unittest import mock
@@ -193,6 +194,28 @@ class ProgramTest(unittest.TestCase):
             gc_adapters.is_protected({"RepoTags": None, "RepoDigests": ["registry.example.com/o/a@sha256:1"]})
         )
         self.assertFalse(gc_adapters.is_protected({"RepoTags": ["alpine:latest"]}))
+
+
+class RecorderAliveTest(unittest.TestCase):
+    """recorder_alive: systemctl is-active with no stdin and a time limit."""
+
+    def test_systemctl_gets_no_stdin_and_a_timeout(self) -> None:
+        done = subprocess.CompletedProcess(["systemctl"], 0)
+        with mock.patch.object(gc_adapters.subprocess, "run", return_value=done) as run:
+            self.assertTrue(gc_adapters.recorder_alive({"heartbeat": time.time()}))
+        self.assertEqual(run.call_args.args[0], ["systemctl", "-q", "is-active", "docker-gc-recorder.service"])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["timeout"], gc_adapters.SYSTEMCTL_TIMEOUT)
+
+    def test_a_systemctl_that_does_not_answer_holds_images_back(self) -> None:
+        hang = subprocess.TimeoutExpired(["systemctl"], gc_adapters.SYSTEMCTL_TIMEOUT)
+        out = io.StringIO()
+        with mock.patch.object(gc_adapters.subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
+            self.assertFalse(gc_adapters.recorder_alive({"heartbeat": time.time()}))
+        self.assertEqual(
+            out.getvalue(),
+            "<4>docker-gc: systemctl is-active docker-gc-recorder.service: no answer in 10s; images are held back\n",
+        )
 
 
 class EntryTest(unittest.TestCase):

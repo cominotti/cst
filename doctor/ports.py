@@ -28,8 +28,8 @@ class DoctorHostPort(Protocol):
         """Map an absolute host path to this process's view (e.g. /run/host)."""
         ...
 
-    def run(self, cmd: list[str], timeout: float = 60) -> tuple[int, str, str]:
-        """Run a read-only query command on the host; return (rc, stdout, stderr)."""
+    def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
+        """Run a read-only query command on the host (with LC_ALL=C when locale_c); return (rc, stdout, stderr)."""
         ...
 
     def repo_path(self, rel: str) -> str:

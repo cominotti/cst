@@ -123,6 +123,7 @@ FLATPAK_SPAWN = """#!/bin/sh
 echo "flatpak-spawn $*" >>"$STUB_LOG"
 [ "$1" = --host ] || exit 1
 shift
+while [ "${1#--env=}" != "$1" ]; do export "${1#--env=}"; shift; done
 exec "$@"
 """
 
@@ -2017,6 +2018,17 @@ class ToolboxTest(Scratch):
         env["CST_DOCTOR_CONTAINER"] = "0"
         self.assertEqual(doc_adapters.Host(env).path("/var/lib/cst-alerts"), "/var/lib/cst-alerts")
 
+    def test_virsh_runs_in_the_c_locale(self) -> None:
+        # The checks compare virsh's answers ("running", "shut off"), which it translates ("desligado" in pt_BR).
+        with open(os.path.join(self.bin, "virsh"), "w") as f:
+            f.write('#!/bin/sh\necho "LC_ALL=${LC_ALL-unset} $*"\n')
+        env = dict(self.env, LANG="pt_BR.UTF-8", LC_ALL="pt_BR.UTF-8")
+        want = (0, "LC_ALL=C -r -c qemu:///system domstate vm1\n", "")
+        self.assertEqual(doc_app.virsh(doc_adapters.Host(env), "domstate", "vm1"), want)
+        # In a toolbox the host command does not get flatpak-spawn's environment: the setting goes in --env.
+        self.assertEqual(doc_app.virsh(doc_adapters.Host(dict(env, CST_DOCTOR_CONTAINER="1")), "domstate", "vm1"), want)
+        self.assertEqual(self.calls(), ["flatpak-spawn --host --env=LC_ALL=C virsh -r -c qemu:///system domstate vm1"])
+
     def test_missing_flatpak_spawn(self) -> None:
         # The Host's own PATH finds the commands (only the stub folder here: no real flatpak-spawn).
         host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1", PATH=self.bin))
@@ -2050,7 +2062,10 @@ class HermeticTest(Scratch):
         ) -> subprocess.CompletedProcess[str]:
             path = (os.environ if env is None else env).get("PATH")
             args = list(args)
-            names = [args[0]] + ([args[2]] if args[:2] == ["flatpak-spawn", "--host"] and len(args) > 2 else [])
+            spawned = (
+                [a for a in args[2:] if not a.startswith("--env=")] if args[:2] == ["flatpak-spawn", "--host"] else []
+            )
+            names = [args[0]] + spawned[:1]
             found = [(n, shutil.which(n, path=path)) for n in names]
             seen.extend(found)
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):

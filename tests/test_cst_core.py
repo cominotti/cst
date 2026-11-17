@@ -16,6 +16,7 @@ from unittest import mock
 from cst_core.adapters import (
     HostExecutionContext,
     SubprocessCommandRunner,
+    SubprocessVirshAdapter,
     SystemClockAdapter,
     SystemctlAdapter,
 )
@@ -212,6 +213,19 @@ class PlanAndOutcomeTest(unittest.TestCase):
 
 
 class AdaptersTest(unittest.TestCase):
+    def test_virsh_in_a_new_session_replaces_bytes_that_are_not_utf8(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-virsh-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "virsh")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\nprintf "\\377abc LC_ALL=%s" "$LC_ALL"\n')
+        os.chmod(stub, 0o755)
+        virsh = SubprocessVirshAdapter(ctx=HostExecutionContext(exists=lambda _path: False))
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            res = virsh.call("domstate", "vm1", start_new_session=True)
+        self.assertEqual((res.returncode, res.stdout), (0, "\ufffdabc LC_ALL=C"))
+        self.assertEqual(res.argv, ("virsh", "-c", "qemu:///system", "domstate", "vm1"))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)

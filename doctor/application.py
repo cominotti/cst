@@ -1047,8 +1047,11 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
 
 # ---- vm: libvirt guests --------------------------------------------------------------------------
 def virsh(host: DoctorHostPort, *args: str, ro: bool = True) -> tuple[int, str, str]:
-    """virsh on the system connection; -r (read-only) where libvirt allows it."""
-    return host.run(["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args), timeout=20)
+    """virsh on the system connection; -r (read-only) where libvirt allows it.
+    In the C locale: the checks compare its answers ("running", "shut off"),
+    which virsh translates."""
+    cmd = ["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args)
+    return host.run(cmd, timeout=20, locale_c=True)
 
 
 def virsh_problem(rc: int, err: str) -> str:

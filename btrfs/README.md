@@ -1369,7 +1369,8 @@ image pulled, built, tagged, loaded) in `/var/lib/docker-gc`.
 Because of this:
 
 - **The first timed image removal happens 14 days after `enable`.**
-- If the recorder is not running, **no images are removed** at all.
+- If the recorder is not running, **no images are removed** at all. A
+  `systemctl is-active` that gives no answer within 10 s counts as "not running".
 - If the recorder was down for a while with Docker running, the 14-day clock
   starts again.
 - Right before removing an image, it checks again that nothing started using it.

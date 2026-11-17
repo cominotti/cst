@@ -179,7 +179,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   qemu:///system list --all --name`, `dumpxml --inactive` and
   `domblklist VM --details`, never with `--security-info`, and `domstate VM` only when a
   disk points to a backup overlay; `virsh -c qemu:///system domcapabilities`, which libvirt
-  does not answer on a read-only connection) and read the world-readable
+  does not answer on a read-only connection), always in the C locale
+  (`LC_ALL=C`: virsh translates "running" and "shut off"), and read the world-readable
   index `/var/lib/cst/vm-backups.json` written by `cst vm backup`, the
   world-readable `/etc/btrfs-setup/snapshots.conf` (is the NAS backup set
   up?), the lock file `/run/cst-vm/nas-VM.lock` with `/proc/<pid>` (is a NAS

@@ -27,6 +27,7 @@ PROTECTED = tuple(
     r.strip() + "/" for r in os.environ.get("DOCKER_GC_PROTECT", "registry.example.com").split(",") if r.strip()
 )
 FLUSH_SECONDS = int(os.environ.get("DOCKER_GC_FLUSH", 30))
+SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
 
 # One journal line per message, "<prio>docker-gc: msg".
 log = partial(journal_log, tag="docker-gc")
@@ -90,8 +91,22 @@ def save_state(st: Mapping[str, Any]) -> None:
 
 
 def recorder_alive(st: Mapping[str, Any]) -> bool:
-    active = subprocess.run(["systemctl", "-q", "is-active", "docker-gc-recorder.service"], check=False).returncode == 0
-    return active and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
+    """The recorder runs and wrote its heartbeat lately. A systemctl that does
+    not answer counts as a recorder that is not running: images are held back."""
+    try:
+        done = subprocess.run(
+            ["systemctl", "-q", "is-active", "docker-gc-recorder.service"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=SYSTEMCTL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log(
+            4,
+            f"systemctl is-active docker-gc-recorder.service: no answer in {SYSTEMCTL_TIMEOUT}s; images are held back",
+        )
+        return False
+    return done.returncode == 0 and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
 
 
 def container_use(c: Mapping[str, Any]) -> float:
