@@ -47,7 +47,7 @@ MASS_DELETE_PERCENT = 10
 CMD_TIMEOUT = 600
 # Policy letters in btrbk's order; '*' is stored as "all".
 POLICY_UNITS = "hdwmy"
-POLICY_TOKEN = re.compile(r"(\*|[0-9]+)([hdwmy])", re.IGNORECASE)
+POLICY_TOKEN = re.compile(r"(\*|\d+)([hdwmy])", re.IGNORECASE | re.ASCII)  # ASCII: \d is [0-9]
 DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
 
 
@@ -156,7 +156,10 @@ class Decision:
     reason: str
 
 
-class _PlanItem(TypedDict):
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PlanItem:
+    """One snapshot in plan(): its distances from now in btrbk's units."""
+
     snap: Snap
     key: tuple[int, int]
     dh: int
@@ -168,7 +171,16 @@ class _PlanItem(TypedDict):
     dfe: int
     year: int
     month: int
-    reason: str | None
+
+    def delta(self, unit: str) -> int:
+        """The distance in UNIT (a letter of POLICY_UNITS)."""
+        return {"h": self.dh, "d": self.dd, "w": self.dw, "m": self.dm, "y": self.dy}[unit]
+
+
+# The preserve levels of plan(), in btrbk's order: each one picks the first
+# snapshot of every bucket of its unit among the first ones of the level
+# before, and hands its picks on, grouped by the next unit.
+PLAN_LEVELS: tuple[tuple[str, str | None], ...] = (("h", "d"), ("d", "w"), ("w", "m"), ("m", "y"), ("y", None))
 
 
 def plan(
@@ -193,113 +205,100 @@ def plan(
     """
     now_ts = now.timestamp() if isinstance(now, dt.datetime) else now
     now_wall = epoch_to_wall(now_ts, tz)
+    items = sorted((_plan_item(s, now_wall, tz, hod, dow) for s in snaps), key=lambda i: i.key)
+    reasons: dict[int, str] = {}  # id(item) -> why it is kept
+    groups: dict[int, _PlanItem] = {}  # the first snapshot of each hour
+    for i in items:
+        if i.dh < 0:
+            reasons[id(i)] = f"preserve forced: {-i.dh} hours in the future"
+        groups.setdefault(i.dh, i)
+    if items:
+        reasons[id(items[-1])] = "preserve min: latest"
+    for unit, following in PLAN_LEVELS:
+        groups = _preserve_level(groups, unit, following, policy, reasons, hod, DAY_NAMES[dow])
+    deleted = f"not kept by policy '{format_policy(policy)}'"
+    return [
+        Decision(i.snap, "keep", reasons[id(i)]) if reasons.get(id(i)) else Decision(i.snap, "delete", deleted)
+        for i in items
+    ]
+
+
+def _plan_item(s: Snap, now_wall: dt.datetime, tz: dt.tzinfo, hod: int, dow: int) -> _PlanItem:
+    """S's distances from NOW_WALL as btrbk's schedule() computes them."""
     # btrbk: timegm() of the local hour fields, i.e. DST-blind wall-clock hours.
     now_h = now_wall.replace(minute=0, second=0, microsecond=0)
-    dow_name = DAY_NAMES[dow]
+    epoch = wall_to_epoch(s.wall, tz)
+    tm = epoch_to_wall(epoch, tz)  # localtime(): normalizes non-existent times
+    wday = (tm.weekday() + 1) % 7  # Perl: Sunday = 0
+    hfh = tm.hour - hod  # hours from start of day
+    dfe = wday - dow  # days from start of week
+    if hfh < 0:
+        hfh += 24
+        dfe -= 1
+    if dfe < 0:
+        dfe += 7
+    month_corr, year_corr = tm.month - 1, tm.year
+    if tm.day <= dfe:
+        # The month (and year) starts on its first preserve_day_of_week.
+        month_corr -= 1
+        if month_corr < 0:
+            month_corr, year_corr = 11, year_corr - 1
+    dh = int((now_h - tm.replace(minute=0, second=0)).total_seconds()) // 3600
+    dd = perl_int_div(dh + hfh, 24)
+    dw = perl_int_div(dd + dfe, 7)
+    dy = now_wall.year - year_corr
+    dm = dy * 12 + (now_wall.month - 1 - month_corr)
+    return _PlanItem(s, (epoch, s.seq), dh, dd, dw, dm, dy, hfh, dfe, year_corr, month_corr + 1)
 
-    items: list[_PlanItem] = []
-    for s in snaps:
-        epoch = wall_to_epoch(s.wall, tz)
-        tm = epoch_to_wall(epoch, tz)  # localtime(): normalizes non-existent times
-        wday = (tm.weekday() + 1) % 7  # Perl: Sunday = 0
-        hfh = tm.hour - hod  # hours from start of day
-        dfe = wday - dow  # days from start of week
-        if hfh < 0:
-            hfh += 24
-            dfe -= 1
-        if dfe < 0:
-            dfe += 7
-        month_corr, year_corr = tm.month - 1, tm.year
-        if tm.day <= dfe:
-            # The month (and year) starts on its first preserve_day_of_week.
-            month_corr -= 1
-            if month_corr < 0:
-                month_corr, year_corr = 11, year_corr - 1
-        dh = int((now_h - tm.replace(minute=0, second=0)).total_seconds()) // 3600
-        dd = perl_int_div(dh + hfh, 24)
-        dw = perl_int_div(dd + dfe, 7)
-        dy = now_wall.year - year_corr
-        dm = dy * 12 + (now_wall.month - 1 - month_corr)
-        items.append(
-            {
-                "snap": s,
-                "key": (epoch, s.seq),
-                "dh": dh,
-                "dd": dd,
-                "dw": dw,
-                "dm": dm,
-                "dy": dy,
-                "hfh": hfh,
-                "dfe": dfe,
-                "year": year_corr,
-                "month": month_corr + 1,
-                "reason": None,
-            }
+
+def _preserve_level(
+    groups: Mapping[int, _PlanItem],
+    unit: str,
+    following: str | None,
+    policy: Mapping[str, int | str],
+    reasons: dict[int, str],
+    hod: int,
+    dow_name: str,
+) -> dict[int, _PlanItem]:
+    """One preserve level: the GROUPS (first snapshot per bucket of UNIT) the
+    policy keeps get UNIT's reason in REASONS; returns them grouped by the
+    FOLLOWING unit (first one per bucket, newest bucket first)."""
+    picked: dict[int, _PlanItem] = {}
+    for k in sorted(groups, reverse=True):
+        i = groups[k]
+        if _within(policy, unit, i.delta(unit)):
+            reasons[id(i)] = _level_reason(unit, i, hod, dow_name)
+        if following is not None:
+            picked.setdefault(i.delta(following), i)
+    return picked
+
+
+def _within(policy: Mapping[str, int | str], unit: str, delta: int) -> bool:
+    """POLICY keeps a snapshot DELTA units back at this level."""
+    n = policy.get(unit)
+    return bool(n) and (n == "all" or (isinstance(n, int) and delta <= n))
+
+
+def _delta_text(i: _PlanItem, hod: int, dow_name: str) -> str:
+    s = (f" {i.dfe}d" if i.dfe else "") + (f" {i.hfh}h" if i.hfh else "")
+    return (f"{s} after " if s else " at ") + f"{dow_name} {hod:02d}:00"
+
+
+def _level_reason(unit: str, i: _PlanItem, hod: int, dow_name: str) -> str:
+    """btrbk's reason for a snapshot the level of UNIT keeps."""
+    if unit == "h":
+        return f"preserve hourly: first of hour, {i.dh} hours ago"
+    if unit == "d":
+        at = f", {i.hfh}h after " if i.hfh else ", at "
+        return f"preserve daily: first of day, {i.dd} days ago{at}{hod:02d}:00"
+    if unit == "w":
+        return f"preserve weekly: {i.dw} weeks ago," + _delta_text(i, hod, dow_name)
+    if unit == "m":
+        return (
+            f"preserve monthly: first weekly of month {i.year}-{i.month:02d} "
+            f"({i.dm} months ago," + _delta_text(i, hod, dow_name) + ")"
         )
-    items.sort(key=lambda i: i["key"])
-
-    def delta_text(i: _PlanItem) -> str:
-        s = (f" {i['dfe']}d" if i["dfe"] else "") + (f" {i['hfh']}h" if i["hfh"] else "")
-        return (f"{s} after " if s else " at ") + f"{dow_name} {hod:02d}:00"
-
-    def within(unit: str, delta: int) -> bool:
-        n = policy.get(unit)
-        return bool(n) and (n == "all" or (isinstance(n, int) and delta <= n))
-
-    first_hours: dict[int, _PlanItem] = {}
-    for i in items:
-        if i["dh"] < 0:
-            i["reason"] = f"preserve forced: {-i['dh']} hours in the future"
-        first_hours.setdefault(i["dh"], i)
-    if items:
-        items[-1]["reason"] = "preserve min: latest"
-
-    first_days: dict[int, _PlanItem] = {}
-    for k in sorted(first_hours, reverse=True):
-        i = first_hours[k]
-        if within("h", i["dh"]):
-            i["reason"] = f"preserve hourly: first of hour, {i['dh']} hours ago"
-        first_days.setdefault(i["dd"], i)
-    first_weeks: dict[int, _PlanItem] = {}
-    for k in sorted(first_days, reverse=True):
-        i = first_days[k]
-        if within("d", i["dd"]):
-            i["reason"] = (
-                f"preserve daily: first of day, {i['dd']} days ago"
-                + (f", {i['hfh']}h after " if i["hfh"] else ", at ")
-                + f"{hod:02d}:00"
-            )
-        first_weeks.setdefault(i["dw"], i)
-    first_months: dict[int, _PlanItem] = {}
-    for k in sorted(first_weeks, reverse=True):
-        i = first_weeks[k]
-        if within("w", i["dw"]):
-            i["reason"] = f"preserve weekly: {i['dw']} weeks ago," + delta_text(i)
-        first_months.setdefault(i["dm"], i)
-    first_years: dict[int, _PlanItem] = {}
-    for k in sorted(first_months, reverse=True):
-        i = first_months[k]
-        if within("m", i["dm"]):
-            i["reason"] = (
-                f"preserve monthly: first weekly of month {i['year']}-{i['month']:02d} "
-                f"({i['dm']} months ago," + delta_text(i) + ")"
-            )
-        first_years.setdefault(i["dy"], i)
-    for k in sorted(first_years, reverse=True):
-        i = first_years[k]
-        if within("y", i["dy"]):
-            i["reason"] = (
-                f"preserve yearly: first weekly of year {i['year']} ({i['dy']} years ago," + delta_text(i) + ")"
-            )
-
-    out: list[Decision] = []
-    for i in items:
-        reason = i["reason"]
-        if reason:
-            out.append(Decision(i["snap"], "keep", reason))
-        else:
-            out.append(Decision(i["snap"], "delete", f"not kept by policy '{format_policy(policy)}'"))
-    return out
+    return f"preserve yearly: first weekly of year {i.year} ({i.dy} years ago," + _delta_text(i, hod, dow_name) + ")"
 
 
 def newest_of(snaps: Iterable[Snap]) -> Snap | None:
@@ -413,17 +412,7 @@ def parse_subvolume_show(text: str) -> SubvolInfo:
     Label lines are indented; the list after "Snapshot(s):" holds paths that are
     not ours to interpret, so parsing stops there.
     """
-    found: dict[str, str] = {}
-    for line in text.splitlines():
-        if line.strip().startswith("Snapshot(s):"):
-            break
-        m = re.match(r"^\s+([^:\t]+?):\s*(.*?)\s*$", line)
-        if not m or m.group(1) not in SHOW_LABELS:
-            continue
-        key = SHOW_LABELS[m.group(1)]
-        if key in found:
-            raise ParseError(f"label {m.group(1)!r} appears twice")
-        found[key] = m.group(2)
+    found = _show_fields(text)
     missing = [label for label, key in SHOW_LABELS.items() if key not in found]
     if missing:
         raise ParseError("missing " + ", ".join(missing))
@@ -440,6 +429,37 @@ def parse_subvolume_show(text: str) -> SubvolInfo:
         "generation": int(found["generation"]),
         "cgen": int(found["cgen"]),
     }
+
+
+def _show_fields(text: str) -> dict[str, str]:
+    """The SHOW_LABELS fields of `btrfs subvolume show` (key -> value), up to "Snapshot(s):".
+
+    ParseError when a label appears twice."""
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.strip().startswith("Snapshot(s):"):
+            break
+        field = _show_line(line)
+        if field is None or field[0] not in SHOW_LABELS:
+            continue
+        label, value = field
+        key = SHOW_LABELS[label]
+        if key in found:
+            raise ParseError(f"label {label!r} appears twice")
+        found[key] = value
+    return found
+
+
+def _show_line(line: str) -> tuple[str, str] | None:
+    """(label, value) of an indented "Label: value" line, both stripped; None for any other line.
+
+    The label is what follows the indentation up to the first colon, with no tab in it."""
+    if not line[:1].isspace():
+        return None
+    label, colon, value = line.lstrip().partition(":")
+    if not colon or not label or "\t" in label:
+        return None
+    return label, value.strip()
 
 
 def other_parent(info: SubvolInfo, source_uuid: str) -> str | None:
@@ -465,7 +485,7 @@ def require_absolute(option: str, path: str | None) -> None:
         raise Usage(f"{option} must be absolute")
 
 
-def parse_source(text: str, need_policy: bool = True) -> Source:
+def parse_source(text: str, *, need_policy: bool = True) -> Source:
     if "=" not in text:
         raise Usage(f"--source {text!r}: expected NAME=PATH:POLICY")
     name, rest = text.split("=", 1)
