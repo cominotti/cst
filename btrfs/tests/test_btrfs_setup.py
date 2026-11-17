@@ -193,6 +193,27 @@ class TimerRemovalTest(unittest.TestCase):
         )
         self.assertIn("docker-gc disabled", r.stdout)
 
+    def docker_gc_status(self, enabled: str, rc: int) -> str:
+        # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
+        # (not-found); the Python status part is a stub.
+        body = [
+            f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
+            'is-active) echo inactive; return 3 ;; esac; }',
+            'python3() { echo "python3 $*"; }',
+            assignment("DOCKER_GC_UNITS"),
+            shell_function(SETUP, "docker_gc"),
+            "docker_gc status",
+        ]
+        return self.run_bash("\n".join(body)).stdout
+
+    def test_docker_gc_status_prints_one_timer_state(self) -> None:
+        # With "|| echo off", a disabled timer printed "disabled" and then "off" on a line of its own.
+        self.assertEqual(self.docker_gc_status("disabled", 1).splitlines()[0], "timer disabled, recorder inactive")
+        self.assertEqual(self.docker_gc_status("enabled", 0).splitlines()[0], "timer enabled, recorder inactive")
+        self.assertEqual(self.docker_gc_status("not-found", 4).splitlines()[0], "timer not installed, recorder inactive")
+        self.assertEqual(self.docker_gc_status("", 1).splitlines()[0], "timer off, recorder inactive")
+        self.assertEqual(len(self.docker_gc_status("disabled", 1).splitlines()), 2)
+
     def snapshots(self, call: str) -> list[str]:
         # Sourced the way the frontend does; the paths it writes point into the test's folder.
         self.touch(*(os.path.join(self.units, t) for t in ("btrfs-snapshot.timer", "btrfs-snapshot-nas.timer")))

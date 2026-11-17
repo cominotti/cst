@@ -1352,7 +1352,9 @@ cst btrfs docker-gc cleanup-now     # one-off, asks first
 cst btrfs docker-gc disable
 ```
 
-`status` shows the timer and recorder state, since when image use is recorded,
+`status` shows the timer and recorder state on its first line (for example
+`timer enabled, recorder active`; `timer disabled` after `disable`, `timer not
+installed` when the unit is not there), since when image use is recorded,
 the date from which timed image removal is possible, the last run, and then the
 list. `run --dry-run` shows only the list, ends with `(dry run: nothing
 removed)`, and also works in the first 10 minutes after boot. Both only read,

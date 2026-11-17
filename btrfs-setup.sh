@@ -611,7 +611,7 @@ crypt_perf() {
 # ---- docker-gc: weekly, conservative Docker cleanup (explicit opt-in) ---------------------
 DOCKER_GC_UNITS=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
 docker_gc() {
-    local action="${1:-status}" bin=/usr/local/sbin/docker-gc
+    local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer
     [[ $# -gt 0 ]] && shift
     case "${action}" in
         enable)
@@ -633,7 +633,15 @@ docker_gc() {
             echo "docker-gc disabled (recorded state kept in /var/lib/docker-gc)."
             ;;
         status)
-            printf 'timer %s, recorder %s\n' "$(systemctl is-enabled docker-gc.timer 2>/dev/null || echo off)" \
+            # is-enabled prints its word (enabled, disabled, not-found) and exits
+            # non-zero for all but enabled: one word, from systemd; "off" only
+            # when it printed none.
+            timer="$(systemctl is-enabled docker-gc.timer 2>/dev/null)" || true
+            case "${timer}" in
+                "") timer=off ;;
+                not-found) timer="not installed" ;;
+            esac
+            printf 'timer %s, recorder %s\n' "${timer}" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"
             python3 -I -B "${SRC}/docker-gc" status
             ;;
