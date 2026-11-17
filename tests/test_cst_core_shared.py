@@ -522,6 +522,13 @@ class WriteAtomicTest(unittest.TestCase):
         finally:
             os.umask(old)
 
+    def test_without_proc_the_umask_is_assumed_strict_and_never_changed(self) -> None:
+        with (
+            mock.patch("builtins.open", side_effect=OSError("no /proc")),
+            mock.patch.object(core_files.os, "umask", side_effect=AssertionError("umask changed")),
+        ):
+            self.assertEqual(core_files._umask(), 0o077)
+
     def test_relabel_false_starts_no_restorecon_as_root(self) -> None:
         for relabel, calls in ((True, 1), (False, 0)):
             with (

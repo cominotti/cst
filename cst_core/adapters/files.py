@@ -271,9 +271,10 @@ def _umask() -> int:
                     return int(line.split()[1], 8)
     except OSError, ValueError, IndexError:
         pass
-    old = os.umask(0o022)
-    os.umask(old)
-    return old
+    # No readable /proc (not seen on a CST host): assume the strictest common umask instead
+    # of probing with os.umask, which changes it for a moment in every thread; a file then
+    # gets fewer permission bits than asked, never more.
+    return 0o077
 
 
 def locale_bytes(text: str) -> bytes:
