@@ -20,8 +20,7 @@ replace them.
       [README.md, "How to undo"](../../../README.md#how-to-undo).
 - [ ] A root command calls sudo by itself and refuses to run inside a toolbox,
       printing the host command instead; read-only commands keep working there.
-      See "Toolbox vs host" in
-      [AGENTS.md, "How the code fits together"](../../../AGENTS.md#how-the-code-fits-together).
+      See [docs/architecture.md, "Toolbox vs host"](../../../docs/architecture.md#toolbox-vs-host).
 - [ ] It goes through the module's entry point (`<module>-setup.sh` or the
       package's `cli.py`) and its help text uses `CST_PROG`. A new module also
       needs a row in `MODULES` in `cst_core/domain/dispatch.py`.
@@ -34,7 +33,8 @@ replace them.
       `cli.py`: `CLI_CEILINGS` in `tests/test_architecture.py` caps each
       `cli.py` and only goes down.
 - [ ] A need another module already has (sizes, managed files, units, locks,
-      systemd, virsh) uses the `cst_core` code listed in AGENTS.md instead of
+      systemd, virsh) uses the `cst_core` code listed in
+      [docs/architecture.md](../../../docs/architecture.md) instead of
       a copy; `tests/test_duplication.py` fails on copies.
 
 ## Tests, in the same change

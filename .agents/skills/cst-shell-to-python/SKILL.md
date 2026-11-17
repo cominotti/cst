@@ -50,7 +50,7 @@ and `swap/swap-status` into the `swap/` package. Read it with
    new measured value. Never raise one; `CLI_CEILINGS` applies to the new
    `cli.py`.
 7. **Docs in the same change**: the module README's file table and test
-   command, README.md "Other files in this folder", and AGENTS.md where it
+   command, README.md "Other files in this folder", and docs/architecture.md where it
    names which modules have an application layer.
 8. Run the gates in [AGENTS.md, "Commands"](../../../AGENTS.md#commands), and tier 1 when
    the module has a tier 1 test.

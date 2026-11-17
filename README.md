@@ -401,25 +401,15 @@ everything with `plan`, `status` or `doctor` before changing anything:
 - `cst_core/`: shared kernel (`domain/`), port protocols (`ports/`), host adapters
   (`adapters/`), shared use cases (`application/`), the Python CLI dispatcher
   (`cli.py`) behind `cst`, and the installer (`installer.py`).
-- `cst-install.bash`: how every module installs its files. The list of what is
-  installed where, with which mode, is one table, `INSTALL_MANIFEST` in
-  `cst_core/domain/install.py`. A file is written only when it changed (as
-  root, also when a root file is not owned by root), and the output says
-  `unchanged:` or `written:` per file, as it goes; a file that cannot be
-  written ends the run with `cst installer: cannot write DEST: REASON`. A
-  template (`*.in`) needs a `--set KEY=VALUE` for each `@KEY@` it holds, and
-  a `--set` that no template of the call uses is refused too (a misspelt key):
-  both are usage errors, and nothing is written. One rule for a symbolic link
-  at a destination, used by the installer, `cst vm backup-timer`,
-  `cst toolchains auto on` and `cst bluetooth` (for its LDAC watcher program): in a home folder (`~/...`) a
-  link to a file that already holds the wanted content counts as unchanged
-  and stays a link (a dotfiles manager's link), and one to other content is
-  judged as that file would be; at a root destination a link is always
-  replaced. A write replaces the link, never the file it points to. The Python helpers are
-  installed as **zipapps**: one file at the usual path (for example
-  `/usr/local/sbin/docker-gc`) that holds the program and the CST code it
-  imports, so it runs without this folder. `cst_core/installer.py plan SRC...`
-  (or `--module btrfs`) shows what an install would write, without writing.
+- `cst-install.bash`: how every module installs its files, from one table
+  (`INSTALL_MANIFEST` in `cst_core/domain/install.py`). A file is written only
+  when it changed, and the output says `unchanged:` or `written:` per file;
+  `cst_core/installer.py plan SRC...` (or `--module btrfs`) shows what an
+  install would write, without writing. In a home folder, a link to a file
+  that already holds the wanted content stays a link (a dotfiles manager's
+  link). The Python helpers are installed as **zipapps**, one file that runs
+  without this folder. The details:
+  [docs/architecture.md](docs/architecture.md#each-module-has-two-parts).
 - `cst-link.bash`: the helper that `cst btrfs install` and `cst cpu install`
   use to create the link `~/.local/bin/cst` ([The `cst` command](#the-cst-command)).
 - `fix-anaconda-webui-btrfs-compress.sh`: a one-time helper for **installing**
@@ -437,18 +427,14 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `vm` module and `cst doctor`. The unit tests need no root and no btrfs:
   `python3 -I -B tests/run_unit.py`, run from this folder, runs all of them with a
   socket as stdin (the way CI runs them; see [AGENTS.md](AGENTS.md), "Test gotchas").
-- `AGENTS.md`: rules for changing this repository (for people and coding agents),
-  an index of the module documents, the test and lint commands, how the code
-  fits together, and the test gotchas with the gates that enforce them. It is
-  the entry point for coding agents such as Claude Code and Codex, which read
-  it by themselves; there is no separate `CLAUDE.md`.
-- `.agents/rules/`, `.agents/skills/`: the rules every agent follows on any
-  change (for example [refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md))
-  and the skills, checklists for one kind of task (`<name>/SKILL.md`, such as
-  [cst-new-command](.agents/skills/cst-new-command/SKILL.md)). `.claude/rules`
-  and `.claude/skills` are links to these two folders, so Claude Code and the
-  other agents read the same files. `tests/test_docs.py` checks them, the
-  links of every Markdown file, and that each document is in the AGENTS.md index.
+- `AGENTS.md`: the entry point for changing this repository, for people and for
+  coding agents such as Claude Code and Codex, which read it by themselves
+  (there is no separate `CLAUDE.md`): the rules, the index of the documents,
+  the commands and the test gotchas. It links to `docs/architecture.md` (how
+  the code fits together) and to the agent rules and skills in `.agents/`
+  (`.claude/rules` and `.claude/skills` are links to them).
+  `tests/test_docs.py` checks the links of every Markdown file, that each
+  document is in the AGENTS.md index, and the agent files.
 - `pyproject.toml`, `uv.lock`, `tests/uv-dev`, `tests/mutation/`, `docs/dev-tools.md`: the
   developer tools for the Python code (the ruff linter and formatter, the
   ty type checker and the cosmic-ray mutation tester), pinned and installed through uv for

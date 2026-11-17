@@ -5,7 +5,7 @@ description: "Checklist for adding a Python helper that CST installs on the mach
 
 # Adding an installed Python helper
 
-Background: [AGENTS.md, "How the code fits together"](../../../AGENTS.md#how-the-code-fits-together)
+Background: [docs/architecture.md](../../../docs/architecture.md)
 (the manifest, zipapps, entry points) and
 [docs/dev-tools.md, "What each gate checks"](../../../docs/dev-tools.md#what-each-gate-checks).
 
@@ -18,7 +18,8 @@ Background: [AGENTS.md, "How the code fits together"](../../../AGENTS.md#how-the
       the layers (`PURE_MODULES`, `PURE_NAMES`), and every module must be
       reached from an entry point.
 - [ ] A new `cli.py` gets its line in `CLI_CEILINGS` (same file).
-- [ ] Shared needs come from `cst_core` (the list in AGENTS.md), not a copy:
+- [ ] Shared needs come from `cst_core` (the list in
+      [docs/architecture.md](../../../docs/architecture.md)), not a copy:
       `tests/test_duplication.py` counts copies, and a name defined in two
       files needs a reason in `ALLOWED_SAME_NAMES`.
 
