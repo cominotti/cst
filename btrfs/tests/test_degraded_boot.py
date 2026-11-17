@@ -97,7 +97,8 @@ write_if_changed() {
 }"""
 REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.M))
 # sha256 of the generated files as the previous version of the script
-# wrote them (commit 9077ec8): an install of it must stay current.
+# wrote them (main at a2cbb82, the version installed today): an install of
+# it must stay current.
 PREVIOUS_SHA256: Final = {
     RULE: "c8ab30283943b551730c0db39ae57db398e158b22a52f1a846bb0fcc1470b3b1",
     SERVICE: "1dd1f77006551c98cda6826ca1d25f5ca6c60e3cad9b5bb0f0446f7a60fb8458",

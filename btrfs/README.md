@@ -1043,12 +1043,14 @@ own checks:
     changes nothing.
 - It checks the new udev rule with `udevadm verify` before it writes
   anything: a rule that fails leaves nothing written.
-- It writes its files, then runs a self-test: `systemd-analyze verify`
-  must find no problem in its units (a typo such as an unknown key stops it),
-  every disk must show as ready, and `lsblk` must list as many disks of the
-  root filesystem as btrfs counts (none may go unchecked). If the self-test fails, a **newly written** rule is removed again and
-  the initramfs is **not** changed. The other helper files stay in `/etc`;
-  without the rule they do nothing.
+- It writes its files, then checks its units with `systemd-analyze verify`:
+  a problem such as a typo (an unknown key) stops the install there, with
+  the files written and the initramfs **not** changed.
+- Then it runs a self-test: every disk must show as ready, and `lsblk` must
+  list as many disks of the root filesystem as btrfs counts (none may go
+  unchecked). If the self-test fails, a **newly written** rule is removed
+  again and the initramfs is **not** changed. The other helper files stay in
+  `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).
   The change takes effect at the **next boot**. Running install again with
