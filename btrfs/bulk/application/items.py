@@ -473,7 +473,7 @@ def row(b: Bulk, name: str, text: str) -> None:
     b.out.say(row_text(name, text))
 
 
-def item_text(b: Bulk, item: Item, state: str, detail: str, mode: str) -> str:
+def item_text(b: Bulk, item: Item, state: str, detail: str) -> str:
     ctx, du = b.ctx, b.tree.du_bytes
     T, L = ctx.target(item), ctx.link(item)
     parent = os.path.dirname(item.link or "")
@@ -565,7 +565,7 @@ def report(b: Bulk, mode: str) -> int:
             done.add(item.id)
         else:
             left += 1
-        text = item_text(b, item, st, detail, mode)
+        text = item_text(b, item, st, detail)
         if item.id in flagged and st != "ok":
             text += "; waits for the next boot (busy)"
         row(b, describe_paths(ctx, item), text)

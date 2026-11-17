@@ -503,6 +503,17 @@ def steam_copy_need(b: Bulk, a: SteamApp) -> int:
     return a["copy_bytes"] + steam_copy_floor(b) if a["copy_bytes"] else 0
 
 
+def steam_race_guard(b: Bulk, j: SteamJournal) -> str:
+    """Why the switch must not happen now (running | busy | changed), or ''."""
+    if b.host.steam_running(b.ctx):
+        return "running"
+    if b.host.busy_paths([p["src"] for p in j["parts"]], b.ctx.home):
+        return "busy"
+    if b.user.steam_changed(j):
+        return "changed"
+    return ""
+
+
 def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
     """Move one app. Returns ok | running | busy | changed | space."""
     ctx, user, state, host = b.ctx, b.user, b.state, b.host
@@ -536,16 +547,7 @@ def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
         j["stamp"] = user.steam_prepare(parts, idle=ctx.separate)
         j["stamp2"] = user.clock(parts[-1]["new"])
         state.jwrite(ident, j)
-        # Race guard, last moment before the switch.
-        why = (
-            "running"
-            if host.steam_running(ctx)
-            else "busy"
-            if host.busy_paths([p["src"] for p in parts], ctx.home)
-            else "changed"
-            if user.steam_changed(j)
-            else ""
-        )
+        why = steam_race_guard(b, j)  # the last moment before the switch
     except OSError, RuntimeError, Unexpected:
         user.steam_drop_news(j)
         state.jdrop(ident)

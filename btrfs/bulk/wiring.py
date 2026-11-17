@@ -19,7 +19,7 @@ from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.state import StateFiles, bulk_user
 from btrfs.bulk.adapters.user import Account, UserFiles
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BulkPaths, Ctx
+from btrfs.bulk.domain import BadSettings, BulkPaths, Ctx, NoUser
 from btrfs.bulk.ports import HostPort, OutputPort
 from cst_core.adapters.files import CounterFile
 from cst_core.adapters.runtime import sibling_program
@@ -93,7 +93,7 @@ class Wiring:
     def user(self, args: Sequence[str]) -> tuple[Ctx, Account | None]:
         """Whose home, from --user NAME (root) or, not as root, the current
         user and the home override. As root without a name: BULK_USER of
-        bulk.conf (BadSettings on a bad line); SystemExit without either."""
+        bulk.conf (BadSettings on a bad line); NoUser without either."""
         name = None
         if "--user" in args:
             i = args.index("--user")
@@ -102,7 +102,7 @@ class Wiring:
             if not name:
                 name = bulk_user(self.paths.conf)
             if not name or name == "root":
-                raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
+                raise NoUser("btrfs-bulk: needs --user NAME (not root)")
             pw = lookup_user(name)
             return Ctx(real_path(pw.pw_dir), uid=pw.pw_uid, separate=True), pw
         return self.home_ctx(self.home or default_home()), None
@@ -116,7 +116,7 @@ class Wiring:
             if self.root:
                 return self.user_ctx(user_args) if user_args else None
             return self.user_ctx([])
-        except SystemExit, KeyError:
+        except BadSettings, NoUser, KeyError:
             return None
 
     def build(self, ctx: Ctx, pw: Account | None = None) -> Bulk:

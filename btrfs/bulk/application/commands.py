@@ -44,6 +44,8 @@ from btrfs.bulk.domain import (
 )
 from btrfs.bulk.ports import BulkStatePort, HomeTreePort, OutputPort
 
+LIBRARY_ROW = "library ~/Bulk/steam"  # the plan's line about ~/Bulk/steam as a Steam library
+
 
 def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> SteamSurvey:
     """Everything plan prints and apply needs (read-only). allow_copy: --copy
@@ -138,16 +140,16 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
         row(b, "libraryfolders.vdf", "the two copies differ only by the ~/Bulk/steam entry (an interrupted run):")
         row(b, "", "apply writes both again")
     if sv["idx"] is not None:
-        row(b, "library ~/Bulk/steam", f"ok (library {sv['idx']})")
+        row(b, LIBRARY_ROW, f"ok (library {sv['idx']})")
     elif any(a["state"] == "move" for a in sv["apps"]):
         n = max(int(i) for i in lf_libraries(S["tree"])) + 1
         row(
             b,
-            "library ~/Bulk/steam",
+            LIBRARY_ROW,
             f"add as library {n} (contentid {sv['cid'] or 'new'}; both libraryfolders.vdf, backed up first)",
         )
     else:
-        row(b, "library ~/Bulk/steam", "not a library yet (added with the first game that moves)")
+        row(b, LIBRARY_ROW, "not a library yet (added with the first game that moves)")
     texts = {
         "ok": lambda a: "ok (in ~/Bulk/steam)",
         "skip": lambda a: f"skipped: a tool, not a game; move it with --app {a['id']}",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 from typing import NotRequired
@@ -105,15 +106,21 @@ class Unexpected(Exception):
     """A state this tool does not change by itself."""
 
 
-class BadSettings(SystemExit):
-    """bulk.conf has a line that is not a plain KEY=VALUE. A SystemExit with the
-    message: the run stops with exit 1 and the message on stderr. At boot,
-    main() also sends it as an alert (nobody reads the boot console); lines
-    names each bad line (file and line number)."""
+class BadSettings(Exception):
+    """bulk.conf has a line that is not a plain KEY=VALUE: main() stops the
+    run with exit 1 and the message on stderr. At boot, main() also sends it
+    as an alert (nobody reads the boot console); lines names each bad line
+    (file and line number)."""
 
     def __init__(self, lines: str) -> None:
         super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
         self.lines = lines
+
+
+class NoUser(Exception):
+    """As root, neither --user NAME nor BULK_USER names whose home it is (or
+    it names root): main() stops the run with exit 1 and the message on
+    stderr. Root must never guess whose home it moves."""
 
 
 KEEP_HEADER = (
@@ -200,7 +207,7 @@ TOOL_DIR = re.compile(r"(SteamLinuxRuntime|Proton|Steamworks Shared)")
 TOOL_NAME = re.compile(r"(Steam Linux Runtime|Proton\b|Steamworks Common Redistributables)")
 # The keys a libraryfolders.vdf entry may have besides "path" and "apps".
 LF_KEYS = ("label", "contentid", "totalsize", "update_clean_bytes_tally", "time_last_update_verified")
-DECIMAL = re.compile(r"[0-9]+")
+DECIMAL = re.compile(r"\d+", re.ASCII)
 MAKE_DEFAULT = (
     "Once, by hand, so new games go there too: Steam > Settings > Storage > pick ~/Bulk/steam\n"
     "  in the drive list > '...' > Make default. (This tool never touches config/config.vdf,\n"
@@ -402,6 +409,50 @@ def hms(seconds: float) -> str:
 
 
 STEAM_USAGE = "usage: btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"
+
+
+@dataclass(frozen=True, slots=True)
+class SteamArgs:
+    """btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME], parsed."""
+
+    sub: str
+    ids: tuple[str, ...]
+    user_args: tuple[str, ...]
+    allow_copy: bool
+
+
+def parse_steam_args(args: Sequence[str]) -> SteamArgs | tuple[str, ...]:
+    """The steam command's arguments, or the lines for stderr (exit 2)."""
+    sub = args[0] if args else ""
+    ids: list[str] = []
+    user_args: tuple[str, ...] = ()
+    i = 1
+    allow_copy = False
+    while i < len(args):
+        a = args[i]
+        if a == "--copy":
+            allow_copy = True
+            i += 1
+            continue
+        if a == "--app" and i + 1 < len(args) and DECIMAL.fullmatch(args[i + 1]) and len(args[i + 1]) <= 10:
+            ids.append(str(int(args[i + 1])))
+        elif a == "--user" and i + 1 < len(args):
+            user_args = (a, args[i + 1])
+        else:
+            value = f" {args[i + 1]!r}" if a == "--app" and i + 1 < len(args) else ""
+            return (f"btrfs-bulk steam: bad argument {a!r}{value}", STEAM_USAGE)
+        i += 2
+    if sub not in ("plan", "apply"):
+        return (STEAM_USAGE,)
+    return SteamArgs(sub, tuple(ids), user_args, allow_copy)
+
+
+def split_user_args(args: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(the other arguments, ["--user", NAME] or [])."""
+    if "--user" in args:
+        i = args.index("--user")
+        return list(args[:i]) + list(args[i + 2 :]), list(args[i : i + 2])
+    return list(args), []
 
 
 # ---- the home being handled, the program's paths ----
@@ -727,9 +778,13 @@ def steam_move_lines(ctx: Ctx, a: SteamApp, allow_copy: bool) -> list[str]:
     if r or not c:
         out.append(f"move {gib(r)} (reflink, no data written)")
     if c:
-        out.append(f"copy {gib(c)} byte by byte: {steam_nocow_files(ctx, a)};")
-        out.append("btrfs cannot reflink those, so the folders holding them are rewritten into COW ~/Bulk/steam")
-        out.append("(gaining checksums and compression)")
+        out.extend(
+            [
+                f"copy {gib(c)} byte by byte: {steam_nocow_files(ctx, a)};",
+                "btrfs cannot reflink those, so the folders holding them are rewritten into COW ~/Bulk/steam",
+                "(gaining checksums and compression)",
+            ]
+        )
         if not allow_copy:
             out.append("add --copy to allow it")
     if len(out) > 1 and r:

@@ -40,7 +40,7 @@ from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BulkPaths, ItemJournal
+from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.values import Json
@@ -492,12 +492,17 @@ class BulkTest(BulkBase):
                 self.assertEqual(root.user_ctx([]).home, os.path.realpath(pwd.getpwnam(me).pw_dir))
         with open(self.paths.conf, "w") as f:
             f.write("# CST\nBULK_USER=$USER\n")
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(BadSettings) as cm:
             root.user_ctx([])
-        self.assertIn(f"{self.paths.conf} line 2: BULK_USER=$USER: $", str(cm.exception.code))
+        self.assertIn(f"{self.paths.conf} line 2: BULK_USER=$USER: $", str(cm.exception))
         os.remove(self.paths.conf)
-        with self.assertRaisesRegex(SystemExit, "needs --user NAME"):
+        with self.assertRaisesRegex(NoUser, "needs --user NAME"):
             root.user_ctx([])
+        # main(): the message on stderr and exit 1, as a SystemExit with it gave.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
+        self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
 
     def test_a_bad_bulk_conf_line_at_boot_exits_non_zero_and_alerts(self) -> None:
         # The boot service runs `btrfs-bulk boot` before any login. The refusal to guess whose home
@@ -511,12 +516,12 @@ class BulkTest(BulkBase):
             f.write("apps\n")
         sent: list[tuple[str, str]] = []
         self.fake(self.host, "alert", lambda title, body: sent.append((title, body)))
-        with self.assertRaises(SystemExit) as cm:
-            bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root)
-        code = cm.exception.code
-        # A text: Python prints it on stderr and exits 1.
-        self.assertIsInstance(code, str)
-        self.assertIn(f"{self.paths.conf} line 2: BULK_USER=$USER: $", str(code))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
+        # The text on stderr, exit 1 (what Python did with the SystemExit it was).
+        self.assertIn(f"{self.paths.conf} line 2: BULK_USER=$USER: $", err.getvalue())
+        self.assertTrue(err.getvalue().endswith("or pass --user NAME.\n"), err.getvalue())
         self.assertEqual(len(sent), 1, sent)
         title, body = sent[0]
         self.assertEqual(title, "~/Bulk: nothing moved at boot")
@@ -525,8 +530,8 @@ class BulkTest(BulkBase):
         self.assertTrue(os.path.exists(self.paths.flag), "the items wait for the next boot, once the line is fixed")
         # Run by hand, the message is on the terminal: no alert.
         sent.clear()
-        with self.assertRaises(SystemExit):
-            bulk_cli.main(["btrfs-bulk", "plan"], TOOL, wiring=root)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "plan"], TOOL, wiring=root), 1)
         self.assertEqual(sent, [])
 
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
@@ -1005,7 +1010,7 @@ class BulkTest(BulkBase):
         self.setup_programs()
         self.crash_after_late_write()
         self.assertLink("Programs", "apps")  # the switch was complete
-        self.assertEqual(self.journal("apps")["bulk_only"], False)
+        self.assertIs(self.journal("apps")["bulk_only"], False)
         self.assertIn("stamp2", self.journal("apps"))
         # The repair puts the old tree back (with the late write), then moves it again.
         self.assertEqual(self.apply(), ([], []), self.out)
@@ -1427,10 +1432,10 @@ class BulkTest(BulkBase):
         with mock.patch.object(bulk_machine.subprocess, "run", du):
             self.assertEqual(Primitives().du_bytes("/x"), bulk_domain.TreeSize(5368709120, False))
             item = next(i for i in bulk_domain.ITEMS if i.id == "apps")
-            text = bulk_items.item_text(self.bulk, item, "nocow", "folder without +C", "plan")
+            text = bulk_items.item_text(self.bulk, item, "nocow", "folder without +C")
             self.assertEqual(text, "rewrite without copy-on-write (folder without +C, at least 5.0 GiB)")
             answer = answers["whole"]
-            text = bulk_items.item_text(self.bulk, item, "nocow", "folder without +C", "plan")
+            text = bulk_items.item_text(self.bulk, item, "nocow", "folder without +C")
             self.assertEqual(text, "rewrite without copy-on-write (folder without +C, 5.0 GiB)")
             answer = answers["nothing"]
             self.assertEqual(Primitives().du_bytes("/x"), bulk_domain.TreeSize(0, False))
@@ -1615,7 +1620,7 @@ class AsUserTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.pw = pwd.getpwuid(os.getuid())
         for name in ("setgroups", "setresgid", "setresuid"):
-            patcher = mock.patch.object(bulk_user.os, name, lambda *_a: None)
+            patcher = mock.patch.object(bulk_user.os, name, return_value=None)
             patcher.start()
             self.addCleanup(patcher.stop)
 

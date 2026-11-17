@@ -9,7 +9,15 @@ import sys
 
 from btrfs.bulk.application.commands import boot, keep_ids, keep_report, steam_apply, steam_print, steam_survey
 from btrfs.bulk.application.items import apply, exit_status, report
-from btrfs.bulk.domain import BY_ID, DECIMAL, MAKE_DEFAULT, STEAM_USAGE, BadSettings
+from btrfs.bulk.domain import (
+    BY_ID,
+    MAKE_DEFAULT,
+    BadSettings,
+    NoUser,
+    SteamArgs,
+    parse_steam_args,
+    split_user_args,
+)
 from btrfs.bulk.wiring import Wiring
 
 USAGE = (
@@ -20,34 +28,13 @@ USAGE = (
 
 def steam_cmd(w: Wiring, args: Sequence[str]) -> int:
     """btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"""
-    sub = args[0] if args else ""
-    ids: list[str] = []
-    user_args: list[str] = []
-    i = 1
-    allow_copy = False
-    while i < len(args):
-        a = args[i]
-        if a == "--copy":
-            allow_copy = True
-            i += 1
-            continue
-        if a == "--app" and i + 1 < len(args) and DECIMAL.fullmatch(args[i + 1]) and len(args[i + 1]) <= 10:
-            ids.append(str(int(args[i + 1])))
-        elif a == "--user" and i + 1 < len(args):
-            user_args = [a, args[i + 1]]
-        else:
-            print(
-                f"btrfs-bulk steam: bad argument {a!r}"
-                + (f" {args[i + 1]!r}" if a == "--app" and i + 1 < len(args) else ""),
-                file=sys.stderr,
-            )
-            print(STEAM_USAGE, file=sys.stderr)
-            return 2
-        i += 2
-    if sub not in ("plan", "apply"):
-        print(STEAM_USAGE, file=sys.stderr)
+    parsed = parse_steam_args(args)
+    if not isinstance(parsed, SteamArgs):
+        for line in parsed:
+            print(line, file=sys.stderr)
         return 2
-    b = w.bulk(user_args)
+    sub, ids, allow_copy = parsed.sub, list(parsed.ids), parsed.allow_copy
+    b = w.bulk(parsed.user_args)
     if sub == "plan":
         sv = steam_survey(b, ids, allow_copy)
         steam_print(b, sv)
@@ -65,11 +52,7 @@ def steam_cmd(w: Wiring, args: Sequence[str]) -> int:
 
 def keep_cmd(w: Wiring, cmd: str, args: Sequence[str]) -> int:
     """btrfs-bulk keep|unkeep ID... [--user NAME]"""
-    if "--user" in args:
-        i = args.index("--user")
-        ids, user_args = list(args[:i]) + list(args[i + 2 :]), list(args[i : i + 2])
-    else:
-        ids, user_args = list(args), []
+    ids, user_args = split_user_args(args)
     bad = [i for i in ids if i not in BY_ID]
     if not ids or bad:
         if bad:
@@ -86,8 +69,19 @@ def keep_cmd(w: Wiring, cmd: str, args: Sequence[str]) -> int:
 
 def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) -> int:
     """btrfs-bulk with argv (argv[0] the program); entry_file is the running
-    entry point's __file__ (where btrfs-snapshot is found)."""
+    entry point's __file__ (where btrfs-snapshot is found). Whose home it is
+    unknown (a bad bulk.conf line, no user as root): the message on stderr,
+    exit 1."""
     w = Wiring.from_environment(entry_file) if wiring is None else wiring
+    try:
+        return run(w, argv)
+    except (BadSettings, NoUser) as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
+def run(w: Wiring, argv: Sequence[str]) -> int:
+    """One command of btrfs-bulk (argv[0] the program)."""
     cmd = argv[1] if len(argv) > 1 else "status"
     if cmd in ("keep", "unkeep"):
         return keep_cmd(w, cmd, argv[2:])

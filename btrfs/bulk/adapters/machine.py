@@ -432,7 +432,7 @@ class HomeTree:
             names = os.listdir(os.path.join(folder, "steamapps"))
         except OSError:
             return set()
-        return {m.group(1) for m in (re.fullmatch(r"appmanifest_([0-9]+)\.acf", n) for n in names) if m}
+        return {m.group(1) for m in (re.fullmatch(r"appmanifest_(\d+)\.acf", n, re.ASCII) for n in names) if m}
 
     def newest_backup(self, path: str) -> str | None:
         d, base = os.path.split(path)

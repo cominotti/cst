@@ -81,7 +81,7 @@ class StateFiles:
             names = os.listdir(self.paths.state)
         except OSError:
             return []
-        ids = [m.group(1) for m in (re.fullmatch(r"journal-(steam-[0-9]+)\.json", n) for n in names) if m]
+        ids = [m.group(1) for m in (re.fullmatch(r"journal-(steam-\d+)\.json", n, re.ASCII) for n in names) if m]
         return sorted(ids, key=lambda i: int(i[6:]))
 
     # ---- the boot flag ----
