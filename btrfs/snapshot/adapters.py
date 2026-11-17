@@ -129,7 +129,7 @@ class Level:
 
 
 def tree(
-    parent_fd: int, name: str, top: int, dev: int, delete: bool, problems: list[tuple[str, str]], rel: str
+    parent_fd: int, name: str, top: int, dev: int, problems: list[tuple[str, str]], rel: str, *, delete: bool
 ) -> CacheDir:
     """Count (and with DELETE remove) the folder NAME below PARENT_FD, open
     as TOP (closed here), and everything in it. File descriptors only: no
@@ -140,77 +140,115 @@ def tree(
     still recognised as a cache (it stays when anything below could not be
     deleted). Returns a CacheDir; failures go to PROBLEMS (rel, text) and the
     rest goes on."""
-    files = size = 0
-    before = len(problems)
-    stack = [Level(top, name, rel)]
-    while stack:
-        level = stack[-1]
-        is_top = len(stack) == 1
-        if level.todo is None:
-            level.todo = []
+    return TreeWalk(parent_fd, dev, problems, delete=delete).run(Level(top, name, rel))
+
+
+class TreeWalk:
+    """The walk of tree(): a stack of open folders, the counts, the problems."""
+
+    def __init__(self, parent_fd: int, dev: int, problems: list[tuple[str, str]], *, delete: bool) -> None:
+        self.parent_fd = parent_fd
+        self.dev = dev
+        self.problems = problems
+        self.delete = delete
+        self.before = len(problems)
+        self.files = 0
+        self.size = 0
+        self.stack: list[Level] = []
+
+    def run(self, top: Level) -> CacheDir:
+        self.stack.append(top)
+        while self.stack:
+            level = self.stack[-1]
+            is_top = len(self.stack) == 1
+            if level.todo is None:
+                level.todo = self.list_level(level, is_top=is_top)
+            if level.todo:
+                self.descend(level, level.todo.pop())
+                continue
+            # Every subfolder handled: close this one and remove it from its parent.
+            self.leave(is_top=is_top)
+        return CacheDir(top.rel, self.files, self.size)
+
+    def list_level(self, level: Level, *, is_top: bool) -> list[str]:
+        """Count (and delete) what is not a folder in LEVEL; its subfolders, the next one last."""
+        todo: list[str] = []
+        try:
+            with os.scandir(level.fd) as it:
+                entries = list(it)
+        except OSError as e:
+            self.problems.append((level.rel, f"cannot list: {e.strerror}"))
+            entries = []
+        for e in sorted(entries, key=lambda x: x.name):
             try:
-                with os.scandir(level.fd) as it:
-                    entries = list(it)
-            except OSError as e:
-                problems.append((level.rel, f"cannot list: {e.strerror}"))
-                entries = []
-            for e in sorted(entries, key=lambda x: x.name):
-                try:
-                    if e.is_dir(follow_symlinks=False):
-                        level.todo.append(e.name)
-                        continue
-                    st = e.stat(follow_symlinks=False)
-                except OSError as err:
-                    problems.append((os.path.join(level.rel, e.name), err_text(err)))
+                if e.is_dir(follow_symlinks=False):
+                    todo.append(e.name)
                     continue
-                files += 1
-                if stat.S_ISREG(st.st_mode):
-                    size += st.st_size
-                if delete and not (is_top and e.name == CACHE_TAG):  # the top's tag goes last
-                    try:
-                        os.unlink(e.name, dir_fd=level.fd)
-                    except OSError as err:
-                        problems.append((os.path.join(level.rel, e.name), f"cannot delete: {err.strerror}"))
-            level.todo.reverse()
-        if level.todo:
-            child = level.todo.pop()
-            crel = os.path.join(level.rel, child)
-            try:
-                cfd = open_noatime(child, DIR_FLAGS, level.fd)
-            except OSError as e:
-                problems.append((crel, f"cannot open: {e.strerror}"))
+                st = e.stat(follow_symlinks=False)
+            except OSError as err:
+                self.problems.append((os.path.join(level.rel, e.name), err_text(err)))
                 continue
-            if os.fstat(cfd).st_dev != dev:
-                os.close(cfd)
-                if delete:
-                    try:
-                        os.rmdir(child, dir_fd=level.fd)  # an empty placeholder; never a mount's content
-                    except OSError as e:
-                        problems.append((crel, f"on another device, not entered: {e.strerror}"))
-                continue
-            stack.append(Level(cfd, child, crel))
-            continue
-        # Every subfolder handled: close this one and remove it from its parent.
-        stack.pop()
-        failed = len(problems) > before
-        if delete and is_top and not failed:
+            self.files += 1
+            if stat.S_ISREG(st.st_mode):
+                self.size += st.st_size
+            if self.delete and not (is_top and e.name == CACHE_TAG):  # the top's tag goes last
+                self.unlink(level, e.name)
+        todo.reverse()
+        return todo
+
+    def unlink(self, level: Level, name: str) -> None:
+        try:
+            os.unlink(name, dir_fd=level.fd)
+        except OSError as err:
+            self.problems.append((os.path.join(level.rel, name), f"cannot delete: {err.strerror}"))
+
+    def descend(self, level: Level, child: str) -> None:
+        """Open the subfolder CHILD of LEVEL and push it, unless it is on another device."""
+        crel = os.path.join(level.rel, child)
+        try:
+            cfd = open_noatime(child, DIR_FLAGS, level.fd)
+        except OSError as e:
+            self.problems.append((crel, f"cannot open: {e.strerror}"))
+            return
+        if os.fstat(cfd).st_dev == self.dev:
+            self.stack.append(Level(cfd, child, crel))
+            return
+        os.close(cfd)
+        if self.delete:
             try:
-                os.unlink(CACHE_TAG, dir_fd=level.fd)
-            except FileNotFoundError:
-                pass
+                os.rmdir(child, dir_fd=level.fd)  # an empty placeholder; never a mount's content
             except OSError as e:
-                problems.append((os.path.join(level.rel, CACHE_TAG), f"cannot delete: {e.strerror}"))
-                failed = True
+                self.problems.append((crel, f"on another device, not entered: {e.strerror}"))
+
+    def leave(self, *, is_top: bool) -> None:
+        """Pop the folder on top of the stack, close it and (with delete) remove it."""
+        level = self.stack.pop()
+        failed = len(self.problems) > self.before
+        if self.delete and is_top and not failed:
+            failed = not self.unlink_tag(level)
         os.close(level.fd)
         # The top stays when anything in it failed (still a cache, its tag kept).
-        if delete and not (is_top and failed):
-            try:
-                os.rmdir(level.name, dir_fd=parent_fd if is_top else stack[-1].fd)
-            except OSError as e:
-                # Not empty because something below could not go: already reported.
-                if not (failed and e.errno == errno.ENOTEMPTY):
-                    problems.append((level.rel, f"cannot delete: {e.strerror}"))
-    return CacheDir(rel, files, size)
+        if self.delete and not (is_top and failed):
+            self.rmdir(level, is_top=is_top, failed=failed)
+
+    def unlink_tag(self, level: Level) -> bool:
+        """Delete the top folder's CACHEDIR.TAG, last (False when it cannot go)."""
+        try:
+            os.unlink(CACHE_TAG, dir_fd=level.fd)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.problems.append((os.path.join(level.rel, CACHE_TAG), f"cannot delete: {e.strerror}"))
+            return False
+        return True
+
+    def rmdir(self, level: Level, *, is_top: bool, failed: bool) -> None:
+        try:
+            os.rmdir(level.name, dir_fd=self.parent_fd if is_top else self.stack[-1].fd)
+        except OSError as e:
+            # Not empty because something below could not go: already reported.
+            if not (failed and e.errno == errno.ENOTEMPTY):
+                self.problems.append((level.rel, f"cannot delete: {e.strerror}"))
 
 
 def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "drop"] = "count") -> CacheWalk:
@@ -224,60 +262,88 @@ def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "dr
     deletes them (counting as it goes). Returns a CacheWalk."""
     start = time.monotonic()
     skip_set = {os.path.normpath(s) for s in skips}
-    holders: set[str] = set()  # folders above a skipped path
+    result = CacheWalk([], [], [], [])
+    if "." in skip_set:
+        result.skipped.append(".")
+        return result
+    search = CacheSearch(open_noatime(root, DIR_FLAGS, None), skip_set, result, drop=mode == "drop")
+    try:
+        search.run()
+    finally:
+        search.close()
+    return dataclasses.replace(result, seconds=time.monotonic() - start)
+
+
+def skip_holders(skip_set: Collection[str]) -> set[str]:
+    """The folders above a skipped path (relative to the walk's root)."""
+    holders: set[str] = set()
     for s in skip_set:
         parent = os.path.dirname(s)
         while parent:
             holders.add(parent)
             parent = os.path.dirname(parent)
-    result = CacheWalk([], [], [], [])
-    if "." in skip_set:
-        result.skipped.append(".")
-        return result
-    root_fd = open_noatime(root, DIR_FLAGS, None)
-    dev = os.fstat(root_fd).st_dev
-    stack = [Level(root_fd, "", "")]
-    try:
-        while stack:
-            level = stack[-1]
+    return holders
+
+
+class CacheSearch:
+    """The walk of walk_caches(): a stack of open folders below the root, and what it found."""
+
+    def __init__(self, root_fd: int, skip_set: set[str], result: CacheWalk, *, drop: bool) -> None:
+        self.skip_set = skip_set
+        self.holders = skip_holders(skip_set)
+        self.result = result
+        self.drop = drop
+        self.dev = os.fstat(root_fd).st_dev
+        self.stack = [Level(root_fd, "", "")]
+
+    def run(self) -> None:
+        while self.stack:
+            level = self.stack[-1]
             if level.todo is None:
-                try:
-                    level.todo = subdirs(level.fd)[::-1]
-                except OSError as e:
-                    result.problems.append((level.rel or ".", f"cannot list: {e.strerror}"))
-                    level.todo = []
+                level.todo = self.subfolders(level)
             if not level.todo:
-                os.close(stack.pop().fd)
+                os.close(self.stack.pop().fd)
                 continue
-            name = level.todo.pop()
-            crel = os.path.join(level.rel, name) if level.rel else name
-            if name in WALK_PRUNE:
-                continue
-            if crel in skip_set:
-                result.skipped.append(crel)
-                continue
-            try:
-                cfd = open_noatime(name, DIR_FLAGS, level.fd)
-            except OSError as e:
-                result.problems.append((crel, f"cannot open: {e.strerror}"))
-                continue
-            # The device first: a nested subvolume (~/Bulk, ~/.cache) with a
-            # tag is an empty placeholder in a snapshot, nothing to drop.
-            if os.fstat(cfd).st_dev != dev:
-                os.close(cfd)
-                continue
-            if not has_cache_tag(cfd):
-                stack.append(Level(cfd, name, crel))
-                continue
-            if crel in holders:
-                result.kept.append(crel)
-                stack.append(Level(cfd, name, crel))
-                continue
-            result.folders.append(tree(level.fd, name, cfd, dev, mode == "drop", result.problems, crel))
-    finally:
-        for level in stack:
+            self.visit(level, level.todo.pop())
+
+    def close(self) -> None:
+        for level in self.stack:
             os.close(level.fd)
-    return dataclasses.replace(result, seconds=time.monotonic() - start)
+
+    def subfolders(self, level: Level) -> list[str]:
+        """LEVEL's subfolders, the next one last ([] when it cannot be listed)."""
+        try:
+            return subdirs(level.fd)[::-1]
+        except OSError as e:
+            self.result.problems.append((level.rel or ".", f"cannot list: {e.strerror}"))
+            return []
+
+    def visit(self, level: Level, name: str) -> None:
+        """The subfolder NAME of LEVEL: skipped, entered, kept or counted (and dropped) as a cache."""
+        crel = os.path.join(level.rel, name) if level.rel else name
+        if name in WALK_PRUNE:
+            return
+        if crel in self.skip_set:
+            self.result.skipped.append(crel)
+            return
+        try:
+            cfd = open_noatime(name, DIR_FLAGS, level.fd)
+        except OSError as e:
+            self.result.problems.append((crel, f"cannot open: {e.strerror}"))
+            return
+        # The device first: a nested subvolume (~/Bulk, ~/.cache) with a
+        # tag is an empty placeholder in a snapshot, nothing to drop.
+        if os.fstat(cfd).st_dev != self.dev:
+            os.close(cfd)
+            return
+        if not has_cache_tag(cfd):
+            self.stack.append(Level(cfd, name, crel))
+            return
+        if crel in self.holders:
+            self.result.kept.append(crel)
+            self.stack.append(Level(cfd, name, crel))
+            return
+        self.result.folders.append(tree(level.fd, name, cfd, self.dev, self.result.problems, crel, delete=self.drop))
 
 
 # The commands of a snapshot run: where it runs, never moved to the host.
