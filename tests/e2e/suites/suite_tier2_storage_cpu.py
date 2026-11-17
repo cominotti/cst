@@ -438,12 +438,20 @@ sys.exit(os.waitstatus_to_exitcode(status))
 
 # test_20, test_21: runs a command on a new pseudo-terminal (`cst vm tune
 # apply` and `nocow apply` ask [y/N] and refuse without a terminal) with
-# argv[1] typed ahead: input() reads it at the question. Prints what the
-# command printed; exits with its code.
+# argv[1] typed ahead: input() reads it at the question. The terminal echoes
+# the answer when it is typed, so it comes first in the output and the prompt's
+# line goes on with what the command prints next. Prints what the command
+# printed, without the terminal control strings (OSC, ESC ] ... BEL or ESC \)
+# that sudo's PAM session writes to the terminal (systemd's OSC 3008 context
+# markers); exits with its code, or kills it after 300 s. On a failure the output
+# goes to stderr too, so the test's log shows it.
 PTY_ANSWER_DRIVER = r"""
 import os
 import pty
+import re
+import select
 import sys
+import time
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -453,7 +461,11 @@ if pid == 0:
         os._exit(127)  # exec failed: never run the loop below in the child
 os.write(fd, sys.argv[1].encode() + b"\n")  # typed ahead: input() reads it at the prompt
 out = bytearray()
-while True:
+deadline = time.monotonic() + 300
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.5)
+    if not ready:
+        continue
     try:
         data = os.read(fd, 4096)
     except OSError:  # EIO: the command ended and closed the terminal
@@ -461,9 +473,16 @@ while True:
     if not data:
         break
     out += data
+else:
+    os.kill(pid, 9)
+    out += b"\nE2E-PTY: no end after 300 s\n"
 _, status = os.waitpid(pid, 0)
-sys.stdout.write(out.decode(errors="replace").replace("\r\n", "\n"))
-sys.exit(os.waitstatus_to_exitcode(status))
+code = os.waitstatus_to_exitcode(status)
+text = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", b"", bytes(out)).decode(errors="replace").replace("\r\n", "\n")
+sys.stdout.write(text)
+if code != 0:  # the script stops at out="$(drive ...)" under set -e: the CI log gets the output from stderr
+    sys.stderr.write(text)
+sys.exit(code)
 """
 
 # test_20: a Linux guest (its libosinfo id) with the hardware `cst vm tune`
@@ -568,7 +587,7 @@ same "apply without a terminal" "$w/d0.xml"
 
 # 3. answered no.
 out="$(drive n)"
-grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer ends the prompt's line
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer was echoed first, when typed ahead
 same "apply answered no" "$w/d0.xml"
 [[ ! -e "$w/backups" ]]
 
@@ -705,15 +724,16 @@ same "apply without a terminal" "$before"
 # 3. answered no: nothing changed.
 out="$(drive n)"
 show "apply, no" "$out"
-grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer ends the prompt's line
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer was echoed first, when typed ahead
 same "apply answered no" "$before"
 
 # 4. answered yes: the system folder created as libvirt does it, through sudo, and every folder marked.
 out="$(drive y)"
 show apply "$out"
-# Not -x: apply adds "(its mark is not readable as your user: set again, harmless)" to a folder
-# it is about to create (reported separately as a wording bug; this test checks the action).
-grep -qF "  create (root:root 0711) and mark +C: $sys (sudo)" <<<"$out"
+# Today's wording, pinned: apply adds "(its mark is not readable as your user: set again,
+# harmless)" to a folder it is about to create, which has no mark to read yet (reported as
+# a wording bug; the fix drops that suffix here and changes this line).
+grep -qxF "  create (root:root 0711) and mark +C: $sys (sudo) (its mark is not readable as your user: set again, harmless)" <<<"$out"
 grep -qxF "  mark +C: $sess" <<<"$out"
 grep -qxF "  mark +C: $boxes" <<<"$out"
 grep -qF "  sudo install -d -o root -g root -m 0711 $sys" <<<"$out"   # on the line of the question

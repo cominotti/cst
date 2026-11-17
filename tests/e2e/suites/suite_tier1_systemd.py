@@ -210,9 +210,7 @@ same() {   # same LABEL BEFORE
     return 1
 }
 show() { sed "s/^/test_80 $1: /" <<<"$2" >&2; }   # the CI log
-# The run ends with the live checks, which fail here (no adapter, bluetoothd not
-# active): exit 1 with that error and nothing else.
-verify_failed_only() {   # verify_failed_only LABEL RC OUT
+verify_failed_only() {   # verify_failed_only LABEL RC OUT: the live checks failed, nothing else
     if [[ "$2" != 1 ]] || ! grep -qF "ERROR: verification found problems (see above)." <<<"$3" \
         || ! grep -qF "no Bluetooth adapter in org.bluez" <<<"$3"; then
         echo "test_80 $1: exit $2, not only the live checks failing" >&2
@@ -221,8 +219,15 @@ verify_failed_only() {   # verify_failed_only LABEL RC OUT
 }
 roles() { python3 -I /opt/cst-rw/bluetooth/bt-helper wp-roles | cut -d'|' -f1; }
 wp_pid() { systemctl --user show -p MainPID --value wireplumber.service; }
-no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change
-    if grep -E '^(backup|written|removed|enabled|started|restart): ' <<<"$2"; then
+# step LABEL ARGS...: bt ARGS into $out, shown in the CI log, ending with only the live checks failing.
+step() {
+    local rc=0
+    out="$(bt "${@:2}" 2>&1)" || rc=$?
+    show "$1" "$out"
+    verify_failed_only "$1" "$rc" "$out"
+}
+no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change (every verb it uses)
+    if grep -E '^(adopted|backup|enabled|reconnect|removed|restart|restarted|restored|set|started|written): ' <<<"$2"; then
         echo "test_80 $1 changed something" >&2
         return 1
     fi
@@ -230,9 +235,7 @@ no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change
 systemctl --user is-active wireplumber.service
 
 # 1. apply (no restart: bluetoothd does not run here), then plan has nothing left.
-rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
-show apply "$out"
-verify_failed_only apply "$rc" "$out"
+step apply apply --yes --no-restart
 for f in "$rule" "$le" "$unit" "$watch"; do [[ -f "$f" ]]; done
 grep -qxF "Experimental = true" /etc/bluetooth/main.conf
 rc=0; out="$(bt plan 2>&1)" || rc=$?
@@ -244,9 +247,7 @@ le_text="$(cat "$le")"
 
 # 2. a second apply changes nothing: no file written, no backup, no restart.
 pid="$(wp_pid)"
-rc=0; out="$(bt apply --yes 2>&1)" || rc=$?
-show "second apply" "$out"
-verify_failed_only "second apply" "$rc" "$out"
+step "second apply" apply --yes
 no_writes "second apply" "$out"
 grep -qxF "unchanged: /etc/bluetooth/main.conf (Experimental and KernelExperimental already set in [General])" <<<"$out"
 grep -qxF "unchanged: $rule" <<<"$out"
@@ -264,9 +265,7 @@ same "le-audio (show)" "$s1"
 # 4. le-audio on: the setting written (other lines kept), the drop-in removed,
 # WirePlumber restarted and reading the PipeWire default roles again.
 [[ "$(roles)" == classic ]]
-rc=0; out="$(bt le-audio on --yes 2>&1)" || rc=$?
-show "le-audio on" "$out"
-verify_failed_only "le-audio on" "$rc" "$out"
+step "le-audio on" le-audio on --yes
 grep -qxF "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=on" <<<"$out"
 grep -qxF "removed:   $le (LE Audio on)" <<<"$out"
 grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"$out"
@@ -277,15 +276,12 @@ grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"
 systemctl --user is-active wireplumber.service
 # Only the settings and the drop-in changed.
 diff <(grep -vF -e "$le" -e "$conf" <<<"$s1") <(files | grep -vF -e "$le" -e "$conf")
-rc=0; bt plan >/dev/null 2>&1 || rc=$?
-[[ "$rc" == 0 ]]
+bt plan >/dev/null 2>&1   # exit 0: nothing to do
 s2="$(files)"
 pid="$(wp_pid)"
 
 # 5. le-audio on again: nothing written, nothing restarted.
-rc=0; out="$(bt le-audio on --yes 2>&1)" || rc=$?
-show "le-audio on again" "$out"
-verify_failed_only "le-audio on again" "$rc" "$out"
+step "le-audio on again" le-audio on --yes
 grep -qxF "unchanged: ~/.config/cst/bluetooth.conf already has LE_AUDIO=on" <<<"$out"
 grep -qxF "unchanged: LE Audio on (no drop-in)" <<<"$out"
 no_writes "le-audio on again" "$out"
@@ -296,17 +292,14 @@ grep -qxF "LE Audio in PipeWire: on (~/.config/cst/bluetooth.conf)" <<<"$out"
 same "le-audio (show, on)" "$s2"
 
 # 6. le-audio off: the same drop-in back, the classic roles again.
-rc=0; out="$(bt le-audio off --yes 2>&1)" || rc=$?
-show "le-audio off" "$out"
-verify_failed_only "le-audio off" "$rc" "$out"
+step "le-audio off" le-audio off --yes
 grep -qxF "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=off" <<<"$out"
 grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"$out"
 [[ "$(cat "$le")" == "$le_text" ]]
 [[ "$(roles)" == classic ]]
 [[ "$(wp_pid)" != "$pid" ]]
 grep -qxF "LE_AUDIO=off" "$conf"
-rc=0; bt plan >/dev/null 2>&1 || rc=$?
-[[ "$rc" == 0 ]]
+bt plan >/dev/null 2>&1   # exit 0: nothing to do
 echo E2E-OK
 """
 
