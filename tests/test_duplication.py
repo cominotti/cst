@@ -64,7 +64,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "label": "a Docker volume's label vs a toolchain cache's display label",
     # Types with the same short name in different programs.
     "Episode": "the daemon's live episode object vs the report's record of it (a TypedDict)",
-    "Host": "the snapshot run's host adapter vs doctor's read-only host adapter (different ports)",
+    "Host": "the snapshot run's host adapter vs doctor's read-only host adapter vs bulk's HostPort "
+    "(btrfs-snapshot's busy check, Steam's processes, the alert): different ports",
     "Result": "a snapshot step's outcome vs a doctor check line",
     "Stop": "bt-ldac-watch's signal flag vs the vm backup's cancellation",
     # The same word, different measurements or rules.

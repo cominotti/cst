@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-bulk's own files (root-owned; the user cannot fake them): the
 settings (bulk.conf), the journals of interrupted moves, the boot flag, the
-keep list, convert-plan, the boot counter and the run lock.
+keep list, convert-plan and the run lock. (The boot counter is cst_core's
+CounterFile, which wiring.py builds.)
 """
 
 from __future__ import annotations
