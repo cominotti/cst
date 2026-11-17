@@ -30,6 +30,7 @@ from btrfs.docker_volumes_nocow.adapters import (
     recover,
     volumes,
 )
+from cst_core.adapters.files import write_atomic
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 
 
@@ -138,7 +139,6 @@ def migrate() -> int:
         pending(fix=True)
     if not os.path.exists(FLAG):
         return 0
-    os.makedirs(os.path.dirname(ATTEMPTS), exist_ok=True)
     try:
         with open(ATTEMPTS) as f:
             attempts = int(f.read())
@@ -157,8 +157,9 @@ def migrate() -> int:
             capture_output=True,
         )
         return 0
-    with open(ATTEMPTS, "w") as f:
-        f.write(str(attempts + 1))
+    # Durable before the long rewrite starts: a hang or hard reset must still count this boot,
+    # or "gave up after two boots" never trips.
+    write_atomic(ATTEMPTS, str(attempts + 1), mode=0o644)
     set_nocow(VOLUMES, True)
     todo = pending(fix=True)
     log(5, f"rewriting {len(todo)} volume(s) without copy-on-write before Docker starts")

@@ -10,6 +10,7 @@ import contextlib
 import io
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import tempfile
@@ -322,7 +323,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.object(core_files.os, "geteuid", return_value=0),
-            mock.patch.object(core_files.os, "chown"),
+            mock.patch.object(core_files.os, "fchown"),
             mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
             mock.patch.object(core_files.subprocess, "run", side_effect=run),
             contextlib.redirect_stderr(stderr),
@@ -368,6 +369,90 @@ class WriteBytesAtomicTest(unittest.TestCase):
             os.umask(old)
         for d in (os.path.join(self.tmp, "new"), os.path.dirname(dest)):
             self.assertEqual(os.stat(d).st_mode & 0o7777, 0o755, d)
+
+
+class WriteAtomicTest(unittest.TestCase):
+    """cst_core.adapters.files.write_atomic: unique temp, exact mode, fsync file then folder, temp gone on errors."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-wa-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dest = os.path.join(self.tmp, "sub", "counter")
+
+    def record(self) -> tuple[list[str], contextlib.ExitStack]:
+        events: list[str] = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd: int) -> None:
+            events.append("fsync folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync file")
+            real_fsync(fd)
+
+        def replace(src: str, dst: str) -> None:
+            events.append("replace")
+            real_replace(src, dst)
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(core_files.os, "fsync", fsync))
+        stack.enter_context(mock.patch.object(core_files.os, "replace", replace))
+        return events, stack
+
+    def test_durable_write_syncs_the_file_then_the_folder(self) -> None:
+        events, stack = self.record()
+        old = os.umask(0o077)
+        try:
+            with stack:
+                core_files.write_atomic(self.dest, "2", mode=0o644)
+        finally:
+            os.umask(old)
+        self.assertEqual(events, ["fsync file", "replace", "fsync folder"])
+        with open(self.dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"2")
+        self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o644)
+        self.assertEqual(os.stat(os.path.dirname(self.dest)).st_mode & 0o7777, 0o755)
+        self.assertEqual(os.listdir(os.path.dirname(self.dest)), ["counter"])
+
+    def test_not_durable_skips_the_syncs(self) -> None:
+        events, stack = self.record()
+        with stack:
+            core_files.write_atomic(self.dest, b"x", mode=0o600, durable=False)
+        self.assertEqual(events, ["replace"])
+        self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o600)
+
+    def test_the_temporary_file_is_removed_on_every_error(self) -> None:
+        os.makedirs(os.path.dirname(self.dest))
+        with open(self.dest, "w") as fh:
+            fh.write("old")
+        for name, error in (("write", OSError(28, "No space left on device")), ("replace", KeyboardInterrupt())):
+            with self.subTest(name=name), mock.patch.object(core_files.os, name, side_effect=error):
+                with self.assertRaises(type(error)):
+                    core_files.write_atomic(self.dest, b"new", mode=0o644)
+                self.assertEqual(os.listdir(os.path.dirname(self.dest)), ["counter"])
+                with open(self.dest) as fh:
+                    self.assertEqual(fh.read(), "old")
+
+    def test_owner_root_chowns_only_as_root(self) -> None:
+        for owner, euid, calls in (("root", 0, 1), ("caller", 0, 0), ("root", 1000, 0)):
+            with (
+                self.subTest(owner=owner, euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.os, "fchown") as fchown,
+                mock.patch.object(core_files.shutil, "which", return_value=None),
+            ):
+                core_files.write_atomic(self.dest, b"x", mode=0o644, owner=owner)
+                self.assertEqual(fchown.call_count, calls)
+                if calls:
+                    self.assertEqual(fchown.call_args.args[1:], (0, 0))
+
+    def test_a_link_at_dest_is_replaced_not_followed(self) -> None:
+        target = os.path.join(self.tmp, "target")
+        with open(target, "w") as fh:
+            fh.write("keep")
+        os.makedirs(os.path.dirname(self.dest))
+        os.symlink(target, self.dest)
+        core_files.write_atomic(self.dest, "new", mode=0o644)
+        self.assertFalse(os.path.islink(self.dest))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "keep")
 
 
 class ForceSymlinkAndRunnerTest(unittest.TestCase):

@@ -12,6 +12,7 @@ Two text readers decode on purpose in two ways; do not merge them:
 
 from collections.abc import Callable
 import contextlib
+import errno
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import overload
+from typing import Literal, overload
 
 from cst_core.domain.files import OwnedState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
@@ -236,41 +237,84 @@ class LocalFileSystemAdapter:
             raise
 
 
-def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
-    """Write bytes atomically with explicit permissions (ignoring umask) and SELinux restorecon.
+type FileOwner = Literal["caller", "root"]
 
-    Missing folders are created 0755 (exactly). A link at dest is replaced by
-    the rename itself, never followed and never removed first: dest always
-    holds the old or the new file. As root, a failed restorecon is reported
-    on stderr (the file is written; only its label may be wrong).
-    """
-    abs_dest = os.path.abspath(dest)
-    parent = os.path.dirname(abs_dest)
-    ensure_dir(parent, 0o755)
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_dest)}.", dir=parent)
+
+def _fsync_dir(folder: str) -> None:
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(content)
-        os.chmod(tmp, mode)
-        if os.geteuid() == 0:
-            os.chown(tmp, 0, 0)
-        os.replace(tmp, abs_dest)
+        os.fsync(fd)
+    except OSError as e:
+        if e.errno not in (errno.EINVAL, errno.ENOTSUP):  # a filesystem that cannot sync a folder
+            raise
+    finally:
+        os.close(fd)
+
+
+def _relabel(path: str) -> None:
+    """restorecon as root; a failure is reported on stderr (the file is written, its label may be wrong)."""
+    restorecon = shutil.which("restorecon")
+    if restorecon is None:
+        return
+    # "--": the path is an operand even if a caller ever passes one starting with "-".
+    done = subprocess.run(
+        [restorecon, "-F", "--", path],
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+    )
+    if done.returncode != 0:
+        why = first_line(done.stderr) or f"exit status {done.returncode}"
+        print(f"warning: restorecon {path}: {why} (its SELinux label may be wrong)", file=sys.stderr)
+
+
+def write_atomic(path: str, data: bytes | str, *, mode: int, durable: bool = True, owner: FileOwner = "caller") -> None:
+    """Replace the file at path with data, atomically: path holds the old or the new file, never a part.
+
+    - A unique temporary file in the same folder (mkstemp), mode set exactly
+      with fchmod (the umask does not reduce it), then os.replace. A link at
+      path is replaced, never followed. Missing folders are created 0755
+      (ensure_dir). The temporary file is removed on every error.
+    - durable (the default): the file is fsynced before the rename and the
+      folder after it, so the new content survives a power loss or a hard
+      reset (a boot counter must not lose its increment).
+    - owner: "caller" leaves the file to whoever writes it; "root" also makes
+      it 0:0 when running as root (the installer's files).
+    - As root, the file is relabelled (restorecon); a failure is reported on
+      stderr, not raised.
+    - str data is written as UTF-8 (surrogateescape: bytes read with it come
+      back as they were).
+    """
+    abs_path = os.path.abspath(path)
+    parent = os.path.dirname(abs_path)
+    ensure_dir(parent, 0o755)
+    content = data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_path)}.", dir=parent)
+    try:
+        try:
+            os.fchmod(fd, mode)
+            if owner == "root" and os.geteuid() == 0:
+                os.fchown(fd, 0, 0)
+            view = memoryview(content)
+            while view:
+                view = view[os.write(fd, view) :]
+            if durable:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, abs_path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+    if durable:
+        _fsync_dir(parent)
     if os.geteuid() == 0:
-        restorecon = shutil.which("restorecon")
-        if restorecon is not None:
-            # "--": the path is an operand even if a caller ever passes one starting with "-".
-            done = subprocess.run(
-                [restorecon, "-F", "--", abs_dest],
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                stdin=subprocess.DEVNULL,
-            )
-            if done.returncode != 0:
-                why = first_line(done.stderr) or f"exit status {done.returncode}"
-                print(f"warning: restorecon {abs_dest}: {why} (its SELinux label may be wrong)", file=sys.stderr)
+        _relabel(abs_path)
+
+
+def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
+    """The installer's write: write_atomic, durable, owned by root as root (and relabelled)."""
+    write_atomic(dest, content, mode=mode, durable=True, owner="root")

@@ -725,7 +725,9 @@ left alone. For each item it does one of these:
 **no snapshot is taken** (it would keep their data for months). To do it
 without a reboot, close the programs and run `cst btrfs bulk apply`
 again. After two boots with items still busy, it gives up, removes the flag
-and sends an alert (shown at your next login). The items stay where they are,
+and sends an alert (shown at your next login). Each boot's attempt is written
+to disk (fsync) before the moves start, so a boot that hangs or is reset
+during the moves still counts. The items stay where they are,
 and snapshots start.
 
 **`NEEDS A LOOK` items are not moved automatically.** `snapshots setup`

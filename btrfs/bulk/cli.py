@@ -69,6 +69,7 @@ from btrfs.bulk.steam import (
     steam_target,
     u_reflink_probe,
 )
+from cst_core.adapters.files import write_atomic
 
 
 def steam_survey(ctx: Ctx, ids: Sequence[str], allow_copy: bool = False) -> dict[str, Any]:
@@ -411,9 +412,8 @@ def boot(ctx: Ctx) -> int:
             f"Left: {left} - see 'journalctl -u btrfs-bulk-boot'; close what uses them and run 'cst btrfs bulk apply'.",
         )
         return 1
-    os.makedirs(STATE, mode=0o755, exist_ok=True)
-    with open(attempts_file, "w") as f:
-        f.write(str(attempts + 1))
+    # Durable before the moves start: a hang or hard reset must still count this boot.
+    write_atomic(attempts_file, str(attempts + 1), mode=0o644)
     log("btrfs-bulk: moving the items the desktop session kept busy into ~/Bulk...")
     deferred, problems = apply(ctx)
     if not deferred:

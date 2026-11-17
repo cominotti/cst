@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-from cst_core.adapters.files import read_bytes, read_text
+from cst_core.adapters.files import read_bytes, read_text, write_atomic
 from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState
@@ -67,7 +67,6 @@ from toolchains.adapters import (
     uv_lock_busy,
     workspace_metadata,
     wrapper_path,
-    write_atomic,
     write_cfg,
     write_state,
 )
@@ -1362,13 +1361,13 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
     changed = False
     for rel, text in copies().items():
         if st[rel] != "ok":
-            write_atomic(os.path.join(home, rel), text, 0o755 if rel == PROG_REL else 0o644)
+            write_atomic(os.path.join(home, rel), text, mode=0o755 if rel == PROG_REL else 0o644)
             say(f"written:   ~/{rel}")
         else:
             say(f"unchanged: ~/{rel}")
     for name, render in UNITS.items():
         if st[name] != "ok":
-            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), 0o644)
+            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), mode=0o644)
             say(f"written:   {label(name)}")
             changed = True
         else:
@@ -1444,7 +1443,7 @@ def cmd_auto_off(home: str, now: float) -> int:
             f"{MARKER}: written by `cst toolchains auto off`.\n"
             "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
             "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n",
-            0o644,
+            mode=0o644,
         )
         say(f"written:   ~/{OFF_REL} (snapshots setup leaves the pruning off)")
     say(f"toolchain caches are no longer pruned automatically (settings in ~/{CONF_REL} kept, if any)")
@@ -1862,7 +1861,7 @@ def install_wrapper(home: str, values: WrapperValues) -> int:
         say(f"kept:      {path} (sccache wrapper)")
         return 0
     try:
-        write_atomic(path, text, 0o755)
+        write_atomic(path, text, mode=0o755)
     except OSError as e:
         say(f"{NAME}: cannot write {path}: {e.strerror or e}", 3, err=True)
         return 1

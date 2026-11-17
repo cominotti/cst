@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters.files import owned_file_state_at
+from cst_core.adapters.files import owned_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
@@ -974,22 +974,6 @@ def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> O
     return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
 
 
-def write_atomic(path: str, text: str | bytes, mode: int) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(text.encode() if isinstance(text, str) else text)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def turned_off(home: str) -> bool:
     return os.path.lexists(os.path.join(home, OFF_REL))
 
@@ -1017,7 +1001,7 @@ def write_cfg(path: str, text: str) -> str:
     except OSError:
         mode = 0o644
     try:
-        write_atomic(real, text, mode)
+        write_atomic(real, text, mode=mode)
     except OSError as e:
         return str(e.strerror or e)
     return ""

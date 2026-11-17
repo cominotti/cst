@@ -812,7 +812,8 @@ class MigrateTest(Base):
             rc, out = self.call(nocow_cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         folder = os.path.dirname(self.flag)
-        self.assertEqual(synced, [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
+        # Then the attempts counter (write_atomic): its temporary file and its folder.
+        self.assertEqual(synced[:3], [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
 
     def test_flag_not_durable_leaves_the_folder_copy_on_write(self) -> None:
         # fsync fails (an I/O error): treated like a flag that cannot be written.
@@ -1094,6 +1095,34 @@ class MigrateTest(Base):
         self.assertEqual(self.call(nocow_cli.migrate), (0, ""))
         self.assertEqual(len(self.fs.commands("cp")), 2)
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_attempts_counter_is_durable_before_the_rewrite_starts(self) -> None:
+        # PRIM-02: the counter was written with open("w") and no fsync, then the long rewrite
+        # started; a hang or hard reset before the next btrfs commit lost the increment, so
+        # "gave up after two boots" could never trip.
+        self.volume("cow")
+        self.schedule()
+        events: list[str] = []
+        real_fsync = os.fsync
+        folder = os.path.dirname(self.attempts)
+
+        def fsync(fd: int) -> None:
+            path = os.readlink(f"/proc/self/fd/{fd}")
+            events.append("fsync counter folder" if path == folder else f"fsync {os.path.dirname(path)}")
+            real_fsync(fd)
+
+        def cp(src: str, dst: str) -> tuple[int, str]:
+            events.append("cp")
+            return cp_fails(src, dst)
+
+        self.fs.cp = cp
+        with mock.patch.object(os, "fsync", fsync):
+            self.call(nocow_cli.migrate)
+        self.assertEqual(self.read_attempts(), "1")
+        first_cp = events.index("cp")
+        self.assertIn(f"fsync {folder}", events[:first_cp], events)  # the counter's own bytes
+        self.assertIn("fsync counter folder", events[:first_cp], events)  # its rename
+        self.assertEqual(sorted(os.listdir(folder)), ["attempts"], "a temporary file was left")
 
     def test_mark_gives_two_boots_again(self) -> None:
         self.volume("cow")

@@ -539,6 +539,34 @@ class BulkTest(BulkBase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 0)  # no flag: nothing to do
 
+    def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
+        # PRIM-02: the counter was written with open("w") and no fsync before the moves; a hang
+        # or hard reset before the next btrfs commit lost it, and the give-up never tripped.
+        self.write("Programs/a", "a")
+        self.busy = {self.H("Programs")}
+        self.apply()
+        events: list[str] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            events.append(f"fsync {os.readlink(f'/proc/self/fd/{fd}')}")
+            real_fsync(fd)
+
+        def moves(ctx: object) -> tuple[list[str], list[str]]:
+            events.append("apply")
+            return ["apps"], []
+
+        self.m.apply = moves
+        with mock.patch.object(os, "fsync", fsync), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.boot(self.ctx), 3)
+        counter = os.path.join(self.m.STATE, "boot-attempts")
+        with open(counter) as f:
+            self.assertEqual(f.read(), "1")
+        before = events[: events.index("apply")]
+        self.assertTrue(any(e.startswith(f"fsync {self.m.STATE}/.boot-attempts.") for e in before), events)
+        self.assertIn(f"fsync {self.m.STATE}", before)  # the rename's folder entry
+        self.assertEqual(os.stat(counter).st_mode & 0o777, 0o644)
+
     def test_written_during_switch_is_rolled_back(self) -> None:
         self.write("Programs/a", "a")
         self.m.u_late_write = lambda j: True
