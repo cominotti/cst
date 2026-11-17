@@ -1,31 +1,30 @@
 # SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/docker-volumes-nocow (Docker volumes without copy-on-write).
 
-The helper runs as root at boot and rewrites Docker volumes. These tests use
-its package (btrfs/docker_volumes_nocow, through a PackageView that also
-holds cst_core's NOCOW ioctls) and never let it reach the machine:
+The helper runs as root at boot and rewrites Docker volumes. These tests
+build its use cases over the real adapters (btrfs/docker_volumes_nocow
+wiring.build_nocow) and never let them reach the machine:
 
-- every path it writes or reads state from (VOLUMES, FLAG, ATTEMPTS,
-  POSTPONED, NOTIFY) points into a temporary folder of the test, and so does
-  PROC, the /proc
-  where it looks for a dockerd (a fake tree: no process unless a test adds
-  one);
+- every path it writes or reads state from (NocowPaths: volumes, flag,
+  attempts, postponed, notify) points into a temporary folder of the test,
+  and so does proc, the /proc where it looks for a dockerd (a fake tree: no
+  process unless a test adds one);
 - the file attribute ioctls (FS_IOC_GETFLAGS / FS_IOC_SETFLAGS, under
   flags() and set_nocow()) go to a fake that keeps the flags of each inode in
   a dictionary, and refuses any file outside the temporary folder;
 - the commands it runs (systemctl, chcon, cp, btrfs, btrfs-notify) go to a
-  fake subprocess module; any other command fails the test. The fake cp
+  fake command runner; any other command fails the test. The fake cp
   copies the tree in Python and gives each new entry the NOCOW flag of its
   folder, as btrfs does when a file is created;
 - os.sync() is replaced by a counter.
 
-Starting the program (its package imported anew) only reads
-/etc/docker/daemon.json and does nothing else (ImportTest checks both).
+Starting the program (its package imported anew) reads and changes nothing;
+its paths read only /etc/docker/daemon.json (ImportTest checks both).
 
 A crash (a kill, a timeout or a power loss) is simulated by raising Crash, a
 BaseException, at one step: migrate() catches Exception for each volume, so
 Crash leaves the helper the way a dead process would. The next call of
-migrate() is the next boot.
+migrate is the next boot.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_docker_volumes_nocow -v
@@ -47,7 +46,7 @@ import tempfile
 import time
 import unittest
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -58,8 +57,11 @@ if _CHECKOUT not in sys.path:
 
 from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
+from btrfs.docker_volumes_nocow import wiring as nocow_wiring
+from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
+from btrfs.docker_volumes_nocow.domain import NocowPaths
 from cst_core.adapters import nocow as core_nocow
-from tests.package_view import PackageView
+from cst_core.ports import CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
@@ -68,12 +70,6 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-volumes-nocow")
 PKG = "btrfs.docker_volumes_nocow"
-
-
-def load() -> PackageView:
-    """The program's package as one namespace (the program is a thin entry
-    over it), plus cst_core's NOCOW ioctls, so a fake fcntl reaches them."""
-    return PackageView(nocow_cli, nocow_adapters, core_nocow)
 
 
 def load_program_fresh() -> ModuleType:
@@ -93,8 +89,6 @@ def load_program_fresh() -> ModuleType:
         sys.modules.update(saved)
         vars(sys.modules["btrfs"])["docker_volumes_nocow"] = saved[PKG]
 
-
-M = load()
 
 NOCOW = 0x00800000  # FS_NOCOW_FL, what chattr +C sets
 OTHER = 0x00000080  # FS_NOATIME_FL: another attribute the helper must leave alone
@@ -195,12 +189,13 @@ class FakeSystem:
         self.docker_state = "inactive"
         self.systemctl_rc = 0
         self.systemctl_out_on_error = False  # a failing systemctl still prints docker_state
-        self.systemctl_missing = False
         self.free = 1 << 50
         self.btrfs_out: str | None = None  # None: a normal `btrfs filesystem usage -b` answer
         self.chcon_rc = 0
         self.syncs = 0
         self.cp: Callable[[str, str], tuple[int, str]] = self.copy
+        self.notify = ""  # btrfs-notify's path in the test folder
+        self.missing: set[str] = set()  # programs that are not installed
 
     # ---- the ioctls -------------------------------------------------------
 
@@ -268,21 +263,20 @@ class FakeSystem:
 
     # ---- the commands -----------------------------------------------------
 
-    def run(self, args: list[str], **kw: object) -> subprocess.CompletedProcess:
-        args = list(args)
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        """CommandRunnerPort.run: each command the helper may run, answered by the fake."""
+        args = list(argv)
         self.calls.append(args)
-        text = bool(kw.get("text"))
+        not_found = self.not_found(args, kw)
+        if not_found is not None:
+            return not_found
 
-        def done(rc: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess:
-            if text:
-                return subprocess.CompletedProcess(args, rc, out, err)
-            return subprocess.CompletedProcess(args, rc, out.encode(), err.encode())
+        def done(rc: int = 0, out: str = "", err: str = "") -> CommandResult:
+            return CommandResult(rc, out, err, argv=tuple(args))
 
         if args[0] == "systemctl":
             if args != ["systemctl", "show", "-P", "ActiveState", "docker.service"]:
                 raise AssertionError(f"unexpected systemctl call: {args}")
-            if self.systemctl_missing:
-                raise FileNotFoundError(2, "No such file or directory", "systemctl")
             answers = self.systemctl_rc == 0 or self.systemctl_out_on_error
             return done(self.systemctl_rc, self.docker_state + "\n" if answers else "")
         if args[0] == "chcon":
@@ -312,9 +306,22 @@ class FakeSystem:
                 raise AssertionError(f"cp must copy the contents: {args}")
             rc, err = self.cp(src[:-2], dst[:-1])
             return done(rc, "", err)
-        if args[0] == nocow_adapters.NOTIFY:
+        if args[0] == self.notify:
             return done()
         raise AssertionError(f"unexpected command: {args}")
+
+    def not_found(self, args: list[str], kw: Mapping[str, object]) -> CommandResult | None:
+        """Checks the options of a command, and answers for one that is missing (None: it is installed).
+
+        As subprocess.run(capture_output=True, text=True) ran them: stdin ours, strict
+        decoding; btrfs-notify's output was never decoded."""
+        want = {"stdin": "inherit"} if args[0] == self.notify else {"stdin": "inherit", "decode_errors": "strict"}
+        if kw != want:
+            raise AssertionError(f"{args[0]} run with {kw}, not {want}")
+        if args[0] not in self.missing:
+            return None
+        missing = FileNotFoundError(2, "No such file or directory", args[0])
+        return CommandResult(127, "", str(missing), argv=tuple(args), fault="missing", cause=missing)
 
     def sync(self) -> None:
         self.syncs += 1
@@ -378,6 +385,32 @@ class FakeSystem:
         return n
 
 
+class Commands:
+    """The helper's commands as the program runs them (their exit status), and its recovery step."""
+
+    def __init__(self, service: DockerVolumesNocow) -> None:
+        self.service = service
+
+    # Called directly, not through the cli: an OSError reaches the test (the cli would log it).
+    def status(self) -> int:
+        self.service.status()
+        return 0
+
+    def mark(self) -> int:
+        return 1 if self.service.mark() else 0
+
+    def migrate(self) -> int:
+        self.service.migrate()
+        return 0
+
+    def unmark(self) -> int:
+        self.service.unmark()
+        return 0
+
+    def recover(self) -> None:
+        self.service.recover()
+
+
 class Base(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-nocow-test-")
@@ -397,34 +430,23 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.vols, "metadata.db"), "wb") as f:
             f.write(b"bolt")
         self.fs = FakeSystem(self.tmp)
-        for name, value in (
-            ("VOLUMES", self.vols),
-            ("FLAG", self.flag),
-            ("ATTEMPTS", self.attempts),
-            ("POSTPONED", self.postponed),
-            ("NOTIFY", self.notify),
-            ("PROC", self.proc),
-            ("fcntl", SimpleNamespace(ioctl=self.fs.ioctl)),
-            ("subprocess", SimpleNamespace(run=self.fs.run)),
-        ):
-            self.enterContext(mock.patch.object(M, name, value))
+        self.fs.notify = self.notify
+        self.paths = NocowPaths(
+            volumes=self.vols,
+            flag=self.flag,
+            attempts=self.attempts,
+            postponed=self.postponed,
+            notify=self.notify,
+            proc=self.proc,
+        )
+        self.cli = Commands(nocow_wiring.build_nocow(self.paths, runner=self.fs))
+        self.enterContext(mock.patch.object(core_nocow, "fcntl", SimpleNamespace(ioctl=self.fs.ioctl)))
         self.enterContext(mock.patch.object(os, "sync", self.fs.sync))
         self.enterContext(mock.patch.object(os, "getxattr", self.fs.getxattr))
         # Nothing of the helper may point outside the test folder.
-        for path in (
-            nocow_adapters.VOLUMES,
-            nocow_adapters.FLAG,
-            nocow_adapters.ATTEMPTS,
-            nocow_adapters.POSTPONED,
-            nocow_adapters.NOTIFY,
-            nocow_adapters.PROC,
-        ):
+        paths = self.cli.service.paths
+        for path in (paths.volumes, paths.flag, paths.attempts, paths.postponed, paths.notify, paths.proc):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
-
-    def fresh(self) -> None:
-        """A new test folder and new fakes, for the next subTest."""
-        self.doCleanups()
-        self.setUp()
 
     # ---- set-up helpers ---------------------------------------------------
 
@@ -462,17 +484,6 @@ class Base(unittest.TestCase):
         with open(self.attempts, "w") as f:
             f.write(text)
 
-    def read_attempts(self) -> str | None:
-        try:
-            with open(self.attempts) as f:
-                return f.read()
-        except FileNotFoundError:
-            return None
-
-    def schedule(self) -> None:
-        """What `cst btrfs install` leaves when mark finds CoW data."""
-        open(self.flag, "a").close()
-
     def call(self, fn: Callable[[], int | None]) -> tuple[int | None, str]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -486,7 +497,7 @@ class Base(unittest.TestCase):
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
-            rc = nocow_cli.main()
+            rc = nocow_cli.nocow_cli(service=self.cli.service)
         return rc, out.getvalue(), err.getvalue()
 
     # ---- checks -----------------------------------------------------------
@@ -501,9 +512,28 @@ class Base(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(self.vols, name))), ["_data"])
 
 
+def fresh(test: Base) -> None:
+    """A new test folder and new fakes, for the next subTest."""
+    test.doCleanups()
+    test.setUp()
+
+
+def read_attempts(test: Base) -> str | None:
+    try:
+        with open(test.attempts) as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def schedule(test: Base) -> None:
+    """What `cst btrfs install` leaves when mark finds CoW data."""
+    open(test.flag, "a").close()
+
+
 class ImportTest(unittest.TestCase):
-    def test_import_only_reads_daemon_json(self) -> None:
-        opened: list[tuple[str, str]] = []
+    def trapped(self, opened: list[tuple[str, str]]) -> contextlib.ExitStack:
+        """Every call that changes the machine or runs a command fails; open() is recorded and finds nothing."""
 
         def fake_open(path: str, mode: str = "r", *a: object, **kw: object) -> io.StringIO:
             opened.append((str(path), mode))
@@ -522,18 +552,30 @@ class ImportTest(unittest.TestCase):
             (subprocess, ("run", "Popen")),
             (fcntl, ("ioctl",)),
         )
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(builtins, "open", fake_open))
-            for module, names in changes:
-                for name in names:
-                    stack.enter_context(mock.patch.object(module, name, trap(f"{module.__name__}.{name}")))
-            loaded = load_program_fresh()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(builtins, "open", fake_open))
+        for module, names in changes:
+            for name in names:
+                stack.enter_context(mock.patch.object(module, name, trap(f"{module.__name__}.{name}")))
+        return stack
+
+    def test_import_reads_and_changes_nothing(self) -> None:
+        opened: list[tuple[str, str]] = []
+        with self.trapped(opened):
+            load_program_fresh()
+        self.assertEqual(opened, [])
+
+    def test_the_paths_read_only_daemon_json(self) -> None:
+        opened: list[tuple[str, str]] = []
+        with self.trapped(opened):
+            paths = nocow_wiring.nocow_paths()
         self.assertEqual(opened, [("/etc/docker/daemon.json", "r")])
-        self.assertEqual(loaded.VOLUMES, "/var/lib/docker/volumes")
-        self.assertEqual(loaded.FLAG, "/etc/btrfs-setup/docker-nocow-pending")
-        self.assertEqual(loaded.ATTEMPTS, "/var/lib/docker-volumes-nocow/attempts")
-        self.assertEqual(loaded.POSTPONED, "/var/lib/docker-volumes-nocow/postponed")
-        self.assertEqual(loaded.PROC, "/proc")
+        self.assertEqual(paths.volumes, "/var/lib/docker/volumes")
+        self.assertEqual(paths.flag, "/etc/btrfs-setup/docker-nocow-pending")
+        self.assertEqual(paths.attempts, "/var/lib/docker-volumes-nocow/attempts")
+        self.assertEqual(paths.postponed, "/var/lib/docker-volumes-nocow/postponed")
+        self.assertEqual(paths.proc, "/proc")
+        self.assertEqual(paths, NocowPaths())
 
     def test_docker_root_reads_data_root(self) -> None:
         for text, want in (
@@ -558,7 +600,7 @@ class ImportTest(unittest.TestCase):
 class StatusTest(Base):
     def test_volumes_folder_absent(self) -> None:
         shutil.rmtree(self.vols)
-        rc, out = self.call(nocow_cli.status)
+        rc, out = self.call(self.cli.status)
         self.assertEqual((rc, out), (0, f"{self.vols}: absent\n"))
         self.assertEqual(self.fs.calls, [])
 
@@ -570,15 +612,15 @@ class StatusTest(Base):
         mixed = self.volume("mixed", nocow=True)
         self.fs.set(os.path.join(mixed, "db/wal"), False)
         before = dict(self.fs.attrs)
-        rc, out = self.call(nocow_cli.status)
+        rc, out = self.call(self.cli.status)
         self.assertEqual(rc, 0)
         self.assertEqual(
             out,
             f"{self.vols}: new volumes NOCOW; 1 of 3 volume(s) fully NOCOW\n"
             "  1 with copy-on-write data (2 MiB), migration not scheduled\n",
         )
-        self.schedule()
-        rc, out = self.call(nocow_cli.status)
+        schedule(self)
+        rc, out = self.call(self.cli.status)
         self.assertIn("  1 with copy-on-write data (2 MiB), migration at the next boot\n", out)
         # status is read only: no flag set, no command run.
         self.assertEqual(self.fs.sets, [])
@@ -587,7 +629,7 @@ class StatusTest(Base):
 
     def test_volumes_folder_without_nocow(self) -> None:
         self.volume("done", nocow=True)
-        rc, out = self.call(nocow_cli.status)
+        rc, out = self.call(self.cli.status)
         self.assertEqual(out, f"{self.vols}: new volumes copy-on-write; 1 of 1 volume(s) fully NOCOW\n")
 
 
@@ -606,9 +648,9 @@ class NotVolumeDataTest(Base):
         os.mkdir(os.path.join(self.vols, "linked"))
         os.symlink(elsewhere, os.path.join(self.vols, "linked", "_data"))
         before = tree(elsewhere)
-        self.assertEqual(self.call(nocow_cli.status), (0, self.all_done))
-        self.schedule()
-        rc, out = self.call(nocow_cli.migrate)
+        self.assertEqual(self.call(self.cli.status), (0, self.all_done))
+        schedule(self)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertIn(f"<5>{TAG}: rewriting 0 volume(s)", out)
         self.assertEqual(self.fs.commands("cp"), [])
@@ -620,7 +662,7 @@ class NotVolumeDataTest(Base):
         mnt = self.fill(os.path.join(self.vols, "done", "_data", "mnt"))  # copy-on-write data
         before = tree(mnt)
         # Seen as part of the volume, the folder holds copy-on-write data.
-        rc, out = self.call(nocow_cli.status)
+        rc, out = self.call(self.cli.status)
         self.assertIn("0 of 1 volume(s) fully NOCOW\n  1 with copy-on-write data (2 MiB)", out)
         real_lstat = os.lstat
 
@@ -629,8 +671,8 @@ class NotVolumeDataTest(Base):
             return OtherDevice(st) if path == mnt else st
 
         with mock.patch.object(os, "lstat", lstat):
-            self.assertEqual(self.call(nocow_cli.status), (0, self.all_done))
-            self.assertEqual(self.call(nocow_cli.mark), (0, ""))
+            self.assertEqual(self.call(self.cli.status), (0, self.all_done))
+            self.assertEqual(self.call(self.cli.mark), (0, ""))
         self.assertEqual(self.fs.sets_below(mnt), [])
         self.assertEqual(tree(mnt), before)
 
@@ -638,7 +680,7 @@ class NotVolumeDataTest(Base):
 class MarkUnmarkTest(Base):
     def test_mark_absent(self) -> None:
         shutil.rmtree(self.vols)
-        rc, out = self.call(nocow_cli.mark)
+        rc, out = self.call(self.cli.mark)
         self.assertEqual((rc, out), (0, f"{self.vols}: absent (Docker not set up yet): nothing to mark\n"))
         self.assertEqual(self.fs.sets, [])
 
@@ -646,7 +688,7 @@ class MarkUnmarkTest(Base):
         self.fs.set(self.vols, False, other=OTHER)
         top = self.volume("cow")
         self.set_attempts("2")
-        rc, out = self.call(nocow_cli.mark)
+        rc, out = self.call(self.cli.mark)
         self.assertEqual(rc, 1)
         self.assertEqual(
             out,
@@ -658,7 +700,7 @@ class MarkUnmarkTest(Base):
             self.assertTrue(self.fs.nocow(os.path.join(top, rel)), rel)
         for rel in ("db/base/1", "db/wal/000001", "README"):
             self.assertFalse(self.fs.nocow(os.path.join(top, rel)), rel)
-        self.assertIsNone(self.read_attempts())  # a new request gets its two boots again
+        self.assertIsNone(read_attempts(self))  # a new request gets its two boots again
         self.assertFalse(os.path.exists(self.flag))  # the flag is install's job
         self.assertEqual(self.fs.calls, [])
 
@@ -666,16 +708,16 @@ class MarkUnmarkTest(Base):
         self.volume("done", nocow=True)
         self.volume("empty", data={"a/b": b""})
         self.set_attempts("1")
-        rc, out = self.call(nocow_cli.mark)
+        rc, out = self.call(self.cli.mark)
         self.assertEqual((rc, out), (0, ""))
         self.assertTrue(self.fs.nocow(self.vols))
         self.assert_all_nocow(os.path.join(self.vols, "empty/_data"))
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
 
     def test_unmark_clears_only_the_volumes_folder(self) -> None:
         self.fs.set(self.vols, True, other=OTHER)
         top = self.volume("done", nocow=True)
-        rc, out = self.call(nocow_cli.unmark)
+        rc, out = self.call(self.cli.unmark)
         self.assertEqual((rc, out), (0, ""))
         self.assertEqual(self.fs.flags_of(self.vols), OTHER)
         self.assert_all_nocow(top)  # existing volumes stay NOCOW
@@ -683,7 +725,7 @@ class MarkUnmarkTest(Base):
 
     def test_unmark_absent(self) -> None:
         shutil.rmtree(self.vols)
-        self.assertEqual(self.call(nocow_cli.unmark), (0, ""))
+        self.assertEqual(self.call(self.cli.unmark), (0, ""))
         self.assertEqual(self.fs.sets, [])
 
 
@@ -702,12 +744,53 @@ class MainTest(Base):
             raise OSError(25, "Inappropriate ioctl for device")
 
         self.volume("cow")
-        with mock.patch.object(M, "fcntl", SimpleNamespace(ioctl=no_flags)):
+        with mock.patch.object(core_nocow, "fcntl", SimpleNamespace(ioctl=no_flags)):
             for cmd, want in (("status", 2), ("mark", 2), ("migrate", 0), ("unmark", 0)):
                 with self.subTest(cmd=cmd):
                     rc, out, _ = self.main(cmd)
                     self.assertEqual(rc, want)
                     self.assertIn(f"<3>{TAG}: {self.vols}: [Errno 25] Inappropriate ioctl for device\n", out)
+
+
+class MissingProgramTest(Base):
+    """A program the helper runs is missing: it stops as when subprocess.run raised."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fs.set(self.vols, True)
+        self.top = self.volume("cow")
+        schedule(self)
+
+    def test_btrfs_missing_stops_the_run_with_one_line(self) -> None:
+        self.fs.missing.add("btrfs")
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.endswith(f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: 'btrfs'\n"), out)
+        self.assertEqual(read_attempts(self), "1")  # counted before the rewrite
+        self.assertTrue(os.path.exists(self.flag))
+
+    def test_cp_missing_leaves_the_volume_as_it_was(self) -> None:
+        self.fs.missing.add("cp")
+        before = tree(self.top)
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertIn(f"<3>{TAG}: cow: [Errno 2] No such file or directory: 'cp'; left as it was\n", out)
+        self.assertEqual(tree(self.top), before)
+        # The empty twin stays, as before; recover() removes it at the next boot.
+        self.assertEqual(sorted(os.listdir(os.path.join(self.vols, "cow"))), ["_data", "_data.nocow-new"])
+
+    def test_notify_missing_after_giving_up(self) -> None:
+        self.set_attempts("2")
+        self.fs.missing.add(self.notify)
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n"
+            f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: '{self.notify}'\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
 
 
 class MigrateTest(Base):
@@ -720,8 +803,8 @@ class MigrateTest(Base):
         done_ino = ino(done)
         top = self.volume("cow")
         before, old_ino = tree(top), ino(top)
-        self.schedule()
-        rc, out = self.call(nocow_cli.migrate)
+        schedule(self)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(tree(top), before)  # same entries, modes, data and link targets
         self.assertNotEqual(ino(top), old_ino)  # a new copy
@@ -729,7 +812,7 @@ class MigrateTest(Base):
         self.assert_no_leftovers("cow")
         self.assertEqual(ino(done), done_ino)  # a NOCOW volume is not copied
         self.assertFalse(os.path.exists(self.flag))
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
         new = top + ".nocow-new"
         self.assertEqual(self.fs.commands("chcon"), [["chcon", "--reference", top, new]])
         self.assertEqual(
@@ -745,27 +828,27 @@ class MigrateTest(Base):
 
     def test_volumes_folder_absent(self) -> None:
         shutil.rmtree(self.vols)
-        self.schedule()
-        self.assertEqual(self.call(nocow_cli.migrate), (0, ""))
+        schedule(self)
+        self.assertEqual(self.call(self.cli.migrate), (0, ""))
         self.assertEqual(self.fs.calls, [])
         self.assertTrue(os.path.exists(self.flag))
 
     def test_not_scheduled_copies_nothing(self) -> None:
         top = self.volume("cow")
         before = tree(top)
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual((rc, out), (0, ""))
         self.assertEqual(tree(top), before)
         self.assertFalse(self.fs.nocow(os.path.join(top, "README")))
         self.assertEqual([c[0] for c in self.fs.calls], ["systemctl"])
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
 
     def test_volumes_folder_lost_its_flag_schedules_and_migrates_at_once(self) -> None:
         # Docker installed after `cst btrfs install`: its volumes folder has no +C.
         self.fs.set(self.vols, False)
         top = self.volume("cow")
         before = tree(top)
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertTrue(self.fs.nocow(self.vols))
         self.assertEqual(tree(top), before)
@@ -812,7 +895,7 @@ class MigrateTest(Base):
             real_fsync(fd)
 
         with mock.patch.object(os, "fsync", fsync):
-            rc, out = self.call(nocow_cli.migrate)
+            rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         folder = os.path.dirname(self.flag)
         self.assertEqual(synced[:3], [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
@@ -831,7 +914,7 @@ class MigrateTest(Base):
             raise OSError(5, "Input/output error")
 
         with mock.patch.object(os, "fsync", fsync):
-            rc, out = self.call(nocow_cli.migrate)
+            rc, out = self.call(self.cli.migrate)
         self.assertEqual(
             out,
             f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); "
@@ -861,7 +944,7 @@ class MigrateTest(Base):
         self.assertFalse(self.fs.nocow(self.vols))
         self.assertEqual(tree(top), before)
         self.assertEqual(self.fs.commands("cp"), [])
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
         # The obstacle goes: the next boot schedules and migrates.
         os.remove(os.path.dirname(self.flag))
         rc, out, _ = self.main("migrate")
@@ -875,7 +958,7 @@ class MigrateTest(Base):
         shutil.rmtree(os.path.dirname(self.flag))
         self.fs.set(self.vols, False)
         top = self.volume("empty", data={"a/b": b""})
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual((rc, out), (0, ""))
         self.assertTrue(self.fs.nocow(self.vols))
         self.assert_all_nocow(top)
@@ -883,13 +966,13 @@ class MigrateTest(Base):
 
     def test_scheduled_with_nothing_left_to_copy(self) -> None:
         top = self.volume("empty", data={"a/b": b""})
-        self.schedule()
-        rc, out = self.call(nocow_cli.migrate)
+        schedule(self)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assert_all_nocow(top)  # fixed in place
         self.assertEqual(self.fs.commands("cp"), [])
         self.assertFalse(os.path.exists(self.flag))
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
         self.assertIn(f"<5>{TAG}: rewriting 0 volume(s)", out)
 
     def migrate_refused(
@@ -900,16 +983,16 @@ class MigrateTest(Base):
         again at the next boot."""
         top = make() if make else self.volume("cow")
         before, old_ino = tree(top), ino(top)
-        self.schedule()
+        schedule(self)
         self.fs.cp = cp
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(tree(top), before)
         self.assertEqual(ino(top), old_ino)  # the original, untouched
         self.assertFalse(self.fs.nocow(os.path.join(top, "README")))
         self.assert_no_leftovers("cow")
         self.assertTrue(os.path.exists(self.flag))
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
         self.assertIn(f"<3>{TAG}: cow: {why}; left as it was\n", out)
         self.assertNotIn("all Docker volumes are NOCOW now", out)
         self.assertEqual(self.fs.syncs, 0)
@@ -938,7 +1021,7 @@ class MigrateTest(Base):
             ),
         ):
             with self.subTest(cp=name):
-                self.fresh()
+                fresh(self)
                 self.migrate_refused(self.fs.copy_then(change), why)
 
     def test_copy_fails(self) -> None:
@@ -963,8 +1046,8 @@ class MigrateTest(Base):
 
     def test_labels_kept(self) -> None:
         top = self.labelled_volume()
-        self.schedule()
-        rc, out = self.call(nocow_cli.migrate)
+        schedule(self)
+        rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assertEqual(self.fs.label_of(top), self.CONTAINER + b"\0")
         for p, _ in entries(top):
@@ -992,7 +1075,7 @@ class MigrateTest(Base):
             ("loses the top label", lambda dst: self.fs.label(dst, None), f".: {old} vs none"),
         ):
             with self.subTest(cp=name):
-                self.fresh()
+                fresh(self)
                 self.migrate_refused(
                     self.fs.copy_then(change), f"copy check failed (SELinux label of {why})", self.labelled_volume
                 )
@@ -1010,8 +1093,8 @@ class MigrateTest(Base):
         # SELinux disabled: no labels to copy, chcon cannot work, nothing changes.
         top = self.volume("cow")
         self.fs.chcon_rc = 1
-        self.schedule()
-        rc, out = self.call(nocow_cli.migrate)
+        schedule(self)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assert_all_nocow(top)
@@ -1019,10 +1102,10 @@ class MigrateTest(Base):
 
     def test_labels_equal_up_to_the_trailing_nul(self) -> None:
         top = self.labelled_volume()
-        self.schedule()
+        schedule(self)
         # The copy's README reads back with a NUL, the original's without.
         self.fs.cp = self.fs.copy_then(lambda dst: self.fs.label(os.path.join(dst, "README"), self.CONTAINER + b"\0"))
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assert_all_nocow(top)
 
@@ -1036,7 +1119,7 @@ class MigrateTest(Base):
 
                 with mock.patch.object(os, "getxattr", getxattr):
                     self.assertEqual(nocow_adapters.label(top), want)
-                    self.assertEqual(set(nocow_adapters.labels(top).values()), {None})
+                    self.assertEqual(set(self.cli.service.tree.labels(top).values()), {None})
 
         def denied(path: str, attribute: str, *, follow_symlinks: bool = True) -> bytes:
             raise PermissionError(13, "Permission denied", path)
@@ -1048,13 +1131,13 @@ class MigrateTest(Base):
         bad = self.volume("a-bad")
         good = self.volume("b-good")
         bad_before, good_before = tree(bad), tree(good)
-        self.schedule()
+        schedule(self)
 
         def fails_for_a(src: str, dst: str) -> tuple[int, str]:
             return cp_fails(src, dst) if "/a-bad/" in src else self.fs.copy(src, dst)
 
         self.fs.cp = fails_for_a
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(tree(bad), bad_before)
         self.assertFalse(self.fs.nocow(os.path.join(bad, "README")))
@@ -1064,54 +1147,54 @@ class MigrateTest(Base):
         self.assert_no_leftovers("b-good")
         self.assertIn(f"<3>{TAG}: a-bad: copy failed: cp: boom; left as it was\n", out)
         self.assertTrue(os.path.exists(self.flag))
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
 
     def test_free_space(self) -> None:
         top = self.volume("cow")
         before = tree(top)
-        self.schedule()
+        schedule(self)
         # One byte short of the copy plus the 20 GiB margin: skipped.
         self.fs.free = DATA_BYTES + 20 * GIB - 1
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertIn(f"<4>{TAG}: cow: not enough free space for a 2 MiB copy; skipped\n", out)
         self.assertEqual(self.fs.commands("cp"), [])
         self.assertEqual(tree(top), before)
         self.assertTrue(os.path.exists(self.flag))
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
         # Exactly enough: copied.
         self.fs.free = DATA_BYTES + 20 * GIB
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assert_all_nocow(top)
         self.assertFalse(os.path.exists(self.flag))
 
     def test_free_space_unknown_is_a_skip(self) -> None:
         self.volume("cow")
-        self.schedule()
+        schedule(self)
         self.fs.btrfs_out = ""
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<4>{TAG}: cow: not enough free space for a 2 MiB copy; skipped\n", out)
         self.assertEqual(self.fs.commands("cp"), [])
 
     def test_gives_up_after_two_boots(self) -> None:
         top = self.volume("cow")
         before = tree(top)
-        self.schedule()
+        schedule(self)
         self.fs.cp = cp_fails
         msg = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
         for boot, attempts in ((1, "1"), (2, "2")):
             with self.subTest(boot=boot):
-                rc, out = self.call(nocow_cli.migrate)
+                rc, out = self.call(self.cli.migrate)
                 self.assertEqual(rc, 0)
-                self.assertEqual(self.read_attempts(), attempts)
+                self.assertEqual(read_attempts(self), attempts)
                 self.assertTrue(os.path.exists(self.flag))
                 self.assertNotIn(msg, out)
         # Third boot: no third try; the flag and the counter go, the user is told.
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(out, f"<3>{TAG}: {msg}\n")
         self.assertFalse(os.path.exists(self.flag))
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
         self.assertEqual(len(self.fs.commands("cp")), 2)
         self.assertEqual(
             self.fs.commands(self.notify),
@@ -1119,7 +1202,7 @@ class MigrateTest(Base):
         )
         self.assertEqual(tree(top), before)
         # Later boots: nothing scheduled, nothing tried, no second alert.
-        self.assertEqual(self.call(nocow_cli.migrate), (0, ""))
+        self.assertEqual(self.call(self.cli.migrate), (0, ""))
         self.assertEqual(len(self.fs.commands("cp")), 2)
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
 
@@ -1128,7 +1211,7 @@ class MigrateTest(Base):
         # started; a hang or hard reset before the next btrfs commit lost the increment, so
         # "gave up after two boots" could never trip.
         self.volume("cow")
-        self.schedule()
+        schedule(self)
         events: list[str] = []
         real_fsync = os.fsync
         folder = os.path.dirname(self.attempts)
@@ -1144,8 +1227,8 @@ class MigrateTest(Base):
 
         self.fs.cp = cp
         with mock.patch.object(os, "fsync", fsync):
-            self.call(nocow_cli.migrate)
-        self.assertEqual(self.read_attempts(), "1")
+            self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "1")
         first_cp = events.index("cp")
         self.assertIn(f"fsync {folder}", events[:first_cp], events)  # the counter's own bytes
         self.assertIn("fsync counter folder", events[:first_cp], events)  # its rename
@@ -1153,35 +1236,35 @@ class MigrateTest(Base):
 
     def test_mark_gives_two_boots_again(self) -> None:
         self.volume("cow")
-        self.schedule()
+        schedule(self)
         self.set_attempts("2")
-        self.call(nocow_cli.mark)
+        self.call(self.cli.mark)
         self.fs.cp = cp_fails
-        self.call(nocow_cli.migrate)
-        self.assertEqual(self.read_attempts(), "1")  # tried, not given up
+        self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "1")  # tried, not given up
         self.assertEqual(len(self.fs.commands("cp")), 1)
 
     def test_attempts_file_is_closed(self) -> None:
         # The counter is read and written inside `with open(...)`: no file is
         # left for the garbage collector to close (it warned "unclosed file").
         self.volume("cow")
-        self.schedule()
+        schedule(self)
         self.set_attempts("1")
         self.fs.cp = cp_fails
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
-            self.call(nocow_cli.migrate)
+            self.call(self.cli.migrate)
             gc.collect()
         self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
-        self.assertEqual(self.read_attempts(), "2")
+        self.assertEqual(read_attempts(self), "2")
 
     def test_unreadable_counter_counts_as_zero(self) -> None:
         self.volume("cow")
-        self.schedule()
+        schedule(self)
         self.set_attempts("garbage")
         self.fs.cp = cp_fails
-        self.call(nocow_cli.migrate)
-        self.assertEqual(self.read_attempts(), "1")
+        self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "1")
 
 
 class PostponeBase(Base):
@@ -1196,7 +1279,7 @@ class PostponeBase(Base):
         # A leftover of an interrupted copy: recover() would remove it.
         os.mkdir(self.top + ".nocow-new")
         self.before = tree(os.path.join(self.vols, "cow"))
-        self.schedule()
+        schedule(self)
         self.set_attempts("1")
 
     def assert_migrated(self, out: str) -> None:
@@ -1209,7 +1292,7 @@ class PostponeBase(Base):
         self.assertEqual(self.fs.sets, [])
         self.assertEqual(tree(os.path.join(self.vols, "cow")), self.before)  # recover() not run either
         self.assertTrue(os.path.exists(self.flag))
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
 
 
 class DockerRunningTest(PostponeBase):
@@ -1220,7 +1303,7 @@ class DockerRunningTest(PostponeBase):
             with self.subTest(state=state):
                 self.fs.docker_state = state
                 self.fs.calls.clear()
-                rc, out = self.call(nocow_cli.migrate)
+                rc, out = self.call(self.cli.migrate)
                 self.assertEqual(rc, 0)
                 self.assertEqual(out, f"<4>{TAG}: Docker is running: migration left for the next boot\n")
                 self.assertEqual(self.fs.calls, [["systemctl", "show", "-P", "ActiveState", "docker.service"]])
@@ -1229,15 +1312,15 @@ class DockerRunningTest(PostponeBase):
                 self.assertTrue(os.path.exists(self.flag))
                 # Not counted as an attempt and no alert; the boot is
                 # recorded instead (PostponedRecordTest).
-                self.assertEqual(self.read_attempts(), "1")
+                self.assertEqual(read_attempts(self), "1")
                 self.assertEqual(self.fs.commands(self.notify), [])
 
     def test_stopped_migrates(self) -> None:
         for state in ("inactive", "failed"):
             with self.subTest(state=state):
-                self.fresh()
+                fresh(self)
                 self.fs.docker_state = state
-                self.assert_migrated(self.call(nocow_cli.migrate)[1])
+                self.assert_migrated(self.call(self.cli.migrate)[1])
 
     def test_unknown_state_postpones(self) -> None:
         # Fails closed: only exit code 0 with "inactive" or "failed" lets the
@@ -1253,17 +1336,17 @@ class DockerRunningTest(PostponeBase):
             (4, "active", "systemctl exit 4, ActiveState 'active'"),
         ):
             with self.subTest(rc=rc, state=state):
-                self.fresh()
+                fresh(self)
                 self.fs.systemctl_rc, self.fs.docker_state = rc, state
                 self.fs.systemctl_out_on_error = True
-                rc_, out = self.call(nocow_cli.migrate)
+                rc_, out = self.call(self.cli.migrate)
                 self.assertEqual(rc_, 0)
                 self.assert_postponed(out, f"docker.service state unknown ({shown})")
 
     def test_no_systemctl_postpones(self) -> None:
         # subprocess.run raises FileNotFoundError: postponed like an unknown
         # state, nothing touched, attempts not counted.
-        self.fs.systemctl_missing = True
+        self.fs.missing.add("systemctl")
         rc, out, _ = self.main("migrate")
         self.assertEqual(rc, 0)
         self.assert_postponed(
@@ -1431,9 +1514,9 @@ class DockerdTest(PostponeBase):
             self.ours_bind_mounted,
         ):
             with self.subTest(case=add.__name__):
-                self.fresh()
+                fresh(self)
                 add()
-                rc, out = self.call(nocow_cli.migrate)
+                rc, out = self.call(self.cli.migrate)
                 self.assertEqual(rc, 0)
                 self.assert_postponed(out, f"dockerd (pid 7) uses {self.vols} outside docker.service")
 
@@ -1451,7 +1534,7 @@ class DockerdTest(PostponeBase):
             return real_open(path, mode)
 
         with mock.patch.object(builtins, "open", fake_open):
-            rc, out = self.call(nocow_cli.migrate)
+            rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         why = f"dockerd (pid 7) is running and its data root cannot be read ([Errno 13] Permission denied: '{blocked}')"
         self.assert_postponed(out, why)
@@ -1468,7 +1551,7 @@ class DockerdTest(PostponeBase):
             return real_stat(path)
 
         with mock.patch.object(os, "stat", stat):
-            rc, out = self.call(nocow_cli.migrate)
+            rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         why = f"dockerd (pid 7) is running and its data root cannot be read ([Errno 13] Permission denied: '{blocked}')"
         self.assert_postponed(out, why)
@@ -1553,9 +1636,9 @@ class DockerdTest(PostponeBase):
             self.other_not_processes,
         ):
             with self.subTest(case=add.__name__):
-                self.fresh()
+                fresh(self)
                 add()
-                rc, out = self.call(nocow_cli.migrate)
+                rc, out = self.call(self.cli.migrate)
                 self.assertEqual(rc, 0)
                 self.assert_migrated(out)
 
@@ -1569,8 +1652,8 @@ class PostponedRecordTest(PostponeBase):
         os.makedirs(os.path.join(self.proc, "sys/kernel/random"), exist_ok=True)
         with open(os.path.join(self.proc, "sys/kernel/random/boot_id"), "w") as f:
             f.write(boot_id + "\n")
-        with mock.patch.object(time, "time", lambda: at + 0.5):
-            return self.call(nocow_cli.migrate)
+        with mock.patch.object(time, "time", return_value=at + 0.5):
+            return self.call(self.cli.migrate)
 
     def record(self) -> dict[str, object] | None:
         try:
@@ -1603,10 +1686,10 @@ class PostponedRecordTest(PostponeBase):
             {"reason": "Docker is running", "boots": 3, "first": 1000, "last": 3000, "boot_id": "b3"},
         )
         self.assertEqual(sorted(os.listdir(os.path.dirname(self.postponed))), ["attempts", "postponed"])  # no .new
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
         self.assertEqual(self.fs.commands(self.notify), [])
         # status shows it.
-        rc, out = self.call(nocow_cli.status)
+        rc, out = self.call(self.cli.status)
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertIn(
             "  1 with copy-on-write data (2 MiB), migration at the next boot\n"
@@ -1618,7 +1701,7 @@ class PostponedRecordTest(PostponeBase):
         rc, out = self.boot("b4", 4000)
         self.assert_migrated(out)
         self.assertIsNone(self.record())
-        self.assertNotIn("postponed", self.call(nocow_cli.status)[1])
+        self.assertNotIn("postponed", self.call(self.cli.status)[1])
 
     def test_recorded_when_the_folder_has_no_nocow_flag(self) -> None:
         # Nothing scheduled, but the volumes folder lost +C (Docker installed
@@ -1663,13 +1746,13 @@ class PostponedRecordTest(PostponeBase):
                 rec = self.record()
                 assert rec is not None
                 self.assertEqual((rec["boots"], rec["first"]), (1, 1000))
-                self.assertIn("postponed at 1 boot(s) in a row", self.call(nocow_cli.status)[1])
+                self.assertIn("postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
 
     def test_without_a_boot_id(self) -> None:
         # No boot id to read: the first postponement is still recorded.
         self.fs.docker_state = "active"
-        with mock.patch.object(time, "time", lambda: 1000.0):
-            self.call(nocow_cli.migrate)
+        with mock.patch.object(time, "time", return_value=1000.0):
+            self.call(self.cli.migrate)
         rec = self.record()
         assert rec is not None
         self.assertEqual((rec["boots"], rec["boot_id"]), (1, ""))
@@ -1678,9 +1761,9 @@ class PostponedRecordTest(PostponeBase):
         self.fs.docker_state = "active"
         self.boot("b1", 1000)
         self.assertIsNotNone(self.record())
-        self.call(nocow_cli.unmark)
+        self.call(self.cli.unmark)
         self.assertIsNone(self.record())
-        self.assertEqual(self.call(nocow_cli.unmark), (0, ""))  # and again, with nothing to remove
+        self.assertEqual(self.call(self.cli.unmark), (0, ""))  # and again, with nothing to remove
 
 
 class RecoverTest(Base):
@@ -1693,7 +1776,7 @@ class RecoverTest(Base):
         self.vol = os.path.join(self.vols, "cow")
         self.before = tree(self.top)
         self.ino = ino(self.top)
-        self.schedule()
+        schedule(self)
 
     def second_rename_raises(self, exc: BaseException) -> contextlib.AbstractContextManager[object]:
         """rename(new, data), the second rename of the swap, raises exc; the others run."""
@@ -1708,19 +1791,19 @@ class RecoverTest(Base):
 
     def crash(self) -> None:
         with self.assertRaises(Crash):
-            self.call(nocow_cli.migrate)
-        self.assertEqual(self.read_attempts(), "1")
+            self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "1")
         self.assertTrue(os.path.exists(self.flag))
 
     def next_boot_finishes(self, restored: bool) -> None:
-        rc, out = self.call(nocow_cli.migrate)
+        rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(f"<4>{TAG}: cow: restored the original after an interrupted migration\n" in out, restored, out)
         self.assertEqual(tree(self.top), self.before)
         self.assert_all_nocow(self.top)
         self.assert_no_leftovers("cow")
         self.assertFalse(os.path.exists(self.flag))
-        self.assertIsNone(self.read_attempts())
+        self.assertIsNone(read_attempts(self))
 
     def test_crash_during_the_copy(self) -> None:
         self.fs.cp = lambda src, dst: (self.fs.copy_into(src, dst, stop_after=4), "")
@@ -1742,7 +1825,7 @@ class RecoverTest(Base):
         old = os.path.join(self.vol, names[0])
         self.assertEqual(ino(old), self.ino)
         # recover() alone: the original back under its name, the copy gone.
-        rc, out = self.call(nocow_adapters.recover)
+        rc, out = self.call(self.cli.recover)
         self.assertEqual(out, f"<4>{TAG}: cow: restored the original after an interrupted migration\n")
         self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
@@ -1775,35 +1858,35 @@ class RecoverTest(Base):
         # rename(new, data) fails with an OSError: the original goes back at
         # once; the copy stays until the next boot's recover() removes it.
         with self.second_rename_raises(OSError(16, "Device or resource busy")):
-            rc, out = self.call(nocow_cli.migrate)
+            rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)
         self.assertEqual(self.fs.syncs, 1)  # before the first rename
         self.assertIn(f"<3>{TAG}: cow: [Errno 16] Device or resource busy; left as it was\n", out)
         self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data", "_data.nocow-new"])
-        self.assertEqual(self.read_attempts(), "1")
+        self.assertEqual(read_attempts(self), "1")
         self.next_boot_finishes(restored=False)
 
     def test_recover_cases(self) -> None:
-        self.call(nocow_adapters.recover)  # nothing to do: nothing changes
+        self.call(self.cli.recover)  # nothing to do: nothing changes
         self.assert_no_leftovers("cow")
         # _data there: every old copy and the new one go.
         for x in ("_data.cow-old-1700000000", "_data.cow-old-1700000100", "_data.nocow-new"):
             os.makedirs(os.path.join(self.vol, x, "sub"))
-        rc, out = self.call(nocow_adapters.recover)
+        rc, out = self.call(self.cli.recover)
         self.assertEqual(out, "")  # removed without a log line
         self.assert_no_leftovers("cow")
         self.assertEqual(ino(self.top), self.ino)
         # _data missing, two old copies: the newest (by name) comes back.
         os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1700000100"))
         os.makedirs(os.path.join(self.vol, "_data.cow-old-1700000000"))
-        self.call(nocow_adapters.recover)
+        self.call(self.cli.recover)
         self.assertEqual(ino(self.top), self.ino)
         self.assert_no_leftovers("cow")
         # _data missing and only the new copy: kept, nothing is deleted.
         os.rename(self.top, os.path.join(self.vol, "_data.nocow-new"))
-        self.assertEqual(self.call(nocow_adapters.recover), (None, ""))
+        self.assertEqual(self.call(self.cli.recover), (None, ""))
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data.nocow-new"])
 
     def test_recover_leaves_a_data_that_is_not_a_folder(self) -> None:
@@ -1812,7 +1895,7 @@ class RecoverTest(Base):
         os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1700000000"))
         os.symlink("gone", self.top)
         os.mkdir(os.path.join(self.vol, "_data.nocow-new"))
-        self.assertEqual(self.call(nocow_adapters.recover), (None, ""))
+        self.assertEqual(self.call(self.cli.recover), (None, ""))
         self.assertEqual(os.readlink(self.top), "gone")
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data", "_data.cow-old-1700000000", "_data.nocow-new"])
         self.assertEqual(ino(os.path.join(self.vol, "_data.cow-old-1700000000")), self.ino)
@@ -1826,7 +1909,7 @@ class RecoverTest(Base):
             os.makedirs(os.path.join(elsewhere, x))
         os.symlink(elsewhere, os.path.join(self.vols, "link"))
         os.mkdir(os.path.join(self.vol, "_data.nocow-new"))
-        self.assertEqual(self.call(nocow_adapters.recover), (None, ""))
+        self.assertEqual(self.call(self.cli.recover), (None, ""))
         self.assertTrue(os.path.isfile(os.path.join(self.vols, "metadata.db")))
         self.assertTrue(os.path.islink(os.path.join(self.vols, "link")))
         self.assertEqual(sorted(os.listdir(elsewhere)), names)
@@ -1842,7 +1925,7 @@ class PostponedDurableTest(PostponeBase):
         with open(os.path.join(self.proc, "sys/kernel/random/boot_id"), "w") as f:
             f.write("b1\n")
         with recorded_fsyncs() as synced:
-            self.call(nocow_cli.migrate)
+            self.call(self.cli.migrate)
         assert_replaced_durably(self, self.postponed, synced)
         self.assertTrue(os.path.exists(self.postponed))
 
