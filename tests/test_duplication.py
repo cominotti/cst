@@ -61,7 +61,7 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "migrate": "bulk moves a folder into ~/Bulk; docker-volumes-nocow re-creates a volume NOCOW",
     "recover": "bulk finishes an interrupted move; docker-volumes-nocow an interrupted volume copy",
     "report": "bulk's per-item report vs cpu-watch's run comparison",
-    "run": "bluetooth and vm run commands with their own environment (LC_ALL, sessions); docker-gc's run loop",
+    "run": "bluetooth's and vm's bindings over cst_core's SubprocessCommandRunner (their own options and words); docker-gc's run loop",
     "parse_args": "each program's own argv grammar (doctor, toolchains, vm)",
     "classify": "a bulk folder, a kernel stack, a toolchain cache folder: three different classifications",
     "decide": "the LDAC bitrate, the Chrome cache place, a cache folder's fate: three different rules",

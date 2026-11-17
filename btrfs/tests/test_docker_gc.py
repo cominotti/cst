@@ -219,7 +219,7 @@ class RecorderAliveTest(unittest.TestCase):
 
     def test_systemctl_gets_no_stdin_and_a_timeout(self) -> None:
         done = subprocess.CompletedProcess(["systemctl"], 0)
-        with mock.patch.object(gc_adapters.subprocess, "run", return_value=done) as run:
+        with mock.patch.object(subprocess, "run", return_value=done) as run:
             self.assertTrue(gc_adapters.recorder_alive({"heartbeat": time.time()}))
         self.assertEqual(run.call_args.args[0], ["systemctl", "-q", "is-active", "docker-gc-recorder.service"])
         self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -228,7 +228,7 @@ class RecorderAliveTest(unittest.TestCase):
     def test_a_systemctl_that_does_not_answer_holds_images_back(self) -> None:
         hang = subprocess.TimeoutExpired(["systemctl"], gc_adapters.SYSTEMCTL_TIMEOUT)
         out = io.StringIO()
-        with mock.patch.object(gc_adapters.subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
+        with mock.patch.object(subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
             self.assertFalse(gc_adapters.recorder_alive({"heartbeat": time.time()}))
         self.assertEqual(
             out.getvalue(),

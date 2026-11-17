@@ -165,7 +165,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 3,
     "doctor cli": 1,
     "swap cli": 3,
-    "toolchains cli": 62,
+    "toolchains cli": 57,
     "vm cli": 82,
 }
 
@@ -209,7 +209,6 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
 # (tests/budgets.py). Only goes down.
 PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
-    "bluetooth subprocess.run": 1,
     "btrfs/bulk os.fsync": 7,
     "btrfs/bulk subprocess.Popen": 1,
     "btrfs/bulk subprocess.run": 13,
@@ -217,13 +216,11 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "btrfs/docker_gc os.fsync": 1,
     "btrfs/docker_gc os.replace": 1,
     "btrfs/docker_gc subprocess.Popen": 1,
-    "btrfs/docker_gc subprocess.run": 2,
     "btrfs/docker_volumes_nocow os.fsync": 1,
     "btrfs/docker_volumes_nocow os.replace": 1,
     "btrfs/docker_volumes_nocow subprocess.run": 5,
     "btrfs/snapshot os.fsync": 2,
     "btrfs/snapshot os.replace": 1,
-    "btrfs/snapshot subprocess.run": 1,
     "btrfs/stall_monitord subprocess.Popen": 1,
     "btrfs/stall_report subprocess.run": 3,
     "cpu subprocess.Popen": 1,
@@ -232,7 +229,6 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "cst_core subprocess.run": 1,
     "toolchains fcntl.flock": 3,
     "toolchains os.replace": 1,
-    "toolchains subprocess.run": 6,
     "toolchains tempfile.mkstemp": 1,
     "vm os.replace": 1,
     "vm subprocess.Popen": 1,

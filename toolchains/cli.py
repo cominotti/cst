@@ -56,6 +56,7 @@ from toolchains.adapters import (
     remove_tree,
     resolve_root,
     run_context,
+    RUNNER,
     run_idle,
     rustup_default,
     rustup_home,
@@ -1921,20 +1922,8 @@ def sccache_status_lines(home: str) -> list[str]:
         # TMPDIR=/tmp as in rustc-wrapper: if the server stops right after the
         # socket check, this client call starts a new one, which keeps its TMPDIR.
         env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1", TMPDIR="/tmp")
-        try:
-            r = subprocess.run(
-                [exe, "--show-stats"],
-                check=False,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=5,
-            )
-            stats = dict(SCCACHE_STATS.findall(r.stdout)) if r.returncode == 0 else {}
-        except OSError, subprocess.TimeoutExpired:
-            stats = {}
+        r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout", decode_errors="strict")
+        stats = dict(SCCACHE_STATS.findall(r.stdout)) if r.cause is None and r.returncode == 0 else {}
         if not stats:
             out.append(f"sccache server {env_id}: no answer")
             continue

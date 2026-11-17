@@ -16,7 +16,6 @@ import datetime as dt
 import errno
 import os
 import stat
-import subprocess
 import time
 import zoneinfo
 from btrfs.snapshot.domain import (
@@ -40,6 +39,8 @@ from btrfs.snapshot.domain import (
     plan,
     wall_to_epoch,
 )
+from cst_core.adapters import SubprocessCommandRunner
+from cst_core.ports import CommandRunnerPort
 
 
 # ---- time ----------------------------------------------------------------------------
@@ -368,18 +369,25 @@ def walk_caches(root: str, skips: Sequence[str] = (), mode: str = "count") -> Ca
     return result
 
 
+# The commands of a snapshot run: where it runs, never moved to the host.
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
+
+
 class Host:
     """Everything that touches the system; tests replace it."""
 
     def run(self, argv: Sequence[str]) -> tuple[int, str, str]:
-        env = dict(os.environ, LC_ALL="C")
-        try:
-            p = subprocess.run(argv, check=False, capture_output=True, text=True, env=env, timeout=CMD_TIMEOUT)
-        except FileNotFoundError:
+        """(rc, stdout, stderr) of argv in the C locale, within CMD_TIMEOUT; stdin
+        is ours; output that is not UTF-8 raises. A command that cannot start
+        raises (as subprocess.run did)."""
+        r = RUNNER.run(argv, timeout=CMD_TIMEOUT, locale_c=True, stdin="inherit", decode_errors="strict")
+        if r.fault == "missing":
             return 127, "", f"{argv[0]}: not found"
-        except subprocess.TimeoutExpired:
+        if r.fault == "timeout":
             return 124, "", f"timed out after {CMD_TIMEOUT}s"
-        return p.returncode, p.stdout, p.stderr
+        if r.cause is not None:
+            raise r.cause
+        return r.returncode, r.stdout, r.stderr
 
     def time(self) -> float:
         return time.time()
