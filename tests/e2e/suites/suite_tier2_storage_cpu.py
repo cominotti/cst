@@ -1858,7 +1858,9 @@ echo E2E-OK
         and, for the weekly run, /run/docker-gc the only writable places), against the real DinD daemon behind a stub
         docker.service: the recorder runs without restarts and writes an
         image use it saw in `docker events` (an image imported offline, then
-        tagged) to last-used.json; `cst btrfs docker-gc run` starts
+        tagged every 5 s until it is there: one event sent before the recorder
+        subscribed would be lost) to last-used.json; if it does not, the CI log
+        says whether the same program records it outside the sandbox; `cst btrfs docker-gc run` starts
         docker-gc.service, which ends in success, takes its lock in
         /run/docker-gc (its RuntimeDirectory, kept after the run) and writes
         last-run.json with no failed step
@@ -1880,8 +1882,8 @@ echo E2E-OK
             show() { sed "s/^/test_13 $1: /" <<<"$2" >&2; }   # the CI log
             cleanup() {
                 cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
-                docker image rm -f e2e-gc-probe:1 e2e-gc-probe:2 >/dev/null 2>&1 || true
-                rm -rf "$(dirname "$uptime_dropin")" /run/e2e-uptime /var/tmp/e2e-gc-probe
+                docker images -q e2e-gc-probe | sort -u | xargs -r docker image rm -f >/dev/null 2>&1 || true
+                rm -rf "$(dirname "$uptime_dropin")" /run/e2e-uptime /var/tmp/e2e-gc-probe /run/e2e-gc-plain
                 systemctl stop docker.service e2e-dind.service 2>/dev/null || true
                 rm -f "$stub"
                 systemctl daemon-reload
@@ -1891,6 +1893,7 @@ echo E2E-OK
             journal() { journalctl -q --no-pager -o cat -u "$1" -n 30 >&2 || true; }
 
             docker_up
+            t_enable="$(date +%s)"
             out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
             for u in docker-gc-recorder.service docker-gc.service; do
                 [[ "$(systemctl show -P ProtectSystem "$u")" == strict ]]
@@ -1905,25 +1908,57 @@ echo E2E-OK
             done
             [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] ||
                 { journal docker-gc-recorder.service; exit 1; }
+            # Active comes before the recorder follows the events (it first lists the containers
+            # and writes its state): wait for its line of this start.
+            for _ in $(seq 1 30); do
+                journalctl -q --no-pager -o cat -u docker-gc-recorder.service --since "@$t_enable" |
+                    grep -qF 'recording image use from docker events' && break
+                sleep 1
+            done
 
-            # An image use, offline: import a one-file image, then tag it.
+            # An image use, offline: import a one-file image, then tag it again every 5 s until the
+            # recorder has it. An event Docker sends before `docker events` subscribed is lost, so
+            # one tag right after the start would race the recorder (the first CI run of this test
+            # did not record it); a later tag cannot.
             rm -rf /var/tmp/e2e-gc-probe && mkdir -p /var/tmp/e2e-gc-probe
             echo probe >/var/tmp/e2e-gc-probe/probe.txt
+            t_import="$(date +%s)"
             tar -C /var/tmp/e2e-gc-probe -cf - probe.txt | docker import - e2e-gc-probe:1 >/dev/null
-            docker tag e2e-gc-probe:1 e2e-gc-probe:2
             iid="$(docker image inspect --format '{{.Id}}' e2e-gc-probe:1)"
-            # The recorder saves what it saw every 30 s (DOCKER_GC_FLUSH): its startup write only
-            # makes the file, so wait for this image's id in it.
+            recorded() {   # recorded STATE_FILE: the probe image is in it
+                python3 -I -c 'import json, sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["images"])' \
+                    "$1" "$iid" 2>/dev/null
+            }
+            # Why not, for the CI log: what was saved and sent, and whether the same program
+            # records the probe outside the sandbox (DOCKER_GC_FLUSH=2, its own state folder).
+            diagnose() {
+                echo "the recorder did not record $iid" >&2
+                cat "$state/last-used.json" >&2 || true
+                systemctl show -p NRestarts -p MainPID -p ActiveEnterTimestamp docker-gc-recorder.service >&2 || true
+                journal docker-gc-recorder.service
+                docker events --since "$t_import" --until "$(date +%s)" --format '{{json .}}' | tail -n 5 >&2 || true
+                rm -rf /run/e2e-gc-plain
+                DOCKER_GC_STATE=/run/e2e-gc-plain DOCKER_GC_FLUSH=2 timeout 25 /usr/local/sbin/docker-gc record >&2 &
+                sleep 5
+                docker tag e2e-gc-probe:1 e2e-gc-probe:plain
+                sleep 8
+                if recorded /run/e2e-gc-plain/last-used.json; then
+                    echo "OUTSIDE the sandbox the same recorder records it" >&2
+                else
+                    echo "outside the sandbox the recorder does not record it either" >&2
+                fi
+                wait || true
+            }
             seen=0
-            for _ in $(seq 1 50); do
-                if python3 -I -c 'import json, sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["images"])' \
-                    "$state/last-used.json" "$iid" 2>/dev/null; then
+            for i in $(seq 0 59); do
+                (( i % 5 )) || docker tag e2e-gc-probe:1 "e2e-gc-probe:t$i"
+                if recorded "$state/last-used.json"; then
                     seen=1
                     break
                 fi
                 sleep 1
             done
-            (( seen )) || { echo "the recorder did not record $iid" >&2; journal docker-gc-recorder.service; exit 1; }
+            (( seen )) || { diagnose; exit 1; }
             [[ "$(systemctl is-active docker-gc-recorder.service)" == active ]]
             [[ "$(systemctl show -P NRestarts docker-gc-recorder.service)" == 0 ]]
 
@@ -1998,7 +2033,7 @@ echo E2E-OK
 import json, sys
 d = json.load(open(sys.argv[1]))
 w, c = d["window"], d["coverage"]
-# watch waits for a sample at or after the run's end; the saved window ends just after it.
+# watch waits for a sample at or after the end of the run; the saved window ends just after it.
 assert c["last_sample"] is not None and c["last_sample"] >= w["until"] - 2, (w, c)
 assert d["samples"] >= 1, d["samples"]
 ' "$r_dir/report.json"
