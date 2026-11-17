@@ -55,7 +55,10 @@ together: `<pkg>/wiring.py`. It is the only place that
   use cases (a frozen settings value, or plain arguments);
 - looks up the program itself: `sys.argv[0]`, `sys.executable`, its own
   path (to run it again);
-- re-runs the program as another user: the `sudo` or `runuser` re-exec;
+- re-runs the program as another user: the `sudo` or `runuser` re-exec
+  (in cst_core, running a script again as root or as `SUDO_USER` is the use
+  case itself: `CstDispatcher` and the module router's `ModuleRouter` build
+  those command lines in the application layer, and the port execs them);
 - imports the package's adapters (and cst_core's) and builds them.
 
 `cli.py` only parses argv, calls `wiring` and one use case, and renders

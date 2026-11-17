@@ -1218,6 +1218,26 @@ class ModuleRouterTest(unittest.TestCase):
 class CoreWiringTest(unittest.TestCase):
     """cst_core/wiring.py: what cst and the installer take from the process."""
 
+    def test_the_router_needs_the_shim_it_routes_for(self) -> None:
+        # Without CST_SELF (route.py run by hand, not by vm-setup.sh or toolchains-setup.sh) there is
+        # no script to print the help of or to run again: a usage error, not a traceback or ./vm/cst-vm.
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True):
+            self.assertIsNone(core_wiring.module_router("vm"))
+        env = {"PATH": "/usr/bin:/bin"}
+        for args in (["vm", "help"], ["toolchains", "status"], ["nope"], []):
+            with self.subTest(args=args):
+                p = subprocess.run(
+                    [sys.executable, "-I", "-B", os.path.join(REPO_ROOT, "cst_core", "route.py"), *args],
+                    env=env,
+                    cwd=tempfile.gettempdir(),
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                )
+                self.assertEqual((p.returncode, p.stdout), (2, ""), p.stderr)
+                self.assertTrue(p.stderr.startswith("usage: route.py MODULE [ARGS...]"), p.stderr)
+
     def test_the_installer_builds_payloads_from_this_checkout(self) -> None:
         self.assertIsNotNone(core_wiring.install_service())
 

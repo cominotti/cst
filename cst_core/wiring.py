@@ -34,7 +34,8 @@ def start_router() -> None:
 
 
 def module_router(module: str) -> ModuleRouter | None:
-    """The router of a shim module's commands (None: no such module), with what its shim hands over.
+    """The router of a shim module's commands (None: no such module, or no shim handed CST_SELF over),
+    with what its shim hands over.
 
     CST_SELF (the shim's real path) and CST_ARG0 (its $0) are popped, so the
     program does not inherit them; CST_PROG, the module's container
@@ -44,6 +45,8 @@ def module_router(module: str) -> ModuleRouter | None:
     if routing is None:
         return None
     script = os.environ.pop("CST_SELF", "")
+    if not script:
+        return None
     arg0 = os.environ.pop("CST_ARG0", "") or script
     settings = RouteSettings(
         script=script,

@@ -1002,7 +1002,7 @@ The Python code inside `vm/` (standard library only at run time):
   (`ROUTING` in `cst_core/domain/dispatch.py`, tests in
   `tests/test_module_routing.py`) prints the help or a usage error, and
   execs `cst-vm`: as the user for `list`, `status`, `backup-timer status`,
-  `tune plan` and `nocow plan` (from a toolbox on the host through
+  `tune plan` and `nocow plan` without `--root` (from a toolbox on the host through
   flatpak-spawn), on the host only for the rest, which first runs the
   script again through sudo (`nocow apply` stays the user's).
 - `vm/cst-vm`: the entry point (its docstring is the help); it only hands

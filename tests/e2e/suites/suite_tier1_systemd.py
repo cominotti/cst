@@ -2066,7 +2066,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
         toolchains steps down to SUDO_USER through the real runuser (tester's HOME, USER,
         XDG_RUNTIME_DIR; SUDO_USER and XDG_CONFIG_HOME dropped); without a SUDO_USER (or
-        with root) it refuses with exit 1; vm's root commands refuse in a toolbox."""
+        with root) it refuses with exit 1, and with an unknown SUDO_USER too; vm's root commands
+        refuse in a toolbox; the help of both works as root."""
         out = exec_bash(
             self.SYSTEMD_CONTAINER,
             r"""
@@ -2106,6 +2107,16 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
             got=$(CST_PROG="cst vm" CST_VM_CONTAINER=1 bash "$d/vm-setup.sh" backup w 2>&1) || rc=$?
             [[ $rc == 1 && "$got" == *"'cst vm backup w' must run on the host, not inside a toolbox/container."* ]] \
                 || { echo "vm in a toolbox: exit $rc: $got" >&2; exit 1; }
+            rc=0
+            got=$(SUDO_USER=e2e-no-such-user CST_PROG="cst toolchains" bash "$d/toolchains-setup.sh" status 2>&1) || rc=$?
+            [[ $rc == 1 && "$got" == "cst toolchains: ERROR: SUDO_USER=e2e-no-such-user: no such user" ]] \
+                || { echo "toolchains, unknown SUDO_USER: exit $rc: $got" >&2; exit 1; }
+            for m in vm toolchains; do
+                rc=0
+                got=$(CST_PROG="cst $m" bash "$d/$m-setup.sh" help) || rc=$?
+                [[ $rc == 0 && "$got" == *"Usage: cst $m <command> [args]" ]] \
+                    || { echo "$m help as root: exit $rc: $got" >&2; exit 1; }
+            done
             echo E2E-OK
             """,
         ).stdout

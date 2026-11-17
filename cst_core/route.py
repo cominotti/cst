@@ -34,7 +34,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     router = wiring.module_router(args[0]) if args else None
     if router is None:
         print(
-            "usage: route.py MODULE [ARGS...] (MODULE: a shim module of cst_core.domain.dispatch.ROUTING)",
+            "usage: route.py MODULE [ARGS...] (MODULE: a shim module of cst_core.domain.dispatch.ROUTING;"
+            " run by its setup script, which hands over CST_SELF)",
             file=sys.stderr,
         )
         return 2
