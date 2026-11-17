@@ -93,12 +93,6 @@ def save_state(st: Mapping[str, Any]) -> None:
     write_atomic(LAST_USED, json.dumps(st), mode="umask", durable="file", relabel=False)
 
 
-def save_summary(summary: Mapping[str, object]) -> None:
-    """LAST_RUN, replaced atomically (it was rewritten in place): what status shows of the last run."""
-    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
-    write_atomic(LAST_RUN, json.dumps(summary), mode="umask", durable=False, relabel=False)
-
-
 def recorder_alive(st: Mapping[str, Any]) -> bool:
     """The recorder runs and wrote its heartbeat lately. A systemctl that does
     not answer counts as a recorder that is not running: images are held back."""
