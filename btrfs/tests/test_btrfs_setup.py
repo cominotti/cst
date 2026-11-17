@@ -32,9 +32,11 @@ SETUP = os.path.join(REPO, "btrfs-setup.sh")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 
 # The log says, for each clean, whether the unit file was still there.
 STUBS = """
@@ -46,9 +48,12 @@ systemctl() {
 }
 rm() {
     echo "rm $*" >>"$LOG"
-    local a
+    local a r=-f
     for a in "$@"; do
-        if [[ "$a" == "$T"/* ]]; then command rm -f -- "$a"; fi
+        if [[ "$a" == -*r* ]]; then r=-rf; fi
+    done
+    for a in "$@"; do
+        if [[ "$a" == "$T"/* ]]; then command rm "$r" -- "$a"; fi
     done
 }
 """
@@ -58,7 +63,7 @@ def assignment(name: str) -> str:
     """The line (or lines, for an array) that sets NAME at the top of btrfs-setup.sh."""
     with open(SETUP) as f:
         text = f.read()
-    m = re.search(rf"^{name}=(\(.*?\)|.*)$", text, re.M | re.S)
+    m = re.search(rf"^{name}=(\(.*?\)|[^\n]*)$", text, re.M | re.S)
     if m is None:
         raise AssertionError(f"{name}= not found in {SETUP}")
     return m.group(0)
@@ -181,8 +186,7 @@ class TimerRemovalTest(unittest.TestCase):
 
     def test_docker_gc_disable_forgets_its_timer(self) -> None:
         self.touch(os.path.join(self.units, "docker-gc.timer"))
-        body = [assignment("DOCKER_GC_UNITS"), shell_function(SETUP, "docker_gc"), "docker_gc disable"]
-        r = self.run_bash("\n".join(body))
+        r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable"]))
         self.assertEqual(
             self.calls(),
             [
@@ -192,6 +196,94 @@ class TimerRemovalTest(unittest.TestCase):
             ],
         )
         self.assertIn("docker-gc disabled", r.stdout)
+        self.assertIn("docker-gc disable --purge", r.stdout)
+
+    def docker_gc_body(self) -> list[str]:
+        """docker_gc as btrfs-setup.sh defines it, its recorded state in the test's folder and the
+        real cst_installed_dests (read-only: the manifest's destinations)."""
+        return [
+            f'. "{REPO}/cst-install.bash"',
+            assignment("DOCKER_GC_UNITS"),
+            'DOCKER_GC_STATE="$T/docker-gc-state"',
+            shell_function(SETUP, "docker_gc_files"),
+            shell_function(SETUP, "docker_gc"),
+        ]
+
+    def test_docker_gc_disable_purge_removes_program_units_and_state(self) -> None:
+        self.touch(os.path.join(self.units, "docker-gc.timer"))
+        state = os.path.join(self.tmp, "docker-gc-state")
+        os.makedirs(state)
+        self.touch(os.path.join(state, "last-used.json"))
+        r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
+        units = ["docker-gc-recorder.service", "docker-gc.service", "docker-gc.timer"]
+        self.assertEqual(
+            self.calls(),
+            [
+                "systemctl disable --now " + " ".join(units),
+                "systemctl clean --what=state docker-gc.timer",
+                "  (docker-gc.timer file present)",
+                "rm -fv /usr/local/sbin/docker-gc",
+                *(f"rm -fv /etc/systemd/system/{u}" for u in units),
+                f"rm -rf {state}",
+                "systemctl daemon-reload",
+                "systemctl reset-failed " + " ".join(units),
+            ],
+        )
+        self.assertFalse(os.path.exists(state))
+        self.assertIn("docker-gc removed", r.stdout)
+        # A second purge: the state is gone, so it is not removed again.
+        os.unlink(self.log)
+        self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
+        self.assertNotIn(f"rm -rf {state}", self.calls())
+
+    def test_docker_gc_disable_refuses_an_unknown_argument(self) -> None:
+        for args in ("--all", "--purge --dry-run"):
+            with self.subTest(args=args):
+                body = "\n".join([*self.docker_gc_body(), f"(docker_gc disable {args}) && exit 9 || echo rc=$?"])
+                r = self.run_bash(body)
+                self.assertIn("rc=2", r.stdout)
+                self.assertIn("only --purge", r.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def docker_gc_status(self, enabled: str, rc: int) -> str:
+        # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
+        # (not-found); the Python status part is a stub.
+        body = [
+            f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
+            "is-active) echo inactive; return 3 ;; esac; }",
+            'python3() { echo "python3 $*"; }',
+            *self.docker_gc_body(),
+            # The installed files, in the test's folder (the real ones may exist where the test runs).
+            'docker_gc_files() { printf "%s\\n" "$T/units/docker-gc" "$T/units/docker-gc.timer"; }',
+            "docker_gc status",
+        ]
+        return self.run_bash("\n".join(body)).stdout
+
+    def test_docker_gc_status_prints_one_timer_state(self) -> None:
+        # With "|| echo off", a disabled timer printed "disabled" and then "off" on a line of its own.
+        self.assertEqual(self.docker_gc_status("disabled", 1).splitlines()[0], "timer disabled, recorder inactive")
+        self.assertEqual(self.docker_gc_status("enabled", 0).splitlines()[0], "timer enabled, recorder inactive")
+        self.assertEqual(
+            self.docker_gc_status("not-found", 4).splitlines()[0], "timer not installed, recorder inactive"
+        )
+        self.assertEqual(self.docker_gc_status("", 1).splitlines()[0], "timer off, recorder inactive")
+        self.assertEqual(len(self.docker_gc_status("disabled", 1).splitlines()), 2)
+
+    def test_docker_gc_status_lists_what_purge_would_remove(self) -> None:
+        self.touch(os.path.join(self.units, "docker-gc.timer"))
+        os.makedirs(os.path.join(self.tmp, "docker-gc-state"))
+        self.assertEqual(
+            self.docker_gc_status("disabled", 1).splitlines(),
+            [
+                "timer disabled, recorder inactive",
+                f"still installed: {self.units}/docker-gc.timer",
+                f"still installed: {self.tmp}/docker-gc-state",
+                "('cst-btrfs-test docker-gc disable --purge' removes them)",
+                "python3 -I -B " + BTRFS + "/docker-gc status",
+            ],
+        )
+        # Enabled: nothing to list.
+        self.assertEqual(len(self.docker_gc_status("enabled", 0).splitlines()), 2)
 
     def snapshots(self, call: str) -> list[str]:
         # Sourced the way the frontend does; the paths it writes point into the test's folder.
@@ -557,15 +649,20 @@ function /usr/local/sbin/btrfs-snapshot { echo "btrfs-snapshot $*"; }
         self.assertNotIn("older CST", r.stdout)
 
 
+def service_lines(unit: str) -> list[str]:
+    """The [Service] lines of btrfs/units/UNIT as shipped, without blanks and comments."""
+    with open(os.path.join(BTRFS, "units", unit)) as f:
+        text = f.read()
+    m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    assert m is not None, text
+    return [ln for ln in m.group(1).splitlines() if ln and not ln.startswith("#")]
+
+
 class StallMonitorUnitTest(unittest.TestCase):
     """btrfs/units/btrfs-stall-monitor.service as shipped."""
 
     def service_lines(self) -> list[str]:
-        with open(os.path.join(BTRFS, "units", "btrfs-stall-monitor.service")) as f:
-            text = f.read()
-        m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
-        assert m is not None, text
-        return [ln for ln in m.group(1).splitlines() if ln and not ln.startswith("#")]
+        return service_lines("btrfs-stall-monitor.service")
 
     def test_journal_lines_carry_the_daemon_name(self) -> None:
         # Not python3, the program systemd starts.
@@ -578,6 +675,255 @@ class StallMonitorUnitTest(unittest.TestCase):
         self.assertIn("RuntimeDirectory=btrfs-stall-monitor", lines)
         self.assertIn("Restart=on-failure", lines)
         self.assertIn("RuntimeDirectoryPreserve=restart", lines)
+
+
+class DockerGcUnitsTest(unittest.TestCase):
+    """btrfs/units/docker-gc-recorder.service and docker-gc.service as shipped: sandboxed, with
+    /var/lib/docker-gc (docker-gc's state) as the place they may write, and /run/docker-gc (the
+    run lock) for the weekly run."""
+
+    UNITS = ("docker-gc-recorder.service", "docker-gc.service")
+
+    def service(self, name: str) -> dict[str, list[str]]:
+        keys: dict[str, list[str]] = {}
+        for ln in service_lines(name):
+            k, _, v = ln.partition("=")
+            keys.setdefault(k, []).append(v)
+        return keys
+
+    def test_both_have_the_same_sandbox(self) -> None:
+        # The block is written out in each unit (systemd has no include): a setting added to
+        # one only shows here. What differs is the job, and the weekly run's lock folder.
+        own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "Nice", "IOSchedulingClass"}
+        own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
+        recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
+        self.assertEqual(recorder, weekly)
+
+    def test_both_run_sandboxed_with_no_capability(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                s = self.service(name)
+                self.assertEqual(s.get("CapabilityBoundingSet"), [""])
+                for key, value in (
+                    ("NoNewPrivileges", "yes"),
+                    ("ProtectSystem", "strict"),
+                    ("ProtectHome", "read-only"),
+                    ("PrivateTmp", "yes"),
+                    ("RestrictAddressFamilies", "AF_UNIX"),
+                    ("SystemCallFilter", "@system-service"),
+                    ("MemoryDenyWriteExecute", "yes"),
+                ):
+                    self.assertEqual(s.get(key), [value], key)
+
+    def test_buildx_keeps_its_state_in_the_state_directory(self) -> None:
+        # docker builder prune runs buildx, which fails to mkdir ~/.docker under ProtectHome=read-only.
+        self.assertEqual(
+            self.service("docker-gc.service").get("Environment"), ["BUILDX_CONFIG=/var/lib/docker-gc/buildx"]
+        )
+
+    def test_the_paths_docker_gc_writes_are_the_units_state_and_runtime_directories(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                s = self.service(name)
+                self.assertEqual(s.get("StateDirectory"), ["docker-gc"])
+                self.assertNotIn("ReadWritePaths", s)
+        if os.environ.get("DOCKER_GC_STATE") is None:
+            self.assertEqual(gc_adapters.STATE_DIR, "/var/lib/docker-gc")
+        for path in (gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
+            self.assertEqual(os.path.dirname(path), gc_adapters.STATE_DIR, path)
+        # The run lock: only the weekly run takes it (the recorder does not). Kept after the run
+        # (Preserve=), so a cleanup-now that holds it then does not lose its file.
+        if os.environ.get("DOCKER_GC_RUNTIME") is None:
+            self.assertEqual(gc_adapters.LOCK, "/run/docker-gc/run.lock")
+        gc = self.service("docker-gc.service")
+        self.assertEqual((gc.get("RuntimeDirectory"), gc.get("RuntimeDirectoryPreserve")), (["docker-gc"], ["yes"]))
+        self.assertNotIn("RuntimeDirectory", self.service("docker-gc-recorder.service"))
+
+
+SCRUB_CASES: list[tuple[str, str | None]] = [
+    # (snapshots.conf text, the limit both readers give; None: both refuse)
+    ("", ""),
+    ("SCRUB_LIMIT=1G\n", "1G"),
+    ("SCRUB_LIMIT='500M'\n", "500M"),
+    ('SCRUB_LIMIT="2g"\n', "2g"),
+    ("SCRUB_LIMIT=1G  # per device\n", "1G"),
+    ("SCRUB_LIMIT='1G'\t# quoted, then a comment\n", "1G"),
+    ("export SCRUB_LIMIT=1G\n", "1G"),
+    ("  SCRUB_LIMIT=750K\n", "750K"),
+    ("SCRUB_LIMIT=1G\nSCRUB_LIMIT=2T\n", "2T"),
+    ("SCRUB_LIMIT=0\n", ""),
+    ("SCRUB_LIMIT=\n", ""),
+    ("SCRUB_LIMIT=''\n", ""),
+    ("SCRUB_LIMIT= # none\n", ""),
+    ("#SCRUB_LIMIT=1G\n", ""),
+    ("SCRUB_LIMITS=fast\n", ""),
+    ("HOME_SUBVOL=home\nNAS_HOST=''\nSCRUB_LIMIT=1G # c\n", "1G"),
+    ("SCRUB_LIMIT=$X\n", None),
+    ('SCRUB_LIMIT="1$G"\n', None),
+    ("SCRUB_LIMIT=1\\G\n", None),
+    ("SCRUB_LIMIT = 1G\n", None),
+    ("SCRUB_LIMIT= 1G\n", None),
+    ("SCRUB_LIMIT=1G; touch x\n", None),
+    ("SCRUB_LIMIT=1G 2G\n", None),
+    ("SCRUB_LIMIT='1G'x\n", None),
+    ("SCRUB_LIMIT=1G\r\n", None),
+    ("SCRUB_LIMIT\n", None),
+    ("SCRUB_LIMIT=fast\n", None),
+    ("SCRUB_LIMIT=1.5G\n", None),
+    ("SCRUB_LIMIT=-1\n", None),
+    ("SCRUB_LIMIT=1G\nSCRUB_LIMIT=$(date)\n", None),
+]
+
+
+class ScrubLimitTest(unittest.TestCase):
+    """SCRUB_LIMIT (the weekly scrub's speed limit) in snapshots.conf: btrfs-setup.sh's
+    reader, the drop-in install writes from it, and what status shows."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-scrub-limit-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.conf = os.path.join(self.tmp, "snapshots.conf")
+        self.dropin = os.path.join(self.tmp, "units", "btrfs-scrub-weekly.service.d", "10-cst-limit.conf")
+
+    def bash(self, *lines: str) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                f'. "{REPO}/cst-install.bash"',
+                assignment("SCRUB_SIZE_RE"),
+                assignment("SCRUB_LINE_RE"),
+                f'BTRFS_CONF="{self.conf}"; SCRUB_DROPIN="{self.dropin}"; BTRFS_SYSFS="{self.tmp}/sys"',
+                *(shell_function(SETUP, f) for f in ("scrub_limit_setting", "scrub_limit_dropin")),
+                *(shell_function(SETUP, f) for f in ("install_scrub_limit", "status_scrub_limit")),
+                *lines,
+            ]
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": self.tmp, "LC_ALL": "C"},
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+
+    def write_conf(self, text: str) -> None:
+        with open(self.conf, "w", newline="") as f:
+            f.write(text)
+
+    def test_bash_and_doctor_read_scrub_limit_alike(self) -> None:
+        for text, want in SCRUB_CASES:
+            with self.subTest(conf=text):
+                if text:
+                    self.write_conf(text)
+                elif os.path.exists(self.conf):
+                    os.unlink(self.conf)
+                r = self.bash("scrub_limit_setting")
+                bash = r.stdout if r.returncode == 0 else None
+                setting, problem = scrub_limit_setting(parse_shell_assignments(text))
+                doctor = None if problem else setting
+                self.assertEqual((bash, doctor), (want, want), r.stderr)
+                if want is None:
+                    self.assertIn("SCRUB_LIMIT", r.stderr)
+                elif want:
+                    # The value bash itself gives when it sources the file (btrfs-snapshot does).
+                    sourced = subprocess.run(
+                        ["bash", "-c", '. "$1"; printf %s "$SCRUB_LIMIT"', "_", self.conf],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env={"PATH": "/usr/bin:/bin"},
+                        stdin=subprocess.DEVNULL,
+                    ).stdout
+                    self.assertEqual(sourced, want)
+
+    def test_install_writes_the_drop_in_for_a_limit_and_removes_it_for_none(self) -> None:
+        self.write_conf("SCRUB_LIMIT=1G\n")
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"written:   {self.dropin}", r.stdout)
+        with open(self.dropin) as f:
+            lines = [ln for ln in f.read().splitlines() if ln and not ln.startswith("#")]
+        self.assertEqual(
+            lines,
+            [
+                "[Service]",
+                "ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 1G /var",
+                # "-": a reset that fails does not turn a good scrub into a failed unit.
+                "ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var",
+            ],
+        )
+        self.assertEqual(os.stat(self.dropin).st_mode & 0o777, 0o644)
+        # A second install changes nothing.
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertIn(f"unchanged: {self.dropin}", r.stdout)
+        # No limit any more: the drop-in and its folder go; a second run finds nothing to do.
+        self.write_conf("SCRUB_LIMIT=0\n")
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
+        r = self.bash('install_scrub_limit ""')
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a file whatever its mode")
+    def test_an_unreadable_settings_file_is_refused_not_read_as_no_limit(self) -> None:
+        # Read as "no limit", install would remove a drop-in that the setting asks for.
+        self.write_conf("SCRUB_LIMIT=1G\n")
+        os.chmod(self.conf, 0)
+        r = self.bash('scrub_limit_setting && echo "rc=0"')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("rc=0", r.stdout)
+        self.assertIn(f"{self.conf}: cannot read it", r.stderr)
+
+    def test_doctor_reads_the_limit_back_from_the_drop_in_bash_writes(self) -> None:
+        for limit in ("1G", "500m", "750K"):
+            with self.subTest(limit=limit):
+                r = self.bash(f"scrub_limit_dropin {limit}")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(scrub_dropin_limit(r.stdout), limit)
+
+    def test_no_setting_writes_no_drop_in(self) -> None:
+        r = self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
+
+    def status(self) -> list[str]:
+        r = self.bash("status_scrub_limit 00000000-0000-0000-0000-000000000000")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.splitlines()
+
+    def test_status_compares_the_setting_with_the_service(self) -> None:
+        conf = self.conf
+        self.assertEqual(
+            self.status(),
+            [f"  setting: none (SCRUB_LIMIT in {conf}; none = full speed)", "  service: no limit, as set"],
+        )
+        self.write_conf("SCRUB_LIMIT='1G'\n")
+        self.assertEqual(self.status()[1], "  service: no limit, DIFFERS from the setting (run install)")
+        self.bash('install_scrub_limit "$(scrub_limit_setting)"')
+        self.assertEqual(
+            self.status(),
+            [f"  setting: 1G (SCRUB_LIMIT in {conf}; none = full speed)", "  service: 1G, as set"],
+        )
+        self.write_conf("SCRUB_LIMIT=$FAST\n")
+        out = self.status()
+        self.assertTrue(out[0].startswith(f"  setting: INVALID: {conf} line 1: "), out)
+        self.assertEqual(out[1], "  service: 1G (fix the setting, then run install)")
+
+    def test_status_shows_the_limit_sysfs_holds_now(self) -> None:
+        for devid, limit in (("1", 8388608), ("2", 0)):
+            d = os.path.join(self.tmp, "sys", "00000000-0000-0000-0000-000000000000", "devinfo", devid)
+            os.makedirs(d)
+            with open(os.path.join(d, "scrub_speed_max"), "w") as f:
+                f.write(f"{limit}\n")
+        self.assertEqual(self.status()[2], "  now in sysfs (bytes/s, 0 = no limit): device 1 8388608, device 2 0")
+
+    def test_the_weekly_timer_spaces_out_its_catch_up(self) -> None:
+        with open(os.path.join(BTRFS, "units", "btrfs-scrub-weekly.timer")) as f:
+            timer = f.read().splitlines()
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("RandomizedDelaySec=15min", timer)
 
 
 if __name__ == "__main__":

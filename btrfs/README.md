@@ -133,7 +133,7 @@ cst btrfs help
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
 | `bulk steam plan\|apply [--app ID] [--copy]` | root | Moves your installed Steam games into the `~/Bulk/steam` library, with Steam closed (section 10.1). `plan` is a dry run. `apply` also installs the boot step that repairs an interrupted move. `--copy` allows a real copy of NOCOW game data (it cannot be reflinked). |
-| `docker-gc enable\|status\|run [--dry-run]\|cleanup-now\|disable` | root | Weekly Docker cleanup (section 11). |
+| `docker-gc enable\|status\|run [--dry-run]\|cleanup-now\|disable [--purge]` | root | Weekly Docker cleanup (section 11). |
 | `report [args]` | user | "Was storage the bottleneck in this time window, and why?" (section 7). |
 | `watch [args]` | user | Run a command and save the report of its time window (section 7.5). |
 | `help` | anyone | Prints the built-in help. |
@@ -181,7 +181,7 @@ Unit files go to `/etc/systemd/system/`.
 | Part | Files | Runs when |
 |---|---|---|
 | Health check (4.2) | `/usr/local/sbin/btrfs-health-check`, `btrfs-health-check.service` + `.timer` | 2 min after boot, then every hour |
-| Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00 (or at the next boot if the PC was off) |
+| Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00, up to 15 min later (or after the next boot if the PC was off); speed limit: `SCRUB_LIMIT` |
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
 | Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
@@ -272,9 +272,42 @@ need that file, and by then the other copy may be bad too.
 Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
 only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
 so on this PC the scrub reads at the disks' full speed (see
-[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)). If the PC was off, it runs at the
-next boot. After the scrub, the health check runs at once. If the scrub fails,
-the health check also runs and alerts.
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)) unless you set a speed limit (below). If the PC was off, it runs after the
+next boot, up to 15 minutes later (`RandomizedDelaySec=15min`), so not in
+the first minutes after login. After the scrub, the health check runs at once.
+If the scrub fails, the health check also runs and alerts.
+
+**Speed limit (`SCRUB_LIMIT`).** A full-speed scrub reads both disks as fast
+as they go (here 4.5 GiB/s for 1.7 TiB in 6 minutes), which can stall builds
+running at the same time. btrfs has its own limit per device
+(`btrfs scrub limit`, sysfs `devinfo/<id>/scrub_speed_max`), which works with
+any IO scheduler. Set it in `/etc/btrfs-setup/snapshots.conf` (create the
+file if it is not there; other keys can stay out) and run `cst btrfs install`:
+
+```
+SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limit
+```
+
+- The default is **no limit**: choose the number after measuring (for
+  example a scrub during a build, with `cst btrfs report`). 1G per device
+  makes 1.7 TiB take about 30 minutes.
+- `install` writes the drop-in
+  `/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf`: it
+  sets the limit on every device before the scrub (`ExecStartPre`) and sets
+  it back to 0 after it (`ExecStopPost`, which also runs when the scrub
+  fails or is stopped; the kernel forgets the limit at the next mount anyway).
+  With no limit there is no drop-in, and `install` removes an old one.
+  `uninstall` removes it too.
+- The value is read with the same rules as `cst doctor` reads this file: a
+  plain size (digits, then K, M, G or T), as `SCRUB_LIMIT=1G`,
+  `SCRUB_LIMIT='1G'` or `SCRUB_LIMIT="1G"`. Any other form, or a value
+  that is not a size, makes `install` stop before it changes anything.
+- If setting the limit fails (a btrfs-progs without `scrub limit`), that
+  scrub does not run and the unit fails: it never runs at full speed by
+  mistake. The health check alerts when the last scrub gets too old.
+- `status` shows the setting, the limit the service sets and the value in
+  sysfs now; `cst doctor` shows the same as `info` and warns when the
+  setting and the service differ.
 
 To start one by hand (on the host):
 
@@ -671,6 +704,7 @@ Read-only. Sections:
 | `services and timers` | next/last runs of the timers; whether `btrfs-stall-monitor.service` and `below.service` are active |
 | `last health check` | the last result lines of the health check |
 | `last scrub` | start, status, duration, error summary |
+| `weekly scrub speed limit (per device)` | `SCRUB_LIMIT` (section 4.3), the limit the scrub service sets (`DIFFERS from the setting (run install)` when they do not match; `INVALID` with the line for a bad setting), and `scrub_speed_max` of each device in sysfs now (0 = no limit) |
 | `last fstrim` | the last trim results |
 | `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
@@ -730,6 +764,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   goes too: `systemctl clean --what=state` while the timer is still loaded. So
   does the stamp of `btrfs-scrub-monthly.timer`, a timer of older versions (that
   one also at `install`);
+- the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
+  section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed scripts in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher;
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
@@ -972,6 +1008,14 @@ cst btrfs watch --list
 Results go to `~/.local/state/btrfs-stall-watch/<timestamp>/` (`workload.log`,
 `report.txt`, `report.json`), with an index in `runs.tsv`. `watch` needs the
 installed `btrfs-stall-report` command.
+
+The recorder writes to disk about every 10 s, so after the command ends
+`watch` waits (usually 5 to 15 s) until the recording has a sample at or after
+the end. The saved report's window runs from the start of the command to just
+after the newest sample it saw then, which can be a few seconds past the end.
+If no such sample comes within about 60 s (the recorder is not running), it
+saves the report of the command's own window (NO DATA when the recorder took
+no sample during it either).
 
 ---
 
@@ -1349,10 +1393,12 @@ cst btrfs docker-gc status          # tracking state + what a run would remove n
 cst btrfs docker-gc run --dry-run   # only the list of what a run would remove
 cst btrfs docker-gc run             # run the weekly job now
 cst btrfs docker-gc cleanup-now     # one-off, asks first
-cst btrfs docker-gc disable
+cst btrfs docker-gc disable         # stop it; --purge also removes its files (11.3)
 ```
 
-`status` shows the timer and recorder state, since when image use is recorded,
+`status` shows the timer and recorder state on its first line (for example
+`timer enabled, recorder active`; `timer disabled` after `disable`, `timer not
+installed` when the unit is not there), since when image use is recorded,
 the date from which timed image removal is possible, the last run, and then the
 list. `run --dry-run` shows only the list, ends with `(dry run: nothing
 removed)`, and also works in the first 10 minutes after boot. Both only read,
@@ -1419,19 +1465,43 @@ list). It needs a terminal.
 - `/usr/local/sbin/docker-gc`;
 - `docker-gc.service`, `docker-gc.timer` and `docker-gc-recorder.service` in
   `/etc/systemd/system`;
-- its state in `/var/lib/docker-gc`.
+- its state in `/var/lib/docker-gc`: `last-used.json` (the recorder's
+  record) and `last-run.json`;
+- the run lock `/run/docker-gc/run.lock` (one run at a time, shared by the
+  weekly run, `run` and `cleanup-now`; in RAM, gone at the next boot, so
+  `run --dry-run` and `cleanup-now` add nothing to `/var/lib/docker-gc`).
+
+Both services run sandboxed: no capabilities, the whole file system read-only
+except `/var/lib/docker-gc` (`ProtectSystem=strict` with
+`StateDirectory=docker-gc`) and, for the weekly run, `/run/docker-gc`
+(`RuntimeDirectory=docker-gc`, kept after the run so that a `cleanup-now`
+holding the lock keeps its file), `/root` read-only (the docker CLI reads its
+settings there), only Unix sockets (`/run/docker.sock`, systemd), and the
+usual kernel and system-call limits. `docker builder prune` runs the buildx
+plugin, which keeps its state in `~/.docker/buildx`: the weekly run points it
+to `/var/lib/docker-gc/buildx` instead (`BUILDX_CONFIG`), so it uses the
+default builder (the Docker daemon's own build cache) even if root picked
+another one with `docker buildx use`. As root they still own
+`/run/docker.sock`, `/var/lib/docker-gc` and `/run/docker-gc`, so they need no capability.
+`systemd-analyze security docker-gc-recorder.service` rates them about 2.1
+(it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
+until `enable` installs the new program, an old installed copy and
+`cleanup-now` or `run --dry-run` from the checkout do not see each other's
+lock, so run `enable` again after an update.
 
 `disable` stops the timer and the recorder, and makes systemd forget the
 timer's last run (`systemctl clean --what=state docker-gc.timer`). **The files stay**, including the
-recorded state; `uninstall` (section 6) does not touch docker-gc either. There
-is no command that removes the files. If you want them gone, remove them by
-hand after `disable`:
+recorded state, so `enable` later goes on with the same record of image use.
+`status` lists them (`still installed: ...`) while the timer is not enabled.
+`uninstall` (section 6) does not touch docker-gc.
+
+`disable --purge` does the same and then removes everything `enable` added:
+the program, the three unit files and `/var/lib/docker-gc`. The recorded
+image use is lost with it, so after a later `enable` the 14 days start again.
+A second `disable --purge` changes nothing.
 
 ```
-sudo rm /usr/local/sbin/docker-gc /etc/systemd/system/docker-gc.service \
-        /etc/systemd/system/docker-gc.timer /etc/systemd/system/docker-gc-recorder.service
-sudo rm -rf /var/lib/docker-gc
-sudo systemctl daemon-reload
+cst btrfs docker-gc disable --purge
 ```
 
 ---
@@ -1921,7 +1991,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`; no I/O. `adapters.py`: the `Host` (commands, clock, directory entries; tests replace it), the btrfs commands, the scan of the snapshot folder, the cache-folder walk, the local time zone, and the safeguards (they resolve pinned paths on the filesystem). `cli.py`: one `Run` per invocation, the run lock, the argument parser and `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain.py`: the items (`Item`, `ITEMS`), the CACHEDIR.TAG text, sizes and texts, and Steam's file formats (VDF, `libraryfolders.vdf`, app manifests); no I/O. `adapters.py`: settings and state paths, btrfs and the filesystem (subvolumes, +C, mounts, busy files, copies), the child process that runs as the user (`Ctx`, `as_user`) and the steps it runs (`u_*`), the journals, the boot flag, the keep list, the run lock, and where `btrfs-snapshot` is (`snapshot_program()`: the checkout's copy from a checkout, the installed one from the zipapp). `steam.py`: one game's move into `~/Bulk/steam` with its journal and recovery. `items.py`: each item's state, its move and link, recovery, `apply`, the plan/status report. `cli.py`: `steam plan/apply`, `keep/unkeep`, `boot`, `main()`. |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the one line of `plan` (`plan_line`). `cli.py`: `status`, `apply`, `off` and `main()`. |
-| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines, the run lock (cst_core's `log` and `take_lock`) and the last checks before an image is removed (`remove_image`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
+| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines, the run lock (cst_core's `log` and `take_lock`) and the last checks before an image is removed (`remove_image`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | No rule of its own without I/O, so no `domain.py`. `adapters.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`), their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the postponed record, SELinux labels, the journal lines. `cli.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark`, `status` and `main()`. |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and keys, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`), the episode being recorded (`Episode`); no I/O. `adapters.py`: reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines and the `Writer` thread of the log files. `monitor.py`: the sampling loop (`Monitor`: probes, samples, episodes, hung and busy tasks, the kernel log, alerts). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain.py`: the record formats, the wait categories and hints, classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift), the open episode, the verdict lines and number formats; no I/O. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, below and the container names. `analysis.py`: `analyse()`, one window's coverage, totals, categories, episodes and events (it reads the clock, and runs below when asked). `cli.py`: the text report, the arguments and `main()`. |

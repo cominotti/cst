@@ -114,6 +114,37 @@ class ProgramTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "<5>docker-gc: another docker-gc run is active; skipped\n")
         os.close(gc_adapters.locked())  # released with the fd: taken again
 
+    def test_the_lock_is_in_the_runtime_folder_and_leaves_no_state(self) -> None:
+        # The sandboxed docker-gc.service may write only in its StateDirectory and RuntimeDirectory;
+        # the lock was /run/docker-gc.lock, read-only under ProtectSystem=strict. It is in the
+        # RuntimeDirectory (/run/docker-gc, which locked() makes for a run outside the unit), so a
+        # dry run or cleanup-now leaves nothing in the state folder that 'disable --purge' removes.
+        # A fresh interpreter, so that the environment sets the default paths as on the machine.
+        state = os.path.join(self.tmp, "state", "docker-gc")
+        runtime = os.path.join(self.tmp, "not-yet", "docker-gc")
+        code = (
+            "import os, sys; sys.path.insert(0, sys.argv[1]);"
+            "from btrfs.docker_gc import adapters as a;"
+            "fd = a.locked(); print(a.LOCK); print(oct(os.stat(os.path.dirname(a.LOCK)).st_mode & 0o777))"
+        )
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", code, _CHECKOUT],
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "DOCKER_GC_STATE": state,
+                "DOCKER_GC_RUNTIME": runtime,
+            },
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(r.stdout.splitlines(), [os.path.join(runtime, "run.lock"), "0o755"])
+        self.assertTrue(os.path.isfile(os.path.join(runtime, "run.lock")))
+        self.assertFalse(os.path.exists(state))
+
     def test_unknown_command_is_a_usage_error(self) -> None:
         rc, out, err = self.run_main("bogus")
         self.assertEqual((rc, out), (2, ""))

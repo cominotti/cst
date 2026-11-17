@@ -631,6 +631,78 @@ class BtrfsTest(Scratch):
             f.write(f"4096 {fs_bytes // copies // 4096}\n")
         return base
 
+    def scrub(self, conf: str | None = None, dropin: str | None = None, live: int = 0) -> str:
+        """The scrub unit installed, snapshots.conf, the drop-in, and devinfo/1's limit now."""
+        self.fs()
+        units = os.path.join(self.root, "etc", "systemd", "system")
+        os.makedirs(os.path.join(units, "btrfs-scrub-weekly.service.d"))
+        open(os.path.join(units, "btrfs-scrub-weekly.service"), "w").close()
+        if dropin is not None:
+            with open(os.path.join(units, "btrfs-scrub-weekly.service.d", "10-cst-limit.conf"), "w") as f:
+                f.write(f"[Service]\nExecStartPre=/usr/sbin/btrfs scrub limit -a -l {dropin} /var\n")
+        if conf is not None:
+            os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"), exist_ok=True)
+            with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+                f.write(conf)
+        for devid in ("1", "2"):
+            with open(
+                os.path.join(self.root, "sys", "fs", "btrfs", UUID, "devinfo", devid, "scrub_speed_max"), "w"
+            ) as f:
+                f.write(f"{live if devid == '1' else 0}\n")
+        r = self.run_tool()
+        self.assertEqual(r.stderr, "")
+        return r.stdout
+
+    def test_scrub_without_a_limit_is_info(self) -> None:
+        out = self.scrub()
+        self.assertIn(
+            "info   weekly scrub: speed limit none (full speed; SCRUB_LIMIT, btrfs/README.md 4.3); "
+            "now in sysfs: no limit on any device",
+            out,
+        )
+        self.assertNotIn("SCRUB_LIMIT of", out)
+
+    def test_scrub_limit_set_and_installed_shows_it_and_the_live_value(self) -> None:
+        out = self.scrub(conf="SCRUB_LIMIT='1G'\n", dropin="1G", live=1 << 30)
+        self.assertIn(
+            f"info   weekly scrub: speed limit 1G per device; now in sysfs: {UUID[:8]} device 1 1.0 GiB/s", out
+        )
+        self.assertNotIn("WARN   weekly scrub", out)
+
+    def test_scrub_limit_not_installed_yet_warns(self) -> None:
+        out = self.scrub(conf="SCRUB_LIMIT=500M\n")
+        self.assertIn(
+            "WARN   weekly scrub: speed limit none in the service but 500M in SCRUB_LIMIT of "
+            "/etc/btrfs-setup/snapshots.conf: run `cst btrfs install`",
+            out,
+        )
+
+    def test_a_scrub_limit_line_ending_in_cr_warns_as_install_refuses_it(self) -> None:
+        # Line ends kept, as bash reads them: the CR is part of the value, which install refuses.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        self.assertIn("WARN   /etc/btrfs-setup/snapshots.conf line 1: SCRUB_LIMIT=1G", out)
+        self.assertIn("`cst btrfs install` refuses to run until it is fixed", out)
+
+    def test_a_bad_scrub_limit_line_has_the_files_own_line_number(self) -> None:
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\n")
+        scrub = [ln for ln in out.splitlines() if "`cst btrfs install` refuses to run until it is fixed" in ln]
+        self.assertEqual(len(scrub), 1, out)
+        self.assertIn("snapshots.conf line 3: SCRUB_LIMIT=$X", scrub[0])
+
+    def test_a_bad_scrub_limit_line_warns_once(self) -> None:
+        out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
+        self.assertIn(
+            "WARN   /etc/btrfs-setup/snapshots.conf SCRUB_LIMIT='fast' is not a size such as 500M or 1G: "
+            "`cst btrfs install` refuses to run until it is fixed",
+            out,
+        )
+        self.assertNotIn("in the service but", out)
+
+    def test_no_scrub_unit_no_scrub_line(self) -> None:
+        self.fs()
+        r = self.run_tool()
+        self.assertNotIn("weekly scrub", r.stdout)
+
     def test_no_btrfs_is_info(self) -> None:
         r = self.run_tool()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

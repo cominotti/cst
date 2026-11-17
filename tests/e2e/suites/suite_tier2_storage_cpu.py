@@ -52,6 +52,34 @@ top_level_opts() {
 }
 """
 
+# For the docker-gc tests (test_09, test_13): Docker up, as the units see it.
+# The DinD daemon (e2e-dind.service, test_05) on the loop btrfs, and a stub
+# docker.service (a oneshot that stays active, as in test_05a): the unit the
+# recorder is bound to (BindsTo=) and docker-gc.service's ExecCondition asks.
+DOCKER_UP_FN = r"""
+stub=/run/systemd/system/docker.service
+docker_up() {
+    printf '[Unit]\nDescription=E2E stub of docker.service (dockerd runs in e2e-dind.service)\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' \
+        >"$stub"
+    systemctl daemon-reload
+    [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
+    # As in test_05a: Fedora's generic service.d drop-ins may apply; one of docker.service may not.
+    local dropins _
+    dropins="$(systemctl show -P DropInPaths docker.service)"
+    if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
+        echo "a docker.service drop-in applies to the stub: $dropins" >&2
+        return 1
+    fi
+    systemctl start e2e-dind.service
+    for _ in $(seq 1 30); do
+        docker info >/dev/null 2>&1 && break
+        sleep 0.5
+    done
+    docker info >/dev/null
+    systemctl start docker.service
+}
+"""
+
 # test_05a: docker-volumes-nocow migrate on the real btrfs, with a stub
 # docker.service (no dockerd: a oneshot that stays active) so that only its
 # ActiveState matters. The helper and its unit come from test_02's
@@ -1341,15 +1369,17 @@ EOF
         a second `enable` writes nothing; `disable` stops and disables all
         three and forgets the timer's last run, and keeps the program and the
         unit files; a second `disable` changes nothing; `enable` again runs
-        the recorder again."""
+        the recorder again; `disable --purge` removes the program, the units
+        and /var/lib/docker-gc, and status says the timer is not installed; a
+        second purge changes nothing; `enable` after it writes everything again."""
         out = exec_bash(
             self.PRIV_CONTAINER,
-            r"""
+            DOCKER_UP_FN
+            + r"""
             set -E
             trap 'echo "test_09 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
-            stub=/run/systemd/system/docker.service
             bin=/usr/local/sbin/docker-gc
             units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
             stamp=/var/lib/systemd/timers/stamp-docker-gc.timer
@@ -1399,23 +1429,7 @@ EOF
             # Docker up: the DinD daemon, and a stub docker.service for the recorder's BindsTo=.
             remove_all
             systemctl reset-failed "${units[@]}" 2>/dev/null || true
-            printf '[Unit]\nDescription=E2E stub of docker.service (dockerd runs in e2e-dind.service)\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' \
-                >"$stub"
-            systemctl daemon-reload
-            [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
-            # As in test_05a: Fedora's generic service.d drop-ins may apply; one of docker.service may not.
-            dropins="$(systemctl show -P DropInPaths docker.service)"
-            if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
-                echo "a docker.service drop-in applies to the stub: $dropins" >&2
-                exit 1
-            fi
-            systemctl start e2e-dind.service
-            for _ in $(seq 1 30); do
-                docker info >/dev/null 2>&1 && break
-                sleep 0.5
-            done
-            docker info >/dev/null
-            systemctl start docker.service
+            docker_up
 
             # 1. enable.
             out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
@@ -1452,10 +1466,9 @@ EOF
             for f in "${units[@]/#//etc/systemd/system/}"; do test -f "$f"; done
             out="$(cst btrfs docker-gc status 2>&1)" || { show "status after disable" "$out"; exit 1; }
             show "status after disable" "$out"
-            # Not one exact line: is-enabled prints "disabled" and exits 1, so the "|| echo off" fallback of
-            # btrfs-setup.sh adds "off" on a line of its own (a known bug, left for its fix to tighten this).
-            grep -q '^timer disabled' <<<"$out"
-            grep -qF 'recorder inactive' <<<"$out"
+            # One exact first line (an older btrfs-setup.sh added "off" on a line of its own).
+            [[ "$(head -n 1 <<<"$out")" == 'timer disabled, recorder inactive' ]]
+            if grep -qx 'off.*' <<<"$out"; then echo "status printed a second timer state" >&2; exit 1; fi
             out="$(cst btrfs status 2>&1)" || { show "btrfs status" "$out"; exit 1; }
             grep -qxF '  off (/opt/cst-rw/cst btrfs docker-gc enable)' <<<"$out"   # "${PROG} docker-gc enable"
 
@@ -1475,6 +1488,45 @@ EOF
             no_writes "enable after disable" "$out"
             [[ "$(systemctl is-enabled docker-gc.timer)" == enabled ]]
             systemctl is-active docker-gc.timer
+            recorder_runs
+            test -d /var/lib/docker-gc
+
+            # 6. disable --purge: stopped, and the program, the units and the recorded state removed.
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show purge "$out"; exit 1; }
+            show purge "$out"
+            grep -qF 'docker-gc removed: program, units and recorded state' <<<"$out"
+            for f in "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp" /var/lib/docker-gc; do
+                if [[ -e "$f" ]]; then echo "purge left $f" >&2; exit 1; fi
+            done
+            # A dry run after the purge adds nothing to the state folder (the lock is in /run/docker-gc).
+            out="$(cst btrfs docker-gc run --dry-run 2>&1)" || { show "dry run after purge" "$out"; exit 1; }
+            grep -qF '(dry run: nothing removed)' <<<"$out"
+            if [[ -e /var/lib/docker-gc ]]; then echo "the dry run made /var/lib/docker-gc" >&2; exit 1; fi
+            for u in "${units[@]}"; do
+                [[ "$(systemctl show -P LoadState "$u")" == not-found ]]
+                [[ "$(systemctl is-active "$u" 2>/dev/null || true)" != active ]]
+            done
+            out="$(cst btrfs docker-gc status 2>&1)" || { show "status after purge" "$out"; exit 1; }
+            show "status after purge" "$out"
+            [[ "$(head -n 1 <<<"$out")" == 'timer not installed, recorder inactive' ]]
+            if grep -q '^still installed:' <<<"$out"; then echo "status lists a purged file" >&2; exit 1; fi
+
+            # 7. A second purge changes nothing.
+            before="$(state)"
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show "second purge" "$out"; exit 1; }
+            after="$(state)"
+            if [[ "$after" != "$before" ]]; then
+                echo "a second purge changed the state:" >&2
+                diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+                exit 1
+            fi
+
+            # 8. enable after a purge installs everything again.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "enable after purge" "$out"; exit 1; }
+            show "enable after purge" "$out"
+            for f in "$bin" "${units[@]/#//etc/systemd/system/}"; do
+                grep -qxF "written:   $f" <<<"$out" || { echo "no 'written:   $f'" >&2; exit 1; }
+            done
             recorder_runs
             echo E2E-OK
             """,
@@ -1795,6 +1847,315 @@ echo E2E-OK
             rc=0
             out="$(cst btrfs bulk steam bogus 2>&1)" || rc=$?
             [[ "$rc" == 2 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_13_docker_gc_sandboxed_units_record_and_run_with_real_docker(self) -> None:
+        """docker-gc-recorder.service and docker-gc.service as shipped, sandboxed
+        (ProtectSystem=strict, no capability, AF_UNIX only; /var/lib/docker-gc
+        and, for the weekly run, /run/docker-gc the only writable places), against the real DinD daemon behind a stub
+        docker.service: the recorder runs without restarts and writes an
+        image use it saw in `docker events` (an image imported offline, then
+        tagged every 5 s until it is there: one event sent before the recorder
+        subscribed would be lost) to last-used.json; if it does not, the CI log
+        says whether the same program records it outside the sandbox; `cst btrfs docker-gc run` starts
+        docker-gc.service, which ends in success, takes its lock in
+        /run/docker-gc (its RuntimeDirectory, kept after the run) and writes
+        last-run.json with no failed step
+        (the build-cache prune runs buildx, whose state is in
+        /var/lib/docker-gc/buildx). A runner booted less than
+        10 minutes ago would make the run skip itself (MIN_UPTIME): then, and
+        only then, a test drop-in shows the unit a later /proc/uptime."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            DOCKER_UP_FN
+            + r"""
+            set -E
+            trap 'echo "test_13 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
+            state=/var/lib/docker-gc
+            uptime_dropin=/run/systemd/system/docker-gc.service.d/90-e2e-uptime.conf
+            show() { sed "s/^/test_13 $1: /" <<<"$2" >&2; }   # the CI log
+            cleanup() {
+                cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
+                docker images -q e2e-gc-probe | sort -u | xargs -r docker image rm -f >/dev/null 2>&1 || true
+                rm -rf "$(dirname "$uptime_dropin")" /run/e2e-uptime /var/tmp/e2e-gc-probe /run/e2e-gc-plain
+                systemctl stop docker.service e2e-dind.service 2>/dev/null || true
+                rm -f "$stub"
+                systemctl daemon-reload
+                systemctl reset-failed "${units[@]}" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            journal() { journalctl -q --no-pager -o cat -u "$1" -n 30 >&2 || true; }
+
+            docker_up
+            t_enable="$(date +%s)"
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
+            for u in docker-gc-recorder.service docker-gc.service; do
+                [[ "$(systemctl show -P ProtectSystem "$u")" == strict ]]
+                [[ "$(systemctl show -P CapabilityBoundingSet "$u")" == "" ]]
+                [[ "$(systemctl show -P StateDirectory "$u")" == docker-gc ]]
+            done
+            [[ "$(systemctl show -P RuntimeDirectory docker-gc.service)" == docker-gc ]]
+            [[ "$(systemctl show -P RuntimeDirectory docker-gc-recorder.service)" == "" ]]
+            for _ in $(seq 1 30); do
+                [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] && break
+                sleep 1
+            done
+            [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] ||
+                { journal docker-gc-recorder.service; exit 1; }
+            # Active comes before the recorder follows the events (it first lists the containers
+            # and writes its state): wait for its line of this start.
+            for _ in $(seq 1 30); do
+                journalctl -q --no-pager -o cat -u docker-gc-recorder.service --since "@$t_enable" |
+                    grep -qF 'recording image use from docker events' && break
+                sleep 1
+            done
+
+            # An image use, offline: import a one-file image, then tag it again every 5 s until the
+            # recorder has it. An event Docker sends before `docker events` subscribed is lost, so
+            # one tag right after the start would race the recorder (the first CI run of this test
+            # did not record it); a later tag cannot.
+            rm -rf /var/tmp/e2e-gc-probe && mkdir -p /var/tmp/e2e-gc-probe
+            echo probe >/var/tmp/e2e-gc-probe/probe.txt
+            t_import="$(date +%s)"
+            tar -C /var/tmp/e2e-gc-probe -cf - probe.txt | docker import - e2e-gc-probe:1 >/dev/null
+            iid="$(docker image inspect --format '{{.Id}}' e2e-gc-probe:1)"
+            recorded() {   # recorded STATE_FILE: the probe image is in it
+                python3 -I -c 'import json, sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["images"])' \
+                    "$1" "$iid" 2>/dev/null
+            }
+            # Why not, for the CI log: what was saved and sent, and whether the same program
+            # records the probe outside the sandbox (DOCKER_GC_FLUSH=2, its own state folder).
+            diagnose() {
+                echo "the recorder did not record $iid" >&2
+                cat "$state/last-used.json" >&2 || true
+                systemctl show -p NRestarts -p MainPID -p ActiveEnterTimestamp docker-gc-recorder.service >&2 || true
+                journal docker-gc-recorder.service
+                docker events --since "$t_import" --until "$(date +%s)" --format '{{json .}}' | tail -n 5 >&2 || true
+                rm -rf /run/e2e-gc-plain
+                DOCKER_GC_STATE=/run/e2e-gc-plain DOCKER_GC_FLUSH=2 timeout 25 /usr/local/sbin/docker-gc record >&2 &
+                sleep 5
+                docker tag e2e-gc-probe:1 e2e-gc-probe:plain
+                sleep 8
+                if recorded /run/e2e-gc-plain/last-used.json; then
+                    echo "OUTSIDE the sandbox the same recorder records it" >&2
+                else
+                    echo "outside the sandbox the recorder does not record it either" >&2
+                fi
+                wait || true
+            }
+            seen=0
+            for i in $(seq 0 59); do
+                (( i % 5 )) || docker tag e2e-gc-probe:1 "e2e-gc-probe:t$i"
+                if recorded "$state/last-used.json"; then
+                    seen=1
+                    break
+                fi
+                sleep 1
+            done
+            (( seen )) || { diagnose; exit 1; }
+            [[ "$(systemctl is-active docker-gc-recorder.service)" == active ]]
+            [[ "$(systemctl show -P NRestarts docker-gc-recorder.service)" == 0 ]]
+
+            # The weekly run, as 'cst btrfs docker-gc run' starts it.
+            if (( $(cut -d. -f1 /proc/uptime) < 610 )); then
+                echo "test_13: uptime under 10 minutes: the run sees a later /proc/uptime" >&2
+                echo '100000.00 100000.00' >/run/e2e-uptime
+                mkdir -p "$(dirname "$uptime_dropin")"
+                printf '[Service]\nBindReadOnlyPaths=/run/e2e-uptime:/proc/uptime\n' >"$uptime_dropin"
+                systemctl daemon-reload
+            fi
+            rm -f "$state/last-run.json"
+            out="$(cst btrfs docker-gc run 2>&1)" || { show run "$out"; journal docker-gc.service; exit 1; }
+            show run "$out"
+            [[ "$(systemctl show -P Result docker-gc.service)" == success ]]
+            [[ "$(systemctl show -P ExecMainStatus docker-gc.service)" == 0 ]]
+            # Every step worked under the sandbox: a failed removal or build-cache prune is only counted.
+            python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(d["failed"] != 0)' \
+                "$state/last-run.json" || { cat "$state/last-run.json" >&2; journal docker-gc.service; exit 1; }
+            test -f /run/docker-gc/run.lock
+            test ! -e "$state/run.lock"
+            test ! -e /run/docker-gc.lock
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_14_btrfs_watch_waits_for_the_real_recorder(self) -> None:
+        """`cst btrfs watch` as the user with the real recorder
+        (btrfs-stall-monitor.service from `cst btrfs install`) on the loop
+        btrfs: a run that writes and syncs 64 MiB passes on its exit status,
+        and the report it saves covers the end of the run (the wait for the
+        recorder's next write works), with samples and a verdict that is not
+        NO DATA. `uninstall` at the end leaves the machine as test_06 left it."""
+        # Registered first: an install that fails half way is undone too.
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall >/dev/null; "
+            "rm -rf /var/tmp/e2e-watch2 /home/tester/e2e-watch.bin",
+            check=False,
+        )
+        exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs install --no-below >/dev/null
+            systemctl is-active btrfs-stall-monitor.service
+            rm -rf /var/tmp/e2e-watch2 && install -d -m 0777 /var/tmp/e2e-watch2
+            """,
+        )
+        out = as_tester_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_14 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C XDG_STATE_HOME=/var/tmp/e2e-watch2
+            base=$XDG_STATE_HOME/btrfs-stall-watch
+            rc=0
+            t0="$(date +%s)"
+            out="$(/opt/cst-rw/cst btrfs watch -l e2e-io -- sh -c \
+                'dd if=/dev/zero of="$HOME/e2e-watch.bin" bs=1M count=64 conv=fsync status=none; rm -f "$HOME/e2e-watch.bin"; exit 4' \
+                2>&1)" || rc=$?
+            sed 's/^/test_14 watch: /' <<<"$out" >&2   # the CI log
+            [[ "$rc" == 4 ]]
+            # The recorder writes every ~10 s: watch must not run out its 60 s wait.
+            (( $(date +%s) - t0 < 45 )) || { echo "watch waited $(( $(date +%s) - t0 )) s" >&2; exit 1; }
+            IFS=$'\t' read -r _ _ r_exit r_label r_dir < <(sed -n 2p "$base/runs.tsv")
+            [[ "$r_exit" == 4 && "$r_label" == e2e-io && -d "$r_dir" ]]
+            grep -q '^verdict ' "$r_dir/report.txt"
+            if grep -q '^verdict  NO DATA' "$r_dir/report.txt"; then echo "the recorder recorded nothing" >&2; exit 1; fi
+            python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+w, c = d["window"], d["coverage"]
+# watch waits for a sample at or after the end of the run; the saved window ends just after it.
+assert c["last_sample"] is not None and c["last_sample"] >= w["until"] - 2, (w, c)
+assert d["samples"] >= 1, d["samples"]
+' "$r_dir/report.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_15_scrub_speed_limit_is_set_for_the_run_and_reset_after(self) -> None:
+        """SCRUB_LIMIT on the loop RAID1 with the real btrfs and systemd:
+        `cst btrfs install` writes the drop-in (a second install changes
+        nothing), systemd merges it (ExecStartPre sets the limit, ExecStopPost
+        resets it) and the timer has RandomizedDelaySec=15min. A test drop-in
+        that sorts after CST's copies scrub_speed_max of each device while the
+        unit starts (a scrub of the small loop filesystem is too short to
+        sample from outside): the limit during the run, 0 after a good run and
+        after a failed one. A bad setting makes install stop with nothing
+        changed; no limit removes the drop-in, and a run then has none;
+        `uninstall` removes the drop-in. The machine is left as test_14 left
+        it (uninstalled, snapshots.conf as it was)."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_15 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            show() { sed "s/^/test_15 $1: /" <<<"$2" >&2; }   # the CI log
+            uuid="$(cat /run/e2e-loop-uuid)"
+            conf=/etc/btrfs-setup/snapshots.conf
+            svc=btrfs-scrub-weekly.service
+            dropin="/etc/systemd/system/$svc.d/10-cst-limit.conf"
+            probe="/run/systemd/system/$svc.d"
+            during=/run/e2e-scrub-during
+            devmax=("/sys/fs/btrfs/$uuid"/devinfo/*/scrub_speed_max)
+            (( ${#devmax[@]} == 2 ))
+            rm -f /run/e2e-snapshots.conf.orig
+            if [[ -e "$conf" ]]; then cp -a "$conf" /run/e2e-snapshots.conf.orig; fi
+            cleanup() {
+                rm -rf "$probe" "$during"
+                if [[ -e /run/e2e-snapshots.conf.orig ]]; then mv -f /run/e2e-snapshots.conf.orig "$conf"; else rm -f "$conf"; fi
+                cst btrfs uninstall >/dev/null 2>&1 || true
+                local f
+                for f in "${devmax[@]}"; do echo 0 >"$f" 2>/dev/null || true; done
+                systemctl daemon-reload
+                systemctl reset-failed "$svc" btrfs-health-check.service 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            limits() { tr '\n' ' ' <"$1"; }
+            now() { cat "${devmax[@]}" | tr '\n' ' '; }
+            set_limit() {   # set_limit LINE: the SCRUB_LIMIT line of snapshots.conf ("" = none)
+                mkdir -p "$(dirname "$conf")"
+                touch "$conf"
+                sed -i '/^SCRUB_LIMIT=/d' "$conf"
+                if [[ -n "$1" ]]; then printf '%s\n' "$1" >>"$conf"; fi
+            }
+            run_scrub() {   # run_scrub WANT: the unit's result
+                rm -f "$during"
+                systemctl start "$svc" || true
+                [[ "$(systemctl show -P Result "$svc")" == "$1" ]] ||
+                    { systemctl status --no-pager "$svc" >&2 || true; return 1; }
+            }
+
+            # 1. install with a limit, then the merged unit.
+            set_limit "SCRUB_LIMIT='8M'"
+            out="$(cst btrfs install --no-below 2>&1)" || { show install "$out"; exit 1; }
+            grep -qxF "written:   $dropin" <<<"$out"
+            [[ "$(systemctl show -P RandomizedDelayUSec btrfs-scrub-weekly.timer)" == 15min ]]
+            systemctl show -p ExecStartPre "$svc" | grep -qF 'argv[]=/usr/sbin/btrfs scrub limit -a -l 8M /var'
+            systemctl show -p ExecStopPost "$svc" | grep -qF 'argv[]=/usr/sbin/btrfs scrub limit -a -l 0 /var'
+            out="$(cst btrfs status 2>&1)" || { show status "$out"; exit 1; }
+            grep -qxF '  service: 8M, as set' <<<"$out"
+
+            # 2. A second install writes nothing new.
+            out="$(cst btrfs install --no-below 2>&1)" || { show "second install" "$out"; exit 1; }
+            grep -qxF "unchanged: $dropin" <<<"$out"
+
+            # 3. The limit during a good run, 0 after it.
+            mkdir -p "$probe"
+            printf '[Service]\nExecStartPre=/bin/sh -c "cat %s >%s"\n' "${devmax[*]}" "$during" >"$probe/20-e2e-probe.conf"
+            systemctl daemon-reload
+            run_scrub success
+            [[ "$(limits "$during")" == "8388608 8388608 " ]]
+            [[ "$(now)" == "0 0 " ]]
+
+            # 4. A failed run resets it too.
+            printf '[Service]\nExecStart=\nExecStart=/bin/false\n' >"$probe/30-e2e-fail.conf"
+            systemctl daemon-reload
+            run_scrub exit-code
+            [[ "$(limits "$during")" == "8388608 8388608 " ]]
+            [[ "$(now)" == "0 0 " ]]
+            rm -f "$probe/30-e2e-fail.conf"
+            systemctl daemon-reload
+            systemctl reset-failed "$svc"
+
+            # 5. A bad setting: install stops before it changes anything.
+            set_limit 'SCRUB_LIMIT=fast'
+            before="$(stat -c '%i %Y' "$dropin")"
+            rc=0
+            out="$(cst btrfs install --no-below 2>&1)" || rc=$?
+            show "install, bad setting" "$out"
+            [[ "$rc" == 1 ]]
+            grep -qF "SCRUB_LIMIT='fast' is not a size" <<<"$out"
+            if grep -q '^written:' <<<"$out"; then echo "install wrote a file" >&2; exit 1; fi
+            [[ "$(stat -c '%i %Y' "$dropin")" == "$before" ]]
+            grep -qF '  setting: INVALID:' <<<"$(cst btrfs status 2>&1)"
+
+            # 6. No limit: the drop-in goes, and a run has none.
+            set_limit ''
+            out="$(cst btrfs install --no-below 2>&1)" || { show "install, no limit" "$out"; exit 1; }
+            grep -qF "removed '$dropin'" <<<"$out"
+            test ! -e "$(dirname "$dropin")"
+            if systemctl show -p ExecStartPre "$svc" | grep -qF 'scrub limit'; then echo "a limit is still set" >&2; exit 1; fi
+            run_scrub success
+            [[ "$(limits "$during")" == "0 0 " ]]
+
+            # 7. uninstall removes the drop-in.
+            set_limit 'SCRUB_LIMIT=1G'
+            out="$(cst btrfs install --no-below 2>&1)" || { show "install again" "$out"; exit 1; }
+            test -f "$dropin"
+            out="$(cst btrfs uninstall 2>&1)" || { show uninstall "$out"; exit 1; }
+            test ! -e "$(dirname "$dropin")"
             echo E2E-OK
             """,
         ).stdout

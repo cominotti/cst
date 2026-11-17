@@ -1354,8 +1354,8 @@ EOF
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
         "cst-vm-backup@e2e.service": 94,
-        "docker-gc-recorder.service": 94,
-        "docker-gc.service": 94,
+        "docker-gc-recorder.service": 21,
+        "docker-gc.service": 21,
         "docker-volumes-nocow.service": 94,
     }
 

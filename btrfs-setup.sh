@@ -16,7 +16,8 @@
 #       * weekly fstrim: Fedora's own fstrim.timer, only made sure it is enabled
 #         (discard=async trims btrfs continuously; this covers /boot and the
 #         ESP, and is a safety net for btrfs)
-#       * health check (hourly) + weekly scrub, alerting on: missing member or
+#       * health check (hourly) + weekly scrub (speed limit per device:
+#         SCRUB_LIMIT in /etc/btrfs-setup/snapshots.conf, default none), alerting on: missing member or
 #         mixed chunk profiles, device error counters, fs forced read-only,
 #         kernel btrfs/IO errors, md RAID degraded, NVMe SMART warnings/wear,
 #         scrub errors/age, low unallocated space, automatic-reclaim failures,
@@ -129,7 +130,10 @@
 #                          14+ days (use recorded from docker events, so the
 #                          first timed removal is 14 days after enabling) and
 #                          build cache unused 14+ days.
-#   docker-gc status | run [--dry-run] | disable
+#   docker-gc status | run [--dry-run] | disable [--purge]
+#                          disable stops it and keeps its files; --purge also
+#                          removes its program, its three units and its
+#                          recorded state (/var/lib/docker-gc).
 #   docker-gc cleanup-now  one-off: lists every unused image not seen in use
 #                          and removes it all after one confirmation.
 #   report [args]          (user) btrfs-stall-report: was storage the
@@ -178,6 +182,13 @@ TIMERS=(btrfs-health-check.timer btrfs-scrub-weekly.timer)
 OLD_UNITS=(btrfs-scrub-monthly.service btrfs-scrub-monthly.timer)
 # Where systemd keeps the last run of a Persistent= timer (stamp-<timer>).
 TIMER_STAMP_DIR=/var/lib/systemd/timers
+# The weekly scrub's speed limit per device: SCRUB_LIMIT in the btrfs settings
+# file (bash-sourced; also read by btrfs-snapshot, btrfs-health-check and
+# cst doctor). install turns it into a drop-in of the scrub service.
+BTRFS_CONF=/etc/btrfs-setup/snapshots.conf
+BTRFS_SYSFS=/sys/fs/btrfs
+SCRUB_SERVICE=btrfs-scrub-weekly.service
+SCRUB_DROPIN="${UNIT_DIR}/${SCRUB_SERVICE}.d/10-cst-limit.conf"
 # Mount options every btrfs mount of the root fs is expected to carry.
 EXPECTED_OPTS=(compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd)
 
@@ -304,6 +315,85 @@ check_syntax() {
     else
         bash -n "$1"
     fi
+}
+
+# scrub_limit_setting [FILE]: SCRUB_LIMIT of the btrfs settings file (default
+# BTRFS_CONF) on stdout: a size btrfs scrub limit takes (digits, then K, M, G
+# or T: per second, per device), or nothing for no limit (unset, empty or 0).
+# Read by cst_core's rules for bash-sourced files (cst doctor reads it the
+# same way, doctor.domain.scrub_limit_setting): '...', "..." without $ ` \,
+# or one plain word; an optional export; blanks and a # comment after it; the
+# last line wins. Fails, with the reason on stderr, when a SCRUB_LIMIT line
+# has any other form or the value is not such a size.
+SCRUB_SIZE_RE='^[0-9]+[KkMmGgTt]?$'
+SCRUB_LINE_RE="^SCRUB_LIMIT=('([^']*)'|\"([^\"\$\`\\]*)\"|([^[:space:]'\"\$\`\\;&|<>()]*))([[:blank:]]+#.*|[[:blank:]]*)$"
+scrub_limit_setting() {
+    local conf="${1:-${BTRFS_CONF}}" line rest value="" n=0
+    [[ -e "${conf}" ]] || return 0
+    [[ -f "${conf}" && -r "${conf}" ]] || { echo "${conf}: cannot read it" >&2; return 1; }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        n=$((n + 1))
+        rest="${line#"${line%%[![:blank:]]*}"}"
+        if [[ "${rest}" =~ ^export[[:blank:]]+(.*)$ ]]; then rest="${BASH_REMATCH[1]}"; fi
+        [[ "${rest}" =~ ^SCRUB_LIMIT([^A-Za-z0-9_]|$) ]] || continue
+        if [[ ! "${rest}" =~ ${SCRUB_LINE_RE} ]]; then
+            echo "${conf} line ${n}: '${line}' is not a plain SCRUB_LIMIT=SIZE line" >&2
+            return 1
+        fi
+        value="${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+    done <"${conf}"
+    if [[ -n "${value}" && "${value}" != 0 && ! "${value}" =~ ${SCRUB_SIZE_RE} ]]; then
+        echo "${conf}: SCRUB_LIMIT='${value}' is not a size such as 500M or 1G" >&2
+        return 1
+    fi
+    [[ "${value}" == 0 ]] || printf '%s' "${value}"
+}
+
+# scrub_limit_dropin LIMIT: the drop-in of the scrub service for that limit.
+scrub_limit_dropin() {
+    cat <<EOF
+# Managed by btrfs-setup.sh (CST), from SCRUB_LIMIT in ${BTRFS_CONF}.
+# btrfs's own limit works with any IO scheduler (IOSchedulingClass=idle
+# needs BFQ or Kyber). sysfs keeps it only until the next mount, and the
+# reset runs after every run, also a failed or stopped one.
+[Service]
+ExecStartPre=/usr/sbin/btrfs scrub limit -a -l $1 /var
+ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var
+EOF
+}
+
+# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none.
+install_scrub_limit() {
+    if [[ -n "$1" ]]; then
+        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644
+    elif [[ -e "${SCRUB_DROPIN}" ]]; then
+        rm -fv "${SCRUB_DROPIN}"
+        rmdir "$(dirname "${SCRUB_DROPIN}")" 2>/dev/null || true
+    fi
+}
+
+# status_scrub_limit: the setting, the drop-in, and the limit in sysfs now.
+status_scrub_limit() {
+    local uuid="$1" want have f live=()
+    if want="$(scrub_limit_setting 2>&1)"; then
+        echo "  setting: ${want:-none} (SCRUB_LIMIT in ${BTRFS_CONF}; none = full speed)"
+    else
+        echo "  setting: INVALID: ${want}"
+        want="?"
+    fi
+    have="$(sed -n 's|^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l \([^ ]*\) /var$|\1|p' "${SCRUB_DROPIN}" 2>/dev/null || true)"
+    if [[ "${want}" == "?" ]]; then
+        echo "  service: ${have:-no limit} (fix the setting, then run install)"
+    elif [[ "${want}" == "${have}" ]]; then
+        echo "  service: ${have:-no limit}, as set"
+    else
+        echo "  service: ${have:-no limit}, DIFFERS from the setting (run install)"
+    fi
+    for f in "${BTRFS_SYSFS}/${uuid}"/devinfo/*/scrub_speed_max; do
+        [[ -r "${f}" ]] && live+=("device $(basename "$(dirname "${f}")") $(cat "${f}")")
+    done
+    (( ${#live[@]} )) && echo "  now in sysfs (bytes/s, 0 = no limit): $(IFS=,; echo "${live[*]}" | sed 's/,/, /g')"
+    return 0
 }
 
 # sysval FILE: its content, or "?" when unreadable.
@@ -477,6 +567,8 @@ status() (
         grep -E 'btrfs-health-check:' | tail -n 3 | sed 's/^/  /'
     section "last scrub"
     btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | sed 's/^/  /'
+    section "weekly scrub speed limit (per device)"
+    status_scrub_limit "${uuid}"
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
         grep -E 'trimmed|Failed|failed' | tail -n 4 | sed 's/^/  /'
@@ -610,8 +702,14 @@ crypt_perf() {
 # ---- uninstall -------------------------------------------------------------------
 # ---- docker-gc: weekly, conservative Docker cleanup (explicit opt-in) ---------------------
 DOCKER_GC_UNITS=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
+DOCKER_GC_STATE=/var/lib/docker-gc
+# docker_gc_files: the program and the three unit files, as installed (from the manifest).
+docker_gc_files() {
+    cst_installed_dests btrfs/docker-gc "${DOCKER_GC_UNITS[@]/#/btrfs/units/}"
+}
 docker_gc() {
-    local action="${1:-status}" bin=/usr/local/sbin/docker-gc
+    local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer f purge=0 shown=0
+    local -a files
     [[ $# -gt 0 ]] && shift
     case "${action}" in
         enable)
@@ -629,12 +727,54 @@ docker_gc() {
             echo "To clear the current backlog once (asks first): ${PROG} docker-gc cleanup-now"
             ;;
         disable)
+            case "${1:-}" in
+                "") ;;
+                --purge) purge=1 ;;
+                *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
+            esac
+            (( $# <= 1 )) || { echo "docker-gc disable: unknown argument '${2}' (only --purge)" >&2; exit 2; }
+            # While the unit files are still there: clean needs the timer loaded.
             disable_timers "${DOCKER_GC_UNITS[@]}"
-            echo "docker-gc disabled (recorded state kept in /var/lib/docker-gc)."
+            if (( ! purge )); then
+                echo "docker-gc disabled (recorded state kept in ${DOCKER_GC_STATE})."
+                echo "To also remove its program, units and recorded state: ${PROG} docker-gc disable --purge"
+                return 0
+            fi
+            mapfile -t files < <(docker_gc_files)
+            (( ${#files[@]} == ${#DOCKER_GC_UNITS[@]} + 1 )) ||
+                { echo "docker-gc disable --purge: cannot list its installed files" >&2; exit 1; }
+            for f in "${files[@]}"; do
+                rm -fv "${f}"
+            done
+            if [[ -e "${DOCKER_GC_STATE}" ]]; then
+                rm -rf "${DOCKER_GC_STATE}"
+                echo "removed '${DOCKER_GC_STATE}' (the recorded image use)"
+            fi
+            systemctl daemon-reload
+            systemctl reset-failed "${DOCKER_GC_UNITS[@]}" 2>/dev/null || true
+            echo "docker-gc removed: program, units and recorded state ('${PROG} docker-gc enable' installs it again)."
             ;;
         status)
-            printf 'timer %s, recorder %s\n' "$(systemctl is-enabled docker-gc.timer 2>/dev/null || echo off)" \
+            # is-enabled prints its word (enabled, disabled, not-found) and exits
+            # non-zero for all but enabled: one word, from systemd; "off" only
+            # when it printed none.
+            timer="$(systemctl is-enabled docker-gc.timer 2>/dev/null)" || true
+            case "${timer}" in
+                "") timer=off ;;
+                not-found) timer="not installed" ;;
+            esac
+            printf 'timer %s, recorder %s\n' "${timer}" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"
+            # What 'disable --purge' would remove, while the timer is not enabled.
+            if [[ "${timer}" != enabled ]]; then
+                mapfile -t files < <(docker_gc_files)
+                for f in "${files[@]}" "${DOCKER_GC_STATE}"; do
+                    [[ -e "${f}" ]] || continue
+                    echo "still installed: ${f}"
+                    shown=1
+                done
+                (( ! shown )) || echo "('${PROG} docker-gc disable --purge' removes them)"
+            fi
             python3 -I -B "${SRC}/docker-gc" status
             ;;
         run)
@@ -650,7 +790,7 @@ docker_gc() {
             [[ -t 0 ]] || { echo "cleanup-now asks for confirmation: run it in a terminal." >&2; exit 1; }
             python3 -I -B "${SRC}/docker-gc" cleanup-now
             ;;
-        *) echo "docker-gc: enable|status|run [--dry-run]|cleanup-now|disable" >&2; exit 2 ;;
+        *) echo "docker-gc: enable|status|run [--dry-run]|cleanup-now|disable [--purge]" >&2; exit 2 ;;
     esac
 }
 
@@ -680,6 +820,7 @@ uninstall() {
     for unit in "${UNITS[@]}"; do
         rm -fv "${UNIT_DIR}/${unit}"
     done
+    install_scrub_limit ""
     mapfile -t dests < <(cst_installed_dests "${BINARIES[@]/#/btrfs/}")
     for dest in "${dests[@]}"; do
         rm -fv "${dest}"
@@ -716,7 +857,7 @@ uninstall() {
     echo "Not touched: snapshots and the NAS backup ('${PROG} snapshots disable [--purge]' stops them / deletes"
     echo "             the local snapshots; the restic repository on the NAS, its password in"
     echo "             /etc/btrfs-setup/restic-password and the layered 'restic' package stay)."
-    echo "Not touched: docker-gc ('${PROG} docker-gc disable' stops it)."
+    echo "Not touched: docker-gc ('${PROG} docker-gc disable' stops it; 'disable --purge' also removes its files)."
     echo "Not touched: toolchain caches and settings (the toolchains module; 'cst toolchains auto off' stops the pruning)."
     echo "Not touched: ~/Bulk and its symlinks (plain folders and links; see btrfs/README.md to undo one)."
     echo "Not touched: the degraded-boot component ('${PROG} degraded-boot uninstall' removes it)."
@@ -727,7 +868,7 @@ uninstall() {
 
 # ---- install ---------------------------------------------------------------------
 install_all() {
-    local with_below=1 f u uuid arg below_pending staged_has_below
+    local with_below=1 f u uuid arg below_pending staged_has_below scrub_limit
     for arg in "$@"; do
         case "${arg}" in
             --no-below) with_below=0 ;;
@@ -745,10 +886,12 @@ install_all() {
     uuid="$(root_fs_uuid)"
     [[ "${uuid}" =~ ^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$ ]] ||
         { echo "unexpected root fs UUID '${uuid}'" >&2; exit 1; }
+    scrub_limit="$(scrub_limit_setting)" || { echo "install: nothing changed; fix SCRUB_LIMIT first." >&2; exit 1; }
 
     # Files.
     cst_install "${BINARIES[@]/#/btrfs/}"
     install_units "${UNITS[@]}"
+    install_scrub_limit "${scrub_limit}"
     install_pending_alerts
     cst_install btrfs/sysctl/90-btrfs-writeback.conf
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).

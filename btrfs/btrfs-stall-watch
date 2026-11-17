@@ -73,18 +73,29 @@ else
 fi
 set -e
 end_epoch="$(date +%s)"
-window=(--since "@${start_epoch}" --until "@$(( end_epoch + 1 ))")
 # The daemon hands data to disk about every 10 s (and an open stall episode
-# only when it ends): wait until the recording covers the end of the run.
-# The last poll's output is kept as report.json.
+# only when it ends): wait until the recording has a sample at or after the
+# end of the run. The report keeps only samples up to its --until, so the
+# polls have none (up to now); the saved report then ends just after the
+# newest sample they saw. That can be a few samples past the end (they come
+# to disk in batches). With no such sample after 20 polls (~60 s; no
+# recorder), the window ends one second after the run, as before.
+until_epoch=$(( end_epoch + 1 ))
 for _ in $(seq 1 20); do
-    btrfs-stall-report "${window[@]}" --json --no-below >"${out_dir}/report.json" 2>/dev/null || true
+    # Two steps: an exit status other than 0 must not add a second line to last.
+    btrfs-stall-report --since "@${start_epoch}" --json --no-below >"${out_dir}/report.json" 2>/dev/null || true
     last="$(python3 -I -c 'import json, sys; print(int(json.load(sys.stdin)["coverage"]["last_sample"] or 0))' \
         <"${out_dir}/report.json" 2>/dev/null || echo 0)"
-    (( last >= end_epoch - 1 )) && break
+    if (( last >= end_epoch )); then
+        until_epoch=$(( last + 1 ))
+        break
+    fi
     sleep 3
 done
+window=(--since "@${start_epoch}" --until "@${until_epoch}")
 
+# report.json is written again for the saved window (the polls had none).
+btrfs-stall-report "${window[@]}" --json --no-below >"${out_dir}/report.json" 2>/dev/null || true
 btrfs-stall-report "${window[@]}" >"${out_dir}/report.txt" 2>&1 || true
 
 [[ -s "${out_base}/runs.tsv" ]] || printf 'start\tend\texit\tlabel\tdir\n' >"${out_base}/runs.tsv"

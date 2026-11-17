@@ -7,6 +7,9 @@ Description=Weekly btrfs scrub (Saturday-to-Sunday night, 02:00)
 OnCalendar=Sun *-*-* 02:00:00
 # Machine off at that time: run at next boot instead of waiting a week.
 Persistent=true
+# Up to 15 min later, also for that catch-up: not in the first minutes after
+# boot, when the login and its programs read the disks too.
+RandomizedDelaySec=15min
 
 [Install]
 WantedBy=timers.target

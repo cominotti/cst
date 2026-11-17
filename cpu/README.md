@@ -577,6 +577,23 @@ zswap later writes cold pages on to the NVMe swap. With
 To keep the old behaviour, set `GAME_ZSWAP_WRITEBACK='yes'` in
 `/etc/cpu-setup/cpu-setup.conf`.
 
+**systemd-oomd watches `app.slice` too.** Fedora's `systemd-oomd` kills a
+whole cgroup when memory pressure stays high, before the kernel's OOM killer
+would act. On this PC `oomctl` lists `app.slice` of your user manager under
+"Memory Pressure Monitored CGroups", with a limit of 80% for 20 s (Fedora's
+defaults, not set by CST). If a heavy game plus desktop apps keep the memory
+pressure of `app.slice` above 80% for 20 s, oomd kills one cgroup under it,
+and that can be the game. Writeback off makes this more likely: pages that
+compress badly stay in RAM, and the kernel works harder to reclaim memory
+there (the zswap documentation calls this "reclaim inefficiency"). This has
+not been seen here; it is a risk to watch for, not a measured problem.
+
+- Check the limits: `oomctl` (look for `app.slice`).
+- Check whether oomd killed something: `journalctl -u systemd-oomd -g Killed`.
+- If it ever kills a game, set `GAME_ZSWAP_WRITEBACK='yes'` first. CST does
+  not set `ManagedOOMPreference=avoid` on the game's scope: that waits for a
+  measurement that shows it is needed.
+
 Note: `machine.slice` (the VM) also has `MemoryLow=48G`, set by the `swap`
 module (`cst swap apply`, see [../swap/README.md](../swap/README.md)), not by
 this script. So the game's 16G protection competes with a large VM protection.

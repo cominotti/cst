@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.errors import Usage
+from cst_core.domain.text import ShellAssignments
 
 NAME = "cst-doctor"
 
@@ -76,6 +77,13 @@ SNAP_WRITABLE = HostPath(f"{SNAP_STATE}/{WRITABLE_FILE}")
 SNAP_CONF = HostPath("/etc/btrfs-setup/snapshots.conf")  # also read by the VM NAS check
 
 NOCOW_POSTPONED = HostPath("/var/lib/docker-volumes-nocow/postponed")
+
+# The weekly scrub and the drop-in `cst btrfs install` writes from SCRUB_LIMIT.
+SCRUB_UNIT = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service")
+SCRUB_DROPIN = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf")
+_SCRUB_SIZE = re.compile(r"[0-9]+[KkMmGgTt]?")
+_SCRUB_LIMIT_LINE = re.compile(r"[ \t]*(?:export[ \t]+)?SCRUB_LIMIT(?![A-Za-z0-9_])")
+_SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.M)
 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
@@ -488,3 +496,26 @@ def parse_args(argv: Sequence[str]) -> tuple[str, bool]:
         else:
             raise Usage(f"unknown argument '{a}'")
     return "run", brief
+
+
+def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:
+    """SCRUB_LIMIT of the btrfs settings file (read strictly, as bash sources it):
+    (size, "") with size "" for no limit (unset, empty or 0), or ("", problem)
+    when a SCRUB_LIMIT line is not a plain assignment or the value is not a
+    size (digits, then K, M, G or T). btrfs-setup.sh's scrub_limit_setting
+    reads it the same way and refuses to install on a problem."""
+    for p in settings.problems:
+        if _SCRUB_LIMIT_LINE.match(p.text):
+            return "", str(p)
+    value = settings.values.get("SCRUB_LIMIT", "")
+    if value in ("", "0"):
+        return "", ""
+    if not _SCRUB_SIZE.fullmatch(value):
+        return "", f"SCRUB_LIMIT='{value}' is not a size such as 500M or 1G"
+    return value, ""
+
+
+def scrub_dropin_limit(text: str) -> str:
+    """The limit the scrub service's drop-in sets, or "" (no drop-in, no limit)."""
+    m = _SCRUB_DROPIN_LIMIT.search(text)
+    return m.group(1) if m else ""
