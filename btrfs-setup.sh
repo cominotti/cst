@@ -288,14 +288,23 @@ forget_timer_state() {
 # them forgotten (forget_timer_state), while their files are still there.
 # A unit with no file in UNIT_DIR is not there: its failure is expected and
 # says nothing. Any other failure is reported on stderr with systemctl's
-# reason, and the others still go; it returns 0, so the caller goes on
-# (the paths that turn a feature off, and uninstall).
+# reason (its "Failed ..." or "Job for ..." line, else its first line: a
+# failed stop ends with a "See systemctl status ..." hint, not the reason),
+# and the others still go; it returns 0, so the caller goes on (the paths
+# that turn a feature off, and uninstall).
 disable_timers() {
-    local u out
+    local u out line reason
     for u in "$@"; do
         if ! out="$(systemctl disable --now "${u}" 2>&1)" && [[ -e "${UNIT_DIR}/${u}" ]]; then
-            out="${out##*$'\n'}"
-            echo "WARNING: could not disable ${u}: ${out:-systemctl failed}" >&2
+            reason=""
+            while IFS= read -r line; do
+                case "${line}" in
+                    Failed* | "Job for "*) reason="${line}"; break ;;
+                    "") ;;
+                    *) reason="${reason:-${line}}" ;;
+                esac
+            done <<<"${out}"
+            echo "WARNING: could not disable ${u}: ${reason:-systemctl failed}" >&2
         fi
     done
     forget_timer_state "$@"

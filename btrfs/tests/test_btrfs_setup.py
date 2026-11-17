@@ -195,6 +195,27 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertIn("went-on", r.stdout)
         self.assertEqual(r.stderr, "")  # a unit that is not there is not a problem
 
+    def test_disable_timers_names_systemctls_reason_not_its_hint(self) -> None:
+        # A stop that fails: notices first, the reason, then a "See ..." hint as the last line.
+        self.touch(os.path.join(self.units, "x.service"))
+        body = """
+systemctl() {
+    [[ "$1" == disable ]] || return 0
+    printf '%s\\n' 'The unit files have no installation config (WantedBy=, RequiredBy=, UpheldBy=,' \\
+        "Removed '/etc/systemd/system/multi-user.target.wants/x.service'." \\
+        'Job for x.service failed because the control process exited with error code.' \\
+        'See "systemctl status x.service" and "journalctl -xeu x.service" for details.' >&2
+    return 1
+}
+disable_timers x.service
+"""
+        r = self.run_bash(body)
+        self.assertEqual(
+            r.stderr,
+            "WARNING: could not disable x.service: "
+            "Job for x.service failed because the control process exited with error code.\n",
+        )
+
     def test_uninstall_stops_every_timer_before_it_forgets_them(self) -> None:
         timers = re.findall(r"[\w.-]+\.timer", assignment("TIMERS"))
         self.assertGreaterEqual(len(timers), 2)
