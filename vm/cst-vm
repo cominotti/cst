@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """cst-vm: copies of a libvirt VM (disks, UEFI variables, TPM state) taken
 before a risky change, such as a Fedora major upgrade. It is the program
 behind `cst vm` (vm-setup.sh).

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst cpu`: smooth games while builds, Docker and the VM run
 
 This folder holds the parts of `cpu-setup.sh`, the `cpu` module of CST

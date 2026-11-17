@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The LDAC rate watcher's loop (bt-ldac-watch): it listens to `pactl
 subscribe`, looks at the headset, and bounces the card's profile LDAC ->
 SBC -> LDAC when the rules in bluetooth.domain say so. The program

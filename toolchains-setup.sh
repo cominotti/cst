@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # toolchains-setup.sh  (the `toolchains` module of CST: run it as `cst toolchains ...`)
 #
@@ -65,7 +66,7 @@ TOOL="${SRC}/cst-toolchains"
 PROG="${CST_PROG:-$0}"
 
 usage() {
-    sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
     echo "Usage: ${PROG} <command> [args]"
 }
 die() { echo "${PROG}: ERROR: $*" >&2; exit 1; }

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's text report, the arguments and main()."""
 
 import argparse

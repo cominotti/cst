@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the tier 2 opt-in guard in tests/e2e/run.py.
 
 These never start Docker: the tier runners are replaced by stubs that fail

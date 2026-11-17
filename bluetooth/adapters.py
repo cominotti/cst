@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Concrete host adapters for the `bluetooth` bounded context."""
 
 from collections.abc import Sequence

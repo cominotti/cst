@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """One journal line per message: stdout with an sd-daemon priority prefix.
 
 systemd reads `<N>` at the start of a line a service prints as its syslog

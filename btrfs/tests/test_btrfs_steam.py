@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for `btrfs-bulk steam plan|apply` (no root, no btrfs, no Steam).
 
 The Steam library is a scratch tree under a temporary HOME, built from

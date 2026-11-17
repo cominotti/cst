@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Where a CST program finds itself, its siblings and its data: in a checkout or installed.
 
 A python-entry runs two ways: from the checkout (`python3 -I btrfs/docker-gc`,

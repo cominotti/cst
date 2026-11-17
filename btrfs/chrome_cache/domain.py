@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """chrome-cache's rules, no I/O: the flag lines, reading chrome-flags.conf's text and deciding what to write."""
 
 from __future__ import annotations

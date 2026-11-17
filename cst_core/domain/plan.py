@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure outcome and plan reporting primitives."""
 
 from dataclasses import dataclass

@@ -1,6 +1,7 @@
 ---
 description: A change is either a refactor (no behaviour change, proved) or a behaviour change (with a test that fails on the old code), never both; never use git stash in a worktree
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 <!-- global rule: loaded for every request -->
 
 # Refactor or behaviour change: one kind per change

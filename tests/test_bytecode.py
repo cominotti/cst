@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Programs run from a checkout write no bytecode into it.
 
 On main every helper was one file that imported only the standard library,

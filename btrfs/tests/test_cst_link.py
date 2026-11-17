@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for cst-link.bash (the ~/.local/bin/cst link made by
 `cst btrfs install` and `cst cpu install`), on a scratch home. getent and
 runuser are replaced by shell functions, so no root is needed.

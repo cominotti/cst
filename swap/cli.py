@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Command-line entrypoint for `cst swap` (`swap-setup.sh`)."""
 
 import os.path as _cst_path

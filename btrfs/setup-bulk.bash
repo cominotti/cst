@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # setup-bulk.bash: `cst btrfs bulk ...` and the ~/Bulk step of
 # `snapshots setup` (sourced by setup-snapshots.bash; runs as root; uses

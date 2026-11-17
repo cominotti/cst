@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate for CST's Python entry points (the programs something starts).
 
 - **One bootstrap.** A program run from the checkout under `python3 -I` sees

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure domain rules for comparing and updating managed files and marked lines."""
 
 from dataclasses import dataclass

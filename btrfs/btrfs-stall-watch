@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # btrfs-stall-watch  (run as: cst btrfs watch ...)
 #
@@ -26,7 +27,7 @@ label=""
 duration=""
 declare -a workload=()
 
-usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

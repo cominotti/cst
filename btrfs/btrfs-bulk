@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-bulk: ~/Bulk, one folder for everything that can be downloaded again.
 
 Installed by `btrfs-setup.sh snapshots setup` / `btrfs-setup.sh bulk apply`

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst swap`: zswap, encrypted swap and memory protection
 
 This folder holds the parts of `swap-setup.sh`, the `swap` module of CST

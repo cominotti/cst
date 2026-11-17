@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Ports (interfaces) for the `doctor` bounded context."""
 
 from collections.abc import Callable, Iterable, Mapping

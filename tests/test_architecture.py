@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate: enforce Hexagonal Architecture and DDD invariants via AST.
 
 Checks every Python file under a `domain`, `ports`, or `application` layer:

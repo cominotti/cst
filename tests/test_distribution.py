@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Distribution gate: what `install` writes works where it is written.
 
 For INSTALL_MANIFEST (cst_core/domain/install.py), the one list of installed
@@ -167,6 +168,29 @@ class DistributionGateTest(unittest.TestCase):
         for e in python_entry_srcs():
             problems.extend(zipapp_import_problems(e.src, build_python_zipapp(REPO, e.src)))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_every_managed_by_line_reaches_the_zipapp(self) -> None:
+        # `grep managed-by` on an installed program names who installed it: the line in the
+        # entry's first comment lines (after the shebang and the license header) is copied
+        # in front of the archive. A longer header above it would push it out of reach.
+        marked: list[str] = []
+        problems: list[str] = []
+        for e in python_entry_srcs():
+            head: list[bytes] = []
+            for line in Path(REPO, e.src).read_bytes().splitlines(keepends=True)[1:]:
+                if not line.startswith(b"#"):
+                    break
+                head.append(line)
+            managed = [line for line in head if line.startswith(b"# managed-by:")]
+            if not managed:
+                continue
+            marked.append(e.src)
+            preamble = build_python_zipapp(REPO, e.src).split(b"PK\x03\x04", 1)[0]
+            if managed[0] not in preamble:
+                problems.append(f"{e.src}: {managed[0]!r} is not in front of the zipapp")
+        self.assertEqual(problems, [], "\n".join(problems))
+        self.assertIn("bluetooth/bt-ldac-watch", marked)
+        self.assertIn("toolchains/cst-toolchains", marked)
 
     def test_import_checker_sees_function_level_and_path_loads(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-dist-")

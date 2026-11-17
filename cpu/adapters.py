@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The cpu module's reach into the host: cpu-setup.conf and virsh (vm-pin);
 sysfs, procfs, cgroups and the recorded runs (cpu-watch)."""
 

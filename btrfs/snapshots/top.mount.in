@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). The btrfs top level (subvolid=5),
 # where the snapshots live outside the visible tree; mounted on demand.
 # Same options as /var: on btrfs, mount options are per filesystem.

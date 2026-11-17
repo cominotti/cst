@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The host side of the `cst` dispatcher: files, users, and running a module the way bash did."""
 
 from collections.abc import Mapping, Sequence

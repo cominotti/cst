@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # swap-setup.sh  (the `swap` module of CST: run it as `cst swap ...`)
 #

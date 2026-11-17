@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Compute the SHA256 pins that .github/actions/setup-invowk needs for an invowk release.
 
 Run it through invowk from the repository root:

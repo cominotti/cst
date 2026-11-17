@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """cst-doctor: a read-only check-up of this workstation. It is the program
 behind `cst doctor` (and the last section of `cst status`). It never changes
 anything: it only reads files and runs query commands (rpm-ostree status,

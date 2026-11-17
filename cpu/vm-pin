@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """vm-pin: keep a libvirt VM off the P-cores and the game's E-cores, and
 keep the CPU features off that make Windows bootloop under QEMU 11.
 

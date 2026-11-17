@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST).
 # Automatic block-group reclaim ("auto-balance") for the root btrfs filesystem,
 # a last line of defence against ENOSPC rather than routine housekeeping:

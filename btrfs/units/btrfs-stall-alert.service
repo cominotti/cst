@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST).
 # Started by btrfs-stall-monitor.service to deliver its queued alerts as
 # desktop notifications (needs runuser, so it lives outside that sandbox);

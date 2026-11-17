@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Commits that `git blame` skips, so that it shows the commit that last
 # changed what a line does, not one that only changed its layout. GitHub reads
 # this file by itself. Locally, once per clone:

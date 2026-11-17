@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Hexagonal CLI dispatcher for the top-level `cst` command."""
 
 import os.path as _cst_path

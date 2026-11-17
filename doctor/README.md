@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst doctor`: a read-only check-up
 
 This folder holds `cst-doctor`, the program behind `cst doctor`. It is not a

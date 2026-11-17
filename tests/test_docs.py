@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate: the Markdown documents and the agent files hold together.
 
 - Every relative link in a Markdown file of the repository, [text](path),

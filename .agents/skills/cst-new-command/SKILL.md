@@ -2,6 +2,7 @@
 name: cst-new-command
 description: "Checklist for adding or changing a cst command or operation that changes the machine (a subcommand, an option, an apply, install or uninstall step of a module): the dry run, apply, status and undo, the unit and E2E test matrix, a cst doctor check, the module README and the cli.py ceiling. Use when a change adds or alters a `cst MODULE ...` command or anything that writes system files, units, sysctls or settings."
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
 # Adding a cst command that changes the machine
 

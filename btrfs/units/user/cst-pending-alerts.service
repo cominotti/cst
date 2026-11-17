@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). Global user unit (/etc/systemd/user),
 # enabled for every user with `systemctl --global enable`.
 # At each graphical login, shows the storage alerts that were raised while no

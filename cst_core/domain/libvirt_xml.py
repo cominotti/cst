@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Rules for rewriting a libvirt domain definition with ElementTree (cpu vm-pin, cst-vm tune)."""
 
 import io

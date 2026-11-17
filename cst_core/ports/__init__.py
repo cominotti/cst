@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Port interfaces (typing.Protocol) and shared boundary errors for CST adapters."""
 
 from collections.abc import Mapping, Sequence

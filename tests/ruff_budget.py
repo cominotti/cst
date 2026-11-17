@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Ruff budgets: rule hits that may only go down (the end of `invowk cmd test pylint`).
 
 Use: python3 -I -B tests/ruff_budget.py   (from anywhere; needs uv, like tests/uv-dev)

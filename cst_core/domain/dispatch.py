@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Domain model and formatting for the top-level `cst` module dispatcher."""
 
 from collections.abc import Mapping

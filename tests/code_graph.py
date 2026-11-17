@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The production Python code of the checkout as a graph, for the static gates.
 
 - `production_python()`: every Python file that ships or runs from the

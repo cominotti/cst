@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 // Managed by cpu-setup.sh (CST): GameMode's [custom] hooks, running as
 // @USER@ in the active local session, may start/stop only cpu-game.service.
 polkit.addRule(function(action, subject) {

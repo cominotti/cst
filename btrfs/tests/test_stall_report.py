@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the zswap numbers of btrfs/btrfs-stall-report (no root needed).
 
 Daemons before version 7 read only the first page of /proc/vmstat, so their

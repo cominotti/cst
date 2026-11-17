@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # btrfs-degraded-boot-setup.sh
 #
@@ -394,7 +395,7 @@ case "${1:-}" in
     ""|--files-only)
         ;;
     *)
-        sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

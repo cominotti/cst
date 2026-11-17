@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 module: "cst"
 version: "0.1.0"
 description: "Cominotti Setup Tools: dev, lint, E2E test orchestration and host diagnostics"

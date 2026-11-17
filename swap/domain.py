@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure domain model, parsing, and calculations for the swap module."""
 
 from collections.abc import Mapping, Sequence

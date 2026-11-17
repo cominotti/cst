@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by cpu-setup.sh (CST). Root-level slice for Docker containers
 # (daemon.json "cgroup-parent": "builds.slice"): a sibling of user.slice, so
 # its weight really competes with the desktop and the game.

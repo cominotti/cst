@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 set -euo pipefail
 
 if [[ ${EUID:-$(id -u)} -ne 0 && -z "${ANACONDA_BTRFS_FIX_TARGET:-}" ]]; then

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # CST (Cominotti Setup Tools)
 
 Scripts for one workstation: **sophia**. They keep its disks safe and watched,
@@ -496,3 +497,8 @@ Each detailed document has a longer glossary at its end.
 ## License
 
 Licensed under the [Mozilla Public License 2.0 (MPL-2.0)](LICENSE).
+
+Each file names its license in one line, `SPDX-License-Identifier: MPL-2.0`,
+in its own comment syntax; [AGENTS.md](AGENTS.md) says where the line goes
+and how to check and add it. The full notice, Exhibit A, is in
+[LICENSE](LICENSE), which the license allows.

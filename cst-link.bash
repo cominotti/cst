@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # cst-link.bash: sourced (not run) by the `install` of btrfs-setup.sh and
 # cpu-setup.sh, as root.
 #

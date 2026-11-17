@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """cst-mutation: mutation testing of one Python helper, with cosmic-ray, in a sandbox.
 
 Mutation testing changes the code on purpose, one small change at a time (a

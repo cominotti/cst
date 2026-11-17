@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Local files for the install use case: atomic writes, modes, root ownership, SELinux labels."""
 
 import os

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """docker-volumes-nocow's machine side: where Docker keeps its volumes, their files and NOCOW flags, whether a dockerd uses them, the postponed record, SELinux labels."""
 
 from __future__ import annotations

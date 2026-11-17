@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for bluetooth/bt-ldac-watch (the LDAC sample rate watcher):
 parsing of pw-dump, pactl events and pactl cards, the act/skip decision, the
 one-attempt-per-connection state machine and its cooldown, the bounce with a

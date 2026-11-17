@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Budgets: counts the static gates allow today, which may only go down.
 
 A budget table maps a key, usually "<package> <layer>", to the count found

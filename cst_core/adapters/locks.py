@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Run locks: one run at a time, through flock(2) on a lock file."""
 
 import fcntl

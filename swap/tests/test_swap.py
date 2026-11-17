@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for swap domain, presenter, application service, and CLI.
 
 Run from the repository root (-B: no __pycache__ in the repository):

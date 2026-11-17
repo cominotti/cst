@@ -2,6 +2,7 @@
 name: cst-shell-to-python
 description: "Procedure for converting a CST bash script (a <module>-setup.sh, a helper, a sourced .bash library) to Python without changing its behaviour: behaviour tests against the bash first, the same command line, exit codes and output, the swap-setup.sh precedent, a thin shim, deleting the bash, lowering the ceilings and keeping the docs in step. Use when asked to port, rewrite or convert a shell script of this repository to Python."
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
 # Converting a bash script to Python
 

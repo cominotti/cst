@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for tests/package_view.py: the tests' one namespace over a package's modules."""
 
 import types

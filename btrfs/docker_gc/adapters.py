@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """docker-gc's machine side: its settings (environment), the docker commands, the last-used state, the run lock."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for tests/uv-dev, the wrapper the invowk tasks `test pylint`
 and `test types` run ruff and ty through.
 

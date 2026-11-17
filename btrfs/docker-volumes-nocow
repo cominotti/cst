@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """docker-volumes-nocow: Docker volumes without copy-on-write (btrfs NOCOW, +C).
 
 Installed by `cst btrfs install` (CST) as

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The btrfs NOCOW attribute (chattr +C) of files and folders, through ioctl.
 
 A folder marked NOCOW makes the files created in it later NOCOW too; an

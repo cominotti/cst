@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Steam's games into the ~/Bulk/steam library: reading Steam's library
 files and app manifests, the move of one game (reflink, or a byte-by-byte
 copy that is compared) with its journal, its recovery, and the space

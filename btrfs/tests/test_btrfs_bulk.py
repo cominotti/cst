@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/btrfs-bulk (no root, no btrfs needed).
 
 HOME is a temporary folder; subvolumes, NOCOW flags, the busy check and

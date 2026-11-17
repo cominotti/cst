@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the rust:build target of toolchains/cst-toolchains: the
 pruning of cargo's build folders (no root, no btrfs, no systemd needed).
 

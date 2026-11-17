@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The ~/Bulk items: the state of each one (classify), the move of its
 data into ~/Bulk and the link left behind, the recovery of interrupted
 moves, apply and the plan/status report.

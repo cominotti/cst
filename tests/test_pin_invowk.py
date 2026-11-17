@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Offline tests for .github/scripts/pin_invowk.py (no network, no cosign)."""
 
 from __future__ import annotations

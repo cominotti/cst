@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # cpu-setup.sh  (the `cpu` module of CST: run it as `cst cpu ...`)
 #
@@ -111,7 +112,7 @@ declare -A EXPERIMENTS=(
 PROG="${CST_PROG:-$0}"
 
 usage() {
-    sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
     echo "Usage: ${PROG} <command> [args]"
 }
 in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }

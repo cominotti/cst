@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the cpu module: vm-pin XML rewriting, cpu-watch frame-time
 and run-summary helpers, cpu-watch quiet (fake /proc files and clock) and its
 dispatch from cpu-setup.sh (host and toolbox), game-profile CPU range expansion, on/off, drift

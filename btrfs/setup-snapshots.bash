@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # setup-snapshots.bash: `cst btrfs snapshots ...` (sourced by the frontend,
 # runs as root; uses its helpers cst_install/cst_install_text (cst-install.bash), install_units/

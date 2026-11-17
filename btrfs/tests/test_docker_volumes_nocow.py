@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/docker-volumes-nocow (Docker volumes without copy-on-write).
 
 The helper runs as root at boot and rewrites Docker volumes. These tests use

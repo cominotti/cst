@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Duplicated code in the checkout, measured (for tests/test_duplication.py).
 
 - Python clones: sliding windows of W normalized code lines (comments,

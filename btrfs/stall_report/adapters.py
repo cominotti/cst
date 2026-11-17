@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's machine side: the log folder, `date -d` for --since/--until, reading the daily log files, below and container names."""
 
 from typing import Any

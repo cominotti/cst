@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # bluetooth-setup.sh  (the `bluetooth` module of CST: run it as `cst bluetooth ...`)
 #
@@ -106,7 +107,7 @@ LW_SRC="${SRC}/bt-ldac-watch"
 PROG="${CST_PROG:-$0}"
 
 usage() {
-    sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
     echo "Usage: ${PROG} <command> [options]"
 }
 in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }

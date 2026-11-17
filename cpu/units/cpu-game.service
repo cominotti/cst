@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by cpu-setup.sh (CST). Started/stopped by GameMode's [custom]
 # hooks (polkit lets the desktop user manage only this unit) or by
 # `cst cpu game on|off`. Runtime-only settings: a reboot clears them too.

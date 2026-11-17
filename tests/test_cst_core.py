@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the cst_core Shared Kernel and base adapters."""
 
 from collections.abc import Callable, Mapping, Sequence

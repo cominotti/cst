@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/btrfs-snapshot-core (no root, no btrfs needed).
 
 Run from the repository root (-B: no __pycache__ in the repository):

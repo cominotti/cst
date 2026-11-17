@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate: every Python file of the repository is under the Python gates.
 
 ruff finds *.py files by itself but not the extensionless helpers (such as

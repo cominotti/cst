@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Every shell file of the checkout, one per line (the list `invowk cmd test lint` lints).
 
 Use: python3 -I -B tests/shell_files.py   (from anywhere)

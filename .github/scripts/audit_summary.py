@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Append a GitHub Actions job summary for `invowk audit --format json` output."""
 
 import json

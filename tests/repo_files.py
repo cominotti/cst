@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The files of the repository, for the static gate tests.
 
 tests/test_repo_paths.py, tests/test_python_files.py,

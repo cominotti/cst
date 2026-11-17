@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the SMART part of btrfs/btrfs-health-check (no root needed).
 
 The health check reads the NVMe health log (SMART) of the btrfs member disks

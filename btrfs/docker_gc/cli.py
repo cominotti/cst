@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """docker-gc's commands (record, run, cleanup-now, status): the plan, what it shows and removes, and main()."""
 
 from __future__ import annotations

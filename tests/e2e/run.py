@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Docker E2E orchestrator for cst (Layer 1 unprivileged systemd + Layer 2 privileged storage/cgroups)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The host as cst-toolchains sees it: output lines (journal-aware), the
 cargo build folders on disk, the processes that use them, cargo, git, uv,
 rustup and sccache, the user manager (systemctl --user), and the files

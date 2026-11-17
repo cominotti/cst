@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """cst installer: writes the files of INSTALL_MANIFEST (cst_core/domain/install.py).
 
 The one way the setup scripts install files (through cst-install.bash).

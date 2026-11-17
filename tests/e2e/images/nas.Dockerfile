@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 FROM registry.fedoraproject.org/fedora:45
 
 RUN dnf -y install \

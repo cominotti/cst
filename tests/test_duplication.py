@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Duplication ratchet: copied code in production may only go down.
 
 CEILINGS holds today's measurements (tests/duplication.py says how each is

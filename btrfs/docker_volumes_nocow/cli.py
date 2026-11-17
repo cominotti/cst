@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """docker-volumes-nocow's commands: migrate (one volume's NOCOW copy, the boot's run), mark, unmark, status and main()."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Declarative installation manifest and executable inventory for CST."""
 
 from collections.abc import Mapping, Sequence
