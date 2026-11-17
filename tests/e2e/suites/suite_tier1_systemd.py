@@ -1674,8 +1674,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
         "cst-vm-backup@e2e.service": 94,
-        "docker-gc-recorder.service": 21,
-        "docker-gc.service": 21,
+        # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
+        # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
+        "docker-gc-recorder.service": 23,
+        "docker-gc.service": 23,
         "docker-volumes-nocow.service": 94,
     }
 
