@@ -323,6 +323,22 @@ class ZipappTest(unittest.TestCase):
         )
         self.assertEqual((res.returncode, res.stdout.strip(), res.stderr), (0, "7", ""))
 
+    def test_zipapp_keeps_the_managed_by_line_below_a_license_header(self) -> None:
+        # The SPDX line takes line 2 of an entry, which moves its managed-by line to line 3:
+        # it must still be copied in front of the archive, right after the shebang.
+        (self.root / "demo" / "demo-tool").write_text(
+            "#!/usr/bin/python3 -I\n"
+            "# SPDX-License-Identifier: MPL-2.0\n"
+            "# managed-by: demo-setup.sh (CST)\n"
+            "def main() -> None:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        built = build_python_zipapp(self.root, "demo/demo-tool")
+        self.assertTrue(
+            built.startswith(b"#!/usr/bin/python3 -I\n# managed-by: demo-setup.sh (CST)\nPK\x03\x04"), built[:120]
+        )
+
     def test_entry_payload_copies_other_kinds(self) -> None:
         e = entry("demo/data.conf", "/etc/x")
         self.assertEqual(entry_payload(self.root, e), b"KEY=1\n")

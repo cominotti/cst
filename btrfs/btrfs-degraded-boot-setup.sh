@@ -394,7 +394,7 @@ case "${1:-}" in
     ""|--files-only)
         ;;
     *)
-        sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

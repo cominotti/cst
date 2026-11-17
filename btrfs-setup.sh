@@ -185,7 +185,7 @@ EXPECTED_OPTS=(compress=zstd:1 flushoncommit noatime discard=async degraded spac
 PROG="${CST_PROG:-$0}"
 
 usage() {
-    sed -n '2,/^$/p' "${SELF}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
     echo "Usage: ${PROG} <command> [args]"
 }
 in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }
