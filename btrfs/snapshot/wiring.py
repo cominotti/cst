@@ -32,7 +32,7 @@ def run_time_zone(name: str | None) -> dt.tzinfo:
         if tz is None:
             raise Usage(f"unknown --tz {name!r}")
         return tz
-    return local_tz(None, os.environ.get("TZ", ""))
+    return local_tz(os.environ.get("TZ", ""))
 
 
 def machine(host: SnapshotHostPort | None, log: LogFn, *, state_dir: str, pin_file: str) -> Machine:

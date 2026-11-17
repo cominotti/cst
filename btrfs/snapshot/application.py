@@ -110,26 +110,17 @@ class Run:
 
     # Lists in the state directory ----------------------------------------------
     def state_file(self, name: str) -> str:
-        return os.path.join(self.options.state_dir, name)
-
-    def read_list(self, name: str) -> list[str]:
-        """The entries (one per line) of STATE/name; [] if it does not exist.
-        OSError if it cannot be read."""
-        return self.state.read_list(name)
-
-    def write_list(self, name: str, entries: Sequence[str], *, sync_dir: bool = True) -> None:
-        """Replace STATE/name with ENTRIES, durably; removed when ENTRIES is empty."""
-        self.state.write_list(name, entries, sync_dir=sync_dir)
+        return self.state.path(name)
 
     def list_add(self, name: str, entry: str) -> None:
-        entries = self.read_list(name)
+        entries = self.state.read_list(name)
         if entry not in entries:
-            self.write_list(name, entries + [entry])
+            self.state.write_list(name, entries + [entry])
 
     def list_remove(self, name: str, entry: str) -> None:
-        entries = self.read_list(name)
+        entries = self.state.read_list(name)
         if entry in entries:
-            self.write_list(name, [e for e in entries if e != entry])
+            self.state.write_list(name, [e for e in entries if e != entry])
 
     def record_writable(self) -> None:
         """STATE/core-writable: the writable entries the scans saw (cst doctor
@@ -138,8 +129,8 @@ class Run:
             return
         entries = sorted(self.writable)
         try:
-            if self.read_list(WRITABLE_FILE) != entries:  # unchanged: no rewrite, no fsync
-                self.write_list(WRITABLE_FILE, entries)
+            if self.state.read_list(WRITABLE_FILE) != entries:  # unchanged: no rewrite, no fsync
+                self.state.write_list(WRITABLE_FILE, entries)
         except OSError as e:
             self.log(4, f"cannot write {self.state_file(WRITABLE_FILE)}: {e.strerror}")
 
@@ -303,7 +294,7 @@ class Run:
             line += f" {self.boot_id} {self.boottime:.3f}"
         # The file is fsynced, its folder is not (a crash at worst keeps the
         # previous record): one btrfs log sync less per run.
-        self.write_list(STATE_FILE, [line], sync_dir=False)
+        self.state.write_list(STATE_FILE, [line], sync_dir=False)
         self._last_run = (parse_state(line), None)
 
     # Per source ---------------------------------------------------------------
@@ -376,6 +367,15 @@ class Run:
         )
 
 
+# How bad an exit status is: an error beats a refusal beats ok.
+STATUS_RANK = {EXIT_OK: 0, EXIT_REFUSED: 1, EXIT_ERROR: 2}
+
+
+def worst(a: int, b: int) -> int:
+    """The worse of two exit statuses (EXIT_OK, EXIT_REFUSED, EXIT_ERROR)."""
+    return b if STATUS_RANK[b] > STATUS_RANK[a] else a
+
+
 @dataclasses.dataclass
 class Result:
     name: str
@@ -386,10 +386,7 @@ class Result:
     note: str = ""
 
     def worse(self, status: int) -> None:
-        # error beats refusal beats ok
-        rank = {EXIT_OK: 0, EXIT_REFUSED: 1, EXIT_ERROR: 2}
-        if rank[status] > rank[self.status]:
-            self.status = status
+        self.status = worst(self.status, status)
 
 
 def process_source(run: Run, src: Source, *, create: bool) -> Result:
@@ -815,7 +812,7 @@ def finish_unfinished(run: Run) -> int:
     status (EXIT_ERROR if finishing one failed)."""
     path = run.state_file(UNFINISHED_FILE)
     try:
-        entries = run.read_list(UNFINISHED_FILE)
+        entries = run.state.read_list(UNFINISHED_FILE)
     except OSError as e:
         run.log(4, f"cannot read {path} ({err_text(e)}); interrupted snapshots are not finished")
         return EXIT_OK
@@ -904,8 +901,7 @@ SUMMARY_WORD = {EXIT_OK: "ok", EXIT_REFUSED: "blocked by a safety check", EXIT_E
 def overall_status(status: int, results: Iterable[Result]) -> int:
     """The run's exit status: an error beats a refusal beats ok (STATUS: finishing the leftovers)."""
     for r in results:
-        if r.status == EXIT_ERROR or (r.status == EXIT_REFUSED and status == EXIT_OK):
-            status = r.status
+        status = worst(status, r.status)
     return status
 
 
@@ -952,7 +948,7 @@ def cmd_list(args: RunOptions, machine: Machine, tz: dt.tzinfo) -> tuple[int, Li
     """Every snapshot of each source with its decision (changes nothing)."""
     run = Run(args, machine, tz)
     try:
-        unfinished = set(run.read_list(UNFINISHED_FILE))
+        unfinished = set(run.state.read_list(UNFINISHED_FILE))
     except OSError:
         unfinished = set()
     out = [list_source(run, src, unfinished) for src in args.sources]
@@ -1012,9 +1008,9 @@ def cmd_finish(args: RunOptions, machine: Machine, tz: dt.tzinfo) -> int:
     first, so they become ours and are deleted too)."""
     status = locked(args, machine, lambda: finish_unfinished(Run(args, machine, tz)))
     if status != EXIT_BUSY:
+        # finish_unfinished answers EXIT_OK or EXIT_ERROR.
         machine.log(
-            5 if status == EXIT_OK else 3,
-            f"{'dry run ' if args.dry_run else ''}finish summary: result: {'ok' if status == EXIT_OK else 'error'}",
+            SUMMARY_LEVEL[status], f"{'dry run ' if args.dry_run else ''}finish summary: result: {SUMMARY_WORD[status]}"
         )
     return status
 

@@ -65,6 +65,10 @@ class BtrfsPort(Protocol):
 class StateStorePort(Protocol):
     """The files of --state-dir, by name (STATE_FILE, UNFINISHED_FILE, WRITABLE_FILE)."""
 
+    def path(self, name: str) -> str:
+        """The path of the file NAME (for messages)."""
+        ...
+
     def read_list(self, name: str) -> list[str]:
         """The entries (one per line); [] if the file does not exist; OSError if it cannot be read."""
         ...

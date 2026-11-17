@@ -43,12 +43,9 @@ from cst_core.ports import CommandRunnerPort
 
 
 # ---- time ----------------------------------------------------------------------------
-def local_tz(name: str | None, tz_env: str) -> dt.tzinfo:
-    """The zone used for names and retention: --tz (NAME), else $TZ (TZ_ENV,
-    which wiring reads), else /etc/localtime. An unknown NAME raises
-    zoneinfo.ZoneInfoNotFoundError or ValueError, as zoneinfo does."""
-    if name:
-        return zoneinfo.ZoneInfo(name)
+def local_tz(tz_env: str) -> dt.tzinfo:
+    """The zone used for names and retention when there is no --tz: $TZ
+    (TZ_ENV, which wiring reads), else /etc/localtime, else UTC."""
     env = tz_env.lstrip(":")
     if env:
         try:

@@ -76,7 +76,7 @@ core() {   # core CMD [args...]: rc in $rc, output in ${OUT}
     local extra=()
     case "${cmd}" in
         snapshot|prune) extra=(--lock "${LOCK}") ;;
-        *) ;;   # list, latest, ...: no lock
+        *) ;;   # list: takes no lock
     esac
     python3 -I "${CORE}" "${cmd}" --snapdir "${SNAPS}" --source "t=${SRC}:${POLICY}" \
         --state-dir "${STATE}" --pin-file "${PINS}" --assume-clock-ok "${extra[@]}" "$@" >"${OUT}" 2>&1
