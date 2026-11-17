@@ -12,6 +12,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import tempfile
 from typing import Protocol, cast
 import unittest
 from unittest import mock
@@ -24,6 +25,9 @@ class _E2ERunModule(Protocol):
     run_tier2: Callable[..., bool]
     main: Callable[[Sequence[str] | None], int]
     checkout_preflight: Callable[..., str | None]
+    host_lsm_security_opts: Callable[[], list[str]]
+    selinux_type: Callable[[Path], str | None]
+    host_selinux: Callable[..., bool]
 
     def checkout_label_problem(
         self, *, enforcing: bool, types: Mapping[str, str | None], repo: Path, label_disabled: bool = False
@@ -110,8 +114,44 @@ class CheckoutPreflightTest(unittest.TestCase):
         assert msg is not None
         self.assertIn("/w/cst-wt (user_home_t)", msg)
         self.assertIn("chcon -R -t container_file_t /w/cst-wt", msg)
-        # Containers started with label=disable (SELinux seen at /sys/fs/selinux) read any label.
+        # Containers started with label=disable (host_selinux) read any label.
         self.assertIsNone(check(enforcing=True, types={"/w/cst-wt": "user_home_t"}, repo=repo, label_disabled=True))
+        # container_ro_file_t is a type containers may read too.
+        self.assertIsNone(check(enforcing=True, types={"/w/cst-wt": "container_ro_file_t"}, repo=repo))
+
+    def test_host_selinux_is_seen_from_a_toolbox(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-e2e-lsm-")))
+        enforce, marker, host_enforce = tmp / "sys-enforce", tmp / "containerenv", tmp / "host-enforce"
+
+        def seen() -> bool:
+            return self.mod.host_selinux(enforce, marker, host_enforce)
+
+        self.assertFalse(seen(), "no SELinux anywhere")
+        host_enforce.write_text("1\n")
+        self.assertFalse(seen(), "a /run/host tree outside a container is not this machine's host")
+        marker.write_text("")
+        self.assertTrue(seen(), "inside a toolbox: the host's selinuxfs under /run/host")
+        host_enforce.unlink()
+        marker.unlink()
+        enforce.write_text("0\n")
+        self.assertTrue(seen(), "SELinux in the kernel, even permissive")
+
+    def test_label_disable_from_a_toolbox(self) -> None:
+        # The host's SELinux seen only under /run/host: label=disable is added
+        # (the toolbox's docker is the host's daemon), so the preflight passes.
+        self.mod.host_selinux = lambda *a, **k: True
+        self.assertIn("label=disable", self.mod.host_lsm_security_opts())
+        self.mod.host_selinux = lambda *a, **k: False
+        self.assertNotIn("label=disable", self.mod.host_lsm_security_opts())
+
+    def test_selinux_type_of_a_label(self) -> None:
+        path = Path("/w/cst-wt/cst")
+        with mock.patch("os.getxattr", return_value=b"unconfined_u:object_r:user_home_t:s0:c1,c2\0"):
+            self.assertEqual(self.mod.selinux_type(path), "user_home_t")
+        with mock.patch("os.getxattr", side_effect=OSError(61, "No data available")):
+            self.assertIsNone(self.mod.selinux_type(path))
+        with mock.patch("os.getxattr", return_value=b"garbage"):
+            self.assertIsNone(self.mod.selinux_type(path))
 
     def test_a_bad_label_stops_the_run_before_any_container(self) -> None:
         calls: list[int] = []

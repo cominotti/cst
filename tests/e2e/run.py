@@ -74,12 +74,18 @@ def run(
 # mode, files labelled for a home folder (user_home_t, a fresh clone or a git
 # worktree) cannot be read or run by the container ("Permission denied" on
 # /opt/cst/cst in test_01) unless it starts with label=disable, which
-# host_lsm_security_opts adds only where /sys/fs/selinux is visible (not
-# inside a toolbox). The fix is the label containers may use.
+# host_lsm_security_opts adds whenever it sees the host's SELinux: at
+# /sys/fs/selinux, or under /run/host inside a toolbox (whose docker is the
+# host's daemon). checkout_preflight is the fallback for any other case: it
+# stops the run and prints the label containers may use.
 SELINUX_ENFORCE = Path("/sys/fs/selinux/enforce")
 # Inside a toolbox the host's selinuxfs is not mounted at /sys/fs/selinux; it is under /run/host.
 SELINUX_ENFORCE_FROM_TOOLBOX = Path("/run/host/sys/fs/selinux/enforce")
+# podman and toolbox create this file in every container they start.
+CONTAINER_MARKER = Path("/run/.containerenv")
 CONTAINER_FILE_TYPE = "container_file_t"
+# The types a container may read and run besides container_file_t.
+CONTAINER_READABLE_TYPES = frozenset({CONTAINER_FILE_TYPE, "container_ro_file_t"})
 
 
 def selinux_type(path: Path) -> str | None:
@@ -102,7 +108,7 @@ def checkout_label_problem(
     """
     if not enforcing or label_disabled:
         return None
-    wrong = sorted(path for path, kind in types.items() if kind is not None and kind != CONTAINER_FILE_TYPE)
+    wrong = sorted(path for path, kind in types.items() if kind is not None and kind not in CONTAINER_READABLE_TYPES)
     if not wrong:
         return None
     found = ", ".join(f"{p} ({types[p]})" for p in wrong)
@@ -130,9 +136,16 @@ def checkout_preflight(repo: Path = REPO_ROOT) -> str | None:
     )
 
 
+def host_selinux(
+    enforce: Path = SELINUX_ENFORCE, marker: Path = CONTAINER_MARKER, host_enforce: Path = SELINUX_ENFORCE_FROM_TOOLBOX
+) -> bool:
+    """SELinux is on in the kernel the containers run on: here, or on the host of this toolbox."""
+    return enforce.exists() or (marker.exists() and host_enforce.exists())
+
+
 def host_lsm_security_opts() -> list[str]:
     opts: list[str] = []
-    if Path("/sys/fs/selinux/enforce").exists():
+    if host_selinux():
         opts.extend(["--security-opt", "label=disable"])
     apparmor = Path("/sys/module/apparmor/parameters/enabled")
     try:

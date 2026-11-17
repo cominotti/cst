@@ -37,10 +37,14 @@ Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
 Both commands take `--keep_logs` (keep the journald/systemd logs in
 `tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).
-Before it starts a container, `run.py` checks that the containers can use the
-checkout: with SELinux enforcing, a checkout or git worktree labelled for a
-home folder (`user_home_t`) gives "Permission denied" inside them, so the run
-stops at once and prints the fix, `chcon -R -t container_file_t <checkout>`.
+The containers read and run the checkout from a bind mount. Where SELinux is
+on, a checkout or git worktree labelled for a home folder (`user_home_t`)
+would give "Permission denied" inside them, so `run.py` starts them with
+`--security-opt label=disable` whenever it sees SELinux: at
+`/sys/fs/selinux` on the host, or at `/run/host/sys/fs/selinux` inside a
+toolbox (whose `docker` talks to the host's daemon). If SELinux is enforcing
+and that option is not added, the run stops before any container starts and
+prints the fix, `chcon -R -t container_file_t <checkout>`.
 
 `invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
 `test lint`, `test pylint`, `test types`, `test unit`), then both tiers.
