@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import pwd
 import signal
+import stat
 import zipfile
 
 from cst_core.adapters.zipapp import build_python_zipapp
@@ -124,39 +125,66 @@ def checkout_commit(root: str | None) -> str:
     No git command: as root in a user's checkout, git refuses to work
     (safe.directory). A worktree's .git file names its own git folder; its
     branches live in the common one (commondir); packed-refs holds the rest.
+
+    The checkout belongs to its user while the installer may run as root, so
+    every file is opened without following a link and read only when it is a
+    regular file owned by the checkout's owner: a crafted .git (a link, a
+    gitdir or ref pointing elsewhere) cannot make root copy another file's text
+    into the world-readable install record.
     """
     if not root:
         return "unknown"
     try:
+        owner = os.lstat(root).st_uid
+
+        def read(path: str) -> str | None:
+            return _read_owned(path, owner)
+
         git = os.path.join(root, ".git")
-        if os.path.isfile(git):
-            line = Path(git).read_text(encoding="utf-8").strip()
+        if os.path.isfile(git) and not os.path.islink(git):
+            line = (read(git) or "").strip()
             if not line.startswith("gitdir:"):
                 return "unknown"
             git = os.path.normpath(os.path.join(root, line.split(":", 1)[1].strip()))
         common = git
-        if os.path.isfile(os.path.join(git, "commondir")):
-            common = os.path.normpath(os.path.join(git, Path(git, "commondir").read_text(encoding="utf-8").strip()))
-        head = Path(git, "HEAD").read_text(encoding="utf-8").strip()
+        commondir = read(os.path.join(git, "commondir"))
+        if commondir is not None:
+            common = os.path.normpath(os.path.join(git, commondir.strip()))
+        head = (read(os.path.join(git, "HEAD")) or "").strip()
         if not head.startswith("ref:"):
             return head if _is_sha(head) else "unknown"
         ref = head.split(":", 1)[1].strip()
         if not _is_ref_name(ref):
             return "unknown"
         for folder in (git, common):
-            p = os.path.join(folder, ref)
-            if os.path.isfile(p):
-                sha = Path(p).read_text(encoding="utf-8").strip()
+            text = read(os.path.join(folder, ref))
+            if text is not None:
+                sha = text.strip()
                 return sha if _is_sha(sha) else "unknown"
-        packed = os.path.join(common, "packed-refs")
-        if os.path.isfile(packed):
-            for line in Path(packed).read_text(encoding="utf-8").splitlines():
-                sha, _, name = line.partition(" ")
-                if name == ref and _is_sha(sha):
-                    return sha
+        for line in (read(os.path.join(common, "packed-refs")) or "").splitlines():
+            sha, _, name = line.partition(" ")
+            if name == ref and _is_sha(sha):
+                return sha
     except OSError, UnicodeDecodeError:
         return "unknown"
     return "unknown"
+
+
+def _read_owned(path: str, owner: int) -> str | None:
+    """The text of path when it is a regular file owned by owner, opened without following a
+    link at its last part; None otherwise (absent, a link, a folder, someone else's file)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner:
+            return None
+        with os.fdopen(fd, encoding="utf-8", closefd=False) as fh:
+            return fh.read(1 << 20)
+    finally:
+        os.close(fd)
 
 
 def _is_ref_name(ref: str) -> bool:

@@ -22,6 +22,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
@@ -453,6 +454,23 @@ class CheckoutCommitTest(unittest.TestCase):
             with self.subTest(ref=ref):
                 self.git(".git/HEAD", text=f"ref: {ref}\n")
                 self.assertEqual(checkout_commit(self.tmp), "unknown")
+        # A link at HEAD (or at the ref) is never followed, even to a commit-shaped text.
+        os.unlink(os.path.join(self.tmp, ".git/HEAD"))
+        os.symlink(os.path.join(self.tmp, "outside"), os.path.join(self.tmp, ".git/HEAD"))
+        self.assertEqual(checkout_commit(self.tmp), "unknown")
+        os.unlink(os.path.join(self.tmp, ".git/HEAD"))
+        self.git(".git/HEAD", text="ref: refs/heads/main\n")
+        os.makedirs(os.path.join(self.tmp, ".git/refs/heads"), exist_ok=True)
+        os.symlink(os.path.join(self.tmp, "outside"), os.path.join(self.tmp, ".git/refs/heads/main"))
+        self.assertEqual(checkout_commit(self.tmp), "unknown")
+        # Files owned by someone else than the checkout's owner are not read (root reading a
+        # gitdir or commondir that points into another account's folder).
+        with mock.patch(
+            "cst_core.adapters.runtime.os.lstat",
+            return_value=os.stat_result((0o40755, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0)),
+        ):
+            self.git(".git/HEAD", text="e" * 40 + "\n")
+            self.assertEqual(checkout_commit(self.tmp), "unknown")
         self.git(".git/HEAD", text="ref: refs/heads/fix/a-b_c.1\n")
         self.git(".git/refs/heads/fix/a-b_c.1", text="f" * 40 + "\n")
         self.assertEqual(checkout_commit(self.tmp), "f" * 40)
