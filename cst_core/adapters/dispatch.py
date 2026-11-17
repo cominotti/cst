@@ -8,8 +8,9 @@ import shutil
 import signal
 import subprocess
 import sys
+from typing import Literal
 
-from cst_core.adapters import HostExecutionContext
+from cst_core.adapters import HostExecutionContext, can_spawn_on_host, on_host_argv
 from cst_core.domain.errors import shell_exit_status
 from cst_core.ports import ContainerProbePort
 
@@ -29,6 +30,13 @@ def ignore_quit() -> None:
     """
     if signal.getsignal(signal.SIGQUIT) is not signal.SIG_IGN:
         signal.signal(signal.SIGQUIT, lambda _sig, _frame: None)
+
+
+def default_ctrl_c() -> None:
+    """Ctrl-C ends this process the way it ended the bash script it replaces (killed by
+    SIGINT, no KeyboardInterrupt traceback). A Ctrl-C ignored by the caller stays ignored."""
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def _start_failure(argv: Sequence[str], exc: OSError) -> int:
@@ -72,6 +80,24 @@ class LocalCstDispatchAdapter:
     def realpath(self, path: str) -> str:
         """os.path.realpath."""
         return os.path.realpath(path)
+
+    def exec_on_host(self, argv: Sequence[str], *, settings: Mapping[str, str]) -> int | None:
+        """exec argv on the host through flatpak-spawn (with settings), or None when it is not on PATH."""
+        if not can_spawn_on_host(os.environ.get("PATH")):
+            return None
+        return self.exec_replace(on_host_argv(argv, settings))
+
+    def read_text(self, path: str) -> str:
+        """The file's bytes, decoded as the file system's names are (every byte kept)."""
+        with open(path, "rb") as fh:
+            return os.fsdecode(fh.read())
+
+    def say(self, stream: Literal["out", "err"], text: str) -> None:
+        """text encoded back as read_text decoded it, written to stdout or stderr and flushed."""
+        out = sys.stdout if stream == "out" else sys.stderr
+        out.flush()
+        out.buffer.write(os.fsencode(text))
+        out.buffer.flush()
 
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         """Run `argv` in the foreground on the terminal's streams, as bash runs a command; its exit status.

@@ -404,8 +404,9 @@ everything with `plan`, `status` or `doctor` before changing anything:
 
 - `cst_core/`: shared kernel (`domain/`), port protocols (`ports/`), host adapters
   (`adapters/`), shared use cases (`application/`), the Python CLI dispatcher
-  (`cli.py`) behind `cst`, the installer (`installer.py`), and their
-  composition root (`wiring.py`).
+  (`cli.py`) behind `cst`, the installer (`installer.py`), the router of the
+  shim modules' commands (`route.py`, run by `vm-setup.sh` and
+  `toolchains-setup.sh`), and their composition root (`wiring.py`).
 - `cst-install.bash`: how every module installs its files, from one table
   (`INSTALL_MANIFEST` in `cst_core/domain/install.py`). A file is written only
   when it changed, and the output says `unchanged:` or `written:` per file;

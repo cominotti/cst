@@ -127,7 +127,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
 
 
 # Package modules that are programs of their own (`python3 -I -B cst_core/installer.py`).
-ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py"})
+ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_core/route.py"})
 
 # Package modules with no role yet, and why. Each holds use cases and their
 # I/O together; splitting one into its layers removes its line. Only shrinks.

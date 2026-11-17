@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The composition root of cst_core's programs: `cst` (cst_core/cli.py) and the installer.
+"""The composition root of cst_core's programs: `cst` (cst_core/cli.py), the installer and the module router (route.py).
 
 What these programs take from the process lives here: the environment the
 shell wrappers hand over, the signals Python changes at start, and the
@@ -11,18 +11,48 @@ import os
 import sys
 from typing import TextIO
 
-from cst_core.adapters.dispatch import LocalCstDispatchAdapter, ignore_quit
+from cst_core.adapters.dispatch import LocalCstDispatchAdapter, default_ctrl_c, ignore_quit
 from cst_core.adapters.install import LocalInstallTarget
 from cst_core.adapters.runtime import checkout_root, undo_python_start
 from cst_core.adapters.zipapp import entry_payload
-from cst_core.application.dispatch import CstDispatcher
+from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
 from cst_core.application.install import InstallService
+from cst_core.domain.dispatch import ROUTING
 
 
 def start_cst() -> None:
     """Undo what Python changes at start (SIGPIPE, LC_CTYPE); ignore Ctrl-\\ as the bash cst did."""
     undo_python_start()
     ignore_quit()
+
+
+def start_router() -> None:
+    """As cst: Python's SIGPIPE and LC_CTYPE undone (the program it execs gets the caller's), Ctrl-\\ ignored
+    until the exec; and Ctrl-C kills it as it killed the bash script (no traceback)."""
+    start_cst()
+    default_ctrl_c()
+
+
+def module_router(module: str) -> ModuleRouter | None:
+    """The router of a shim module's commands (None: no such module), with what its shim hands over.
+
+    CST_SELF (the shim's real path) and CST_ARG0 (its $0) are popped, so the
+    program does not inherit them; CST_PROG, the module's container
+    override and SUDO_USER are read, and stay as the caller set them.
+    """
+    routing = ROUTING.get(module)
+    if routing is None:
+        return None
+    script = os.environ.pop("CST_SELF", "")
+    arg0 = os.environ.pop("CST_ARG0", "") or script
+    settings = RouteSettings(
+        script=script,
+        arg0=arg0,
+        cst_prog=os.environ.get("CST_PROG", ""),
+        container=os.environ.get(routing.container_override, "") if routing.container_override else "",
+        sudo_user=os.environ.get("SUDO_USER", ""),
+    )
+    return ModuleRouter(port=LocalCstDispatchAdapter(), routing=routing, settings=settings)
 
 
 def start_installer() -> None:

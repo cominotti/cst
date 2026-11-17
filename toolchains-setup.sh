@@ -58,39 +58,10 @@
 set -Eeuo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-SRC="$(dirname "${SELF}")/toolchains"
-TOOL="${SRC}/cst-toolchains"
-
-# Shown in the help and in hints: "cst toolchains" when run through the cst
-# command (it sets CST_PROG), else the name this script was started with.
-PROG="${CST_PROG:-$0}"
-
-usage() {
-    sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
-    echo "Usage: ${PROG} <command> [args]"
-}
-die() { echo "${PROG}: ERROR: $*" >&2; exit 1; }
-
-cmd="${1:-help}"
-[[ $# -gt 0 ]] && shift
-case "${cmd}" in
-    help|-h|--help) usage; exit 0 ;;
-    status|prune|auto|config) ;;
-    *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
-esac
-
-# The caches, the timer and the settings are the user's: as root (sudo, or
-# `cst status` after asking sudo once) it starts again as that user.
-if [[ ${EUID} -eq 0 ]]; then
-    user="${SUDO_USER:-}"
-    [[ -n "${user}" && "${user}" != root ]] ||
-        die "run it from your user account (needs SUDO_USER): toolchain caches and settings belong to your user"
-    uid="$(id -u "${user}")"
-    env_args=("HOME=$(getent passwd "${user}" | cut -d: -f6)" "USER=${user}" "LOGNAME=${user}"
-              "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus")
-    [[ -n "${CST_PROG:-}" ]] && env_args+=("CST_PROG=${CST_PROG}")
-    exec runuser -u "${user}" -- env -u XDG_CONFIG_HOME -u SUDO_USER "${env_args[@]}" "${SELF}" "${cmd}" "$@"
-fi
-
-# The program checks the rest of the command line (exit 2 on a mistake).
-CST_PROG="${PROG}" exec python3 -I -B "${TOOL}" "${cmd}" "$@"
+# The routing (read, user or root commands; flatpak-spawn from a toolbox,
+# the runuser re-run) is ROUTING in cst_core/domain/dispatch.py, run by
+# cst_core/route.py, which prints the help above. CST_SELF and CST_ARG0: this
+# script and the name it was started with; CST_LC_CTYPE: the caller's
+# LC_CTYPE, which Python changes at start under a C locale.
+CST_SELF="${SELF}" CST_ARG0="$0" CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" \
+    exec /usr/bin/python3 -I -B "$(dirname "${SELF}")/cst_core/route.py" toolchains "$@"

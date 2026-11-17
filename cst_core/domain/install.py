@@ -157,6 +157,7 @@ btrfs/chrome-cache
 btrfs/tests/realbtrfs-snapshot-core.sh
 cst_core/cli.py
 cst_core/installer.py
+cst_core/route.py
 doctor/cst-doctor
 fix-anaconda-webui-btrfs-compress.sh
 swap/cli.py

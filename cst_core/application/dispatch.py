@@ -1,16 +1,27 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The `cst` dispatcher's use case: help, status across modules, doctor, and handing over to a module.
+"""The `cst` dispatcher's use case (help, status across modules, doctor, handing over to a
+module), and the router of a shim module's command (ModuleRouter).
 
 Its host side is CstDispatchPort (cst_core/ports), implemented by
 cst_core/adapters/dispatch.py; cst_core/cli.py wires the two.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 import os.path
 from typing import TextIO
 
-from cst_core.domain.dispatch import MODULE_BY_NAME, MODULES, format_cst_usage
-from cst_core.ports import CstDispatchPort
+from cst_core.domain.dispatch import (
+    MODULE_BY_NAME,
+    MODULES,
+    HELP_WORDS,
+    ModuleRouting,
+    Routed,
+    format_cst_usage,
+    route_command,
+    script_help,
+)
+from cst_core.ports import CstDispatchPort, ModuleRoutePort
 
 
 def _say(stream: TextIO, text: str) -> None:
@@ -139,7 +150,7 @@ class CstDispatcher:
         """Dispatch CLI arguments after `cst`."""
         cmd = argv[0] if argv and argv[0] else "help"  # bash's ${1:-help}: an empty word is help too
         rest = argv[1:]
-        if cmd in ("help", "-h", "--help"):
+        if cmd in HELP_WORDS:
             _say(self._stdout, self.usage())
             return 0
         if cmd == "status":
@@ -158,3 +169,125 @@ class CstDispatcher:
         _say(self._stderr, f"{self._cst_name}: unknown command or module '{cmd}'")
         _say(self._stderr, self.usage())
         return 2
+
+
+@dataclass(frozen=True, slots=True)
+class RouteSettings:
+    """What a shim hands over and what the router reads from the environment once.
+
+    script: the shim (its real path), arg0: the name it was started with
+    ($0), cst_prog: CST_PROG as the caller set it ("" when unset or empty),
+    container: the module's override ("1", "0", or "" to detect),
+    sudo_user: SUDO_USER ("" when unset).
+    """
+
+    script: str
+    arg0: str
+    cst_prog: str
+    container: str
+    sudo_user: str
+
+
+class ModuleRouter:
+    """Run a shim module's command (`cst vm ...`, `cst toolchains ...`) the way its setup script did.
+
+    The command line and the privilege of each command come from the
+    module's routing table (cst_core.domain.dispatch.ROUTING). The end is
+    always an exec, as in bash: the program (python3 -I -B PROGRAM ARGS),
+    flatpak-spawn (a read command in a toolbox), sudo (the script again,
+    as root) or runuser (the script again, as SUDO_USER).
+    """
+
+    def __init__(self, *, port: ModuleRoutePort, routing: ModuleRouting, settings: RouteSettings) -> None:
+        self._port, self._routing, self._s = port, routing, settings
+        self._prog = settings.cst_prog or settings.arg0  # ${CST_PROG:-$0}
+
+    def _help(self) -> str:
+        return script_help(self._port.read_text(self._s.script), self._prog)
+
+    def _program(self, cmd: str, rest: Sequence[str]) -> list[str]:
+        tool = os.path.join(os.path.dirname(self._s.script), self._routing.program)
+        return ["python3", "-I", "-B", tool, cmd, *rest]
+
+    def _run_program(self, cmd: str, rest: Sequence[str]) -> int:
+        """exec the program here, with CST_PROG naming the command in its help and hints."""
+        env = dict(self._port.environ())
+        env["CST_PROG"] = self._prog
+        return self._port.exec_replace(self._program(cmd, rest), env=env)
+
+    def _in_container(self) -> bool:
+        if self._s.container in ("0", "1"):
+            return self._s.container == "1"
+        return self._port.is_container()
+
+    def route(self, argv: Sequence[str]) -> int:
+        """Route argv (the command and its arguments): help, a usage error, or an exec."""
+        cmd = argv[0] if argv and argv[0] else "help"  # ${1:-help}: an empty word is help too
+        rest = list(argv[1:])
+        return self._follow(cmd, rest, route_command(self._routing, cmd, rest, self._prog))
+
+    def _follow(self, cmd: str, rest: Sequence[str], routed: Routed) -> int:
+        if routed.action == "help":
+            self._port.say("out", self._help())
+            return 0
+        if routed.action == "unknown":
+            self._port.say("err", f"{routed.message}\n{self._help()}")
+            return 2
+        if routed.action == "usage":
+            self._port.say("err", f"{routed.message}\n")
+            return 2
+        if routed.privilege == "as-user":
+            return self._as_user(cmd, rest)
+        if routed.privilege == "read":
+            return self._read(cmd, rest)
+        if self._in_container():
+            words = " ".join([cmd, *rest])
+            self._port.say(
+                "err",
+                f"'{self._prog} {words}' must run on the host, not inside a toolbox/container.\n"
+                f"In a host terminal: {self._prog} {words}\n",
+            )
+            return 1
+        if routed.privilege == "root" and self._port.euid() != 0:
+            # sudo resets the environment: CST_PROG is handed over explicitly (when the caller set it).
+            handed = ["env", f"CST_PROG={self._s.cst_prog}"] if self._s.cst_prog else []
+            return self._port.exec_replace(["sudo", "--", *handed, self._s.script, cmd, *rest])
+        return self._run_program(cmd, rest)
+
+    def _read(self, cmd: str, rest: Sequence[str]) -> int:
+        """Read-only, as the caller; from a toolbox on the host (flatpak-spawn), or here after a note."""
+        if self._in_container():
+            rc = self._port.exec_on_host(self._program(cmd, rest), settings={"CST_PROG": self._prog})
+            if rc is not None:
+                return rc
+            # A container without a way to the host (CI, plain podman/docker): answer from here.
+            self._port.say("out", "(cannot reach the host from this container: showing what is visible here)\n")
+        return self._run_program(cmd, rest)
+
+    def _as_user(self, cmd: str, rest: Sequence[str]) -> int:
+        """The caller's own files: as root, the script runs again as SUDO_USER (runuser)."""
+        if self._port.euid() != 0:
+            return self._run_program(cmd, rest)
+        user = self._s.sudo_user
+        if not user or user == "root":
+            self._port.say(
+                "err",
+                f"{self._prog}: ERROR: run it from your user account (needs SUDO_USER): {self._routing.user_reason}\n",
+            )
+            return 1
+        try:
+            uid, home = self._port.user_passwd(user)
+        except KeyError:
+            self._port.say("err", f"{self._prog}: ERROR: SUDO_USER={user}: no such user\n")
+            return 1
+        unset = [word for name in (*self._routing.user_unset, "SUDO_USER") for word in ("-u", name)]
+        session = [
+            f"HOME={home}",
+            f"USER={user}",
+            f"LOGNAME={user}",
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+        ]
+        handed = [f"CST_PROG={self._s.cst_prog}"] if self._s.cst_prog else []
+        argv = ["runuser", "-u", user, "--", "env", *unset, *session, *handed, self._s.script, cmd, *rest]
+        return self._port.exec_replace(argv)
