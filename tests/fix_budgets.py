@@ -39,7 +39,13 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from tests import ruff_budget, test_architecture as arch, test_duplication as dup, test_typing_budget as typing_budget
+from tests import (
+    ruff_budget,
+    test_architecture as arch,
+    test_duplication as dup,
+    test_module_size as size,
+    test_typing_budget as typing_budget,
+)
 from tests.budgets import lowered
 
 type Kind = Literal["budget", "ceiling", "names"]
@@ -92,6 +98,7 @@ TABLES: Final[tuple[Table, ...]] = (
     Table(DUP, "ALLOWED_SAME_NAMES", "names", dup.same_names_defined),
     Table(DUP, "ALLOWED_SHELL_SAME_NAMES", "names", dup.shell_same_names_defined),
     Table("tests/ruff_budget.py", "RUFF_BUDGETS", "budget", ruff_budget.measure),
+    Table("tests/test_module_size.py", "OVER_CAP", "budget", size.module_sizes, default=size.MODULE_LINE_CAP),
 )
 
 

@@ -277,6 +277,7 @@ include = [
     "tests/test_install_record.py",
     "tests/test_license_headers.py",
     "tests/test_module_routing.py",
+    "tests/test_module_size.py",
     "tests/test_package_view.py",
     "tests/test_pin_invowk.py",
     "tests/test_python_files.py",
