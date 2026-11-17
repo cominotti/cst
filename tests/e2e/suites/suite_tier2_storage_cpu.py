@@ -1855,7 +1855,7 @@ echo E2E-OK
     def test_13_docker_gc_sandboxed_units_record_and_run_with_real_docker(self) -> None:
         """docker-gc-recorder.service and docker-gc.service as shipped, sandboxed
         (ProtectSystem=strict, no capability, AF_UNIX only; /var/lib/docker-gc
-        the one writable place), against the real DinD daemon behind a stub
+        and, for the weekly run, /run/docker-gc the only writable places), against the real DinD daemon behind a stub
         docker.service: the recorder runs without restarts and writes an
         image use it saw in `docker events` (an image imported offline, then
         tagged) to last-used.json; `cst btrfs docker-gc run` starts

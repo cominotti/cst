@@ -679,7 +679,8 @@ class StallMonitorUnitTest(unittest.TestCase):
 
 class DockerGcUnitsTest(unittest.TestCase):
     """btrfs/units/docker-gc-recorder.service and docker-gc.service as shipped: sandboxed, with
-    /var/lib/docker-gc (docker-gc's state and run lock) as the one place they may write."""
+    /var/lib/docker-gc (docker-gc's state) as the place they may write, and /run/docker-gc (the
+    run lock) for the weekly run."""
 
     UNITS = ("docker-gc-recorder.service", "docker-gc.service")
 

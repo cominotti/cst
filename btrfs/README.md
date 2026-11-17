@@ -1014,7 +1014,8 @@ The recorder writes to disk about every 10 s, so after the command ends
 the end. The saved report's window runs from the start of the command to just
 after the newest sample it saw then, which can be a few seconds past the end.
 If no such sample comes within about 60 s (the recorder is not running), it
-saves the report of the command's own window, which then says NO DATA.
+saves the report of the command's own window (NO DATA when the recorder took
+no sample during it either).
 
 ---
 
