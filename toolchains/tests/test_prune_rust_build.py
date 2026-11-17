@@ -163,6 +163,8 @@ def load() -> _ToolchainsModule:
     The program is the checkout's cst-toolchains (what main() would be told)."""
     tc_adapters.Program.entry_file = TOOL
     view = PackageView(tc_cli, tc_adapters, tc_domain)
+    # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
+    view.restore_default_signals = lambda: None
     return cast("_ToolchainsModule", cast("object", view))
 
 
@@ -309,6 +311,10 @@ class SettingsTest(Base):
             self.m.parse_conf("MAX_IDEL=24h\n", known)  # a typo is not ignored
         with self.assertRaises(self.m.ConfigError):
             self.m.parse_conf("just words\n", known)
+        # cst_core's one reader: `export` is an assignment; a value bash would expand is an error.
+        self.assertEqual(self.m.parse_conf("export MIN_KEEP=1h\n", known), {"MIN_KEEP": "1h"})
+        with self.assertRaisesRegex(self.m.ConfigError, r"^line 2: MAX_IDLE=\$IDLE: \$"):
+            self.m.parse_conf("MIN_KEEP=1h\nMAX_IDLE=$IDLE\nMAX_IDEL=1\n", known)
 
     def test_policy_defaults_and_limits(self) -> None:
         s = self.m.Settings(self.home)

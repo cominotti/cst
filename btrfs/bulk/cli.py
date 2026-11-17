@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from btrfs.bulk.adapters import (
-    CONF,
+    bulk_user,
     Ctx,
     FLAG,
     KEEP,
@@ -69,6 +69,7 @@ from btrfs.bulk.steam import (
     steam_target,
     u_reflink_probe,
 )
+from cst_core.adapters.files import write_atomic
 
 
 def steam_survey(ctx: Ctx, ids: Sequence[str], allow_copy: bool = False) -> dict[str, Any]:
@@ -365,13 +366,7 @@ def user_ctx(args: Sequence[str]) -> Ctx:
         name = args[i + 1] if i + 1 < len(args) else None
     if ROOT:
         if not name:
-            try:
-                with open(CONF) as f:
-                    for line in f:
-                        if line.startswith("BULK_USER="):
-                            name = line.split("=", 1)[1].strip().strip("'\"")
-            except OSError:
-                pass
+            name = bulk_user()
         if not name or name == "root":
             raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
         pw = pwd.getpwnam(name)
@@ -411,9 +406,8 @@ def boot(ctx: Ctx) -> int:
             f"Left: {left} - see 'journalctl -u btrfs-bulk-boot'; close what uses them and run 'cst btrfs bulk apply'.",
         )
         return 1
-    os.makedirs(STATE, mode=0o755, exist_ok=True)
-    with open(attempts_file, "w") as f:
-        f.write(str(attempts + 1))
+    # Durable before the moves start: a hang or hard reset must still count this boot.
+    write_atomic(attempts_file, str(attempts + 1), mode=0o644)
     log("btrfs-bulk: moving the items the desktop session kept busy into ~/Bulk...")
     deferred, problems = apply(ctx)
     if not deferred:

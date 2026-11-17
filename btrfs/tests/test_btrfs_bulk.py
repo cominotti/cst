@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -78,6 +79,8 @@ class _BtrfsBulkModule(Protocol):
     RUN_USER: str
     SNAPSHOT: str | None
     STEAM_ROOT: str
+    ROOT: bool
+    user_ctx: Callable[[Sequence[str]], _CtxProto]
     NOCOW_TOP: str
     ITEMS: Sequence[_ItemProto]
     BY_ID: Mapping[str, _ItemProto]
@@ -538,6 +541,54 @@ class BulkTest(BulkBase):
         self.assertEqual(len(sent), 1)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 0)  # no flag: nothing to do
+
+    @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
+    def test_root_reads_bulk_user_with_the_one_settings_reader(self) -> None:
+        # A hand-rolled reader took "BULK_USER=" lines only, quotes stripped by hand; a
+        # value bash would expand ended in a KeyError traceback from pwd as root.
+        me = pwd.getpwuid(os.getuid()).pw_name
+        self.m.ROOT = True
+        for text in (f"BULK_USER={me}\n", f"# CST\nBULK_USER='{me}'\n", f"BULK_USER = {me}  # who\n"):
+            with self.subTest(text=text):
+                with open(self.m.CONF, "w") as f:
+                    f.write(text)
+                self.assertEqual(self.m.user_ctx([]).home, os.path.realpath(pwd.getpwnam(me).pw_dir))
+        with open(self.m.CONF, "w") as f:
+            f.write("# CST\nBULK_USER=$USER\n")
+        with self.assertRaises(SystemExit) as cm:
+            self.m.user_ctx([])
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", str(cm.exception.code))
+        os.remove(self.m.CONF)
+        with self.assertRaisesRegex(SystemExit, "needs --user NAME"):
+            self.m.user_ctx([])
+
+    def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
+        # The counter was written with open("w") and no fsync before the moves; a hang
+        # or hard reset before the next btrfs commit lost it, and the give-up never tripped.
+        self.write("Programs/a", "a")
+        self.busy = {self.H("Programs")}
+        self.apply()
+        events: list[str] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            events.append(f"fsync {os.readlink(f'/proc/self/fd/{fd}')}")
+            real_fsync(fd)
+
+        def moves(ctx: object) -> tuple[list[str], list[str]]:
+            events.append("apply")
+            return ["apps"], []
+
+        self.m.apply = moves
+        with mock.patch.object(os, "fsync", fsync), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.boot(self.ctx), 3)
+        counter = os.path.join(self.m.STATE, "boot-attempts")
+        with open(counter) as f:
+            self.assertEqual(f.read(), "1")
+        before = events[: events.index("apply")]
+        self.assertTrue(any(e.startswith(f"fsync {self.m.STATE}/.boot-attempts.") for e in before), events)
+        self.assertIn(f"fsync {self.m.STATE}", before)  # the rename's folder entry
+        self.assertEqual(os.stat(counter).st_mode & 0o777, 0o644)
 
     def test_written_during_switch_is_rolled_back(self) -> None:
         self.write("Programs/a", "a")

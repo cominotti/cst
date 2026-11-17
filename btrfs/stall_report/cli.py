@@ -6,8 +6,9 @@ import os
 import sys
 import time
 
-from btrfs.stall_report.adapters import LOG_DIR, container_names, load, parse_time
+from btrfs.stall_report.adapters import LOG_DIR, container_names, load, report_window
 from btrfs.stall_report.analysis import analyse
+from cst_core.adapters.runtime import restore_default_signals
 from btrfs.stall_report.domain import (
     AnalyseResult,
     MetaRecord,
@@ -150,6 +151,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, verbose: bool) -> None:
 
 
 def main() -> None:
+    restore_default_signals()  # a read-only report (and --help): `| head` ends it quietly
     ap = argparse.ArgumentParser(
         prog="btrfs-stall-report", description="Summarise recorded IO/btrfs stalls for a time window."
     )
@@ -165,11 +167,7 @@ def main() -> None:
     ap.add_argument("--no-below", action="store_true", help="skip below's per-process section (faster)")
     ap.add_argument("--log-dir", default=LOG_DIR)
     args = ap.parse_args()
-    now = time.time()
-    until = parse_time(args.until, now)
-    since = parse_time(args.since, now - 1800)
-    if since >= until:
-        sys.exit("--since must be before --until")
+    since, until = report_window(args.since, args.until)
     if not os.path.isdir(args.log_dir):
         sys.exit(
             f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "

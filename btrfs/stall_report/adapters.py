@@ -33,6 +33,16 @@ def parse_time(s: str | None, default: float) -> float:
     return float(out.stdout.strip())
 
 
+def report_window(since: str | None, until: str | None) -> tuple[float, float]:
+    """(since, until) of the report: --until (default now), --since (default 30 min before now)."""
+    now = time.time()
+    end = parse_time(until, now)
+    start = parse_time(since, now - 1800)
+    if start >= end:
+        sys.exit("--since must be before --until")
+    return start, end
+
+
 def load(log_dir: str, since: float, until: float) -> list[Any]:
     # Whatever each line parses to; analyse() picks the records by their "t".
     recs: list[Any] = []

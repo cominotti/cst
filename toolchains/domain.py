@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
 from cst_core.domain.errors import Usage
+from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
 from cst_core.domain.values import format_bytes_gib_mib
 
@@ -134,24 +135,21 @@ def parse_bool(text: str) -> bool:
 
 
 def parse_conf(text: str, known: AbstractSet[str]) -> dict[str, str]:
-    """{KEY: raw value} from KEY=value lines; '#' starts a comment (also after
-    a value, behind a blank); quotes around the value are dropped. Keys not in
-    KNOWN are an error (a typo must not silently fall back to a default)."""
-    out: dict[str, str] = {}
-    for n, line in enumerate(text.splitlines(), 1):
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if "=" not in s:
-            raise ConfigError(f"line {n}: expected KEY=value, got '{s}'")
-        key, val = (p.strip() for p in s.split("=", 1))
-        val = re.sub(r"\s+#.*$", "", val).strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
-            val = val[1:-1]
-        if key not in known:
-            raise ConfigError(f"line {n}: unknown setting '{key}' (known: {', '.join(sorted(known))})")
-        out[key] = val
-    return out
+    """{KEY: raw value} through cst_core's one settings reader (a file only
+    Python reads: blanks around = allowed; '#' starts a comment, also after a
+    value behind a blank; quotes around the value dropped). The first line
+    that is not an assignment, or that sets a key not in KNOWN, is an error:
+    a typo must not silently fall back to a default."""
+    parsed = parse_shell_assignments(text, bash_sourced=False)
+    issues = [(p.line, str(p)) for p in parsed.problems]
+    issues += [
+        (a.line, f"line {a.line}: unknown setting '{a.key}' (known: {', '.join(sorted(known))})")
+        for a in parsed.entries
+        if a.key not in known
+    ]
+    if issues:
+        raise ConfigError(min(issues)[1])
+    return dict(parsed.values)
 
 
 def parse_sccache_size(text: str) -> str:

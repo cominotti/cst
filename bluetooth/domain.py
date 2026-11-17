@@ -6,6 +6,7 @@ import re
 from typing import Any, Final
 
 from cst_core.domain.files import effective_lines
+from cst_core.domain.text import SettingsProblem, parse_shell_assignments
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
 # (connected isochronous streams, LC3). Naming only this UUID, rather than
@@ -361,21 +362,27 @@ def roles_state(value: str | None) -> str:
 
 # ---- settings -------------------------------------------------------------------------------
 def parse_settings(text: str) -> dict[str, str]:
-    """{KEY: value} from KEY=value lines. '#' starts a comment (also after a
-    value, behind a blank); quotes around the value are dropped; unknown keys
-    are ignored."""
-    out: dict[str, str] = {}
-    for line in text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, val = (p.strip() for p in s.split("=", 1))
-        val = re.sub(r"\s+#.*$", "", val).strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
-            val = val[1:-1]
-        if key in SETTING_KEYS:
-            out[key] = val
-    return out
+    """{KEY: value} of the known keys, through cst_core's one settings reader
+    (a file only Python reads: blanks around =, '#' comments also after a
+    value, quotes dropped); unknown keys are ignored. A line that is not an
+    assignment sets nothing (settings_problems lists them)."""
+    return {k: v for k, v in parse_shell_assignments(text, bash_sourced=False).values.items() if k in SETTING_KEYS}
+
+
+def settings_problems(text: str) -> tuple[SettingsProblem, ...]:
+    """The lines of a settings file that are not plain assignments."""
+    return parse_shell_assignments(text, bash_sourced=False).problems
+
+
+_LINE_KEY: Final = re.compile(r"\s*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def line_key(line: str) -> str | None:
+    """The key one line sets, or tries to: also `export KEY=...` and a problem line
+    (`KEY=$X`, which sets nothing), so settings_set replaces it; None for a
+    comment or any other line."""
+    m = _LINE_KEY.match(line)
+    return m.group(1) if m else None
 
 
 def set_keys(text: str) -> list[str]:
@@ -385,12 +392,9 @@ def set_keys(text: str) -> list[str]:
 
 def parse_settings_order(text: str) -> Iterator[str]:
     """Yield known setting keys in the order they appear in TEXT."""
-    for line in text.splitlines():
-        s = line.strip()
-        if s and not s.startswith("#") and "=" in s:
-            key = s.split("=", 1)[0].strip()
-            if key in SETTING_KEYS:
-                yield key
+    for a in parse_shell_assignments(text, bash_sourced=False).entries:
+        if a.key in SETTING_KEYS:
+            yield a.key
 
 
 def settings_set(text: str | None, key: str, value: str) -> tuple[str, bool]:
@@ -403,11 +407,7 @@ def settings_set(text: str | None, key: str, value: str) -> tuple[str, bool]:
     if text is None:
         return f"# CST bluetooth settings (override bluetooth/bluetooth.conf in the repo)\n{want}\n", True
     lines, nl, final = split_lines(text)
-    idx = [
-        i
-        for i, line in enumerate(lines)
-        if "=" in line and not line.strip().startswith("#") and line.split("=", 1)[0].strip() == key
-    ]
+    idx = [i for i, line in enumerate(lines) if line_key(line) == key]
     before = list(lines)
     if idx:
         if parse_settings(lines[idx[-1]]).get(key) != value:
@@ -428,6 +428,17 @@ def merged_settings(texts: Iterable[str]) -> dict[str, str]:
     for t in texts:
         out.update(parse_settings(t))
     return out
+
+
+def settings_report(files: Sequence[tuple[str, str]]) -> tuple[str, str]:
+    """What `bt-helper settings` prints for (path, text) files in priority
+    order: (KEY=value lines of the merged settings, for stdout; one warning
+    per line that is not an assignment, for stderr)."""
+    shown = "".join(f"{k}={v}\n" for k, v in merged_settings(t for _, t in files).items())
+    warnings = "".join(
+        f"warning: {path} {p} (the line is ignored)\n" for path, t in files for p in settings_problems(t)
+    )
+    return shown, warnings
 
 
 # ---- live state (parsed from the output of busctl, pactl and pw-dump) ----------------------

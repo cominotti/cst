@@ -126,7 +126,10 @@ a line in this table.
 ## 5. Settings
 
 The defaults are in `toolchains/toolchains.conf` in CST. To change one,
-create `~/.config/cst/toolchains.conf` with `KEY=value` lines; yours win:
+create `~/.config/cst/toolchains.conf` with `KEY=value` lines; yours win
+(blanks around `=`, quotes and a `# comment` after the value are fine; a
+line that is not an assignment, a `$`, backtick or backslash outside single
+quotes, or an unknown key stops every run, naming the line):
 
 ```
 # ~/.config/cst/toolchains.conf

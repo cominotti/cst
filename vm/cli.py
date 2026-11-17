@@ -23,8 +23,7 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from cst_core.adapters import write_bytes_atomic
-from cst_core.adapters.files import owned_file_state_at
+from cst_core.adapters.files import owned_file_state_at, write_bytes_atomic
 from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
@@ -52,6 +51,7 @@ from vm.adapters import (
     VmLock,
     blklist,
     booted_deployment,
+    conf_number,
     confirm,
     cpu_disable_list,
     default_vm,
@@ -70,6 +70,7 @@ from vm.adapters import (
     notify,
     on_signal,
     package_versions,
+    prepare_command,
     precreate_nocow,
     probe_dir,
     qcow2_backing_file,
@@ -92,7 +93,6 @@ from vm.domain import (
     KEEP_TAG,
     KNOBS,
     LIVE_STATES,
-    NAS_DEFAULTS,
     NAS_SSH_ALIAS,
     ON_CALENDAR,
     OVERLAY_MARK,
@@ -348,17 +348,11 @@ class Uncertain(Refused):
     stayed unclear: the overlay files are kept, an alert is sent."""
 
 
-def conf_number(key: str, path: str | None = None) -> int:
-    """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
-    v = read_conf(path or VM_CONF).get(key, "")
-    return int(v) if v.isdigit() else NAS_DEFAULTS[key]
-
-
 def nas_settings() -> dict[str, Any]:
     """{host, env, repo} for restic, from the /home NAS backup's settings.
     Refused when that backup is not set up: its setup creates the
     repository, the SSH key and the password file this one reuses."""
-    conf = read_conf(NAS_CONF)
+    conf = read_conf(NAS_CONF, bash_sourced=True)
     setup = f"{CST} btrfs snapshots nas setup"
     if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
         raise Refused(
@@ -1014,7 +1008,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
     files = timer_files(entry_file)
-    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p)) for p, (t, _) in files.items()}
+    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p), owner="root") for p, (t, _) in files.items()}
     if sub == "status":
         on = unit in wants_links()
         print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
@@ -1035,7 +1029,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
                 print(f"  last run of the service: {last}")
         nas = [e for e in read_index() if e["vm"] == vm and e.get("mode") == "nas"]
         print(f"  last NAS backup: {describe_entry(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
-        conf = read_conf(NAS_CONF)
+        conf = read_conf(NAS_CONF, bash_sourced=True)
         if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
             print(f"  the NAS backup is not set up: {CST} btrfs snapshots nas setup")
         return 0
@@ -1457,10 +1451,11 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
         return 2
     cmd, vm = a["cmd"], a["vm"]
-    if cmd == "help":
-        print(doc)
-        return 0
     try:
+        prepare_command(cmd, a["sub"], a["nas"], vm)
+        if cmd == "help":
+            print(doc)
+            return 0
         if cmd == "list":
             return cmd_list(vm)
         if cmd == "nocow":
@@ -1472,8 +1467,8 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
             return cmd_tune(vm, a["sub"] == "apply", a["guest_virtio"])
         if cmd == "backup-timer":
             return cmd_timer(a["sub"], vm, entry_file)
+        safe_output()  # a closed terminal or pipe never cuts a backup or its cleanup short
         if a["nas"]:
-            safe_output()
             return cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
         return cmd_backup(vm, a["full"])
     except (Refused, Stop) as e:

@@ -9,7 +9,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import pwd
 import re
 import shutil
 import stat
@@ -22,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-from cst_core.adapters.files import read_bytes, read_text
+from cst_core.adapters.files import read_bytes, read_text, write_atomic
 from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState
@@ -38,6 +37,7 @@ from toolchains.adapters import (
     find_manifests,
     find_worktrees,
     in_container,
+    output_mode,
     manager_path,
     measure,
     metadata_env,
@@ -49,6 +49,7 @@ from toolchains.adapters import (
     release,
     remove_tree,
     resolve_root,
+    run_context,
     run_idle,
     rustup_default,
     rustup_home,
@@ -67,7 +68,6 @@ from toolchains.adapters import (
     uv_lock_busy,
     workspace_metadata,
     wrapper_path,
-    write_atomic,
     write_cfg,
     write_state,
 )
@@ -1358,17 +1358,17 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
     st = unit_states(home)
     conflicts = [k for k, v in st.items() if v == "conflict"]
     if conflicts:
-        raise Refused("not written by CST (or a symlink), left alone: " + ", ".join(label(k) for k in conflicts))
+        raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
     changed = False
     for rel, text in copies().items():
         if st[rel] != "ok":
-            write_atomic(os.path.join(home, rel), text, 0o755 if rel == PROG_REL else 0o644)
+            write_atomic(os.path.join(home, rel), text, mode=0o755 if rel == PROG_REL else 0o644)
             say(f"written:   ~/{rel}")
         else:
             say(f"unchanged: ~/{rel}")
     for name, render in UNITS.items():
         if st[name] != "ok":
-            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), 0o644)
+            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), mode=0o644)
             say(f"written:   {label(name)}")
             changed = True
         else:
@@ -1444,7 +1444,7 @@ def cmd_auto_off(home: str, now: float) -> int:
             f"{MARKER}: written by `cst toolchains auto off`.\n"
             "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
             "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n",
-            0o644,
+            mode=0o644,
         )
         say(f"written:   ~/{OFF_REL} (snapshots setup leaves the pruning off)")
     say(f"toolchain caches are no longer pruned automatically (settings in ~/{CONF_REL} kept, if any)")
@@ -1645,7 +1645,7 @@ def wrapper_text(values: WrapperValues) -> str | None:
 
 
 def wrapper_state(home: str, text: str) -> str:
-    """ok | change | missing | conflict (not CST's, or a symlink)."""
+    """ok | change | missing | conflict (not CST's; a symlink counts by what it points to)."""
     path = wrapper_path(home)
     st = file_state(path, text)
     if st == "ok":
@@ -1764,7 +1764,7 @@ def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues)
     if st == "ok":
         return [("ok", shown, f"sccache wrapper up to date ({values})")]
     if st == "conflict":
-        return [("keep", shown, "not CST's file (or a symlink): left alone, so CST writes no rustc-wrapper line")]
+        return [("keep", shown, "not CST's file: left alone, so CST writes no rustc-wrapper line")]
     return [
         (
             "write",
@@ -1856,13 +1856,13 @@ def install_wrapper(home: str, values: WrapperValues) -> int:
         return 1
     st = wrapper_state(home, text)
     if st == "conflict":
-        say(f"{NAME}: sccache: {path} is not CST's file (or a symlink): left alone", 3, err=True)
+        say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
         return 1
     if st == "ok":
         say(f"kept:      {path} (sccache wrapper)")
         return 0
     try:
-        write_atomic(path, text, 0o755)
+        write_atomic(path, text, mode=0o755)
     except OSError as e:
         say(f"{NAME}: cannot write {path}: {e.strerror or e}", 3, err=True)
         return 1
@@ -2174,6 +2174,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
+    output_mode(a["cmd"], a["action"])
     if a["cmd"] == "help":
         print(doc)
         return 0
@@ -2190,8 +2191,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         except OSError as e:
             print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)
             return 1
-    home = os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if a["home"] is None else a["home"])
-    now = float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time())  # override: tests
+    home, now = run_context(a["home"])
     cmd, action = a["cmd"], a["action"]
     try:
         if cmd == "status":

@@ -18,7 +18,8 @@ import unittest
 
 sys.dont_write_bytecode = True
 
-from cst_core.adapters import HostExecutionContext, LocalFileSystemAdapter
+from cst_core.adapters import HostExecutionContext
+from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment

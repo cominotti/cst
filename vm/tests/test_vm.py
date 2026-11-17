@@ -20,6 +20,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -392,6 +393,33 @@ class BackupTest(Scratch):
         self.assertIn(f"sudo cp --reflink=auto -a {dest}/files{self.disk} {self.disk}", r.stdout)
         self.assertIn("not against losing the disks", r.stdout)
         self.assertNotIn("s3cret", r.stdout + r.stderr)
+
+    def test_read_only_commands_stop_quietly_on_a_closed_pipe_and_a_backup_does_not(self) -> None:
+        # `cst vm status | head -1` ended in "Exception ignored ... BrokenPipeError",
+        # exit 120. A read-only command now dies of SIGPIPE, silently, as a shell tool does.
+        def closed_pipe(*args: str) -> subprocess.CompletedProcess[bytes]:
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                return subprocess.run(
+                    ["python3", "-I", TOOL, *args],
+                    check=False,
+                    env=self.env,
+                    stdout=w,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                )
+            finally:
+                os.close(w)
+
+        for args in (("status", "win"), ("help",)):
+            p = closed_pipe(*args)
+            self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
+        # A local backup keeps going with nowhere to print, and leaves a complete backup.
+        p = closed_pipe("backup", "win")
+        self.assertEqual((p.returncode, p.stderr), (0, b""))
+        self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
 
     def test_index_drops_removed_backups(self) -> None:
         os.makedirs(os.path.dirname(self.index))
@@ -1475,7 +1503,7 @@ class PackageTest(unittest.TestCase):
                 {"VM_NOCOW": True, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": True, "VM_TUNE_NIC": True},
             )
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
-            self.assertEqual([vm_cli.conf_number(k, conf) for k in numbers], [4, 3, 6])
+            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [4, 3, 6])
             with open(conf, "w") as f:
                 f.write(
                     "# comment\n"
@@ -1491,7 +1519,7 @@ class PackageTest(unittest.TestCase):
                 vm_adapters.knobs(conf),
                 {"VM_NOCOW": False, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": False, "VM_TUNE_NIC": False},
             )
-            self.assertEqual([vm_cli.conf_number(k, conf) for k in numbers], [8, 3, 12])
+            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [8, 3, 12])
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
@@ -1535,16 +1563,28 @@ class PackageTest(unittest.TestCase):
 
     def test_main_dispatch(self) -> None:
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch("sys.stdout", out):
+        helped: list[bool] = []
+        with (
+            mock.patch("sys.stdout", out),
+            # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+            mock.patch.object(vm_adapters, "restore_default_signals", lambda: helped.append(True)),
+        ):
             self.assertEqual(vm_cli.main(["help"], doc="DOC", entry_file=TOOL), 0)
-        self.assertEqual(out.getvalue(), "DOC\n")
+        self.assertEqual((out.getvalue(), helped), ("DOC\n", [True]))
         with mock.patch("sys.stderr", err):
             self.assertEqual(vm_cli.main(["bogus"], doc="DOC", entry_file=TOOL), 2)
         self.assertIn("unknown command 'bogus'", err.getvalue())
         out = io.StringIO()
-        with patch_vm("read_index", lambda path=None: []), mock.patch("sys.stdout", out):
+        restored: list[bool] = []
+        with (
+            patch_vm("read_index", lambda path=None: []),
+            mock.patch("sys.stdout", out),
+            # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+            mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
+        ):
             self.assertEqual(vm_cli.main(["list", "win"], doc="DOC", entry_file=TOOL), 0)
         self.assertIn("no VM backups of win", out.getvalue())
+        self.assertEqual(restored, [True], "a read-only command must get SIGPIPE back at its default")
 
     def test_virsh_runs_with_the_c_locale(self) -> None:
         recorded: list[tuple[list[str], bool, str]] = []
@@ -1619,6 +1659,30 @@ class PackageTest(unittest.TestCase):
         self.assertTrue(vm_domain.is_cst_vm_program(build_python_zipapp(REPO, "vm/cst-vm")))
         self.assertFalse(vm_domain.is_cst_vm_program(b"#!/usr/bin/python3 -I\nprint(1)\n"))
         self.assertFalse(vm_domain.is_cst_vm_program(b'#!/bin/sh\n"""cst-vm:'))
+
+
+class VmLockTest(unittest.TestCase):
+    def test_lock_folder_and_pid_file_are_readable_under_a_077_umask(self) -> None:
+        # `sudo cst vm backup --nas` keeps a user's 077 umask; /run/cst-vm came out 0700 and the
+        # lock 0600, so cst doctor (not root) could not read the pid and called a running backup's
+        # overlay "left behind".
+        tmp = tempfile.mkdtemp(prefix="cst-vm-lock-")
+        self.addCleanup(shutil.rmtree, tmp)
+        run_dir = os.path.join(tmp, "run", "cst-vm")
+        old = os.umask(0o077)
+        try:
+            with mock.patch.object(vm_adapters, "RUN_DIR", run_dir), vm_adapters.VmLock("win") as lock:
+                self.assertEqual(os.stat(run_dir).st_mode & 0o7777, 0o755)
+                self.assertEqual(os.stat(os.path.dirname(run_dir)).st_mode & 0o7777, 0o755)
+                self.assertEqual(os.stat(lock.path).st_mode & 0o7777, 0o644)
+                with open(lock.path) as f:
+                    self.assertEqual(f.read(), f"{os.getpid()}\n")  # the pid is in the flocked file itself
+                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters.VmLock("win"):
+                    pass
+        finally:
+            os.umask(old)
+        with open(lock.path) as f:
+            self.assertEqual(f.read(), "", "the pid is cleared when the lock is released")
 
 
 if __name__ == "__main__":

@@ -1032,6 +1032,60 @@ class TimerTest(Nas):
         self.assertEqual(r.returncode, 1)
         self.assertIn(f"not CST's files, left as they are: {copy}", r.stderr)
 
+    def test_a_link_at_a_root_destination_is_replaced_not_followed(self) -> None:
+        # The installer's one link rule (cst_core.domain.install.link_read_through): at a root
+        # destination a link is replaced, whatever it points to; it was "not CST's file" before.
+        elsewhere = os.path.join(self.tmp, "elsewhere.timer")
+        with open(elsewhere, "w") as f:
+            f.write("[Timer]\n")
+        timer = os.path.join(self.units, "cst-vm-backup@.timer")
+        os.symlink(elsewhere, timer)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  updated: {timer}", r.stdout)
+        self.assertFalse(os.path.islink(timer))
+        self.assertIn("Persistent=true\n", read(timer))
+        self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
+
+    def test_settings_are_read_as_bash_reads_them_and_a_problem_line_refuses_the_backup(self) -> None:
+        # Snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
+        # but cst-vm read "1 # on" and called the NAS backup "not set up".
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=1 # on\nNAS_PATH='/volume1/restic'\nNAS_RESTIC_HOST=sophia\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        self.assertNotIn("not set up", r.stdout)
+        # A line bash reads differently (it runs NAS_PATH as a command): status says so and goes on,
+        # a backup refuses before it touches the VM (never a default or a guessed value).
+        with open(self.conf, "a") as f:
+            f.write("NAS_PATH = /volume2/other\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other: blanks around =", r.stderr)
+        open(self.log, "w").close()
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(self.calls(), [], "the backup ran commands")
+        cpu = self.env["CST_VM_CPU_CONF"]
+        with open(cpu, "w") as f:
+            f.write("VM_NAME=$HOSTNAME\n")  # bash would expand it
+        r = self.run_tool("backup")  # no VM named: VM_NAME would choose it
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{cpu} line 1: VM_NAME=$HOSTNAME: $", r.stderr)
+        self.assertEqual(self.calls(), [])
+        # A backup of a named VM reads nothing from cpu-setup.conf: a line there does not stop it
+        # (the weekly timer names the VM).
+        r = self.run_tool("backup", "win")
+        self.assertNotIn(cpu, r.stderr)
+        self.assertNotEqual(self.calls(), [], "the backup of a named VM did not start")
+        # The way back is never blocked: off reads no setting; it prints the lines and turns the timer off.
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
+        self.assertIn("Off: cst-vm-backup@win.timer", r.stdout)
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")

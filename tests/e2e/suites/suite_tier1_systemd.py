@@ -919,7 +919,15 @@ EOF
             f"""
             rm -rf {stage} && install -d -m 0755 {stage} {stage}/home && install -d -o tester {stage}/home/tester
             {installer} install --root {stage} --owner root {sets}
-            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets}
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user
+            # A --set no template of the call uses is refused (exit 2), and nothing is written: a user
+            # file removed first is still missing afterwards.
+            u1="{stage}$(runuser -u tester -- {installer} dests --owner user --home /home/tester | head -n 1)"
+            rm -f "$u1"
+            rc=0; runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets} || rc=$?
+            [[ "$rc" == 2 ]] || {{ echo "an unused --set was not refused with exit 2 (exit $rc)" >&2; exit 1; }}
+            [[ ! -e "$u1" ]] || {{ echo "a refused install wrote $u1" >&2; exit 1; }}
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user >/dev/null
             again="$({installer} install --root {stage} --owner root {sets})"
             if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
             ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
@@ -932,6 +940,20 @@ EOF
             if grep -v '^unchanged: ' <<<"$lgain"; then echo "a link to the same content was rewritten" >&2; exit 1; fi
             [[ -L "$d" ]] || {{ echo "the link was replaced" >&2; exit 1; }}
             rm -f "$d" /home/tester/.e2e-link-target
+            # At a root destination a link is replaced, even one to the same content; and as root
+            # a root file owned by a user (a hand copy) is rewritten, owned by root again.
+            r="{stage}/usr/local/sbin/btrfs-notify"
+            cp -p "$r" /var/tmp/e2e-root-link-target
+            ln -sfn /var/tmp/e2e-root-link-target "$r"
+            chown tester:tester "{stage}/etc/sysctl.d/90-btrfs-writeback.conf"
+            rgain="$({installer} install --root {stage} --owner root {sets})"
+            grep -qxF "written:   $r" <<<"$rgain" || {{ echo "a link at a root destination was kept" >&2; exit 1; }}
+            [[ ! -L "$r" ]] || {{ echo "the root link is still a link" >&2; exit 1; }}
+            grep -qxF "written:   {stage}/etc/sysctl.d/90-btrfs-writeback.conf" <<<"$rgain" ||
+                {{ echo "a root file owned by tester was left" >&2; exit 1; }}
+            [[ "$(stat -c %u:%g {stage}/etc/sysctl.d/90-btrfs-writeback.conf)" == 0:0 ]] ||
+                {{ echo "the rewritten file is not root's" >&2; exit 1; }}
+            rm -f /var/tmp/e2e-root-link-target
             echo E2E-INSTALLED
             """,
         ).stdout

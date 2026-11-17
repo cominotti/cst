@@ -229,7 +229,9 @@ reads, also works in a toolbox).
 **Settings.** The defaults are in [`bluetooth.conf`](bluetooth.conf) in this
 folder (`DEVICE`, `LDAC_QUALITY`, `BEARER`, `LE_AUDIO`, `LDAC_RATE`). To change them for your user,
 write the lines you want to change into `~/.config/cst/bluetooth.conf`, in
-the same `KEY=value` format; that file wins over the defaults, and the
+the same `KEY=value` format (a line that is not one, or a value with `$`, a
+backtick or a backslash outside single quotes, is ignored with a warning
+naming the line); that file wins over the defaults, and the
 command line options win over both. `BEARER` is empty by default: the
 headset's own setting is left alone. `LE_AUDIO` is `off` by default (`on`
 or `off`; see [LE Audio: off by default](#le-audio-off-by-default)).

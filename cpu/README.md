@@ -296,6 +296,14 @@ uses the same five names as its default.) A byte that is not UTF-8 in this
 file, or in a mapped file's name that `cpu-watch` reads in `/proc/PID/maps`,
 is replaced and no longer stops `vm-pin` or `cpu-watch`.
 
+The game profile sources this file with bash, and `vm-pin` and `cst doctor`
+read it the same way (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
+them). Keep to plain `KEY=value` lines: quote a value with blanks in single
+quotes. A line bash would read differently, or that it would run as a
+command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
+sets nothing for `vm-pin`: `plan` and `status` print it with its line
+number, `apply` refuses to start, and `cst doctor` warns.
+
 | Key | Meaning | Read by |
 |-----|---------|---------|
 | `TARGET_USER` | Your user. Needed for everything in your session. | `cpu-setup.sh`, game profile |

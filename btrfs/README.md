@@ -609,7 +609,9 @@ docker volume rm <name>         # or one volume by name
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
   start Docker again with `sudo systemctl start docker.socket docker.service`.
 - If the migration does not finish after two boots, it gives up with the
-  message `Docker volumes: NOCOW migration gave up`. This runs early at boot,
+  message `Docker volumes: NOCOW migration gave up`. The count of boots is
+  written to disk (fsync) before each rewrite starts, so a boot that hangs or
+  is reset during the rewrite still counts. This runs early at boot,
   before anyone has logged in, so the desktop alert is **kept and shown at
   your next login** (section 4.9). It is also in the journal
   (`journalctl -u docker-volumes-nocow`). Run `install` again to retry.

@@ -16,7 +16,10 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import signal
+import subprocess
 import sys
+import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, cast
@@ -685,6 +688,32 @@ class ClassifyBranchesTest(unittest.TestCase):
         for (sig, examples, comms, kind), want in cases:
             with self.subTest(sig=sig, comms=comms, kind=kind):
                 self.assertEqual(c(sig, examples, comms, kind), want)
+
+
+class ClosedPipeTest(unittest.TestCase):
+    def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
+        # `btrfs-stall-report | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). Now it ends on SIGPIPE, silently. An empty log folder: the
+        # report still prints its window and verdict.
+        tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")
+        with tempfile.TemporaryDirectory() as logs:
+            for args in (["--log-dir", logs, "--since", "@1", "--until", "@2", "--no-below"], ["--help"]):
+                with self.subTest(args=args):
+                    r, w = os.pipe()
+                    os.close(r)
+                    try:
+                        p = subprocess.run(
+                            ["/usr/bin/python3", "-I", tool, *args],
+                            check=False,
+                            stdout=w,
+                            stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL,
+                            env={"PATH": "/usr/bin:/bin"},
+                            timeout=60,
+                        )
+                    finally:
+                        os.close(w)
+                    self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
 
 
 if __name__ == "__main__":

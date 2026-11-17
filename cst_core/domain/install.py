@@ -2,9 +2,10 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import re
 from typing import Final, Literal
 
-from cst_core.domain.values import OctalMode
+from cst_core.domain.values import DomainValidationError, OctalMode
 
 type Owner = Literal["root", "user"]
 type ArtifactKind = Literal["python-entry", "shell", "unit", "data"]
@@ -195,15 +196,77 @@ def expand_dest(dest: str, home: str | None) -> str:
     return dest
 
 
+_PLACEHOLDER: Final = re.compile(r"@([A-Z_][A-Z0-9_]*)@")
+
+
+def template_keys(text: str) -> frozenset[str]:
+    """The KEYs of the @KEY@ placeholders in a template's text."""
+    return frozenset(_PLACEHOLDER.findall(text))
+
+
 def render_template(text: str, values: Mapping[str, str]) -> str:
     """`text` with every @KEY@ replaced literally by its value, ending in one newline.
 
     Same result as the shell render it replaces (`$(<file)` drops the trailing
-    newlines, printf adds one back).
+    newlines, printf adds one back). One pass: a value that itself holds
+    `@KEY@` is not replaced again. A placeholder without a value is an error
+    (DomainValidationError): a unit with `What=/dev/disk/by-uuid/@UUID@` must
+    never be written. Values no placeholder uses are checked by the caller,
+    which sees every template of one install (InstallService).
     """
-    for key, value in values.items():
-        text = text.replace(f"@{key}@", value)
-    return text.rstrip("\n") + "\n"
+    missing = sorted(template_keys(text) - values.keys())
+    if missing:
+        raise DomainValidationError(
+            "no value for " + ", ".join(f"@{k}@" for k in missing) + " (give it with --set KEY=VALUE)"
+        )
+    return _PLACEHOLDER.sub(lambda m: values[m.group(1)], text).rstrip("\n") + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class OnDisk:
+    """What is at an install destination now.
+
+    data, mode, uid, gid: of the regular file found there, read through a
+    symbolic link (data None: no regular file can be read there); is_link:
+    the destination itself is a symbolic link.
+    """
+
+    data: bytes | None
+    mode: int
+    uid: int
+    gid: int
+    is_link: bool
+
+
+def link_read_through(owner: Owner) -> bool:
+    """THE rule for a symbolic link at a destination CST writes whole (the
+    installer, vm backup-timer, toolchains' copies and units).
+
+    At a root destination (owner root) a link is never current: it is
+    replaced by an atomic write, never followed (only root can plant it, and
+    root programs must not depend on where it points). At a user destination
+    (owner user, `~/...`) a link is read through: when its target already
+    holds what CST would write, it is left alone as a link (a dotfiles
+    manager's link); otherwise the caller decides as for a file with those
+    bytes, and a write replaces the link itself, never what it points to.
+    """
+    return owner == "user"
+
+
+def is_current(found: OnDisk | None, data: bytes, mode: int, owner: Owner, *, as_root: bool) -> bool:
+    """True when the destination already holds exactly data with mode.
+
+    A link counts only where link_read_through allows it; as root, a root
+    entry must also be owned by 0:0 (a file left by a hand copy, owned by a
+    user, is rewritten).
+    """
+    if found is None or found.data is None:
+        return False
+    if found.is_link and not link_read_through(owner):
+        return False
+    if (found.data, found.mode) != (data, mode):
+        return False
+    return not (as_root and owner == "root" and (found.uid, found.gid) != (0, 0))
 
 
 def select_entries(

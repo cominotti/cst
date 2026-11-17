@@ -17,6 +17,7 @@ import fcntl
 import io
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -822,6 +823,32 @@ class AutoTest(Scratch):
         self.assertTrue(os.path.exists(service))
         self.assertTrue(os.path.exists(prog))
 
+    def test_auto_on_keeps_a_link_to_the_same_program_and_replaces_one_to_an_older_copy(self) -> None:
+        # The installer's one link rule for a user destination (cst_core.domain.install.link_read_through):
+        # a link is judged by what it points to; a write replaces the link, never its target.
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        prog = os.path.join(self.home, ".local/lib/cst/cst-toolchains")
+        kept = os.path.join(self.home, "dotfiles-cst-toolchains")
+        os.rename(prog, kept)
+        os.symlink(kept, prog)
+        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "ok")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
+        self.assertTrue(os.path.islink(prog))
+        old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
+        with open(kept, "w") as f:
+            f.write(old)
+        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
+        self.assertFalse(os.path.islink(prog))
+        with open(kept) as f:
+            self.assertEqual(f.read(), old, "the link was written through")
+
     def test_auto_on_upgrades_a_plain_script_copy_to_the_zipapp(self) -> None:
         # Older CST versions installed cst-toolchains as a plain script (it
         # holds CST's marker): auto on replaces it with the zipapp, and a
@@ -845,7 +872,7 @@ class AutoTest(Scratch):
         self.write(".local/lib/cst/cst-toolchains", "#!/bin/sh\necho mine\n")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 1, out)
-        self.assertIn("not written by CST (or a symlink), left alone: ~/.local/lib/cst/cst-toolchains", out)
+        self.assertIn("not written by CST, left alone: ~/.local/lib/cst/cst-toolchains", out)
         with open(prog) as f:
             self.assertEqual(f.read(), "#!/bin/sh\necho mine\n")
 
@@ -1102,6 +1129,43 @@ class ParseSizeTest(unittest.TestCase):
         for text in ("150", "1x", "", "G"):
             with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
                 tc_domain.parse_size(text)
+
+
+class ClosedPipeTest(Scratch):
+    def test_status_and_plans_stop_quietly_on_a_closed_pipe(self) -> None:
+        # `cst toolchains status | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). The read-only commands now end on SIGPIPE, silently.
+        # Only what needs no fake of this process (the subprocess sees none): help and the brief status.
+        env = {**self.env, "PATH": "/usr/bin:/bin"}
+        for args in (("help",), ("status", "--brief")):
+            with self.subTest(args=args):
+                r, w = os.pipe()
+                os.close(r)
+                try:
+                    p = subprocess.run(
+                        ["/usr/bin/python3", "-I", TOOL, *args, "--home", self.home],
+                        check=False,
+                        env=env,
+                        stdout=w,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        timeout=60,
+                    )
+                finally:
+                    os.close(w)
+                self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+    def test_only_the_commands_that_read_get_sigpipe_back(self) -> None:
+        restored: list[tuple[str, str | None]] = []
+        for cmd, action in (("help", None), ("status", None), ("prune", "plan"), ("config", "plan")):
+            with mock.patch.object(
+                tc_adapters, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
+            ):
+                tc_adapters.output_mode(cmd, action)
+        self.assertEqual(restored, [("help", None), ("status", None), ("prune", "plan"), ("config", "plan")])
+        with mock.patch.object(tc_adapters, "restore_default_signals", side_effect=AssertionError("restored")):
+            for cmd, action in (("prune", "apply"), ("config", "apply"), ("auto", "on"), ("auto", "off")):
+                tc_adapters.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
 if __name__ == "__main__":

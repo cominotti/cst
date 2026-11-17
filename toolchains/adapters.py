@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -23,8 +24,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters.files import owned_file_state_at
-from cst_core.adapters.runtime import program_path
+from cst_core.adapters.files import owned_file_state_at, write_atomic
+from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
 from toolchains.domain import (
@@ -919,6 +920,24 @@ def in_container() -> bool:
     return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
 
 
+def run_context(home: str | None) -> tuple[str, float]:
+    """(the home folder to work on: --home or the user's, now: CST_TOOLCHAINS_NOW in tests)."""
+    return (
+        os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if home is None else home),
+        float(os.environ.get("CST_TOOLCHAINS_NOW") or time.time()),
+    )
+
+
+def output_mode(cmd: str, action: str | None) -> None:
+    """A command that only reads (help, status, prune plan, config plan) gets
+    SIGPIPE back at its default, so `cst toolchains status | head` ends
+    quietly. The ones that change files (prune, auto, config apply) keep
+    Python's handling: a closed pipe never cuts their lock release or file
+    writes short."""
+    if cmd in ("help", "status") or action == "plan":
+        restore_default_signals()
+
+
 def systemctl_cmd(*args: str) -> list[str]:
     # Tests point this at a stub: no test may reach the real user manager.
     stub = os.environ.get("CST_TOOLCHAINS_SYSTEMCTL")
@@ -965,25 +984,13 @@ def manager_path() -> str | None:
 
 
 def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> OwnedState:
-    """ok | change (ours: it holds MARKER, and differs) | conflict (not ours, or a symlink) | missing."""
+    """ok | change (ours: it holds MARKER, and differs) | conflict (not ours) | missing.
+
+    Every file here is in the user's home: a symbolic link is judged by what
+    it points to (cst_core.domain.install.link_read_through), and a write
+    replaces the link itself."""
     want = wanted.encode() if isinstance(wanted, str) else wanted
-    return owned_file_state_at(path, want, lambda data: marker.encode() in data)
-
-
-def write_atomic(path: str, text: str | bytes, mode: int) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(text.encode() if isinstance(text, str) else text)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
 
 
 def turned_off(home: str) -> bool:
@@ -1013,7 +1020,7 @@ def write_cfg(path: str, text: str) -> str:
     except OSError:
         mode = 0o644
     try:
-        write_atomic(real, text, mode)
+        write_atomic(real, text, mode=mode)
     except OSError as e:
         return str(e.strerror or e)
     return ""

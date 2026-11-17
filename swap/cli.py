@@ -18,7 +18,8 @@ from typing import NoReturn, TextIO
 
 
 from cst_core.adapters.runtime import checkout_root, program_path, restore_default_signals
-from cst_core.adapters import HostExecutionContext, LocalFileSystemAdapter, SubprocessCommandRunner, SystemctlAdapter
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
+from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application import SwapApplicationService, SwapEnvironment

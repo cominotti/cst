@@ -78,19 +78,19 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # module docstring). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
-    "btrfs/bulk/cli.py": 422,
+    "btrfs/bulk/cli.py": 415,
     "btrfs/chrome_cache/cli.py": 131,
     "btrfs/docker_gc/cli.py": 347,
     "btrfs/docker_volumes_nocow/cli.py": 193,
     "btrfs/snapshot/cli.py": 1069,
     "btrfs/stall_monitord/cli.py": 11,
-    "btrfs/stall_report/cli.py": 161,
-    "cpu/cli.py": 258,
+    "btrfs/stall_report/cli.py": 158,
+    "cpu/cli.py": 257,
     "cst_core/cli.py": 165,
-    "doctor/cli.py": 36,
+    "doctor/cli.py": 35,
     "swap/cli.py": 112,
     "toolchains/cli.py": 1946,
-    "vm/cli.py": 1302,
+    "vm/cli.py": 1299,
 }
 
 

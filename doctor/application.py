@@ -8,7 +8,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.text import first_line, parse_assignments
+from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
@@ -698,6 +698,11 @@ def read_entries(host: DoctorHostPort, path: str) -> list[str] | None:
 
 
 @check("btrfs")
+def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
+    yield from settings_file_warnings(host, SNAP_CONF, bash_sourced=True)
+
+
+@check("btrfs")
 def check_snapshots_writable(host: DoctorHostPort) -> Iterator[Result]:
     if not host.isdir(host.path(SNAP_STATE)):
         return  # snapshots never set up
@@ -782,14 +787,39 @@ def game_again(host: DoctorHostPort) -> str:
     return "sudo systemctl restart cpu-game.service"
 
 
-def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
-    """The last KEY= of a shell settings file (quotes removed), or None. The
-    last assignment wins, as in the shell and in vm-pin's conf()."""
+def settings_of(host: DoctorHostPort, path: str, *, bash_sourced: bool = True) -> ShellAssignments | None:
+    """A settings file read with cst_core's one reader (as bash reads it when
+    bash_sourced), or None when it cannot be read."""
     try:
         with host.open_text(host.path(path)) as f:
-            return parse_assignments(f.read()).get(key)
+            return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
     except OSError:
         return None
+
+
+def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
+    """The value of KEY in a settings file that bash also sources (the last
+    assignment wins, as in bash and in vm-pin), or None. A problem line sets
+    nothing; check_settings_files reports it."""
+    parsed = settings_of(host, path)
+    return None if parsed is None else parsed.values.get(key)
+
+
+def settings_file_warnings(host: DoctorHostPort, path: str, *, bash_sourced: bool) -> Iterator[Result]:
+    """WARN for each line of a settings file that is not a plain assignment."""
+    parsed = settings_of(host, path, bash_sourced=bash_sourced)
+    bash = " (bash, which also sources this file, reads it its own way)" if bash_sourced else ""
+    for p in parsed.problems if parsed else ():
+        yield Result(
+            WARN,
+            f"{path} {p}. CST's Python programs take nothing from the line{bash}, and the cst commands "
+            "that change the machine with these settings refuse to run until it is fixed",
+        )
+
+
+@check("cpu")
+def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
+    yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True)
 
 
 def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
@@ -1106,17 +1136,15 @@ def newest_vm_backup(host: DoctorHostPort) -> float:
 
 
 def nas_configured(host: DoctorHostPort) -> bool:
-    """The /home NAS backup is set up (snapshots.conf is world-readable)."""
-    vals: dict[str, str] = {}
-    try:
-        with host.open_text(host.path(SNAP_CONF)) as f:
-            for line in f:
-                if "=" in line and not line.lstrip().startswith("#"):
-                    k, v = line.strip().split("=", 1)
-                    vals[k.strip()] = v.strip().strip("'\"")
-    except OSError:
-        return False
-    return vals.get("NAS_ENABLED") == "1" and bool(vals.get("NAS_PATH"))
+    """The /home NAS backup is set up (snapshots.conf is world-readable; read as btrfs-snapshot reads it)."""
+    parsed = settings_of(host, SNAP_CONF)
+    values = parsed.values if parsed else {}
+    return values.get("NAS_ENABLED") == "1" and bool(values.get("NAS_PATH"))
+
+
+@check("vm")
+def check_vm_settings(host: DoctorHostPort) -> Iterator[Result]:
+    yield from settings_file_warnings(host, VM_CONF, bash_sourced=False)
 
 
 @check("vm")

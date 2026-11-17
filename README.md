@@ -403,10 +403,19 @@ everything with `plan`, `status` or `doctor` before changing anything:
   (`cli.py`) behind `cst`, and the installer (`installer.py`).
 - `cst-install.bash`: how every module installs its files. The list of what is
   installed where, with which mode, is one table, `INSTALL_MANIFEST` in
-  `cst_core/domain/install.py`. A file is written only when it changed, and the
-  output says `unchanged:` or `written:` per file. A symbolic link to a file
-  that already holds the wanted content counts as unchanged and stays a link;
-  a write replaces the link, never the file it points to. The Python helpers are
+  `cst_core/domain/install.py`. A file is written only when it changed (as
+  root, also when a root file is not owned by root), and the output says
+  `unchanged:` or `written:` per file, as it goes; a file that cannot be
+  written ends the run with `cst installer: cannot write DEST: REASON`. A
+  template (`*.in`) needs a `--set KEY=VALUE` for each `@KEY@` it holds, and
+  a `--set` that no template of the call uses is refused too (a misspelt key):
+  both are usage errors, and nothing is written. One rule for a symbolic link
+  at a destination, used by the installer, `cst vm backup-timer`,
+  `cst toolchains auto on` and `cst bluetooth` (for its LDAC watcher program): in a home folder (`~/...`) a
+  link to a file that already holds the wanted content counts as unchanged
+  and stays a link (a dotfiles manager's link), and one to other content is
+  judged as that file would be; at a root destination a link is always
+  replaced. A write replaces the link, never the file it points to. The Python helpers are
   installed as **zipapps**: one file at the usual path (for example
   `/usr/local/sbin/docker-gc`) that holds the program and the CST code it
   imports, so it runs without this folder. `cst_core/installer.py plan SRC...`

@@ -30,14 +30,18 @@ from cst_core.domain.install import (
     INSTALL_MANIFEST,
     ArtifactKind,
     InstallEntry,
+    OnDisk,
     Owner,
     expand_dest,
+    is_current,
     manifest_by_src,
     parse_manifest,
     render_template,
     select_entries,
+    template_keys,
 )
-from cst_core.domain.values import OctalMode
+from cst_core.domain.values import DomainValidationError, OctalMode
+from cst_core.ports import WriteFailed
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLER = os.path.join(REPO, "cst_core", "installer.py")
@@ -52,17 +56,28 @@ def entry(
 
 
 class _MemoryTarget:
-    """InstallTargetPort in memory, recording writes."""
+    """InstallTargetPort in memory, recording writes; owners[path] = (uid, gid), links = paths that are links."""
 
     def __init__(self, files: Mapping[str, tuple[bytes, int]] | None = None) -> None:
         self.files: dict[str, tuple[bytes, int]] = dict(files or {})
+        self.owners: dict[str, tuple[int, int]] = {}
+        self.links: set[str] = set()
         self.writes: list[str] = []
+        self.fail_on: str | None = None
 
-    def current(self, path: str) -> tuple[bytes, int] | None:
-        return self.files.get(path)
+    def current(self, path: str) -> OnDisk | None:
+        if path not in self.files:
+            return None
+        data, mode = self.files[path]
+        uid, gid = self.owners.get(path, (0, 0))
+        return OnDisk(data, mode, uid, gid, path in self.links)
 
     def write(self, path: str, data: bytes, mode: int) -> None:
+        if path == self.fail_on:
+            raise WriteFailed(path, "Permission denied")
         self.files[path] = (data, mode)
+        self.owners.pop(path, None)
+        self.links.discard(path)
         self.writes.append(path)
 
 
@@ -71,6 +86,33 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(render_template("a=@A@ b=@B@\n\n", {"A": "x|&\\y", "B": "2"}), "a=x|&\\y b=2\n")
         self.assertEqual(render_template("no keys", {}), "no keys\n")
         self.assertEqual(render_template("@U@ @U@\n", {"U": "danilo"}), "danilo danilo\n")
+
+    def test_render_template_refuses_a_placeholder_without_a_value(self) -> None:
+        # Without --set UUID=..., top.mount.in was written with What=/dev/disk/by-uuid/@UUID@.
+        with self.assertRaisesRegex(DomainValidationError, "@UUID@"):
+            render_template("What=/dev/disk/by-uuid/@UUID@\nOptions=@OPTIONS@\n", {"OPTIONS": "o"})
+        self.assertEqual(template_keys("@A@ @B_2@ @a@ user@host @@"), {"A", "B_2"})
+
+    def test_render_template_is_one_pass(self) -> None:
+        # A value holding another placeholder's spelling is written as it is, never replaced again.
+        self.assertEqual(render_template("@A@ @B@", {"A": "@B@", "B": "x"}), "@B@ x\n")
+
+    def test_is_current_link_and_owner_rules(self) -> None:
+        file_ = OnDisk(b"x", 0o644, 0, 0, False)
+        link = OnDisk(b"x", 0o644, 0, 0, True)
+        self.assertTrue(is_current(file_, b"x", 0o644, "root", as_root=True))
+        self.assertFalse(is_current(file_, b"x", 0o600, "root", as_root=True))
+        self.assertFalse(is_current(None, b"x", 0o644, "user", as_root=False))
+        self.assertFalse(is_current(OnDisk(None, 0, -1, -1, True), b"x", 0o644, "user", as_root=False))
+        # One link rule: replaced at a root destination, read through at a user destination.
+        self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=True))
+        self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=False))
+        self.assertTrue(is_current(link, b"x", 0o644, "user", as_root=False))
+        # As root, a root entry must be owned by 0:0; a staged run as a user cannot check it.
+        foreign = OnDisk(b"x", 0o644, 1000, 1000, False)
+        self.assertFalse(is_current(foreign, b"x", 0o644, "root", as_root=True))
+        self.assertTrue(is_current(foreign, b"x", 0o644, "root", as_root=False))
+        self.assertTrue(is_current(foreign, b"x", 0o644, "user", as_root=True))
 
     def test_expand_dest(self) -> None:
         self.assertEqual(expand_dest("~/.config/x", "/home/u/"), "/home/u/.config/x")
@@ -134,31 +176,73 @@ class InstallServiceTest(unittest.TestCase):
         self.assertEqual(lines, ["would write: /etc/a", "would write: /etc/t"])
         self.assertEqual(todo, 2)
         self.assertEqual(self.target.writes, [])
-        self.assertEqual(self.svc.install([self.a, self.t], req), ["written:   /etc/a", "written:   /etc/t"])
+        self.assertEqual(list(self.svc.install([self.a, self.t], req)), ["written:   /etc/a", "written:   /etc/t"])
         self.assertEqual(self.target.files["/etc/t"], (b"uuid=1234\n", 0o644))
         self.assertEqual(self.svc.plan([self.a, self.t], req), (["unchanged: /etc/a", "unchanged: /etc/t"], 0))
-        self.assertEqual(self.svc.install([self.a, self.t], req), ["unchanged: /etc/a", "unchanged: /etc/t"])
+        self.assertEqual(list(self.svc.install([self.a, self.t], req)), ["unchanged: /etc/a", "unchanged: /etc/t"])
         self.assertEqual(self.target.writes, ["/etc/a", "/etc/t"])
 
     def test_a_changed_mode_or_content_is_rewritten(self) -> None:
         self.target.files["/etc/a"] = (b"A\n", 0o600)
-        self.assertEqual(self.svc.install([self.a], InstallRequest()), ["written:   /etc/a"])
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["written:   /etc/a"])
         self.target.files["/etc/a"] = (b"old\n", 0o644)
-        self.assertEqual(self.svc.install([self.a], InstallRequest()), ["written:   /etc/a"])
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["written:   /etc/a"])
+
+    def test_as_root_a_root_file_owned_by_a_user_is_rewritten(self) -> None:
+        self.target.files["/etc/a"] = (b"A\n", 0o644)
+        self.target.owners["/etc/a"] = (1000, 1000)  # left by a hand copy
+        self.assertEqual(self.svc.plan([self.a], InstallRequest(as_root=True)), (["would write: /etc/a"], 1))
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest(as_root=True))), ["written:   /etc/a"])
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest(as_root=True))), ["unchanged: /etc/a"])
+
+    def test_a_link_is_rewritten_at_a_root_destination_and_kept_at_a_user_one(self) -> None:
+        self.target.files.update({"/etc/a": (b"A\n", 0o644), "/home/u/.config/u": (b"U\n", 0o644)})
+        self.target.links.update({"/etc/a", "/home/u/.config/u"})
+        req = InstallRequest(home="/home/u")
+        self.assertEqual(
+            list(self.svc.install([self.a, self.u], req)), ["written:   /etc/a", "unchanged: /home/u/.config/u"]
+        )
+        self.assertEqual(self.target.links, {"/home/u/.config/u"})
+
+    def test_a_template_value_missing_or_unused_writes_nothing(self) -> None:
+        for values, why in (({}, "@UUID@"), ({"UUID": "1", "UIDD": "2"}, "--set UIDD")):
+            with self.subTest(values=values):
+                req = InstallRequest(values=values)
+                # Raised when install is called, before any file (also /etc/a, listed first) is written.
+                with self.assertRaisesRegex(DomainValidationError, why):
+                    self.svc.install([self.a, self.t], req)
+                with self.assertRaisesRegex(DomainValidationError, why):
+                    self.svc.plan([self.a, self.t], req)
+                with self.assertRaisesRegex(DomainValidationError, why):
+                    self.svc.desired(self.t, values)
+        # A value is used when any template of the call uses it; files with no template take no --set.
+        with self.assertRaisesRegex(DomainValidationError, "--set UUID"):
+            self.svc.install([self.a], InstallRequest(values={"UUID": "1"}))
+        self.assertEqual(self.target.writes, [])
+
+    def test_lines_come_as_files_are_written_and_a_failure_names_its_file(self) -> None:
+        self.target.fail_on = "/etc/t"
+        lines = self.svc.install([self.a, self.t, self.u], InstallRequest(values={"UUID": "1"}, home="/h"))
+        self.assertEqual(next(lines), "written:   /etc/a")
+        with self.assertRaisesRegex(WriteFailed, "cannot write /etc/t: Permission denied"):
+            next(lines)
+        self.assertEqual(self.target.writes, ["/etc/a"])
 
     def test_user_entries_go_to_the_given_home_and_never_as_root(self) -> None:
-        self.assertEqual(self.svc.install([self.u], InstallRequest(home="/home/u")), ["written:   /home/u/.config/u"])
+        self.assertEqual(
+            list(self.svc.install([self.u], InstallRequest(home="/home/u"))), ["written:   /home/u/.config/u"]
+        )
         with self.assertRaises(InstallRefused):
             self.svc.install([self.u], InstallRequest(home="/home/u", as_root=True))
         # Staged (tests, the distribution gate): allowed, nothing real is touched.
         self.assertEqual(
-            self.svc.install([self.u], InstallRequest(home="/home/u", as_root=True, root="/stage")),
+            list(self.svc.install([self.u], InstallRequest(home="/home/u", as_root=True, root="/stage"))),
             ["written:   /stage/home/u/.config/u"],
         )
 
     def test_staging_root_and_only_manifest_destinations(self) -> None:
         # The entry's own dest, under the staging root; there is no other destination to ask for.
-        self.assertEqual(self.svc.install([self.a], InstallRequest(root="/stage/")), ["written:   /stage/etc/a"])
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest(root="/stage/"))), ["written:   /stage/etc/a"])
         for root in ("stage", "/stage/../etc"):
             with self.subTest(root=root), self.assertRaises(ValueError):
                 self.svc.install([self.a], InstallRequest(root=root))
@@ -252,20 +336,32 @@ class LocalTargetTest(unittest.TestCase):
         os.makedirs(os.path.dirname(dest))
         os.symlink(victim, dest)
         os.chmod(victim, 0o640)
-        # A link is read through, as main's `[[ -f ]] && cmp -s` did (it is only replaced when written).
-        self.assertEqual(self.t.current(dest), (b"keep", 0o640))
+        uid, gid = os.getuid(), os.getgid()
+        # A link is read through and reported as a link (domain.install.is_current decides what that means).
+        self.assertEqual(self.t.current(dest), OnDisk(b"keep", 0o640, uid, gid, True))
         self.t.write(dest, b"new", 0o750)
         self.assertEqual(Path(victim).read_bytes(), b"keep", "the link was followed")
         self.assertFalse(os.path.islink(dest))
-        self.assertEqual(self.t.current(dest), (b"new", 0o750))
+        self.assertEqual(self.t.current(dest), OnDisk(b"new", 0o750, uid, gid, False))
         self.assertIsNone(self.t.current(os.path.join(self.tmp, "missing")))
-        self.assertIsNone(self.t.current(self.tmp), "a folder is not a file")
+        folder = self.t.current(self.tmp)
+        self.assertTrue(folder is not None and folder.data is None, "a folder is not a file")
         os.symlink(os.path.join(self.tmp, "missing"), os.path.join(self.tmp, "dangling"))
-        self.assertIsNone(self.t.current(os.path.join(self.tmp, "dangling")))
+        self.assertEqual(self.t.current(os.path.join(self.tmp, "dangling")), OnDisk(None, 0, -1, -1, True))
         os.symlink(self.tmp, os.path.join(self.tmp, "to-a-folder"))
-        self.assertIsNone(self.t.current(os.path.join(self.tmp, "to-a-folder")))
+        to_folder = self.t.current(os.path.join(self.tmp, "to-a-folder"))
+        self.assertTrue(to_folder is not None and to_folder.data is None and to_folder.is_link)
 
-    def test_a_link_to_the_wanted_content_is_left_alone(self) -> None:
+    def test_a_write_that_fails_names_the_destination(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only folder")
+        ro = os.path.join(self.tmp, "ro")
+        os.makedirs(ro, mode=0o555)
+        with self.assertRaises(WriteFailed) as cm:
+            self.t.write(os.path.join(ro, "f"), b"x", 0o644)
+        self.assertEqual(str(cm.exception), f"cannot write {ro}/f: Permission denied")
+
+    def test_a_link_to_the_wanted_content_is_left_alone_at_a_user_destination(self) -> None:
         # A dotfiles link (~/.config/gamemode.ini -> a copy elsewhere) that already holds what
         # install writes stays a link, and the line says unchanged, as on main.
         real = os.path.join(self.tmp, "real")
@@ -274,10 +370,22 @@ class LocalTargetTest(unittest.TestCase):
         link = os.path.join(self.tmp, "link")
         os.symlink(real, link)
         service = InstallService(self.t, lambda _e: b"")
-        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644), f"unchanged: {link}")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "user"), f"unchanged: {link}")
         self.assertTrue(os.path.islink(link))
-        self.assertEqual(service.write_if_changed(link, b"y\n", 0o644), f"written:   {link}")
+        self.assertEqual(service.write_if_changed(link, b"y\n", 0o644, "user"), f"written:   {link}")
         self.assertFalse(os.path.islink(link), "a write replaces the link, never writes through it")
+        self.assertEqual(Path(real).read_bytes(), b"x\n")
+
+    def test_a_link_at_a_root_destination_is_replaced_even_with_the_wanted_content(self) -> None:
+        real = os.path.join(self.tmp, "real")
+        Path(real).write_bytes(b"x\n")
+        os.chmod(real, 0o644)
+        link = os.path.join(self.tmp, "link")
+        os.symlink(real, link)
+        service = InstallService(self.t, lambda _e: b"")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "root"), f"written:   {link}")
+        self.assertFalse(os.path.islink(link))
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "root"), f"unchanged: {link}")
         self.assertEqual(Path(real).read_bytes(), b"x\n")
 
 
@@ -388,6 +496,41 @@ class InstallerCliTest(unittest.TestCase):
         r = self.cli("install", "--root", self.stage, "--home", "/home/u", "cpu/gamemode.ini")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(Path(self.stage, "home/u/.config/gamemode.ini").is_file())
+
+    def test_a_template_value_missing_or_unused_is_a_usage_error_and_writes_nothing(self) -> None:
+        # No --set USER wrote a polkit rule with "@USER@" in it, and reported success.
+        srcs = ("btrfs/btrfs-notify", "cpu/cpu-game.rules.in")
+        for sets, why in (((), b"@USER@"), (("--set", "USER=u", "--set", "USR=u"), b"--set USR")):
+            for command in ("install", "plan", "check"):
+                with self.subTest(command=command, sets=sets):
+                    r = self.cli(command, "--root", self.stage, *sets, *srcs)
+                    self.assertEqual(r.returncode, 2, r)
+                    self.assertIn(why, r.stderr)
+                    self.assertEqual(r.stdout, b"")
+        r = self.cli("payload", "cpu/cpu-game.rules.in")
+        self.assertEqual((r.returncode, r.stdout), (2, b""))
+        self.assertEqual(self.files(), {})
+        r = self.cli("install", "--root", self.stage, "--set", "USER=u", *srcs)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rule = Path(self.stage, "etc/polkit-1/rules.d/50-cpu-setup-game.rules").read_text()
+        self.assertIn('subject.user == "u"', rule)
+        self.assertNotIn("@USER@", rule)
+
+    def test_a_file_that_cannot_be_written_is_named_after_the_lines_already_printed(self) -> None:
+        # A traceback, and no line for the file already written.
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only folder")
+        units = Path(self.stage, "etc/systemd/system")
+        units.mkdir(parents=True)
+        units.chmod(0o555)
+        self.addCleanup(units.chmod, 0o755)
+        r = self.cli("install", "--root", self.stage, "btrfs/btrfs-notify", "btrfs/units/btrfs-bulk-boot.service")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.decode(), f"written:   {self.stage}/usr/local/sbin/btrfs-notify\n")
+        self.assertEqual(
+            r.stderr.decode(),
+            f"cst installer: cannot write {self.stage}/etc/systemd/system/btrfs-bulk-boot.service: Permission denied\n",
+        )
 
     def test_usage_errors_exit_2_and_change_nothing(self) -> None:
         for args in (

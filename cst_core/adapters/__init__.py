@@ -1,12 +1,8 @@
-"""Concrete infrastructure adapters implementing cst_core ports (zipapps: cst_core.adapters.zipapp)."""
+"""Concrete infrastructure adapters implementing cst_core ports (files: cst_core.adapters.files; zipapps: cst_core.adapters.zipapp)."""
 
 from collections.abc import Callable, Mapping, Sequence
-import contextlib
 import os
-import shutil
-import stat
 import subprocess
-import tempfile
 import time
 
 from cst_core.ports import CommandFailed, CommandResult, CommandRunnerPort, ExecutionContextPort
@@ -32,7 +28,11 @@ class SubprocessCommandRunner:
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> CommandResult:
-        """Run argv with capture_output=True and DEVNULL stdin unless input_text is given."""
+        """Run argv with capture_output=True and DEVNULL stdin unless input_text is given.
+
+        Output that is not UTF-8 is decoded with U+FFFD for the bad bytes,
+        never a UnicodeDecodeError out of run().
+        """
         cmd = list(argv)
         merged_env = None if env is None else {**os.environ, **env}
         try:
@@ -41,6 +41,7 @@ class SubprocessCommandRunner:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=timeout,
                 # No stdin of ours leaks into the command: /dev/null, or input_text.
                 stdin=subprocess.DEVNULL if input_text is None else None,
@@ -65,135 +66,6 @@ class SubprocessCommandRunner:
         if check and proc.returncode != 0:
             raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
         return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
-
-
-class LocalFileSystemAdapter:
-    """FileSystemPort operating on local files with atomic rename and SELinux restorecon."""
-
-    def exists(self, path: str) -> bool:
-        """Return True if path exists (following symlinks)."""
-        return os.path.exists(path)
-
-    def lexists(self, path: str) -> bool:
-        """Return True if path exists (including broken symlinks)."""
-        return os.path.lexists(path)
-
-    def is_dir(self, path: str) -> bool:
-        """Return True if path is an existing directory."""
-        return os.path.isdir(path)
-
-    def is_file(self, path: str) -> bool:
-        """Return True if path is an existing regular file."""
-        return os.path.isfile(path)
-
-    def is_symlink(self, path: str) -> bool:
-        """Return True if path is a symbolic link."""
-        return os.path.islink(path)
-
-    def is_block_device(self, path: str) -> bool:
-        """Return True if path resolves to a block special device."""
-        try:
-            return stat.S_ISBLK(os.stat(path).st_mode)
-        except OSError:
-            return False
-
-    def is_readable(self, path: str) -> bool:
-        """Return True if the current process has read access to path."""
-        return os.access(path, os.R_OK)
-
-    def read_text(self, path: str, default: str | None = None) -> str | None:
-        """Read the file as UTF-8 text, returning default on OSError.
-
-        Byte-transparent, like bash's `read -r` on the shared files (fstab,
-        crypttab): a byte that is not UTF-8 comes back as itself through
-        write_atomic (surrogateescape), and line ends are kept as they are.
-        """
-        try:
-            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
-                return fh.read()
-        except OSError:
-            return default
-
-    def read_first_line(self, path: str, default: str | None = None) -> str | None:
-        """Read and strip file text from path, returning default on OSError."""
-        text = self.read_text(path)
-        return default if text is None else text.strip()
-
-    def readlink(self, path: str, *, canonicalize: bool = False) -> str | None:
-        """Read symlink target, or canonicalize path via realpath if canonicalize=True."""
-        if canonicalize:
-            if not os.path.lexists(path):
-                return None
-            try:
-                return os.path.realpath(path)
-            except OSError:
-                return None
-        try:
-            return os.readlink(path)
-        except OSError:
-            return None
-
-    def list_dir(self, path: str) -> list[str]:
-        """Return sorted directory entry names (may raise OSError or PermissionError)."""
-        return sorted(os.listdir(path))
-
-    def write_atomic(self, dest: str, content: str, mode: int = 0o644) -> None:
-        """Write content to dest atomically via a temporary file in the target directory."""
-        write_bytes_atomic(dest, content.encode("utf-8", "surrogateescape"), mode=mode)
-
-    def write_text_direct(self, path: str, content: str) -> None:
-        """Write content directly in place (for sysfs/procfs pseudo-files)."""
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(content)
-
-    def copy_if_absent(self, src: str, dest: str) -> None:
-        """Copy src to dest preserving metadata only when dest does not yet exist."""
-        if not os.path.lexists(dest) and os.path.exists(src):
-            shutil.copy2(src, dest)
-
-    def remove_file(self, path: str) -> None:
-        """Remove path if present (no error if already absent)."""
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(path)
-
-    def force_symlink(self, target: str, link_path: str) -> None:
-        """Ensure link_path is a symlink pointing to target."""
-        parent = os.path.dirname(os.path.abspath(link_path))
-        os.makedirs(parent, exist_ok=True)
-        if os.path.lexists(link_path):
-            os.unlink(link_path)
-        os.symlink(target, link_path)
-
-
-def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
-    """Write bytes atomically with explicit permissions (ignoring umask) and SELinux restorecon."""
-    abs_dest = os.path.abspath(dest)
-    parent = os.path.dirname(abs_dest)
-    os.makedirs(parent, mode=0o755, exist_ok=True)
-    if os.path.islink(abs_dest):
-        os.unlink(abs_dest)
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_dest)}.", dir=parent)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(content)
-        os.chmod(tmp, mode)
-        if os.geteuid() == 0:
-            os.chown(tmp, 0, 0)
-        os.replace(tmp, abs_dest)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    if os.geteuid() == 0:
-        restorecon = shutil.which("restorecon")
-        if restorecon is not None:
-            # "--": the path is an operand even if a caller ever passes one starting with "-".
-            subprocess.run(
-                [restorecon, "-F", "--", abs_dest],
-                check=False,
-                capture_output=True,
-                stdin=subprocess.DEVNULL,
-            )
 
 
 class HostExecutionContext:

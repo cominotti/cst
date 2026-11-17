@@ -6,23 +6,27 @@ checked against the timers the vm and toolchains programs write today, so
 those modules can switch to it without changing a byte.
 """
 
+import contextlib
 import io
 import os
+import re
 import shutil
+import stat
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from cst_core import adapters as core_adapters
-from cst_core.adapters import nocow
-from cst_core.adapters.files import owned_file_state_at, read_bytes, read_int, read_text
+from cst_core.adapters import files as core_files, nocow
+from cst_core.adapters.files import ensure_dir, owned_file_state_at, read_bytes, read_int, read_text
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
-from cst_core.domain.text import first_line, is_yes, parse_assignments
+from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
@@ -67,12 +71,21 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(format_bytes_gib_mib(1500 * MIB, gib_threshold=10 * GIB, comma=True), "1,500 MiB")
 
     def test_owned_file_state(self) -> None:
-        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True), "ok")
-        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True), "change")
-        self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=False), "conflict")
-        self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False), "missing")
-        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True), "conflict")
-        self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True), "change")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True, owner=owner), "ok")
+                self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True, owner=owner), "change")
+                self.assertEqual(
+                    owned_file_state(b"b", is_link=False, wanted=b"a", ours=False, owner=owner), "conflict"
+                )
+                self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False, owner=owner), "missing")
+                self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True, owner=owner), "change")
+        # The installer's link rule: replaced at a root destination, judged by its target at a user one.
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="root"), "change")
+        self.assertEqual(owned_file_state(None, is_link=True, wanted=b"a", ours=False, owner="root"), "change")
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="user"), "ok")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=True, owner="user"), "change")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=False, owner="user"), "conflict")
 
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
@@ -138,6 +151,45 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
 
+    def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
+        # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
+        superscript_two, arabic_three = chr(0xB2).encode(), chr(0x663).encode()
+        for i, data in enumerate((b"--5", superscript_two, b"-", b"", b"1.5", b"+3", b"\xff", arabic_three)):
+            with self.subTest(data=data):
+                self.assertEqual(read_int(self.path(f"bad{i}", data), -1), -1)
+        self.assertEqual(read_int(self.path("ok", b"  12 \n")), 12)
+
+    def test_the_two_text_readers_keep_their_decode_policies(self) -> None:
+        # Lenient (files.read_text): bad bytes become U+FFFD. Byte-transparent
+        # (LocalFileSystemAdapter.read_text, for files written back): every byte survives a round trip.
+        p = self.path("mixed", b"a\xffb\r\nc\n")
+        self.assertEqual(read_text(p), "a" + chr(0xFFFD) + "b\nc\n")
+        fs = core_files.LocalFileSystemAdapter()
+        text = fs.read_text(p)
+        self.assertEqual(text, "a" + chr(0xDCFF) + "b\r\nc\n")
+        assert text is not None
+        out = self.path("out")
+        fs.write_atomic(out, text)
+        with open(out, "rb") as fh:
+            self.assertEqual(fh.read(), b"a\xffb\r\nc\n")
+
+    def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
+        existing = self.path("existing")
+        os.mkdir(existing, 0o700)
+        target = os.path.join(existing, "a", "b")
+        old = os.umask(0o077)
+        try:
+            created = ensure_dir(target, 0o755)
+            self.assertEqual(ensure_dir(target, 0o755), [], "a second call creates nothing")
+        finally:
+            os.umask(old)
+        self.assertEqual(created, [os.path.join(existing, "a"), target])
+        for d in created:
+            self.assertEqual(os.stat(d).st_mode & 0o7777, 0o755, d)
+        self.assertEqual(os.stat(existing).st_mode & 0o7777, 0o700, "an existing folder was changed")
+        with self.assertRaises(FileExistsError):
+            ensure_dir(self.path("file", b"x"), 0o755)
+
     def test_owned_file_state_at(self) -> None:
         ours = self.path("ours", b"#!/x\nMARK v1\n")
         theirs = self.path("theirs", b"#!/x\nv1\n")
@@ -147,14 +199,26 @@ class AdaptersTest(unittest.TestCase):
         def mark(data: bytes) -> bool:
             return b"MARK" in data
 
-        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark), "ok")
-        self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark), "change")
-        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nMARK v2\n", mark), "conflict")
-        self.assertEqual(owned_file_state_at(theirs, b"#!/x\nv1\n", mark), "ok")
-        self.assertEqual(owned_file_state_at(self.path("link"), b"#!/x\nMARK v1\n", mark), "conflict")
-        self.assertEqual(owned_file_state_at(self.path("missing"), b"x", mark), "missing")
-        self.assertEqual(owned_file_state_at(self.path("dir"), b"x", mark), "conflict")
-        self.assertEqual(owned_file_state_at(ours, None, mark), "change")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark, owner=owner), "ok")
+                self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark, owner=owner), "change")
+                self.assertEqual(owned_file_state_at(theirs, b"#!/x\nMARK v2\n", mark, owner=owner), "conflict")
+                self.assertEqual(owned_file_state_at(theirs, b"#!/x\nv1\n", mark, owner=owner), "ok")
+                self.assertEqual(owned_file_state_at(self.path("missing"), b"x", mark, owner=owner), "missing")
+                self.assertEqual(owned_file_state_at(self.path("dir"), b"x", mark, owner=owner), "conflict")
+                self.assertEqual(owned_file_state_at(ours, None, mark, owner=owner), "change")
+        link = self.path("link")
+        os.symlink(theirs, self.path("link-theirs"))
+        os.symlink(self.path("missing"), self.path("dangling"))
+        # One link rule with the installer: at a root destination a link is
+        # always replaced ("change", whatever it points to); at a user destination its target counts.
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="root"), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="root"), "change")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="user"), "ok")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner="user"), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="user"), "conflict")
+        self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner="user"), "missing")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()
@@ -175,6 +239,29 @@ class AdaptersTest(unittest.TestCase):
         fd2 = take_lock(lock, wait=True)
         assert fd2 is not None
         os.close(fd2)
+
+    def test_a_lock_file_it_creates_gets_exactly_the_mode(self) -> None:
+        # Under a 077 umask (sudo keeps a user's) the 0644 lock cst doctor reads came out 0600.
+        lock = self.path("pid.lock")
+        old = os.umask(0o077)
+        try:
+            fd = take_lock(lock, wait=False, mode=0o644)
+        finally:
+            os.umask(old)
+        assert fd is not None
+        os.close(fd)
+        self.assertEqual(os.stat(lock).st_mode & 0o7777, 0o644)
+        os.chmod(lock, 0o600)
+        fd = take_lock(lock, wait=False, mode=0o644)  # an existing file keeps its mode
+        assert fd is not None
+        os.close(fd)
+        self.assertEqual(os.stat(lock).st_mode & 0o7777, 0o600)
+        # A dangling link without nofollow: created through it, as before (no endless retry).
+        os.symlink(self.path("lock-target"), self.path("dangling"))
+        fd = take_lock(self.path("dangling"), wait=False, nofollow=False)
+        assert fd is not None
+        os.close(fd)
+        self.assertTrue(os.path.exists(self.path("lock-target")))
 
     def test_nocow_sets_and_clears_only_its_bit(self) -> None:
         p = self.path("img", b"")
@@ -216,7 +303,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
         os.symlink(target, dest)
         old = os.umask(0o077)
         try:
-            core_adapters.write_bytes_atomic(dest, b"new", mode=0o755)
+            core_files.write_bytes_atomic(dest, b"new", mode=0o755)
         finally:
             os.umask(old)
         self.assertFalse(os.path.islink(dest))
@@ -227,42 +314,354 @@ class WriteBytesAtomicTest(unittest.TestCase):
         self.assertEqual(os.stat(dest).st_mode & 0o7777, 0o755)
         self.assertEqual(sorted(os.listdir(os.path.dirname(dest))), ["dest"])  # no temporary file left
 
+    def restorecon(self, dest: str, rc: int, err: str) -> tuple[list[list[str]], str]:
+        calls: list[list[str]] = []
+
+        def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, rc, "", err)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(core_files.os, "geteuid", return_value=0),
+            mock.patch.object(core_files.os, "fchown"),
+            mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
+            mock.patch.object(core_files.subprocess, "run", side_effect=run),
+            contextlib.redirect_stderr(stderr),
+        ):
+            core_files.write_bytes_atomic(dest, b"x")
+        return calls, stderr.getvalue()
+
     def test_as_root_restorecon_gets_the_path_as_an_operand(self) -> None:
         dest = os.path.join(self.tmp, "-odd")
-        calls: list[list[str]] = []
-        with (
-            mock.patch.object(core_adapters.os, "geteuid", return_value=0),
-            mock.patch.object(core_adapters.os, "chown"),
-            mock.patch.object(core_adapters.shutil, "which", return_value="/usr/sbin/restorecon"),
-            mock.patch.object(core_adapters.subprocess, "run", side_effect=lambda argv, **_: calls.append(argv)),
-        ):
-            core_adapters.write_bytes_atomic(dest, b"x")
+        calls, err = self.restorecon(dest, 0, "")
         self.assertEqual(calls, [["/usr/sbin/restorecon", "-F", "--", dest]])
+        self.assertEqual(err, "")
+
+    def test_a_failed_restorecon_is_reported(self) -> None:
+        # Its result was dropped.
+        dest = os.path.join(self.tmp, "f")
+        _, err = self.restorecon(dest, 255, "restorecon: lstat(f) failed: Permission denied\n")
+        self.assertEqual(
+            err,
+            f"warning: restorecon {dest}: restorecon: lstat(f) failed: Permission denied "
+            "(its SELinux label may be wrong)\n",
+        )
+        with open(dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"x")
+
+    def test_a_link_at_dest_is_never_removed_before_the_rename(self) -> None:
+        # Dest was unlinked first, a moment with no file at all.
+        target = os.path.join(self.tmp, "target")
+        with open(target, "wb") as fh:
+            fh.write(b"keep")
+        dest = os.path.join(self.tmp, "dest")
+        os.symlink(target, dest)
+        with mock.patch.object(core_files.os, "unlink", side_effect=AssertionError("unlink called")):
+            core_files.write_bytes_atomic(dest, b"new", mode=0o644)
+        self.assertFalse(os.path.islink(dest))
+
+    def test_new_folders_get_exactly_0755_under_a_077_umask(self) -> None:
+        dest = os.path.join(self.tmp, "new", "sub", "f")
+        old = os.umask(0o077)
+        try:
+            core_files.write_bytes_atomic(dest, b"x", mode=0o644)
+        finally:
+            os.umask(old)
+        for d in (os.path.join(self.tmp, "new"), os.path.dirname(dest)):
+            self.assertEqual(os.stat(d).st_mode & 0o7777, 0o755, d)
 
 
-class ParseAssignmentsTest(unittest.TestCase):
-    """The one KEY=VALUE reader of cpu-setup.conf, vm.conf and the snapshot settings (cpu, vm, doctor)."""
+class WriteAtomicTest(unittest.TestCase):
+    """cst_core.adapters.files.write_atomic: unique temp, exact mode, fsync file then folder, temp gone on errors."""
 
-    def test_quotes_comments_and_the_last_assignment(self) -> None:
-        text = "FOO='a'\n# FOO=b\n  #BAR=x\nFOO=\"c\"\n  BAZ = d=e \nEMPTY=''\nnot a setting\n"
-        self.assertEqual(parse_assignments(text), {"FOO": "c", "BAZ ": "d=e", "EMPTY": ""})
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-wa-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.dest = os.path.join(self.tmp, "sub", "counter")
 
-    def test_a_blank_before_the_equal_sign_is_no_assignment(self) -> None:
-        # The shell runs `VM_NAME =x` as a command; no lookup finds it here either.
-        self.assertNotIn("VM_NAME", parse_assignments("VM_NAME =x\n"))
-        self.assertEqual(parse_assignments(""), {})
+    def record(self) -> tuple[list[str], contextlib.ExitStack]:
+        events: list[str] = []
+        real_fsync, real_replace = os.fsync, os.replace
 
-    def test_strip_keys_keeps_the_last_line(self) -> None:
-        # vm's read_conf strips the key; the last line of the file still wins, as in main's cst-vm.
-        self.assertEqual(parse_assignments("K=1\nK = 0\nK=1\n", strip_keys=True), {"K": "1"})
-        self.assertEqual(parse_assignments("K = 0\nK=1\n", strip_keys=True), {"K": "1"})
+        def fsync(fd: int) -> None:
+            events.append("fsync folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync file")
+            real_fsync(fd)
 
-    def test_only_a_newline_ends_a_line(self) -> None:
-        # The callers read files line by line on main (open() iteration): form feed, vertical tab,
-        # the file/group/record separators, NEL and the Unicode line/paragraph separators are not line ends.
-        for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        def replace(src: str, dst: str) -> None:
+            events.append("replace")
+            real_replace(src, dst)
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(core_files.os, "fsync", fsync))
+        stack.enter_context(mock.patch.object(core_files.os, "replace", replace))
+        return events, stack
+
+    def test_durable_write_syncs_the_file_then_the_folder(self) -> None:
+        events, stack = self.record()
+        old = os.umask(0o077)
+        try:
+            with stack:
+                core_files.write_atomic(self.dest, "2", mode=0o644)
+        finally:
+            os.umask(old)
+        self.assertEqual(events, ["fsync file", "replace", "fsync folder"])
+        with open(self.dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"2")
+        self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o644)
+        self.assertEqual(os.stat(os.path.dirname(self.dest)).st_mode & 0o7777, 0o755)
+        self.assertEqual(os.listdir(os.path.dirname(self.dest)), ["counter"])
+
+    def test_not_durable_skips_the_syncs(self) -> None:
+        events, stack = self.record()
+        with stack:
+            core_files.write_atomic(self.dest, b"x", mode=0o600, durable=False)
+        self.assertEqual(events, ["replace"])
+        self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o600)
+
+    def test_the_temporary_file_is_removed_on_every_error(self) -> None:
+        os.makedirs(os.path.dirname(self.dest))
+        with open(self.dest, "w") as fh:
+            fh.write("old")
+        for name, error in (("write", OSError(28, "No space left on device")), ("replace", KeyboardInterrupt())):
+            with self.subTest(name=name), mock.patch.object(core_files.os, name, side_effect=error):
+                with self.assertRaises(type(error)):
+                    core_files.write_atomic(self.dest, b"new", mode=0o644)
+                self.assertEqual(os.listdir(os.path.dirname(self.dest)), ["counter"])
+                with open(self.dest) as fh:
+                    self.assertEqual(fh.read(), "old")
+
+    def test_owner_root_chowns_only_as_root(self) -> None:
+        for owner, euid, calls in (("root", 0, 1), ("caller", 0, 0), ("root", 1000, 0)):
+            with (
+                self.subTest(owner=owner, euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.os, "fchown") as fchown,
+                mock.patch.object(core_files.shutil, "which", return_value=None),
+            ):
+                core_files.write_atomic(self.dest, b"x", mode=0o644, owner=owner)
+                self.assertEqual(fchown.call_count, calls)
+                if calls:
+                    self.assertEqual(fchown.call_args.args[1:], (0, 0))
+
+    def test_a_link_at_dest_is_replaced_not_followed(self) -> None:
+        target = os.path.join(self.tmp, "target")
+        with open(target, "w") as fh:
+            fh.write("keep")
+        os.makedirs(os.path.dirname(self.dest))
+        os.symlink(target, self.dest)
+        core_files.write_atomic(self.dest, "new", mode=0o644)
+        self.assertFalse(os.path.islink(self.dest))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "keep")
+
+
+class ForceSymlinkAndRunnerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-fsl-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_force_symlink_replaces_by_rename(self) -> None:
+        link = os.path.join(self.tmp, "zram.conf")
+        with open(link, "w") as fh:
+            fh.write("old\n")
+        fs = core_files.LocalFileSystemAdapter()
+        # Unlink then symlink left a moment with nothing at the path.
+        with mock.patch.object(core_files.os, "unlink", side_effect=AssertionError("unlink called")):
+            fs.force_symlink("/dev/null", link)
+            fs.force_symlink("/dev/zero", link)
+        self.assertEqual(os.readlink(link), "/dev/zero")
+        self.assertEqual(os.listdir(self.tmp), ["zram.conf"], "a temporary link was left")
+
+    def test_runner_decodes_bytes_that_are_not_utf8(self) -> None:
+        # Printf '\\377abc' raised UnicodeDecodeError out of run().
+        res = core_adapters.SubprocessCommandRunner().run(["printf", "\\377abc"])
+        self.assertEqual((res.returncode, res.stdout), (0, chr(0xFFFD) + "abc"))
+
+
+BASH = "/usr/bin/bash"
+NBSP = chr(0xA0)
+PROBLEM = None
+# (line of a file bash also sources, what parse_shell_assignments must give for K: a value or PROBLEM).
+STRICT_TABLE: tuple[tuple[str, str | None], ...] = (
+    ("K=1", "1"),
+    ("K='a b'", "a b"),
+    ('K="a b"', "a b"),
+    ("K='12-23' # E-cores", "12-23"),
+    ('K="x" # note', "x"),
+    ("export K=v", "v"),
+    ("  K=v", "v"),
+    ("\tK=v  # c", "v"),
+    ("K=", ""),
+    ("K=''", ""),
+    ('K=""', ""),
+    ("K= # c", ""),
+    ("K=a#b", "a#b"),
+    ("K=a #b", "a"),
+    ("K=#x", "#x"),
+    ("K=1 # on", "1"),
+    ("K=user@host:22", "user@host:22"),
+    ("K=/volume1/backups/sophia", "/volume1/backups/sophia"),
+    ("K={a,b}", "{a,b}"),
+    ("K=a{1..3}", "a{1..3}"),  # an assignment word is not brace-expanded...
+    ("export K={a,b}", PROBLEM),  # ...but an argument of export is: bash sets K=b
+    ("export K=a{1..3}", PROBLEM),
+    ("export K=*", "*"),
+    ("K=*", "*"),
+    ("K='$HOME'", "$HOME"),
+    ("K=a=b", "a=b"),
+    ("K=a\x0cb", "a\x0cb"),  # bash splits words at blanks and tabs only
+    ("K=a\x0bb", "a\x0bb"),
+    (f"K=a{NBSP}b", f"a{NBSP}b"),
+    ("K = 1", PROBLEM),
+    ("K =1", PROBLEM),
+    ("K= 1", PROBLEM),
+    ("K=a b", PROBLEM),
+    ("K=$HOME", PROBLEM),
+    ('K="$HOME"', PROBLEM),
+    ("K=`true`", PROBLEM),
+    ("K=a\\b", PROBLEM),
+    ('K="a\\b"', PROBLEM),
+    ("K=~/x", PROBLEM),
+    ("K=a:~/b", PROBLEM),
+    ("K='a", PROBLEM),
+    ('K="a', PROBLEM),
+    ("K='a'b", PROBLEM),
+    ("K=a'b'", PROBLEM),
+    ("K=x;y", PROBLEM),
+    ("K=(a)", PROBLEM),
+    ("K=a|b", PROBLEM),
+    ("K+=1", PROBLEM),
+    ("K[0]=1", PROBLEM),
+    ("readonly K=1", PROBLEM),
+    ("just words", PROBLEM),
+    ("K=x\r", PROBLEM),
+)
+
+
+class ShellAssignmentsTest(unittest.TestCase):
+    """parse_shell_assignments, the one KEY=VALUE reader (cpu, vm, doctor, toolchains, bluetooth, bulk), against bash."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-kv-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.empty_path = os.path.join(self.tmp, "no-commands")
+        os.mkdir(self.empty_path)
+
+    def bash_values(self, text: str, keys: list[str]) -> dict[str, str]:
+        """What bash sets when it sources text: PATH is an empty folder, so a line that is a
+        command runs nothing (the table holds no harmful builtin)."""
+        path = os.path.join(self.tmp, "settings.conf")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        script = (
+            '. "$1" 2>/dev/null; shift; for k in "$@"; do if [[ -v $k ]]; then printf "%s=%s\\0" "$k" "${!k}"; fi; done'
+        )
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", script, "_", path, *keys],
+            check=False,
+            capture_output=True,
+            env={"PATH": self.empty_path, "HOME": self.tmp},
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+        )
+        out: dict[str, str] = {}
+        for item in r.stdout.split(b"\0")[:-1]:
+            k, _, v = item.partition(b"=")
+            out[k.decode()] = v.decode("utf-8", "surrogateescape")
+        return out
+
+    def test_table(self) -> None:
+        for line, want in STRICT_TABLE:
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n")
+                if want is PROBLEM:
+                    self.assertNotIn("K", got.values)
+                    self.assertEqual([p.line for p in got.problems], [1], got)
+                else:
+                    self.assertEqual((dict(got.values), got.problems), ({"K": want}, ()))
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_every_value_is_what_bash_sets(self) -> None:
+        for line, _ in STRICT_TABLE:
+            with self.subTest(line=line):
+                values = parse_shell_assignments(line + "\n").values
+                if "K" in values:
+                    self.assertEqual(self.bash_values(line + "\n", ["K"]), {"K": values["K"]})
+
+    def test_problems_name_the_line_and_set_nothing(self) -> None:
+        got = parse_shell_assignments("A='1'\n# c\nB = 2\nA=$X\n")
+        self.assertEqual(dict(got.values), {"A": "1"}, "a problem line must not change an earlier value")
+        self.assertEqual(
+            [str(p) for p in got.problems],
+            [
+                "line 3: B = 2: blanks around =: bash runs it as a command and sets nothing",
+                "line 4: A=$X: $, ` or \\ outside single quotes: bash would expand it (use single quotes)",
+            ],
+        )
+        self.assertEqual(
+            describe_problems("/etc/x.conf", got.problems).splitlines()[0],
+            "/etc/x.conf line 3: B = 2: blanks around =: bash runs it as a command and sets nothing",
+        )
+        self.assertEqual([(a.line, a.key) for a in got.entries], [(1, "A")])
+        # An escaped blank (printf %q) is named for its backslash, not as a command after a blank.
+        (escaped,) = parse_shell_assignments("NAS_PATH=/volume1/My\\ Backups\n").problems
+        self.assertIn("outside single quotes: bash would expand it", escaped.reason)
+
+    def test_the_last_assignment_wins_and_only_a_newline_ends_a_line(self) -> None:
+        self.assertEqual(dict(parse_shell_assignments("K=1\nK=2\n").values), {"K": "2"})
+        self.assertEqual(dict(parse_shell_assignments("K=1\nK = 0\nK=1\n", bash_sourced=False).values), {"K": "1"})
+        for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", chr(0x85), chr(0x2028), chr(0x2029)):
             with self.subTest(sep=repr(sep)):
-                self.assertEqual(parse_assignments(f"A=1{sep}B=2\n"), {"A": f"1{sep}B=2"})
+                self.assertEqual(dict(parse_shell_assignments(f"A=1{sep}B=2\n").values), {"A": f"1{sep}B=2"})
+
+    def test_python_only_files_keep_what_their_readers_accepted(self) -> None:
+        # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (VM_NOCOW = 0 has always worked in vm.conf),
+        # several words, a Windows line end; still no $, backtick or backslash.
+        text = "VM_NOCOW = 0\nA = 'a b' # c\nB = x y  # z\n  C=1h\nD=v\r\nE=$X\n"
+        got = parse_shell_assignments(text, bash_sourced=False)
+        self.assertEqual(dict(got.values), {"VM_NOCOW": "0", "A": "a b", "B": "x y", "C": "1h", "D": "v"})
+        self.assertEqual([p.line for p in got.problems], [6])
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
+        # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
+        with open(os.path.join(REPO, "cpu-setup.sh"), encoding="utf-8") as fh:
+            cpu = re.search(r"printf '%s\\n' (\"# Managed by cpu-setup\.sh.*?)\| cst_install_text", fh.read(), re.S)
+        with open(os.path.join(REPO, "btrfs", "setup-snapshots.bash"), encoding="utf-8") as fh:
+            snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
+        assert cpu is not None and snap is not None
+        generated = self.bash_text(f"target_user=alice; printf '%s\\n' {cpu.group(1)}")
+        quoted = self.bash_text(
+            "printf 'NAS_HOST=%q\\nNAS_USER=%q\\nNAS_PATH=%q\\nNAS_PORT=%q\\n' nas.local danilo /volume1/backup/sophia 2204"
+        )
+        for name, text in (
+            ("cpu-setup.conf", generated),
+            ("snapshots.conf", snap.group(1) + "\n" + quoted),
+            ("bulk.conf", "# Managed by btrfs-setup.sh (CST)\nBULK_USER=alice\n"),
+        ):
+            with self.subTest(name=name):
+                got = parse_shell_assignments(text)
+                self.assertEqual(got.problems, ())
+                self.assertEqual(dict(got.values), self.bash_values(text, sorted(got.values)))
+        self.assertEqual(parse_shell_assignments(generated).values["VM_CPU_DISABLE"].split()[0], "cet-ss")
+        # btrfs-bulk reads bulk.conf as a Python-only file (bulk_user): the same value there.
+        bulk = parse_shell_assignments("# Managed by btrfs-setup.sh (CST)\nBULK_USER=alice\n", bash_sourced=False)
+        self.assertEqual((dict(bulk.values), bulk.problems), ({"BULK_USER": "alice"}, ()))
+        for rel in ("toolchains/toolchains.conf", "bluetooth/bluetooth.conf"):
+            with self.subTest(rel=rel), open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                self.assertEqual(parse_shell_assignments(fh.read(), bash_sourced=False).problems, ())
+
+    def bash_text(self, script: str) -> str:
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+        )
+        return r.stdout
 
 
 if __name__ == "__main__":
