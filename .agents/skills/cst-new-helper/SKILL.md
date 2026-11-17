@@ -26,7 +26,9 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
 
 ## The entry point (a file without `.py`)
 
-- [ ] Shebang `#!/usr/bin/python3 -I`, executable.
+- [ ] Shebang `#!/usr/bin/python3 -I`, executable, then the license line
+      `# SPDX-License-Identifier: MPL-2.0` (`invowk cmd fix license --apply`
+      adds it to every new file; `tests/test_license_headers.py` checks it).
 - [ ] A docstring (often the help), the `BOOTSTRAP` stanza byte for byte as in
       `tests/test_entrypoints.py`, the imports, a `main()` that is a docstring
       and one statement handing argv to the package, and the `__main__`

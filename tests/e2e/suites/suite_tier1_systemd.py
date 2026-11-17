@@ -1062,6 +1062,14 @@ EOF
             if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
             ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
             if grep -v '^unchanged: ' <<<"$ugain"; then echo "second user run changed files" >&2; exit 1; fi
+            # The license line reaches the rendered templates in their own comment syntax, and an
+            # installed zipapp still names who installed it right after its shebang.
+            [[ "$(head -n 1 {stage}/etc/polkit-1/rules.d/50-cpu-setup-game.rules)" == "// SPDX-License-Identifier: MPL-2.0" ]] ||
+                {{ echo "the rendered polkit rules lost their license line" >&2; exit 1; }}
+            [[ "$(head -n 1 {stage}/etc/tmpfiles.d/btrfs-automatic-reclaim.conf)" == "# SPDX-License-Identifier: MPL-2.0" ]] ||
+                {{ echo "the rendered tmpfiles rule lost its license line" >&2; exit 1; }}
+            [[ "$(sed -n 2p {stage}/home/tester/.local/lib/cst/bt-ldac-watch)" == "# managed-by: bluetooth-setup.sh (CST)"* ]] ||
+                {{ echo "the installed bt-ldac-watch lost its managed-by line" >&2; exit 1; }}
             # A dotfiles-style link to the same content stays a link and counts as unchanged.
             d="{stage}$(runuser -u tester -- {installer} dests --owner user --home /home/tester | head -n 1)"
             runuser -u tester -- cp -p "$d" /home/tester/.e2e-link-target

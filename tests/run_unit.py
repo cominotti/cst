@@ -38,7 +38,8 @@ from typing import Final
 import unittest
 
 # The static gates: tests that read the repository (layers, budgets,
-# entry points, the manifest, the Python and shell lists, docs), not the
+# entry points, the manifest, the Python and shell lists, docs, license
+# headers), not the
 # behaviour of a module. Seconds instead of minutes.
 GATE_MODULES: Final = (
     "tests.test_architecture",
@@ -47,6 +48,7 @@ GATE_MODULES: Final = (
     "tests.test_docs",
     "tests.test_duplication",
     "tests.test_entrypoints",
+    "tests.test_license_headers",
     "tests.test_python_files",
     "tests.test_repo_paths",
     "tests.test_ruff_budget",

@@ -62,6 +62,14 @@ consistent.
   into the CST folder). Name files relative to the CST folder (`./cst`, "at the
   top of the CST folder", `"$PWD/cst"`) or use the `cst` command, which the
   installs link into `~/.local/bin`. `tests/test_repo_paths.py` enforces it.
+- **Every file names its license.** One line,
+  `SPDX-License-Identifier: MPL-2.0`, in the file's comment syntax: line 1,
+  or right after a line that must stay first (a shebang, a
+  `# shellcheck shell=` directive, a Markdown file's frontmatter). The full
+  notice stays in LICENSE. `invowk cmd fix license --apply` adds the line to
+  new files; `tests/test_license_headers.py` fails on a file without it.
+  The few files that cannot carry it (no comment syntax, captured data) are
+  in `LICENSE_EXEMPT` of `tests/license_headers.py`, each with its reason.
 - **CI is the gate.** Work on a branch and open a pull request; `main` accepts
   squash merges with a green `CI Status` (fast gates, both E2E tiers) and a
   green SonarCloud check. Never weaken a check to make it pass.
@@ -111,6 +119,8 @@ invowk cmd test unit                          # all unit tests, socket as stdin 
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
 invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
+invowk cmd test license                       # the license header gate only (tests/test_license_headers.py)
+invowk cmd fix license [--apply]              # list the files without the SPDX line; --apply adds it
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)

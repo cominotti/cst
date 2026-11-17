@@ -103,6 +103,35 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test license"
+		category:    "test"
+		description: "Run the license header gate alone (tests/test_license_headers.py: the SPDX line in every file, the exemptions, LICENSE's notice)"
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "python3 -I -B tests/run_unit.py -v tests.test_license_headers"}
+		}]
+	},
+	{
+		name:        "fix license"
+		category:    "check"
+		description: "List the files that lack the SPDX license header (dry run); with --apply, insert it (tests/license_headers.py; a second run changes nothing)"
+		flags: [
+			{name: "apply", type: "bool", default_value: "false", description: "Insert the header instead of only listing the files"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				if [[ "${INVOWK_FLAG_APPLY:-false}" == "true" ]]; then
+					exec python3 -I -B tests/license_headers.py --apply
+				fi
+				exec python3 -I -B tests/license_headers.py
+				"""}
+		}]
+	},
+	{
 		name:        "test lint"
 		category:    "test"
 		description: "Run bash -n and shellcheck on every shell file of the checkout (the list tests/shell_files.py prints)"
