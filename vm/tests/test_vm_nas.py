@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for `cst vm backup --nas` (vm/cst-vm): the live external
 snapshot, the quiesce fallback, restic's arguments, the blockcommit that
 always follows, its verification, the refusals, the retention (forget), the

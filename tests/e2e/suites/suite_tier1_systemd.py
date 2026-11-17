@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Docker Layer 1 E2E suite: unprivileged systemd PID 1 + user manager + SFTP sidecar."""
 
 from __future__ import annotations

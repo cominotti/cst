@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # How the code fits together
 
 How CST's parts connect: the `cst` dispatcher, the modules, the install manifest, the entry

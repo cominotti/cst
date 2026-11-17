@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for tests/repo_files.py, the file list of the static gate tests.
 
 Run from the repository root (-B: no __pycache__ in the repository):

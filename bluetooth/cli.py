@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The `bt-helper` command line: argv to the bluetooth.domain rules, printed.
 
 A driving adapter: it reads files and the system through BluetoothHostPort

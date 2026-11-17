@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The rules of btrfs-snapshot-core, with no I/O: retention policies and
 btrbk's schedule() (plan), snapshot names and wall-clock time, the circuit
 breaker's limits, and parsing of --source, --caches-skip, the state file and

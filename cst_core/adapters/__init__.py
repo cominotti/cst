@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Concrete infrastructure adapters implementing cst_core ports (files: cst_core.adapters.files; zipapps: cst_core.adapters.zipapp)."""
 
 from collections.abc import Callable, Mapping, Sequence

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The `cst doctor` report: the check results as text lines (presentation only)."""
 
 from collections.abc import Sequence

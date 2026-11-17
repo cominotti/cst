@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """systemd unit files as CST writes them: header comment lines, then sections.
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])

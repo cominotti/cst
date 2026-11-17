@@ -2,6 +2,7 @@
 name: cst-refactor-parity
 description: "How to prove that a CST refactor changes no behaviour: the old code from git (git show main:path, git archive), the unchanged tests run on old and new code, a throwaway parity harness that runs both on the same inputs and compares output, exit codes, files and commands, and a review of the test diff. Use when moving, splitting, renaming or converting code (including shell to Python), when a pull request claims \"no behaviour change\", or when reviewing such a pull request."
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
 # Proving a refactor changes nothing
 

@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """chrome-cache: keep Chrome's (Flatpak) HTTP cache out of /home snapshots.
 
 Run by `cst btrfs snapshots setup` (and `snapshots chrome-cache ...`,

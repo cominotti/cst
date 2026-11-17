@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """tests/run_unit.py: what it loads (all, --gates, names)."""
 
 import os

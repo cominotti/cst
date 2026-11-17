@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # CST (Cominotti Setup Tools)
 
 Scripts for one workstation: **sophia**. They keep its disks safe and watched,

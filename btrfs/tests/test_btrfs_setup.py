@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the timer removal paths of btrfs-setup.sh and
 btrfs/setup-snapshots.bash (bash, so the functions are taken from the
 scripts and run with systemctl and rm as shell functions that log; rm

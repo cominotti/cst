@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Install use case: write manifest files (and generated text) only when they changed.
 
 Output lines are the ones the setup scripts always printed:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # toolchains-setup.sh  (the `toolchains` module of CST: run it as `cst toolchains ...`)
 #

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Text presentation helpers rendering swap domain reports."""
 
 from collections.abc import Mapping, Sequence

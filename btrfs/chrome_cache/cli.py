@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """chrome-cache's commands (status, plan, apply, off) and main()."""
 
 from __future__ import annotations

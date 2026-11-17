@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # btrfs-setup.sh  (the `btrfs` module of CST: run it as `cst btrfs ...`)
 #

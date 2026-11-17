@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Reading small files (sysfs, procfs, state files) the way CST programs need it, and creating folders.
 
 Two text readers decode on purpose in two ways; do not merge them:

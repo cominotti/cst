@@ -2,6 +2,7 @@
 name: cst-new-helper
 description: "Checklist for adding a Python helper that CST installs on the machine (a python-entry such as btrfs/docker-gc or vm/cst-vm, shipped as a zipapp): the package layout, the INSTALL_MANIFEST row, the pyproject.toml lists, the BOOTSTRAP stanza and one-statement main(), the help mode and the tier 1 install test. Use when adding a new installed Python program or a new installed file, or when tests/test_distribution.py, tests/test_entrypoints.py, tests/test_python_files.py or tests/test_architecture.py fail for a new file."
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
 # Adding an installed Python helper
 

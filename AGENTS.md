@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # Working on CST (for agents and people)
 
 CST changes the workstation it runs on: boot, btrfs, systemd units, cgroups,

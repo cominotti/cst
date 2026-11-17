@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The `cst doctor` command line: argv to the checks, the report to a stream.
 
 A driving adapter: it builds the Host (the machine, or the host seen from a

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The rules of cst-toolchains (the program behind `cst toolchains`): names
 and paths, the settings syntax, the pruning decision for cargo's build
 folders, the texts CST writes (unit files, cargo and uv settings, the

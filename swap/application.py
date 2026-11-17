@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure use-case orchestration for the swap module (no direct OS I/O or terminal formatting)."""
 
 from collections.abc import Callable, Mapping

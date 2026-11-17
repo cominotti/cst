@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the toolchains module: the command line and target
 selection of toolchains/cst-toolchains, its settings file, `config` (the
 cargo and uv settings that `cst btrfs snapshots setup` used to write itself,

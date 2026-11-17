@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure rules about which modules a Python source imports (by AST, without running it)."""
 
 import ast

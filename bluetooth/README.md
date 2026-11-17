@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst bluetooth`: LE Audio and adaptive LDAC for the headset
 
 This folder holds the parts of `bluetooth-setup.sh`, the `bluetooth` module of

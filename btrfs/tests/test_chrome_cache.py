@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/chrome-cache and the SNAP_EXCLUDE list (no root needed).
 
 HOME is a temporary folder; "Chrome installed" is a fake system install dir.

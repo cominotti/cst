@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure domain model, constants, parsers, and rules for `cst doctor`.
 
 Standard library only (no filesystem I/O, no subprocess calls, no outer

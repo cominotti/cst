@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 # managed-by: bluetooth-setup.sh (CST): `cst bluetooth apply` installs this copy; edit the one in CST.
 """bt-ldac-watch: keeps the headset's LDAC stream at 48000 Hz (CST, the
 `bluetooth` module; see bluetooth/README.md, "LDAC sample rate").

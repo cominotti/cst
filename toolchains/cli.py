@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The commands of cst-toolchains (`cst toolchains ...`): the settings,
 the targets that prune (rust:build, python:uv), status, auto on|off (the
 user timer and the copies it runs), config, and main(). The program

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # Docker E2E tests
 
 These tests start Fedora 45 containers with systemd as PID 1 and run `cst` in

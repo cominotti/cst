@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # Snapshots of /home (and an optional backup on the NAS)
 
 This document explains everything that `cst btrfs snapshots ...` does.

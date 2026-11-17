@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Concrete adapters implementing swap ports on Linux."""
 
 import re

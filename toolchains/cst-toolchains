@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 # managed-by: toolchains-setup.sh (CST): `cst toolchains auto on` installs this copy; edit the one in CST.
 """cst-toolchains: the caches of the developer toolchains (cargo and uv,
 later go, npm, maven) and the toolchain settings CST writes. It is the program behind

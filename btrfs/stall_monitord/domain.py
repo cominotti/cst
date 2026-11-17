@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-monitord's rules, no I/O: thresholds and intervals, the record version and keys, what a kernel stack waits for (the frame lists, wait_kind), and the episode being recorded."""
 
 from __future__ import annotations

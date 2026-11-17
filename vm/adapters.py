@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The vm module's reach into the host: virsh, rpm, rpm-ostree, systemctl and
 restic; the backup index; the NOCOW flag and the file system of the image
 folders; the per-VM lock; signals and the terminal during a NAS backup.

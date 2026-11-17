@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-bulk's commands: steam plan/apply, keep/unkeep, boot, the user
 whose home is handled, the desktop alert, and main().
 """

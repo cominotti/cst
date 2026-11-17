@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # Storage tools for this PC (`cst btrfs`)
 
 This folder holds the parts. The script `../btrfs-setup.sh`, the `btrfs`

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for tests/mutation/cst-mutation, the `invowk cmd test mutation` helper.
 
 Standard library only: no uv, no cosmic-ray and (except the last test class)

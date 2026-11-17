@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST).
 [Unit]
 Description=Hourly btrfs snapshot of /home

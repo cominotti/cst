@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the newer rules of toolchains/cst-toolchains, all in
 scratch homes with fake programs (no real cache, cargo config or rustup
 folder is touched):

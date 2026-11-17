@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst vm`: backups, virtual hardware and NOCOW for the libvirt VM
 
 This folder holds `cst-vm`, the program behind `cst vm` (the module script

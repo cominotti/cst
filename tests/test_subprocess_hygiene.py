@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate: tests must not let bash inherit stdin.
 
 bash has a check for "started by sshd/rshd": when SHLVL is unset (or 0) and

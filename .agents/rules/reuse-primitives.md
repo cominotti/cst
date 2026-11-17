@@ -1,6 +1,7 @@
 ---
 description: Before writing a helper for a command, a file, a lock, a journal line, the host or toolbox split, a size, a duration, a CPU list, a settings file or a unit, use the cst_core primitive; add a missing option there, never a copy
 ---
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 <!-- global rule: loaded for every request -->
 
 # Reuse before you write

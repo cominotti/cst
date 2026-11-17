@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """bt-helper: the text work of bluetooth-setup.sh (CST), kept apart so the
 tests can call it. It only reads files and standard input and prints to
 standard output; it never writes a file, never needs root and never talks to

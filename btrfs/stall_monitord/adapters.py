@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-monitord's machine side: reading /proc, /sys and cgroupfs to the end of each file, the btrfs/disk/container topology, D-state tasks, the journal lines and the writer thread of the log files."""
 
 from __future__ import annotations

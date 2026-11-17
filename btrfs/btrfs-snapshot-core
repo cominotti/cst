@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-snapshot-core: local read-only snapshots with btrbk-compatible retention.
 
 Installed by btrfs-setup.sh (CST) as /usr/local/sbin/btrfs-snapshot-core

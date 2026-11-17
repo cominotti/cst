@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for installing manifest files: zipapps, the install use case, the
 installer CLI, the bash library and the runtime resolver.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 name: Setup invowk
 description: >-
   Download invowk, check the archive against a SHA256 pinned in this action,

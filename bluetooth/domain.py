@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure domain logic, value parsing, and rendering for the bluetooth module."""
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence

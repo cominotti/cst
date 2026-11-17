@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 # uv-dev: run a developer tool (ruff, ty) from the locked "dev" group of
 # pyproject.toml, through uv.
 #

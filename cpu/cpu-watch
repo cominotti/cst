@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """cpu-watch: frame-pacing telemetry for A/B comparisons (user level, read-only).
 
 Installed by cpu-setup.sh (CST) as /usr/local/bin/cpu-watch; also run

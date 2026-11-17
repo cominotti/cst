@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the concepts several CST modules share through cst_core.
 
 errors, text, units, sizes, owned-file states (domain); file reads, journal

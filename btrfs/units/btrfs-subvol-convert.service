@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). Runs at boot only while
 # 'snapshots setup' left directories the session kept busy (flag file), before
 # any user can log in, so nothing has files open in them. Gives up after two

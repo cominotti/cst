@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The vm module's rules: what a libvirt domain definition is made of, the
 hardware `cst vm tune` recommends, the NAS backup's names and retention,
 the weekly timer unit, the command line. Pure: text in, text or values out.

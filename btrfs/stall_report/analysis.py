@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's analysis of one window: coverage, totals, categories, episodes and events (reads the clock, and below when asked)."""
 
 from concurrent.futures import ThreadPoolExecutor

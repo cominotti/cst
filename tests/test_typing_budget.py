@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Typing budget: `Any` and `cast()` may only go down.
 
 ruff's ANN401 already refuses `Any` as a whole annotation, so what is left

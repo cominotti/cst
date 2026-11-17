@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST).
 [Unit]
 Description=btrfs top level for snapshots (on demand)

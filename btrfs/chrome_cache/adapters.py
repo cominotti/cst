@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """chrome-cache's machine side: the flags file reached without following symlinks, the app's install, cache sizes."""
 
 from __future__ import annotations

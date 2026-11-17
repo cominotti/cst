@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # Developer tools for the Python code: uv, ruff, ty, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's

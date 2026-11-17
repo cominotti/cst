@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 set -euo pipefail
 
 # Default is host-simulation mode (remove container marker files so cst acts as on a real host).

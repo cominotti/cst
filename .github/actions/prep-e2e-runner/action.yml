@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 name: Prepare E2E runner
 description: Reclaim disk space on ubuntu-24.04, provision host btrfs kernel support when needed, and hydrate GHCR image cache.
 

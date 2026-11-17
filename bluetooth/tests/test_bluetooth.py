@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for bluetooth/bt-helper (main.conf editing, the WirePlumber
 rule, settings, parsing of busctl/pactl/pw-dump output) and for the option
 checks of bluetooth-setup.sh. No root, no Bluetooth, no service is touched.

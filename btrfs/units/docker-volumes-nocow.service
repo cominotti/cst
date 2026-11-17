@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). Every boot, before Docker starts:
 # keeps the volumes dir NOCOW (+C) and, when 'install' found volumes with
 # copy-on-write data (flag file), rewrites them while no container can use them.

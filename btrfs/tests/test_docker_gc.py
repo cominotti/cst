@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/docker-gc (no root, no Docker engine).
 
 The program is a thin entry over the btrfs.docker_gc package; the tests use

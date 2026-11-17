@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-monitord's arguments and main()."""
 
 from __future__ import annotations

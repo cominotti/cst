@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Build the self-contained zipapp that `install` writes for a python-entry.
 
 The archive holds the entry as `__main__.py`, every repository package it

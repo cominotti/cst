@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Pure domain value objects with invariant enforcement on construction."""
 
 from dataclasses import dataclass

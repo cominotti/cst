@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """docker-gc: conservative garbage collection for the Docker engine.
 
 Installed by `cst btrfs docker-gc enable` (CST) as

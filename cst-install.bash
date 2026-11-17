@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # cst-install.bash: how the setup scripts install files. Sourced, not run.
 #

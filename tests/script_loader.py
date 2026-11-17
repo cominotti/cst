@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Load an extension-less helper script (or any Python file) as a module, for tests.
 
 The module is registered in `sys.modules` before its body runs: `@dataclass`

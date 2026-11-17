@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). Enabled only by 'cst btrfs snapshots setup'.
 [Unit]
 Description=Hourly btrfs snapshot of /home (space guard + btrfs-snapshot-core, local only)

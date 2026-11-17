@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-snapshot-core's commands: one Run per invocation (clock guards,
 state file, creation, sealing of writable snapshots, deletions under the
 circuit breaker), the run lock, the argument parser and main().

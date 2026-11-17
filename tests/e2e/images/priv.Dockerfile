@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 FROM cst-e2e-systemd:local
 
 RUN dnf -y install \

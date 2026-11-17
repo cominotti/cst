@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the file readers of btrfs/btrfs-stall-monitord (no root needed).
 
 The daemon reads /proc and /sys files. Some of them, like /proc/vmstat, are

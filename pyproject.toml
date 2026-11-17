@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Developer tools for this repository only: the ruff linter and the ty type
 # checker (and, in their own group, the cosmic-ray mutation tester). CST
 # itself is not a Python package and installs nothing from here: its helpers

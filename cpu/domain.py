@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The cpu module's rules: vm-pin's rewrite of a libvirt domain definition
 (vCPU count and pinning, the CPU features kept off) and cpu-watch's numbers.
 

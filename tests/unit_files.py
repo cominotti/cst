@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Every systemd unit CST installs or generates, as text (for the unit gates).
 
 Use: python3 -I -B tests/unit_files.py write STAGE   (from anywhere)

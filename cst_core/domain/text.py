@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Small text rules shared by CST programs."""
 
 from collections.abc import Mapping

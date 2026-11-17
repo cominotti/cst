@@ -1,4 +1,5 @@
 #!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
 """Run the unit tests with a socket as stdin (a run-time gate).
 
 Use: python3 -I -B tests/run_unit.py [-v] [--gates | NAME...]   (from anywhere)

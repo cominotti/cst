@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Port interfaces (typing.Protocol) specific to the swap module."""
 
 from typing import Protocol

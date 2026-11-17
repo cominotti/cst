@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Adapters implementing the `doctor` ports against Linux/toolbox hosts."""
 
 from collections.abc import Callable, Mapping

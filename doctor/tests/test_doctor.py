@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for doctor/cst-doctor (`cst doctor`): telling layered packages
 requested by name from ones pinned to a version (tricky names included),
 the one fix command, local packages, overrides, the staged deployment,

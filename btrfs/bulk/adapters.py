@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """What btrfs-bulk reads and changes on the machine: its settings and state
 paths, btrfs and the filesystem (subvolumes, +C, mounts, busy files,
 copies), the child process that runs as the user (Ctx, as_user), the

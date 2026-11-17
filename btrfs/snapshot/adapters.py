@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """What btrfs-snapshot-core reads and changes on the machine: the Host
 (commands, clock, boot id, directory entries; tests replace it), the btrfs
 commands, the scan of a snapshot directory, the cache-folder walk (file

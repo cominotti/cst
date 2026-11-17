@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 # Managed by btrfs-setup.sh (CST). Runs at boot only while 'bulk apply'
 # (or 'snapshots setup') left items the session kept busy (flag file), or a
 # move was interrupted (a journal), before any user can log in, so nothing has

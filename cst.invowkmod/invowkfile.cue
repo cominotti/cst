@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 default_shell: "/bin/bash"
 workdir: ".."
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The errors every CST program reports the same way.
 
 - Usage: the command line is wrong (exit status 2, usage text shown).

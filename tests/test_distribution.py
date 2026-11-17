@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Distribution gate: what `install` writes works where it is written.
 
 For INSTALL_MANIFEST (cst_core/domain/install.py), the one list of installed

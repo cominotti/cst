@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit contract: every program a unit starts or checks for is an installed CST file that its runner can run.
 
 For every unit CST installs or writes (tests/unit_files.py: the manifest's

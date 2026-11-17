@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Docker Layer 2 E2E suite: --privileged loopback btrfs RAID1, DinD, cgroups v2, Polkit, virsh."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The `cst vm` command line (the program behind vm/cst-vm): backup, the NAS
 backup and its weekly timer, list, status, tune, nocow.
 

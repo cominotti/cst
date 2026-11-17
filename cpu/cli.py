@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The cpu module's command lines: cpu-vm-pin and cpu-watch.
 
 Driving adapters: argv in, the rules of cpu.domain applied to what

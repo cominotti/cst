@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Static gate: no file in the repository names the folder it is cloned in.
 
 CST works from wherever it is cloned: `cst` and the module scripts find

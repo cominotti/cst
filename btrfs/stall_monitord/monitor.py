@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-monitord's sampling loop: probes, samples, episodes, hung and busy tasks, kernel log, alerts."""
 
 from __future__ import annotations

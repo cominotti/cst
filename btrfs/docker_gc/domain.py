@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """docker-gc's rules, no I/O: Docker's generated names, its time stamps, which containers are ephemeral."""
 
 from __future__ import annotations

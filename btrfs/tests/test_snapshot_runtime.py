@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the shell side of the cache-folder exclusion: core_cache_args
 in btrfs/btrfs-snapshot (the core's options from SNAPSHOT_EXCLUDE_CACHES and
 SNAPSHOT_CACHES_SKIP) and what snap_status in btrfs/setup-snapshots.bash

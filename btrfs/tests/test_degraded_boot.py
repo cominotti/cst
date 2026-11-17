@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for btrfs/btrfs-degraded-boot-setup.sh (no root, no real udev or rpm-ostree).
 
 The script has no "sourced, so stop here" guard and runs from top to

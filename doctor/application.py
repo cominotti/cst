@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Application probes, check registry, runner, and renderer for `cst doctor`."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping

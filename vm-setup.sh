@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # vm-setup.sh  (the `vm` module of CST: run it as `cst vm ...`)
 #

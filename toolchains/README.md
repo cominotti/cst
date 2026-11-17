@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 # `cst toolchains`: toolchain caches and settings
 
 This folder holds the parts of `toolchains-setup.sh`, the `toolchains` module

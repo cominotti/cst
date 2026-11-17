@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Unit tests for the vm module: vm/cst-vm (what a domain definition is
 made of, backup with its refusals, the manifest and the world-readable
 index, list, status) and the shell frontend vm-setup.sh.

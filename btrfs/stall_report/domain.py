@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's rules, no I/O: the record formats, the wait categories and hints, classifying a stack, the open episode, the verdict lines and number formats."""
 
 from collections.abc import Sequence

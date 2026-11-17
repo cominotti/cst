@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 #
 # bluetooth-setup.sh  (the `bluetooth` module of CST: run it as `cst bluetooth ...`)
 #

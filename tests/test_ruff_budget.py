@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """tests/ruff_budget.py counts ruff's hits per package (no ruff needed here)."""
 
 import unittest

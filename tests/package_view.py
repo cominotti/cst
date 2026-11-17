@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """One object over the modules of a package, for tests written against a monolith.
 
 A helper used to be one file that each test loaded afresh, so a test could

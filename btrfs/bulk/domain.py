@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """The rules of btrfs-bulk, with no I/O: the items that move into ~/Bulk
 (Item, ITEMS), the CACHEDIR.TAG text, the size thresholds and texts, and
 Steam's file formats (VDF text, libraryfolders.vdf and appmanifest rules).
