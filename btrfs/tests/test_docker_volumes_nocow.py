@@ -60,6 +60,7 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from cst_core.adapters import nocow as core_nocow
 from tests.package_view import PackageView
+from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
@@ -1830,6 +1831,20 @@ class RecoverTest(Base):
         self.assertTrue(os.path.islink(os.path.join(self.vols, "link")))
         self.assertEqual(sorted(os.listdir(elsewhere)), names)
         self.assert_no_leftovers("cow")  # the real volume is still cleaned
+
+
+class PostponedDurableTest(PostponeBase):
+    """POSTPONED is a boot counter: its file and folder are fsynced, so a reset right after cannot lose a boot."""
+
+    def test_file_and_folder_fsynced(self) -> None:
+        self.fs.docker_state = "active"
+        os.makedirs(os.path.join(self.proc, "sys/kernel/random"), exist_ok=True)
+        with open(os.path.join(self.proc, "sys/kernel/random/boot_id"), "w") as f:
+            f.write("b1\n")
+        with recorded_fsyncs() as synced:
+            self.call(nocow_cli.migrate)
+        assert_replaced_durably(self, self.postponed, synced)
+        self.assertTrue(os.path.exists(self.postponed))
 
 
 if __name__ == "__main__":

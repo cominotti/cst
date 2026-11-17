@@ -298,7 +298,7 @@ class DegradedBootTest(unittest.TestCase):
             os.chmod(self.put(f"bin/{name}", f'#!/bin/bash\necho "{name} $*" >>"${{FAKE}}/calls"\n{body}\n'), 0o755)
         self.put("calls", "")
         self.put("root/usr/lib/udev/rules.d/64-btrfs.rules", UPSTREAM_64)
-        self.status_json(fixture("unpinned.json", {"serial": 0}))
+        self.status_json(fixture("unpinned.json"))
 
     # ------------------------------------------------------------ helpers --
     def put(self, rel: str, text: str) -> str:
@@ -415,9 +415,7 @@ R="{self.root}"
     def tracked_json(self, booted: list[str], nxt: list[str] | None = None) -> None:
         """A staged deployment (index 0, next boot) and the booted one, with their initramfs-etc lists."""
         staged = {"serial": 1, "initramfs-etc": [self.at(p) for p in (booted if nxt is None else nxt)]}
-        self.status_json(
-            fixture("staged-clean.json", staged, {"serial": 0, "initramfs-etc": [self.at(p) for p in booted]})
-        )
+        self.status_json(fixture("staged-clean.json", staged, {"initramfs-etc": [self.at(p) for p in booted]}))
 
     # ---------------------------------------------------- harness checks --
     def test_every_path_setting_is_pointed_into_the_fake_root(self) -> None:
@@ -460,6 +458,10 @@ R="{self.root}"
                 self.status_json(fixture(name))
                 out = self.ok('ostree_query next-staged; ostree_query summary; echo "[$(ostree_query tracked)]"')
                 self.assertEqual(out, f"{staged}\n{summary}\n[]\n")
+                # The fixtures as rpm-ostree writes them: with each deployment's serial.
+                first = "5" if staged == "yes" else "b"
+                root = self.ok("ostree_query next-root")
+                self.assertEqual(root, f"/ostree/deploy/fedora/deploy/{first * 64}.0\n")
 
     def test_ostree_query_tracked_lists_are_per_deployment(self) -> None:
         self.status_json(
@@ -641,6 +643,30 @@ next_overlay || :
         self.assertEqual(self.ok(code, stub_overlay=False), self.at("/boot/ostree/initramfs-overlays/next.img") + "\n")
         self.put(f"{entries}/ostree-2.conf", f"options ostree={self.tmp}/boot.1/0\ninitrd /ostree/next/initramfs.img\n")
         self.assertEqual(self.ok(code, stub_overlay=False), "")
+
+    def test_next_overlay_without_boot_entries_is_silent(self) -> None:
+        """No boot entry: no overlay and nothing on stderr. The unmatched
+        pattern reached awk, which said "cannot open" on every install and
+        status; an entry awk really cannot read still shows."""
+        self.status_json(fixture("unpinned.json"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "next"))
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/deploy/next"; else real_ostree_query "$1"; fi; }}
+ov="$(next_overlay)"
+echo "[$ov]"
+"""
+        entries = self.at("/boot/loader/entries")
+        for case in ("no entries folder", "an empty entries folder"):
+            with self.subTest(case):
+                if case == "an empty entries folder":
+                    os.makedirs(entries)
+                r = self.run_bash(code, stub_overlay=False)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "[]\n", ""))
+        os.makedirs(os.path.join(entries, "odd.conf"))  # not a file: awk says so
+        r = self.run_bash(code, stub_overlay=False)
+        self.assertEqual((r.returncode, r.stdout), (0, "[]\n"))
+        self.assertIn("odd.conf", r.stderr)
 
     # ---------------------------------------------------- overlay_in_sync --
     def overlay_rc(self, overlay: str) -> str:

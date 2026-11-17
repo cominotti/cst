@@ -123,11 +123,11 @@ SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"]
 DETACH = {"on": False}
 
 # The commands cst-vm runs (where it runs: not moved to the host from a
-# toolbox), and virsh over the same runner. Output that is not UTF-8 raises
-# UnicodeDecodeError, as text=True did.
+# toolbox), and virsh over the same runner. Bytes of their output that are
+# not UTF-8 become U+FFFD.
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
-VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False, decode_errors="strict")
+VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False)
 
 
 def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
@@ -150,14 +150,13 @@ def run(
 ) -> tuple[int, str, str]:
     """(rc, stdout, stderr); rc 127 when the command does not exist. In the
     C locale (virsh translates its answers: "shut off" is "desligado" in
-    pt_BR); extra_env on top. Output that is not UTF-8 raises."""
+    pt_BR); extra_env on top. Bytes that are not UTF-8 become U+FFFD."""
     r = RUNNER.run(
         cmd,
         timeout=timeout,
         env=extra_env,
         locale_c=True,
         new_session=DETACH["on"] if detach is None else detach,
-        decode_errors="strict",
     )
     return _triple(r, cmd[0], timeout)
 
@@ -351,13 +350,14 @@ def read_index(path: str | None = None) -> list[dict[str, Any]]:
 
 
 def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -> None:
-    """Atomically (temporary file + rename), mode 0644, folder 0755."""
+    """Atomically (temporary file + rename), mode 0644, folder 0755; durable
+    (the file and the folder fsynced): a lost index hides a finished backup."""
     path = path or INDEX
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
     text = json.dumps({"version": 1, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
-    write_atomic(path, text, mode=0o644, durable=False, relabel=False)
+    write_atomic(path, text, mode=0o644, relabel=False)
 
 
 def flag_state(flags: int | None) -> bool | None:

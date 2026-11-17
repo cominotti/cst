@@ -33,6 +33,7 @@ from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.docker_gc import cli as gc_cli
 from btrfs.docker_gc import domain as gc_domain
 from tests.package_view import PackageView
+from tests.probes import bytes_program
 
 sys.dont_write_bytecode = True
 
@@ -176,6 +177,21 @@ class ProgramTest(unittest.TestCase):
         for argv in (("run",), ("cleanup-now",), ("bogus",)):
             self.run_main(*argv)
         self.assertEqual(self.restored, ["x", "x", "x"], "run and cleanup-now must keep Python's handling")
+
+    def test_the_run_summary_replaces_a_link_and_leaves_its_target(self) -> None:
+        # It was rewritten in place: through a link, into the file it pointed to.
+        self.v.STATE_DIR = self.tmp
+        target = os.path.join(self.tmp, "elsewhere")
+        with open(target, "w") as f:
+            f.write("keep")
+        os.symlink(target, gc_adapters.LAST_RUN)
+        gc_adapters.save_summary({"at": 1, "failed": 0})
+        self.assertFalse(os.path.islink(gc_adapters.LAST_RUN))
+        with open(gc_adapters.LAST_RUN) as f:
+            self.assertEqual(json.load(f), {"at": 1, "failed": 0})
+        with open(target) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["elsewhere", "last-run.json"])
 
     def test_status_shows_the_last_run_in_decimal_units(self) -> None:
         self.v.docker_up = lambda: False
@@ -322,6 +338,17 @@ class DockerCommandTest(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(RuntimeError) as stop:
             gc_adapters.docker("info")
         self.assertEqual(str(stop.exception), "docker info: daemon down")
+
+
+class NotUtf8OutputTest(unittest.TestCase):
+    """docker(): bytes of docker's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_replaced(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-gc-bytes-")
+        self.addCleanup(shutil.rmtree, tmp)
+        bytes_program(tmp, "docker", b"img\xff\n")
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            self.assertEqual(gc_adapters.docker("image", "ls", "-q").stdout, "img\ufffd\n")
 
 
 if __name__ == "__main__":

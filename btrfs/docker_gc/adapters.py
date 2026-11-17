@@ -42,10 +42,10 @@ log = partial(journal_log, tag="docker-gc")
 
 
 def docker(*args: str, timeout: int = 600, check: bool = True) -> CommandResult:
-    """docker ARGS (stdin ours; output that is not UTF-8 raises). No answer
-    within timeout, or a failure with check: RuntimeError. A docker that
-    cannot be started raises (as subprocess.run did)."""
-    r = RUNNER.run(["docker", *args], timeout=timeout, stdin="inherit", decode_errors="strict")
+    """docker ARGS (stdin ours; bytes that are not UTF-8 become U+FFFD). No
+    answer within timeout, or a failure with check: RuntimeError. A docker
+    that cannot be started raises (as subprocess.run did)."""
+    r = RUNNER.run(["docker", *args], timeout=timeout, stdin="inherit")
     if r.fault == "timeout":
         raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from r.cause
     if r.cause is not None:
@@ -95,6 +95,12 @@ def load_state() -> dict[str, Any]:
 def save_state(st: Mapping[str, Any]) -> None:
     os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
     write_atomic(LAST_USED, json.dumps(st), mode="umask", durable="file", relabel=False)
+
+
+def save_summary(summary: Mapping[str, object]) -> None:
+    """LAST_RUN, replaced atomically (it was rewritten in place): what status shows of the last run."""
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    write_atomic(LAST_RUN, json.dumps(summary), mode="umask", durable=False, relabel=False)
 
 
 def recorder_alive(st: Mapping[str, Any]) -> bool:

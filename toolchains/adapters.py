@@ -509,7 +509,7 @@ def cargo_query(
 def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str | None, str | None]:
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
-    r = RUNNER.run(cmd, cwd=cwd, base_env=env, timeout=60, decode_errors="strict")
+    r = RUNNER.run(cmd, cwd=cwd, base_env=env, timeout=60)
     if r.cause is not None:
         return None, f"cargo metadata: {r.cause}"
     if r.returncode != 0:
@@ -531,7 +531,7 @@ def run_idle(cmd: Sequence[str], cwd: str, env: Mapping[str, str], timeout: floa
     subprocess.run did."""
     io = shutil.which("ionice")
     full = ([io, "-c", "3"] if io else []) + list(cmd)
-    r = RUNNER.run(full, cwd=cwd, base_env=env, timeout=timeout, nice=19, decode_errors="strict")
+    r = RUNNER.run(full, cwd=cwd, base_env=env, timeout=timeout, nice=19)
     if r.cause is not None:
         raise r.cause
     return subprocess.CompletedProcess(full, r.returncode, r.stdout, r.stderr)
@@ -758,7 +758,6 @@ def remove_tree(path: str, timeout: float | None = None) -> tuple[bool, str]:
         timeout=effective_timeout,
         stdin="inherit",
         output="merge",
-        decode_errors="strict",
     )
     if r.fault == "timeout":
         secs = int(effective_timeout) if effective_timeout is not None else 0
@@ -886,7 +885,7 @@ def rustup_default(home: str, rh: str) -> str:
         return ""
     env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
     env.pop("RUSTUP_TOOLCHAIN", None)
-    r = RUNNER.run([rustup, "default"], cwd=home, base_env=env, timeout=20, decode_errors="strict")
+    r = RUNNER.run([rustup, "default"], cwd=home, base_env=env, timeout=20)
     if r.cause is not None:
         return ""
     words = r.stdout.split() if r.returncode == 0 else []
@@ -895,8 +894,8 @@ def rustup_default(home: str, rh: str) -> str:
 
 def sccache_stats(exe: str, env: Mapping[str, str]) -> dict[str, str]:
     """The fields of `EXE --show-stats` in ENV (stderr dropped, within 5 s);
-    {} when it did not run or failed. Output that is not UTF-8 raises."""
-    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout", decode_errors="strict")
+    {} when it did not run or failed. Bytes that are not UTF-8 become U+FFFD."""
+    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout")
     return dict(SCCACHE_STATS.findall(r.stdout)) if r.cause is None and r.returncode == 0 else {}
 
 
@@ -970,7 +969,7 @@ def systemctl_env() -> dict[str, str]:
 def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user; '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    r = RUNNER.run(systemctl_cmd(*args), base_env=systemctl_env(), timeout=60, stdin="inherit", decode_errors="strict")
+    r = RUNNER.run(systemctl_cmd(*args), base_env=systemctl_env(), timeout=60, stdin="inherit")
     if r.cause is not None:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None

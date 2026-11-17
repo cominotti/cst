@@ -31,6 +31,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
 from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from tests.probes import bytes_program
 from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load
 
 TOOLCHAINS = os.path.dirname(TOOL)
@@ -1338,6 +1339,35 @@ class CommandFaultTextTest(unittest.TestCase):
             mock.patch.object(tc_cli, "socket_answers", return_value=True),
         ):
             self.assertIn("sccache server abc: no answer", tc_cli.sccache_status_lines(tmp))
+
+
+class NotUtf8OutputTest(unittest.TestCase):
+    """cargo, ionice'd commands, rm, rustup, sccache and systemctl: bytes of
+    their output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-tc-bytes-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def stub(self, name: str, out: bytes) -> str:
+        return bytes_program(self.tmp, name, out)
+
+    def test_replaced(self) -> None:
+        env = {"PATH": "/usr/bin:/bin"}
+        cargo = self.stub("cargo", b'{"build_directory": "/t/\xff"}')
+        self.assertEqual(tc_adapters.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
+        self.assertEqual(tc_adapters.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
+        self.stub("rm", b"rm: \xff\n")
+        with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:/usr/bin:/bin"}):
+            self.assertEqual(tc_adapters.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
+        rustup = self.stub("rustup", b"stable\xff (default)\n")
+        with mock.patch.object(tc_adapters.shutil, "which", return_value=rustup):
+            self.assertEqual(tc_adapters.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
+        sccache = self.stub("sccache", b"Compile requests  7\nCache location  /t/\xff\n")
+        self.assertEqual(tc_adapters.sccache_stats(sccache, env).get("Compile requests"), "7")
+        systemctl = self.stub("systemctl", b"enabled\xff\n")
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
+            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
 
 
 if __name__ == "__main__":

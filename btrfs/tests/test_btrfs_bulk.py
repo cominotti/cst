@@ -37,6 +37,7 @@ from btrfs.bulk import adapters as bulk_adapters, cli as bulk_cli, domain as bul
 from btrfs.bulk import steam as bulk_steam
 from cst_core.domain.values import Json
 from tests.package_view import PackageView
+from tests.probes import assert_replaced_durably, recorded_fsyncs
 
 sys.dont_write_bytecode = True
 
@@ -1631,6 +1632,33 @@ class BulkTest(BulkBase):
         self.assertLink("go/pkg/mod", "toolchains/go/pkg/mod")
         self.assertTrue(self.m.is_subvol(self.B("toolchains/go/pkg/mod")))
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
+
+
+class StateFilesDurableTest(BulkBase):
+    """bulk-at-boot, bulk-keep and convert-plan decide what the boot step and
+    apply do: each is replaced with its file and its folder fsynced."""
+
+    def test_bulk_at_boot(self) -> None:
+        with recorded_fsyncs() as synced:
+            bulk_adapters.write_flag(["apps"])
+        assert_replaced_durably(self, self.m.FLAG, synced)
+        with open(self.m.FLAG) as f:
+            self.assertEqual(f.read(), "apps\n")
+
+    def test_bulk_keep(self) -> None:
+        with recorded_fsyncs() as synced:
+            self.m.edit_keep(["apps"], [])
+        assert_replaced_durably(self, self.m.KEEP, synced)
+        self.assertEqual(bulk_adapters.read_keep(), ({"apps"}, []))
+
+    def test_convert_plan(self) -> None:
+        with open(self.m.CONVERT_PLAN, "w") as f:
+            f.write(f"# header\ncopy {self.H('.android/avd')}\ncopy {self.H('Workspace')}\n")
+        with recorded_fsyncs() as synced:
+            self.apply()
+        assert_replaced_durably(self, self.m.CONVERT_PLAN, synced)
+        with open(self.m.CONVERT_PLAN) as f:
+            self.assertEqual(f.read(), f"# header\ncopy {self.H('Workspace')}\n")
 
 
 class GibTest(unittest.TestCase):

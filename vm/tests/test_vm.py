@@ -36,6 +36,7 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
+from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 
 sys.dont_write_bytecode = True
@@ -1624,6 +1625,7 @@ class PackageTest(unittest.TestCase):
             stdin: int | None = None,
             env: Mapping[str, str] | None = None,
             start_new_session: bool = False,
+            errors: str | None = None,
         ) -> subprocess.CompletedProcess[str]:
             recorded.append((list(cmd), start_new_session, (env or {}).get("LC_ALL", "")))
             return subprocess.CompletedProcess(list(cmd), 0, "shut off\n", "")
@@ -1712,6 +1714,32 @@ class VmLockTest(unittest.TestCase):
             os.umask(old)
         with open(lock.path) as f:
             self.assertEqual(f.read(), "", "the pid is cleared when the lock is released")
+
+
+class NotUtf8OutputTest(unittest.TestCase):
+    """run() and virsh(): bytes of a command's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_run_and_virsh(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-vm-bytes-")
+        self.addCleanup(shutil.rmtree, tmp)
+        bytes_program(tmp, "virsh", b"shut \xff off\n")
+        printf = ["printf", "\\377abc"]
+        self.assertEqual(vm_adapters.run(printf), (0, "\ufffdabc", ""))
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            self.assertEqual(vm_adapters.virsh("domstate", "win"), (0, "shut \ufffd off\n", ""))
+
+
+class IndexDurableTest(unittest.TestCase):
+    """write_index: the file and its folder are fsynced (a lost index hides a finished backup)."""
+
+    def test_file_and_folder_fsynced(self) -> None:
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-index-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        index = os.path.join(tmp, "lib-cst", "vm-backups.json")
+        with recorded_fsyncs() as synced:
+            vm_adapters.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
+        assert_replaced_durably(self, index, synced)
+        self.assertEqual(vm_adapters.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
 
 
 if __name__ == "__main__":

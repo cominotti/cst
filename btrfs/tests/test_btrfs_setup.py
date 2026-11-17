@@ -44,7 +44,7 @@ set -Eeuo pipefail
 systemctl() {
     echo "systemctl $*" >>"$LOG"
     if [[ "$1" == clean && -e "${UNIT_DIR}/${!#}" ]]; then echo "  (${!#} file present)" >>"$LOG"; fi
-    [[ " $* " != *" ${FAIL:-none} "* ]]
+    if [[ " $* " == *" ${FAIL:-none} "* ]]; then echo "Failed to $1 unit: $*" >&2; return 1; fi
 }
 rm() {
     echo "rm $*" >>"$LOG"
@@ -159,19 +159,62 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertEqual(self.calls(), ["systemctl clean --what=state b.timer"])
         self.assertIn("went-on", r.stdout)
 
-    def test_disable_timers_disables_in_one_call_then_forgets_only_the_timers(self) -> None:
+    def test_disable_timers_disables_each_unit_then_forgets_only_the_timers(self) -> None:
+        # Every disable fails: only x.timer has a unit file, so only its failure is news.
         self.touch(os.path.join(self.units, "x.timer"))
         r = self.run_bash("disable_timers x.timer x.service gone.timer\necho went-on", fail="disable")
         self.assertEqual(
             self.calls(),
             [
-                "systemctl disable --now x.timer x.service gone.timer",
+                "systemctl disable --now x.timer",
+                "systemctl disable --now x.service",
+                "systemctl disable --now gone.timer",
                 "systemctl clean --what=state x.timer",
                 "  (x.timer file present)",
                 "systemctl clean --what=state gone.timer",
             ],
         )
-        self.assertIn("went-on", r.stdout)  # a failed disable (a unit that is not there) is ignored
+        self.assertIn("went-on", r.stdout)
+        self.assertEqual(
+            r.stderr, "WARNING: could not disable x.timer: Failed to disable unit: disable --now x.timer\n"
+        )
+
+    def test_disable_timers_a_missing_unit_does_not_keep_the_others_enabled(self) -> None:
+        # One systemctl call for all three failed as a whole on gone.timer (no unit file):
+        # the timer and the service there stayed enabled and running.
+        self.touch(*(os.path.join(self.units, u) for u in ("x.timer", "x.service")))
+        r = self.run_bash("disable_timers x.timer gone.timer x.service\necho went-on", fail="gone.timer")
+        self.assertEqual(
+            [c for c in self.calls() if "disable" in c],
+            [
+                "systemctl disable --now x.timer",
+                "systemctl disable --now gone.timer",
+                "systemctl disable --now x.service",
+            ],
+        )
+        self.assertIn("went-on", r.stdout)
+        self.assertEqual(r.stderr, "")  # a unit that is not there is not a problem
+
+    def test_disable_timers_names_systemctls_reason_not_its_hint(self) -> None:
+        # A stop that fails: notices first, the reason, then a "See ..." hint as the last line.
+        self.touch(os.path.join(self.units, "x.service"))
+        body = """
+systemctl() {
+    [[ "$1" == disable ]] || return 0
+    printf '%s\\n' 'The unit files have no installation config (WantedBy=, RequiredBy=, UpheldBy=,' \\
+        "Removed '/etc/systemd/system/multi-user.target.wants/x.service'." \\
+        'Job for x.service failed because the control process exited with error code.' \\
+        'See "systemctl status x.service" and "journalctl -xeu x.service" for details.' >&2
+    return 1
+}
+disable_timers x.service
+"""
+        r = self.run_bash(body)
+        self.assertEqual(
+            r.stderr,
+            "WARNING: could not disable x.service: "
+            "Job for x.service failed because the control process exited with error code.\n",
+        )
 
     def test_uninstall_stops_every_timer_before_it_forgets_them(self) -> None:
         timers = re.findall(r"[\w.-]+\.timer", assignment("TIMERS"))
@@ -190,7 +233,9 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertEqual(
             self.calls(),
             [
-                "systemctl disable --now docker-gc-recorder.service docker-gc.service docker-gc.timer",
+                "systemctl disable --now docker-gc-recorder.service",
+                "systemctl disable --now docker-gc.service",
+                "systemctl disable --now docker-gc.timer",
                 "systemctl clean --what=state docker-gc.timer",
                 "  (docker-gc.timer file present)",
             ],
@@ -219,7 +264,7 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertEqual(
             self.calls(),
             [
-                "systemctl disable --now " + " ".join(units),
+                *(f"systemctl disable --now {u}" for u in units),
                 "systemctl clean --what=state docker-gc.timer",
                 "  (docker-gc.timer file present)",
                 "rm -fv /usr/local/sbin/docker-gc",
@@ -304,7 +349,9 @@ class TimerRemovalTest(unittest.TestCase):
         self.assertEqual(
             self.snapshots("snap_disable"),
             [
-                "systemctl disable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service",
+                "systemctl disable --now btrfs-snapshot.timer",
+                "systemctl disable --now btrfs-snapshot-nas.timer",
+                "systemctl disable --now btrfs-subvol-convert.service",
                 "systemctl clean --what=state btrfs-snapshot.timer",
                 "  (btrfs-snapshot.timer file present)",
                 "systemctl clean --what=state btrfs-snapshot-nas.timer",
