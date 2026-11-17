@@ -18,7 +18,6 @@ from bluetooth.domain import (
     current_values,
     edit_general,
     lw_failure,
-    merged_settings,
     pw_state,
     render_le_off,
     render_unit,
@@ -27,6 +26,7 @@ from bluetooth.domain import (
     roles_state,
     satisfied,
     set_keys,
+    settings_report,
     settings_set,
     unit_state,
     wp_state,
@@ -80,9 +80,9 @@ def main(
             print(f"{where}|{path}", file=out)
         return 0
     if cmd == "settings":
-        texts = [t for t in (host.read_or_none(a) for a in args) if t is not None]
-        for k, v in merged_settings(texts).items():
-            print(f"{k}={v}", file=out)
+        shown, warnings = settings_report([(a, t) for a in args if (t := host.read_or_none(a)) is not None])
+        out.write(shown)
+        err.write(warnings)
         return 0
     if cmd not in _ARITY or len(args) != _ARITY[cmd]:
         print(f"bt-helper: usage: see {argv0} (no arguments)", file=err)

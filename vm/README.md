@@ -753,9 +753,17 @@ In `/etc/cst/vm.conf` (all optional):
 | `VM_NAS_KEEP_MONTHLY` | 3 | monthly restic snapshots kept |
 | `VM_NAS_TIMEOUT_HOURS` | 6 | restic is stopped after this long (the overlay is merged back) |
 
-`cst-vm` reads `vm.conf` (and `cpu-setup.conf`) line by line: blanks around
-the key are allowed (`VM_NOCOW = 0`), the last line of a key wins, and a byte
-that is not UTF-8 (in a comment, say) no longer stops the program.
+`cst-vm` reads these files with CST's one settings reader
+(`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,
+and a byte that is not UTF-8 (in a comment, say) no longer stops the program.
+`cpu-setup.conf` and `snapshots.conf`, which bash also sources, are read exactly
+as bash reads them (`NAS_ENABLED=1 # on` is `1`). `vm.conf`, which only
+Python reads, also allows blanks around `=` (`VM_NOCOW = 0`). A line that is
+not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
+a backtick or a backslash outside single quotes, an unclosed quote) sets
+nothing and is named with its line number: `status` and the `plan`s print it
+and go on; `backup`, `tune apply`, `nocow apply` and `backup-timer on|off`
+refuse to start until it is fixed (a default never stands in for it).
 
 ### 10.8 If a backup left an overlay
 

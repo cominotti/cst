@@ -14,7 +14,7 @@ from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT, GAME_STATE, QUIET_LIMITS, URI, lows, pressure_field
 from cst_core.adapters.files import read_text
-from cst_core.domain.text import parse_assignments
+from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 CONF = "/etc/cpu-setup/cpu-setup.conf"
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
@@ -22,10 +22,21 @@ CG = "/sys/fs/cgroup"
 PROC = "/proc"
 
 
-def conf() -> dict[str, str]:
-    """cpu-setup.conf's settings over vm-pin's defaults."""
+def conf(*, refuse: bool = False) -> dict[str, str]:
+    """cpu-setup.conf's settings over vm-pin's defaults, read as bash (game-profile) reads them.
+
+    A line that is not a plain assignment sets nothing: with refuse (apply)
+    the run stops and names it (a default BUILD_CPUS would re-pin the VM);
+    otherwise (plan, status) it is printed on stderr.
+    """
     vals = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": CPU_DISABLE_DEFAULT}
-    vals.update(parse_assignments(read_text(CONF, "")))
+    parsed = parse_shell_assignments(read_text(CONF, ""))
+    if parsed.problems:
+        text = describe_problems(CONF, parsed.problems)
+        if refuse:
+            sys.exit(f"{text}\nFix these lines first; nothing changed.")
+        print(text, file=sys.stderr)
+    vals.update(parsed.values)
     return vals
 
 

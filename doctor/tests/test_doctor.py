@@ -1648,6 +1648,28 @@ class VmNasBackupTest(VmTest):
         r = self.run_tool()
         self.assertIn("info   VM win: weekly NAS backup timer: on", r.stdout)
 
+    def test_settings_are_read_as_bash_reads_them_and_problem_lines_warn(self) -> None:
+        # PRIM-01: "NAS_ENABLED=1 # on" is 1 for btrfs-snapshot (bash); doctor's own copy of the
+        # reader saw "1 # on" and called the NAS backup not set up.
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        snap = os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf")
+        with open(snap, "w") as f:
+            f.write("NAS_ENABLED=1 # on\nNAS_PATH='/volume1/restic'\n")
+        r = self.run_tool()
+        self.assertIn("The NAS backup works with the VM running", r.stdout)
+        self.assertNotIn("snapshots.conf line", r.stdout)
+        with open(snap, "a") as f:
+            f.write("NAS_HOST = nas\n")
+        os.makedirs(os.path.join(self.root, "etc", "cst"), exist_ok=True)
+        with open(os.path.join(self.root, "etc", "cst", "vm.conf"), "w") as f:
+            f.write("VM_NOCOW = no\nVM_TUNE_NIC=$X\n")  # blanks are fine in vm.conf; $ is not
+        r = self.run_tool()
+        self.assertIn("WARN", r.stdout)
+        self.assertIn("/etc/btrfs-setup/snapshots.conf line 3: NAS_HOST = nas: blanks around =", r.stdout)
+        self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
+        self.assertNotIn("vm.conf line 1", r.stdout)
+
     def test_nas_backup_counts_and_fix_names_it(self) -> None:
         self.deployments(rollback_pinned=True)
         os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))

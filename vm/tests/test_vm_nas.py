@@ -1047,6 +1047,35 @@ class TimerTest(Nas):
         self.assertIn("Persistent=true\n", read(timer))
         self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
 
+    def test_settings_are_read_as_bash_reads_them_and_a_problem_line_refuses_the_backup(self) -> None:
+        # PRIM-01: snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
+        # but cst-vm read "1 # on" and called the NAS backup "not set up".
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=1 # on\nNAS_PATH='/volume1/restic'\nNAS_RESTIC_HOST=sophia\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        self.assertNotIn("not set up", r.stdout)
+        # A line bash reads differently (it runs NAS_PATH as a command): status says so and goes on,
+        # a backup refuses before it touches the VM (never a default or a guessed value).
+        with open(self.conf, "a") as f:
+            f.write("NAS_PATH = /volume2/other\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other: blanks around =", r.stderr)
+        open(self.log, "w").close()
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(self.calls(), [], "the backup ran commands")
+        cpu = self.env["CST_VM_CPU_CONF"]
+        with open(cpu, "w") as f:
+            f.write("VM_NAME=$HOSTNAME\n")  # bash would expand it
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{cpu} line 1: VM_NAME=$HOSTNAME: $", r.stderr)
+        self.assertEqual(self.calls(), [])
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")

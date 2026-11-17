@@ -309,6 +309,10 @@ class SettingsTest(Base):
             self.m.parse_conf("MAX_IDEL=24h\n", known)  # a typo is not ignored
         with self.assertRaises(self.m.ConfigError):
             self.m.parse_conf("just words\n", known)
+        # cst_core's one reader (PRIM-01): `export` is an assignment; a value bash would expand is an error.
+        self.assertEqual(self.m.parse_conf("export MIN_KEEP=1h\n", known), {"MIN_KEEP": "1h"})
+        with self.assertRaisesRegex(self.m.ConfigError, r"^line 2: MAX_IDLE=\$IDLE: \$"):
+            self.m.parse_conf("MIN_KEEP=1h\nMAX_IDLE=$IDLE\nMAX_IDEL=1\n", known)
 
     def test_policy_defaults_and_limits(self) -> None:
         s = self.m.Settings(self.home)

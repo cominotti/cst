@@ -51,6 +51,8 @@ from vm.adapters import (
     VmLock,
     blklist,
     booted_deployment,
+    check_conf,
+    conf_number,
     confirm,
     cpu_disable_list,
     default_vm,
@@ -91,7 +93,6 @@ from vm.domain import (
     KEEP_TAG,
     KNOBS,
     LIVE_STATES,
-    NAS_DEFAULTS,
     NAS_SSH_ALIAS,
     ON_CALENDAR,
     OVERLAY_MARK,
@@ -347,17 +348,11 @@ class Uncertain(Refused):
     stayed unclear: the overlay files are kept, an alert is sent."""
 
 
-def conf_number(key: str, path: str | None = None) -> int:
-    """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
-    v = read_conf(path or VM_CONF).get(key, "")
-    return int(v) if v.isdigit() else NAS_DEFAULTS[key]
-
-
 def nas_settings() -> dict[str, Any]:
     """{host, env, repo} for restic, from the /home NAS backup's settings.
     Refused when that backup is not set up: its setup creates the
     repository, the SSH key and the password file this one reuses."""
-    conf = read_conf(NAS_CONF)
+    conf = read_conf(NAS_CONF, bash_sourced=True)
     setup = f"{CST} btrfs snapshots nas setup"
     if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
         raise Refused(
@@ -1034,7 +1029,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
                 print(f"  last run of the service: {last}")
         nas = [e for e in read_index() if e["vm"] == vm and e.get("mode") == "nas"]
         print(f"  last NAS backup: {describe_entry(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
-        conf = read_conf(NAS_CONF)
+        conf = read_conf(NAS_CONF, bash_sourced=True)
         if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
             print(f"  the NAS backup is not set up: {CST} btrfs snapshots nas setup")
         return 0
@@ -1462,6 +1457,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     try:
         if cmd == "list":
             return cmd_list(vm)
+        check_conf(cmd, a["sub"], a["nas"])
         if cmd == "nocow":
             return cmd_nocow_plan(a["root"]) if a["sub"] == "plan" else cmd_nocow_apply()
         vm = vm or default_vm()

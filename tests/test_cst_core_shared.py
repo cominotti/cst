@@ -9,6 +9,7 @@ those modules can switch to it without changing a byte.
 import contextlib
 import io
 import os
+import re
 import shutil
 import stat
 import struct
@@ -25,7 +26,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
-from cst_core.domain.text import first_line, is_yes, parse_assignments
+from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
 from cst_core.domain.units import render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
@@ -478,29 +479,179 @@ class ForceSymlinkAndRunnerTest(unittest.TestCase):
         self.assertEqual((res.returncode, res.stdout), (0, chr(0xFFFD) + "abc"))
 
 
-class ParseAssignmentsTest(unittest.TestCase):
-    """The one KEY=VALUE reader of cpu-setup.conf, vm.conf and the snapshot settings (cpu, vm, doctor)."""
+BASH = "/usr/bin/bash"
+NBSP = chr(0xA0)
+PROBLEM = None
+# (line of a file bash also sources, what parse_shell_assignments must give for K: a value or PROBLEM).
+STRICT_TABLE: tuple[tuple[str, str | None], ...] = (
+    ("K=1", "1"),
+    ("K='a b'", "a b"),
+    ('K="a b"', "a b"),
+    ("K='12-23' # E-cores", "12-23"),
+    ('K="x" # note', "x"),
+    ("export K=v", "v"),
+    ("  K=v", "v"),
+    ("\tK=v  # c", "v"),
+    ("K=", ""),
+    ("K=''", ""),
+    ('K=""', ""),
+    ("K= # c", ""),
+    ("K=a#b", "a#b"),
+    ("K=a #b", "a"),
+    ("K=#x", "#x"),
+    ("K=1 # on", "1"),
+    ("K=user@host:22", "user@host:22"),
+    ("K=/volume1/backups/sophia", "/volume1/backups/sophia"),
+    ("K={a,b}", "{a,b}"),
+    ("K=*", "*"),
+    ("K='$HOME'", "$HOME"),
+    ("K=a=b", "a=b"),
+    ("K=a\x0cb", "a\x0cb"),  # bash splits words at blanks and tabs only
+    ("K=a\x0bb", "a\x0bb"),
+    (f"K=a{NBSP}b", f"a{NBSP}b"),
+    ("K = 1", PROBLEM),
+    ("K =1", PROBLEM),
+    ("K= 1", PROBLEM),
+    ("K=a b", PROBLEM),
+    ("K=$HOME", PROBLEM),
+    ('K="$HOME"', PROBLEM),
+    ("K=`true`", PROBLEM),
+    ("K=a\\b", PROBLEM),
+    ('K="a\\b"', PROBLEM),
+    ("K=~/x", PROBLEM),
+    ("K=a:~/b", PROBLEM),
+    ("K='a", PROBLEM),
+    ('K="a', PROBLEM),
+    ("K='a'b", PROBLEM),
+    ("K=a'b'", PROBLEM),
+    ("K=x;y", PROBLEM),
+    ("K=(a)", PROBLEM),
+    ("K=a|b", PROBLEM),
+    ("K+=1", PROBLEM),
+    ("K[0]=1", PROBLEM),
+    ("readonly K=1", PROBLEM),
+    ("just words", PROBLEM),
+    ("K=x\r", PROBLEM),
+)
 
-    def test_quotes_comments_and_the_last_assignment(self) -> None:
-        text = "FOO='a'\n# FOO=b\n  #BAR=x\nFOO=\"c\"\n  BAZ = d=e \nEMPTY=''\nnot a setting\n"
-        self.assertEqual(parse_assignments(text), {"FOO": "c", "BAZ ": "d=e", "EMPTY": ""})
 
-    def test_a_blank_before_the_equal_sign_is_no_assignment(self) -> None:
-        # The shell runs `VM_NAME =x` as a command; no lookup finds it here either.
-        self.assertNotIn("VM_NAME", parse_assignments("VM_NAME =x\n"))
-        self.assertEqual(parse_assignments(""), {})
+class ShellAssignmentsTest(unittest.TestCase):
+    """parse_shell_assignments, the one KEY=VALUE reader (cpu, vm, doctor, toolchains, bluetooth, bulk), against bash."""
 
-    def test_strip_keys_keeps_the_last_line(self) -> None:
-        # vm's read_conf strips the key; the last line of the file still wins, as in main's cst-vm.
-        self.assertEqual(parse_assignments("K=1\nK = 0\nK=1\n", strip_keys=True), {"K": "1"})
-        self.assertEqual(parse_assignments("K = 0\nK=1\n", strip_keys=True), {"K": "1"})
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-kv-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.empty_path = os.path.join(self.tmp, "no-commands")
+        os.mkdir(self.empty_path)
 
-    def test_only_a_newline_ends_a_line(self) -> None:
-        # The callers read files line by line on main (open() iteration): form feed, vertical tab,
-        # the file/group/record separators, NEL and the Unicode line/paragraph separators are not line ends.
-        for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+    def bash_values(self, text: str, keys: list[str]) -> dict[str, str]:
+        """What bash sets when it sources text: PATH is an empty folder, so a line that is a
+        command runs nothing (the table holds no harmful builtin)."""
+        path = os.path.join(self.tmp, "settings.conf")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        script = (
+            '. "$1" 2>/dev/null; shift; for k in "$@"; do if [[ -v $k ]]; then printf "%s=%s\\0" "$k" "${!k}"; fi; done'
+        )
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", script, "_", path, *keys],
+            check=False,
+            capture_output=True,
+            env={"PATH": self.empty_path, "HOME": self.tmp},
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+        )
+        out: dict[str, str] = {}
+        for item in r.stdout.split(b"\0")[:-1]:
+            k, _, v = item.partition(b"=")
+            out[k.decode()] = v.decode("utf-8", "surrogateescape")
+        return out
+
+    def test_table(self) -> None:
+        for line, want in STRICT_TABLE:
+            with self.subTest(line=line):
+                got = parse_shell_assignments(line + "\n")
+                if want is PROBLEM:
+                    self.assertNotIn("K", got.values)
+                    self.assertEqual([p.line for p in got.problems], [1], got)
+                else:
+                    self.assertEqual((dict(got.values), got.problems), ({"K": want}, ()))
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_every_value_is_what_bash_sets(self) -> None:
+        for line, _ in STRICT_TABLE:
+            with self.subTest(line=line):
+                values = parse_shell_assignments(line + "\n").values
+                if "K" in values:
+                    self.assertEqual(self.bash_values(line + "\n", ["K"]), {"K": values["K"]})
+
+    def test_problems_name_the_line_and_set_nothing(self) -> None:
+        got = parse_shell_assignments("A='1'\n# c\nB = 2\nA=$X\n")
+        self.assertEqual(dict(got.values), {"A": "1"}, "a problem line must not change an earlier value")
+        self.assertEqual(
+            [str(p) for p in got.problems],
+            [
+                "line 3: B = 2: blanks around =: bash runs it as a command and sets nothing",
+                "line 4: A=$X: $, ` or \\ outside single quotes: bash would expand it (use single quotes)",
+            ],
+        )
+        self.assertEqual(
+            describe_problems("/etc/x.conf", got.problems).splitlines()[0],
+            "/etc/x.conf line 3: B = 2: blanks around =: bash runs it as a command and sets nothing",
+        )
+        self.assertEqual([(a.line, a.key) for a in got.entries], [(1, "A")])
+
+    def test_the_last_assignment_wins_and_only_a_newline_ends_a_line(self) -> None:
+        self.assertEqual(dict(parse_shell_assignments("K=1\nK=2\n").values), {"K": "2"})
+        self.assertEqual(dict(parse_shell_assignments("K=1\nK = 0\nK=1\n", bash_sourced=False).values), {"K": "1"})
+        for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", chr(0x85), chr(0x2028), chr(0x2029)):
             with self.subTest(sep=repr(sep)):
-                self.assertEqual(parse_assignments(f"A=1{sep}B=2\n"), {"A": f"1{sep}B=2"})
+                self.assertEqual(dict(parse_shell_assignments(f"A=1{sep}B=2\n").values), {"A": f"1{sep}B=2"})
+
+    def test_python_only_files_keep_what_their_readers_accepted(self) -> None:
+        # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (PR-A pinned VM_NOCOW = 0),
+        # several words, a Windows line end; still no $, backtick or backslash.
+        text = "VM_NOCOW = 0\nA = 'a b' # c\nB = x y  # z\n  C=1h\nD=v\r\nE=$X\n"
+        got = parse_shell_assignments(text, bash_sourced=False)
+        self.assertEqual(dict(got.values), {"VM_NOCOW": "0", "A": "a b", "B": "x y", "C": "1h", "D": "v"})
+        self.assertEqual([p.line for p in got.problems], [6])
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
+        # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
+        with open(os.path.join(REPO, "cpu-setup.sh"), encoding="utf-8") as fh:
+            cpu = re.search(r"printf '%s\\n' (\"# Managed by cpu-setup\.sh.*?)\| cst_install_text", fh.read(), re.S)
+        with open(os.path.join(REPO, "btrfs", "setup-snapshots.bash"), encoding="utf-8") as fh:
+            snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
+        assert cpu is not None and snap is not None
+        generated = self.bash_text(f"target_user=alice; printf '%s\\n' {cpu.group(1)}")
+        quoted = self.bash_text(
+            "printf 'NAS_HOST=%q\\nNAS_USER=%q\\nNAS_PATH=%q\\nNAS_PORT=%q\\n' nas.local danilo /volume1/backup/sophia 2204"
+        )
+        for name, text in (
+            ("cpu-setup.conf", generated),
+            ("snapshots.conf", snap.group(1) + "\n" + quoted),
+            ("bulk.conf", "# Managed by btrfs-setup.sh (CST)\nBULK_USER=alice\n"),
+        ):
+            with self.subTest(name=name):
+                got = parse_shell_assignments(text)
+                self.assertEqual(got.problems, ())
+                self.assertEqual(dict(got.values), self.bash_values(text, sorted(got.values)))
+        self.assertEqual(parse_shell_assignments(generated).values["VM_CPU_DISABLE"].split()[0], "cet-ss")
+        for rel in ("toolchains/toolchains.conf", "bluetooth/bluetooth.conf"):
+            with self.subTest(rel=rel), open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                self.assertEqual(parse_shell_assignments(fh.read(), bash_sourced=False).problems, ())
+
+    def bash_text(self, script: str) -> str:
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=subprocess.DEVNULL,
+        )
+        return r.stdout
 
 
 if __name__ == "__main__":

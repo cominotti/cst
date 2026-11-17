@@ -37,8 +37,10 @@ from btrfs.bulk.domain import (
     TAG_TEXT,
     Unexpected,
 )
+from cst_core.adapters.files import read_text
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
+from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 ROOT = os.geteuid() == 0
 
@@ -58,6 +60,19 @@ CONF = os.path.join(ETC, "bulk.conf")
 FLAG = os.path.join(ETC, "bulk-at-boot")
 KEEP = os.path.join(ETC, "bulk-keep")
 CONVERT_PLAN = os.path.join(ETC, "convert-plan")
+
+
+def bulk_user() -> str | None:
+    """BULK_USER of bulk.conf (setup-bulk.bash writes it), or None when unset or
+    the file cannot be read. A line that is not a plain assignment stops the
+    run, naming the line: root must never guess whose home it moves."""
+    parsed = parse_shell_assignments(read_text(CONF) or "", bash_sourced=False)
+    if parsed.problems:
+        raise SystemExit(
+            f"btrfs-bulk: {describe_problems(CONF, parsed.problems)}\n"
+            "Fix the line (cst btrfs install writes the file) or pass --user NAME."
+        )
+    return parsed.values.get("BULK_USER") or None
 
 
 def log(msg: str) -> None:

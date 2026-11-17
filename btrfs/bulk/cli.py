@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from btrfs.bulk.adapters import (
-    CONF,
+    bulk_user,
     Ctx,
     FLAG,
     KEEP,
@@ -366,13 +366,7 @@ def user_ctx(args: Sequence[str]) -> Ctx:
         name = args[i + 1] if i + 1 < len(args) else None
     if ROOT:
         if not name:
-            try:
-                with open(CONF) as f:
-                    for line in f:
-                        if line.startswith("BULK_USER="):
-                            name = line.split("=", 1)[1].strip().strip("'\"")
-            except OSError:
-                pass
+            name = bulk_user()
         if not name or name == "root":
             raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
         pw = pwd.getpwnam(name)

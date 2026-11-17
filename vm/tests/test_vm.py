@@ -1475,7 +1475,7 @@ class PackageTest(unittest.TestCase):
                 {"VM_NOCOW": True, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": True, "VM_TUNE_NIC": True},
             )
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
-            self.assertEqual([vm_cli.conf_number(k, conf) for k in numbers], [4, 3, 6])
+            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [4, 3, 6])
             with open(conf, "w") as f:
                 f.write(
                     "# comment\n"
@@ -1491,7 +1491,7 @@ class PackageTest(unittest.TestCase):
                 vm_adapters.knobs(conf),
                 {"VM_NOCOW": False, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": False, "VM_TUNE_NIC": False},
             )
-            self.assertEqual([vm_cli.conf_number(k, conf) for k in numbers], [8, 3, 12])
+            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [8, 3, 12])
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())

@@ -401,6 +401,34 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s["LE_AUDIO"], "on")
         self.assertEqual(self.m.merged_settings(["LE_AUDIO=off\nLE_AUDIO=on\n"])["LE_AUDIO"], "on")
 
+    def test_one_reader_for_export_lines_and_problem_lines(self) -> None:
+        # PRIM-01: bluetooth's own reader saw "export LE_AUDIO" as an unknown key, and settings_set
+        # then appended a second LE_AUDIO line instead of replacing the one that counts.
+        self.assertEqual(self.m.parse_settings("export LE_AUDIO=on\n"), {"LE_AUDIO": "on"})
+        self.assertEqual(self.m.settings_set("export LE_AUDIO=on\n", "LE_AUDIO", "off"), ("LE_AUDIO=off\n", True))
+        self.assertEqual(self.m.set_keys("export LDAC_RATE=48000\n"), ["LDAC_RATE"])
+        # A value bash would expand is a problem, never a literal: `bt-helper settings` warns and ignores it.
+        tmp = tempfile.mkdtemp(prefix="bt-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        p = os.path.join(tmp, "user.conf")
+        with open(p, "w") as f:
+            f.write("LE_AUDIO=on\nLDAC_RATE=$RATE\n")
+        r = subprocess.run(
+            [sys.executable, "-I", HELPER, "settings", DEFAULTS, p],
+            check=False,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LE_AUDIO=on\n", r.stdout)
+        self.assertIn("LDAC_RATE=\n", r.stdout)
+        self.assertEqual(
+            r.stderr,
+            f"warning: {p} line 2: LDAC_RATE=$RATE: $, ` or \\ outside single quotes: "
+            "bash would expand it (use single quotes) (the line is ignored)\n",
+        )
+
     def test_settings_keys(self) -> None:
         self.assertEqual(
             self.m.set_keys("# c\nLDAC_RATE=48000\nFOO=1\nLE_AUDIO=on\nLDAC_RATE=\n"), ["LDAC_RATE", "LE_AUDIO"]

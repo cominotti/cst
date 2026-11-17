@@ -27,11 +27,12 @@ from cst_core.adapters.files import ensure_dir, read_text
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import first_line, is_yes, parse_assignments
+from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
 from vm.domain import (
     BTRFS_MAGIC,
     DEFAULT_VM,
     KNOBS,
+    NAS_DEFAULTS,
     NOT_INSTALLED,
     UNIT_MARKER,
     URI,
@@ -132,22 +133,58 @@ def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[in
     return run(["virsh", "-c", URI, *args], timeout=timeout, detach=detach)
 
 
-def read_conf(path: str) -> dict[str, str]:
-    """The settings of a KEY=VALUE file ({} when it cannot be read). cst-vm has
-    always accepted blanks around the key (`VM_NOCOW = 0` in vm.conf, which
-    only Python reads), so the key is stripped here; the last line wins.
+def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
+    """The settings of a KEY=VALUE file ({} when it cannot be read), through
+    cst_core's one reader (parse_shell_assignments); the last line of a key
+    wins. bash_sourced: cpu-setup.conf and snapshots.conf, which bash sources
+    too, read exactly as bash reads them; vm.conf (only Python reads it) also
+    accepts blanks around = (`VM_NOCOW = 0`), as cst-vm always did. A line
+    that is not an assignment sets nothing (check_conf reports it).
     Undecodable bytes are replaced (main's cst-vm stopped with a traceback)."""
-    return parse_assignments(read_text(path, ""), strip_keys=True)
+    return dict(parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).values)
+
+
+def conf_files(cmd: str, sub: str | None, nas: bool) -> list[tuple[str, bool]]:
+    """[(settings file, bash_sourced)] that a cst-vm command reads."""
+    files = [(VM_CONF, False)]
+    if cmd != "nocow":
+        files.append((CPU_CONF, True))  # VM_NAME, VM_CPU_DISABLE
+    if nas or cmd == "backup-timer":
+        files.append((NAS_CONF, True))
+    return files
+
+
+def check_conf(cmd: str, sub: str | None, nas: bool) -> None:
+    """Problem lines of the settings files a command reads: a command that
+    changes the machine (backup, tune/nocow apply, backup-timer on/off)
+    refuses to start (a default must never stand in for a line that says
+    something else); the others print them on stderr and go on."""
+    found = []
+    for path, bash_sourced in conf_files(cmd, sub, nas):
+        problems = parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).problems
+        if problems:
+            found.append(describe_problems(path, problems))
+    if not found:
+        return
+    if cmd == "backup" or sub in ("apply", "on", "off"):
+        raise Refused("\n".join(found) + "\nFix these lines first; nothing was changed.")
+    print("\n".join(found), file=sys.stderr)
+
+
+def conf_number(key: str, path: str | None = None) -> int:
+    """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
+    v = read_conf(path or VM_CONF).get(key, "")
+    return int(v) if v.isdigit() else NAS_DEFAULTS[key]
 
 
 def default_vm() -> str:
-    return read_conf(CPU_CONF).get("VM_NAME") or DEFAULT_VM
+    return read_conf(CPU_CONF, bash_sourced=True).get("VM_NAME") or DEFAULT_VM
 
 
 def cpu_disable_list(conf_path: str | None = None) -> list[str]:
     """The features vm-pin keeps disabled: VM_CPU_DISABLE from cpu-setup.conf
     when set there (also empty), else vm-pin's default (cpu.domain)."""
-    conf = read_conf(conf_path or CPU_CONF)
+    conf = read_conf(conf_path or CPU_CONF, bash_sourced=True)
     if "VM_CPU_DISABLE" in conf:
         return conf["VM_CPU_DISABLE"].split()
     return CPU_DISABLE_DEFAULT.split()

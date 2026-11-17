@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -78,6 +79,8 @@ class _BtrfsBulkModule(Protocol):
     RUN_USER: str
     SNAPSHOT: str | None
     STEAM_ROOT: str
+    ROOT: bool
+    user_ctx: Callable[[Sequence[str]], _CtxProto]
     NOCOW_TOP: str
     ITEMS: Sequence[_ItemProto]
     BY_ID: Mapping[str, _ItemProto]
@@ -538,6 +541,25 @@ class BulkTest(BulkBase):
         self.assertEqual(len(sent), 1)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.m.boot(self.ctx), 0)  # no flag: nothing to do
+
+    def test_root_reads_bulk_user_with_the_one_settings_reader(self) -> None:
+        # PRIM-01: a hand-rolled reader took "BULK_USER=" lines only, quotes stripped by hand; a
+        # value bash would expand ended in a KeyError traceback from pwd as root.
+        me = pwd.getpwuid(os.getuid()).pw_name
+        self.m.ROOT = True
+        for text in (f"BULK_USER={me}\n", f"# CST\nBULK_USER='{me}'\n", f"BULK_USER = {me}  # who\n"):
+            with self.subTest(text=text):
+                with open(self.m.CONF, "w") as f:
+                    f.write(text)
+                self.assertEqual(self.m.user_ctx([]).home, os.path.realpath(pwd.getpwnam(me).pw_dir))
+        with open(self.m.CONF, "w") as f:
+            f.write("# CST\nBULK_USER=$USER\n")
+        with self.assertRaises(SystemExit) as cm:
+            self.m.user_ctx([])
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", str(cm.exception.code))
+        os.remove(self.m.CONF)
+        with self.assertRaisesRegex(SystemExit, "needs --user NAME"):
+            self.m.user_ctx([])
 
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
         # PRIM-02: the counter was written with open("w") and no fsync before the moves; a hang

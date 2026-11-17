@@ -55,7 +55,7 @@ from cpu.domain import (
 def vm_pin(argv: Sequence[str], doc: str) -> int:
     """`cpu-vm-pin plan|apply|status [VM]` (argv without the program name); doc is its help."""
     action = argv[0] if len(argv) > 0 else "status"
-    c = conf()
+    c = conf(refuse=action == "apply")
     name = argv[1] if len(argv) > 1 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
     disable = c["VM_CPU_DISABLE"].split()

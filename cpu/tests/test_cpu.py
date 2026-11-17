@@ -1640,7 +1640,7 @@ class VmPinCliTest(unittest.TestCase):
         out = io.StringIO()
         with (
             unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
-            unittest.mock.patch.object(cpu_cli, "conf", lambda: dict(self.CONF)),
+            unittest.mock.patch.object(cpu_cli, "conf", lambda refuse=False: dict(self.CONF)),
             contextlib.redirect_stdout(out),
         ):
             rc = cpu_cli.vm_pin(argv, doc="DOC")
@@ -1657,6 +1657,40 @@ class VmPinCliTest(unittest.TestCase):
             (c["VM_NAME"], c["VM_VCPUS"], c["BUILD_CPUS"], c["VM_CPU_DISABLE"], c["TARGET_USER"]),
             ("box", "8", "4-7,9", "cet-ss", "alice"),
         )
+
+    def test_conf_reads_values_as_bash_does_and_refuses_problem_lines_on_apply(self) -> None:
+        # PRIM-01: the header says "values may be edited"; BUILD_CPUS='12-23' # E-cores was
+        # "12-23' # E-cores" for vm-pin (written into the cpuset) and 12-23 for game-profile (bash).
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "w") as f:
+                f.write("BUILD_CPUS='12-23' # E-cores\nexport VM_VCPUS=8\n")
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                c = cpu_adapters.conf()
+            self.assertEqual((c["BUILD_CPUS"], c["VM_VCPUS"]), ("12-23", "8"))
+            with open(p, "w") as f:
+                f.write("VM_NAME='box'\nBUILD_CPUS = 8-11\n")
+            err = io.StringIO()
+            calls: list[tuple[str, ...]] = []
+
+            def virsh(*args: str, check: bool = True) -> str:
+                calls.append(args)
+                return SAMPLE_DOMAIN_XML
+
+            with (
+                unittest.mock.patch.object(cpu_adapters, "CONF", p),
+                unittest.mock.patch.object(cpu_cli, "virsh", virsh),
+                contextlib.redirect_stderr(err),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                c = cpu_adapters.conf()  # plan and status: printed, the key keeps vm-pin's default
+                self.assertEqual(c["BUILD_CPUS"], "12-23")
+                self.assertIn(f"{p} line 2: BUILD_CPUS = 8-11: blanks around =", err.getvalue())
+                with self.assertRaises(SystemExit) as cm:
+                    cpu_cli.vm_pin(["apply"], doc="DOC")
+            self.assertIn(f"{p} line 2: BUILD_CPUS = 8-11", str(cm.exception.code))
+            self.assertIn("nothing changed", str(cm.exception.code))
+            self.assertEqual(calls, [], "apply reached virsh with a default BUILD_CPUS")
 
     def test_plan_prints_the_diff_and_is_idempotent(self) -> None:
         rc, out, calls = self.run_vm_pin(["plan"], SAMPLE_DOMAIN_XML)
