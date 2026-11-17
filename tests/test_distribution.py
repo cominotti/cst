@@ -11,8 +11,8 @@ files:
 - where an entry has a known safe help mode, its zipapp runs it from `/`
   with `/usr/bin/python3 -I` and no PYTHONPATH (exit as expected, no
   ImportError), staged under a temporary root;
-- shell files parse (bash -n) and every file a shell script sources is
-  named by a `# shellcheck source=` line and exists in the checkout;
+- every file a shell script sources is named by a `# shellcheck source=`
+  line and exists in the checkout;
 - every shell file of the checkout (tests/shell_files.py, the list
   `invowk cmd test lint` lints) is a known kind: an installed shell
   program, a setup entry point or sourced library, a checkout-only
@@ -243,17 +243,12 @@ class DistributionGateTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "/usr/local/sbin/btrfs-snapshot"), r.stderr)
 
-    def test_shell_files_parse_and_source_only_checkout_files(self) -> None:
+    def test_shell_files_source_only_checkout_files(self) -> None:
         problems: list[str] = []
         shell = [e.src for e in INSTALL_MANIFEST if e.kind == "shell"]
+        # bash -n: test_every_shell_file_is_known_and_parses, on every shell file.
         for rel in sorted(set(shell) | SETUP_ENTRYPOINTS):
-            path = os.path.join(REPO, rel)
-            r = subprocess.run(
-                ["bash", "-n", path], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-            )
-            if r.returncode != 0:
-                problems.append(f"{rel}: bash -n: {r.stderr.strip()}")
-            problems.extend(source_problems(rel, Path(path).read_text(encoding="utf-8")))
+            problems.extend(source_problems(rel, Path(REPO, rel).read_text(encoding="utf-8")))
         # An installed shell program runs without the checkout: it may source nothing of CST.
         for rel in shell:
             for i, line in enumerate(Path(REPO, rel).read_text(encoding="utf-8").splitlines()):

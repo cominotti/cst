@@ -23,7 +23,6 @@ import unittest
 from tests.code_graph import production_python
 from tests.duplication import (
     clones,
-    is_shell,
     normalized_python,
     normalized_shell,
     python_clones,
@@ -33,7 +32,9 @@ from tests.duplication import (
     shell_same_name_definitions,
     without_protocol_bodies,
 )
-from tests.repo_files import REPO, repo_files
+from tests.budgets import is_test_file
+from tests.repo_files import REPO
+from tests.shell_files import shell_files
 from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
 # One table: metric -> ceiling. Lower a number when a change brings it down.
@@ -112,9 +113,7 @@ ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
 
 
 def _shell_files() -> list[str]:
-    return [
-        rel for rel in repo_files() if not rel.startswith("tests/") and "/tests/" not in rel and is_shell(rel, REPO)
-    ]
+    return [rel for rel in shell_files() if not is_test_file(rel)]
 
 
 def without_declared_copies(source: str) -> str:
@@ -216,13 +215,13 @@ class DuplicationRatchetTest(unittest.TestCase):
         self.assertEqual(normalized_shell("# c\nif x; then\n  a  b\nfi\n"), ["if x; then", "a b"])
 
     def test_shell_functions_are_not_defined_twice(self) -> None:
-        names = shell_same_name_definitions(REPO, _shell_files(), ALLOWED_SHELL_SAME_NAMES)
+        every = shell_same_name_definitions(REPO, _shell_files(), [])
         self.assertEqual(
-            names,
+            {name: files for name, files in every.items() if name not in ALLOWED_SHELL_SAME_NAMES},
             {},
             "a shell function defined in several files: share it, or add it to ALLOWED_SHELL_SAME_NAMES with the reason",
         )
-        stale = sorted(set(ALLOWED_SHELL_SAME_NAMES) - set(shell_same_name_definitions(REPO, _shell_files(), [])))
+        stale = sorted(set(ALLOWED_SHELL_SAME_NAMES) - set(every))
         self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SHELL_SAME_NAMES")
 
     def test_shell_function_names(self) -> None:

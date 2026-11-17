@@ -14,9 +14,10 @@ tier 1's test_16 runs `systemd-analyze verify` and `security` on the same
 units for what a parser cannot see.
 """
 
+from collections.abc import Mapping
 import unittest
 
-from cst_core.domain.install import INSTALL_MANIFEST, InstallEntry
+from cst_core.domain.install import InstallEntry, manifest_by_dest
 from cst_core.domain.values import OctalMode
 from tests.unit_files import UnitText, generated_units, manifest_units
 
@@ -37,7 +38,7 @@ def unit_paths(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def contract_problems(unit: UnitText, by_dest: dict[str, InstallEntry]) -> list[str]:
+def contract_problems(unit: UnitText, by_dest: Mapping[str, InstallEntry]) -> list[str]:
     """What is wrong with the paths one unit names, as text lines (empty: nothing)."""
     runner = "root" if unit.scope == "system" else "user"
     problems: list[str] = []
@@ -61,7 +62,7 @@ def contract_problems(unit: UnitText, by_dest: dict[str, InstallEntry]) -> list[
 
 class UnitContractTest(unittest.TestCase):
     def test_every_unit_names_installed_programs(self) -> None:
-        by_dest = {e.dest: e for e in INSTALL_MANIFEST}
+        by_dest = manifest_by_dest()
         units = manifest_units() + generated_units()
         problems = [p for u in units for p in contract_problems(u, by_dest)]
         self.assertEqual(problems, [], "\n".join(problems))

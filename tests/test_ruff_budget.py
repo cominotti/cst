@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests.ruff_budget import RUFF_BUDGETS, rule_counts, unused_noqa
+from tests.ruff_budget import RULES, RUFF_BUDGETS, rule_counts, unused_noqa
 
 
 def rec(code: str, path: str, row: int = 1) -> dict[str, object]:
@@ -37,7 +37,7 @@ class RuffBudgetTest(unittest.TestCase):
     def test_the_table_names_budgeted_rules(self) -> None:
         for key in RUFF_BUDGETS:
             with self.subTest(key=key):
-                self.assertIn(key.rsplit(" ", 1)[1], {"BLE001", "SLF001", "FBT001", "FBT002", "C901"})
+                self.assertIn(key.rsplit(" ", 1)[1], RULES)
 
 
 if __name__ == "__main__":

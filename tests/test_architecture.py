@@ -411,15 +411,12 @@ def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozense
     tree = ast.parse(source, filename=rel)
     allowed_modules = {a.split(".", 1)[0] for a in allowed}
     problems: list[str] = []
-    bound: dict[str, str] = {}  # local name -> fully qualified name
+    bound = _bindings(tree)  # local name -> fully qualified name
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if not _allowed_module(alias.name) and alias.name not in allowed_modules:
                     problems.append(f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)")
-                bound[alias.asname or alias.name.split(".", 1)[0]] = (
-                    alias.name if alias.asname else alias.name.split(".", 1)[0]
-                )
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
@@ -427,7 +424,6 @@ def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozense
                     pass
                 elif not (_allowed_module(node.module) and (_allowed_use(full) or _allowed_module(full))):
                     problems.append(f"{rel}:{node.lineno}: imports {full} (reach the machine through a port)")
-                bound[alias.asname or alias.name] = full
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in IO_BUILTINS:
             if node.func.id not in bound and node.func.id not in allowed:

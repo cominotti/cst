@@ -53,10 +53,6 @@ class UnitText:
     origin: str  # the manifest source, or the program that writes it
 
 
-def _scope(dest: str) -> Scope:
-    return "user" if dest.startswith(("/etc/systemd/user/", "~/")) else "system"
-
-
 def manifest_units() -> list[UnitText]:
     """The unit rows of INSTALL_MANIFEST, templates rendered."""
     out: list[UnitText] = []
@@ -67,7 +63,7 @@ def manifest_units() -> list[UnitText]:
             text = fh.read()
         if e.src.endswith(".in"):
             text = render_template(text, TEMPLATE_VALUES)
-        out.append(UnitText(os.path.basename(e.dest), text, _scope(e.dest), e.src))
+        out.append(UnitText(os.path.basename(e.dest), text, "user" if e.runner == "user" else "system", e.src))
     return out
 
 

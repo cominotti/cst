@@ -252,7 +252,14 @@ def shell_same_name_definitions(repo: str, files: Iterable[str], allowed: Iterab
     return {name: sorted(paths) for name, paths in sorted(where.items()) if len(paths) > 1}
 
 
-_SHELL_FIRST_LINES: Final = ("#!/usr/bin/env bash", "#!/bin/bash", "#!/usr/bin/bash", "#!/bin/sh", "#!/usr/bin/sh")
+_SHELL_FIRST_LINES: Final = (
+    "#!/usr/bin/env bash",
+    "#!/bin/bash",
+    "#!/usr/bin/bash",
+    "#!/bin/sh",
+    "#!/usr/bin/sh",
+    "# shellcheck shell=",
+)
 
 
 def is_shell(rel: str, repo: str) -> bool:
@@ -264,4 +271,4 @@ def is_shell(rel: str, repo: str) -> bool:
             first = fh.readline()
     except OSError:
         return False
-    return first.startswith(_SHELL_FIRST_LINES) or first.startswith("# shellcheck shell=")
+    return first.startswith(_SHELL_FIRST_LINES)
