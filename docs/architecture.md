@@ -34,19 +34,90 @@ composition root" below).
 
 ## Package layout
 
-Python packages follow the Hexagonal Architecture + DDD layout
-(`domain.py` / `domain/` for pure rules and frozen `slots=True` dataclasses,
-`ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
-cases, `adapters.py` / `adapters/` for host I/O and subprocesses, `cli.py`
-for a program's commands). Only swap, doctor, `cst_core` and btrfs's
-bulk, docker-gc, docker-volumes-nocow and snapshot have an application layer
-with ports; in the other packages `cli.py` orchestrates the commands and
-still does some I/O itself. `tests/test_architecture.py`
+Python packages follow Hexagonal Architecture with a pure core, in one of
+two profiles (next section): `domain.py` / `domain/` for pure rules and
+frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
+and subprocesses, `cli.py` for a program's commands, and, in the full
+profile only, `ports.py` / `ports/` for `Protocol` boundaries,
+`application.py` for use cases, `wiring.py` and `presenter.py`. Only swap,
+doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
+snapshot have the full profile; in the other packages `cli.py` orchestrates the
+commands and some still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py`: new logic goes into `domain` (pure),
 `application` (with ports) or `adapters` (I/O). The I/O left outside the
 adapters has a budget per package and layer that it may not go above
 (`IO_BUDGETS`, see "Static gates beyond lint and types" below).
+
+## Package profile
+
+"Hexagonal + DDD" in CST means a pure functional core (functions and frozen
+dataclasses) with the I/O at the edges, not a domain-model framework. Each
+package has the light profile unless a layer of the full one pays for itself.
+
+**Light profile, the default.** Reference package: `btrfs/chrome_cache`.
+
+- `domain.py`: pure rules and value types (frozen dataclasses, `TypedDict`
+  for JSON shapes, `NewType` where a value crosses a boundary). No I/O.
+- `adapters.py`: the I/O, through the cst_core primitives (runner, files,
+  locks, journal, systemd, virsh; see
+  [reuse-primitives](../.agents/rules/reuse-primitives.md)).
+- `cli.py`: parse argv, call one function, print, return the exit status.
+  Its `main` is the composition root: it builds the adapters and may read
+  the environment; it does no other I/O of its own.
+- Functions first; a class only when it carries state across steps.
+- Tests fake cst_core's `CommandRunnerPort` or `FileSystemPort`, or the
+  adapter functions, instead of a port of the package's own.
+
+`btrfs/chrome_cache/cli.py` still has 7 lines of I/O of its own (closing
+folder descriptors, a folder test, resolving and `os.stat`-ing the home, the
+uid checks), counted in
+`IO_BUDGETS`; they belong in its adapters, in a refactor of their own.
+
+**Full profile: add a layer only when it pays.** Reference package:
+`btrfs/docker_volumes_nocow` (a migration with rollback).
+
+- `application.py`: only for a use case with two or more steps that change
+  the machine and must roll back or resume (journals, twins, renames,
+  multi-step installs).
+- `ports.py`: the `Protocol`s `application.py` is typed against
+  (application never imports adapters). Keep them few and shaped as
+  boundaries (how the machine is reached: docker, the volume tree, the state
+  store), never one method per shell command. Where no test needs a fake of
+  its own, type the use case with cst_core's `CommandRunnerPort` /
+  `FileSystemPort` and fake those.
+- `wiring.py`: only when the program reads its environment and also re-runs
+  itself (sudo, runuser); otherwise the construction stays in `cli.py`'s
+  `main`.
+- `presenter.py`: only when there are two or more output formats (text and
+  `--json`).
+
+**What the gates check in each profile.**
+
+- Every package: no I/O in a `domain` module (also in `application`),
+  frozen slotted dataclasses in `domain`, no outer-layer imports from
+  `domain`, `ports` or `application`, a role for every module, the
+  `cli.py` size (`CLI_CEILINGS`), the I/O outside adapters
+  (`IO_BUDGETS`), the module size cap and the duplication measure.
+- Light: `cli.py` may import adapters and read the environment
+  (`LIGHT_CLI_ALLOWED`: `os.environ`, `os.getenv`; a write to the
+  environment, a re-exec or `sys.executable` still counts). Nothing asks
+  for ports, application, wiring or presenter.
+- Full (`HEXAGONAL_PACKAGES`): `cli.py` and `presenter.py` do no I/O at
+  all, only `wiring.py` and the adapters import an adapter, and only
+  `wiring.py` reads the environment or re-runs the program (see "The
+  composition root" below).
+
+**Size and cohesion.** No package module is over 800 lines
+(`tests/test_module_size.py`; today's larger modules are in `OVER_CAP`, each
+never above its entry). Split a big module by command group or check area,
+not by layer.
+
+**Gates and metrics.** Budgets, ceilings and allow-lists fail only when the
+code is above them; `invowk cmd fix budgets` lowers them to the measured
+values and never raises one. Never reshape code that moves or deletes data
+only to satisfy a metric (Sonar's cognitive complexity, the duplication
+measure).
 
 ## The composition root: `wiring.py`
 

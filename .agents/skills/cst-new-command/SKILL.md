@@ -36,7 +36,11 @@ replace them.
       [cst-new-helper](../cst-new-helper/SKILL.md).
 - [ ] New logic goes into `domain` (pure) or `adapters` (I/O), not into
       `cli.py`: `CLI_CEILINGS` in `tests/test_architecture.py` caps each
-      `cli.py` (never raised; `invowk cmd fix budgets` lowers it).
+      `cli.py` (never raised; `invowk cmd fix budgets` lowers it). An
+      `application.py` (with `ports.py`) only for a use case with two or
+      more machine-changing steps that must roll back or resume
+      ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile));
+      no module over 800 lines (`tests/test_module_size.py`).
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of

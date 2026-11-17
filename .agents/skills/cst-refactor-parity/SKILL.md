@@ -9,6 +9,15 @@ description: "How to prove that a CST refactor changes no behaviour: the old cod
 The rule is [refactor-vs-behaviour](../../rules/refactor-vs-behaviour.md).
 Use the base branch the pull request goes into (`main` below).
 
+A layering refactor moves a package towards its profile
+([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile)):
+the light one (domain, adapters, cli) unless a full-profile layer pays for
+itself. Do not add a port that mirrors one command per method, a
+`presenter.py` with one output format or a `wiring.py` without a re-exec,
+and do not reshape code that moves or deletes data only for a metric. When
+the refactor brings a budget or ceiling down, `invowk cmd fix budgets
+--apply` records it; a refactor never raises one.
+
 ## 1. Get the old code
 
 - One file: `git show main:path/to/file > "$tmp/old/file"`.
