@@ -1274,3 +1274,143 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_09_docker_gc_enable_disable_cycle(self) -> None:
+        """`cst btrfs docker-gc enable` with Docker up (test_05's DinD daemon on
+        the loop btrfs, behind a stub docker.service as in test_05a: the unit
+        the recorder is bound to): the program and its three units written,
+        the recorder and the timer enabled and running, the timer's stamp made;
+        a second `enable` writes nothing; `disable` stops and disables all
+        three and forgets the timer's last run, and keeps the program and the
+        unit files; a second `disable` changes nothing; `enable` again runs
+        the recorder again."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_09 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            stub=/run/systemd/system/docker.service
+            bin=/usr/local/sbin/docker-gc
+            units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
+            stamp=/var/lib/systemd/timers/stamp-docker-gc.timer
+            remove_all() {
+                systemctl disable --now "${units[@]}" 2>/dev/null || true
+                rm -f "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp"
+            }
+            cleanup() {
+                remove_all
+                systemctl stop docker.service e2e-dind.service 2>/dev/null || true
+                rm -f "$stub"
+                systemctl daemon-reload
+                systemctl reset-failed "${units[@]}" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            show() { sed "s/^/test_09 $1: /" <<<"$2" >&2; }   # the CI log
+            state() {
+                local u
+                for u in "${units[@]}"; do
+                    printf '%s %s %s\n' "$u" "$(systemctl is-enabled "$u" 2>/dev/null || true)" \
+                        "$(systemctl is-active "$u" 2>/dev/null || true)"
+                done
+                { find "$bin" /etc/systemd/system "$stamp" -printf '%p %y %m %s %T@ %l\n' 2>/dev/null || true; } | sort
+            }
+            recorder_runs() {   # active, and not restarting (Restart=on-failure would hide a failing recorder)
+                local _
+                for _ in $(seq 1 30); do
+                    [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] && break
+                    sleep 1
+                done
+                sleep 3
+                [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active &&
+                    "$(systemctl show -P NRestarts docker-gc-recorder.service)" == 0 ]] && return 0
+                echo "the recorder does not run:" >&2
+                systemctl status --no-pager docker-gc-recorder.service >&2 || true
+                journalctl -q --no-pager -u docker-gc-recorder.service -n 30 >&2 || true
+                return 1
+            }
+            no_writes() {   # no_writes LABEL OUTPUT: every file unchanged
+                local f
+                if grep -E '^written:' <<<"$2"; then echo "$1 wrote a file" >&2; return 1; fi
+                for f in "$bin" "${units[@]/#//etc/systemd/system/}"; do
+                    grep -qxF "unchanged: $f" <<<"$2" || { echo "$1: no 'unchanged: $f'" >&2; return 1; }
+                done
+            }
+
+            # Docker up: the DinD daemon, and a stub docker.service for the recorder's BindsTo=.
+            remove_all
+            systemctl reset-failed "${units[@]}" 2>/dev/null || true
+            printf '[Unit]\nDescription=E2E stub of docker.service (dockerd runs in e2e-dind.service)\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' \
+                >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
+            systemctl start e2e-dind.service
+            for _ in $(seq 1 30); do
+                docker info >/dev/null 2>&1 && break
+                sleep 0.5
+            done
+            docker info >/dev/null
+            systemctl start docker.service
+
+            # 1. enable.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
+            show enable "$out"
+            grep -qF 'docker-gc enabled: image use is recorded from now on' <<<"$out"
+            for f in "$bin" "${units[@]/#//etc/systemd/system/}"; do
+                grep -qxF "written:   $f" <<<"$out" || { echo "no 'written:   $f'" >&2; exit 1; }
+            done
+            [[ "$(systemctl is-enabled docker-gc-recorder.service)" == enabled ]]
+            [[ "$(systemctl is-enabled docker-gc.timer)" == enabled ]]
+            systemctl is-active docker-gc.timer
+            test -e "$stamp"
+            recorder_runs
+            out="$(cst btrfs docker-gc status 2>&1)" || { show status "$out"; exit 1; }
+            show status "$out"
+            grep -qx 'timer enabled, recorder active' <<<"$out"
+
+            # 2. A second enable writes nothing.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "second enable" "$out"; exit 1; }
+            show "second enable" "$out"
+            no_writes "the second enable" "$out"
+            recorder_runs
+
+            # 3. disable: nothing enabled or running, the stamp forgotten; the program and units stay.
+            out="$(cst btrfs docker-gc disable 2>&1)" || { show disable "$out"; exit 1; }
+            show disable "$out"
+            grep -qxF 'docker-gc disabled (recorded state kept in /var/lib/docker-gc).' <<<"$out"
+            for u in "${units[@]}"; do
+                [[ "$(systemctl is-enabled "$u" 2>/dev/null || true)" != enabled ]]
+                [[ "$(systemctl is-active "$u" 2>/dev/null || true)" != active ]]
+            done
+            test ! -e "$stamp"
+            test -x "$bin"
+            for f in "${units[@]/#//etc/systemd/system/}"; do test -f "$f"; done
+            out="$(cst btrfs docker-gc status 2>&1)" || { show "status after disable" "$out"; exit 1; }
+            show "status after disable" "$out"
+            grep -q '^timer disabled' <<<"$out"
+            grep -qF 'recorder inactive' <<<"$out"
+            out="$(cst btrfs status 2>&1)" || { show "btrfs status" "$out"; exit 1; }
+            grep -qxF '  off (cst btrfs docker-gc enable)' <<<"$out"
+
+            # 4. A second disable changes nothing.
+            before="$(state)"
+            out="$(cst btrfs docker-gc disable 2>&1)" || { show "second disable" "$out"; exit 1; }
+            after="$(state)"
+            if [[ "$after" != "$before" ]]; then
+                echo "a second disable changed the state:" >&2
+                diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+                exit 1
+            fi
+
+            # 5. enable again: running again, nothing written.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "enable again" "$out"; exit 1; }
+            show "enable again" "$out"
+            no_writes "enable after disable" "$out"
+            [[ "$(systemctl is-enabled docker-gc.timer)" == enabled ]]
+            systemctl is-active docker-gc.timer
+            recorder_runs
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
