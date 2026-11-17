@@ -86,10 +86,12 @@ before changing that module.
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
 | Python dev tools: uv, ruff, ty, pinned versions, mutation testing | [docs/dev-tools.md](docs/dev-tools.md) |
 | How the code fits together: `cst` dispatch, modules, the install manifest, entry points, package layout, static gates | [docs/architecture.md](docs/architecture.md) |
+| What `cst_core` already provides: reuse it before you write | [.agents/rules/reuse-primitives.md](.agents/rules/reuse-primitives.md) |
 
 ## Agent rules and skills
 
-`.agents/rules/` holds rules for every change, such as
+`.agents/rules/` holds rules for every change:
+[reuse-primitives](.agents/rules/reuse-primitives.md) and
 [refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md).
 `.agents/skills/` holds checklists for one kind of task: `cst-new-command`,
 `cst-new-helper`, `cst-shell-to-python` and `cst-refactor-parity`

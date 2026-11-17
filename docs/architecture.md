@@ -53,11 +53,8 @@ Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-
 
 ## A concept more than one module needs lives once, in `cst_core`
 
-A module imports it instead of keeping a copy:
-
-- domain: `errors` (`Usage`, `Refused`, `shell_exit_status`: 128+N for a child killed by signal N), `text` (`first_line`, `is_yes`, `file_lines` for lines as bash's `read -r` sees them, `parse_shell_assignments` for KEY=VALUE settings files: the one reader, bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads; problem lines set nothing and carry their line number, `describe_problems` words them), `libvirt_xml` (`keep_prefixes`), `values` (sizes: `GIB`, `MIB`, `ByteSize`, `format_bytes_*`; durations; CPU sets), `files` (managed lines and files, `owned_file_state`, `checked_path`), `units` (`render_unit_file`, `render_timer`), `install` (the manifest), `imports` (AST import analysis);
-- ports and adapters: commands (`CommandRunnerPort`), files (`FileSystemPort`), host vs toolbox (`HostExecutionContext`), systemd (`SystemdPort`), libvirt (`VirshPort`, `SubprocessVirshAdapter`), `adapters.files` (`write_atomic`: unique temp file, exact mode, fsync of the file and its folder unless `durable=False`, owner `caller` or `root`; `write_bytes_atomic`, the installer's durable root-owned write; `read_text`: lenient decode, bad bytes replaced; `read_int`; `read_bytes`; `ensure_dir`: folders created with exactly their mode), `LocalFileSystemAdapter.read_text` (byte-transparent decode, for files written back: the second policy is on purpose), `adapters.locks.take_lock` (a lock file it creates gets exactly its mode), `adapters.journal.log`, `adapters.nocow` (`set_nocow`, `inode_flags`), `adapters.runtime` (also `restore_default_signals`: SIGPIPE back to its default in `cst`, the installer, `cst swap` and the commands that only read: `cst doctor`, `btrfs-stall-report`, `cst vm` status/list/plans, `cst toolchains` status/plans, `cst cpu vm-pin` status/plan and `cpu-watch report`; never in a command with cleanup (a backup, a prune, bulk, snapshots, the daemons), where a closed pipe must not cut the cleanup short; `restore_lc_ctype`: the caller's LC_CTYPE back for the modules `cst` runs), `adapters.dispatch` (how `cst` runs a module: `exec`, or in the foreground with bash's signal rules), `adapters.zipapp`;
-- application: `install` (the installer's use case).
+A module imports it instead of keeping a copy. What `cst_core` provides, need by need, and what to do
+when it lacks an option: the rule [reuse-primitives](../.agents/rules/reuse-primitives.md).
 
 ## Static gates beyond lint and types
 

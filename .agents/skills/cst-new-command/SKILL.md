@@ -33,8 +33,8 @@ replace them.
       `cli.py`: `CLI_CEILINGS` in `tests/test_architecture.py` caps each
       `cli.py` and only goes down.
 - [ ] A need another module already has (sizes, managed files, units, locks,
-      systemd, virsh) uses the `cst_core` code listed in
-      [docs/architecture.md](../../../docs/architecture.md) instead of
+      systemd, virsh) uses the `cst_core` primitive
+      ([reuse-primitives](../../rules/reuse-primitives.md)) instead of
       a copy; `tests/test_duplication.py` fails on copies.
 
 ## Tests, in the same change

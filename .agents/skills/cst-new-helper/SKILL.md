@@ -18,8 +18,8 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       the layers (`PURE_MODULES`, `PURE_NAMES`), and every module must be
       reached from an entry point.
 - [ ] A new `cli.py` gets its line in `CLI_CEILINGS` (same file).
-- [ ] Shared needs come from `cst_core` (the list in
-      [docs/architecture.md](../../../docs/architecture.md)), not a copy:
+- [ ] Shared needs come from `cst_core`
+      ([reuse-primitives](../../rules/reuse-primitives.md)), not a copy:
       `tests/test_duplication.py` counts copies, and a name defined in two
       files needs a reason in `ALLOWED_SAME_NAMES`.
 
