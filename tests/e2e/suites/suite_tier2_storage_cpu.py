@@ -1942,3 +1942,59 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_14_btrfs_watch_waits_for_the_real_recorder(self) -> None:
+        """`cst btrfs watch` as the user with the real recorder
+        (btrfs-stall-monitor.service from `cst btrfs install`) on the loop
+        btrfs: a run that writes and syncs 64 MiB passes on its exit status,
+        and the report it saves covers the end of the run (the wait for the
+        recorder's next write works), with samples and a verdict that is not
+        NO DATA. `uninstall` at the end leaves the machine as test_06 left it."""
+        # Registered first: an install that fails half way is undone too.
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall >/dev/null; "
+            "rm -rf /var/tmp/e2e-watch2 /home/tester/e2e-watch.bin",
+            check=False,
+        )
+        exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs install --no-below >/dev/null
+            systemctl is-active btrfs-stall-monitor.service
+            rm -rf /var/tmp/e2e-watch2 && install -d -m 0777 /var/tmp/e2e-watch2
+            """,
+        )
+        out = as_tester_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_14 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C XDG_STATE_HOME=/var/tmp/e2e-watch2
+            base=$XDG_STATE_HOME/btrfs-stall-watch
+            rc=0
+            t0="$(date +%s)"
+            out="$(/opt/cst-rw/cst btrfs watch -l e2e-io -- sh -c \
+                'dd if=/dev/zero of="$HOME/e2e-watch.bin" bs=1M count=64 conv=fsync status=none; rm -f "$HOME/e2e-watch.bin"; exit 4' \
+                2>&1)" || rc=$?
+            sed 's/^/test_14 watch: /' <<<"$out" >&2   # the CI log
+            [[ "$rc" == 4 ]]
+            # The recorder writes every ~10 s: watch must not run out its 60 s wait.
+            (( $(date +%s) - t0 < 45 )) || { echo "watch waited $(( $(date +%s) - t0 )) s" >&2; exit 1; }
+            IFS=$'\t' read -r _ _ r_exit r_label r_dir < <(sed -n 2p "$base/runs.tsv")
+            [[ "$r_exit" == 4 && "$r_label" == e2e-io && -d "$r_dir" ]]
+            grep -q '^verdict ' "$r_dir/report.txt"
+            if grep -q '^verdict  NO DATA' "$r_dir/report.txt"; then echo "the recorder recorded nothing" >&2; exit 1; fi
+            python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+w, c = d["window"], d["coverage"]
+# watch waits for a sample at or after the run's end; the saved window ends just after it.
+assert c["last_sample"] is not None and c["last_sample"] >= w["until"] - 2, (w, c)
+assert d["samples"] >= 1, d["samples"]
+' "$r_dir/report.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

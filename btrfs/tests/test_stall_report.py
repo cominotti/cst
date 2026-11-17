@@ -8,6 +8,8 @@ upgrade must not add that whole counter as if zswap wrote it in a few
 seconds. The records here are built in memory; nothing reads the real
 /var/log/btrfs-stall-monitor or runs below.
 
+StallWatchWaitTest runs btrfs/btrfs-stall-watch with a stand-in report.
+
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_stall_report -v
 """
@@ -16,7 +18,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -715,6 +719,118 @@ class ClosedPipeTest(unittest.TestCase):
                     finally:
                         os.close(w)
                     self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+
+# A stand-in for btrfs-stall-report, for btrfs-stall-watch: samples every 5 s around the
+# moment the workload ended (the workload writes it to $T/end), of which the recorder has
+# handed to disk only those up to 2 s before that end at the first call, and all of them
+# from the second call on (it writes about every 10 s). Like the real report it keeps only
+# samples in [--since, --until] (--until: default now). Every call is logged to $T/calls.
+FAKE_REPORT = """#!/usr/bin/python3 -I
+import json, os, sys, time
+t = os.environ["T"]
+with open(os.path.join(t, "calls"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+with open(os.path.join(t, "calls")) as f:
+    n = len(f.read().splitlines())
+args = sys.argv[1:]
+def opt(name, default):
+    return float(args[args.index(name) + 1].lstrip("@")) if name in args else default
+since, until = opt("--since", 0.0), opt("--until", time.time() + 3600)
+end = float(open(os.path.join(t, "end")).read())
+samples = [] if os.environ.get("NO_SAMPLES") else [end + d for d in (-12.5, -7.5, -2.5, 2.5, 7.5)]
+written = [s for s in samples if n > 1 or s <= end - 2]
+kept = [s for s in written if since <= s <= until]
+if "--json" in args:
+    print(json.dumps({"window": {"since": since, "until": until},
+                      "coverage": {"last_sample": kept[-1] if kept else None}, "samples": len(kept)}))
+else:
+    print("verdict  fake")
+sys.exit(int(os.environ.get("FAKE_RC", "0")))
+"""
+
+
+class StallWatchWaitTest(unittest.TestCase):
+    """btrfs/btrfs-stall-watch waits for the recorder to cover the end of the run, then
+    saves the report of a window that reaches that sample. sleep is a no-op on PATH."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-stall-watch-test-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        for name, text in (("btrfs-stall-report", FAKE_REPORT), ("sleep", "#!/bin/sh\nexit 0\n")):
+            path = os.path.join(self.bin, name)
+            with open(path, "w") as f:
+                f.write(text)
+            os.chmod(path, 0o755)
+
+    def watch(
+        self, *, no_samples: bool = False, report_rc: int = 0
+    ) -> tuple[subprocess.CompletedProcess[str], float, float | None, list[str]]:
+        """The run, and from the saved report.json: the window's end and the last sample in it."""
+        env = {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": self.tmp,
+            "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+            "T": self.tmp,
+            "LC_ALL": "C",
+        }
+        if no_samples:
+            env["NO_SAMPLES"] = "1"
+        env["FAKE_RC"] = str(report_rc)
+        script = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-watch")
+        r = subprocess.run(
+            ["bash", script, "-l", "t", "--", "sh", "-c", 'date +%s >"$T/end"; exit 3'],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+        )
+        base = os.path.join(self.tmp, "state", "btrfs-stall-watch")
+        runs = [d for d in os.listdir(base) if d != "runs.tsv"]
+        self.assertEqual(len(runs), 1, runs)
+        with open(os.path.join(base, runs[0], "report.json")) as f:
+            report = json.load(f)
+        with open(os.path.join(self.tmp, "calls")) as f:
+            calls = f.read().splitlines()
+        last = report["coverage"]["last_sample"]
+        return r, float(report["window"]["until"]), None if last is None else float(last), calls
+
+    def test_it_waits_for_the_first_sample_after_the_run_and_saves_a_window_reaching_it(self) -> None:
+        r, until, last, calls = self.watch()
+        self.assertEqual(r.returncode, 3, r.stderr)
+        with open(os.path.join(self.tmp, "end")) as f:
+            end = float(f.read())
+        # The old wait polled with --until end+1, so the samples after the end never counted:
+        # it ran out its 20 polls and saved a window ending before them.
+        assert last is not None
+        self.assertGreater(last, end)
+        self.assertGreaterEqual(last, until - 2)
+        polls = [c for c in calls if "--json" in c]
+        self.assertEqual(len(polls), 3, calls)  # two waits, then the saved report
+        self.assertNotIn("--until", polls[0])
+        self.assertIn("verdict  fake", r.stdout)
+
+    def test_a_report_that_exits_non_zero_still_ends_the_wait(self) -> None:
+        # JSON printed with an exit status other than 0 (today's report exits 0 whenever it
+        # prints JSON) still counts, and does not keep watch waiting.
+        r, until, last, calls = self.watch(report_rc=1)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        assert last is not None
+        self.assertGreaterEqual(last, until - 2)
+        self.assertEqual(len([c for c in calls if "--json" in c]), 3, calls)
+
+    def test_with_no_recording_it_gives_up_and_keeps_the_runs_own_window(self) -> None:
+        r, until, last, calls = self.watch(no_samples=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        with open(os.path.join(self.tmp, "end")) as f:
+            end = float(f.read())
+        self.assertIsNone(last)
+        self.assertIn(until - end, (1.0, 2.0))  # end + 1 (date may tick between)
+        self.assertEqual(len([c for c in calls if "--json" in c]), 21, calls)
 
 
 if __name__ == "__main__":

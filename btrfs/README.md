@@ -973,6 +973,13 @@ Results go to `~/.local/state/btrfs-stall-watch/<timestamp>/` (`workload.log`,
 `report.txt`, `report.json`), with an index in `runs.tsv`. `watch` needs the
 installed `btrfs-stall-report` command.
 
+The recorder writes to disk about every 10 s, so after the command ends
+`watch` waits (usually 5 to 15 s) until the recording has a sample at or after
+the end. The saved report's window runs from the start of the command to just
+after the newest sample it saw then, which can be a few seconds past the end.
+If no such sample comes within about 60 s (the recorder is not running), it
+saves the report of the command's own window, which then says NO DATA.
+
 ---
 
 ## 8. `degraded-boot`: start the PC with one disk dead
