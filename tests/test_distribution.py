@@ -73,7 +73,7 @@ HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
 # them must be a manifest source (or checkout-only, with a reason).
 _INSTALLABLE_DIRS: Final = ("/units/", "/sysctl/", "/tmpfiles/", "/snapshots/")
 _INSTALLABLE_SUFFIXES: Final = (".in", ".conf", ".ini", ".rules", ".service", ".timer", ".slice", ".mount")
-_NOT_SHIPPED_PREFIXES: Final = ("tests/", ".github/", "docs/", ".idea/")
+_NOT_SHIPPED_PREFIXES: Final = ("tests/", ".github/", "docs/")
 
 
 def _is_production(rel: str) -> bool:

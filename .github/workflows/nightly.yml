@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   static-gates:
-    name: Validate, Audit, Lint, Types & Unit (Fedora 45)
+    name: Validate, Audit, Lint & Unit (Fedora 45)
     runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:45

@@ -40,8 +40,6 @@ INDEX_EXCEPTIONS: Final[dict[str, str]] = {
 # Folders whose Markdown files are not documents for the index: the agent
 # rules and skills, which test_agent_files checks instead.
 NOT_INDEXED_PREFIXES: Final = (".agents/",)
-# Local files of an editor, untracked and not ignored in some checkouts.
-SKIPPED_PREFIXES: Final = (".idea/",)
 INDEX_HEADING: Final = "## Index"
 AGENT_DIRS: Final = ("rules", "skills")
 
@@ -126,7 +124,7 @@ def read(repo: str, rel: str) -> str:
 
 
 def markdown_files(files: Iterable[str]) -> list[str]:
-    return [rel for rel in files if rel.endswith(".md") and not rel.startswith(SKIPPED_PREFIXES)]
+    return [rel for rel in files if rel.endswith(".md")]
 
 
 def link_problems(repo: str, files: Sequence[str]) -> list[str]:
@@ -300,7 +298,7 @@ class DetectorTest(unittest.TestCase):
             "# Rules\n[not the index](docs/b.md)\n## Index: where\n| a | b |\n|---|---|\n"
             "| x | [README.md](README.md) |\n| y | [docs/a.md](docs/a.md#part) |\n## Commands\n"
         )
-        files = ["AGENTS.md", "README.md", "docs/a.md", "docs/b.md", ".agents/rules/r.md", ".idea/n.md"]
+        files = ["AGENTS.md", "README.md", "docs/a.md", "docs/b.md", ".agents/rules/r.md"]
         self.assertEqual(index_links(agents), {"README.md", "docs/a.md"})
         self.assertEqual(unindexed(files, agents), ["docs/b.md"])
 

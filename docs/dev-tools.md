@@ -49,6 +49,16 @@ physical path (`pwd -P`): one environment per checkout or worktree. Deleting
 these folders is safe; the next run creates them again. `.venv/` and
 `.ruff_cache/` are in `.gitignore` in case a tool is run some other way.
 
+An IDE can make one anyway. A JetBrains IDE (PyCharm, IntelliJ with the
+Python plugin) that opens the checkout reads `pyproject.toml`, offers a uv
+interpreter, and runs uv in the checkout without `UV_PROJECT_ENVIRONMENT`:
+it creates `.venv/` there and installs the `dev` group into it (that is how a
+`.venv/` with ruff and ty appeared next to a new `.idea/`). Point the IDE at
+the environment `tests/uv-dev` made instead
+(`${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>/bin/python`, after one
+`tests/uv-dev ruff --version`), or delete the `.venv/` it made; `.idea/` is
+in `.gitignore`.
+
 uv uses the system Python (`python-preference = "only-system"`) and never
 downloads one. `requires-python = ">=3.15"`: Fedora 45 ships Python 3.15 in
 the CI image, in the E2E images and on the workstation host. ruff and ty

@@ -113,9 +113,7 @@ ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
 
 def _shell_files() -> list[str]:
     return [
-        rel
-        for rel in repo_files()
-        if not rel.startswith((".idea/", "tests/")) and "/tests/" not in rel and is_shell(rel, REPO)
+        rel for rel in repo_files() if not rel.startswith("tests/") and "/tests/" not in rel and is_shell(rel, REPO)
     ]
 
 
