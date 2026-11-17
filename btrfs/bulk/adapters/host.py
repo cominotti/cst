@@ -174,11 +174,13 @@ class Host:
             try:
                 with open(os.path.join(ctx.home, rel)) as f:
                     pid = f.read(32).strip()
+                if not pid.isdigit():  # the user writes this file: never a path for root to open
+                    continue
                 with open(os.path.join(self.proc, pid, "comm")) as f:
                     comm = f.read().strip()
             except OSError, ValueError:
                 continue
-            if pid.isdigit() and comm.startswith("steam"):
+            if comm.startswith("steam"):
                 why.append(f"~/{rel} names the live process {pid}")
         return why
 
