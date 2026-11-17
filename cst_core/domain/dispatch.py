@@ -237,7 +237,10 @@ def script_help(script_text: str, prog: str) -> str:
     line left out, "# " taken off), then the usage line. What
     `sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' | sed 's/^# \\{0,1\\}//'` printed."""
     out: list[str] = []
-    for number, line in enumerate(script_text.split("\n"), start=1):
+    lines = script_text.split("\n")
+    if script_text.endswith("\n"):
+        lines.pop()  # the newline ends the last line; it starts no empty one
+    for number, line in enumerate(lines, start=1):
         if number < 2:
             continue
         if "SPDX-License-Identifier:" not in line:

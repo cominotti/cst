@@ -1060,6 +1060,9 @@ class ModuleRouterTest(unittest.TestCase):
         self.assertEqual(
             script_help("#!/x\n# one", "p"), "one\nUsage: p <command> [args]\n", "no empty line: to the end"
         )
+        # The header runs to the end of a file that ends with a newline: no blank line before Usage (as sed).
+        self.assertEqual(script_help("#!/x\n# one\n# two\n", "p"), "one\ntwo\nUsage: p <command> [args]\n")
+        self.assertEqual(script_help("#!/x\n# one\n\n", "p"), "one\n\nUsage: p <command> [args]\n")
         for module in ROUTING:
             script = os.path.join(REPO_ROOT, f"{module}-setup.sh")
             sed = subprocess.run(
