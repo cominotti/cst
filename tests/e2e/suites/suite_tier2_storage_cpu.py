@@ -632,6 +632,150 @@ echo E2E-OK
 """
 
 
+# test_21: `cst vm nocow` on the loop btrfs (/var and /var/home): the system
+# folder is a scratch path (CST_VM_SYSTEM_IMAGES) whose parent exists, the user
+# folders are tester's.
+VM_NOCOW_SCRIPT = r"""
+set -E
+trap 'echo "test_21 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+w=/var/tmp/e2e-vm-nocow
+H=/home/tester
+sys="$w/libvirt/images"
+sess="$H/.local/share/libvirt/images"
+boxes="$H/.local/share/gnome-boxes/images"
+flat="$H/.var/app/org.gnome.Boxes/data/gnome-boxes/images"
+# As tester, with the test's system folder and settings file (CST_VM_*).
+t() {
+    runuser -u tester -- env HOME="$H" USER=tester LOGNAME=tester PATH=/usr/bin:/bin \
+        CST_VM_SYSTEM_IMAGES="$sys" CST_VM_CONF="$w/vm.conf" "$@"
+}
+nocow() { t /opt/cst-rw/cst vm nocow "$@"; }
+# apply on a pseudo-terminal (it asks [y/N]), answering $1.
+drive() { t /usr/bin/python3 -I "$w/pty-answer.py" "$1" /opt/cst-rw/cst vm nocow apply; }
+# As root (the root-only folder is readable), for tester's folders (SUDO_USER).
+as_root() { SUDO_USER=tester CST_VM_SYSTEM_IMAGES="$sys" CST_VM_CONF="$w/vm.conf" /opt/cst-rw/cst vm nocow "$@"; }
+attrs() { lsattr -d "$1" | awk '{print $1}'; }
+has_c() { [[ "$(attrs "$1")" == *C* ]]; }
+# The flags of every folder and image, and whether the Flatpak tree exists.
+state() {
+    local p
+    for p in "$sys" "$sess" "$boxes" "$sess/old.qcow2"; do
+        if [[ -e "$p" ]]; then echo "$(attrs "$p") $p"; else echo "absent $p"; fi
+    done
+    if [[ -e "$H/.var/app/org.gnome.Boxes" ]]; then echo "present $H/.var/app/org.gnome.Boxes"; fi
+}
+same() {   # same LABEL BEFORE
+    [[ "$(state)" == "$2" ]] && return 0
+    printf 'test_21 %s changed the folders:\nbefore:\n%s\nafter:\n%s\n' "$1" "$2" "$(state)" >&2
+    return 1
+}
+show() { sed "s/^/test_21 $1: /" <<<"$2" >&2; }   # the CI log
+# The lines of plan's block for one folder (its header up to the next header).
+block() { awk -v h="$1  [" 'index($0, h) == 1 {on = 1; print; next} on && /^[^ ]/ {exit} on {print}' <<<"$2"; }
+
+rm -rf "$w/libvirt" "$w/vm.conf"
+mkdir -p "$w/libvirt"   # libvirt is installed (its folder exists), its images folder not yet
+t mkdir -p "$sess" "$boxes"
+t dd if=/dev/urandom of="$sess/old.qcow2" bs=1M count=4 status=none
+t touch "$sess/old2.qcow2.cow-old"
+for p in "$sess" "$boxes" "$sess/old.qcow2"; do
+    if has_c "$p"; then echo "$p has +C before apply: the test would prove nothing" >&2; exit 1; fi
+done
+before="$(state)"
+
+# 1. plan: what apply would do; changes nothing.
+out="$(nocow plan)"
+show plan "$out"
+grep -qxF "$sys  [libvirt qemu:///system: virt-manager, virsh]: not present" <<<"$out"
+grep -qxF "$flat  [GNOME Boxes (Flatpak)]: not present" <<<"$out"
+block "$sess" "$out" | grep -qF "  NOCOW mark (+C): no: "
+block "$sess" "$out" | grep -qF "  still copy-on-write: old.qcow2 "
+block "$sess" "$out" | grep -qF "chattr +C"
+block "$sess" "$out" | grep -qxF "  leftover of a conversion: old2.qcow2.cow-old (remove it once the VM booted well from the new file)"
+block "$boxes" "$out" | grep -qxF "  images: none"
+grep -qF "(folders: $sys (not created yet), $sess, $boxes)" <<<"$out"
+same plan "$before"
+
+# 2. apply without a terminal: refused, nothing changed.
+if out="$(nocow apply </dev/null 2>&1)"; then echo "apply ran without a terminal: $out" >&2; exit 1; fi
+grep -qF "apply asks for confirmation: run it in a terminal" <<<"$out"
+same "apply without a terminal" "$before"
+
+# 3. answered no: nothing changed.
+out="$(drive n)"
+show "apply, no" "$out"
+grep -qF "[y/N] Nothing changed." <<<"$out"   # the answer ends the prompt's line
+same "apply answered no" "$before"
+
+# 4. answered yes: the system folder created as libvirt does it, through sudo, and every folder marked.
+out="$(drive y)"
+show apply "$out"
+# Not -x: apply adds "(its mark is not readable as your user: set again, harmless)" to a folder
+# it is about to create (reported separately as a wording bug; this test checks the action).
+grep -qF "  create (root:root 0711) and mark +C: $sys (sudo)" <<<"$out"
+grep -qxF "  mark +C: $sess" <<<"$out"
+grep -qxF "  mark +C: $boxes" <<<"$out"
+grep -qF "  sudo install -d -o root -g root -m 0711 $sys" <<<"$out"   # on the line of the question
+grep -qxF "  sudo chattr +C $sys" <<<"$out"
+for p in "$sys" "$sess" "$boxes"; do
+    grep -qxF "  done: $p" <<<"$out"
+    has_c "$p"
+done
+[[ "$(stat -c '%U:%G %a' "$sys")" == "root:root 711" ]]
+[[ "$(stat -c '%U' "$sess")" == tester ]]
+# An existing image keeps its state; files created later get the mark.
+if has_c "$sess/old.qcow2"; then echo "apply converted an existing image" >&2; exit 1; fi
+[[ ! -e "$H/.var/app/org.gnome.Boxes" ]]   # a missing user folder is not created
+t touch "$sess/new.qcow2"
+has_c "$sess/new.qcow2"
+touch "$sys/new.img"
+has_c "$sys/new.img"
+rm -f "$sys/new.img"
+after="$(state)"
+
+# 5. plan as tester: the user folders marked, the old image still to convert,
+# the root-only folder unreadable (never "copy-on-write").
+out="$(nocow plan)"
+show "plan after apply" "$out"
+block "$sess" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+block "$boxes" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+block "$sess" "$out" | grep -qxF "  NOCOW images: new.qcow2"
+block "$sess" "$out" | grep -qF "  still copy-on-write: old.qcow2 "
+block "$sys" "$out" | grep -qF "  NOCOW mark (+C): not readable as your user (root-only folder): "
+grep -qF "(folders: $sys (mark not readable here: set again, harmless))" <<<"$out"
+same "plan after apply" "$after"
+
+# 6. As root everything is readable: nothing left to mark, and apply asks nothing.
+out="$(as_root plan --root)"
+show "plan --root" "$out"
+block "$sys" "$out" | grep -qxF "  NOCOW mark (+C): yes"
+grep -qxF "No folder to mark." <<<"$out"
+out="$(as_root apply </dev/null)"
+show "second apply as root" "$out"
+grep -qxF "Every VM image folder present on btrfs already has the NOCOW mark (+C)." <<<"$out"
+same "second apply as root" "$after"
+
+# 7. A second apply as tester sets the mark again only on the folder it cannot read.
+out="$(drive y)"
+show "second apply as tester" "$out"
+grep -qxF "  mark +C: $sys (sudo) (its mark is not readable as your user: set again, harmless)" <<<"$out"
+if grep -qE "^  (create .*|mark )\+C: ($sess|$boxes)$" <<<"$out"; then echo "a second apply marked a user folder again" >&2; exit 1; fi
+grep -qxF "  done: $sys" <<<"$out"
+same "second apply as tester" "$after"
+
+# 8. VM_NOCOW=no: the folders are not managed; a new folder stays copy-on-write.
+printf 'VM_NOCOW=no\n' >"$w/vm.conf"
+t mkdir -p "$flat"
+out="$(nocow apply </dev/null)"
+grep -qxF "VM_NOCOW=no in $w/vm.conf: nothing to do." <<<"$out"
+out="$(nocow plan)"
+grep -qxF "VM_NOCOW=no in $w/vm.conf: the VM image folders are not managed." <<<"$out"
+if has_c "$flat"; then echo "VM_NOCOW=no marked a folder" >&2; exit 1; fi
+echo E2E-OK
+"""
+
+
 def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
@@ -2390,4 +2534,36 @@ assert d["samples"] >= 1, d["samples"]
             self.PRIV_CONTAINER, "systemctl start virtqemud.service && virsh -c qemu:///system list --all >/dev/null"
         )
         out = exec_bash(self.PRIV_CONTAINER, VM_TUNE_SCRIPT).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_21_vm_nocow_plan_apply_second_run(self) -> None:
+        """`cst vm nocow` on the loop btrfs, as tester (sudo for the system
+        folder, as on the workstation). The system folder is missing (its
+        parent exists, as when libvirt is installed); the session folder holds
+        a copy-on-write image and a conversion leftover; the RPM Boxes folder
+        is empty; the Flatpak one is missing. `plan` lists each folder, the
+        image still copy-on-write with the commands to convert it and the
+        leftover, and changes nothing. `apply` without a terminal refuses,
+        answered no changes nothing; answered yes it creates the system
+        folder through sudo (root:root 0711) and sets +C on it and on the two
+        user folders; the existing image keeps no +C, files created later get
+        it, the missing Flatpak folder is not created. Afterwards plan as
+        tester shows the user folders marked and the root-only one not
+        readable (never "copy-on-write"); as root `plan --root` has no
+        folder to mark and a second `apply` asks nothing and changes
+        nothing; a second `apply` as tester sets the mark again only on the
+        root-only folder (the documented "set again, harmless").
+        VM_NOCOW=no leaves a new folder alone. There is no undo command
+        (the undo table of the top-level README says chattr -C by hand)."""
+        w = "/var/tmp/e2e-vm-nocow"
+        h = "/home/tester"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            f"rm -rf {w} {h}/.local/share/libvirt {h}/.local/share/gnome-boxes {h}/.var/app/org.gnome.Boxes",
+            check=False,
+        )
+        exec_bash(self.PRIV_CONTAINER, f"rm -rf {w} && mkdir -p {w}")
+        docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/pty-answer.py"], input_text=PTY_ANSWER_DRIVER)
+        out = exec_bash(self.PRIV_CONTAINER, VM_NOCOW_SCRIPT).stdout
         self.assertIn("E2E-OK", out)

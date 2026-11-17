@@ -990,6 +990,8 @@ virsh wrapper and the timer units in-process.
 The Docker E2E tests ([tests/e2e/README.md](../tests/e2e/README.md), tier 2)
 run the commands for real. `test_20`: `tune plan`, `apply` and a second run
 against the real `virtqemud`, then the restore of the saved definition.
+`test_21`: `nocow plan` and `apply` on a real btrfs, with the system folder
+created through sudo, and a second run as root and as the user.
 
 ## 13. Python module layout
 
