@@ -156,9 +156,11 @@ def normalized_python(source: str, *, type2: bool, skip: AbstractSet[int] = froz
 
 
 def _simple_name(node: ast.expr) -> str | None:
-    """`X` for `X` or `mod.X` (a base class or a decorator), else None."""
+    """`X` for `X`, `mod.X`, `X[T]` or `X(...)` (a base class or a decorator), else None."""
     if isinstance(node, ast.Call):
         node = node.func
+    if isinstance(node, ast.Subscript):  # Protocol[T]
+        node = node.value
     if isinstance(node, ast.Name):
         return node.id
     return node.attr if isinstance(node, ast.Attribute) else None

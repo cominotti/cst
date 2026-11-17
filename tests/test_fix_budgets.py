@@ -86,6 +86,14 @@ class RewriteTest(unittest.TestCase):
         self.assertNotIn("b program", out)
         self.assertEqual(read_table(out, "IO"), {"a cli": 3})
 
+    def test_deletes_a_value_written_in_parentheses_with_its_closing_line(self) -> None:
+        source = 'X = {\n    "keep": "a",\n    "gone": (\n        "a reason "\n        "over two lines"\n    ),  # why\n    # Next.\n    "last": (\n        "b"\n    )\n}\n'
+        out = rewrite(source, "X", {"keep": "a"})
+        self.assertEqual(out, 'X = {\n    "keep": "a",\n    # Next.\n}\n')
+        # A file the edit would break is refused, not written.
+        with self.assertRaisesRegex(ValueError, "does not parse"):
+            rewrite('X = {\n    "keep": "a",\n    "gone": (\n        "b"\n    ),}\n', "X", {"keep": "a"})
+
     def test_an_empty_table_becomes_a_pair_of_braces(self) -> None:
         out = rewrite(SOURCE, "IO", {})
         self.assertIn("IO: Final[dict[str, int]] = {}\nCEIL", out)
@@ -185,7 +193,8 @@ class MainTest(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), SOURCE, "a value above its entry was written")
         self.assertEqual(rc, 1)
-        self.assertEqual(out, "fix budgets: every table is at its measured values\n")
+        self.assertEqual(out, "fix budgets: nothing to lower\n", "not 'every table is at its measured values'")
+        self.assertIn("fix budgets: 2 values above their entries", err)
         self.assertIn("above:   gate.py IO 'a cli': measured 5, above its entry 3", err)
         self.assertIn("above:   gate.py CEIL 'type-2 %': measured 0.95, above its entry 0.9", err)
 

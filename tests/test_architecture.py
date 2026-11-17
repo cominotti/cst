@@ -491,7 +491,10 @@ def cli_code_lines(source: str) -> int:
 
 
 def env_write_lines(source: str, rel: str) -> list[int]:
-    """Lines that change os.environ: an item set or deleted, or a method of ENV_WRITERS called."""
+    """Lines that change os.environ: an item set or deleted, a method of ENV_WRITERS called, or os.environ rebound.
+
+    A write through another name (`env = os.environ; env["A"] = "1"`) is not seen.
+    """
     tree = ast.parse(source, filename=rel)
     bound = _bindings(tree)
 
@@ -508,6 +511,8 @@ def env_write_lines(source: str, rel: str) -> list[int]:
             lines.add(node.lineno)
         elif isinstance(node, ast.AugAssign) and is_environ(node.target):
             lines.add(node.lineno)
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node):
+            lines.add(node.lineno)  # os.environ = ..., del os.environ
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -1020,6 +1025,10 @@ class ArchitectureGateTest(unittest.TestCase):
         )
         self.assertEqual(hard_io_lines(writes, "vm/cli.py", light_cli=True), [5, 6, 7, 8, 9, 10, 11, 12])
         self.assertEqual(env_write_lines(writes, "vm/cli.py"), [5, 6, 7, 8, 9, 12])
+        rebound = "import os\ndef main():\n    os.environ = {}\n    del os.environ\n    environ = {}\n"
+        self.assertEqual(
+            hard_io_lines(rebound, "vm/cli.py", light_cli=True), [3, 4], "a local named environ is no write"
+        )
 
     def test_a_light_package_is_not_pushed_into_the_full_profile(self) -> None:
         light = {

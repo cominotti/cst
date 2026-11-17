@@ -246,6 +246,14 @@ class DuplicationRatchetTest(unittest.TestCase):
         self.assertEqual(clones(computed, 8).cross_file, 20)
         self.assertEqual(declared_lines(records["dc"], records=False), set())
 
+    def test_a_generic_protocol_body_is_left_out(self) -> None:
+        port = "from typing import Protocol\n\nclass P[T](Protocol):\n    def f(self) -> T: ...\n"
+        old_style = (
+            "import typing\n\nclass Q(typing.Protocol[T]):\n    def f(self) -> T: ...\n    def g(self) -> T: ...\n"
+        )
+        self.assertEqual(declared_lines(port, records=False), {4})
+        self.assertEqual(declared_lines(old_style, records=False), {4, 5})
+
     def test_a_left_out_block_does_not_join_the_lines_around_it(self) -> None:
         fields = "".join(f"    f{i}: int\n" for i in range(9))
         code = "    def m(self):\n" + "".join(f"        x{i} = self.f{i} + {i}\n" for i in range(5))

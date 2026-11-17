@@ -90,18 +90,20 @@ def _sub(table: object, key: str) -> dict[str, object]:
 
 def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:
     """Every ruff setting that switches an ANN rule off, as text lines (empty: ANN applies to every file)."""
-    lint = _sub(_sub(_sub(dict(conf), "tool"), "ruff"), "lint")
+    ruff = _sub(_sub(dict(conf), "tool"), "ruff")
     out: list[str] = []
-    for table in ("per-file-ignores", "extend-per-file-ignores"):
-        for key, rules in sorted(_sub(lint, table).items()):
-            if _ignores_ann(rules):
-                out.append(
-                    f"[tool.ruff.lint.{table}] {key!r} = {rules!r}: ignores ANN; annotate the files instead "
-                    "(every Python file is fully annotated)"
-                )
-    for key in ("ignore", "extend-ignore"):
-        if _ignores_ann(lint.get(key)):
-            out.append(f"[tool.ruff.lint] {key} = {lint[key]!r}: ignores ANN for every file; annotate instead")
+    # ruff still reads the older top-level [tool.ruff] form of these settings.
+    for section, settings in (("tool.ruff", ruff), ("tool.ruff.lint", _sub(ruff, "lint"))):
+        for table in ("per-file-ignores", "extend-per-file-ignores"):
+            for key, rules in sorted(_sub(settings, table).items()):
+                if _ignores_ann(rules):
+                    out.append(
+                        f"[{section}.{table}] {key!r} = {rules!r}: ignores ANN; annotate the files instead "
+                        "(every Python file is fully annotated)"
+                    )
+        for key in ("ignore", "extend-ignore"):
+            if _ignores_ann(settings.get(key)):
+                out.append(f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead")
     return out
 
 
@@ -347,6 +349,8 @@ class PythonFilesTest(unittest.TestCase):
             '[tool.ruff.lint.extend-per-file-ignores]\n"c.py" = ["ALL"]\n',
             '[tool.ruff.lint]\nignore = ["ANN401"]\n',
             '[tool.ruff.lint]\nextend-ignore = ["ANN"]\n',
+            '[tool.ruff]\nper-file-ignores = {"a.py" = ["ANN"]}\n',  # the older top-level form
+            '[tool.ruff]\nignore = ["ANN001"]\n',
         ):
             with self.subTest(bad=bad):
                 self.assertEqual(len(ann_ignore_problems(tomllib.loads(bad))), 1)

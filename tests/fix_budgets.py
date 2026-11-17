@@ -52,8 +52,11 @@ from tests.budgets import lowered
 type Kind = Literal["budget", "ceiling", "names"]
 type Measured = Mapping[str, float] | Set[str]
 
-# What may follow the value of an entry on its line: its comma and a comment.
-_ENTRY_END: Final = re.compile(rb"\s*,?\s*(#.*)?$")
+# What may follow the value of an entry on its line: the parentheses around
+# it closing, its comma and a comment; and a line after it that only closes
+# those parentheses.
+_ENTRY_END: Final = re.compile(rb"[\s)]*,?\s*(#.*)?$")
+_CLOSING_LINE: Final = re.compile(rb"\s*\)[\s)]*,?\s*(#.*)?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,11 +166,18 @@ def plan_table(table: Table, current: Mapping[str, object], measured: Measured) 
     return Plan(table, dict(low), changes, above)
 
 
-def _entry_span(lines: Sequence[bytes], key: ast.expr, value: ast.expr) -> tuple[int, int]:
-    """0-based (first, last) line of one entry, which must sit on lines of its own."""
+def _entry_span(lines: Sequence[bytes], key: ast.expr, value: ast.expr, stop: int) -> tuple[int, int]:
+    """0-based (first, last) line of one entry, which must sit on lines of its own.
+
+    `stop` is the 0-based line where the next entry or the closing brace
+    starts. The node of a value written in parentheses ends inside them: the
+    lines after it that only close them belong to the entry too.
+    """
     first, last = key.lineno - 1, (value.end_lineno or value.lineno) - 1
     if lines[first][: key.col_offset].strip() or not _ENTRY_END.match(lines[last][value.end_col_offset or 0 :]):
         raise ValueError(f"line {key.lineno}: an entry to delete shares its lines with another; one entry per line")
+    while last + 1 < stop and _CLOSING_LINE.match(lines[last + 1]):
+        last += 1
     return first, last
 
 
@@ -184,12 +194,14 @@ def rewrite(source: str, name: str, new: Mapping[str, object]) -> str:
         lines[first : last + 1] = [head + b"{}" + tail]
         return b"".join(lines).decode("utf-8")
     edits: list[tuple[int, int, list[bytes]]] = []  # (first, last) lines -> replacement lines
-    for key_node, value_node in zip(node.keys, node.values, strict=True):
+    for i, (key_node, value_node) in enumerate(zip(node.keys, node.values, strict=True)):
         if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
             raise ValueError(f"{name}: line {value_node.lineno}: a key that is not a string literal")
         key = key_node.value
         if key not in new:
-            first, last = _entry_span(lines, key_node, value_node)
+            after = node.keys[i + 1] if i + 1 < len(node.keys) else None
+            stop = (after.lineno if after is not None else node.end_lineno or node.lineno) - 1
+            first, last = _entry_span(lines, key_node, value_node, stop)
             edits.append((first, last, []))
             continue
         to, was = new[key], old[key]
@@ -206,7 +218,11 @@ def rewrite(source: str, name: str, new: Mapping[str, object]) -> str:
     for first, last, repl in sorted(edits, reverse=True):
         lines[first : last + 1] = repl
     out = b"".join(lines).decode("utf-8")
-    if read_table(out, name) != dict(new):
+    try:
+        back = read_table(out, name)
+    except SyntaxError as exc:
+        raise ValueError(f"{name}: the rewritten file does not parse ({exc.msg}, line {exc.lineno})") from exc
+    if back != dict(new):
         raise ValueError(f"{name}: the rewritten table does not read back as planned")
     return out
 
@@ -240,11 +256,18 @@ def main(argv: Sequence[str] = (), repo: str = REPO, tables: Sequence[Table] = T
         for line in plan.above:
             print(f"above:   {where} {line}", file=sys.stderr)
     count = sum(len(p.changes) for p in plans)
-    if not count:
-        print("fix budgets: every table is at its measured values")
-    elif not apply:
+    above = sum(len(p.above) for p in plans)
+    if count and not apply:
         print(f"fix budgets: {count} entr{'y' if count == 1 else 'ies'} can go down; --apply writes them")
-    return 1 if any(p.above for p in plans) else 0
+    elif not count:
+        print("fix budgets: nothing to lower" if above else "fix budgets: every table is at its measured values")
+    if above:
+        print(
+            f"fix budgets: {above} value{'' if above == 1 else 's'} above {'its entry' if above == 1 else 'their entries'}"
+            " (the gates fail on them; the fix never raises an entry)",
+            file=sys.stderr,
+        )
+    return 1 if above else 0
 
 
 if __name__ == "__main__":

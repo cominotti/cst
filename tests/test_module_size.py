@@ -46,8 +46,12 @@ OVER_CAP: Final[dict[str, int]] = {
 
 
 def line_count(source: str) -> int:
-    """Physical lines of a source, as `wc -l` counts them (a last line without a newline counts too)."""
-    return len(source.splitlines())
+    """Physical lines of a source: its newlines, and a last line without one.
+
+    Not str.splitlines, which also breaks at a form feed, U+2028 and other
+    characters that end no line in a source file.
+    """
+    return source.count("\n") + (1 if source and not source.endswith("\n") else 0)
 
 
 def module_sizes() -> dict[str, int]:
@@ -87,6 +91,7 @@ class ModuleSizeTest(unittest.TestCase):
         self.assertEqual(line_count("a\nb"), 2)
         self.assertEqual(line_count(""), 0)
         self.assertEqual(line_count("\n\n"), 2)
+        self.assertEqual(line_count("a\x0cb\u2028c\x1cd\n"), 1, "a form feed or U+2028 ends no line")
 
 
 if __name__ == "__main__":
