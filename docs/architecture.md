@@ -37,8 +37,9 @@ Python packages follow the Hexagonal Architecture + DDD layout
 `ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
 cases, `adapters.py` / `adapters/` for host I/O and subprocesses, `cli.py`
 for a program's commands). Only swap, doctor, `cst_core` and btrfs's
-docker-gc, docker-volumes-nocow and snapshot have an application layer with ports; in the other packages `cli.py` orchestrates
-the commands and still does some I/O itself. `tests/test_architecture.py`
+docker-gc, docker-volumes-nocow and snapshot have an application layer
+with ports; in the other packages `cli.py` orchestrates the commands and
+still does some I/O itself. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
 `application` (with ports) or `adapters` (I/O). The I/O left outside the
