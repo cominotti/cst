@@ -1057,13 +1057,15 @@ own checks:
   nothing changed does not create one.
 - `uninstall` refuses while the current boot is degraded.
 
-`plan` runs the same checks as install (the refusals above, `udevadm verify`
-on the rule, a syntax check of the helper) and prints `would write:` or
-`unchanged:` for each file and `would run: ...` for each command install
-would run (`rpm-ostree initramfs-etc`, `systemctl enable`). It writes no
-file, reloads nothing and creates no deployment. The self-test needs the new
-files in place, so only install runs it; `plan` says how many disks it would
-check.
+`plan` runs the refusals above, `udevadm verify` on the rule and a syntax
+check of the helper, and prints `would write:` or `unchanged:` for each file
+and `would run: ...` for each change install would make (`rpm-ostree
+initramfs-etc`, `systemctl enable` when the record unit is not enabled, the
+removal of files an older version left). It writes no file, reloads nothing
+and creates no deployment. Two checks need the new files in place, so only
+install runs them: `systemd-analyze verify` on the units, and the self-test
+(`plan` says how many disks it would check). Install also reloads systemd
+and udev on every run; `plan` does not list that.
 
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.

@@ -233,10 +233,12 @@ root_members() {
 
 # `sha256sum` lines of the tracked files (read under etc_base), named by
 # their /etc path, as the recorded sums file holds them.
+# A file it cannot read fails it, as the one sha256sum call it replaces did.
 tracked_sums() {
-    local f
+    local f sum
     for f in "${TRACKED[@]}"; do
-        printf '%s  %s\n' "$(sha256sum <"${etc_base}${f}" | cut -d' ' -f1)" "${f}"
+        sum="$(sha256sum <"${etc_base}${f}")" || return
+        printf '%s  %s\n' "${sum%% *}" "${f}"
     done
 }
 

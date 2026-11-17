@@ -706,6 +706,15 @@ next_overlay || :
         self.assertFalse(os.path.exists(self.at("/etc")))
         self.assertEqual(self.read("verified.rules"), EXPECTED_RULE)
 
+    def test_tracked_sums_fails_on_a_file_it_cannot_read(self) -> None:
+        """The recorded sums never hold an empty hash: a missing tracked file fails tracked_sums."""
+        self.install()
+        self.assertEqual(self.ok("tracked_sums"), self.ok('sha256sum "${TRACKED[@]}"'))
+        os.remove(self.at(TIMER))
+        r = self.run_bash("tracked_sums")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn(f"  {self.at(TIMER)}\n", r.stdout)
+
     # ---------------------------------------------------------- self-test --
     def selftest(
         self,
@@ -949,7 +958,8 @@ status() {{ echo STATUS; }}
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", out)
 
     def test_plan_stops_where_install_stops(self) -> None:
-        """The guards' checks that run in the install path run in plan too: a rule that fails verify."""
+        """A check plan shares with install stops it the same way: here a rule that fails udevadm verify.
+        (systemd-analyze verify and the self-test need the files written: install runs them, plan does not.)"""
         self.udev_ready()
         self.tracked_json([])
         before = self.tree()

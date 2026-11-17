@@ -515,7 +515,9 @@ class InstallerCliTest(unittest.TestCase):
         os.symlink(f"{self.stage}/etc/target", dest)
         Path(self.stage, "etc/target").write_bytes(b"generated\n")
         os.chmod(f"{self.stage}/etc/target", 0o640)
-        with self.subTest("a link (to the same bytes) is never current at a root destination"):
+        # As root (a root destination) a link is never current; as a user (a home destination,
+        # how CI runs) it is judged by its target, which holds the same bytes.
+        with self.subTest("a link to the same bytes: current only at a user destination"):
             r = self.cli("text-plan", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
             want = "would write" if os.geteuid() == 0 else "unchanged"
             self.assertEqual(r.stdout, f"{want}: {dest}\n".encode(), r.stderr)
@@ -629,6 +631,9 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash(f'cst_install_text_plan "{self.stage}/u" 0600 alice', stdin=b"y\n")
         self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/u\n", r.stderr)
         self.assertEqual(Path(self.log).read_text().count("runuser -u alice"), 3)
+        r = self.bash("cst_install_as nobody-here cpu/gamemode.ini")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(b"no home folder", r.stderr)
 
     def test_cst_install_text_plan_changes_nothing(self) -> None:
         r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
@@ -638,9 +643,6 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
         self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/etc/gen\n", r.stderr)
         self.assertFalse(os.path.exists(self.log))
-        r = self.bash("cst_install_as nobody-here cpu/gamemode.ini")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn(b"no home folder", r.stderr)
 
     def test_the_installer_gets_the_caller_s_lc_ctype(self) -> None:
         # Python sets LC_CTYPE=C.UTF-8 under a C locale (PEP 538); each of the three ways in hands the
