@@ -7,6 +7,7 @@ checked against the timers the vm and toolchains programs write today, so
 those modules can switch to it without changing a byte.
 """
 
+from collections.abc import Callable, Sequence
 import contextlib
 import io
 import os
@@ -16,12 +17,13 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-from cst_core import adapters as core_adapters
+from cst_core import adapters as core_adapters, ports as core_ports
 from cst_core.adapters import files as core_files, nocow
 from cst_core.adapters.files import (
     ensure_dir,
@@ -598,6 +600,259 @@ STRICT_TABLE: tuple[tuple[str, str | None], ...] = (
     ("just words", PROBLEM),
     ("K=x\r", PROBLEM),
 )
+
+
+class _Container:
+    """ContainerProbePort double: inside a container or not."""
+
+    def __init__(self, *, inside: bool) -> None:
+        self.inside = inside
+
+    def is_container(self) -> bool:
+        return self.inside
+
+
+class _Recorder:
+    """A stand-in for subprocess.run: records argv and kwargs, answers rc 0."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0, "out", "err")
+
+
+class CommandRunnerTest(unittest.TestCase):
+    """SubprocessCommandRunner's options (CommandRunnerPort), on real commands where they can run here."""
+
+    py = sys.executable
+
+    def recorded(
+        self,
+        runner: core_adapters.SubprocessCommandRunner,
+        call: Callable[[core_adapters.SubprocessCommandRunner], object],
+    ) -> tuple[list[str], dict[str, object]]:
+        """(argv, kwargs) that subprocess.run got from call(runner)."""
+        rec = _Recorder()
+        with mock.patch.object(subprocess, "run", rec):
+            call(runner)
+        self.assertEqual(len(rec.calls), 1)
+        return rec.calls[0]
+
+    def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
+        # Only the arguments an option sets: a caller's test double that takes
+        # a fixed set of arguments keeps working when the caller moves here.
+        argv, kw = self.recorded(
+            core_adapters.SubprocessCommandRunner(_Container(inside=False)), lambda r: r.run(["cmd", "arg"])
+        )
+        self.assertEqual(argv, ["cmd", "arg"])
+        want: dict[str, object] = {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "errors": "replace",
+            "stdin": subprocess.DEVNULL,
+        }
+        self.assertEqual(kw, want)
+
+    def test_strict_decoding_raises_as_text_true_did(self) -> None:
+        runner = core_adapters.SubprocessCommandRunner()
+        with self.assertRaises(UnicodeDecodeError):
+            runner.run(["printf", "\\377abc"], decode_errors="strict")
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], decode_errors="strict"))
+        self.assertNotIn("errors", kw)
+
+    def test_faults_are_marked_with_their_cause(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-runner-")
+        self.addCleanup(shutil.rmtree, tmp)
+        runner = core_adapters.SubprocessCommandRunner()
+        missing = runner.run([os.path.join(tmp, "nope")])
+        self.assertEqual((missing.returncode, missing.fault), (127, "missing"))
+        self.assertIsInstance(missing.cause, FileNotFoundError)
+        plain = os.path.join(tmp, "plain")
+        with open(plain, "w") as fh:
+            fh.write("not a program\n")
+        unstartable = runner.run([plain])
+        self.assertEqual((unstartable.returncode, unstartable.fault), (126, "unstartable"))
+        self.assertIsInstance(unstartable.cause, PermissionError)
+        slow = runner.run([self.py, "-c", "import time; time.sleep(30)"], timeout=0.3)
+        self.assertEqual((slow.returncode, slow.fault, slow.stderr), (124, "timeout", "timed out after 0.3s"))
+        self.assertIsInstance(slow.cause, subprocess.TimeoutExpired)
+        with self.assertRaises(core_ports.CommandFailed) as stop:
+            runner.run([self.py, "-c", "import time; time.sleep(30)"], timeout=0.3, check=True)
+        self.assertEqual(stop.exception.returncode, 124)
+        # A command that exits 127 by itself ran: no fault.
+        own = runner.run([self.py, "-c", "raise SystemExit(127)"])
+        self.assertEqual((own.returncode, own.fault, own.cause), (127, None, None))
+
+    def test_environment_options(self) -> None:
+        runner = core_adapters.SubprocessCommandRunner()
+        show = [
+            self.py,
+            "-c",
+            "import os; print(os.environ.get('LC_ALL'), os.environ.get('CST_A'), os.environ.get('CST_B'))",
+        ]
+        with mock.patch.dict(os.environ, {"LC_ALL": "pt_BR.UTF-8", "CST_A": "a", "CST_B": "b"}):
+            self.assertEqual(runner.run(show).stdout, "pt_BR.UTF-8 a b\n")
+            self.assertEqual(runner.run(show, locale_c=True).stdout, "C a b\n")
+            self.assertEqual(runner.run(show, locale_c=True, env={"LC_ALL": "en_US.UTF-8"}).stdout, "en_US.UTF-8 a b\n")
+            self.assertEqual(runner.run(show, env={"CST_A": "x"}, unset=["CST_B"]).stdout, "pt_BR.UTF-8 x None\n")
+            base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CST_B": "base"}
+            self.assertEqual(runner.run(show, base_env=base, locale_c=True).stdout, "C None base\n")
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"]))
+        self.assertNotIn("env", kw, "no option: the command inherits our environment")
+
+    def test_cwd_new_session_and_nice(self) -> None:
+        runner = core_adapters.SubprocessCommandRunner()
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-runner-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        where = [self.py, "-c", "import os; print(os.getcwd())"]
+        self.assertEqual(runner.run(where, cwd=tmp).stdout, tmp + "\n")
+        sid = [self.py, "-c", "import os; print(os.getsid(0))"]
+        self.assertEqual(runner.run(sid).stdout, f"{os.getsid(0)}\n")
+        self.assertNotEqual(runner.run(sid, new_session=True).stdout, f"{os.getsid(0)}\n")
+        niceness = [self.py, "-c", "import os; print(os.nice(0))"]
+        ours = os.nice(0)
+        self.assertEqual(runner.run(niceness, nice=3).stdout, f"{min(ours + 3, 19)}\n")
+        self.assertEqual(runner.run(niceness).stdout, f"{ours}\n")
+
+    def test_stdin_and_output_modes(self) -> None:
+        runner = core_adapters.SubprocessCommandRunner()
+        both = [self.py, "-c", "import sys; print('o'); print('e', file=sys.stderr)"]
+        self.assertEqual((runner.run(both).stdout, runner.run(both).stderr), ("o\n", "e\n"))
+        merged = runner.run(both, output="merge")
+        self.assertEqual((sorted(merged.stdout.split()), merged.stderr), (["e", "o"], ""))
+        only = runner.run(both, output="stdout")
+        self.assertEqual((only.stdout, only.stderr), ("o\n", ""))
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], output="inherit", stdin="inherit"))
+        self.assertEqual(kw, {"check": False}, "both left on ours: nothing captured, no stdin given")
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], input_text="abc"))
+        self.assertEqual((kw["input"], "stdin" in kw), ("abc", False))
+        with self.assertRaises(ValueError):
+            runner.run(["cmd"], input_text="abc", stdin="inherit")
+
+    def test_words_rewrite_only_faults_with_the_callers_argv(self) -> None:
+        seen: list[tuple[list[str], int, float | None]] = []
+
+        def words(argv: Sequence[str], r: core_ports.CommandResult, timeout: float | None) -> core_ports.CommandResult:
+            seen.append((list(argv), r.returncode, timeout))
+            return core_ports.CommandResult(
+                r.returncode, "", f"{argv[0]}: {r.fault}", argv=r.argv, fault=r.fault, cause=r.cause
+            )
+
+        tmp = tempfile.mkdtemp(prefix="cst-runner-")
+        self.addCleanup(shutil.rmtree, tmp)
+        missing = os.path.join(tmp, "nope")
+        inside = core_adapters.SubprocessCommandRunner(_Container(inside=True), words=words)
+        rec = _Recorder()
+        rec_fault: list[str] = []
+
+        def raising(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            rec(argv, **kwargs)
+            rec_fault.append(argv[0])
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        with mock.patch.object(subprocess, "run", raising):
+            r = inside.run([missing, "x"], on_host=True, timeout=7)
+        # words gets the argv the caller gave, not the flatpak-spawn one that ran.
+        self.assertEqual(rec_fault, ["flatpak-spawn"])
+        self.assertEqual(seen, [([missing, "x"], 127, 7)])
+        self.assertEqual(
+            (r.returncode, r.stderr, r.fault, r.argv[0]), (127, f"{missing}: missing", "missing", "flatpak-spawn")
+        )
+        runner = core_adapters.SubprocessCommandRunner(_Container(inside=False), words=words)
+        with self.assertRaises(core_ports.CommandFailed) as stop:
+            runner.run([missing], check=True)
+        self.assertEqual((stop.exception.returncode, stop.exception.stderr), (127, f"{missing}: missing"))
+        seen.clear()
+        plain = runner.run([self.py, "-c", "import sys; print('e', file=sys.stderr); raise SystemExit(3)"])
+        self.assertEqual((plain.returncode, plain.stderr, plain.fault, seen), (3, "e\n", None, []))
+
+    def test_the_constructors_base_env_is_the_default_and_a_call_can_name_its_own(self) -> None:
+        path = os.environ.get("PATH", "/usr/bin:/bin")
+        runner = core_adapters.SubprocessCommandRunner(base_env={"PATH": path, "CST_A": "runner"})
+        show = [self.py, "-c", "import os; print(os.environ.get('CST_A'), os.environ.get('LC_ALL'))"]
+        with mock.patch.dict(os.environ, {"CST_A": "process"}):
+            self.assertEqual(runner.run(show).stdout, "runner None\n")
+            self.assertEqual(runner.run(show, locale_c=True).stdout, "runner C\n")
+            self.assertEqual(runner.run(show, base_env={"PATH": path, "CST_A": "call"}).stdout, "call None\n")
+            self.assertEqual(core_adapters.SubprocessCommandRunner().run(show).stdout, "process None\n")
+
+    def test_on_host_wraps_only_inside_a_container(self) -> None:
+        inside = core_adapters.SubprocessCommandRunner(_Container(inside=True))
+        outside = core_adapters.SubprocessCommandRunner(_Container(inside=False))
+        argv, kw = self.recorded(inside, lambda r: r.run(["cmd", "arg"], on_host=True, locale_c=True, env={"K": "v"}))
+        # The host command does not get flatpak-spawn's environment: the settings go in --env.
+        self.assertEqual(argv, ["flatpak-spawn", "--host", "--env=LC_ALL=C", "--env=K=v", "cmd", "arg"])
+        env = kw["env"]
+        assert isinstance(env, dict)
+        self.assertEqual((env["LC_ALL"], env["K"]), ("C", "v"))
+        on_host: Callable[[core_adapters.SubprocessCommandRunner], object] = lambda r: r.run(
+            ["cmd", "arg"], on_host=True
+        )
+        self.assertEqual(self.recorded(inside, on_host)[0], ["flatpak-spawn", "--host", "cmd", "arg"])
+        self.assertEqual(self.recorded(inside, lambda r: r.run(["cmd", "arg"]))[0], ["cmd", "arg"], "on_host is opt-in")
+        self.assertEqual(self.recorded(outside, on_host)[0], ["cmd", "arg"])
+        with self.assertRaises(ValueError):
+            inside.run(["cmd"], on_host=True, unset=["X"])
+
+
+class _RecordingRunner:
+    """CommandRunnerPort double for the virsh adapter: records argv and options."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **options: object) -> core_ports.CommandResult:
+        self.calls.append((list(argv), options))
+        return core_ports.CommandResult(0, "", "")
+
+
+class VirshAdapterTest(unittest.TestCase):
+    """SubprocessVirshAdapter builds virsh's argv and hands its options to the one runner."""
+
+    def test_options_reach_the_runner(self) -> None:
+        runner = _RecordingRunner()
+        virsh = core_adapters.SubprocessVirshAdapter("qemu:///x", runner, on_host=False, decode_errors="strict")
+        virsh.call("domstate", "vm1", timeout=15, start_new_session=True)
+        argv, opts = runner.calls[-1]
+        self.assertEqual(argv, ["virsh", "-c", "qemu:///x", "domstate", "vm1"])
+        want: dict[str, object] = {
+            "check": False,
+            "timeout": 15,
+            "locale_c": True,
+            "new_session": True,
+            "on_host": False,
+            "decode_errors": "strict",
+        }
+        self.assertEqual(opts, want)
+        ro = core_adapters.SubprocessVirshAdapter(runner=runner, read_only=True)
+        ro.call("list")
+        self.assertEqual(runner.calls[-1][0], ["virsh", "-r", "-c", "qemu:///system", "list"])
+        self.assertEqual((runner.calls[-1][1]["on_host"], runner.calls[-1][1]["timeout"]), (True, 60))
+
+    def test_domains_and_dumpxml(self) -> None:
+        class Answers(_RecordingRunner):
+            def run(self, argv: Sequence[str], **options: object) -> core_ports.CommandResult:
+                super().run(argv, **options)
+                if "list" in argv:
+                    return core_ports.CommandResult(0, "a\n\n b \n", "")
+                return core_ports.CommandResult(1, "", "no domain")
+
+        virsh = core_adapters.SubprocessVirshAdapter(runner=Answers(), on_host=False)
+        self.assertEqual(virsh.domains(), ["a", "b"])
+        self.assertIsNone(virsh.dumpxml("x", inactive=True))
+
+    def test_in_a_container_virsh_runs_on_the_host_in_the_c_locale(self) -> None:
+        rec = _Recorder()
+        virsh = core_adapters.SubprocessVirshAdapter(ctx=_Container(inside=True))
+        with mock.patch.object(subprocess, "run", rec):
+            virsh.call("domstate", "vm1")
+        self.assertEqual(
+            rec.calls[0][0],
+            ["flatpak-spawn", "--host", "--env=LC_ALL=C", "virsh", "-c", "qemu:///system", "domstate", "vm1"],
+        )
 
 
 class ShellAssignmentsTest(unittest.TestCase):

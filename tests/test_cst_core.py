@@ -64,6 +64,7 @@ class FakeRunner:
         timeout: float | None = None,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        **_options: object,
     ) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)

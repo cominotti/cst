@@ -21,7 +21,7 @@ one place only.
 
 | Need | Use | Notes |
 |---|---|---|
-| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. A command whose answers are parsed runs in the C locale: `c_locale(env)` (`cst_core.adapters`), not an `LC_ALL` literal. |
+| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. Every option is off by default and a call names what it needs: `timeout`, `input_text`, `env`/`unset`/`base_env`, `cwd`, `locale_c` (a command whose answers are parsed: not an `LC_ALL` literal), `new_session`, `on_host` (`flatpak-spawn --host` inside a container), `stdin`, `output`, `decode_errors`, `nice`. A command that is missing, cannot start or times out comes back with `fault` and `cause` set: a module keeps its own message from them (a 2-line binding), never its own `subprocess.run`. Only streaming readers (`subprocess.Popen`: docker events, restic, the cpu watch) and the dispatcher's foreground run stay outside it. |
 | Host or toolbox, run on the host | `HostExecutionContext` (`cst_core.adapters`), `ExecutionContextPort` | Root commands refuse inside a toolbox ([docs/architecture.md](../../docs/architecture.md#toolbox-vs-host)). |
 | systemd | `SystemdPort` (`cst_core.ports`), `SystemctlAdapter` (`cst_core.adapters`) | |
 | libvirt | `VirshPort` (`cst_core.ports`), `SubprocessVirshAdapter` (`cst_core.adapters`) | |
