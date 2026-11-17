@@ -797,10 +797,11 @@ class ShellAssignmentsTest(unittest.TestCase):
         return r.stdout
 
     def test_old_ansi_c_line_without_closing_quote_fails_fast(self) -> None:
-        # Forty \NNNN escapes and no closing quote: with a backtracking regex each
-        # escape could be cut three ways (\1|111, \11|11, \111|1), which took
-        # minutes; the possessive form fails at once and reports the line.
-        line = "NAS_PATH=$'" + "\\1111" * 40 + "\n"
+        # Sixteen \NNNN escapes and no closing quote: with a backtracking regex each
+        # escape could be cut three ways (\1|111, \11|11, \111|1), 3**16 tries
+        # (about 4 s here, so a regression fails the 1 s limit in seconds instead
+        # of hanging the run); the possessive form fails at once and reports the line.
+        line = "NAS_PATH=$'" + "\\1111" * 16 + "\n"
         started = time.perf_counter()
         parsed = parse_snapshots_conf(line)
         self.assertLess(time.perf_counter() - started, 1.0)
