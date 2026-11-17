@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: MPL-2.0
-"""What btrfs-snapshot-core reads and changes on the machine: the Host
-(commands, clock, boot id, directory entries; tests replace it), the btrfs
-commands, the scan of a snapshot directory, the cache-folder walk (file
-descriptors only, no symlink followed), the local time zone, and the
-safeguards, which resolve pinned paths on the filesystem.
+"""What btrfs-snapshot-core reads and changes on the machine, behind the
+ports of btrfs/snapshot/ports.py: the Host (commands, clock, boot id,
+directory entries, the cache-folder walk with file descriptors only, no
+symlink followed; tests replace it), the btrfs commands, the state
+directory, the pin file (which resolves pinned paths on the filesystem),
+the run lock, the journal lines, and the local time zone.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Collection
-from collections.abc import Mapping
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, TextIO
 import dataclasses
 import datetime as dt
 import errno
@@ -23,34 +24,29 @@ from btrfs.snapshot.domain import (
     BOOT_ID_FILE,
     CACHE_SIGNATURE,
     CACHE_TAG,
-    CLOCK_SLACK,
     CMD_TIMEOUT,
-    Decision,
-    KEEP_NEWEST,
-    MIN_AGE,
-    ParseError,
-    Snap,
     WALK_PRUNE,
+    CacheDir,
+    CacheWalk,
+    ParseError,
     SubvolInfo,
     SubvolPath,
     err_text,
-    name_regex,
-    other_parent,
-    parse_snapshot_name,
     parse_subvolume_show,
-    plan,
-    wall_to_epoch,
 )
+from btrfs.snapshot.ports import SnapshotHostPort
 from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.files import locale_bytes, write_atomic
+from cst_core.adapters.journal import log as journal_log
+from cst_core.adapters.locks import take_lock
 from cst_core.ports import CommandRunnerPort
 
 
 # ---- time ----------------------------------------------------------------------------
-def local_tz(name: str | None = None) -> dt.tzinfo:
-    """The zone used for names and retention: --tz, else $TZ, else /etc/localtime."""
-    if name:
-        return zoneinfo.ZoneInfo(name)
-    env = os.environ.get("TZ", "").lstrip(":")
+def local_tz(tz_env: str) -> dt.tzinfo:
+    """The zone used for names and retention when there is no --tz: $TZ
+    (TZ_ENV, which wiring reads), else /etc/localtime, else UTC."""
+    env = tz_env.lstrip(":")
     if env:
         try:
             if env.startswith("/"):
@@ -66,104 +62,15 @@ def local_tz(name: str | None = None) -> dt.tzinfo:
         return dt.UTC
 
 
-def apply_safeguards(
-    decisions: list[Decision],
-    now: float,
-    tz: dt.tzinfo,
-    pins: Collection[str],
-) -> list[Decision]:
-    """The decisions with policy deletions turned into keeps for the 3 newest
-    (by generation and by name), anything younger than 24 h, and pinned paths."""
-    snaps = [d.snap for d in decisions]
-    protected: set[int] = set()
-    for key in (lambda s: (s.cgen, s.wall, s.seq), lambda s: (wall_to_epoch(s.wall, tz), s.seq)):
-        protected.update(id(s) for s in sorted(snaps, key=key, reverse=True)[:KEEP_NEWEST])
-    out: list[Decision] = []
-    for d in decisions:
-        s = d.snap
-        if d.action != "delete":
-            out.append(d)
-        elif id(s) in protected:
-            out.append(
-                dataclasses.replace(d, action="keep", reason=f"safeguard: one of the {KEEP_NEWEST} newest ({d.reason})")
-            )
-        elif now - wall_to_epoch(s.wall, tz) < MIN_AGE:
-            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: younger than 24 h ({d.reason})"))
-        elif is_pinned(s.path, pins):
-            out.append(dataclasses.replace(d, action="keep", reason=f"safeguard: pinned ({d.reason})"))
-        else:
-            out.append(d)
-    return out
-
-
-def is_pinned(path: str, pins: Collection[str]) -> bool:
-    if not path or not pins:
-        return False
-    return os.path.normpath(path) in pins or os.path.realpath(path) in pins
-
-
-def unexplained_deletions(
-    decisions: Sequence[Decision],
-    snaps: Sequence[Snap],
-    policy: Mapping[str, int | str],
-    tz: dt.tzinfo,
-    pins: Collection[str],
-    since: int | None,
-    ref: float | None = None,
-) -> list[Decision]:
-    """The deletions in DECISIONS (made now) that time passing does not explain.
-
-    A deletion is explained when the snapshot was kept at SINCE (the last
-    successful run: policy and safeguards replayed over the snapshots named up
-    to then) and is due at REF (the trusted current time; None = the time the
-    decisions were made). After the machine was off, whole days of hourly
-    snapshots age out at once and all of them are explained, so the circuit
-    breaker does not trip on them; a shrunken policy dooms snapshots that were
-    already due at SINCE, and a clock that jumped ahead of REF dooms snapshots
-    not yet due at REF - those stay unexplained. SINCE None: nothing is
-    explained (no successful run recorded)."""
-    doomed = [d for d in decisions if d.action == "delete" and not d.snap.virtual]
-    if since is None or not doomed:
-        return doomed
-    real = [s for s in snaps if not s.virtual]
-    before = [s for s in real if wall_to_epoch(s.wall, tz) <= since + CLOCK_SLACK]
-    kept_then = {
-        id(d.snap) for d in apply_safeguards(plan(before, since, policy, tz), since, tz, pins) if d.action == "keep"
-    }
-    if ref is None:
-        due_now = {id(d.snap) for d in doomed}
-    else:
-        due_now = {
-            id(d.snap) for d in apply_safeguards(plan(real, ref, policy, tz), ref, tz, pins) if d.action == "delete"
-        }
-    return [d for d in doomed if not (id(d.snap) in kept_then and id(d.snap) in due_now)]
+def known_zone(name: str) -> dt.tzinfo | None:
+    """The zone NAME (a --tz value), or None when zoneinfo does not know it."""
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except zoneinfo.ZoneInfoNotFoundError, ValueError:
+        return None
 
 
 # ---- cache folders ---------------------------------------------------------------------
-@dataclasses.dataclass
-class CacheDir:
-    rel: str  # path relative to the walked root
-    files: int = 0  # entries that are not folders (files, symlinks, ...)
-    size: int = 0  # apparent size of the regular files, bytes
-
-
-@dataclasses.dataclass
-class CacheWalk:
-    folders: list[CacheDir]  # tagged folders (dropped in "drop" mode)
-    kept: list[str]  # rel: tagged, but holding a skipped path, so kept and walked
-    skipped: list[str]  # rel: skip paths that exist (never entered)
-    problems: list[tuple[str, str]]  # (rel, text): what could not be read or deleted
-    seconds: float = 0.0
-
-    @property
-    def files(self) -> int:
-        return sum(c.files for c in self.folders)
-
-    @property
-    def size(self) -> int:
-        return sum(c.size for c in self.folders)
-
-
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 NOATIME = getattr(os, "O_NOATIME", 0)
 
@@ -219,7 +126,7 @@ class Level:
 
 
 def tree(
-    parent_fd: int, name: str, top: int, dev: int, delete: bool, problems: list[tuple[str, str]], rel: str
+    parent_fd: int, name: str, top: int, dev: int, problems: list[tuple[str, str]], rel: str, *, delete: bool
 ) -> CacheDir:
     """Count (and with DELETE remove) the folder NAME below PARENT_FD, open
     as TOP (closed here), and everything in it. File descriptors only: no
@@ -230,77 +137,115 @@ def tree(
     still recognised as a cache (it stays when anything below could not be
     deleted). Returns a CacheDir; failures go to PROBLEMS (rel, text) and the
     rest goes on."""
-    out = CacheDir(rel)
-    before = len(problems)
-    stack = [Level(top, name, rel)]
-    while stack:
-        level = stack[-1]
-        is_top = len(stack) == 1
-        if level.todo is None:
-            level.todo = []
+    return TreeWalk(parent_fd, dev, problems, delete=delete).run(Level(top, name, rel))
+
+
+class TreeWalk:
+    """The walk of tree(): a stack of open folders, the counts, the problems."""
+
+    def __init__(self, parent_fd: int, dev: int, problems: list[tuple[str, str]], *, delete: bool) -> None:
+        self.parent_fd = parent_fd
+        self.dev = dev
+        self.problems = problems
+        self.delete = delete
+        self.before = len(problems)
+        self.files = 0
+        self.size = 0
+        self.stack: list[Level] = []
+
+    def run(self, top: Level) -> CacheDir:
+        self.stack.append(top)
+        while self.stack:
+            level = self.stack[-1]
+            is_top = len(self.stack) == 1
+            if level.todo is None:
+                level.todo = self.list_level(level, is_top=is_top)
+            if level.todo:
+                self.descend(level, level.todo.pop())
+                continue
+            # Every subfolder handled: close this one and remove it from its parent.
+            self.leave(is_top=is_top)
+        return CacheDir(top.rel, self.files, self.size)
+
+    def list_level(self, level: Level, *, is_top: bool) -> list[str]:
+        """Count (and delete) what is not a folder in LEVEL; its subfolders, the next one last."""
+        todo: list[str] = []
+        try:
+            with os.scandir(level.fd) as it:
+                entries = list(it)
+        except OSError as e:
+            self.problems.append((level.rel, f"cannot list: {e.strerror}"))
+            entries = []
+        for e in sorted(entries, key=lambda x: x.name):
             try:
-                with os.scandir(level.fd) as it:
-                    entries = list(it)
-            except OSError as e:
-                problems.append((level.rel, f"cannot list: {e.strerror}"))
-                entries = []
-            for e in sorted(entries, key=lambda x: x.name):
-                try:
-                    if e.is_dir(follow_symlinks=False):
-                        level.todo.append(e.name)
-                        continue
-                    st = e.stat(follow_symlinks=False)
-                except OSError as err:
-                    problems.append((os.path.join(level.rel, e.name), err_text(err)))
+                if e.is_dir(follow_symlinks=False):
+                    todo.append(e.name)
                     continue
-                out.files += 1
-                if stat.S_ISREG(st.st_mode):
-                    out.size += st.st_size
-                if delete and not (is_top and e.name == CACHE_TAG):  # the top's tag goes last
-                    try:
-                        os.unlink(e.name, dir_fd=level.fd)
-                    except OSError as err:
-                        problems.append((os.path.join(level.rel, e.name), f"cannot delete: {err.strerror}"))
-            level.todo.reverse()
-        if level.todo:
-            child = level.todo.pop()
-            crel = os.path.join(level.rel, child)
-            try:
-                cfd = open_noatime(child, DIR_FLAGS, level.fd)
-            except OSError as e:
-                problems.append((crel, f"cannot open: {e.strerror}"))
+                st = e.stat(follow_symlinks=False)
+            except OSError as err:
+                self.problems.append((os.path.join(level.rel, e.name), err_text(err)))
                 continue
-            if os.fstat(cfd).st_dev != dev:
-                os.close(cfd)
-                if delete:
-                    try:
-                        os.rmdir(child, dir_fd=level.fd)  # an empty placeholder; never a mount's content
-                    except OSError as e:
-                        problems.append((crel, f"on another device, not entered: {e.strerror}"))
-                continue
-            stack.append(Level(cfd, child, crel))
-            continue
-        # Every subfolder handled: close this one and remove it from its parent.
-        stack.pop()
-        failed = len(problems) > before
-        if delete and is_top and not failed:
+            self.files += 1
+            if stat.S_ISREG(st.st_mode):
+                self.size += st.st_size
+            if self.delete and not (is_top and e.name == CACHE_TAG):  # the top's tag goes last
+                self.unlink(level, e.name)
+        todo.reverse()
+        return todo
+
+    def unlink(self, level: Level, name: str) -> None:
+        try:
+            os.unlink(name, dir_fd=level.fd)
+        except OSError as err:
+            self.problems.append((os.path.join(level.rel, name), f"cannot delete: {err.strerror}"))
+
+    def descend(self, level: Level, child: str) -> None:
+        """Open the subfolder CHILD of LEVEL and push it, unless it is on another device."""
+        crel = os.path.join(level.rel, child)
+        try:
+            cfd = open_noatime(child, DIR_FLAGS, level.fd)
+        except OSError as e:
+            self.problems.append((crel, f"cannot open: {e.strerror}"))
+            return
+        if os.fstat(cfd).st_dev == self.dev:
+            self.stack.append(Level(cfd, child, crel))
+            return
+        os.close(cfd)
+        if self.delete:
             try:
-                os.unlink(CACHE_TAG, dir_fd=level.fd)
-            except FileNotFoundError:
-                pass
+                os.rmdir(child, dir_fd=level.fd)  # an empty placeholder; never a mount's content
             except OSError as e:
-                problems.append((os.path.join(level.rel, CACHE_TAG), f"cannot delete: {e.strerror}"))
-                failed = True
+                self.problems.append((crel, f"on another device, not entered: {e.strerror}"))
+
+    def leave(self, *, is_top: bool) -> None:
+        """Pop the folder on top of the stack, close it and (with delete) remove it."""
+        level = self.stack.pop()
+        failed = len(self.problems) > self.before
+        if self.delete and is_top and not failed:
+            failed = not self.unlink_tag(level)
         os.close(level.fd)
         # The top stays when anything in it failed (still a cache, its tag kept).
-        if delete and not (is_top and failed):
-            try:
-                os.rmdir(level.name, dir_fd=parent_fd if is_top else stack[-1].fd)
-            except OSError as e:
-                # Not empty because something below could not go: already reported.
-                if not (failed and e.errno == errno.ENOTEMPTY):
-                    problems.append((level.rel, f"cannot delete: {e.strerror}"))
-    return out
+        if self.delete and not (is_top and failed):
+            self.rmdir(level, is_top=is_top, failed=failed)
+
+    def unlink_tag(self, level: Level) -> bool:
+        """Delete the top folder's CACHEDIR.TAG, last (False when it cannot go)."""
+        try:
+            os.unlink(CACHE_TAG, dir_fd=level.fd)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.problems.append((os.path.join(level.rel, CACHE_TAG), f"cannot delete: {e.strerror}"))
+            return False
+        return True
+
+    def rmdir(self, level: Level, *, is_top: bool, failed: bool) -> None:
+        try:
+            os.rmdir(level.name, dir_fd=self.parent_fd if is_top else self.stack[-1].fd)
+        except OSError as e:
+            # Not empty because something below could not go: already reported.
+            if not (failed and e.errno == errno.ENOTEMPTY):
+                self.problems.append((level.rel, f"cannot delete: {e.strerror}"))
 
 
 def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "drop"] = "count") -> CacheWalk:
@@ -314,61 +259,88 @@ def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "dr
     deletes them (counting as it goes). Returns a CacheWalk."""
     start = time.monotonic()
     skip_set = {os.path.normpath(s) for s in skips}
-    holders: set[str] = set()  # folders above a skipped path
+    result = CacheWalk([], [], [], [])
+    if "." in skip_set:
+        result.skipped.append(".")
+        return result
+    search = CacheSearch(open_noatime(root, DIR_FLAGS, None), skip_set, result, drop=mode == "drop")
+    try:
+        search.run()
+    finally:
+        search.close()
+    return dataclasses.replace(result, seconds=time.monotonic() - start)
+
+
+def skip_holders(skip_set: Collection[str]) -> set[str]:
+    """The folders above a skipped path (relative to the walk's root)."""
+    holders: set[str] = set()
     for s in skip_set:
         parent = os.path.dirname(s)
         while parent:
             holders.add(parent)
             parent = os.path.dirname(parent)
-    result = CacheWalk([], [], [], [])
-    if "." in skip_set:
-        result.skipped.append(".")
-        return result
-    root_fd = open_noatime(root, DIR_FLAGS, None)
-    dev = os.fstat(root_fd).st_dev
-    stack = [Level(root_fd, "", "")]
-    try:
-        while stack:
-            level = stack[-1]
+    return holders
+
+
+class CacheSearch:
+    """The walk of walk_caches(): a stack of open folders below the root, and what it found."""
+
+    def __init__(self, root_fd: int, skip_set: set[str], result: CacheWalk, *, drop: bool) -> None:
+        self.skip_set = skip_set
+        self.holders = skip_holders(skip_set)
+        self.result = result
+        self.drop = drop
+        self.dev = os.fstat(root_fd).st_dev
+        self.stack = [Level(root_fd, "", "")]
+
+    def run(self) -> None:
+        while self.stack:
+            level = self.stack[-1]
             if level.todo is None:
-                try:
-                    level.todo = subdirs(level.fd)[::-1]
-                except OSError as e:
-                    result.problems.append((level.rel or ".", f"cannot list: {e.strerror}"))
-                    level.todo = []
+                level.todo = self.subfolders(level)
             if not level.todo:
-                os.close(stack.pop().fd)
+                os.close(self.stack.pop().fd)
                 continue
-            name = level.todo.pop()
-            crel = os.path.join(level.rel, name) if level.rel else name
-            if name in WALK_PRUNE:
-                continue
-            if crel in skip_set:
-                result.skipped.append(crel)
-                continue
-            try:
-                cfd = open_noatime(name, DIR_FLAGS, level.fd)
-            except OSError as e:
-                result.problems.append((crel, f"cannot open: {e.strerror}"))
-                continue
-            # The device first: a nested subvolume (~/Bulk, ~/.cache) with a
-            # tag is an empty placeholder in a snapshot, nothing to drop.
-            if os.fstat(cfd).st_dev != dev:
-                os.close(cfd)
-                continue
-            if not has_cache_tag(cfd):
-                stack.append(Level(cfd, name, crel))
-                continue
-            if crel in holders:
-                result.kept.append(crel)
-                stack.append(Level(cfd, name, crel))
-                continue
-            result.folders.append(tree(level.fd, name, cfd, dev, mode == "drop", result.problems, crel))
-    finally:
-        for level in stack:
+            self.visit(level, level.todo.pop())
+
+    def close(self) -> None:
+        for level in self.stack:
             os.close(level.fd)
-    result.seconds = time.monotonic() - start
-    return result
+
+    def subfolders(self, level: Level) -> list[str]:
+        """LEVEL's subfolders, the next one last ([] when it cannot be listed)."""
+        try:
+            return subdirs(level.fd)[::-1]
+        except OSError as e:
+            self.result.problems.append((level.rel or ".", f"cannot list: {e.strerror}"))
+            return []
+
+    def visit(self, level: Level, name: str) -> None:
+        """The subfolder NAME of LEVEL: skipped, entered, kept or counted (and dropped) as a cache."""
+        crel = os.path.join(level.rel, name) if level.rel else name
+        if name in WALK_PRUNE:
+            return
+        if crel in self.skip_set:
+            self.result.skipped.append(crel)
+            return
+        try:
+            cfd = open_noatime(name, DIR_FLAGS, level.fd)
+        except OSError as e:
+            self.result.problems.append((crel, f"cannot open: {e.strerror}"))
+            return
+        # The device first: a nested subvolume (~/Bulk, ~/.cache) with a
+        # tag is an empty placeholder in a snapshot, nothing to drop.
+        if os.fstat(cfd).st_dev != self.dev:
+            os.close(cfd)
+            return
+        if not has_cache_tag(cfd):
+            self.stack.append(Level(cfd, name, crel))
+            return
+        if crel in self.holders:
+            self.result.kept.append(crel)
+            self.stack.append(Level(cfd, name, crel))
+            return
+        self.result.folders.append(tree(level.fd, name, cfd, self.dev, self.result.problems, crel, delete=self.drop))
 
 
 # The commands of a snapshot run: where it runs, never moved to the host.
@@ -429,7 +401,9 @@ class Host:
 
 
 class Btrfs:
-    def __init__(self, host: Host) -> None:
+    """The btrfs commands, run through a host (BtrfsPort)."""
+
+    def __init__(self, host: SnapshotHostPort) -> None:
         self.host = host
 
     def show(self, path: SubvolPath) -> SubvolInfo:
@@ -449,7 +423,7 @@ class Btrfs:
             return False
         raise ParseError(f"unexpected property output {value!r}")
 
-    def snapshot(self, source: SubvolPath, dest: str, readonly: bool = True) -> tuple[int, str, str]:
+    def snapshot(self, source: SubvolPath, dest: str, *, readonly: bool = True) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "snapshot"] + (["-r"] if readonly else []) + [source, dest])
 
     def set_readonly(self, path: SubvolPath) -> tuple[int, str, str]:
@@ -459,52 +433,97 @@ class Btrfs:
         return self.host.run(["btrfs", "subvolume", "delete", path])
 
 
-@dataclasses.dataclass
-class Scan:
-    owned: list[Snap]
-    ignored: list[tuple[str, str]]  # (path, reason): not ours, never touched
-    unverifiable: list[tuple[str, str]]  # (path, reason): could be ours, blocks deletions
-    writable: list[str] = dataclasses.field(default_factory=list)  # paths of the "not read-only" entries in ignored
+# ---- the state directory, the pin file, the run lock, the journal ----------------------
+class StateDir:
+    """The lists and the last-run record in --state-dir (StateStorePort)."""
 
+    def __init__(self, state_dir: str) -> None:
+        self.state_dir = state_dir
 
-def scan_snapshots(host: Host, btrfs: Btrfs, snapdir: str, name: str, source_uuid: str | None) -> Scan:
-    """Owned snapshots of one source. source_uuid None = skip the parent check (latest)."""
-    owned: list[Snap] = []
-    ignored: list[tuple[str, str]] = []
-    unverifiable: list[tuple[str, str]] = []
-    writable: list[str] = []
-    try:
-        entries = host.listdir(snapdir)
-    except FileNotFoundError:
-        return Scan(owned, ignored, unverifiable)
-    except OSError as e:
-        raise ParseError(f"cannot list {snapdir}: {e.strerror}") from None
-    pattern = name_regex(name)
-    for entry in entries:
-        if not pattern.fullmatch(entry):
-            continue
-        path = os.path.join(snapdir, entry)
-        parsed = parse_snapshot_name(name, entry)
-        if parsed is None:
-            ignored.append((path, "invalid date in the name"))
-            continue
-        kind = host.kind(path)
-        if kind != "subvol":
-            ignored.append((path, "not a subvolume" if kind != "symlink" else "symlink"))
-            continue
+    def path(self, name: str) -> str:
+        return os.path.join(self.state_dir, name)
+
+    def read_list(self, name: str) -> list[str]:
+        """The entries (one per line) of STATE/name; [] if it does not exist.
+        OSError if it cannot be read. Bytes that are not UTF-8 become U+FFFD
+        (such a line names no snapshot, so it is left alone with a warning)."""
         try:
-            info = btrfs.show(SubvolPath(path))  # host.kind said so
-            ro = btrfs.readonly(SubvolPath(path))
-        except ParseError as e:
-            unverifiable.append((path, str(e)))
-            continue
-        if not ro:
-            ignored.append((path, "not read-only"))
-            writable.append(path)
-            continue
-        other = other_parent(info, source_uuid) if source_uuid is not None else None
-        if other:
-            ignored.append((path, other))
-            continue
-        owned.append(Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"]))
-    return Scan(owned, ignored, unverifiable, writable)
+            with open(self.path(name), encoding="utf-8", errors="replace") as f:
+                return [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def write_list(self, name: str, entries: Sequence[str], *, sync_dir: bool = True) -> None:
+        """Replace STATE/name with ENTRIES, durably (fsync of the file and,
+        with SYNC_DIR, the folder); removed when ENTRIES is empty.
+        World-readable: cst doctor runs as the user."""
+        path = self.path(name)
+        if not entries:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        os.makedirs(self.state_dir, mode=0o755, exist_ok=True)
+        # 0644 whatever the umask (sudo keeps a user's 077).
+        # The locale's encoding, as the file object it used to write through (open()'s default).
+        text = locale_bytes("".join(f"{e}\n" for e in entries))
+        write_atomic(path, text, mode=0o644, durable=sync_dir or "file", relabel=False)
+
+    def read_record(self, name: str) -> str | None:
+        """STATE/name's text (the locale's encoding), stripped; None if it does not exist."""
+        try:
+            with open(self.path(name)) as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+
+
+class PinFile:
+    """The pin file (PinsPort): one path per line, each normalised and resolved."""
+
+    def __init__(self, pin_file: str) -> None:
+        self.pin_file = pin_file
+
+    def read(self) -> tuple[set[str], str | None]:
+        """(the pinned paths, problem or None); a file that breaks halfway keeps the lines read before."""
+        pins: set[str] = set()
+        try:
+            with open(self.pin_file) as f:
+                for raw in f:
+                    line = raw.strip()
+                    if line:
+                        pins.add(os.path.normpath(line))
+                        pins.add(os.path.realpath(line))
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeDecodeError) as e:
+            return pins, f"cannot read the pin file {self.pin_file}: {e}"
+        return pins, None
+
+    def covers(self, path: str, pins: Collection[str]) -> bool:
+        if not path or not pins:
+            return False
+        return os.path.normpath(path) in pins or os.path.realpath(path) in pins
+
+
+class RunLock:
+    """The run lock (RunLockPort): an flock on the lock file, never waited for."""
+
+    def acquire(self, path: str) -> Callable[[], None] | None:
+        fd = take_lock(path, wait=False)
+        if fd is None:
+            return None
+        return lambda: os.close(fd)
+
+
+class Log:
+    """btrfs-snapshot's journal lines ("<prio>btrfs-snapshot: msg") on the
+    stream main chose: stdout, or stderr for the commands whose stdout is
+    their answer (latest, caches, --json)."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+
+    def __call__(self, level: int, msg: str) -> None:
+        journal_log(level, msg, tag="btrfs-snapshot", stream=self.stream)

@@ -44,7 +44,6 @@ ANY_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk cli": 3,
     "btrfs/bulk domain": 8,
     "btrfs/bulk unlayered": 50,
-    "btrfs/snapshot cli": 4,
     "btrfs/stall_monitord adapters": 1,
     "btrfs/stall_monitord domain": 2,
     "btrfs/stall_monitord unlayered": 7,
