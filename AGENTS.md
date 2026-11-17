@@ -65,7 +65,8 @@ consistent.
 - **Every file names its license.** One line,
   `SPDX-License-Identifier: MPL-2.0`, in the file's comment syntax: line 1,
   or right after a line that must stay first (a shebang, a
-  `# shellcheck shell=` directive, a Markdown file's frontmatter). The full
+  `# shellcheck shell=` directive, an XML declaration, a Dockerfile
+  `# syntax=` directive, a Markdown file's frontmatter). The full
   notice stays in LICENSE. `invowk cmd fix license --apply` adds the line to
   new files; `tests/test_license_headers.py` fails on a file without it.
   The few files that cannot carry it (no comment syntax, captured data) are

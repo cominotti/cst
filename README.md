@@ -499,8 +499,6 @@ Each detailed document has a longer glossary at its end.
 Licensed under the [Mozilla Public License 2.0 (MPL-2.0)](LICENSE).
 
 Each file names its license in one line, `SPDX-License-Identifier: MPL-2.0`,
-in its own comment syntax (line 1, or line 2 after a shebang). The full
-notice, Exhibit A, is in [LICENSE](LICENSE), which the license allows.
-`invowk cmd test license` checks the line in every file and
-`invowk cmd fix license` adds it to new ones (see
-[AGENTS.md](AGENTS.md)).
+in its own comment syntax; [AGENTS.md](AGENTS.md) says where the line goes
+and how to check and add it. The full notice, Exhibit A, is in
+[LICENSE](LICENSE), which the license allows.

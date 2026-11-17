@@ -12,13 +12,16 @@ This module checks:
 - LICENSE keeps the full notice (Exhibit A), and README's License section
   points to LICENSE;
 - the rules themselves and the fixer (dry run, --apply, a second run);
-- what the header must not change: the help of the seven scripts that
-  print their own header comment shows no license line, and every `.in`
-  template renders with the header in its destination's syntax.
+- what the header must not change: the help of the scripts that print
+  their own header comment (HELP_FROM_HEADER, every shell file with that
+  sed) shows no license line, and every `.in` template renders with the
+  header in its destination's syntax.
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 """
 
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
@@ -35,12 +38,14 @@ from tests.license_headers import (
     apply,
     header_line,
     header_problem,
+    main,
     plan,
     problems,
     unmatched_exemptions,
     with_header,
 )
 from tests.repo_files import REPO, repo_files
+from tests.shell_files import shell_files
 
 FIXER = os.path.join(REPO, "tests", "license_headers.py")
 # The scripts whose help is their header comment (lines 2 up to the first
@@ -83,6 +88,12 @@ class LicenseGateTest(unittest.TestCase):
                 text = Path(REPO, e.src).read_text(encoding="utf-8")
                 rendered = render_template(text, dict.fromkeys(template_keys(text), "x"))
                 self.assertIsNone(header_problem(e.dest, rendered))
+
+    def test_every_script_that_prints_its_header_comment_is_listed(self) -> None:
+        # A script copied from these (same sed) is checked by the test below only once it is listed.
+        idiom = "sed -n '2,/^$/"
+        using = {rel for rel in shell_files() if idiom in Path(REPO, rel).read_text(encoding="utf-8")}
+        self.assertEqual(using, {script for script, _, _ in HELP_FROM_HEADER})
 
     def test_help_from_the_header_comment_shows_no_license_line(self) -> None:
         home = tempfile.mkdtemp(prefix="cst-license-help-")
@@ -206,6 +217,40 @@ class FixerTest(unittest.TestCase):
         self.assertIn("not UTF-8", changes[0].refused or "")
         self.assertIn("unknown file kind", changes[1].refused or "")
 
+    def run_main(self, *argv: str, files: list[str] | None = None, repo: str = "") -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = main(argv, repo=repo or self.repo, files=files)
+            except unittest.SkipTest as exc:  # would only skip this test: the command must not raise it
+                self.fail(f"main() raised SkipTest: {exc}")
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_command_lists_then_adds_then_has_nothing_to_do(self) -> None:
+        names = [*self.files, "link.py"]
+        before = self.snapshot()
+        listed = ["a.py", "run.sh", "skill/SKILL.md"]
+        want = (
+            "".join(f"would add:  {rel}\n" for rel in listed) + "3 file(s) lack the license header; --apply adds it\n"
+        )
+        self.assertEqual(self.run_main(files=names), (0, want, ""))
+        self.assertEqual(self.snapshot(), before, "the dry run wrote a file")
+        self.assertEqual(self.run_main("--apply", files=names), (0, "".join(f"added:      {r}\n" for r in listed), ""))
+        self.assertEqual(problems(self.repo, names), [])
+        self.assertEqual(self.run_main("--apply", files=names), (0, "", ""), "a second run changes nothing")
+
+    def test_the_command_refuses_and_rejects_without_a_traceback(self) -> None:
+        Path(self.repo, "odd.dat").write_text("data\n", encoding="utf-8")
+        code, out, err = self.run_main("--apply", files=["odd.dat"])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("refused:    odd.dat: unknown file kind", err)
+        self.assertEqual(Path(self.repo, "odd.dat").read_text(encoding="utf-8"), "data\n")
+        self.assertEqual(self.run_main("--bogus")[0], 2)
+        # No file list: a folder that is not a git checkout is one line on stderr, not a traceback.
+        code, out, err = self.run_main(repo=os.path.join(self.repo, "missing"))
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err.startswith("license_headers.py: not a git checkout"), err)
+
     def test_the_checkout_has_nothing_to_add(self) -> None:
         repo_files()  # outside a git checkout (a source tarball) this skips, as the gate does
         r = subprocess.run(
@@ -216,14 +261,6 @@ class FixerTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        bad = subprocess.run(
-            [sys.executable, "-I", "-B", FIXER, "--bogus"],
-            check=False,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(bad.returncode, 2)
 
 
 if __name__ == "__main__":

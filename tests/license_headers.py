@@ -28,6 +28,7 @@ import fnmatch
 import os
 import sys
 from typing import Final
+import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if REPO not in sys.path:
@@ -119,6 +120,20 @@ def header_line(rel: str, first_line: str) -> str | None:
     return syntax[0] + IDENTIFIER + syntax[1]
 
 
+def _locate(rel: str, lines: Sequence[str]) -> tuple[str, list[int], int] | None:
+    """For the lines of `rel` (no line ends): the header, the lines that hold it and the
+    line it belongs on; None for an unknown kind."""
+    syntax = comment_syntax(rel, lines[0] if lines else "")
+    if syntax is None:
+        return None
+    header = syntax[0] + IDENTIFIER + syntax[1]
+    at = [i for i, line in enumerate(lines) if line == header]
+    # Where the header goes in the file without it: a header above a frontmatter
+    # hides the frontmatter from header_index, and is still misplaced.
+    want = header_index([line for line in lines if line != header], syntax)
+    return header, at, want
+
+
 def header_index(lines: Sequence[str], syntax: tuple[str, str]) -> int:
     """The 0-based line the header belongs on (lines as from str.splitlines())."""
     if not lines:
@@ -134,16 +149,10 @@ def header_index(lines: Sequence[str], syntax: tuple[str, str]) -> int:
 
 def header_problem(rel: str, text: str) -> str | None:
     """Why `text` (the content of `rel`) does not carry the header as these rules want it; None when it does."""
-    lines = text.splitlines()
-    first = lines[0] if lines else ""
-    syntax = comment_syntax(rel, first)
-    if syntax is None:
+    found = _locate(rel, text.splitlines())
+    if found is None:
         return f"{rel}: unknown file kind: add its comment syntax to tests/license_headers.py, or an exemption"
-    header = syntax[0] + IDENTIFIER + syntax[1]
-    at = [i for i, line in enumerate(lines) if line == header]
-    # Where the header goes in the file without it: a header above a frontmatter
-    # hides the frontmatter from header_index, and is still misplaced.
-    want = header_index([line for line in lines if line != header], syntax)
+    header, at, want = found
     if not at:
         return f"{rel}: no license header (want line {want + 1}: {header!r})"
     if at != [want]:
@@ -161,13 +170,10 @@ def with_header(rel: str, text: str) -> str:
     if problem is None:
         return text
     lines = text.splitlines(keepends=True)
-    syntax = comment_syntax(rel, lines[0] if lines else "")
-    if syntax is None:
+    found = _locate(rel, [line.rstrip("\r\n") for line in lines])
+    if found is None or found[1]:
         raise ValueError(problem)
-    header = syntax[0] + IDENTIFIER + syntax[1]
-    if any(line.rstrip("\r\n") == header for line in lines):
-        raise ValueError(problem)
-    at = header_index([line.rstrip("\r\n") for line in lines], syntax)
+    header, _, at = found
     if at > 0 and not lines[at - 1].endswith("\n"):
         lines[at - 1] += "\n"
     lines.insert(at, header + "\n")
@@ -230,17 +236,26 @@ def apply(repo: str, changes: Iterable[Change]) -> None:
                 fh.write(change.text)
 
 
-def main(argv: Sequence[str] = ()) -> int:
-    """Exit 0: done or nothing to do; 1: a file needs a look (refused); 2: bad arguments."""
+def main(argv: Sequence[str] = (), repo: str = REPO, files: Sequence[str] | None = None) -> int:
+    """Exit 0: done or nothing to do; 1: a file needs a look (refused); 2: bad arguments, or no file list.
+
+    `files` defaults to the files of the checkout at `repo` (tests pass their own).
+    """
     args = list(argv)
     if args not in ([], ["--apply"]):
         print("usage: license_headers.py [--apply]", file=sys.stderr)
         return 2
-    changes = plan(REPO, repo_files(REPO))
+    if files is None:
+        try:
+            files = repo_files(repo)
+        except (unittest.SkipTest, AssertionError) as exc:  # not a checkout, or git refused to read it
+            print(f"license_headers.py: {exc}", file=sys.stderr)
+            return 2
+    changes = plan(repo, files)
     todo = [c for c in changes if c.text is not None]
     refused = [c.refused for c in changes if c.refused is not None]
     if args:
-        apply(REPO, todo)
+        apply(repo, todo)
     for change in todo:
         print(("added:      " if args else "would add:  ") + change.rel)
     for reason in refused:
