@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Mapping
 import os
 from typing import Any, BinaryIO, Protocol, TextIO
 
+from cst_core.ports import VirshPort
 from doctor.domain import Deployment, OstreeAnswer, Result
 
 
@@ -31,6 +32,10 @@ class DoctorHostPort(Protocol):
 
     def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
         """Run a read-only query command on the host (with LC_ALL=C when locale_c); return (rc, stdout, stderr)."""
+        ...
+
+    def virsh(self, *, read_only: bool) -> VirshPort:
+        """virsh on the host's system connection (-r when read_only), with run()'s answers for a fault."""
         ...
 
     def repo_path(self, rel: str) -> str:

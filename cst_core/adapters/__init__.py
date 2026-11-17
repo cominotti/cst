@@ -2,11 +2,22 @@
 """Concrete infrastructure adapters implementing cst_core ports (files: cst_core.adapters.files; zipapps: cst_core.adapters.zipapp)."""
 
 from collections.abc import Callable, Mapping, Sequence
+import functools
 import os
 import subprocess
 import time
+from typing import TypedDict
 
-from cst_core.ports import CommandFailed, CommandResult, CommandRunnerPort, ExecutionContextPort
+from cst_core.ports import (
+    CommandFailed,
+    CommandFault,
+    CommandResult,
+    CommandRunnerPort,
+    ContainerProbePort,
+    DecodeErrors,
+    OutputMode,
+    StdinMode,
+)
 
 
 def _decode_stream(data: str | bytes | None) -> str:
@@ -23,8 +34,118 @@ def c_locale(env: Mapping[str, str] | None = None) -> dict[str, str]:
     return {**(env or {}), "LC_ALL": "C"}
 
 
+class _RunKwargs(TypedDict, total=False):
+    """The subprocess.run arguments of one call: only those an option sets, so
+    a call with the defaults reaches subprocess.run as it always did."""
+
+    timeout: float
+    stdin: int
+    input: str
+    stdout: int
+    env: dict[str, str]
+    stderr: int
+    capture_output: bool
+    text: bool
+    preexec_fn: Callable[[], None]
+    errors: str
+    cwd: str
+    start_new_session: bool
+
+
+def _renice(increment: int) -> None:
+    """In the child, before exec: nice(increment); a refusal is ignored (the command still runs)."""
+    try:
+        os.nice(increment)
+    except OSError:
+        pass
+
+
+def _additions(env: Mapping[str, str] | None, *, locale_c: bool) -> dict[str, str]:
+    """The variables a call sets on top of its base environment: LC_ALL=C first, so env wins."""
+    return {**(c_locale() if locale_c else {}), **(env or {})}
+
+
+def _child_env(
+    env: Mapping[str, str] | None, unset: Sequence[str], base_env: Mapping[str, str] | None, *, locale_c: bool
+) -> dict[str, str] | None:
+    """The command's whole environment; None (inherit ours) when no option changes it."""
+    if env is None and not unset and base_env is None and not locale_c:
+        return None
+    merged = {**(os.environ if base_env is None else base_env), **_additions(env, locale_c=locale_c)}
+    for name in unset:
+        merged.pop(name, None)
+    return merged
+
+
+def _stream_kwargs(
+    input_text: str | None, stdin: StdinMode, output: OutputMode, decode_errors: DecodeErrors
+) -> _RunKwargs:
+    """stdin, stdout, stderr and decoding."""
+    if input_text is not None and stdin != "devnull":
+        raise ValueError("input_text is the command's stdin: stdin must stay 'devnull'")
+    kw: _RunKwargs = {}
+    if input_text is not None:
+        kw["input"] = input_text
+    elif stdin == "devnull":
+        kw["stdin"] = subprocess.DEVNULL
+    if output == "capture":
+        kw["capture_output"] = True
+    elif output == "merge":
+        kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.STDOUT
+    elif output == "stdout":
+        kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.DEVNULL
+    if output != "inherit" or input_text is not None:
+        kw["text"] = True
+        if decode_errors == "replace":
+            kw["errors"] = "replace"
+    return kw
+
+
+def _fault_result(
+    cmd: Sequence[str], fault: CommandFault, cause: Exception, stdout: str = "", stderr: str = ""
+) -> CommandResult:
+    rc = {"missing": 127, "unstartable": 126, "timeout": 124}[fault]
+    return CommandResult(rc, stdout, stderr or str(cause), argv=tuple(cmd), fault=fault, cause=cause)
+
+
+# A caller's own words for a fault: (argv as the caller gave it, the
+# result, the timeout) -> the result to return instead.
+type _FaultWords = Callable[[Sequence[str], CommandResult, float | None], CommandResult]
+
+
 class SubprocessCommandRunner:
-    """CommandRunnerPort backed by subprocess.run with explicit stdin handling."""
+    """CommandRunnerPort backed by subprocess.run with explicit stdin handling.
+
+    subprocess.run gets only the arguments an option sets (see _RunKwargs).
+    """
+
+    def __init__(
+        self,
+        ctx: ContainerProbePort | None = None,
+        *,
+        base_env: Mapping[str, str] | None = None,
+        words: _FaultWords | None = None,
+    ) -> None:
+        """ctx: asked at each on_host call (inside a container or not).
+        base_env: the environment a call starts from when it names none (None:
+        this process's). words: rewrites a fault's result in the caller's own
+        words (before check)."""
+        self._ctx = HostExecutionContext() if ctx is None else ctx
+        self._base_env = base_env
+        self._words = words
+
+    def _argv(
+        self, argv: Sequence[str], env: Mapping[str, str] | None, unset: Sequence[str], *, locale_c: bool, on_host: bool
+    ) -> list[str]:
+        """argv, behind flatpak-spawn --host when on_host inside a container. The
+        host command does not get flatpak-spawn's environment: what the call sets
+        goes in --env."""
+        if not (on_host and self._ctx.is_container()):
+            return list(argv)
+        if unset:
+            raise ValueError("unset cannot reach a command run on the host from a container")
+        passed = [f"--env={k}={v}" for k, v in _additions(env, locale_c=locale_c).items()]
+        return ["flatpak-spawn", "--host", *passed, *argv]
 
     def run(
         self,
@@ -34,45 +155,60 @@ class SubprocessCommandRunner:
         timeout: float | None = None,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        unset: Sequence[str] = (),
+        base_env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        locale_c: bool = False,
+        new_session: bool = False,
+        on_host: bool = False,
+        stdin: StdinMode = "devnull",
+        output: OutputMode = "capture",
+        decode_errors: DecodeErrors = "replace",
+        nice: int | None = None,
     ) -> CommandResult:
-        """Run argv with capture_output=True and DEVNULL stdin unless input_text is given.
+        """Run argv (see CommandRunnerPort for the options).
 
-        Output that is not UTF-8 is decoded with U+FFFD for the bad bytes,
-        never a UnicodeDecodeError out of run().
+        A command that is missing (127), cannot start (126) or times out (124)
+        gives a CommandResult with fault and cause set (CommandFailed with
+        check); with decode_errors="strict", output that is not UTF-8 raises
+        UnicodeDecodeError.
         """
-        cmd = list(argv)
-        merged_env = None if env is None else {**os.environ, **env}
+        cmd = self._argv(argv, env, unset, locale_c=locale_c, on_host=on_host)
+        kw = _stream_kwargs(input_text, stdin, output, decode_errors)
+        child_env = _child_env(env, unset, self._base_env if base_env is None else base_env, locale_c=locale_c)
+        if child_env is not None:
+            kw["env"] = child_env
+        if timeout is not None:
+            kw["timeout"] = timeout
+        if cwd is not None:
+            kw["cwd"] = cwd
+        if new_session:
+            kw["start_new_session"] = True
+        if nice:
+            kw["preexec_fn"] = functools.partial(_renice, nice)
+        res = self._spawn(cmd, kw, timeout)
+        if res.fault is not None and self._words is not None:
+            res = self._words(argv, res, timeout)
+        if check and res.returncode != 0:
+            raise CommandFailed(cmd, res.returncode, res.stdout, res.stderr)
+        return res
+
+    @staticmethod
+    def _spawn(cmd: Sequence[str], kw: _RunKwargs, timeout: float | None) -> CommandResult:
         try:
-            proc = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=timeout,
-                # No stdin of ours leaks into the command: /dev/null, or input_text.
-                stdin=subprocess.DEVNULL if input_text is None else None,
-                input=input_text,
-                env=merged_env,
-            )
+            proc = subprocess.run(cmd, check=False, **kw)
         except FileNotFoundError as exc:
-            if check:
-                raise CommandFailed(cmd, 127, "", str(exc)) from None
-            return CommandResult(returncode=127, stdout="", stderr=str(exc), argv=tuple(cmd))
+            # The cwd folder is missing (subprocess names it): the program may exist, it could not start there.
+            fault: CommandFault = (
+                "unstartable" if exc.filename is not None and exc.filename == kw.get("cwd") else "missing"
+            )
+            return _fault_result(cmd, fault, exc)
         except subprocess.TimeoutExpired as exc:
             msg = f"timed out after {timeout}s" if timeout is not None else "command timed out"
-            out = _decode_stream(exc.stdout)
-            err = _decode_stream(exc.stderr) or msg
-            if check:
-                raise CommandFailed(cmd, 124, out, err) from None
-            return CommandResult(returncode=124, stdout=out, stderr=err, argv=tuple(cmd))
+            return _fault_result(cmd, "timeout", exc, _decode_stream(exc.stdout), _decode_stream(exc.stderr) or msg)
         except OSError as exc:
-            if check:
-                raise CommandFailed(cmd, 126, "", str(exc)) from None
-            return CommandResult(returncode=126, stdout="", stderr=str(exc), argv=tuple(cmd))
-        if check and proc.returncode != 0:
-            raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
-        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, argv=tuple(cmd))
+            return _fault_result(cmd, "unstartable", exc)
+        return CommandResult(proc.returncode, _decode_stream(proc.stdout), _decode_stream(proc.stderr), argv=tuple(cmd))
 
 
 class HostExecutionContext:
@@ -159,17 +295,32 @@ class SystemctlAdapter:
 
 
 class SubprocessVirshAdapter:
-    """VirshPort adapter running `virsh` on the host (via `flatpak-spawn --host` in containers)."""
+    """VirshPort adapter: `virsh [-r] -c URI ARGS` in the C locale, through a CommandRunnerPort.
+
+    on_host: inside a container, virsh runs on the host (flatpak-spawn --host);
+    read_only: -r, for the queries libvirt answers on a read-only connection;
+    decode_errors: what the runner does with output that is not UTF-8.
+    ctx only builds the default runner (the runner decides on_host): a ctx
+    next to a runner is refused, since it would be ignored.
+    """
 
     def __init__(
         self,
         uri: str = "qemu:///system",
         runner: CommandRunnerPort | None = None,
-        ctx: ExecutionContextPort | None = None,
+        ctx: ContainerProbePort | None = None,
+        *,
+        on_host: bool = True,
+        read_only: bool = False,
+        decode_errors: DecodeErrors = "replace",
     ) -> None:
+        if runner is not None and ctx is not None:
+            raise ValueError("SubprocessVirshAdapter: ctx only builds the default runner; give the runner its ctx")
         self._uri = uri
-        self._runner = SubprocessCommandRunner() if runner is None else runner
-        self._ctx = HostExecutionContext() if ctx is None else ctx
+        self._runner = SubprocessCommandRunner(ctx) if runner is None else runner
+        self._on_host = on_host
+        self._read_only = read_only
+        self._decode_errors: DecodeErrors = decode_errors
 
     def call(
         self,
@@ -178,34 +329,17 @@ class SubprocessVirshAdapter:
         timeout: float | None = 60,
         start_new_session: bool = False,
     ) -> CommandResult:
-        """Execute `virsh -c <uri> *args` (using direct subprocess when start_new_session=True)."""
-        base = ["virsh", "-c", self._uri, *args]
-        cmd = ["flatpak-spawn", "--host", *base] if self._ctx.is_container() else base
-        if start_new_session:
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=timeout,
-                    stdin=subprocess.DEVNULL,
-                    env=c_locale(os.environ),
-                    start_new_session=True,
-                )
-            except FileNotFoundError as exc:
-                if check:
-                    raise CommandFailed(cmd, 127, "", str(exc)) from None
-                return CommandResult(127, "", str(exc), argv=tuple(cmd))
-            except subprocess.TimeoutExpired:
-                if check:
-                    raise CommandFailed(cmd, 124, "", f"timed out after {timeout}s") from None
-                return CommandResult(124, "", f"timed out after {timeout}s", argv=tuple(cmd))
-            if check and proc.returncode != 0:
-                raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
-            return CommandResult(proc.returncode, proc.stdout, proc.stderr, argv=tuple(cmd))
-        return self._runner.run(cmd, check=check, timeout=timeout, env=c_locale())
+        """Run `virsh -c <uri> *args`; start_new_session: in a session of its own."""
+        cmd = ["virsh", *(["-r"] if self._read_only else []), "-c", self._uri, *args]
+        return self._runner.run(
+            cmd,
+            check=check,
+            timeout=timeout,
+            locale_c=True,
+            new_session=start_new_session,
+            on_host=self._on_host,
+            decode_errors=self._decode_errors,
+        )
 
     def domains(self, *, all_domains: bool = True) -> list[str]:
         """Return configured domain names, or empty list on failure."""

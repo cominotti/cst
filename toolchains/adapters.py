@@ -25,10 +25,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+from cst_core.adapters import SubprocessCommandRunner
 from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState, UnitFileState
+from cst_core.ports import CommandRunnerPort
 from toolchains.domain import (
     CACHE_TAG,
     CARGO_COMM,
@@ -53,6 +55,7 @@ from toolchains.domain import (
     RUST_TOOLS,
     SCAN_SKIP,
     SCCACHE_DIR_REL,
+    SCCACHE_STATS,
     STATE_DIR_REL,
     TOOL_FILE_DIRS,
     TOOL_FILE_MAX,
@@ -79,6 +82,9 @@ from toolchains.domain import (
 PROC = "/proc"
 # How hints name the frontend ("cst toolchains" through cst).
 PROG = os.environ.get("CST_PROG") or "cst toolchains"
+# The commands cst-toolchains runs (each call names its stdin, environment
+# and timeout; output that is not UTF-8 raises, as text=True did).
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 
 class Program:
@@ -504,12 +510,9 @@ def cargo_query(
 def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str | None, str | None]:
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
-    try:
-        r = subprocess.run(
-            cmd, check=False, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return None, f"cargo metadata: {e}"
+    r = RUNNER.run(cmd, cwd=cwd, base_env=env, timeout=60, decode_errors="strict")
+    if r.cause is not None:
+        return None, f"cargo metadata: {r.cause}"
     if r.returncode != 0:
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
@@ -521,30 +524,18 @@ def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str
     return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
 
 
-def lower_priority() -> None:
-    """In the child, before exec: the lowest CPU priority (the timer runs at
-    Nice=19 anyway; a manual run should not slow builds either)."""
-    try:
-        os.nice(19)
-    except OSError:
-        pass
-
-
 def run_idle(cmd: Sequence[str], cwd: str, env: Mapping[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
-    """subprocess.run at idle CPU and IO priority (ionice -c 3 when present)."""
+    """cmd at idle CPU and IO priority: ionice -c 3 when present, and nice 19
+    in the child (the timer runs at Nice=19 anyway; a manual run should not
+    slow builds either). A command that cannot start or does not finish
+    within timeout raises OSError or subprocess.TimeoutExpired, as
+    subprocess.run did."""
     io = shutil.which("ionice")
     full = ([io, "-c", "3"] if io else []) + list(cmd)
-    return subprocess.run(
-        full,
-        check=False,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        preexec_fn=lower_priority,
-    )
+    r = RUNNER.run(full, cwd=cwd, base_env=env, timeout=timeout, nice=19, decode_errors="strict")
+    if r.cause is not None:
+        raise r.cause
+    return subprocess.CompletedProcess(full, r.returncode, r.stdout, r.stderr)
 
 
 def walk_dirs(
@@ -763,18 +754,18 @@ def remove_tree(path: str, timeout: float | None = None) -> tuple[bool, str]:
     None: none): rm is stopped then; what is left of PATH (an already
     renamed-away folder) is a leftover that the next run deletes."""
     effective_timeout = None if timeout is None else max(1.0, float(timeout))
-    try:
-        r = subprocess.run(
-            ["rm", "-rf", "--one-file-system", "--", path],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=effective_timeout,
-        )
-    except subprocess.TimeoutExpired:
+    r = RUNNER.run(
+        ["rm", "-rf", "--one-file-system", "--", path],
+        timeout=effective_timeout,
+        stdin="inherit",
+        output="merge",
+        decode_errors="strict",
+    )
+    if r.fault == "timeout":
         secs = int(effective_timeout) if effective_timeout is not None else 0
         return False, f"stopped after {secs}s (the run's time budget); the next run deletes the rest"
+    if r.cause is not None:
+        raise r.cause
     return r.returncode == 0, r.stdout.strip()
 
 
@@ -898,21 +889,18 @@ def rustup_default(home: str, rh: str) -> str:
         return ""
     env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
     env.pop("RUSTUP_TOOLCHAIN", None)
-    try:
-        r = subprocess.run(
-            [rustup, "default"],
-            check=False,
-            cwd=home,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except OSError, subprocess.TimeoutExpired:
+    r = RUNNER.run([rustup, "default"], cwd=home, base_env=env, timeout=20, decode_errors="strict")
+    if r.cause is not None:
         return ""
     words = r.stdout.split() if r.returncode == 0 else []
     return words[0] if words else ""
+
+
+def sccache_stats(exe: str, env: Mapping[str, str]) -> dict[str, str]:
+    """The fields of `EXE --show-stats` in ENV (stderr dropped, within 5 s);
+    {} when it did not run or failed. Output that is not UTF-8 raises."""
+    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout", decode_errors="strict")
+    return dict(SCCACHE_STATS.findall(r.stdout)) if r.cause is None and r.returncode == 0 else {}
 
 
 def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str], bool]:
@@ -985,13 +973,10 @@ def systemctl_env() -> dict[str, str]:
 def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user; '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    try:
-        r = subprocess.run(
-            systemctl_cmd(*args), check=False, capture_output=True, text=True, env=systemctl_env(), timeout=60
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
+    r = RUNNER.run(systemctl_cmd(*args), base_env=systemctl_env(), timeout=60, stdin="inherit", decode_errors="strict")
+    if r.cause is not None:
         if check:
-            raise Refused(f"systemctl --user {' '.join(args)}: {e}") from None
+            raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None
         return ""
     if check and r.returncode not in ok:
         raise Refused(f"systemctl --user {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")

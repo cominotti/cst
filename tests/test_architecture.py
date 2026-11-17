@@ -118,7 +118,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 165,
     "doctor/cli.py": 35,
     "swap/cli.py": 112,
-    "toolchains/cli.py": 1910,
+    "toolchains/cli.py": 1897,
     "vm/cli.py": 1288,
 }
 
@@ -165,8 +165,8 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 3,
     "doctor cli": 1,
     "swap cli": 3,
-    "toolchains cli": 62,
-    "vm cli": 83,
+    "toolchains cli": 57,
+    "vm cli": 82,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
@@ -209,7 +209,6 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
 # (tests/budgets.py). Only goes down.
 PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
-    "bluetooth subprocess.run": 1,
     "btrfs/bulk os.fsync": 7,
     "btrfs/bulk subprocess.Popen": 1,
     "btrfs/bulk subprocess.run": 13,
@@ -217,27 +216,22 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "btrfs/docker_gc os.fsync": 1,
     "btrfs/docker_gc os.replace": 1,
     "btrfs/docker_gc subprocess.Popen": 1,
-    "btrfs/docker_gc subprocess.run": 2,
     "btrfs/docker_volumes_nocow os.fsync": 1,
     "btrfs/docker_volumes_nocow os.replace": 1,
     "btrfs/docker_volumes_nocow subprocess.run": 5,
     "btrfs/snapshot os.fsync": 2,
     "btrfs/snapshot os.replace": 1,
-    "btrfs/snapshot subprocess.run": 1,
     "btrfs/stall_monitord subprocess.Popen": 1,
     "btrfs/stall_report subprocess.run": 3,
     "cpu subprocess.Popen": 1,
-    "cpu subprocess.run": 2,
+    "cpu subprocess.run": 1,
     "cpu tempfile.NamedTemporaryFile": 1,
     "cst_core subprocess.run": 1,
-    "doctor subprocess.run": 1,
     "toolchains fcntl.flock": 3,
     "toolchains os.replace": 1,
-    "toolchains subprocess.run": 6,
     "toolchains tempfile.mkstemp": 1,
     "vm os.replace": 1,
     "vm subprocess.Popen": 1,
-    "vm subprocess.run": 2,
     "vm tempfile.mkstemp": 2,
 }
 
@@ -252,12 +246,11 @@ LITERAL_BUDGETS: Final[dict[str, int]] = {
     "cst_core /run/.containerenv": 1,
     "doctor /.dockerenv": 1,
     "doctor /run/.containerenv": 1,
-    "doctor flatpak-spawn": 2,
+    "doctor flatpak-spawn": 1,
     "doctor qemu:///system": 1,
     "toolchains /.dockerenv": 1,
     "toolchains /run/.containerenv": 1,
     "toolchains flatpak-spawn": 4,
-    "vm LC_ALL": 3,
     "vm qemu:///system": 3,
     "vm restorecon": 2,
 }
@@ -271,7 +264,6 @@ CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/
 # remove its line. Only shrinks.
 CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/adapters/__init__.py:SystemClockAdapter": "the adapter of ClockPort; no program takes a clock through the port yet",
-    "cst_core/adapters/__init__.py:SubprocessVirshAdapter": "the adapter of VirshPort; cpu, vm and doctor still run virsh themselves",
     "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
     "cst_core/adapters/nocow.py:FS_IOC_SETFLAGS": "an ioctl request used inside nocow.py and by its tests",
@@ -304,7 +296,6 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/domain/values.py:CpuSet": "cpu parses CPU lists itself (cpus_of): adopt it there or delete it",
     "cst_core/ports/__init__.py:HostPathPort": "a port no program takes yet: adopt it or delete it",
     "cst_core/ports/__init__.py:ClockPort": "a port no program takes yet: adopt it or delete it",
-    "cst_core/ports/__init__.py:VirshPort": "a port no program takes yet (virsh runs in cpu, vm and doctor): adopt it or delete it",
 }
 
 

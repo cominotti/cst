@@ -23,6 +23,7 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from cst_core.adapters import c_locale
 from cst_core.adapters.files import write_bytes_atomic
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
@@ -77,6 +78,7 @@ from vm.adapters import (
     read_index,
     restic,
     run,
+    run_on_terminal,
     safe_output,
     mark_folder_nocow,
     signals_held,
@@ -396,7 +398,7 @@ def restic_ready(nas: Mapping[str, Any]) -> None:
 def restic_backup(nas: Mapping[str, Any], args: Sequence[str], timeout: int) -> tuple[int, dict[str, Any]]:
     """restic backup --json: stderr goes through, the status lines become a
     progress line every minute, the summary is kept. (rc, summary or {})."""
-    env = {**os.environ, "LC_ALL": "C", **nas["env"]}
+    env = {**c_locale(os.environ), **nas["env"]}
     try:
         p = subprocess.Popen(["restic", *args], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, env=env)
     except FileNotFoundError:
@@ -1236,9 +1238,9 @@ def mark_system_dir(d: Mapping[str, Any]) -> str:
     steps.append(["chattr", "+C", path])
     for cmd in steps:
         print(f"  sudo {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
-        p = subprocess.run(["sudo", "--", *cmd], check=False, env={**os.environ, "LC_ALL": "C"})
-        if p.returncode != 0:
-            return f"sudo {cmd[0]} {q}: exit {p.returncode}"
+        rc = run_on_terminal(["sudo", "--", *cmd])
+        if rc != 0:
+            return f"sudo {cmd[0]} {q}: exit {rc}"
     rc, so, _ = run(["sudo", "--", "lsattr", "-d", path])
     attrs = so.split()[0] if rc == 0 and so.split() else ""
     return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"

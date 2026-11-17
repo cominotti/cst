@@ -219,7 +219,7 @@ class RecorderAliveTest(unittest.TestCase):
 
     def test_systemctl_gets_no_stdin_and_a_timeout(self) -> None:
         done = subprocess.CompletedProcess(["systemctl"], 0)
-        with mock.patch.object(gc_adapters.subprocess, "run", return_value=done) as run:
+        with mock.patch.object(subprocess, "run", return_value=done) as run:
             self.assertTrue(gc_adapters.recorder_alive({"heartbeat": time.time()}))
         self.assertEqual(run.call_args.args[0], ["systemctl", "-q", "is-active", "docker-gc-recorder.service"])
         self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
@@ -228,7 +228,7 @@ class RecorderAliveTest(unittest.TestCase):
     def test_a_systemctl_that_does_not_answer_holds_images_back(self) -> None:
         hang = subprocess.TimeoutExpired(["systemctl"], gc_adapters.SYSTEMCTL_TIMEOUT)
         out = io.StringIO()
-        with mock.patch.object(gc_adapters.subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
+        with mock.patch.object(subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
             self.assertFalse(gc_adapters.recorder_alive({"heartbeat": time.time()}))
         self.assertEqual(
             out.getvalue(),
@@ -272,6 +272,25 @@ class EntryTest(unittest.TestCase):
                 finally:
                     os.close(w)
                 self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
+
+
+class DockerCommandTest(unittest.TestCase):
+    """docker(): a docker that does not answer stops the run with one line; one that is missing raises."""
+
+    def test_no_answer_and_missing(self) -> None:
+        hang = subprocess.TimeoutExpired(["docker"], 30)
+        with mock.patch.object(subprocess, "run", side_effect=hang):
+            with self.assertRaises(RuntimeError) as stop:
+                gc_adapters.docker("image", "ls", "-q", timeout=30)
+        self.assertEqual(str(stop.exception), "docker image ls: no answer in 30s")
+        self.assertIsInstance(stop.exception.__cause__, subprocess.TimeoutExpired)
+        missing = FileNotFoundError(2, "No such file or directory", "docker")
+        with mock.patch.object(subprocess, "run", side_effect=missing), self.assertRaises(FileNotFoundError):
+            gc_adapters.docker("info")
+        failed = subprocess.CompletedProcess(["docker"], 1, "", "daemon down\n")
+        with mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(RuntimeError) as stop:
+            gc_adapters.docker("info")
+        self.assertEqual(str(stop.exception), "docker info: daemon down")
 
 
 if __name__ == "__main__":

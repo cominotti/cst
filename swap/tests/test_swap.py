@@ -766,6 +766,7 @@ class _FakeRunner:
         timeout: float | None = None,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        **_options: object,
     ) -> CommandResult:
         del argv, check, timeout, input_text, env
         return CommandResult(0, "", "")
@@ -1089,6 +1090,7 @@ class _ScriptedRunner:
         timeout: float | None = None,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        **_options: object,
     ) -> CommandResult:
         del timeout, input_text, env
         self.calls.append(list(argv))
@@ -1243,6 +1245,7 @@ class SwapApplyOutputTest(_SwapScratch):
                 timeout: float | None = None,
                 input_text: str | None = None,
                 env: Mapping[str, str] | None = None,
+                **_options: object,
             ) -> CommandResult:
                 if argv[0] != program:
                     return super().run(argv, check=check, timeout=timeout, input_text=input_text, env=env)

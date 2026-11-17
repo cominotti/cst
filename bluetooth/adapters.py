@@ -5,11 +5,12 @@ from collections.abc import Sequence
 import ctypes
 import json
 import os
-import subprocess
 import sys
 from typing import Any
 
 from bluetooth.domain import LE_SECTION, classify_other_fragments, snapshot
+from cst_core.adapters import SubprocessCommandRunner
+from cst_core.ports import CommandRunnerPort
 
 
 def read(path: str) -> str:
@@ -106,15 +107,19 @@ class LocalBluetoothHostAdapter:
 
 
 # ---- the LDAC rate watcher: pw-dump and pactl ------------------------------------------------
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
+
+
 def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
-    """(exit status, stdout) of CMD; 127 when it cannot be started, 124 on timeout."""
-    try:
-        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout
-    except FileNotFoundError:
-        return 127, ""
-    except subprocess.TimeoutExpired:
-        return 124, ""
+    """(exit status, stdout) of CMD; 127 when it does not exist, 124 on timeout.
+    stdin is ours; output that is not UTF-8 raises; a command that cannot
+    start raises (as subprocess.run did)."""
+    r = RUNNER.run(cmd, timeout=timeout, stdin="inherit", decode_errors="strict")
+    if r.fault in ("missing", "timeout"):
+        return r.returncode, ""
+    if r.cause is not None:
+        raise r.cause
+    return r.returncode, r.stdout
 
 
 class Live:

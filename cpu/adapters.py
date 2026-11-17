@@ -14,16 +14,20 @@ import time
 from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT, GAME_STATE, QUIET_LIMITS, URI, lows, pressure_field
-from cst_core.adapters import c_locale
+from cst_core.adapters import SubprocessVirshAdapter
 from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.ports import VirshPort
 
 CONF = "/etc/cpu-setup/cpu-setup.conf"
 RUNS = os.path.expanduser("~/.local/state/cpu-setup/runs")
 CG = "/sys/fs/cgroup"
 PROC = "/proc"
 VIRSH_TIMEOUT = 60  # seconds for one virsh call
+# virsh where vm-pin runs (also in a toolbox: not moved to the host); output
+# that is not UTF-8 is replaced.
+VIRSH: VirshPort = SubprocessVirshAdapter(URI, on_host=False)
 
 
 def conf(*, refuse: bool = False) -> dict[str, str]:
@@ -66,23 +70,16 @@ def virsh(*args: str, check: bool = True) -> str:
 
     A failure, or no answer within VIRSH_TIMEOUT seconds, stops the run with
     one line when check is set; without check the run goes on with what
-    virsh printed (nothing, on a timeout).
+    virsh printed (nothing, on a timeout). A virsh that cannot be started
+    raises (as subprocess.run did).
     """
-    try:
-        r = subprocess.run(
-            ["virsh", "-c", URI, *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=VIRSH_TIMEOUT,
-            stdin=subprocess.DEVNULL,
-            env=c_locale(os.environ),
-        )
-    except subprocess.TimeoutExpired:
+    r = VIRSH.call(*args, timeout=VIRSH_TIMEOUT)
+    if r.fault == "timeout":
         if check:
             sys.exit(f"virsh {' '.join(args)}: no answer within {VIRSH_TIMEOUT} s")
         return ""
+    if r.cause is not None:
+        raise r.cause
     if check and r.returncode != 0:
         sys.exit(f"virsh {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout

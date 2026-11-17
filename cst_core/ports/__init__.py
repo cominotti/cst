@@ -3,9 +3,27 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from cst_core.domain.install import OnDisk
+
+
+# Why a command did not run to its end: not found (exit status 127), found
+# but could not start (126: no permission, not an executable, its cwd
+# folder missing), or stopped at its timeout (124).
+type CommandFault = Literal["missing", "unstartable", "timeout"]
+
+# The command's stdin: /dev/null (nothing of ours leaks into it), or ours.
+type StdinMode = Literal["devnull", "inherit"]
+
+# Its stdout and stderr: both captured; stderr merged into the captured
+# stdout; stdout captured and stderr discarded; or both left on ours (the
+# result's stdout and stderr are then empty).
+type OutputMode = Literal["capture", "merge", "stdout", "inherit"]
+
+# Captured output that is not UTF-8: U+FFFD for the bad bytes, or a
+# UnicodeDecodeError out of run() (what some callers still expect).
+type DecodeErrors = Literal["replace", "strict"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +35,14 @@ class CommandResult:
     stderr: str
     # The command that ran, for messages (a fake may leave it empty); not compared.
     argv: tuple[str, ...] = field(default=(), compare=False)
+    # Set when the command did not run to its end (returncode 127, 126 or
+    # 124 then); None when it ran and exited, whatever its exit status (a
+    # command may exit 127 itself). Not compared.
+    fault: CommandFault | None = field(default=None, compare=False)
+    # The exception behind fault (FileNotFoundError, another OSError, or
+    # subprocess.TimeoutExpired): for a caller that keeps its own message, or
+    # that lets the exception propagate as it did before. Not compared.
+    cause: Exception | None = field(default=None, compare=False)
 
 
 class CommandFailed(RuntimeError):
@@ -47,7 +73,29 @@ class WriteFailed(Exception):
 
 
 class CommandRunnerPort(Protocol):
-    """Executes external commands without leaking shell or stdin state."""
+    """Executes external commands without leaking shell or stdin state.
+
+    Every option defaults to off, so a call names what it needs:
+    - check: raise CommandFailed on a non-zero exit (or a fault);
+    - timeout: seconds (None: no limit); past it, exit status 124;
+    - input_text: the command's stdin (instead of /dev/null);
+    - env: variables set on top of the base environment; unset: names
+      removed from it; base_env: the environment to start from (None: this
+      process's);
+    - cwd: the folder the command runs in;
+    - locale_c: LC_ALL=C, for a command whose answers are parsed (env
+      still wins);
+    - new_session: the command runs in a session of its own (a Ctrl-C or a
+      closed terminal does not reach it);
+    - on_host: inside a container, run it on the host (flatpak-spawn --host,
+      with env and locale_c passed as --env); on the host, as is. The --env
+      values are on flatpak-spawn's command line (ps shows them): no secrets
+      there. base_env, timeout, nice and new_session then act on the local
+      flatpak-spawn process, not on the host command (a timeout stops
+      flatpak-spawn; the host command may run on);
+    - stdin, output, decode_errors: see StdinMode, OutputMode, DecodeErrors;
+    - nice: added to the command's niceness before it starts.
+    """
 
     def run(
         self,
@@ -57,6 +105,16 @@ class CommandRunnerPort(Protocol):
         timeout: float | None = None,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        unset: Sequence[str] = (),
+        base_env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        locale_c: bool = False,
+        new_session: bool = False,
+        on_host: bool = False,
+        stdin: StdinMode = "devnull",
+        output: OutputMode = "capture",
+        decode_errors: DecodeErrors = "replace",
+        nice: int | None = None,
     ) -> CommandResult: ...
 
 
@@ -96,6 +154,12 @@ class FileSystemPort(Protocol):
     def force_symlink(self, target: str, link_path: str) -> None: ...
 
 
+class ContainerProbePort(Protocol):
+    """Tells whether this process runs inside a container (a toolbox)."""
+
+    def is_container(self) -> bool: ...
+
+
 class ExecutionContextPort(Protocol):
     """Describes the execution environment (host vs container/toolbox, privilege level)."""
 
@@ -125,7 +189,11 @@ class ClockPort(Protocol):
 
 
 class VirshPort(Protocol):
-    """Consolidated interface to libvirt (`virsh`) domain queries and control."""
+    """Consolidated interface to libvirt (`virsh`) domain queries and control.
+
+    call runs `virsh -c URI ARGS` in the C locale (virsh translates its
+    answers) through a CommandRunnerPort; its CommandResult carries fault.
+    """
 
     def call(
         self,

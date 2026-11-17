@@ -61,7 +61,7 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "migrate": "bulk moves a folder into ~/Bulk; docker-volumes-nocow re-creates a volume NOCOW",
     "recover": "bulk finishes an interrupted move; docker-volumes-nocow an interrupted volume copy",
     "report": "bulk's per-item report vs cpu-watch's run comparison",
-    "run": "bluetooth and vm run commands with their own environment (LC_ALL, sessions); docker-gc's run loop",
+    "run": "bluetooth's and vm's bindings over cst_core's SubprocessCommandRunner (their own options and words); docker-gc's run loop",
     "parse_args": "each program's own argv grammar (doctor, toolchains, vm)",
     "classify": "a bulk folder, a kernel stack, a toolchain cache folder: three different classifications",
     "decide": "the LDAC bitrate, the Chrome cache place, a cache folder's fate: three different rules",
@@ -81,7 +81,7 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "render_service": "the toolchains and vm units' own text, both through cst_core.domain.units",
     "render_timer": "the toolchains and vm timers, both over cst_core.domain.units.render_timer",
     "systemctl": "toolchains runs systemctl --user and raises Refused; vm runs system systemctl for a status",
-    "virsh": "cpu exits on a failure; doctor runs read-only (-r) through its host port; vm runs with timeouts",
+    "virsh": "bindings over cst_core's SubprocessVirshAdapter: cpu exits on a failure; doctor is read-only (-r); vm returns (rc, out, err)",
     "log": "each program's log binding (plain stdout for bulk, journal tags) over cst_core.adapters.journal.log",
     # Left for a follow-up (see the stage report): same idea, kept apart for now.
     "read_bytes": "btrfs-stall-monitord reads /proc with os.read until EOF and its tests fake os.read; "

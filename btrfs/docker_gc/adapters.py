@@ -7,15 +7,16 @@ from collections.abc import Mapping, Sequence
 from functools import partial
 import json
 import os
-import subprocess
 import sys
 import time
 from typing import Any
 
 from btrfs.docker_gc.domain import HEARTBEAT_SECONDS, ts
+from cst_core.adapters import SubprocessCommandRunner
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
+from cst_core.ports import CommandResult, CommandRunnerPort
 
 STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")  # override: tests
 LAST_USED = os.path.join(STATE_DIR, "last-used.json")
@@ -29,16 +30,21 @@ PROTECTED = tuple(
 )
 FLUSH_SECONDS = int(os.environ.get("DOCKER_GC_FLUSH", 30))
 SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 # One journal line per message, "<prio>docker-gc: msg".
 log = partial(journal_log, tag="docker-gc")
 
 
-def docker(*args: str, timeout: int = 600, check: bool = True) -> subprocess.CompletedProcess[str]:
-    try:
-        r = subprocess.run(["docker", *args], check=False, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from e
+def docker(*args: str, timeout: int = 600, check: bool = True) -> CommandResult:
+    """docker ARGS (stdin ours; output that is not UTF-8 raises). No answer
+    within timeout, or a failure with check: RuntimeError. A docker that
+    cannot be started raises (as subprocess.run did)."""
+    r = RUNNER.run(["docker", *args], timeout=timeout, stdin="inherit", decode_errors="strict")
+    if r.fault == "timeout":
+        raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from r.cause
+    if r.cause is not None:
+        raise r.cause
     if check and r.returncode != 0:
         raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
     return r
@@ -94,19 +100,17 @@ def save_state(st: Mapping[str, Any]) -> None:
 def recorder_alive(st: Mapping[str, Any]) -> bool:
     """The recorder runs and wrote its heartbeat lately. A systemctl that does
     not answer counts as a recorder that is not running: images are held back."""
-    try:
-        done = subprocess.run(
-            ["systemctl", "-q", "is-active", "docker-gc-recorder.service"],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            timeout=SYSTEMCTL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
+    done = RUNNER.run(
+        ["systemctl", "-q", "is-active", "docker-gc-recorder.service"], timeout=SYSTEMCTL_TIMEOUT, output="inherit"
+    )
+    if done.fault == "timeout":
         log(
             4,
             f"systemctl is-active docker-gc-recorder.service: no answer in {SYSTEMCTL_TIMEOUT}s; images are held back",
         )
         return False
+    if done.cause is not None:
+        raise done.cause
     return done.returncode == 0 and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
 
 
