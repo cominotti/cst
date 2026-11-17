@@ -23,7 +23,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.domain.files import MarkedLineSpec
-from cst_core.ports import CommandFailed, CommandResult
+from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -677,9 +677,9 @@ class _FakeSystemd:
     def restart(self, unit: str) -> CommandResult:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
-    def escape_path(self, path: str, *, suffix: str) -> str:
+    def escape_path(self, path: str, *, suffix: str) -> UnitName:
         cleaned = path.lstrip("/").replace("/", "-")
-        return f"{cleaned}.{suffix}"
+        return UnitName(f"{cleaned}.{suffix}")
 
 
 class _FakeSwapSystem:

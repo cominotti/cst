@@ -62,6 +62,25 @@ SAMPLE_DOMAIN_XML = """\
 """
 
 
+class CpusOfTest(unittest.TestCase):
+    """cpus_of reads a core type's CPU list (the kernel's cpulist format) through cst_core CpuSet."""
+
+    def cpus(self, text: str) -> list[int]:
+        with unittest.mock.patch.object(cpu_adapters, "read_text", lambda _path, default="": text or default):
+            return cpu_adapters.cpus_of("cpu_core")
+
+    def test_ranges_and_single_cpus(self) -> None:
+        self.assertEqual(self.cpus("0-3,8,10-11\n"), [0, 1, 2, 3, 8, 10, 11])
+
+    def test_a_core_type_the_machine_does_not_have_has_no_cpus(self) -> None:
+        self.assertEqual(self.cpus(""), [])  # no /sys/devices/cpu_atom on a CPU without E-cores
+
+    def test_text_that_is_no_cpu_list_raises_value_error(self) -> None:
+        for text in ("a-b-c", "0-1-2", "x"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.cpus(text)
+
+
 class VmPinTest(unittest.TestCase):
     def setUp(self) -> None:
         self.m = cpu_domain

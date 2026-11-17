@@ -150,7 +150,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   setting that switches a file or a rule off: fix the code.
   `tests/test_python_files.py` fails on each
   ([docs/dev-tools.md, "What each gate checks"](docs/dev-tools.md#what-each-gate-checks)).
-- Run one module with `invowk cmd test module NAME`: a bare `python3 -m unittest NAME` skips the socket-stdin gate (see "Test gotchas"). Either way the full suite still has to pass.
+- Run one module with `invowk cmd test module NAME`: a bare `python3 -m unittest NAME` skips the socket-stdin and no-sudo gates (see "Test gotchas"). Either way the full suite still has to pass.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
 - CI runs the unit tests as a non-root user named `ci`. Tests must not depend on the developer's home or groups.
 
@@ -181,3 +181,19 @@ Two gates enforce it:
 - `tests/run_unit.py` (at run time): runs the whole suite with a socket as
   stdin, so the failure shows up on every run. `invowk cmd test unit` and CI
   use it.
+
+### A test that reaches sudo passes in a toolbox
+
+In a toolbox sudo asks for no password. A test that runs a script which
+calls sudo (even with a PATH of its own, so a stub cannot catch it) then
+runs it as root on the real machine, and still passes.
+
+**Rule:** no unit test reaches sudo or another setuid program.
+`tests/run_unit.py` enforces it at run time: before the tests start it sets
+the kernel's no_new_privs flag (`prctl(PR_SET_NO_NEW_PRIVS)`), which every
+child inherits and none can clear. sudo then refuses to run, and such a test
+fails on every run. `NoPrivilegeGainTest` in `tests/test_run_unit.py`
+checks the flag. Never clear it or work around it. The flag reaches only
+the runner's children: a command handed to a daemon (`flatpak-spawn --host`,
+docker, `systemd-run`) does not inherit it, so a unit test never starts one
+of those either.

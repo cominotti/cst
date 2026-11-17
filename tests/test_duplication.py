@@ -42,7 +42,7 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.09,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 1.02,
+    "python type-2 W=8 duplicated %": 0.95,
     "shell W=5 duplicated %": 0.47,
     "same-name definitions in >1 file": 0,
 }
@@ -77,7 +77,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "free_bytes": "statvfs free space of a folder vs btrfs's estimated free space of the Docker volumes",
     "is_subvol": "bulk also checks the btrfs magic; chrome-cache only needs the subvolume inode",
     "gib": "each program's display threshold, both over cst_core format_bytes_gib_mib",
-    "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused)",
+    "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused); "
+    "both over cst_core ByteSize (parse, parse_iec)",
     "render_service": "the toolchains and vm units' own text, both through cst_core.domain.units",
     "render_timer": "the toolchains and vm timers, both over cst_core.domain.units.render_timer",
     "systemctl": "toolchains runs systemctl --user and raises Refused; vm runs system systemctl for a status",

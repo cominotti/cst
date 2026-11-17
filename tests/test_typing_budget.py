@@ -75,7 +75,6 @@ ANY_BUDGETS: Final[dict[str, int]] = {
 CAST_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests": 1,
     "btrfs tests": 18,
-    "btrfs/bulk adapters": 1,
     "btrfs/stall_report domain": 1,
     "tests tests": 4,
     "toolchains cli": 1,

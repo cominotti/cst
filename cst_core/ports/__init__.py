@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal, NewType, Protocol
 
 from cst_core.domain.install import OnDisk
 
@@ -172,12 +172,6 @@ class ExecutionContextPort(Protocol):
     def host_run_dir(self, subpath: str) -> str: ...
 
 
-class HostPathPort(Protocol):
-    """Maps an absolute host path into this process's container or host view."""
-
-    def path(self, host_path: str) -> str: ...
-
-
 class ClockPort(Protocol):
     """Provides wall-clock, monotonic timestamps, and sleeping without direct `time` imports."""
 
@@ -186,6 +180,12 @@ class ClockPort(Protocol):
     def monotonic(self) -> float: ...
 
     def sleep(self, seconds: float) -> None: ...
+
+
+# A libvirt domain name ("win11-devbox"), as virsh lists and takes it.
+VmName = NewType("VmName", str)
+# A systemd unit name with its suffix ("dev-zram0.swap", "foo@x.service").
+UnitName = NewType("UnitName", str)
 
 
 class VirshPort(Protocol):
@@ -203,9 +203,9 @@ class VirshPort(Protocol):
         start_new_session: bool = False,
     ) -> CommandResult: ...
 
-    def domains(self, *, all_domains: bool = True) -> list[str]: ...
+    def domains(self, *, all_domains: bool = True) -> list[VmName]: ...
 
-    def dumpxml(self, domain: str, *, inactive: bool = False) -> str | None: ...
+    def dumpxml(self, domain: VmName, *, inactive: bool = False) -> str | None: ...
 
 
 class CstDispatchPort(Protocol):
@@ -221,6 +221,14 @@ class CstDispatchPort(Protocol):
 
     def user_passwd(self, user: str) -> tuple[int, str]: ...
 
+    def which(self, name: str, path: str | None) -> str | None:
+        """Where PATH (path; None: the default) finds the program name, or None."""
+        ...
+
+    def realpath(self, path: str) -> str:
+        """path with every link resolved."""
+        ...
+
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         """Run argv in the foreground (bash's semantics for signals); its exit status."""
         ...
@@ -235,19 +243,19 @@ class SystemdPort(Protocol):
 
     def daemon_reload(self) -> None: ...
 
-    def start(self, unit: str) -> CommandResult:
+    def start(self, unit: UnitName) -> CommandResult:
         """`systemctl start unit`: its exit status and what it printed."""
         ...
 
-    def stop(self, unit: str) -> CommandResult:
+    def stop(self, unit: UnitName) -> CommandResult:
         """`systemctl stop unit`: its exit status and what it printed."""
         ...
 
-    def restart(self, unit: str) -> CommandResult:
+    def restart(self, unit: UnitName) -> CommandResult:
         """`systemctl restart unit`: its exit status and what it printed."""
         ...
 
-    def escape_path(self, path: str, *, suffix: str) -> str: ...
+    def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
 
 class InstallTargetPort(Protocol):

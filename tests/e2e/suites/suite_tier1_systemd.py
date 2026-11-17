@@ -1474,16 +1474,18 @@ EOF
         """systemd keeps the last run of a Persistent= timer (for a user timer
         ~/.local/share/systemd/timers/stamp-NAME; made when the timer starts,
         touched at each run) after the timer is gone. `auto off` removes it
-        (systemctl --user clean --what=state, before the unit file goes)."""
+        (systemctl --user clean --what=state, before the unit file goes).
+        No prune runs here: `auto on` starts the timer, and starting a
+        Persistent= timer that never ran makes its stamp (systemd's
+        timer_start). The guard below fails loudly if it did not."""
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
             """
             stamp=/home/tester/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer
             /opt/cst-rw/cst toolchains auto on >/dev/null
             systemctl --user is-active cst-toolchains-prune.timer
-            systemctl --user start cst-toolchains-prune.service
             if [ ! -e "$stamp" ]; then
-                echo "no $stamp after auto on and a run: the check below would prove nothing" >&2
+                echo "no $stamp after auto on started the timer: the check below would prove nothing" >&2
                 ls -la /home/tester/.local/share/systemd/timers >&2 || true
                 exit 1
             fi

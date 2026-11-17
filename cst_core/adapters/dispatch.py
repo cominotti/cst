@@ -4,6 +4,7 @@
 from collections.abc import Mapping, Sequence
 import os
 import pwd
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,6 +58,14 @@ class LocalCstDispatchAdapter:
         """Return `(uid, home_dir)` for `user`."""
         entry = pwd.getpwnam(user)
         return entry.pw_uid, entry.pw_dir
+
+    def which(self, name: str, path: str | None) -> str | None:
+        """shutil.which(name, path=path)."""
+        return shutil.which(name, path=path)
+
+    def realpath(self, path: str) -> str:
+        """os.path.realpath."""
+        return os.path.realpath(path)
 
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         """Run `argv` in the foreground on the terminal's streams, as bash runs a command; its exit status.

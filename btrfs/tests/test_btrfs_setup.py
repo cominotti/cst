@@ -83,6 +83,7 @@ class TimerRemovalTest(unittest.TestCase):
             [
                 STUBS,
                 shell_function(SETUP, "forget_timer_state"),
+                shell_function(SETUP, "disable_timers"),
                 f'UNIT_DIR="$T/units"; TIMER_STAMP_DIR="$T/timers"; SRC={BTRFS}; PROG=cst-btrfs-test',
                 body,
             ]
@@ -152,6 +153,20 @@ class TimerRemovalTest(unittest.TestCase):
         r = self.run_bash("forget_timer_state a.service b.timer docker-gc-recorder.service\necho went-on", fail="clean")
         self.assertEqual(self.calls(), ["systemctl clean --what=state b.timer"])
         self.assertIn("went-on", r.stdout)
+
+    def test_disable_timers_disables_in_one_call_then_forgets_only_the_timers(self) -> None:
+        self.touch(os.path.join(self.units, "x.timer"))
+        r = self.run_bash("disable_timers x.timer x.service gone.timer\necho went-on", fail="disable")
+        self.assertEqual(
+            self.calls(),
+            [
+                "systemctl disable --now x.timer x.service gone.timer",
+                "systemctl clean --what=state x.timer",
+                "  (x.timer file present)",
+                "systemctl clean --what=state gone.timer",
+            ],
+        )
+        self.assertIn("went-on", r.stdout)  # a failed disable (a unit that is not there) is ignored
 
     def test_uninstall_stops_every_timer_before_it_forgets_them(self) -> None:
         timers = re.findall(r"[\w.-]+\.timer", assignment("TIMERS"))

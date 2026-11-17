@@ -12,6 +12,8 @@ from typing import Any
 import os
 import subprocess
 import time
+
+from cst_core.adapters.files import locale_bytes, write_atomic
 from btrfs.bulk.adapters import (
     CONVERT_PLAN,
     Ctx,
@@ -394,11 +396,14 @@ def prune_convert_plan(ctx: Ctx) -> None:
     drop = {link for i in ITEMS if (link := ctx.link(i)) is not None}
     keep = [ln for ln in lines if ln.startswith("#") or not ln.strip() or ln.split(maxsplit=1)[-1].strip() not in drop]
     if keep != lines:
-        tmp = CONVERT_PLAN + ".tmp"
-        with open(tmp, "w") as f:
-            f.writelines(keep)
-        os.chmod(tmp, 0o644)
-        os.rename(tmp, CONVERT_PLAN)
+        # Encoded as it was read: in the locale's encoding (open()'s default).
+        write_atomic(
+            CONVERT_PLAN,
+            locale_bytes("".join(keep)),
+            mode=0o644,
+            durable=False,
+            relabel=False,
+        )
         log("  convert-plan: dropped the paths that now live in ~/Bulk")
 
 

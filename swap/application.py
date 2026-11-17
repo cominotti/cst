@@ -9,7 +9,7 @@ import re
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
-from cst_core.ports import CommandResult, FileSystemPort, SystemdPort
+from cst_core.ports import CommandResult, FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
@@ -616,7 +616,7 @@ class SwapApplicationService:
         return SwapApplyResult(returncode, tuple(events), None, (), "", "", self._env.prog)
 
     def _run_units(
-        self, steps: tuple[tuple[Callable[[str], CommandResult], str], ...], events: list[ApplyEvent]
+        self, steps: tuple[tuple[Callable[[UnitName], CommandResult], UnitName], ...], events: list[ApplyEvent]
     ) -> int:
         """`systemctl VERB UNIT` for each (systemd call, unit) step, showing its output; the first failing status, else 0.
 
@@ -682,7 +682,7 @@ class SwapApplicationService:
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
         real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
         swap0_used = find_swap_used_kib(swaps_text, real_swap0)
-        crypt_unit = f"systemd-cryptsetup@{spec.name}.service"
+        crypt_unit = UnitName(f"systemd-cryptsetup@{spec.name}.service")
         if swap0_used is not None:
             if line_changed:
                 if swap0_used == 0:
@@ -742,11 +742,11 @@ class SwapApplicationService:
             avail_kib = meminfo.get("MemAvailable", 0) // 1024
             if can_evict_zram(zram_used, avail_kib):
                 events.append(ApplyEvent("out", "line", "zram0: swapping off"))
-                swapoff = self._systemd.stop("dev-zram0.swap")
+                swapoff = self._systemd.stop(UnitName("dev-zram0.swap"))
                 _show_output(swapoff, events, self._env.prog)
                 if swapoff.returncode == 0:
                     # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
-                    self._systemd.stop("systemd-zram-setup@zram0.service")
+                    self._systemd.stop(UnitName("systemd-zram-setup@zram0.service"))
                     self._system.reset_zram0()
                     events.append(ApplyEvent("out", "line", "zram0: removed"))
                 else:

@@ -13,6 +13,7 @@ from typing import Any
 
 from btrfs.docker_gc.domain import HEARTBEAT_SECONDS, ts
 from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.files import write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
@@ -89,12 +90,7 @@ def load_state() -> dict[str, Any]:
 
 def save_state(st: Mapping[str, Any]) -> None:
     os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
-    tmp = LAST_USED + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(st, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, LAST_USED)
+    write_atomic(LAST_USED, json.dumps(st), mode="umask", durable="file", relabel=False)
 
 
 def recorder_alive(st: Mapping[str, Any]) -> bool:

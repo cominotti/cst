@@ -482,6 +482,66 @@ class WriteAtomicTest(unittest.TestCase):
         self.assertEqual(events, ["replace"])
         self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o600)
 
+    def test_file_durability_syncs_the_file_but_not_the_folder(self) -> None:
+        events, stack = self.record()
+        with stack:
+            core_files.write_atomic(self.dest, b"x", mode=0o644, durable="file")
+        self.assertEqual(events, ["fsync file", "replace"])
+        with open(self.dest, "rb") as fh:
+            self.assertEqual(fh.read(), b"x")
+
+    def test_umask_mode_is_what_open_gives_a_new_file(self) -> None:
+        os.makedirs(os.path.dirname(self.dest))
+        plain = os.path.join(self.tmp, "plain")
+        for umask in (0o022, 0o077, 0o002):
+            old = os.umask(umask)
+            try:
+                with open(plain, "w"):
+                    pass
+                core_files.write_atomic(self.dest, b"x", mode="umask", durable=False)
+            finally:
+                os.umask(old)
+            with self.subTest(umask=oct(umask)):
+                self.assertEqual(os.stat(self.dest).st_mode & 0o7777, 0o666 & ~umask)
+                self.assertEqual(os.stat(self.dest).st_mode & 0o7777, os.stat(plain).st_mode & 0o7777)
+            os.unlink(plain)
+
+    def test_locale_bytes_are_what_open_w_writes(self) -> None:
+        plain = os.path.join(self.tmp, "plain")
+        text = "a\nentry é\n"
+        with open(plain, "w") as fh:
+            fh.write(text)
+        with open(plain, "rb") as fh:
+            self.assertEqual(core_files.locale_bytes(text), fh.read())
+
+    def test_the_umask_is_read_without_changing_it(self) -> None:
+        old = os.umask(0o027)
+        try:
+            with mock.patch.object(core_files.os, "umask", side_effect=AssertionError("umask changed")):
+                self.assertEqual(core_files._umask(), 0o027)
+        finally:
+            os.umask(old)
+
+    def test_without_proc_the_umask_is_assumed_strict_and_never_changed(self) -> None:
+        with (
+            mock.patch("builtins.open", side_effect=OSError("no /proc")),
+            mock.patch.object(core_files.os, "umask", side_effect=AssertionError("umask changed")),
+        ):
+            self.assertEqual(core_files._umask(), 0o077)
+
+    def test_relabel_false_starts_no_restorecon_as_root(self) -> None:
+        for relabel, calls in ((True, 1), (False, 0)):
+            with (
+                self.subTest(relabel=relabel),
+                mock.patch.object(core_files.os, "geteuid", return_value=0),
+                mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
+                mock.patch.object(
+                    core_files.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                ) as run,
+            ):
+                core_files.write_atomic(self.dest, b"x", mode=0o644, relabel=relabel)
+                self.assertEqual(run.call_count, calls)
+
     def test_the_temporary_file_is_removed_on_every_error(self) -> None:
         os.makedirs(os.path.dirname(self.dest))
         with open(self.dest, "w") as fh:

@@ -16,6 +16,7 @@ import signal
 import subprocess
 import time
 
+from cst_core.adapters.files import write_atomic
 from btrfs.stall_monitord.adapters import (
     CGROUP_ROOT,
     Topology,
@@ -675,9 +676,8 @@ class Monitor:
             # Plain-text queue for /usr/local/sbin/btrfs-notify --queue:
             # line 1 urgency, line 2 title, rest body.
             path = os.path.join(self.run_dir, f"alert-{time.time_ns()}.txt")
-            with open(path + ".tmp", "w", encoding="utf-8") as f:
-                f.write(f"{'critical' if level == 'crit' else 'normal'}\n{title.replace(chr(10), ' ')}\n{body}\n")
-            os.rename(path + ".tmp", path)
+            text = f"{'critical' if level == 'crit' else 'normal'}\n{title.replace(chr(10), ' ')}\n{body}\n"
+            write_atomic(path, text.encode("utf-8"), mode="umask", durable=False, relabel=False)
             subprocess.Popen(
                 ["systemctl", "--no-block", "start", "btrfs-stall-alert.service"],
                 stdout=subprocess.DEVNULL,

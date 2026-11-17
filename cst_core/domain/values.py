@@ -6,11 +6,15 @@ import re
 from typing import Final, Self
 
 
+# A value JSON can carry as it is: json.loads(json.dumps(v)) == v. A tuple
+# comes back as a list and a set does not go, so neither is one.
+type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
+
+
 class DomainValidationError(ValueError):
     """Raised when a domain value object invariant is violated."""
 
 
-KIB: Final = 1 << 10
 MIB: Final = 1 << 20
 GIB: Final = 1 << 30
 

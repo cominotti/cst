@@ -17,6 +17,8 @@ from cst_core.ports import (
     DecodeErrors,
     OutputMode,
     StdinMode,
+    UnitName,
+    VmName,
 )
 
 
@@ -212,7 +214,7 @@ class SubprocessCommandRunner:
 
 
 class HostExecutionContext:
-    """ExecutionContextPort and HostPathPort detecting host vs toolbox/container environments."""
+    """ExecutionContextPort detecting host vs toolbox/container environments (and mapping a host path into this view)."""
 
     def __init__(
         self,
@@ -288,10 +290,10 @@ class SystemctlAdapter:
         """Restart unit; its exit status and output."""
         return self._runner.run(["systemctl", "restart", unit], check=False)
 
-    def escape_path(self, path: str, *, suffix: str) -> str:
+    def escape_path(self, path: str, *, suffix: str) -> UnitName:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
-        return res.stdout.strip()
+        return UnitName(res.stdout.strip())
 
 
 class SubprocessVirshAdapter:
@@ -341,13 +343,13 @@ class SubprocessVirshAdapter:
             decode_errors=self._decode_errors,
         )
 
-    def domains(self, *, all_domains: bool = True) -> list[str]:
+    def domains(self, *, all_domains: bool = True) -> list[VmName]:
         """Return configured domain names, or empty list on failure."""
         args = ["list", "--all", "--name"] if all_domains else ["list", "--name"]
         res = self.call(*args, check=False)
         if res.returncode != 0:
             return []
-        return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+        return [VmName(line.strip()) for line in res.stdout.splitlines() if line.strip()]
 
     def dumpxml(self, domain: str, *, inactive: bool = False) -> str | None:
         """Return XML definition of `domain`, or None on failure."""

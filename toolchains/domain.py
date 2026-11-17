@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 from cst_core.domain.errors import Usage
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
-from cst_core.domain.values import format_bytes_gib_mib
+from cst_core.domain.values import MIB, ByteSize, DomainValidationError, Duration, format_bytes_gib_mib
 
 MARKER = "# managed-by: toolchains-setup.sh (CST)"
 NAME = "cst-toolchains"
@@ -102,28 +102,25 @@ def tilde(path: str, home: str) -> str:
     return "~" + path[len(home) :] if path == home or path.startswith(home + "/") else path
 
 
-DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
 SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
 
 
 def parse_duration(text: str) -> int:
-    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*", text, re.I)
-    if not m:
-        raise ConfigError(f"'{text}' is not a duration (a number with s, m, h, d or w, e.g. 48h)")
-    return int(float(m.group(1)) * DURATION_UNITS[m.group(2).lower()])
+    """Whole seconds of '<number><s|m|h|d|w>' (cst_core Duration.parse_float; the unit is required)."""
+    try:
+        return int(Duration.parse_float(text))
+    except DomainValidationError:
+        raise ConfigError(f"'{text}' is not a duration (a number with s, m, h, d or w, e.g. 48h)") from None
 
 
 def parse_size(text: str) -> int:
-    """Bytes. The unit is required (only 0 may go without): MAX_TOTAL=150
-    meant as 150G would otherwise be 150 bytes, a cap that deletes
-    everything older than MIN_KEEP."""
-    t = text.strip().lower()
-    if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t):
-        return 0
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t)
-    if not m:
-        raise ConfigError(f"'{text}' is not a size (a number with K, M, G or T, e.g. 150G; 0 or off for no cap)")
-    return int(float(m.group(1)) * SIZE_UNITS[m.group(2)])
+    """Bytes (cst_core ByteSize.parse_iec). The unit is required (only 0 may
+    go without): MAX_TOTAL=150 meant as 150G would otherwise be 150 bytes, a
+    cap that deletes everything older than MIN_KEEP."""
+    try:
+        return ByteSize.parse_iec(text).bytes_count
+    except DomainValidationError as e:
+        raise ConfigError(str(e)) from None
 
 
 def parse_bool(text: str) -> bool:
@@ -306,7 +303,7 @@ TOOL_FILE_DIRS = {
     ".buildkite": (".yml", ".yaml"),
 }
 TOOL_FILE_TOP = (".gitlab-ci.yml",)
-TOOL_FILE_MAX = 1 << 20  # bytes read of one file
+TOOL_FILE_MAX = MIB  # bytes read of one file
 TOOL_FILES_MAX = 100000  # files read in all; more: the report counts as incomplete
 # A folder with this file is a cache (cargo's target/ and registry, ...): not searched.
 CACHE_TAG = "CACHEDIR.TAG"

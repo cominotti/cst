@@ -1,24 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Pure outcome and plan reporting primitives."""
+"""Pure plan reporting primitives."""
 
 from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class Ok[T]:
-    """Successful outcome carrying a typed value."""
-
-    value: T
-
-
-@dataclass(frozen=True, slots=True)
-class Err[E]:
-    """Failed outcome carrying a typed domain or application error."""
-
-    error: E
-
-
-type Outcome[T, E] = Ok[T] | Err[E]
 
 
 @dataclass(frozen=True, slots=True)

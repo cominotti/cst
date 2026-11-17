@@ -8,7 +8,7 @@ Pure: text in, text or values out. Reading the host is cpu.adapters' job.
 from collections.abc import Callable, Mapping, Sequence
 from itertools import islice
 import re
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.libvirt_xml import keep_prefixes
@@ -116,7 +116,7 @@ def cpu_line(xml_text: str, disable: Sequence[str]) -> str:
 
 
 # ---- cpu-watch ---------------------------------------------------------------
-def pressure_field(text: str, kind: str, key: str) -> str | None:
+def pressure_field(text: str, kind: Literal["some", "full"], key: str) -> str | None:
     """The KEY= value (as text) on the KIND line ('some' or 'full') of a
     pressure file's text, or None."""
     m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.M)

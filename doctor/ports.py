@@ -6,7 +6,7 @@ import os
 from typing import Any, BinaryIO, Protocol, TextIO
 
 from cst_core.ports import VirshPort
-from doctor.domain import Deployment, OstreeAnswer, Result
+from doctor.domain import HostPath, Result, ViewPath
 
 
 class DoctorHostPort(Protocol):
@@ -20,13 +20,10 @@ class DoctorHostPort(Protocol):
     uid: int
     # The machine's architecture (uname -m), e.g. x86_64.
     arch: str
-    state_home: str
-    _ostree: OstreeAnswer
-    _ostree_list: list[Deployment]
-    _domains: tuple[list[str] | None, str]
-    _dumpxml: dict[str, tuple[int, str, str]]
+    # The doctor's own XDG state folder (a path of this process: never mapped).
+    state_home: ViewPath
 
-    def path(self, p: str) -> str:
+    def path(self, p: HostPath) -> ViewPath:
         """Map an absolute host path to this process's view (e.g. /run/host)."""
         ...
 
@@ -38,48 +35,48 @@ class DoctorHostPort(Protocol):
         """virsh on the host's system connection (-r when read_only), with run()'s answers for a fault."""
         ...
 
-    def repo_path(self, rel: str) -> str:
+    def repo_path(self, rel: str) -> ViewPath:
         """Where the CST checkout's file `rel` is (it may not exist)."""
         ...
 
     # Files, by paths already mapped with path(). Each raises OSError like the os call it stands for.
-    def open_text(self, path: str) -> TextIO:
+    def open_text(self, path: ViewPath) -> TextIO:
         """Open for reading as UTF-8 (undecodable bytes replaced)."""
         ...
 
-    def open_bytes(self, path: str) -> BinaryIO:
+    def open_bytes(self, path: ViewPath) -> BinaryIO:
         """Open for reading as bytes."""
         ...
 
-    def listdir(self, path: str) -> list[str]:
+    def listdir(self, path: ViewPath) -> list[str]:
         """The names in a folder."""
         ...
 
-    def exists(self, path: str) -> bool:
+    def exists(self, path: ViewPath) -> bool:
         """True when path exists (following links)."""
         ...
 
-    def isdir(self, path: str) -> bool:
+    def isdir(self, path: ViewPath) -> bool:
         """True for a folder (following links)."""
         ...
 
-    def isfile(self, path: str) -> bool:
+    def isfile(self, path: ViewPath) -> bool:
         """True for a regular file (following links)."""
         ...
 
-    def islink(self, path: str) -> bool:
+    def islink(self, path: ViewPath) -> bool:
         """True for a symbolic link."""
         ...
 
-    def stat(self, path: str) -> os.stat_result:
+    def stat(self, path: ViewPath) -> os.stat_result:
         """os.stat of path."""
         ...
 
-    def lstat(self, path: str) -> os.stat_result:
+    def lstat(self, path: ViewPath) -> os.stat_result:
         """os.lstat of path."""
         ...
 
-    def realpath(self, path: str) -> str:
+    def realpath(self, path: ViewPath) -> ViewPath:
         """The path with every link resolved."""
         ...
 

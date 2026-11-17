@@ -28,10 +28,10 @@ from cst_core.adapters import (
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
-from cst_core.cli import CstDispatcher
+from cst_core.application.dispatch import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
-from cst_core.domain.plan import Err, Ok, Outcome, PlanItem
+from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import (
     ByteSize,
     CpuSet,
@@ -207,16 +207,11 @@ class ManagedFilesTest(unittest.TestCase):
         )
 
 
-class PlanAndOutcomeTest(unittest.TestCase):
-    def test_plan_item_and_outcome(self) -> None:
+class PlanItemTest(unittest.TestCase):
+    def test_plan_item(self) -> None:
         row = PlanItem("ok", "crypttab: swap0 line", "up to date")
         self.assertEqual(row.format_line(), "  ok        crypttab: swap0 line                   up to date")
         self.assertEqual(PlanItem("ok", "zram0").format_line(), "  ok        zram0")
-
-        ok: Outcome[int, str] = Ok(42)
-        err: Outcome[int, str] = Err("boom")
-        self.assertEqual(ok.value, 42)
-        self.assertEqual(err.error, "boom")
 
 
 class AdaptersTest(unittest.TestCase):
@@ -338,7 +333,11 @@ class _FakeDispatchPort:
         env: Mapping[str, str] | None = None,
         passwd: Mapping[str, tuple[int, str]] | None = None,
         handler: Callable[[list[str], Mapping[str, str] | None], int] | None = None,
+        on_path: Mapping[str, str] | None = None,
+        links: Mapping[str, str] | None = None,
     ) -> None:
+        self.on_path = {} if on_path is None else dict(on_path)
+        self.links = {} if links is None else dict(links)
         self.files = set() if files is None else files
         self.container = container
         self.uid = uid
@@ -362,6 +361,12 @@ class _FakeDispatchPort:
 
     def user_passwd(self, user: str) -> tuple[int, str]:
         return self.passwd[user]
+
+    def which(self, name: str, path: str | None) -> str | None:
+        return self.on_path.get(name) if path else None
+
+    def realpath(self, path: str) -> str:
+        return self.links.get(path, path)
 
     def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
         cmd = list(argv)
@@ -418,6 +423,22 @@ class CstDispatcherTest(unittest.TestCase):
         self.assertEqual(dispatcher.dispatch(["nope"]), 2)
         self.assertIn("cst: unknown command or module 'nope'", err.getvalue())
         self.assertIn("Modules here:", err.getvalue())
+
+    def test_the_name_in_messages_comes_from_the_port(self) -> None:
+        # "cst" when the cst on PATH is this copy (through a link), else how it was called.
+        missing = ["nope"]
+        for on_path, links, want in (
+            ({"cst": "/home/u/.local/bin/cst"}, {"/home/u/.local/bin/cst": "/repo/cst"}, "cst"),
+            ({"cst": "/usr/bin/cst"}, {}, "./cst"),
+            ({}, {}, "./cst"),
+        ):
+            port = _FakeDispatchPort(env={"PATH": "/usr/bin"}, on_path=on_path, links=links)
+            dispatcher, _, err = self._dispatcher(port)
+            with self.subTest(on_path=on_path):
+                self.assertEqual(dispatcher.dispatch(missing), 2)
+                self.assertTrue(
+                    err.getvalue().startswith(f"{want}: unknown command or module 'nope'\n"), err.getvalue()
+                )
 
     def test_module_dispatch_and_missing_module(self) -> None:
         port = _FakeDispatchPort(files={"/repo/swap-setup.sh"}, env={"CST_NAME": "cst"})

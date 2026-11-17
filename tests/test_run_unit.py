@@ -2,6 +2,9 @@
 """tests/run_unit.py: what it loads (all, --gates, names)."""
 
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,6 +20,39 @@ def ids(suite: unittest.TestSuite) -> set[str]:
         else:
             out.add(test.id())
     return out
+
+
+# A child that sets the flag the way the runner does, then reports it and,
+# when sudo is there and the run is not root, what sudo answers (it must refuse to run).
+_NO_PRIVS_CHILD = """
+import os, shutil, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from tests.run_unit import forbid_privilege_gain
+forbid_privilege_gain()
+with open("/proc/self/status") as f:
+    print(next(line for line in f if line.startswith("NoNewPrivs:")).split()[1])
+sudo = shutil.which("sudo")
+if sudo and os.geteuid() != 0:  # root needs no setuid: sudo runs whatever the flag says
+    done = subprocess.run([sudo, "-n", "true"], capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+    print(done.returncode)
+"""
+
+
+class NoPrivilegeGainTest(unittest.TestCase):
+    def test_the_runner_keeps_every_test_from_becoming_root(self) -> None:
+        # A test that ran sudo passed in a toolbox (sudo without a password), as root on the real machine.
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _NO_PRIVS_CHILD, REPO],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        lines = done.stdout.split()
+        self.assertEqual(lines[:1], ["1"], done.stdout + done.stderr)
+        if shutil.which("sudo") and os.geteuid() != 0:
+            self.assertNotEqual(lines[1:], ["0"], "sudo ran as root despite no_new_privs")
 
 
 class LoadTest(unittest.TestCase):

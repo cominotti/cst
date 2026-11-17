@@ -60,7 +60,7 @@ MODULES: Final[tuple[ModuleSpec, ...]] = (
 
 MODULE_BY_NAME: Final[Mapping[str, ModuleSpec]] = {spec.name: spec for spec in MODULES}
 
-USAGE_HEADER: Final[str] = """
+_USAGE_HEADER: Final[str] = """
 cst
 
 CST (Cominotti Setup Tools): one command for the setup tools of this
@@ -109,7 +109,7 @@ Modules here:"""
 
 def format_cst_usage(present_modules: Mapping[str, bool]) -> str:
     """Format `cst help` output with availability annotations per module."""
-    lines = [USAGE_HEADER]
+    lines = [_USAGE_HEADER]
     for spec in MODULES:
         state = "" if present_modules.get(spec.name, False) else " (not in this copy)"
         lines.append(f"  {spec.name:<10} {spec.about}{state}")

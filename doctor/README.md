@@ -511,7 +511,9 @@ The code is split into four layers under `doctor/`:
   host's files for the checks, and knows where the CST checkout is) and `VmTools` (the knobs and
   the image folder probe of `vm.adapters`).
 - `doctor/application.py`: host probes, check implementations, `CHECKS` registry
-  and `run_checks`. No direct I/O: files and commands go through
+  and `run_checks`, and `DoctorFacts`: what several checks ask (rpm-ostree with
+  every deployment, the libvirt domains, each VM's definition), asked once per
+  `Host` and kept here, not on the host port. No direct I/O: files and commands go through
   `DoctorHostPort` (`tests/test_architecture.py` checks it).
 - `doctor/presenter.py`: `render`, the report as text.
 - `doctor/cli.py`: the command line: arguments, the `Host`, the VM checks
@@ -522,8 +524,12 @@ The code is split into four layers under `doctor/`:
 Each check is a small function in `doctor/application.py`, registered with
 `@check("area")`. It gets a `DoctorHostPort` (how to run a query and where
 host files are) and yields `Result(status, message, fix)`. Areas are printed
-in the order their first check was registered. A check that crashes becomes
-one `ERROR` line; the others still run. A check must never change anything:
+in the order their first check was registered. A host file is named by a
+`HostPath` (`/etc/cst/vm.conf`) and read through `host.path(...)`, which
+gives the `ViewPath` this process can open (`/run/host/...` in a toolbox);
+the host's file methods take a `ViewPath` only, so ty catches a path that
+was not mapped or was mapped twice (`view_join` and `host_join` join on each
+side). A check that crashes becomes one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 

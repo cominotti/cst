@@ -271,6 +271,17 @@ forget_timer_state() {
     done
 }
 
+# disable_timers UNIT...: `systemctl disable --now` of every UNIT in one
+# call (a failure ignored: a unit that is not there), then the last runs of
+# the timers among them forgotten (forget_timer_state), while their files
+# are still there. The paths that turn a feature off use it;
+# stop_monitoring goes unit by unit instead (one missing unit must not stop
+# the others from being stopped).
+disable_timers() {
+    systemctl disable --now "$@" 2>/dev/null || true
+    forget_timer_state "$@"
+}
+
 # remove_old_units: the units of earlier versions (OLD_UNITS) stopped, their
 # timers' last runs forgotten, and their files removed. A stamp left by an
 # earlier removal (its unit file already gone, so systemd cannot clean it)
@@ -279,8 +290,7 @@ remove_old_units() {
     local u
     for u in "${OLD_UNITS[@]}"; do
         if [[ -e "${UNIT_DIR}/${u}" ]]; then
-            systemctl disable --now "${u}" 2>/dev/null || true
-            forget_timer_state "${u}"
+            disable_timers "${u}"
             rm -fv "${UNIT_DIR}/${u}"
         fi
         [[ "${u}" != *.timer ]] || rm -fv "${TIMER_STAMP_DIR}/stamp-${u}"
@@ -619,8 +629,7 @@ docker_gc() {
             echo "To clear the current backlog once (asks first): ${PROG} docker-gc cleanup-now"
             ;;
         disable)
-            systemctl disable --now "${DOCKER_GC_UNITS[@]}" 2>/dev/null || true
-            forget_timer_state "${DOCKER_GC_UNITS[@]}"
+            disable_timers "${DOCKER_GC_UNITS[@]}"
             echo "docker-gc disabled (recorded state kept in /var/lib/docker-gc)."
             ;;
         status)
