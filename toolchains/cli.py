@@ -2193,7 +2193,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         try:
             os.execvp(
                 "flatpak-spawn",
-                ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", "/usr/bin/python3", "-I", me, *argv],
+                ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", "/usr/bin/python3", "-I", "-B", me, *argv],
             )
         except OSError as e:
             print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)

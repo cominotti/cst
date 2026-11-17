@@ -753,6 +753,10 @@ In `/etc/cst/vm.conf` (all optional):
 | `VM_NAS_KEEP_MONTHLY` | 3 | monthly restic snapshots kept |
 | `VM_NAS_TIMEOUT_HOURS` | 6 | restic is stopped after this long (the overlay is merged back) |
 
+`cst-vm` reads `vm.conf` (and `cpu-setup.conf`) line by line: blanks around
+the key are allowed (`VM_NOCOW = 0`), the last line of a key wins, and a byte
+that is not UTF-8 (in a comment, say) no longer stops the program.
+
 ### 10.8 If a backup left an overlay
 
 `cst doctor` warns when a disk of a VM points to a `.cst-overlay-` file and

@@ -313,6 +313,37 @@ class PartsTest(unittest.TestCase):
             self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
             self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent")), {})
 
+    def test_read_conf_last_line_wins_with_or_without_blanks(self) -> None:
+        # main's cst-vm stripped the key line by line, so the last line in the file won.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "vm.conf")
+            for text, want in (
+                ("VM_NOCOW=1\nVM_NOCOW = 0\nVM_NOCOW=1\n", "1"),
+                ("VM_NOCOW=1\nVM_NOCOW =0\nVM_NOCOW=yes\n", "yes"),
+                ("VM_NOCOW=1\nVM_NOCOW = 0\n", "0"),
+            ):
+                with self.subTest(text=text):
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": want})
+
+    def test_read_conf_lines_end_at_newlines_only(self) -> None:
+        # main read the file line by line: a form feed or \u2028 inside a line does not end it.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "vm.conf")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("A=1\x0cB=2\nC=3\u2028D=4\r\nE=5\n")
+            self.assertEqual(vm_adapters.read_conf(p), {"A": "1\x0cB=2", "C": "3\u2028D=4", "E": "5"})
+
+    def test_read_conf_replaces_undecodable_bytes(self) -> None:
+        # Intended change from main (which stopped with a UnicodeDecodeError traceback): the
+        # settings around a non-UTF-8 byte are still read.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "vm.conf")
+            with open(p, "wb") as f:
+                f.write(b"VM_NOCOW=no\n# caf\xe9\n")
+            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "no"})
+
     def test_cpu_disable_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "c.conf")

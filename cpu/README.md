@@ -292,7 +292,9 @@ VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'
 ```
 
 (Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
-uses the same five names as its default.)
+uses the same five names as its default.) A byte that is not UTF-8 in this
+file, or in a mapped file's name that `cpu-watch` reads in `/proc/PID/maps`,
+is replaced and no longer stops `vm-pin` or `cpu-watch`.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|

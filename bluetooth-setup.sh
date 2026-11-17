@@ -112,7 +112,7 @@ usage() {
 in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }
 die() { echo "${PROG}: ERROR: $*" >&2; exit 1; }
 bad_usage() { echo "${PROG} ${cmd}: $*" >&2; exit 2; }
-helper() { python3 -I "${HELPER}" "$@"; }
+helper() { python3 -I -B "${HELPER}" "$@"; }
 
 cmd="${1:-help}"
 [[ $# -gt 0 ]] && shift
@@ -552,7 +552,7 @@ le_others_report() {
 # config files now (bt-helper wp-roles, through libwireplumber, read-only; on
 # the host, where the library is). Fails when it could not be read.
 wp_roles() {
-    hostcmd env XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}" python3 -I "${HELPER}" wp-roles 2>/dev/null
+    hostcmd env XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}" python3 -I -B "${HELPER}" wp-roles 2>/dev/null
 }
 
 # le_roles_check: whether the roles WirePlumber will offer BlueZ match

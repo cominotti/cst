@@ -16,7 +16,6 @@ from bluetooth.domain import (
     adapter_path,
     card_state,
     current_values,
-    device_id,
     edit_general,
     lw_failure,
     merged_settings,
@@ -51,7 +50,6 @@ _ARITY: Final[dict[str, int]] = {
     "lw-failure": 0,
     "wp-roles": 0,
     "settings-set": 3,
-    "device-id": 1,
 }
 
 
@@ -145,10 +143,6 @@ def main(
     if cmd == "unit-state":
         print(unit_state(host.read_or_none(args[0]), render_unit(args[1], args[2])), file=out)
         return 0
-    if cmd == "device-id":
-        print(device_id(args[0]), file=out)
-        return 0
-
     try:
         data = json.loads(host.read_stdin())
     except ValueError:

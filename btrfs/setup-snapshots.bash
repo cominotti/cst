@@ -73,7 +73,7 @@ snap_toolchains_prog() {
 snap_toolchains() {   # args...
     local home
     home="$(snap_home)" || return 1
-    runuser -u "${target_user}" -- env CST_PROG="$(snap_toolchains_prog)" python3 -I "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
+    runuser -u "${target_user}" -- env CST_PROG="$(snap_toolchains_prog)" python3 -I -B "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
 }
 
 # The `config plan` lines for the setup preview, indented, without its
@@ -87,7 +87,7 @@ snap_toolchains_config_preview() {
 snap_chrome() {   # action
     local home
     home="$(snap_home)" || return 1
-    runuser -u "${target_user}" -- python3 -I "${CHROME_TOOL}" "$1" --home "${home}"
+    runuser -u "${target_user}" -- python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
 }
 
 snap_home() {

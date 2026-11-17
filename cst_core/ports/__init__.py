@@ -139,7 +139,13 @@ class CstDispatchPort(Protocol):
 
     def user_passwd(self, user: str) -> tuple[int, str]: ...
 
-    def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int: ...
+    def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
+        """Run argv in the foreground (bash's semantics for signals); its exit status."""
+        ...
+
+    def exec_replace(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
+        """Replace this process with argv (bash's exec); returns only when argv cannot start."""
+        ...
 
 
 class SystemdPort(Protocol):
@@ -147,11 +153,17 @@ class SystemdPort(Protocol):
 
     def daemon_reload(self) -> None: ...
 
-    def start(self, unit: str) -> bool: ...
+    def start(self, unit: str) -> CommandResult:
+        """`systemctl start unit`: its exit status and what it printed."""
+        ...
 
-    def stop(self, unit: str) -> bool: ...
+    def stop(self, unit: str) -> CommandResult:
+        """`systemctl stop unit`: its exit status and what it printed."""
+        ...
 
-    def restart(self, unit: str) -> bool: ...
+    def restart(self, unit: str) -> CommandResult:
+        """`systemctl restart unit`: its exit status and what it printed."""
+        ...
 
     def escape_path(self, path: str, *, suffix: str) -> str: ...
 
@@ -160,7 +172,7 @@ class InstallTargetPort(Protocol):
     """The files `install` reads and writes (the real root, or a staging folder in tests)."""
 
     def current(self, path: str) -> tuple[bytes, int] | None:
-        """(content, permission bits) of the regular file at path; None when absent or not a regular file."""
+        """(content, permission bits) of the regular file at path (read through a link); None when absent or not a file."""
         ...
 
     def write(self, path: str, data: bytes, mode: int) -> None:

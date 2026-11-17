@@ -40,7 +40,7 @@ import sys
 from typing import NoReturn
 
 from cst_core.adapters.install import LocalInstallTarget
-from cst_core.adapters.runtime import checkout_root
+from cst_core.adapters.runtime import checkout_root, restore_default_signals
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, Owner, expand_dest, select_entries
@@ -102,6 +102,8 @@ def _entries(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one installer command; 0 ok, 1 refused or not current, 2 usage."""
+    # A reader that stops early (`cmp -s <(installer.py payload ...)`) ends this quietly, as it ended cp or cat.
+    restore_default_signals()
     try:
         a = _parser().parse_intermixed_args(list(sys.argv[1:] if argv is None else argv))
         if a.command == "help":

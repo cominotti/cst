@@ -924,6 +924,14 @@ EOF
             if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
             ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
             if grep -v '^unchanged: ' <<<"$ugain"; then echo "second user run changed files" >&2; exit 1; fi
+            # A dotfiles-style link to the same content stays a link and counts as unchanged.
+            d="{stage}$(runuser -u tester -- {installer} dests --owner user --home /home/tester | head -n 1)"
+            runuser -u tester -- cp -p "$d" /home/tester/.e2e-link-target
+            runuser -u tester -- ln -sfn /home/tester/.e2e-link-target "$d"
+            lgain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"
+            if grep -v '^unchanged: ' <<<"$lgain"; then echo "a link to the same content was rewritten" >&2; exit 1; fi
+            [[ -L "$d" ]] || {{ echo "the link was replaced" >&2; exit 1; }}
+            rm -f "$d" /home/tester/.e2e-link-target
             echo E2E-INSTALLED
             """,
         ).stdout

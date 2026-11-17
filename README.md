@@ -75,7 +75,13 @@ The modules are independent. You can use one without the other. A **module**
 (also called a frontend) is one script that installs, shows and removes a
 group of parts; the parts live in the folder next to it. Each module also
 works on its own (`bash btrfs-setup.sh status` is the same as
-`cst btrfs status`), but its messages then show its own name.
+`cst btrfs status`), but its messages then show its own name. `cst MODULE`
+hands over to the module's script (it replaces itself with it, as `exec`
+does): Ctrl-C, signals and the exit status are the module's own. `cst status`
+and `cst doctor` run each script in the foreground, as a shell does: Ctrl-C
+reaches the script, and `cst` stops with it only if the script stops. Of
+cst's own settings a module only sees `CST_PROG` (its name in hints), and
+`CST_NAME` after the sudo re-run of `cst status` (so hints keep the name).
 
 **How to call it.** The first time, run it from the CST folder:
 
@@ -396,7 +402,9 @@ everything with `plan`, `status` or `doctor` before changing anything:
 - `cst-install.bash`: how every module installs its files. The list of what is
   installed where, with which mode, is one table, `INSTALL_MANIFEST` in
   `cst_core/domain/install.py`. A file is written only when it changed, and the
-  output says `unchanged:` or `written:` per file. The Python helpers are
+  output says `unchanged:` or `written:` per file. A symbolic link to a file
+  that already holds the wanted content counts as unchanged and stays a link;
+  a write replaces the link, never the file it points to. The Python helpers are
   installed as **zipapps**: one file at the usual path (for example
   `/usr/local/sbin/docker-gc`) that holds the program and the CST code it
   imports, so it runs without this folder. `cst_core/installer.py plan SRC...`

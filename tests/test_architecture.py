@@ -77,7 +77,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # Code lines of each package's cli.py (cli_code_lines), a ceiling that only goes down (see the
 # module docstring). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
-    "bluetooth/cli.py": 134,
+    "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 422,
     "btrfs/chrome_cache/cli.py": 131,
     "btrfs/docker_gc/cli.py": 347,
@@ -86,9 +86,9 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 161,
     "cpu/cli.py": 258,
-    "cst_core/cli.py": 195,
+    "cst_core/cli.py": 169,
     "doctor/cli.py": 36,
-    "swap/cli.py": 136,
+    "swap/cli.py": 112,
     "toolchains/cli.py": 1956,
     "vm/cli.py": 1302,
 }

@@ -251,13 +251,34 @@ class LocalTargetTest(unittest.TestCase):
         dest = os.path.join(self.tmp, "a", "b", "file")
         os.makedirs(os.path.dirname(dest))
         os.symlink(victim, dest)
-        self.assertIsNone(self.t.current(dest), "a link is never current")
+        os.chmod(victim, 0o640)
+        # A link is read through, as main's `[[ -f ]] && cmp -s` did (it is only replaced when written).
+        self.assertEqual(self.t.current(dest), (b"keep", 0o640))
         self.t.write(dest, b"new", 0o750)
         self.assertEqual(Path(victim).read_bytes(), b"keep", "the link was followed")
         self.assertFalse(os.path.islink(dest))
         self.assertEqual(self.t.current(dest), (b"new", 0o750))
         self.assertIsNone(self.t.current(os.path.join(self.tmp, "missing")))
         self.assertIsNone(self.t.current(self.tmp), "a folder is not a file")
+        os.symlink(os.path.join(self.tmp, "missing"), os.path.join(self.tmp, "dangling"))
+        self.assertIsNone(self.t.current(os.path.join(self.tmp, "dangling")))
+        os.symlink(self.tmp, os.path.join(self.tmp, "to-a-folder"))
+        self.assertIsNone(self.t.current(os.path.join(self.tmp, "to-a-folder")))
+
+    def test_a_link_to_the_wanted_content_is_left_alone(self) -> None:
+        # A dotfiles link (~/.config/gamemode.ini -> a copy elsewhere) that already holds what
+        # install writes stays a link, and the line says unchanged, as on main.
+        real = os.path.join(self.tmp, "real")
+        Path(real).write_bytes(b"x\n")
+        os.chmod(real, 0o644)
+        link = os.path.join(self.tmp, "link")
+        os.symlink(real, link)
+        service = InstallService(self.t, lambda _e: b"")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644), f"unchanged: {link}")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(service.write_if_changed(link, b"y\n", 0o644), f"written:   {link}")
+        self.assertFalse(os.path.islink(link), "a write replaces the link, never writes through it")
+        self.assertEqual(Path(real).read_bytes(), b"x\n")
 
 
 def _run(
@@ -283,6 +304,25 @@ class InstallerCliTest(unittest.TestCase):
 
     def cli(self, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
         return _run([SYSTEM_PYTHON, "-I", "-B", INSTALLER, *args], stdin=stdin)
+
+    def test_payload_into_a_closed_pipe_stops_quietly(self) -> None:
+        # bluetooth-setup.sh runs `cmp -s <(cst_installer payload ...) DEST`: cmp stops reading at the first
+        # difference, and the installer must then end without a BrokenPipeError on the user's terminal.
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            proc = subprocess.run(
+                [SYSTEM_PYTHON, "-I", "-B", INSTALLER, "payload", "bluetooth/bt-ldac-watch"],
+                check=False,
+                stdout=write_end,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                cwd="/",
+                env={"PATH": "/usr/bin:/bin"},
+            )
+        finally:
+            os.close(write_end)
+        self.assertEqual(proc.stderr, b"")
 
     def files(self) -> dict[str, bytes]:
         out: dict[str, bytes] = {}
@@ -424,7 +464,7 @@ class RuntimeResolverTest(unittest.TestCase):
         main = os.path.join(REPO, "cpu", "cpu-watch")
         self.assertIsNone(running_archive(main))
         self.assertEqual(checkout_root(main), REPO)
-        self.assertEqual(program_argv(main), ["/usr/bin/python3", "-I", main])
+        self.assertEqual(program_argv(main), ["/usr/bin/python3", "-I", "-B", main])
         self.assertEqual(sibling_program("cpu/vm-pin", main), os.path.join(REPO, "cpu", "vm-pin"))
         self.assertEqual(install_payload("cpu/vm-pin", main), entry_payload(REPO, manifest_by_src()["cpu/vm-pin"]))
 
@@ -435,7 +475,7 @@ class RuntimeResolverTest(unittest.TestCase):
         main = os.path.join(archive, "__main__.py")
         self.assertEqual(running_archive(main), archive)
         self.assertIsNone(checkout_root(main))
-        self.assertEqual(program_argv(main), ["/usr/bin/python3", "-I", archive])
+        self.assertEqual(program_argv(main), ["/usr/bin/python3", "-I", "-B", archive])
         self.assertEqual(sibling_program("cpu/cpu-watch", main), "/usr/local/bin/cpu-watch")
         self.assertEqual(
             sibling_program("toolchains/cst-toolchains", main, home="/home/u"), "/home/u/.local/lib/cst/cst-toolchains"

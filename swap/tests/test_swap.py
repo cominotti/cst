@@ -4,10 +4,11 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s swap/tests -t . -v
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import io
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -18,9 +19,10 @@ import unittest
 sys.dont_write_bytecode = True
 
 from cst_core.adapters import HostExecutionContext, LocalFileSystemAdapter
-from cst_core.domain.files import MarkedLineSpec, inspect_managed_file
-from cst_core.ports import CommandResult
+from cst_core.domain.files import MarkedLineSpec
+from cst_core.ports import CommandFailed, CommandResult
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
+from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage
 import swap.domain as D
 from swap.domain import (
@@ -39,7 +41,15 @@ from swap.domain import (
     share,
     zswap_summary,
 )
-from swap.presenter import render_apply, render_debug, render_plan, render_pool, render_settings, render_status
+from swap.presenter import (
+    render_apply,
+    render_debug,
+    render_plan,
+    render_pool,
+    render_settings,
+    render_status,
+    run_command,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SWAP = os.path.dirname(HERE)
@@ -400,16 +410,24 @@ class StatusMathTest(unittest.TestCase):
 
 
 class MarkerTest(unittest.TestCase):
-    """Domain MarkedLineSpec and inspect_managed_file on scratch files via SwapHardwareSpec."""
+    """The service's marked-line and managed-file steps (the code apply runs) on scratch files."""
 
     tmp: str
-    fs: LocalFileSystemAdapter
+    fs: _FakeTempFileSystem
     spec: SwapHardwareSpec
+    svc: SwapApplicationService
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
-        self.fs = LocalFileSystemAdapter()
+        self.fs = _FakeTempFileSystem({})
         self.spec = SwapHardwareSpec()
+        swaps = os.path.join(self.tmp, "swaps")
+        self.svc = SwapApplicationService(
+            SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp, spec=self.spec),
+            self.fs,
+            _FakeSystemd(swaps, "/dev/dm-0"),
+            _FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
+        )
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
@@ -425,23 +443,39 @@ class MarkerTest(unittest.TestCase):
         return self.spec.fstab_spec() if which == "fstab" else self.spec.crypttab_spec()
 
     def state(self, p: str, which: str = "fstab") -> str:
-        exists = self.fs.exists(p)
-        content = self.fs.read_text(p) if exists else None
-        return self.line_spec(which).inspect(content, exists=exists, readable=True)
+        return self.svc._inspect_marked(p, self.line_spec(which))
 
     def write_marked(self, p: str, which: str = "fstab") -> None:
-        if not self.fs.exists(p):
-            self.fs.write_atomic(p, "", 0o644)
-        self.fs.copy_if_absent(p, f"{p}.pre-swap-config.bak")
-        existing = self.fs.read_text(p, "") or ""
-        self.fs.write_atomic(p, self.line_spec(which).render_updated(existing), 0o644)
+        events: list[D.ApplyEvent] = []
+        ok, _changed, _written = self.svc._apply_marked_line(p, self.line_spec(which), 0o644, events)
+        self.assertTrue(ok, events)
 
     def file_state(self, src: str, dest: str) -> str:
-        desired = self.fs.read_text(src) or ""
-        is_symlink = self.fs.is_symlink(dest)
-        exists = self.fs.exists(dest)
-        actual = self.fs.read_text(dest) if (exists and not is_symlink) else None
-        return inspect_managed_file(desired, actual, exists=exists, is_symlink=is_symlink, readable=True)
+        return self.svc._inspect_file(src, dest)
+
+    def test_unreadable_files(self) -> None:
+        p = self.path("fstab", "x\n")
+        self.fs._unreadable.add(p)
+        self.assertEqual(self.state(p), "unreadable")
+        self.assertEqual(self.file_state(TMPFILES, p), "unreadable")
+        events: list[D.ApplyEvent] = []
+        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events)[0], False)
+        self.assertIn("unreadable", events[-1].text)
+
+    def test_other_lines_come_back_byte_for_byte(self) -> None:
+        # main read and rewrote fstab/crypttab with bash `read -r`: bytes that are not UTF-8, a CR, a form
+        # feed and a last line without a newline all came back as they were (the last one with a newline).
+        p = os.path.join(self.tmp, "fstab")
+        foreign = b"# caf\xe9 comment\r\n\x0cform feed\nUUID=x / btrfs defaults 0 0"
+        with open(p, "wb") as f:
+            f.write(foreign)
+        self.assertEqual(self.state(p), "missing")
+        self.write_marked(p)
+        with open(p, "rb") as f:
+            self.assertEqual(f.read(), foreign + b"\n" + self.line_spec().desired_line.encode() + b"\n")
+        self.assertEqual(self.state(p), "ok")
+        with open(p + ".pre-swap-config.bak", "rb") as f:
+            self.assertEqual(f.read(), foreign)
 
     def test_old_host_lines_are_adopted_in_place(self) -> None:
         for which, old in (("fstab", OLD_FSTAB), ("crypttab", OLD_CRYPTTAB)):
@@ -556,8 +590,12 @@ class _FakeSystemd:
         fs: _FakeTempFileSystem | None = None,
         mapper_link: str = "/dev/mapper/swap0",
         fail_unit: str | None = None,
+        fail_result: CommandResult | None = None,
+        on_call: Callable[[str, str], object] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self._fail_result = CommandResult(1, "", "") if fail_result is None else fail_result
+        self._on_call = on_call
         self.daemon_reloads = 0
         self._swaps_path = swaps_path
         self._mapper_real = mapper_real
@@ -581,29 +619,32 @@ class _FakeSystemd:
         with open(self._swaps_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join([header, *rest]) + "\n")
 
-    def start(self, unit: str) -> bool:
-        self.calls.append(("start", unit))
-        if unit == self._fail_unit:
-            return False
+    def _call(self, verb: str, unit: str) -> bool:
+        self.calls.append((verb, unit))
+        if self._on_call is not None:
+            self._on_call(verb, unit)
+        return unit != self._fail_unit
+
+    def start(self, unit: str) -> CommandResult:
+        if not self._call("start", unit):
+            return self._fail_result
         if unit == "systemd-cryptsetup@swap0.service" and self._fs is not None:
             self._fs.add_block_link(self._mapper_link, self._mapper_real)
         if unit == "dev-mapper-swap0.swap":
             self._set_active(self._mapper_real, True)
-        return True
+        return CommandResult(0, "", "")
 
-    def stop(self, unit: str) -> bool:
-        self.calls.append(("stop", unit))
-        if unit == self._fail_unit:
-            return False
+    def stop(self, unit: str) -> CommandResult:
+        if not self._call("stop", unit):
+            return self._fail_result
         if unit == "dev-mapper-swap0.swap":
             self._set_active(self._mapper_real, False)
         elif unit == "dev-zram0.swap":
             self._set_active("/dev/zram0", False)
-        return True
+        return CommandResult(0, "", "")
 
-    def restart(self, unit: str) -> bool:
-        self.calls.append(("restart", unit))
-        return unit != self._fail_unit
+    def restart(self, unit: str) -> CommandResult:
+        return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
     def escape_path(self, path: str, *, suffix: str) -> str:
         cleaned = path.lstrip("/").replace("/", "-")
@@ -620,7 +661,11 @@ class _FakeSwapSystem:
         size_bytes: int | None,
         part_type: str = "",
         swapon_text: str = "NAME TYPE SIZE USED PRIO\n/dev/dm-0 partition 128G 0B -2\n",
+        sysctl_result: CommandResult | None = None,
+        swapon_result: CommandResult | None = None,
     ) -> None:
+        self._sysctl_result = CommandResult(0, "", "") if sysctl_result is None else sysctl_result
+        self._swapon_result = CommandResult(0, swapon_text, "") if swapon_result is None else swapon_result
         self._proc_dir = proc_dir
         self._size_bytes = size_bytes
         self._part_type = part_type
@@ -629,9 +674,9 @@ class _FakeSwapSystem:
         self.sysctl_calls: list[tuple[str, str | None]] = []
         self.zram_resets = 0
 
-    def blockdev_size_bytes(self, dev_path: str) -> int | None:
+    def blockdev_size(self, dev_path: str) -> str:
         del dev_path
-        return self._size_bytes
+        return str(self._size_bytes)
 
     def blkid_type(self, dev_path: str) -> str:
         del dev_path
@@ -640,8 +685,10 @@ class _FakeSwapSystem:
     def modprobe(self, module: str) -> None:
         self.modprobes.append(module)
 
-    def apply_sysctl_file(self, sysctl_conf: str, *, exclude_key: str | None = None) -> None:
+    def apply_sysctl_file(self, sysctl_conf: str, *, exclude_key: str | None = None) -> CommandResult:
         self.sysctl_calls.append((sysctl_conf, exclude_key))
+        if self._sysctl_result.returncode != 0:
+            return self._sysctl_result
         with open(sysctl_conf, encoding="utf-8") as fh:
             for key, val in parse_sysctl(fh.read()):
                 if key == exclude_key:
@@ -650,12 +697,13 @@ class _FakeSwapSystem:
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, "w", encoding="utf-8") as out:
                     out.write(val + "\n")
+        return self._sysctl_result
 
     def reset_zram0(self) -> None:
         self.zram_resets += 1
 
-    def swapon_show(self) -> str:
-        return self._swapon_text
+    def swapon_show(self) -> CommandResult:
+        return self._swapon_result
 
 
 class _FakeContext:
@@ -692,8 +740,8 @@ class _FakeRunner:
         return CommandResult(0, "", "")
 
 
-class SwapApplicationTest(unittest.TestCase):
-    """End-to-end application service and CLI tests inside temporary directories."""
+class _SwapScratch(unittest.TestCase):
+    """A scratch /etc, /proc, /sys and cgroup tree for the application service."""
 
     tmp: str
     spec: SwapHardwareSpec
@@ -773,6 +821,10 @@ class SwapApplicationTest(unittest.TestCase):
         if mapper_present:
             links[self.spec.mapper_path] = "/dev/dm-0"
         return _FakeTempFileSystem(links, unreadable)
+
+
+class SwapApplicationTest(_SwapScratch):
+    """End-to-end application service and CLI tests inside temporary directories."""
 
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
@@ -969,8 +1021,257 @@ class SwapApplicationTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Usage: cst swap <command> [args]", proc.stdout)
+        # A closed pipe stops it quietly, as the bash swap-setup.sh stopped (SIGPIPE at its default).
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            piped = subprocess.run(
+                ["bash", SETUP, "help"],
+                stdout=write_end,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin", "CST_PROG": "cst swap"},
+                timeout=60,
+            )
+        finally:
+            os.close(write_end)
+        self.assertEqual(piped.stderr, "")
+        self.assertEqual(piped.returncode, -signal.SIGPIPE)
         # No container marker (faked: CI itself runs in Docker): the host /etc.
         self.assertEqual(HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000).etc_dir(), "/etc")
+
+
+class _ScriptedRunner:
+    """CommandRunnerPort answering by program name (argv[0]); records each argv."""
+
+    def __init__(self, results: Mapping[str, CommandResult]) -> None:
+        self._results = dict(results)
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = False,
+        timeout: float | None = None,
+        input_text: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        del timeout, input_text, env
+        self.calls.append(list(argv))
+        res = self._results.get(argv[0], CommandResult(0, "", ""))
+        if check and res.returncode != 0:
+            raise CommandFailed(argv, res.returncode, res.stdout, res.stderr)
+        return res
+
+
+class _ZswapWriteFails(_FakeTempFileSystem):
+    def write_text_direct(self, path: str, content: str) -> None:
+        raise PermissionError(13, "Permission denied", path)
+
+
+class SwapApplyOutputTest(_SwapScratch):
+    """apply prints each step as it runs and stops at a failing command with its message and exit status,
+    as swap-setup.sh did under `set -Eeuo pipefail`."""
+
+    def _service(
+        self,
+        *,
+        systemd: _FakeSystemd | None = None,
+        system: _FakeSwapSystem | LinuxSwapSystemAdapter | None = None,
+        fs: _FakeTempFileSystem | None = None,
+    ) -> tuple[SwapApplicationService, _FakeSystemd]:
+        fs = self._fs() if fs is None else fs
+        sd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs) if systemd is None else systemd
+        sw = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
+        return SwapApplicationService(self.env, fs, sd, sw), sd
+
+    def _apply(self, service: SwapApplicationService) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command("apply", service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_each_step_is_printed_before_the_next_one_runs(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        seen: dict[str, str] = {}
+        fs = self._fs()
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            on_call=lambda verb, unit: seen.setdefault(f"{verb} {unit}", out.getvalue()),
+        )
+        service, _ = self._service(systemd=systemd, fs=fs)
+        self.assertEqual(run_command("apply", service, hint="", out=out, err=err), 0, err.getvalue())
+        before_start = seen["start systemd-cryptsetup@swap0.service"]
+        self.assertIn("== swap0: crypttab and fstab", before_start)
+        self.assertIn("/dev/mapper/swap0: activating", before_start)
+        self.assertIn("zram0: swapping off", seen["stop dev-zram0.swap"])
+        self.assertEqual(out.getvalue().count("== zswap"), 1, "each line once")
+
+    def test_verification_has_no_blank_line_before_it(self) -> None:
+        rc, out, err = self._apply(self._service()[0])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("\n== verification\n", out)
+        self.assertNotIn("\n\n== verification", out)
+
+    def test_a_failing_systemctl_start_shows_its_message_and_exit_status(self) -> None:
+        job = "Job for systemd-cryptsetup@swap0.service failed because the control process exited with error code.\n"
+        fs = self._fs()
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            fail_unit="systemd-cryptsetup@swap0.service",
+            fail_result=CommandResult(5, "", job),
+        )
+        rc, out, err = self._apply(self._service(systemd=systemd, fs=fs)[0])
+        self.assertEqual(rc, 5)
+        self.assertEqual(err, job)
+        self.assertIn("/dev/mapper/swap0: activating", out)
+        self.assertNotIn("== zswap", out, "apply stops at the failing command")
+
+    def test_a_failing_zram_swapoff_shows_systemctl_before_the_warning(self) -> None:
+        fs = self._fs()
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            fail_unit="dev-zram0.swap",
+            fail_result=CommandResult(1, "", "Job for dev-zram0.swap failed.\n"),
+        )
+        rc, _out, err = self._apply(self._service(systemd=systemd, fs=fs)[0])
+        self.assertEqual(rc, 0, "zram0 still active is a 'later' note, not a failure, as before")
+        self.assertIn("Job for dev-zram0.swap failed.\nWARNING: swapoff of zram0 failed", err)
+
+    def test_a_failing_sysctl_shows_its_message_and_exit_status(self) -> None:
+        msg = "sysctl: cannot stat /proc/sys/vm/nope: No such file or directory\n"
+        system = _FakeSwapSystem(
+            self.env.proc_dir, size_bytes=self.spec.expected_size_bytes, sysctl_result=CommandResult(255, "", msg)
+        )
+        rc, out, err = self._apply(self._service(system=system)[0])
+        self.assertEqual(rc, 255)
+        self.assertEqual(err, msg)
+        self.assertIn("== sysctl", out)
+        self.assertIn("zram0: removed", out, "the lines of the steps done before are on screen")
+        self.assertNotIn("== machine.slice", out)
+
+    def test_a_failing_daemon_reload_shows_its_message_and_exit_status(self) -> None:
+        class _ReloadFails(_FakeSystemd):
+            def daemon_reload(self) -> None:
+                raise CommandFailed(["systemctl", "daemon-reload"], 4, "", "Failed to reload daemon: Access denied\n")
+
+        fs = self._fs()
+        rc, out, err = self._apply(
+            self._service(systemd=_ReloadFails(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs), fs=fs)[0]
+        )
+        self.assertEqual(rc, 4)
+        self.assertEqual(err, "Failed to reload daemon: Access denied\n")
+        self.assertIn(f"written:   {self.env.fstab}", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_command_killed_by_a_signal_gives_128_plus_n(self) -> None:
+        # bash under set -e exited with 128+N for a command killed by signal N, never with 256-N.
+        fs = self._fs()
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            fail_unit="systemd-cryptsetup@swap0.service",
+            fail_result=CommandResult(-signal.SIGTERM, "", ""),
+        )
+        self.assertEqual(self._apply(self._service(systemd=systemd, fs=fs)[0])[0], 128 + signal.SIGTERM)
+
+        class _ReloadKilled(_FakeSystemd):
+            def daemon_reload(self) -> None:
+                raise CommandFailed(["systemctl", "daemon-reload"], -signal.SIGKILL)
+
+        fs = self._fs()
+        killed = _ReloadKilled(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        self.assertEqual(self._apply(self._service(systemd=killed, fs=fs)[0])[0], 128 + signal.SIGKILL)
+
+    def test_a_failing_write_is_an_error_line_not_a_traceback(self) -> None:
+        fs = _ZswapWriteFails({self.spec.device_path: "/dev/nvme0n1p5"})
+        rc, out, err = self._apply(self._service(fs=fs)[0])
+        self.assertEqual(rc, 1)
+        self.assertIn("cst swap: ERROR: [Errno 13] Permission denied", err)
+        self.assertIn("== zswap", out)
+
+    def test_a_failing_blockdev_shows_its_message_and_exit_status(self) -> None:
+        runner = _ScriptedRunner(
+            {"blockdev": CommandResult(1, "", "blockdev: cannot open /dev/nvme0n1p5: No such device\n")}
+        )
+        system = LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter())
+        rc, out, err = self._apply(self._service(system=system)[0])
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, "blockdev: cannot open /dev/nvme0n1p5: No such device\n")
+        self.assertNotIn("None", out + err)
+
+    def test_blockdev_size_is_compared_as_printed(self) -> None:
+        runner = _ScriptedRunner({"blockdev": CommandResult(0, "12345\n", "")})
+        system = LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter())
+        rc, _out, err = self._apply(self._service(system=system)[0])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"/dev/disk/by-partuuid/{self.spec.partuuid} is 12345 bytes, expected", err)
+
+    def test_swapon_show_output_is_shown_even_when_it_fails(self) -> None:
+        system = _FakeSwapSystem(
+            self.env.proc_dir,
+            size_bytes=self.spec.expected_size_bytes,
+            swapon_result=CommandResult(4, "", "swapon: /proc/swaps: open failed\n"),
+        )
+        rc, _out, err = self._apply(self._service(system=system)[0])
+        self.assertEqual(rc, 0, "`swapon --show || true`")
+        self.assertIn("swapon: /proc/swaps: open failed\n", err)
+
+    def test_linux_adapter_returns_the_command_results(self) -> None:
+        runner = _ScriptedRunner(
+            {
+                "sysctl": CommandResult(255, "", "sysctl: cannot stat x\n"),
+                "swapon": CommandResult(4, "out\n", "err\n"),
+            }
+        )
+        system = LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter())
+        self.assertEqual(system.apply_sysctl_file("/x.conf"), CommandResult(255, "", "sysctl: cannot stat x\n"))
+        self.assertEqual(system.swapon_show(), CommandResult(4, "out\n", "err\n"))
+        self.assertEqual(runner.calls, [["sysctl", "-q", "-p", "/x.conf"], ["swapon", "--show"]])
+
+    def test_fstab_that_is_not_utf8_is_read_and_kept(self) -> None:
+        with open(self.env.fstab, "wb") as f:
+            f.write(b"# caf\xe9 comment\nUUID=x / btrfs defaults 0 0\n")
+        plan = io.StringIO()
+        self.assertEqual(run_command("plan", self._service()[0], hint="", out=plan, err=io.StringIO()), 0)
+        self.assertIn("fstab: /dev/mapper/swap0 line", plan.getvalue())
+        rc, _out, err = self._apply(self._service()[0])
+        self.assertEqual(rc, 0, err)
+        with open(self.env.fstab, "rb") as f:
+            self.assertTrue(f.read().startswith(b"# caf\xe9 comment\nUUID=x / btrfs defaults 0 0\n"))
+
+
+class SwapArgumentsTest(unittest.TestCase):
+    """The command line, as swap-setup.sh parsed it."""
+
+    def test_an_empty_command_is_help(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(execute_cli([""], env={"CST_PROG": "cst swap"}, out=out, err=err), 0)
+        self.assertIn("Usage: cst swap <command> [args]", out.getvalue())
+        self.assertEqual(err.getvalue(), "")
+
+    def test_only_the_first_argument_of_plan_and_status_is_read(self) -> None:
+        box = _FakeContext(container=True, root=False, etc_dir="/nonexistent", run_dir="/nonexistent")
+        for cmd in ("plan", "status"):
+            with self.subTest(cmd=cmd):
+                err = io.StringIO()
+                rc = execute_cli(
+                    [cmd, "--root", "x"], env={"CST_PROG": "cst swap"}, out=io.StringIO(), err=err, ctx=box
+                )
+                self.assertEqual(rc, 1)
+                self.assertIn(f"'cst swap {cmd} --root x' must run on the host", err.getvalue())
+                err = io.StringIO()
+                self.assertEqual(execute_cli([cmd, "--nope", "--root"], env={}, out=io.StringIO(), err=err), 2)
+                self.assertEqual(err.getvalue(), f"{cmd}: unknown argument '--nope' (only --root)\n")
 
 
 if __name__ == "__main__":

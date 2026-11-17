@@ -102,9 +102,14 @@ class LocalFileSystemAdapter:
         return os.access(path, os.R_OK)
 
     def read_text(self, path: str, default: str | None = None) -> str | None:
-        """Read UTF-8 text from path, returning default on OSError."""
+        """Read the file as UTF-8 text, returning default on OSError.
+
+        Byte-transparent, like bash's `read -r` on the shared files (fstab,
+        crypttab): a byte that is not UTF-8 comes back as itself through
+        write_atomic (surrogateescape), and line ends are kept as they are.
+        """
         try:
-            with open(path, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
                 return fh.read()
         except OSError:
             return default
@@ -134,7 +139,7 @@ class LocalFileSystemAdapter:
 
     def write_atomic(self, dest: str, content: str, mode: int = 0o644) -> None:
         """Write content to dest atomically via a temporary file in the target directory."""
-        write_bytes_atomic(dest, content.encode("utf-8"), mode=mode)
+        write_bytes_atomic(dest, content.encode("utf-8", "surrogateescape"), mode=mode)
 
     def write_text_direct(self, path: str, content: str) -> None:
         """Write content directly in place (for sysfs/procfs pseudo-files)."""
@@ -256,17 +261,17 @@ class SystemctlAdapter:
         """Run `systemctl daemon-reload`."""
         self._runner.run(["systemctl", "daemon-reload"], check=True)
 
-    def start(self, unit: str) -> bool:
-        """Start unit and return True on zero exit status."""
-        return self._runner.run(["systemctl", "start", unit], check=False).returncode == 0
+    def start(self, unit: str) -> CommandResult:
+        """Start unit; its exit status and output (the caller shows systemctl's message)."""
+        return self._runner.run(["systemctl", "start", unit], check=False)
 
-    def stop(self, unit: str) -> bool:
-        """Stop unit and return True on zero exit status."""
-        return self._runner.run(["systemctl", "stop", unit], check=False).returncode == 0
+    def stop(self, unit: str) -> CommandResult:
+        """Stop unit; its exit status and output."""
+        return self._runner.run(["systemctl", "stop", unit], check=False)
 
-    def restart(self, unit: str) -> bool:
-        """Restart unit and return True on zero exit status."""
-        return self._runner.run(["systemctl", "restart", unit], check=False).returncode == 0
+    def restart(self, unit: str) -> CommandResult:
+        """Restart unit; its exit status and output."""
+        return self._runner.run(["systemctl", "restart", unit], check=False)
 
     def escape_path(self, path: str, *, suffix: str) -> str:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""

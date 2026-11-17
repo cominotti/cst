@@ -17,12 +17,12 @@ import sys
 from typing import NoReturn, TextIO
 
 
-from cst_core.adapters.runtime import checkout_root, program_path
+from cst_core.adapters.runtime import checkout_root, program_path, restore_default_signals
 from cst_core.adapters import HostExecutionContext, LocalFileSystemAdapter, SubprocessCommandRunner, SystemctlAdapter
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
-from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
-from swap.presenter import render_apply, render_plan, render_status
+from swap.application import SwapApplicationService, SwapEnvironment
+from swap.presenter import run_command
 
 _HELP_TEXT = """\
 swap-setup.sh  (the `swap` module of CST: run it as `cst swap ...`)
@@ -86,7 +86,7 @@ def execute_cli(
     stderr = sys.stderr if err is None else err
     prog = env_map.get("CST_PROG") or "cst swap"
 
-    cmd = args[0] if args else "help"
+    cmd = args[0] if args and args[0] else "help"  # bash's ${1:-help}: an empty word is help too
     rest = args[1:] if args else []
     orig_args = [cmd, *rest]
     want_root = False
@@ -95,12 +95,11 @@ def execute_cli(
         stdout.write(format_usage(prog))
         return 0
     if cmd in ("plan", "status"):
-        if not rest:
-            pass
-        elif rest == ["--root"]:
+        first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
+        if first == "--root":
             want_root = True
-        else:
-            print(f"{cmd}: unknown argument '{rest[0]}' (only --root)", file=stderr)
+        elif first:
+            print(f"{cmd}: unknown argument '{first}' (only --root)", file=stderr)
             return 2
     elif cmd == "apply":
         if rest:
@@ -119,19 +118,8 @@ def execute_cli(
             return 1
         if not exec_ctx.is_root():
             reexec = _sudo_reexec if elevate is None else elevate
-            reexec(
-                [
-                    "sudo",
-                    "--",
-                    "env",
-                    f"CST_PROG={prog}",
-                    sys.executable,
-                    "-I",
-                    "-B",
-                    program_path(__file__),
-                    *orig_args,
-                ]
-            )
+            python = [sys.executable, "-I", "-B", program_path(__file__)]
+            reexec(["sudo", "--", "env", f"CST_PROG={prog}", *python, *orig_args])
 
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     file_sys = LocalFileSystemAdapter() if fs is None else fs
@@ -144,24 +132,12 @@ def execute_cli(
         prog=prog,
     )
     service = SwapApplicationService(swap_env, file_sys, systemd, swap_system)
-    hint = f"{prog} {cmd} --root, on the host"
-
-    try:
-        if cmd == "plan":
-            return render_plan(service.plan_report(), out=stdout)
-        if cmd == "status":
-            return render_status(
-                service.status_report(hint=hint, include_config=True),
-                out=stdout,
-            )
-        return render_apply(service.apply_changes(), out=stdout, err=stderr)
-    except MissingDesiredFileError as exc:
-        print(f"{prog}: ERROR: {exc}", file=stderr)
-        return 1
+    return run_command(cmd, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
 
 
 def main() -> int:
     """CLI entrypoint returning process exit status."""
+    restore_default_signals()  # a closed pipe stops it quietly, as it stopped the bash swap-setup.sh
     return execute_cli()
 
 

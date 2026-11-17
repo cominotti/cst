@@ -1,6 +1,6 @@
 """Pure use-case orchestration for the swap module (no direct OS I/O or terminal formatting)."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import posixpath
 import re
@@ -8,7 +8,7 @@ import re
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
-from cst_core.ports import FileSystemPort, SystemdPort
+from cst_core.ports import CommandResult, FileSystemPort, SystemdPort
 from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
@@ -55,6 +55,28 @@ DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-50-memory-low
 def _under(base: str, manifest_path: str, prefix: str) -> str:
     """manifest_path (which starts with prefix) moved under base."""
     return posixpath.join(base, manifest_path[len(prefix) :])
+
+
+class _EventLog(list[ApplyEvent]):
+    """apply's events in order; each also goes to emit as it happens, so the CLI prints every
+    step before the next one runs (as swap-setup.sh's echo lines did)."""
+
+    def __init__(self, emit: Callable[[ApplyEvent], None] | None) -> None:
+        super().__init__()
+        self._emit = emit
+
+    def append(self, event: ApplyEvent, /) -> None:
+        super().append(event)
+        if self._emit is not None:
+            self._emit(event)
+
+
+def _show_output(res: CommandResult, events: list[ApplyEvent]) -> None:
+    """What a command printed, passed on as it is (bash let it reach the terminal)."""
+    if res.stdout:
+        events.append(ApplyEvent("out", "raw", res.stdout))
+    if res.stderr:
+        events.append(ApplyEvent("err", "raw", res.stderr))
 
 
 class MissingDesiredFileError(RuntimeError):
@@ -139,6 +161,11 @@ class SwapApplicationService:
         self._fs = fs
         self._systemd = systemd
         self._system = system
+
+    @property
+    def prog(self) -> str:
+        """The command name in messages (`cst swap`)."""
+        return self._env.prog
 
     def _desired_text(self, path: str) -> str:
         text = self._fs.read_text(path)
@@ -499,8 +526,8 @@ class SwapApplicationService:
         if not self._fs.is_block_device(spec.device_path):
             fail(f"Swap partition {spec.device_path} not found.")
             return None
-        actual = self._system.blockdev_size_bytes(spec.device_path)
-        if actual != spec.expected_size_bytes:
+        actual = self._system.blockdev_size(spec.device_path)
+        if actual != str(spec.expected_size_bytes):
             fail(
                 f"{spec.device_path} is {actual} bytes, expected {spec.expected_size_bytes}: "
                 "the PARTUUID points at an unexpected device; refusing."
@@ -576,14 +603,36 @@ class SwapApplicationService:
             events.append(ApplyEvent("out", "line", f"written:   {dest}"))
         return True
 
-    def apply_changes(self) -> SwapApplyResult:
-        """Idempotently apply swap, zswap, zram-off, sysctl, and MemoryLow config."""
+    def _stopped(self, returncode: int, events: list[ApplyEvent]) -> SwapApplyResult:
+        """The result of an apply that stopped before the verification."""
+        return SwapApplyResult(returncode, tuple(events), None, (), "", "", self._env.prog)
+
+    def _run_units(self, steps: tuple[tuple[str, str], ...], events: list[ApplyEvent]) -> int:
+        """`systemctl VERB UNIT` for each step, showing its output; the first failing exit status, else 0.
+
+        Under `set -e` swap-setup.sh stopped at a failing systemctl with its
+        exit status, and its message was the error the user saw.
+        """
+        calls = {"start": self._systemd.start, "stop": self._systemd.stop, "restart": self._systemd.restart}
+        for verb, unit in steps:
+            res = calls[verb](unit)
+            _show_output(res, events)
+            if res.returncode != 0:
+                return res.returncode
+        return 0
+
+    def apply_changes(self, emit: Callable[[ApplyEvent], None] | None = None) -> SwapApplyResult:
+        """Idempotently apply swap, zswap, zram-off, sysctl, and MemoryLow config.
+
+        emit receives each event as it happens (the CLI prints it at once);
+        the result holds them all too.
+        """
         env = self._env
         spec = env.spec
-        events: list[ApplyEvent] = []
+        events: list[ApplyEvent] = _EventLog(emit)
         tmpfiles_text = self._check_preconditions(events)
         if tmpfiles_text is None:
-            return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            return self._stopped(1, events)
 
         events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
         c_spec = spec.crypttab_spec()
@@ -597,7 +646,7 @@ class SwapApplicationService:
                     "remove it by hand, then run apply again.",
                 )
             )
-            return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            return self._stopped(1, events)
         if self._inspect_marked(env.fstab, f_spec) == "conflict":
             events.append(
                 ApplyEvent(
@@ -607,14 +656,14 @@ class SwapApplicationService:
                     "remove it by hand, then run apply again.",
                 )
             )
-            return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            return self._stopped(1, events)
 
         ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events)
         if not ok_c:
-            return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            return self._stopped(1, events)
         ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events)
         if not ok_f:
-            return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            return self._stopped(1, events)
         line_changed = changed_c or changed_f
         line_written = written_c or written_f
         if line_written:
@@ -633,15 +682,9 @@ class SwapApplicationService:
                             "out", "line", f"{spec.mapper_path}: entry changed and the device is empty: re-activating"
                         )
                     )
-                    if not (
-                        self._systemd.stop(swap_unit)
-                        and self._systemd.restart(crypt_unit)
-                        and self._systemd.start(swap_unit)
-                    ):
-                        events.append(
-                            ApplyEvent("err", "error", f"{env.prog}: ERROR: failed to re-activate {spec.mapper_path}.")
-                        )
-                        return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+                    rc = self._run_units((("stop", swap_unit), ("restart", crypt_unit), ("start", swap_unit)), events)
+                    if rc != 0:
+                        return self._stopped(rc, events)
                 else:
                     events.append(
                         ApplyEvent(
@@ -657,9 +700,9 @@ class SwapApplicationService:
             events.append(
                 ApplyEvent("out", "line", f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)")
             )
-            if not (self._systemd.start(crypt_unit) and self._systemd.start(swap_unit)):
-                events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: failed to activate {spec.mapper_path}."))
-                return SwapApplyResult(1, tuple(events), None, (), "", "", env.prog)
+            rc = self._run_units((("start", crypt_unit), ("start", swap_unit)), events)
+            if rc != 0:
+                return self._stopped(rc, events)
 
         events.append(ApplyEvent("out", "section", "== zswap"))
         self._apply_managed_file(env.src_tmpfiles, env.tmpfiles_conf, TMPFILES_ENTRY.mode.bits, events)
@@ -687,7 +730,10 @@ class SwapApplicationService:
             avail_kib = meminfo.get("MemAvailable", 0) // 1024
             if can_evict_zram(zram_used, avail_kib):
                 events.append(ApplyEvent("out", "line", "zram0: swapping off"))
-                if self._systemd.stop("dev-zram0.swap"):
+                swapoff = self._systemd.stop("dev-zram0.swap")
+                _show_output(swapoff, events)
+                if swapoff.returncode == 0:
+                    # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
                     self._systemd.stop("systemd-zram-setup@zram0.service")
                     self._system.reset_zram0()
                     events.append(ApplyEvent("out", "line", "zram0: removed"))
@@ -725,9 +771,12 @@ class SwapApplicationService:
                     "out", "line", "           after 'cst cpu experiment off wsf-300', run apply again, or reboot)"
                 )
             )
-            self._system.apply_sysctl_file(env.sysctl_conf, exclude_key=exp_key)
+            sysctl = self._system.apply_sysctl_file(env.sysctl_conf, exclude_key=exp_key)
         else:
-            self._system.apply_sysctl_file(env.sysctl_conf)
+            sysctl = self._system.apply_sysctl_file(env.sysctl_conf)
+        _show_output(sysctl, events)
+        if sysctl.returncode != 0:
+            return self._stopped(sysctl.returncode, events)
 
         events.append(ApplyEvent("out", "section", "== machine.slice"))
         if self._apply_managed_file(env.src_dropin, env.slice_dropin, DROPIN_ENTRY.mode.bits, events):
@@ -741,7 +790,7 @@ class SwapApplicationService:
         active_zram0 = find_swap_used_kib(swaps_final, "/dev/zram0") is not None
         if not active_swap0:
             fail = True
-        swapon_out = self._system.swapon_show()
+        swapon = self._system.swapon_show()
         verify_notes: list[str] = []
         if not active_swap0:
             verify_notes.append(f"  BAD   {spec.name} is not active as swap")
@@ -755,7 +804,8 @@ class SwapApplicationService:
             tuple(events),
             settings,
             tuple(verify_notes),
-            swapon_out,
+            swapon.stdout,
             verify_error,
             env.prog,
+            swapon.stderr,
         )

@@ -16,10 +16,14 @@ class LocalInstallTarget:
     """
 
     def current(self, path: str) -> tuple[bytes, int] | None:
-        """(content, permission bits) of a regular file; None when absent, a link or not a file."""
+        """(content, permission bits) of the regular file at path, read through a link; None when absent or not a file.
+
+        A link to the wanted content is current, as the old install_file's
+        `[[ -f ]] && cmp -s` saw it: it stays a link. write() replaces it.
+        """
         path = checked_path(path)
         try:
-            st = os.lstat(path)
+            st = os.stat(path)
             if not stat.S_ISREG(st.st_mode):
                 return None
             with open(path, "rb") as fh:

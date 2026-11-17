@@ -192,6 +192,23 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             with unittest.mock.patch.object(cpu_adapters, "CONF", os.path.join(tmp, "absent")):
                 self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), self.names)
 
+    def test_undecodable_bytes_are_replaced(self) -> None:
+        # Intended change from main, where vm-pin and cpu-watch stopped with a UnicodeDecodeError
+        # traceback: a non-UTF-8 byte in cpu-setup.conf, or in a mapped file's name in
+        # /proc/PID/maps (the kernel does not escape it), no longer stops the program.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "cpu-setup.conf")
+            with open(p, "wb") as f:
+                f.write(b"VM_VCPUS=8\n# caf\xe9\n")
+            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
+                self.assertEqual(cpu_adapters.conf()["VM_VCPUS"], "8")
+            maps = os.path.join(tmp, "maps")
+            with open(maps, "wb") as f:
+                f.write(
+                    b"7f00 r-xp 0 00:00 1 /home/u/caf\xe9/lib.so\n7f01 r-xp 0 00:00 2 /usr/lib/libgamemodeauto.so.0\n"
+                )
+            self.assertIn("libgamemode", cpu_adapters.read_text(maps, ""))
+
     def test_messages(self) -> None:
         root = ET.fromstring(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", self.names))
         self.assertIn("CPU features disabled: cet-ss", self.m.features_note(root, self.names))
@@ -673,7 +690,7 @@ class SetupQuietDispatchTest(unittest.TestCase):
     def test_host_runs_the_checkouts_cpu_watch(self) -> None:
         watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
         rc, log, err = self.run_setup("quiet", "--for", "5", env={"QUIET_CPU_PCT": "20"})
-        self.assertEqual((rc, log), (0, [f"python3 -I {watch} quiet --for 5"]), err)
+        self.assertEqual((rc, log), (0, [f"python3 -I -B {watch} quiet --for 5"]), err)
 
     def test_container_runs_it_on_the_host_with_the_limits(self) -> None:
         open(self.marker, "w").close()
@@ -687,16 +704,16 @@ class SetupQuietDispatchTest(unittest.TestCase):
                 0,
                 [
                     f"flatpak-spawn --host --env=QUIET_CPU_PCT=20 --env=QUIET_WRITE_MBPS=8 "
-                    f"python3 -I {watch} quiet --wait 2h --json"
+                    f"python3 -I -B {watch} quiet --wait 2h --json"
                 ],
             ),
             err,
         )
         # No limit set: nothing extra (an empty list under set -u).
         rc, log, err = self.run_setup("quiet")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} quiet"]), err)
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} quiet"]), err)
         rc, log, err = self.run_setup("report")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I {watch} report"]), err)
+        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} report"]), err)
 
     def test_container_hands_over_every_limit_cpu_watch_reads(self) -> None:
         # The list in cpu-setup.sh must follow cpu-watch's QUIET_LIMITS: a limit

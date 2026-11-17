@@ -704,7 +704,9 @@ runs. A manual `prune apply` has the same budget.
 
 All of them start with (or contain) `# managed-by: toolchains-setup.sh (CST)`;
 files without that line are never overwritten or removed. Each run saves its
-summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`).
+summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`). A
+summary that is not a JSON object (edited by hand, say) counts as none
+recorded.
 
 **Coming from `cst btrfs cargo-gc`.** The first version of this cleanup was
 `cst btrfs cargo-gc` (timer `cst-cargo-build-gc.timer`, settings

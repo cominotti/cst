@@ -1,10 +1,13 @@
 """Unit tests for the cst_core Shared Kernel and base adapters."""
 
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 import io
 import os
 import shutil
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +19,7 @@ from cst_core.adapters import (
     SystemClockAdapter,
     SystemctlAdapter,
 )
+from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.cli import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
@@ -31,6 +35,9 @@ from cst_core.domain.values import (
     format_bytes_human,
 )
 from cst_core.ports import CommandFailed, CommandResult
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CLEAN_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 
 
 class FakeRunner:
@@ -215,6 +222,16 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
         self.assertEqual(fs.read_text(target), "line1\nline2\n")
         self.assertEqual(fs.read_first_line(target), "line1\nline2")
+        # Byte-transparent, as bash's read -r was on fstab/crypttab: no decode error, no newline translation.
+        raw = os.path.join(tmp, "raw")
+        with open(raw, "wb") as fh:
+            fh.write(b"caf\xe9\r\nx\n")
+        text = fs.read_text(raw)
+        assert text is not None
+        self.assertTrue(text.endswith("\r\nx\n"))
+        fs.write_atomic(raw, text, mode=0o644)
+        with open(raw, "rb") as fh:
+            self.assertEqual(fh.read(), b"caf\xe9\r\nx\n")
 
         bak = target + ".bak"
         fs.copy_if_absent(target, bak)
@@ -260,9 +277,10 @@ class AdaptersTest(unittest.TestCase):
         )
         sysd = SystemctlAdapter(fake)
         sysd.daemon_reload()
-        self.assertTrue(sysd.start("systemd-cryptsetup@swap0.service"))
-        self.assertTrue(sysd.restart("systemd-cryptsetup@swap0.service"))
-        self.assertFalse(sysd.stop("dev-zram0.swap"))
+        self.assertEqual(sysd.start("systemd-cryptsetup@swap0.service").returncode, 0)
+        self.assertEqual(sysd.restart("systemd-cryptsetup@swap0.service").returncode, 0)
+        # systemctl's message comes back with its exit status: swap apply shows both.
+        self.assertEqual(sysd.stop("dev-zram0.swap"), CommandResult(1, "", "failed"))
         self.assertEqual(sysd.escape_path("/dev/mapper/swap0", suffix="swap"), "dev-mapper-swap0.swap")
 
     def test_host_execution_context_and_clock(self) -> None:
@@ -305,6 +323,7 @@ class _FakeDispatchPort:
         self.passwd = {} if passwd is None else dict(passwd)
         self.handler = handler
         self.calls: list[tuple[list[str], dict[str, str] | None]] = []
+        self.execs: list[list[str]] = []
 
     def is_file(self, path: str) -> bool:
         return path in self.files
@@ -328,6 +347,10 @@ class _FakeDispatchPort:
         if self.handler is not None:
             return self.handler(cmd, copied_env)
         return 0
+
+    def exec_replace(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
+        self.execs.append(list(argv))
+        return self.run_passthrough(argv, env=env)
 
 
 class CstDispatcherTest(unittest.TestCase):
@@ -363,6 +386,12 @@ class CstDispatcherTest(unittest.TestCase):
         self.assertIn("  vm         ", out.getvalue())
         self.assertIn("(not in this copy)", out.getvalue())
 
+        # bash's `cmd="${1:-help}"`: one empty word is help too.
+        out.truncate(0)
+        self.assertEqual(dispatcher.dispatch([""]), 0)
+        self.assertIn("Modules here:", out.getvalue())
+        self.assertEqual(err.getvalue(), "")
+
         self.assertEqual(dispatcher.dispatch(["nope"]), 2)
         self.assertIn("cst: unknown command or module 'nope'", err.getvalue())
         self.assertIn("Modules here:", err.getvalue())
@@ -376,6 +405,7 @@ class CstDispatcherTest(unittest.TestCase):
         self.assertEqual(cmd, ["bash", "/repo/swap-setup.sh", "plan", "--root"])
         assert env is not None
         self.assertEqual(env["CST_PROG"], "cst swap")
+        self.assertEqual(port.execs, [cmd], "the module replaces cst (bash's exec)")
 
         self.assertEqual(dispatcher.dispatch(["vm", "status"]), 1)
         self.assertIn("cst: the 'vm' module is not in this copy (/repo/vm-setup.sh is missing)", err.getvalue())
@@ -385,7 +415,8 @@ class CstDispatcherTest(unittest.TestCase):
         user_port = _FakeDispatchPort(files={doc}, uid=1000, env={"CST_NAME": "cst"})
         user_disp, _, _ = self._dispatcher(user_port)
         self.assertEqual(user_disp.dispatch(["doctor", "--brief"]), 0)
-        self.assertEqual(user_port.calls[0][0], ["python3", "-I", doc, "--brief"])
+        self.assertEqual(user_port.calls[0][0], ["python3", "-I", "-B", doc, "--brief"])
+        self.assertEqual(user_port.execs, [], "doctor runs in the foreground, not exec'd")
         assert user_port.calls[0][1] is not None
         self.assertEqual(user_port.calls[0][1]["CST_PROG"], "cst doctor")
 
@@ -417,6 +448,7 @@ class CstDispatcherTest(unittest.TestCase):
                 "CST_PROG=cst doctor",
                 "python3",
                 "-I",
+                "-B",
                 doc,
             ],
         )
@@ -431,6 +463,7 @@ class CstDispatcherTest(unittest.TestCase):
         self.assertEqual(disp_elevate.dispatch(["status"]), 0)
         self.assertIn("asking sudo once", err.getvalue())
         self.assertEqual(host_nonroot.calls[0][0], ["sudo", "--", "env", "CST_NAME=cst", "/repo/cst", "status"])
+        self.assertEqual(host_nonroot.execs, [host_nonroot.calls[0][0]], "sudo replaces cst (bash's exec)")
 
         box_port = _FakeDispatchPort(files=all_files, container=True, uid=1000, env={"CST_NAME": "cst"})
         disp_box, out, _ = self._dispatcher(box_port)
@@ -443,9 +476,208 @@ class CstDispatcherTest(unittest.TestCase):
                 ["bash", "/repo/bluetooth-setup.sh", "status"],
                 ["bash", "/repo/toolchains-setup.sh", "status"],
                 ["bash", "/repo/vm-setup.sh", "status"],
-                ["python3", "-I", "/repo/doctor/cst-doctor", "--brief"],
+                ["python3", "-I", "-B", "/repo/doctor/cst-doctor", "--brief"],
             ],
         )
+        self.assertEqual(box_port.execs, [], "the status of each module runs in the foreground")
+
+
+class LocalCstDispatchAdapterTest(unittest.TestCase):
+    """The real adapter: exit statuses as bash shows them."""
+
+    def test_a_foreground_command_killed_by_a_signal_gives_128_plus_n(self) -> None:
+        port = LocalCstDispatchAdapter()
+        # run_passthrough hands its own stdin on (a terminal, as bash does); SHLVL keeps a socket
+        # stdin from making bash read ~/.bashrc (AGENTS.md, "Test gotchas").
+        env = {**_CLEAN_ENV, "SHLVL": "1"}
+        self.assertEqual(port.run_passthrough(["bash", "-c", "kill -TERM $$"], env=env), 143)
+        self.assertEqual(port.run_passthrough(["bash", "-c", "exit 3"], env=env), 3)
+
+    def test_a_command_that_cannot_start(self) -> None:
+        port = LocalCstDispatchAdapter()
+        missing = os.path.join(tempfile.gettempdir(), "cst-no-such-program")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(port.run_passthrough([missing]), 127)
+            self.assertEqual(port.exec_replace([missing]), 127)
+        self.assertEqual(err.getvalue(), f"{missing}: No such file or directory\n" * 2)
+
+
+def _cst_copy(tmp: str, swap_setup: str) -> str:
+    """A copy of the cst command (the wrapper and cst_core) in tmp, with swap-setup.sh as the only module."""
+    shutil.copy2(os.path.join(REPO_ROOT, "cst"), os.path.join(tmp, "cst"))
+    shutil.copytree(
+        os.path.join(REPO_ROOT, "cst_core"),
+        os.path.join(tmp, "cst_core"),
+        ignore=shutil.ignore_patterns("__pycache__"),
+        dirs_exist_ok=True,
+    )
+    with open(os.path.join(tmp, "swap-setup.sh"), "w", encoding="utf-8") as fh:
+        fh.write(swap_setup)
+    return os.path.join(tmp, "cst")
+
+
+class CstCommandTest(unittest.TestCase):
+    """The real cst command, run from a scratch copy: exec, signals, pipes and the environment of a module."""
+
+    tmp: str
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-cmd-")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def _run(
+        self, swap_setup: str, *args: str, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        cst = _cst_copy(self.tmp, swap_setup)
+        return subprocess.run(
+            [cst, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            env=dict(_CLEAN_ENV if env is None else env),
+            timeout=30,
+        )
+
+    def test_a_module_killed_by_a_signal_kills_cst_with_it(self) -> None:
+        # main ran `exec bash MODULE`: the module was the cst process (bash showed 143).
+        proc = self._run("kill -TERM $$\n", "swap")
+        self.assertEqual(proc.returncode, -signal.SIGTERM, proc.stderr)
+
+    def test_the_module_replaces_cst(self) -> None:
+        proc = self._run('echo "pid=$$ ppid=$PPID"\n', "swap")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # The module runs as the process cst started as: its parent is this test.
+        self.assertIn(f"ppid={os.getpid()}", proc.stdout)
+
+    def test_ctrl_c_lets_the_module_finish_its_trap(self) -> None:
+        cst = _cst_copy(
+            self.tmp,
+            # The sleep runs in the background (where Ctrl-C does not reach it) so the
+            # trap runs at once wherever the signal lands; the trap ends it.
+            "trap 'echo cleanup start; kill $s; sleep 0.3; echo cleanup done; exit 130' INT\n"
+            "sleep 10 & s=$!\necho started\nwait $s\n",
+        )
+        proc = subprocess.Popen(
+            [cst, "swap"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            env=dict(_CLEAN_ENV),
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        self.assertEqual(proc.stdout.readline(), "started\n")
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        self.assertIn("cleanup done", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(proc.returncode, 130)
+
+    def test_status_waits_for_a_module_that_handles_ctrl_c(self) -> None:
+        # status runs each module in the foreground, as bash did: Ctrl-C reaches the module, which may
+        # handle it; cst neither prints a traceback nor kills the module.
+        cst = _cst_copy(
+            self.tmp,
+            "trap 'echo cleanup start; kill $s; sleep 0.3; echo cleanup done' INT\n"
+            "sleep 10 & s=$!\necho started\nwait $s\necho after\n",
+        )
+        proc = subprocess.Popen(
+            [cst, "status"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            env=dict(_CLEAN_ENV),
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        while proc.stdout.readline() not in ("started\n", ""):
+            pass
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        self.assertIn("cleanup done", out)
+        self.assertIn("==== doctor", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_status_stops_when_a_module_dies_of_ctrl_c(self) -> None:
+        cst = _cst_copy(self.tmp, "echo started\nsleep 10\n")
+        proc = subprocess.Popen(
+            [cst, "status"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            env=dict(_CLEAN_ENV),
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        while proc.stdout.readline() not in ("started\n", ""):
+            pass
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        self.assertNotIn("==== doctor", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(proc.returncode, -signal.SIGINT)
+
+    def test_ctrl_c_ignored_by_cst_s_caller_stays_ignored(self) -> None:
+        # bash keeps a signal ignored at its start ignored for the commands it runs (`nohup`-style callers).
+        cst = _cst_copy(self.tmp, "echo started\nsleep 0.5\necho after\n")
+        proc = subprocess.Popen(
+            ["bash", "-c", "trap '' INT; exec \"$0\" status", cst],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            env=dict(_CLEAN_ENV),
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        while proc.stdout.readline() not in ("started\n", ""):
+            pass
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        self.assertIn("after", out)
+        self.assertIn("==== doctor", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_help_into_a_closed_pipe_stops_quietly(self) -> None:
+        cst = _cst_copy(self.tmp, "")
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            proc = subprocess.run(
+                [cst, "help"],
+                stdout=write_end,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                env=dict(_CLEAN_ENV),
+                timeout=30,
+            )
+        finally:
+            os.close(write_end)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(proc.returncode, -signal.SIGPIPE)
+
+    def test_a_module_starts_with_sigpipe_at_its_default(self) -> None:
+        # Python ignores SIGPIPE; an exec'd module must not inherit that (bash cannot undo an ignored signal).
+        proc = self._run('yes | head -n 1\necho "pipe=${PIPESTATUS[*]}"\n', "swap")
+        self.assertIn("pipe=141 0", proc.stdout)
+
+    def test_a_module_sees_only_cst_prog_from_cst(self) -> None:
+        script = 'echo "PROG=$CST_PROG NAME=${CST_NAME-unset} SELF=${CST_SELF-unset} DIR=${CST_DIR-unset} ARG0=${CST_ARG0-unset}"\n'
+        proc = self._run(script, "swap")
+        cst = os.path.join(self.tmp, "cst")
+        self.assertEqual(proc.stdout, f"PROG={cst} swap NAME=unset SELF=unset DIR=unset ARG0=unset\n", proc.stderr)
+        # A name the caller set (sudo's `env CST_NAME=...`) is kept, as before.
+        proc = self._run(script, "swap", env={**_CLEAN_ENV, "CST_NAME": "cst"})
+        self.assertEqual(proc.stdout, "PROG=cst swap NAME=cst SELF=unset DIR=unset ARG0=unset\n", proc.stderr)
 
 
 if __name__ == "__main__":

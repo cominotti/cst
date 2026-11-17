@@ -2,7 +2,7 @@
 
 import re
 
-from cst_core.ports import CommandRunnerPort, FileSystemPort
+from cst_core.ports import CommandResult, CommandRunnerPort, FileSystemPort
 
 
 class LinuxSwapSystemAdapter:
@@ -12,13 +12,9 @@ class LinuxSwapSystemAdapter:
         self._runner = runner
         self._fs = fs
 
-    def blockdev_size_bytes(self, dev_path: str) -> int | None:
-        """Query exact block device size via `blockdev --getsize64`, or None if unreadable."""
-        res = self._runner.run(["blockdev", "--getsize64", dev_path], check=False)
-        if res.returncode != 0:
-            return None
-        out = res.stdout.strip()
-        return int(out) if out.isdigit() else None
+    def blockdev_size(self, dev_path: str) -> str:
+        """The size `blockdev --getsize64` prints; CommandFailed when it fails (apply stops, as under set -e)."""
+        return self._runner.run(["blockdev", "--getsize64", dev_path], check=True).stdout.strip()
 
     def blkid_type(self, dev_path: str) -> str:
         """Return `blkid -o value -s TYPE` for dev_path, or '' when absent."""
@@ -32,21 +28,19 @@ class LinuxSwapSystemAdapter:
         # Built-in algorithms have no module to load; preconditions() checks /proc/crypto right after.
         self._runner.run(["modprobe", module], check=False)
 
-    def apply_sysctl_file(self, sysctl_conf: str, *, exclude_key: str | None = None) -> None:
-        """Apply a sysctl.d file with `sysctl -q -p`, optionally skipping one key."""
+    def apply_sysctl_file(self, sysctl_conf: str, *, exclude_key: str | None = None) -> CommandResult:
+        """Apply a sysctl.d file with `sysctl -q -p`, optionally skipping one key; its exit status and output."""
         if exclude_key is None:
-            self._runner.run(["sysctl", "-q", "-p", sysctl_conf], check=True)
-            return
+            return self._runner.run(["sysctl", "-q", "-p", sysctl_conf], check=False)
         text = self._fs.read_text(sysctl_conf) or ""
         pattern = re.compile(rf"^\s*{re.escape(exclude_key)}\s*=")
         filtered = "\n".join(line for line in text.splitlines() if not pattern.match(line)) + "\n"
-        self._runner.run(["sysctl", "-q", "-p", "-"], check=True, input_text=filtered)
+        return self._runner.run(["sysctl", "-q", "-p", "-"], check=False, input_text=filtered)
 
     def reset_zram0(self) -> None:
         """Best-effort reset of /dev/zram0 after stopping its swap unit."""
         self._runner.run(["zramctl", "--reset", "/dev/zram0"], check=False)
 
-    def swapon_show(self) -> str:
-        """Return `swapon --show` output, or '' if the command fails."""
-        res = self._runner.run(["swapon", "--show"], check=False)
-        return res.stdout if res.returncode == 0 else ""
+    def swapon_show(self) -> CommandResult:
+        """`swapon --show`: shown whatever its exit status (`swapon --show || true` before)."""
+        return self._runner.run(["swapon", "--show"], check=False)

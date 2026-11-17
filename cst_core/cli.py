@@ -11,49 +11,17 @@ _cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
 if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
     _cst_sys.path.insert(0, _cst_root)
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import os
-import pwd
 import shutil
-import subprocess
 import sys
 from typing import TextIO
 
 
-from cst_core.adapters.runtime import checkout_root
+from cst_core.adapters.dispatch import LocalCstDispatchAdapter
+from cst_core.adapters.runtime import checkout_root, restore_default_signals
 from cst_core.domain.dispatch import MODULE_BY_NAME, MODULES, format_cst_usage
 from cst_core.ports import CstDispatchPort
-
-
-class LocalCstDispatchAdapter:
-    """Concrete `CstDispatchPort` backed by the host OS and subprocess stdio passthrough."""
-
-    def is_file(self, path: str) -> bool:
-        """Return True when `path` exists as a regular file."""
-        return os.path.isfile(path)
-
-    def is_container(self) -> bool:
-        """Return True inside a Podman toolbox or Docker container."""
-        return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
-
-    def euid(self) -> int:
-        """Return effective user ID."""
-        return os.geteuid()
-
-    def environ(self) -> Mapping[str, str]:
-        """Return a snapshot of the process environment."""
-        return dict(os.environ)
-
-    def user_passwd(self, user: str) -> tuple[int, str]:
-        """Return `(uid, home_dir)` for `user`."""
-        entry = pwd.getpwnam(user)
-        return entry.pw_uid, entry.pw_dir
-
-    def run_passthrough(self, argv: Sequence[str], *, env: Mapping[str, str] | None = None) -> int:
-        """Run `argv` inheriting terminal streams and return its exit code."""
-        merged = None if env is None else dict(env)
-        proc = subprocess.run(list(argv), check=False, env=merged)
-        return proc.returncode
 
 
 class CstDispatcher:
@@ -105,7 +73,7 @@ class CstDispatcher:
             return 1
         env = dict(self._port.environ())
         env["CST_PROG"] = f"{self._cst_name} {module_name}"
-        return self._port.run_passthrough(["bash", script_path, *args], env=env)
+        return self._port.exec_replace(["bash", script_path, *args], env=env)
 
     def run_doctor(self, args: Sequence[str]) -> int:
         """Run `doctor/cst-doctor` as the invoking user, stepping down from sudo if needed."""
@@ -140,12 +108,13 @@ class CstDispatcher:
                     f"CST_PROG={self._cst_name} doctor",
                     "python3",
                     "-I",
+                    "-B",
                     doctor,
                     *args,
                 ]
             )
         env["CST_PROG"] = f"{self._cst_name} doctor"
-        return self._port.run_passthrough(["python3", "-I", doctor, *args], env=env)
+        return self._port.run_passthrough(["python3", "-I", "-B", doctor, *args], env=env)
 
     def status_all(self) -> int:
         """Run read-only `status` across all modules (elevating once if needed) and finish with `doctor --brief`."""
@@ -154,7 +123,7 @@ class CstDispatcher:
         )
         if need_root and self._port.euid() != 0 and not self._port.is_container():
             print("(some modules need root for their status: asking sudo once)", file=self._stderr, flush=True)
-            return self._port.run_passthrough(
+            return self._port.exec_replace(
                 ["sudo", "--", "env", f"CST_NAME={self._cst_name}", self._self_path, "status"]
             )
 
@@ -183,7 +152,7 @@ class CstDispatcher:
 
     def dispatch(self, argv: Sequence[str]) -> int:
         """Dispatch CLI arguments after `cst`."""
-        cmd = argv[0] if argv else "help"
+        cmd = argv[0] if argv and argv[0] else "help"  # bash's ${1:-help}: an empty word is help too
         rest = argv[1:]
         if cmd in ("help", "-h", "--help"):
             print(self.usage(), file=self._stdout, flush=True)
@@ -209,9 +178,11 @@ class CstDispatcher:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for `cst`."""
-    repo_dir = os.environ.get("CST_DIR") or checkout_root(__file__) or _cst_root
-    self_path = os.environ.get("CST_SELF") or os.path.join(repo_dir, "cst")
-    arg0 = os.environ.get("CST_ARG0") or (sys.argv[0] if sys.argv else "cst")
+    restore_default_signals()
+    # What the cst wrapper hands over; popped, so the modules do not inherit it.
+    repo_dir = os.environ.pop("CST_DIR", "") or checkout_root(__file__) or _cst_root
+    self_path = os.environ.pop("CST_SELF", "") or os.path.join(repo_dir, "cst")
+    arg0 = os.environ.pop("CST_ARG0", "") or (sys.argv[0] if sys.argv else "cst")
     dispatcher = CstDispatcher(
         port=LocalCstDispatchAdapter(),
         repo_dir=repo_dir,

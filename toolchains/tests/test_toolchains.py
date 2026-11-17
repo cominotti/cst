@@ -985,6 +985,16 @@ class StatusTest(Scratch):
         rc, out = self.run_main("status", "--brief")
         self.assertEqual(out.splitlines()[1], "rust:build: last prune: none recorded")
 
+    def test_a_state_file_that_is_not_an_object_is_none_recorded(self) -> None:
+        # Intended change from main, where status --brief stopped with an AttributeError traceback
+        # (exit 1) on such a file: CST always writes an object, so anything else is no record.
+        self.write(".local/state/cst/toolchains-rust-build.json", "[1, 2]")
+        self.write(".local/state/cst/toolchains-python-uv.json", '"x"')
+        rc, out = self.run_main("status", "--brief")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("rust:build: last prune: none recorded", out)
+        self.assertIn("python:uv: last prune: none recorded", out)
+
     def test_bad_settings_are_shown(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_MAX_TOTAL=150\n")
         rc, out = self.run_main("status")

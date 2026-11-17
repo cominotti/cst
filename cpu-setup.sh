@@ -130,9 +130,9 @@ case "${cmd}" in
             for v in QUIET_CPU_PCT QUIET_CPU_PSI QUIET_IO_PSI QUIET_MEMORY_PSI QUIET_WRITE_MBPS; do
                 if [[ -n "${!v+set}" ]]; then fwd+=("--env=${v}=${!v}"); fi
             done
-            exec flatpak-spawn --host "${fwd[@]}" python3 -I "${SRC}/cpu-watch" "${cmd}" "$@"
+            exec flatpak-spawn --host "${fwd[@]}" python3 -I -B "${SRC}/cpu-watch" "${cmd}" "$@"
         fi
-        exec python3 -I "${SRC}/cpu-watch" "${cmd}" "$@"
+        exec python3 -I -B "${SRC}/cpu-watch" "${cmd}" "$@"
         ;;
     install|status|uninstall|game|vm-pin|docker-slice|experiment) ;;
     *) echo "Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;
@@ -438,13 +438,13 @@ status() (
             "$(cat "/sys/fs/cgroup/user.slice/user-$(id -u "${target_user}").slice/user@$(id -u "${target_user}").service/user.slice/cpuset.cpus.effective" 2>/dev/null)"
     fi
     section "VM"
-    python3 -I "${SRC}/vm-pin" status 2>&1 | sed -n '1,4p;$p' | sed 's/^/  /'
+    python3 -I -B "${SRC}/vm-pin" status 2>&1 | sed -n '1,4p;$p' | sed 's/^/  /'
     section "Docker"
     docker_slice status | sed 's/^/  /'
     section "memory experiments"
     experiment list
     section "last measurements"
-    [[ -n "${target_user}" ]] && runuser -u "${target_user}" -- env HOME="$(user_home)" python3 -I "${SRC}/cpu-watch" report 2>/dev/null | tail -n 5 | sed 's/^/  /'
+    [[ -n "${target_user}" ]] && runuser -u "${target_user}" -- env HOME="$(user_home)" python3 -I -B "${SRC}/cpu-watch" report 2>/dev/null | tail -n 5 | sed 's/^/  /'
 )
 
 case "${cmd}" in
@@ -462,7 +462,7 @@ case "${cmd}" in
             *) echo "game: on|off|state" >&2; exit 2 ;;
         esac
         ;;
-    vm-pin) python3 -I "${SRC}/vm-pin" "$@" ;;
+    vm-pin) python3 -I -B "${SRC}/vm-pin" "$@" ;;
     docker-slice) docker_slice "$@" ;;
     experiment) experiment "$@" ;;
 esac

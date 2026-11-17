@@ -4,8 +4,12 @@ from collections.abc import Mapping, Sequence
 import sys
 from typing import TextIO
 
+from cst_core.domain.errors import shell_exit_status
+from cst_core.ports import CommandFailed
+from swap.application import MissingDesiredFileError, SwapApplicationService
 from swap.domain import (
     PAGE,
+    ApplyEvent,
     CgroupSwapRow,
     ConfigSectionReport,
     DebugSectionReport,
@@ -207,19 +211,60 @@ def render_status(report: SwapStatusReport, out: TextIO = sys.stdout) -> int:
     return 0
 
 
-def render_apply(result: SwapApplyResult, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
-    """Render swap apply output/warnings/errors and return exit code."""
-    for ev in result.events:
-        print(ev.text, file=out if ev.stream == "out" else err)
+def _write_raw(text: str, out: TextIO) -> None:
+    out.write(text if text.endswith("\n") else text + "\n")
+
+
+def print_event(ev: ApplyEvent, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> None:
+    """Print one apply event at once (a command's own output as it came)."""
+    stream = out if ev.stream == "out" else err
+    if ev.kind == "raw":
+        _write_raw(ev.text, stream)
+        stream.flush()
+    else:
+        print(ev.text, file=stream, flush=True)
+
+
+def render_apply(
+    result: SwapApplyResult, out: TextIO = sys.stdout, err: TextIO = sys.stderr, *, events_shown: bool = False
+) -> int:
+    """Render swap apply output/warnings/errors and return exit code (events_shown: already printed)."""
+    if not events_shown:
+        for ev in result.events:
+            print_event(ev, out, err)
     if result.settings is not None:
-        _section("verification", out)
+        # No blank line before it, like the other section lines of apply.
+        print("== verification", file=out)
         render_settings(result.settings, out, header=False)
         for note in result.verify_notes:
             print(note, file=out)
         if result.swapon_out:
-            out.write(result.swapon_out if result.swapon_out.endswith("\n") else result.swapon_out + "\n")
+            _write_raw(result.swapon_out, out)
+        if result.swapon_err:
+            _write_raw(result.swapon_err, err)
     if result.verify_error:
         print(result.verify_error, file=err)
     if result.returncode == 0:
         print(f"Done. Details: {result.prog} status", file=out)
     return result.returncode
+
+
+def run_command(cmd: str, service: SwapApplicationService, *, hint: str, out: TextIO, err: TextIO) -> int:
+    """plan, status or apply. apply prints each step as it runs; a failing command stops it with
+    that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
+    try:
+        if cmd == "plan":
+            return render_plan(service.plan_report(), out=out)
+        if cmd == "status":
+            return render_status(service.status_report(hint=hint, include_config=True), out=out)
+        result = service.apply_changes(emit=lambda ev: print_event(ev, out, err))
+        return shell_exit_status(render_apply(result, out=out, err=err, events_shown=True))
+    except CommandFailed as exc:
+        if exc.stdout:
+            print_event(ApplyEvent("out", "raw", exc.stdout), out, err)
+        if exc.stderr:
+            print_event(ApplyEvent("err", "raw", exc.stderr), out, err)
+        return shell_exit_status(exc.returncode)
+    except (MissingDesiredFileError, OSError) as exc:
+        print(f"{service.prog}: ERROR: {exc}", file=err)
+        return 1

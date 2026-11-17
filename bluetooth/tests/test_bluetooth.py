@@ -1452,8 +1452,10 @@ class HexagonalArchitectureTest(unittest.TestCase):
         self.assertTrue(out.getvalue().startswith("2026-11-11T14:11:58-03:00|"))
 
         out, err = io.StringIO(), io.StringIO()
-        self.assertEqual(bt_app.main(["device-id", MAC.lower()], fake, stdout=out, stderr=err), 0)
-        self.assertEqual(out.getvalue().strip(), "0A_1B_2C_3D_4E_5F")
+        # No device-id command, as on main (only the watcher uses domain.device_id): a usage error.
+        self.assertEqual(bt_app.main(["device-id", MAC.lower()], fake, stdout=out, stderr=err), 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("usage", err.getvalue())
 
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(bt_app.main(["unknown"], fake, stdout=out, stderr=err), 2)

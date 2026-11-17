@@ -210,9 +210,9 @@ case "${cmd}" in
     report)
         # The repo copy, so it matches these sources even before reinstalling.
         if in_container; then
-            exec flatpak-spawn --host python3 -I "${SRC}/btrfs-stall-report" "$@"
+            exec flatpak-spawn --host python3 -I -B "${SRC}/btrfs-stall-report" "$@"
         fi
-        exec python3 -I "${SRC}/btrfs-stall-report" "$@"
+        exec python3 -I -B "${SRC}/btrfs-stall-report" "$@"
         ;;
     watch)
         exec bash "${SRC}/btrfs-stall-watch" "$@"
@@ -438,7 +438,7 @@ status() (
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
         grep -E 'trimmed|Failed|failed' | tail -n 4 | sed 's/^/  /'
     section "docker volumes (NOCOW)"
-    python3 -I "${SRC}/docker-volumes-nocow" status 2>&1 | sed 's/^/  /'
+    python3 -I -B "${SRC}/docker-volumes-nocow" status 2>&1 | sed 's/^/  /'
     section "docker-gc"
     if systemctl -q is-enabled docker-gc.timer 2>/dev/null; then
         journalctl -u docker-gc.service -o cat --no-pager 2>/dev/null | grep -E '^<[0-9]>docker-gc: removed|docker-gc: removed' |
@@ -474,7 +474,7 @@ status() (
         echo "  run through sudo from your user account to see your ~/Bulk"
     fi
     section "stalls, last hour (report --since '1 hour ago' --no-below)"
-    python3 -I "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
+    python3 -I -B "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
         sed 's/^/  /'
     data="$(du -sh "${DATA_DIR}" 2>/dev/null | cut -f1)"
     echo
@@ -592,11 +592,11 @@ docker_gc() {
         status)
             printf 'timer %s, recorder %s\n' "$(systemctl is-enabled docker-gc.timer 2>/dev/null || echo off)" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"
-            python3 -I "${SRC}/docker-gc" status
+            python3 -I -B "${SRC}/docker-gc" status
             ;;
         run)
             if [[ "${1:-}" == --dry-run ]]; then
-                python3 -I "${SRC}/docker-gc" run --dry-run
+                python3 -I -B "${SRC}/docker-gc" run --dry-run
             else
                 [[ -x "${bin}" ]] || { echo "Enable first: ${PROG} docker-gc enable" >&2; exit 1; }
                 systemctl start docker-gc.service
@@ -605,7 +605,7 @@ docker_gc() {
             ;;
         cleanup-now)
             [[ -t 0 ]] || { echo "cleanup-now asks for confirmation: run it in a terminal." >&2; exit 1; }
-            python3 -I "${SRC}/docker-gc" cleanup-now
+            python3 -I -B "${SRC}/docker-gc" cleanup-now
             ;;
         *) echo "docker-gc: enable|status|run [--dry-run]|cleanup-now|disable" >&2; exit 2 ;;
     esac

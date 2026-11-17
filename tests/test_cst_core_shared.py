@@ -252,6 +252,18 @@ class ParseAssignmentsTest(unittest.TestCase):
         self.assertNotIn("VM_NAME", parse_assignments("VM_NAME =x\n"))
         self.assertEqual(parse_assignments(""), {})
 
+    def test_strip_keys_keeps_the_last_line(self) -> None:
+        # vm's read_conf strips the key; the last line of the file still wins, as in main's cst-vm.
+        self.assertEqual(parse_assignments("K=1\nK = 0\nK=1\n", strip_keys=True), {"K": "1"})
+        self.assertEqual(parse_assignments("K = 0\nK=1\n", strip_keys=True), {"K": "1"})
+
+    def test_only_a_newline_ends_a_line(self) -> None:
+        # The callers read files line by line on main (open() iteration): form feed, vertical tab,
+        # the file/group/record separators, NEL and the Unicode line/paragraph separators are not line ends.
+        for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=repr(sep)):
+                self.assertEqual(parse_assignments(f"A=1{sep}B=2\n"), {"A": f"1{sep}B=2"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ BULK_UNIT=btrfs-bulk-boot.service
 # The repo copy (like docker-gc): matches these sources before reinstalling.
 bulk_run() {   # plan|apply|status | keep|unkeep ID... | steam plan|apply [--app ID]... [--copy]
     # shellcheck disable=SC2154  # target_user: set by btrfs-setup.sh
-    python3 -I "${BULK_TOOL}" "$@" --user "${target_user}"
+    python3 -I -B "${BULK_TOOL}" "$@" --user "${target_user}"
 }
 
 # Before any run that can leave a journal (bulk apply, bulk steam apply):
