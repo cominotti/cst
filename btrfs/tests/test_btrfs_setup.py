@@ -46,9 +46,12 @@ systemctl() {
 }
 rm() {
     echo "rm $*" >>"$LOG"
-    local a
+    local a r=-f
     for a in "$@"; do
-        if [[ "$a" == "$T"/* ]]; then command rm -f -- "$a"; fi
+        if [[ "$a" == -*r* ]]; then r=-rf; fi
+    done
+    for a in "$@"; do
+        if [[ "$a" == "$T"/* ]]; then command rm "$r" -- "$a"; fi
     done
 }
 """
@@ -181,8 +184,7 @@ class TimerRemovalTest(unittest.TestCase):
 
     def test_docker_gc_disable_forgets_its_timer(self) -> None:
         self.touch(os.path.join(self.units, "docker-gc.timer"))
-        body = [assignment("DOCKER_GC_UNITS"), shell_function(SETUP, "docker_gc"), "docker_gc disable"]
-        r = self.run_bash("\n".join(body))
+        r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable"]))
         self.assertEqual(
             self.calls(),
             [
@@ -192,16 +194,63 @@ class TimerRemovalTest(unittest.TestCase):
             ],
         )
         self.assertIn("docker-gc disabled", r.stdout)
+        self.assertIn("docker-gc disable --purge", r.stdout)
+
+    def docker_gc_body(self) -> list[str]:
+        """docker_gc as btrfs-setup.sh defines it, its recorded state in the test's folder and the
+        real cst_installed_dests (read-only: the manifest's destinations)."""
+        return [
+            f'. "{REPO}/cst-install.bash"',
+            assignment("DOCKER_GC_UNITS"),
+            'DOCKER_GC_STATE="$T/docker-gc-state"',
+            shell_function(SETUP, "docker_gc_files"),
+            shell_function(SETUP, "docker_gc"),
+        ]
+
+    def test_docker_gc_disable_purge_removes_program_units_and_state(self) -> None:
+        self.touch(os.path.join(self.units, "docker-gc.timer"))
+        state = os.path.join(self.tmp, "docker-gc-state")
+        os.makedirs(state)
+        self.touch(os.path.join(state, "last-used.json"))
+        r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
+        units = ["docker-gc-recorder.service", "docker-gc.service", "docker-gc.timer"]
+        self.assertEqual(
+            self.calls(),
+            [
+                "systemctl disable --now " + " ".join(units),
+                "systemctl clean --what=state docker-gc.timer",
+                "  (docker-gc.timer file present)",
+                "rm -fv /usr/local/sbin/docker-gc",
+                *(f"rm -fv /etc/systemd/system/{u}" for u in units),
+                f"rm -rf {state}",
+                "systemctl daemon-reload",
+                "systemctl reset-failed " + " ".join(units),
+            ],
+        )
+        self.assertFalse(os.path.exists(state))
+        self.assertIn("docker-gc removed", r.stdout)
+        # A second purge: the state is gone, so it is not removed again.
+        os.unlink(self.log)
+        self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
+        self.assertNotIn(f"rm -rf {state}", self.calls())
+
+    def test_docker_gc_disable_refuses_an_unknown_argument(self) -> None:
+        body = "\n".join([*self.docker_gc_body(), "(docker_gc disable --all) && exit 9 || echo rc=$?"])
+        r = self.run_bash(body)
+        self.assertIn("rc=2", r.stdout)
+        self.assertIn("only --purge", r.stderr)
+        self.assertEqual(self.calls(), [])
 
     def docker_gc_status(self, enabled: str, rc: int) -> str:
         # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
         # (not-found); the Python status part is a stub.
         body = [
             f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
-            'is-active) echo inactive; return 3 ;; esac; }',
+            "is-active) echo inactive; return 3 ;; esac; }",
             'python3() { echo "python3 $*"; }',
-            assignment("DOCKER_GC_UNITS"),
-            shell_function(SETUP, "docker_gc"),
+            *self.docker_gc_body(),
+            # The installed files, in the test's folder (the real ones may exist where the test runs).
+            'docker_gc_files() { printf "%s\\n" "$T/units/docker-gc" "$T/units/docker-gc.timer"; }',
             "docker_gc status",
         ]
         return self.run_bash("\n".join(body)).stdout
@@ -210,9 +259,27 @@ class TimerRemovalTest(unittest.TestCase):
         # With "|| echo off", a disabled timer printed "disabled" and then "off" on a line of its own.
         self.assertEqual(self.docker_gc_status("disabled", 1).splitlines()[0], "timer disabled, recorder inactive")
         self.assertEqual(self.docker_gc_status("enabled", 0).splitlines()[0], "timer enabled, recorder inactive")
-        self.assertEqual(self.docker_gc_status("not-found", 4).splitlines()[0], "timer not installed, recorder inactive")
+        self.assertEqual(
+            self.docker_gc_status("not-found", 4).splitlines()[0], "timer not installed, recorder inactive"
+        )
         self.assertEqual(self.docker_gc_status("", 1).splitlines()[0], "timer off, recorder inactive")
         self.assertEqual(len(self.docker_gc_status("disabled", 1).splitlines()), 2)
+
+    def test_docker_gc_status_lists_what_purge_would_remove(self) -> None:
+        self.touch(os.path.join(self.units, "docker-gc.timer"))
+        os.makedirs(os.path.join(self.tmp, "docker-gc-state"))
+        self.assertEqual(
+            self.docker_gc_status("disabled", 1).splitlines(),
+            [
+                "timer disabled, recorder inactive",
+                f"still installed: {self.units}/docker-gc.timer",
+                f"still installed: {self.tmp}/docker-gc-state",
+                "('cst-btrfs-test docker-gc disable --purge' removes them)",
+                "python3 -I -B " + BTRFS + "/docker-gc status",
+            ],
+        )
+        # Enabled: nothing to list.
+        self.assertEqual(len(self.docker_gc_status("enabled", 0).splitlines()), 2)
 
     def snapshots(self, call: str) -> list[str]:
         # Sourced the way the frontend does; the paths it writes point into the test's folder.

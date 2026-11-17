@@ -133,7 +133,7 @@ cst btrfs help
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
 | `bulk steam plan\|apply [--app ID] [--copy]` | root | Moves your installed Steam games into the `~/Bulk/steam` library, with Steam closed (section 10.1). `plan` is a dry run. `apply` also installs the boot step that repairs an interrupted move. `--copy` allows a real copy of NOCOW game data (it cannot be reflinked). |
-| `docker-gc enable\|status\|run [--dry-run]\|cleanup-now\|disable` | root | Weekly Docker cleanup (section 11). |
+| `docker-gc enable\|status\|run [--dry-run]\|cleanup-now\|disable [--purge]` | root | Weekly Docker cleanup (section 11). |
 | `report [args]` | user | "Was storage the bottleneck in this time window, and why?" (section 7). |
 | `watch [args]` | user | Run a command and save the report of its time window (section 7.5). |
 | `help` | anyone | Prints the built-in help. |
@@ -1349,7 +1349,7 @@ cst btrfs docker-gc status          # tracking state + what a run would remove n
 cst btrfs docker-gc run --dry-run   # only the list of what a run would remove
 cst btrfs docker-gc run             # run the weekly job now
 cst btrfs docker-gc cleanup-now     # one-off, asks first
-cst btrfs docker-gc disable
+cst btrfs docker-gc disable         # stop it; --purge also removes its files (11.3)
 ```
 
 `status` shows the timer and recorder state on its first line (for example
@@ -1425,15 +1425,17 @@ list). It needs a terminal.
 
 `disable` stops the timer and the recorder, and makes systemd forget the
 timer's last run (`systemctl clean --what=state docker-gc.timer`). **The files stay**, including the
-recorded state; `uninstall` (section 6) does not touch docker-gc either. There
-is no command that removes the files. If you want them gone, remove them by
-hand after `disable`:
+recorded state, so `enable` later goes on with the same record of image use.
+`status` lists them (`still installed: ...`) while the timer is not enabled.
+`uninstall` (section 6) does not touch docker-gc.
+
+`disable --purge` does the same and then removes everything `enable` added:
+the program, the three unit files and `/var/lib/docker-gc`. The recorded
+image use is lost with it, so after a later `enable` the 14 days start again.
+A second `disable --purge` changes nothing.
 
 ```
-sudo rm /usr/local/sbin/docker-gc /etc/systemd/system/docker-gc.service \
-        /etc/systemd/system/docker-gc.timer /etc/systemd/system/docker-gc-recorder.service
-sudo rm -rf /var/lib/docker-gc
-sudo systemctl daemon-reload
+cst btrfs docker-gc disable --purge
 ```
 
 ---

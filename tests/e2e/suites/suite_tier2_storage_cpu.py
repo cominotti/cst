@@ -1341,7 +1341,9 @@ EOF
         a second `enable` writes nothing; `disable` stops and disables all
         three and forgets the timer's last run, and keeps the program and the
         unit files; a second `disable` changes nothing; `enable` again runs
-        the recorder again."""
+        the recorder again; `disable --purge` removes the program, the units
+        and /var/lib/docker-gc, and status says the timer is not installed; a
+        second purge changes nothing; `enable` after it writes everything again."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             r"""
@@ -1474,6 +1476,41 @@ EOF
             no_writes "enable after disable" "$out"
             [[ "$(systemctl is-enabled docker-gc.timer)" == enabled ]]
             systemctl is-active docker-gc.timer
+            recorder_runs
+            test -d /var/lib/docker-gc
+
+            # 6. disable --purge: stopped, and the program, the units and the recorded state removed.
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show purge "$out"; exit 1; }
+            show purge "$out"
+            grep -qF 'docker-gc removed: program, units and recorded state' <<<"$out"
+            for f in "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp" /var/lib/docker-gc; do
+                if [[ -e "$f" ]]; then echo "purge left $f" >&2; exit 1; fi
+            done
+            for u in "${units[@]}"; do
+                [[ "$(systemctl show -P LoadState "$u")" == not-found ]]
+                [[ "$(systemctl is-active "$u" 2>/dev/null || true)" != active ]]
+            done
+            out="$(cst btrfs docker-gc status 2>&1)" || { show "status after purge" "$out"; exit 1; }
+            show "status after purge" "$out"
+            [[ "$(head -n 1 <<<"$out")" == 'timer not installed, recorder inactive' ]]
+            if grep -q '^still installed:' <<<"$out"; then echo "status lists a purged file" >&2; exit 1; fi
+
+            # 7. A second purge changes nothing.
+            before="$(state)"
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show "second purge" "$out"; exit 1; }
+            after="$(state)"
+            if [[ "$after" != "$before" ]]; then
+                echo "a second purge changed the state:" >&2
+                diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+                exit 1
+            fi
+
+            # 8. enable after a purge installs everything again.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "enable after purge" "$out"; exit 1; }
+            show "enable after purge" "$out"
+            for f in "$bin" "${units[@]/#//etc/systemd/system/}"; do
+                grep -qxF "written:   $f" <<<"$out" || { echo "no 'written:   $f'" >&2; exit 1; }
+            done
             recorder_runs
             echo E2E-OK
             """,

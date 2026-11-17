@@ -129,7 +129,10 @@
 #                          14+ days (use recorded from docker events, so the
 #                          first timed removal is 14 days after enabling) and
 #                          build cache unused 14+ days.
-#   docker-gc status | run [--dry-run] | disable
+#   docker-gc status | run [--dry-run] | disable [--purge]
+#                          disable stops it and keeps its files; --purge also
+#                          removes its program, its three units and its
+#                          recorded state (/var/lib/docker-gc).
 #   docker-gc cleanup-now  one-off: lists every unused image not seen in use
 #                          and removes it all after one confirmation.
 #   report [args]          (user) btrfs-stall-report: was storage the
@@ -610,8 +613,14 @@ crypt_perf() {
 # ---- uninstall -------------------------------------------------------------------
 # ---- docker-gc: weekly, conservative Docker cleanup (explicit opt-in) ---------------------
 DOCKER_GC_UNITS=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
+DOCKER_GC_STATE=/var/lib/docker-gc
+# docker_gc_files: the program and the three unit files, as installed (from the manifest).
+docker_gc_files() {
+    cst_installed_dests btrfs/docker-gc "${DOCKER_GC_UNITS[@]/#/btrfs/units/}"
+}
 docker_gc() {
-    local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer
+    local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer f purge=0 shown=0
+    local -a files
     [[ $# -gt 0 ]] && shift
     case "${action}" in
         enable)
@@ -629,8 +638,31 @@ docker_gc() {
             echo "To clear the current backlog once (asks first): ${PROG} docker-gc cleanup-now"
             ;;
         disable)
+            case "${1:-}" in
+                "") ;;
+                --purge) purge=1 ;;
+                *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
+            esac
+            # While the unit files are still there: clean needs the timer loaded.
             disable_timers "${DOCKER_GC_UNITS[@]}"
-            echo "docker-gc disabled (recorded state kept in /var/lib/docker-gc)."
+            if (( ! purge )); then
+                echo "docker-gc disabled (recorded state kept in ${DOCKER_GC_STATE})."
+                echo "To also remove its program, units and recorded state: ${PROG} docker-gc disable --purge"
+                return 0
+            fi
+            mapfile -t files < <(docker_gc_files)
+            (( ${#files[@]} == ${#DOCKER_GC_UNITS[@]} + 1 )) ||
+                { echo "docker-gc disable --purge: cannot list its installed files" >&2; exit 1; }
+            for f in "${files[@]}"; do
+                rm -fv "${f}"
+            done
+            if [[ -e "${DOCKER_GC_STATE}" ]]; then
+                rm -rf "${DOCKER_GC_STATE}"
+                echo "removed '${DOCKER_GC_STATE}' (the recorded image use)"
+            fi
+            systemctl daemon-reload
+            systemctl reset-failed "${DOCKER_GC_UNITS[@]}" 2>/dev/null || true
+            echo "docker-gc removed: program, units and recorded state ('${PROG} docker-gc enable' installs it again)."
             ;;
         status)
             # is-enabled prints its word (enabled, disabled, not-found) and exits
@@ -643,6 +675,16 @@ docker_gc() {
             esac
             printf 'timer %s, recorder %s\n' "${timer}" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"
+            # What 'disable --purge' would remove, while the timer is not enabled.
+            if [[ "${timer}" != enabled ]]; then
+                mapfile -t files < <(docker_gc_files)
+                for f in "${files[@]}" "${DOCKER_GC_STATE}"; do
+                    [[ -e "${f}" ]] || continue
+                    echo "still installed: ${f}"
+                    shown=1
+                done
+                (( ! shown )) || echo "('${PROG} docker-gc disable --purge' removes them)"
+            fi
             python3 -I -B "${SRC}/docker-gc" status
             ;;
         run)
@@ -658,7 +700,7 @@ docker_gc() {
             [[ -t 0 ]] || { echo "cleanup-now asks for confirmation: run it in a terminal." >&2; exit 1; }
             python3 -I -B "${SRC}/docker-gc" cleanup-now
             ;;
-        *) echo "docker-gc: enable|status|run [--dry-run]|cleanup-now|disable" >&2; exit 2 ;;
+        *) echo "docker-gc: enable|status|run [--dry-run]|cleanup-now|disable [--purge]" >&2; exit 2 ;;
     esac
 }
 
@@ -724,7 +766,7 @@ uninstall() {
     echo "Not touched: snapshots and the NAS backup ('${PROG} snapshots disable [--purge]' stops them / deletes"
     echo "             the local snapshots; the restic repository on the NAS, its password in"
     echo "             /etc/btrfs-setup/restic-password and the layered 'restic' package stay)."
-    echo "Not touched: docker-gc ('${PROG} docker-gc disable' stops it)."
+    echo "Not touched: docker-gc ('${PROG} docker-gc disable' stops it; 'disable --purge' also removes its files)."
     echo "Not touched: toolchain caches and settings (the toolchains module; 'cst toolchains auto off' stops the pruning)."
     echo "Not touched: ~/Bulk and its symlinks (plain folders and links; see btrfs/README.md to undo one)."
     echo "Not touched: the degraded-boot component ('${PROG} degraded-boot uninstall' removes it)."
