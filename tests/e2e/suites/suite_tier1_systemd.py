@@ -1349,6 +1349,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             self.skipTest(f"{comp}: already there (another test's): {present.split()}")
         cleanup = f"{run}{installer} remove {home} --component {comp} >/dev/null"
         self.addCleanup(exec_bash, c, cleanup, check=False)
+        made_needs: list[str] = []
         for need in self.COMPONENT_NEEDS.get(comp, ()):
             # Installed (and removed after) only when none of its files is there: another test's stay.
             present = f"$({installer} dests --component {need} | while read -r d; do [[ ! -e $d ]] || echo $d; done)"
@@ -1356,6 +1357,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                 c, f'if [[ -z "{present}" ]]; then {installer} install --component {need} >/dev/null; echo made; fi'
             ).stdout
             if "made" in made:
+                made_needs.append(need)
                 self.addCleanup(exec_bash, c, f"{installer} remove --component {need} >/dev/null", check=False)
         out = exec_bash(
             c,
@@ -1398,6 +1400,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             """,
         ).stdout
         self.assertIn("E2E-CYCLE-OK", out)
+        # Removed now, not at the end of the test: the component's own cycle (a later subTest) needs it gone.
+        for need in made_needs:
+            exec_bash(c, f"{installer} remove --component {need} >/dev/null")
 
     def test_20_units_are_verified_before_they_replace_the_installed_ones(self) -> None:
         """As root on the container's /, the installer runs the real `systemd-analyze verify
