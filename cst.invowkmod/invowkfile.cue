@@ -40,7 +40,7 @@ cmds: [
 	{
 		name:        "fmt"
 		category:    "check"
-		description: "Format every Python file (ruff format), then apply ruff's safe fixes (ruff check --fix), through uv (tests/uv-dev)"
+		description: "Apply ruff's safe fixes (ruff check --fix), then format every Python file (ruff format), through uv (tests/uv-dev)"
 		depends_on: {
 			tools: [{alternatives: ["uv"]}]
 		}
@@ -49,8 +49,9 @@ cmds: [
 			runtimes: [{name: "native"}]
 			script: {content: """
 				set -euo pipefail
-				tests/uv-dev ruff format
+				# Fixes first: a fix can change a line the formatter would then rewrite.
 				tests/uv-dev ruff check --fix
+				tests/uv-dev ruff format
 				"""}
 		}]
 	},
@@ -119,7 +120,10 @@ cmds: [
 					echo "test lint: tests/shell_files.py found no shell file" >&2
 					exit 1
 				fi
-				bash -n "${scripts[@]}"
+				# One file per bash -n: with several, bash parses the first and takes the rest as its arguments.
+				for script in "${scripts[@]}"; do
+					bash -n "${script}"
+				done
 				if command -v shellcheck >/dev/null 2>&1; then
 					shellcheck -S warning -x "${scripts[@]}"
 				else

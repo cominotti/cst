@@ -96,12 +96,22 @@ def expected_skip(test_id: str) -> bool:
     return any(test_id == key or test_id.startswith(key + ".") for key in EXPECTED_SKIPS)
 
 
-def skip_problems(skipped: Sequence[tuple[str, str]]) -> list[str]:
-    """The skips (test id, reason) EXPECTED_SKIPS does not name, as text lines."""
+# The reason tests/repo_files.py gives when the checkout has no .git (a
+# source tarball): the gates that read the repository have nothing to read.
+NOT_A_CHECKOUT: Final = "not a git checkout: "
+
+
+def skip_problems(skipped: Sequence[tuple[str, str]], *, git_checkout: bool = True) -> list[str]:
+    """The skips (test id, reason) EXPECTED_SKIPS does not name, as text lines.
+
+    git_checkout: the checkout has a .git. Without one, the gates'
+    NOT_A_CHECKOUT skips are expected too; with one, git can only fail
+    (repo_files raises), so such a skip there is not let through.
+    """
     return [
         f"{test_id}: skipped ({reason}), and not in EXPECTED_SKIPS of tests/run_unit.py"
         for test_id, reason in skipped
-        if not expected_skip(test_id)
+        if not expected_skip(test_id) and (git_checkout or not reason.startswith(NOT_A_CHECKOUT))
     ]
 
 
@@ -133,7 +143,7 @@ def main(argv: Sequence[str]) -> int:
     skipped = [(test.id(), reason) for test, reason in result.skipped]
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
-    problems = skip_problems(skipped)
+    problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
     for line in problems:
         print(f"error: {line}", file=sys.stderr)
     return 0 if result.wasSuccessful() and not problems else 1

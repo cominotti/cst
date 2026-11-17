@@ -113,7 +113,7 @@ invowk cmd test docs                          # the docs gate only
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
-invowk cmd fmt                                # ruff format, then ruff's safe fixes
+invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
