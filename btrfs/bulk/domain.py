@@ -229,6 +229,105 @@ def dec(s: object) -> bool:
 
 
 # ---- VDF (Valve's text KeyValues): pure functions, no I/O ----
+class VdfText:
+    """The strict parser of vdf_parse over one decoded text; p is an offset in it."""
+
+    def __init__(self, text: str) -> None:
+        self.text, self.n = text, len(text)
+
+    def bad(self, p: int, what: str) -> NoReturn:
+        line = self.text.count("\n", 0, p) + 1
+        col = p - (self.text.rfind("\n", 0, p) + 1) + 1
+        raise Unexpected(f"{what} at line {line}, column {col}")
+
+    def ws(self, p: int) -> int:
+        while p < self.n and self.text[p] in " \t\r\n":
+            p += 1
+        return p
+
+    def token_error(self, p: int) -> NoReturn:
+        text = self.text
+        if text.startswith("//", p):
+            self.bad(p, "a comment")
+        if text[p] == "#":
+            self.bad(p, "a #include/#base directive")
+        if text[p] == "[":
+            self.bad(p, "a [$condition]")
+        if text[p] == "{":
+            self.bad(p, "a '{' without a key")
+        self.bad(p, f"unquoted text {text[p]!r}")
+
+    def string(self, p: int) -> tuple[str, int]:
+        text, n = self.text, self.n
+        start, out = p, []
+        p += 1
+        while True:
+            if p >= n or text[p] == "\n":
+                self.bad(start, "an unterminated string")
+            c = text[p]
+            if c == '"':
+                return "".join(out), p + 1
+            if c == "\\":
+                if p + 1 < n and text[p + 1] in '\\"':
+                    out.append(text[p + 1])
+                    p += 2
+                    continue
+                self.bad(p, "an unsupported escape")
+            out.append(c)
+            p += 1
+
+    def pair(self, p: int, depth: int) -> tuple[int, str, VdfValue, int]:
+        kp = p
+        key, p = self.string(p)
+        p = self.ws(p)
+        if p >= self.n:
+            self.bad(kp, "a key without a value")
+        if self.text[p] == '"':
+            val, p = self.string(p)
+        elif self.text[p] == "{":
+            val, p = self.obj(p + 1, depth + 1, p)
+        else:
+            self.token_error(p)
+        return kp, key, val, p
+
+    def obj(self, p: int, depth: int, open_at: int) -> tuple[Vdf, int]:
+        if depth > 32:
+            self.bad(open_at, "nesting too deep")
+        d: Vdf = {}
+        while True:
+            p = self.ws(p)
+            if p >= self.n:
+                self.bad(open_at, "an unbalanced '{'")
+            if self.text[p] == "}":
+                return d, p + 1
+            if self.text[p] != '"':
+                self.token_error(p)
+            kp, key, val, p = self.pair(p, depth)
+            if key in d:
+                self.bad(kp, f"a duplicate key {key!r}")
+            d[key] = val
+
+    def document(self) -> Vdf:
+        """The one root key and its block, nothing after it."""
+        text, n = self.text, self.n
+        p = self.ws(0)
+        if p >= n:
+            raise Unexpected("empty")
+        if text[p] == "}":
+            self.bad(p, "an unbalanced '}'")
+        if text[p] != '"':
+            self.token_error(p)
+        _, key, val, p = self.pair(p, 0)
+        if not isinstance(val, dict):
+            raise Unexpected("the root key has no '{ }' block")
+        p = self.ws(p)
+        if p < n:
+            if text[p] == "}":
+                self.bad(p, "an unbalanced '}'")
+            self.bad(p, "trailing data")
+        return {key: val}
+
+
 def vdf_parse(data: bytes) -> Vdf:
     """Strict parser: quoted strings, braces, whitespace, the escapes \\\\ and
     \\". Anything else (unquoted text, comments, #include/#base, [$COND],
@@ -240,94 +339,7 @@ def vdf_parse(data: bytes) -> Vdf:
         text = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise Unexpected(f"not UTF-8 (byte {e.start})") from None
-    n = len(text)
-
-    def bad(p: int, what: str) -> NoReturn:
-        line = text.count("\n", 0, p) + 1
-        col = p - (text.rfind("\n", 0, p) + 1) + 1
-        raise Unexpected(f"{what} at line {line}, column {col}")
-
-    def ws(p: int) -> int:
-        while p < n and text[p] in " \t\r\n":
-            p += 1
-        return p
-
-    def token_error(p: int) -> NoReturn:
-        if text.startswith("//", p):
-            bad(p, "a comment")
-        if text[p] == "#":
-            bad(p, "a #include/#base directive")
-        if text[p] == "[":
-            bad(p, "a [$condition]")
-        if text[p] == "{":
-            bad(p, "a '{' without a key")
-        bad(p, f"unquoted text {text[p]!r}")
-
-    def string(p: int) -> tuple[str, int]:
-        start, out = p, []
-        p += 1
-        while True:
-            if p >= n or text[p] == "\n":
-                bad(start, "an unterminated string")
-            c = text[p]
-            if c == '"':
-                return "".join(out), p + 1
-            if c == "\\":
-                if p + 1 < n and text[p + 1] in '\\"':
-                    out.append(text[p + 1])
-                    p += 2
-                    continue
-                bad(p, "an unsupported escape")
-            out.append(c)
-            p += 1
-
-    def pair(p: int, depth: int) -> tuple[int, str, VdfValue, int]:
-        kp = p
-        key, p = string(p)
-        p = ws(p)
-        if p >= n:
-            bad(kp, "a key without a value")
-        if text[p] == '"':
-            val, p = string(p)
-        elif text[p] == "{":
-            val, p = obj(p + 1, depth + 1, p)
-        else:
-            token_error(p)
-        return kp, key, val, p
-
-    def obj(p: int, depth: int, open_at: int) -> tuple[Vdf, int]:
-        if depth > 32:
-            bad(open_at, "nesting too deep")
-        d: Vdf = {}
-        while True:
-            p = ws(p)
-            if p >= n:
-                bad(open_at, "an unbalanced '{'")
-            if text[p] == "}":
-                return d, p + 1
-            if text[p] != '"':
-                token_error(p)
-            kp, key, val, p = pair(p, depth)
-            if key in d:
-                bad(kp, f"a duplicate key {key!r}")
-            d[key] = val
-
-    p = ws(0)
-    if p >= n:
-        raise Unexpected("empty")
-    if text[p] == "}":
-        bad(p, "an unbalanced '}'")
-    if text[p] != '"':
-        token_error(p)
-    _, key, val, p = pair(p, 0)
-    if not isinstance(val, dict):
-        raise Unexpected("the root key has no '{ }' block")
-    p = ws(p)
-    if p < n:
-        if text[p] == "}":
-            bad(p, "an unbalanced '}'")
-        bad(p, "trailing data")
-    return {key: val}
+    return VdfText(text).document()
 
 
 def vdf_dump(tree: Mapping[str, VdfValue]) -> bytes:
@@ -523,6 +535,9 @@ def present[T](value: T | None, what: str) -> T:
 
 
 # ---- the journals (root-owned JSON in BulkPaths.state; read back by any later version) ----
+# The field order of these TypedDicts was chosen so that no eight lines repeat
+# another record (tests/test_duplication.py, type 2): reordering them can fail
+# that gate. JSON keys do not depend on it.
 class ItemJournal(TypedDict):
     """journal-<id>.json of one item's move. kind: copy | subvol."""
 
@@ -652,6 +667,48 @@ def lf_libraries(tree: Vdf) -> Vdf:
     return vdf_block(tree.get("libraryfolders"), "libraryfolders")
 
 
+def lf_check_apps(idx: str, v: VdfValue) -> None:
+    """The apps block of library IDX: decimal app ids and sizes."""
+    if not isinstance(v, dict):
+        raise Unexpected(f"library {idx}: 'apps' is not a block")
+    for a, s in v.items():
+        if not (dec(a) and dec(s)):
+            raise Unexpected(f"library {idx}: app {a!r} {s!r} is not decimal")
+
+
+def lf_check_key(idx: str, k: str, v: VdfValue) -> None:
+    """One key of library IDX's entry."""
+    if k == "apps":
+        lf_check_apps(idx, v)
+    elif k == "path":
+        if not isinstance(v, str) or not os.path.isabs(v):
+            raise Unexpected(f"library {idx}: 'path' is not an absolute path")
+    elif k in LF_KEYS:
+        if not isinstance(v, str):
+            raise Unexpected(f"library {idx}: {k!r} is a block, not a value")
+    else:
+        raise Unexpected(f"library {idx}: unknown key {k!r}")
+
+
+def lf_check_entry(idx: str, e: VdfValue) -> str:
+    """Library IDX's entry, checked; its path."""
+    if not isinstance(e, dict):
+        raise Unexpected(f"library {idx} is not a block")
+    for k, v in e.items():
+        lf_check_key(idx, k, v)
+    if "path" not in e or "apps" not in e:
+        raise Unexpected(f"library {idx} lacks 'path' or 'apps'")
+    return vdf_text(e["path"], f"library {idx}: 'path'")
+
+
+def lf_check_apart(real: Sequence[tuple[str, str]]) -> None:
+    """No two libraries (number, resolved path) are one folder, or one inside the other."""
+    for i, (ia, a) in enumerate(real):
+        for ib, b in real[i + 1 :]:
+            if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                raise Unexpected(f"libraries {ia} and {ib} are the same folder, or one is inside the other")
+
+
 def lf_validate(tree: Vdf, resolve: Callable[[str], str]) -> Vdf:
     """Schema of libraryfolders.vdf; returns its "libraryfolders" dict."""
     lf = tree.get("libraryfolders")
@@ -659,32 +716,7 @@ def lf_validate(tree: Vdf, resolve: Callable[[str], str]) -> Vdf:
         raise Unexpected("the top level is not exactly one 'libraryfolders' block")
     if not lf or list(lf) != [str(i) for i in range(len(lf))]:
         raise Unexpected(f"library numbers are not 0, 1, 2... in order: {', '.join(lf) or 'none'}")
-    real: list[tuple[str, str]] = []
-    for idx, e in lf.items():
-        if not isinstance(e, dict):
-            raise Unexpected(f"library {idx} is not a block")
-        for k, v in e.items():
-            if k == "apps":
-                if not isinstance(v, dict):
-                    raise Unexpected(f"library {idx}: 'apps' is not a block")
-                for a, s in v.items():
-                    if not (dec(a) and dec(s)):
-                        raise Unexpected(f"library {idx}: app {a!r} {s!r} is not decimal")
-            elif k == "path":
-                if not isinstance(v, str) or not os.path.isabs(v):
-                    raise Unexpected(f"library {idx}: 'path' is not an absolute path")
-            elif k in LF_KEYS:
-                if not isinstance(v, str):
-                    raise Unexpected(f"library {idx}: {k!r} is a block, not a value")
-            else:
-                raise Unexpected(f"library {idx}: unknown key {k!r}")
-        if "path" not in e or "apps" not in e:
-            raise Unexpected(f"library {idx} lacks 'path' or 'apps'")
-        real.append((idx, resolve(vdf_text(e["path"], f"library {idx}: 'path'"))))
-    for i, (ia, a) in enumerate(real):
-        for ib, b in real[i + 1 :]:
-            if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
-                raise Unexpected(f"libraries {ia} and {ib} are the same folder, or one is inside the other")
+    lf_check_apart([(idx, resolve(lf_check_entry(idx, e))) for idx, e in lf.items()])
     return lf
 
 

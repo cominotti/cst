@@ -1162,6 +1162,7 @@ class SteamTest(tb.BulkBase):
 
     def test_bulk_status_points_to_bulk_steam(self) -> None:
         self.fake(bulk_items, "BIG", 1)
+        self.fake(bulk_domain, "BIG", 1)  # gib() reads it there
         _, text = self.report()
         self.assertIn("'cst btrfs bulk steam plan'", text)
 

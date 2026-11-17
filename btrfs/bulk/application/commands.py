@@ -29,10 +29,12 @@ from btrfs.bulk.domain import (
     STEAM_MARGIN,
     STEAM_ROOT,
     Ctx,
+    SteamApp,
     SteamRunning,
     SteamSurvey,
     Unexpected,
     Vdf,
+    VdfPair,
     du_text,
     gib,
     hms,
@@ -87,19 +89,8 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         sv["nothing"] = True
         sv["fatal"] = f"no Steam (Flatpak) library at ~/{STEAM_ROOT}: nothing to move"
         return sv
-    state, detail = classify(b, BY_ID["steam"], set(), kept)
-    if state != "ok":
-        sv["fatal"] = f"~/Bulk/steam is not in place ({state} {detail}): run 'cst btrfs bulk apply' first"
-        return sv
-    try:
-        f = b.user.flatpak_state(STEAM_APP, T)
-    except (OSError, RuntimeError, Unexpected) as e:
-        f = f"cannot be checked ({e})"
-    if f != "ok":
-        sv["fatal"] = (
-            f"the Steam Flatpak may not use {T} yet ({'not installed' if f == 'absent' else f}): "
-            "run 'cst btrfs bulk apply' first"
-        )
+    sv["fatal"] = steam_library_problem(b, T, kept)
+    if sv["fatal"]:
         return sv
     try:
         sv["idx"] = steam_target(b, S, cid)
@@ -107,22 +98,43 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         sv["fatal"] = str(e)
         return sv
     sv["S"], sv["cid"] = S, cid
+    survey_apps(b, sv, S, ids)
+    return sv
+
+
+def steam_library_problem(b: Bulk, target: str, kept: set[str]) -> str:
+    """Why ~/Bulk/steam (target) cannot take games yet, or '': it must be in place, and the Flatpak may use it."""
+    state, detail = classify(b, BY_ID["steam"], set(), kept)
+    if state != "ok":
+        return f"~/Bulk/steam is not in place ({state} {detail}): run 'cst btrfs bulk apply' first"
+    try:
+        f = b.user.flatpak_state(STEAM_APP, target)
+    except (OSError, RuntimeError, Unexpected) as e:
+        f = f"cannot be checked ({e})"
+    if f != "ok":
+        return (
+            f"the Steam Flatpak may not use {target} yet ({'not installed' if f == 'absent' else f}): "
+            "run 'cst btrfs bulk apply' first"
+        )
+    return ""
+
+
+def survey_apps(b: Bulk, sv: SteamSurvey, pair: VdfPair, ids: Sequence[str]) -> None:
+    """steam_survey's apps (those named, or every installed one), and the space their moves need."""
+    src, T = steam_roots(b.ctx)
     if ids:
         sel = [(i, True) for i in sorted(set(ids), key=int)]
     else:
         sel = [(i, False) for i in sorted(b.tree.steam_manifests(src) | b.tree.steam_manifests(T), key=int)]
-    sv["apps"] = [steam_app(b, S, i, explicit) for i, explicit in sel]
+    sv["apps"] = [steam_app(b, pair, i, explicit) for i, explicit in sel]
     if any(a["state"] == "move" for a in sv["apps"]):
         sv["free"] = b.tree.free_bytes(T)
         sv["copy_bytes"] = sum(a["copy_bytes"] for a in sv["apps"] if a["state"] == "move")
         if sv["free"] < STEAM_MARGIN:
             sv["space"] = f"less than {gib(STEAM_MARGIN)} free in ~/Bulk"
-    return sv
 
 
 def steam_print(b: Bulk, sv: SteamSurvey) -> None:
-    ctx = b.ctx
-    src, _ = steam_roots(ctx)
     b.out.say(
         "Steam (Flatpak): games move from the main library into ~/Bulk/steam (reflink where possible, Steam closed)."
     )
@@ -135,14 +147,24 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
             ("" if sv["nothing"] else "NEEDS A LOOK: ") + sv["fatal"] + ("" if sv["nothing"] else " (nothing touched)"),
         )
         return
-    S = present(sv["S"], "the libraryfolders.vdf pair")
-    if S["repair"]:
+    print_library(b, sv, present(sv["S"], "the libraryfolders.vdf pair"))
+    print_apps(b, sv)
+    print_shader_caches(b, sv)
+    if sv["space"]:
+        row(b, "free space", f"NEEDS A LOOK: {sv['space']}")
+    if sv["copy_bytes"]:
+        print_copies(b, sv)
+
+
+def print_library(b: Bulk, sv: SteamSurvey, pair: VdfPair) -> None:
+    """steam_print's lines on libraryfolders.vdf and ~/Bulk/steam as a library."""
+    if pair["repair"]:
         row(b, "libraryfolders.vdf", "the two copies differ only by the ~/Bulk/steam entry (an interrupted run):")
         row(b, "", "apply writes both again")
     if sv["idx"] is not None:
         row(b, LIBRARY_ROW, f"ok (library {sv['idx']})")
     elif any(a["state"] == "move" for a in sv["apps"]):
-        n = max(int(i) for i in lf_libraries(S["tree"])) + 1
+        n = max(int(i) for i in lf_libraries(pair["tree"])) + 1
         row(
             b,
             LIBRARY_ROW,
@@ -150,6 +172,10 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
         )
     else:
         row(b, LIBRARY_ROW, "not a library yet (added with the first game that moves)")
+
+
+def print_apps(b: Bulk, sv: SteamSurvey) -> None:
+    """steam_print's line (or lines) on each app."""
     texts = {
         "ok": lambda a: "ok (in ~/Bulk/steam)",
         "skip": lambda a: f"skipped: a tool, not a game; move it with --app {a['id']}",
@@ -161,7 +187,7 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
         if a["state"] != "move":
             row(b, name, texts[a["state"]](a))
             continue
-        lines = steam_move_lines(ctx, a, sv["copy"])
+        lines = steam_move_lines(b.ctx, a, sv["copy"])
         row(b, name, lines[0])
         for line in lines[1:]:
             row(b, "", line)
@@ -169,6 +195,11 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
         row(b, "games", "none installed")
     elif not any(a["state"] in ("move", "ok") for a in sv["apps"]):
         row(b, "games", "nothing to move by default; name one with --app ID")
+
+
+def print_shader_caches(b: Bulk, sv: SteamSurvey) -> None:
+    """steam_print's lines on the shader caches that stay in the main library."""
+    src, _ = steam_roots(b.ctx)
     for a in sv["apps"]:
         sc = os.path.join(src, "steamapps", "shadercache", a["id"])
         if a["state"] in ("move", "ok") and b.tree.kind(sc) == "dir" and not b.tree.empty_dir(sc):
@@ -178,140 +209,187 @@ def steam_print(b: Bulk, sv: SteamSurvey) -> None:
                 f"{du_text(b.tree.du_bytes(sc))} stays (steamapps/shadercache/{a['id']}",
             )
             row(b, "", "of the main library): Steam builds a new one in ~/Bulk/steam; then delete the old one")
-    if sv["space"]:
-        row(b, "free space", f"NEEDS A LOOK: {sv['space']}")
-    if sv["copy_bytes"]:
-        g, floor = b.host.snapshot_guard(), steam_copy_floor(b)
-        need, left = sv["copy_bytes"] + floor, sv["free"] - sv["copy_bytes"]
+
+
+def print_copies(b: Bulk, sv: SteamSurvey) -> None:
+    """steam_print's lines on the real (byte by byte) copies and the free space they need."""
+    g, floor = b.host.snapshot_guard(), steam_copy_floor(b)
+    need, left = sv["copy_bytes"] + floor, sv["free"] - sv["copy_bytes"]
+    row(
+        b,
+        "real copies",
+        f"{gib(sv['copy_bytes'])} in all: {gib(need)} must be free in ~/Bulk, {gib(sv['free'])} "
+        "free now" + ("" if sv["free"] >= need else " (NEEDS A LOOK: not enough for all)"),
+    )
+    row(
+        b,
+        "",
+        f"({gib(floor)} stays free: the snapshot emergency purge at {gib(g['emergency'])} plus {gib(MARGIN)};",
+    )
+    row(b, "", "the old copies free nothing while /home snapshots still hold them)")
+    if sv["free"] >= need and left <= g["pause"]:
         row(
             b,
-            "real copies",
-            f"{gib(sv['copy_bytes'])} in all: {gib(need)} must be free in ~/Bulk, {gib(sv['free'])} "
-            "free now" + ("" if sv["free"] >= need else " (NEEDS A LOOK: not enough for all)"),
+            "",
+            f"NOTE: about {gib(max(left, 0))} free after all copies: /home snapshots pause at or below "
+            f"{gib(g['pause'])}",
         )
         row(
             b,
             "",
-            f"({gib(floor)} stays free: the snapshot emergency purge at {gib(g['emergency'])} plus {gib(MARGIN)};",
+            f"and resume above {gib(g['resume'])} (once old snapshots expire); fewer games per run may avoid it",
         )
-        row(b, "", "the old copies free nothing while /home snapshots still hold them)")
-        if sv["free"] >= need and left <= g["pause"]:
-            row(
-                b,
-                "",
-                f"NOTE: about {gib(max(left, 0))} free after all copies: /home snapshots pause at or below "
-                f"{gib(g['pause'])}",
-            )
-            row(
-                b,
-                "",
-                f"and resume above {gib(g['resume'])} (once old snapshots expire); fewer games per run may avoid it",
-            )
-        row(b, "", "each copy is read back and compared byte for byte before the old one is deleted;")
-        row(b, "", "at idle priority: expect minutes per 10 GiB, more while the PC is busy")
+    row(b, "", "each copy is read back and compared byte for byte before the old one is deleted;")
+    row(b, "", "at idle priority: expect minutes per 10 GiB, more while the PC is busy")
 
 
 def steam_apply(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> int:
     """Returns the exit status: 0 done, 1 needs a look, 5 Steam is running.
     allow_copy (--copy): games with NOCOW data may be copied byte by byte;
     without it they are refused (1), the others still move."""
-    ctx, log = b.ctx, b.out.log
     lock = b.state.run_lock()
     try:
-        stuck = [s for s in recover(b) if s.startswith("steam-")]
-        if stuck:
-            log(f"interrupted Steam move(s) need a look first ({', '.join(stuck)}): nothing else done")
-            return 1
-        sv = steam_survey(b, ids, allow_copy)
-        steam_print(b, sv)
-        if sv["running"]:
-            log("Steam is running: nothing done. Close it (Steam > Exit) and run again.")
-            return 5
-        if sv["fatal"]:
-            return 0 if sv["nothing"] else 1
-        movers = [a for a in sv["apps"] if a["state"] == "move"]
-        rc = 1 if any(a["state"] in ("look", "update") for a in sv["apps"]) else 0
-        for a in [a for a in movers if a["copy_bytes"] and not allow_copy]:
-            log(
-                f"NEEDS A LOOK: {a['id']} {a['name']}: {gib(a['copy_bytes'])} must be copied byte by byte because "
-                f"{steam_nocow_files(ctx, a)}, which btrfs cannot reflink into copy-on-write ~/Bulk/steam: run "
-                "again with --copy to allow it (if the +C files are few and small, recreating them without +C "
-                "lets the game move by reflink instead)"
-            )
-            rc = 1
-        movers = [a for a in movers if allow_copy or not a["copy_bytes"]]
-        if not movers and present(sv["S"], "the libraryfolders.vdf pair")["repair"]:
-            try:
-                ensure_library(b, sv)  # the interrupted library entry, in both copies
-            except SteamRunning as e:
-                log(f"Steam is running ({e}): nothing done")
-                return 5
-            except (OSError, RuntimeError, Unexpected) as e:
-                log(f"NEEDS A LOOK: {e}")
-                return 1
-        if not movers:
-            if rc == 0 and sv["idx"] is not None:
-                log("Everything asked for is in ~/Bulk/steam already.")
-            return rc
-        if sv["space"]:
-            log("not enough free space in ~/Bulk: nothing done")
-            return 1
-        sample = next(
-            (p.get("sample", "") for a in movers for p in a["parts"] if p.get("mode") == "reflink" and p.get("sample")),
-            "",
-        )
-        try:
-            if sample:  # games that are copied byte by byte need no reflink
-                b.user.reflink_probe(sample, steam_roots(ctx)[1])
-            ensure_library(b, sv)
-        except SteamRunning as e:
-            log(f"Steam is running ({e}): nothing done")
-            return 5
-        except (OSError, RuntimeError, Unexpected) as e:
-            log(f"NEEDS A LOOK: {e} (no game moved)")
-            return 1
-        moved = 0
-        for a in sorted(movers, key=lambda x: int(x["id"])):
-            name = f"{a['id']} {a['name']}"
-            how = [
-                f"reflink {gib(a['reflink_bytes'])}" if a["reflink_bytes"] else "",
-                f"real copy {gib(a['copy_bytes'])}" if a["copy_bytes"] else "",
-            ]
-            log(f"{'start:':<10} {name}: {', '.join(x for x in how if x) or 'reflink'}")
-            t0 = b.host.now()
-            try:
-                res = steam_move(b, sv, a)
-            except (OSError, RuntimeError, Unexpected) as e:
-                log(f"NEEDS A LOOK: {name}: {e}; no further game moved this run")
-                return 1
-            if res == "ok":
-                moved += 1
-                log(f"{'done:':<10} {name}: in ~/Bulk/steam now ({hms(b.host.now() - t0)})")
-                continue
-            if res == "space":
-                log(
-                    f"NEEDS A LOOK: {name}: not enough free space in ~/Bulk for a real copy of "
-                    f"{gib(a['copy_bytes'])} (needs {gib(steam_copy_need(b, a))}: {gib(steam_copy_floor(b))} must stay "
-                    "free so the /home snapshots are not purged): skipped, nothing changed for it"
-                )
-                rc = 1
-                continue
-            log(
-                f"{'stopped:':<10} {name}: "
-                + {
-                    "running": "Steam started: undone, nothing moved; close it and run again",
-                    "busy": "in use (open files): undone; close what uses it and run again",
-                    "changed": "written to during the move: undone; run again",
-                }[res]
-            )
-            return 5 if res in ("running", "busy") else 1
-        if moved:
-            b.out.say(MAKE_DEFAULT)
-            b.out.say("Then start Steam: Settings > Storage lists both libraries; the moved games are in ~/Bulk/steam.")
-        return rc
-
+        return steam_apply_locked(b, ids, allow_copy=allow_copy)
     finally:
         b.state.release(lock)
+
+
+def steam_apply_locked(b: Bulk, ids: Sequence[str], *, allow_copy: bool) -> int:
+    """steam_apply under the run lock."""
+    log = b.out.log
+    sv = survey_to_apply(b, ids, allow_copy=allow_copy)
+    if isinstance(sv, int):
+        return sv
+    movers = [a for a in sv["apps"] if a["state"] == "move"]
+    rc = 1 if any(a["state"] in ("look", "update") for a in sv["apps"]) else 0
+    if refuse_copies(b, [a for a in movers if a["copy_bytes"] and not allow_copy]):
+        rc = 1
+    movers = [a for a in movers if allow_copy or not a["copy_bytes"]]
+    if not movers and present(sv["S"], "the libraryfolders.vdf pair")["repair"]:
+        failed = library_ready(b, sv, "", "")  # the interrupted library entry, in both copies
+        if failed is not None:
+            return failed
+    if not movers:
+        if rc == 0 and sv["idx"] is not None:
+            log("Everything asked for is in ~/Bulk/steam already.")
+        return rc
+    return start_moves(b, sv, movers, rc)
+
+
+def start_moves(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) -> int:
+    """The space and reflink checks and the library entry, then the moves; the exit status."""
+    if sv["space"]:
+        b.out.log("not enough free space in ~/Bulk: nothing done")
+        return 1
+    sample = next(
+        (p.get("sample", "") for a in movers for p in a["parts"] if p.get("mode") == "reflink" and p.get("sample")),
+        "",
+    )
+    failed = library_ready(b, sv, sample, " (no game moved)")
+    if failed is not None:
+        return failed
+    return move_games(b, sv, movers, rc)
+
+
+def survey_to_apply(b: Bulk, ids: Sequence[str], *, allow_copy: bool) -> SteamSurvey | int:
+    """The interrupted Steam moves recovered, then the survey, printed; or the
+    exit status when nothing may be moved (a move needs a look, Steam runs,
+    a fatal problem)."""
+    log = b.out.log
+    stuck = [s for s in recover(b) if s.startswith("steam-")]
+    if stuck:
+        log(f"interrupted Steam move(s) need a look first ({', '.join(stuck)}): nothing else done")
+        return 1
+    sv = steam_survey(b, ids, allow_copy)
+    steam_print(b, sv)
+    if sv["running"]:
+        log("Steam is running: nothing done. Close it (Steam > Exit) and run again.")
+        return 5
+    if sv["fatal"]:
+        return 0 if sv["nothing"] else 1
+    return sv
+
+
+def refuse_copies(b: Bulk, refused: Sequence[SteamApp]) -> bool:
+    """The games that need a real copy, without --copy: one line each; True if there are any."""
+    for a in refused:
+        b.out.log(
+            f"NEEDS A LOOK: {a['id']} {a['name']}: {gib(a['copy_bytes'])} must be copied byte by byte because "
+            f"{steam_nocow_files(b.ctx, a)}, which btrfs cannot reflink into copy-on-write ~/Bulk/steam: run "
+            "again with --copy to allow it (if the +C files are few and small, recreating them without +C "
+            "lets the game move by reflink instead)"
+        )
+    return bool(refused)
+
+
+def library_ready(b: Bulk, sv: SteamSurvey, sample: str, why: str) -> int | None:
+    """The reflink test with sample (a copy-on-write file of a game that moves by
+    reflink; '': none), then ~/Bulk/steam as a library (ensure_library). None
+    when it is ready, else the exit status (5 Steam runs, 1 failed, logged
+    with why after the error)."""
+    try:
+        if sample:  # games that are copied byte by byte need no reflink
+            b.user.reflink_probe(sample, steam_roots(b.ctx)[1])
+        ensure_library(b, sv)
+    except SteamRunning as e:
+        b.out.log(f"Steam is running ({e}): nothing done")
+        return 5
+    except (OSError, RuntimeError, Unexpected) as e:
+        b.out.log(f"NEEDS A LOOK: {e}{why}")
+        return 1
+    return None
+
+
+def move_games(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) -> int:
+    """Move each game in turn; the exit status (rc unless one needed a look or stopped the run)."""
+    moved = 0
+    for a in sorted(movers, key=lambda x: int(x["id"])):
+        res = move_game(b, sv, a)
+        if res == "ok":
+            moved += 1
+        elif res == "space":
+            rc = 1
+        else:
+            return 5 if res in ("running", "busy") else 1
+    if moved:
+        b.out.say(MAKE_DEFAULT)
+        b.out.say("Then start Steam: Settings > Storage lists both libraries; the moved games are in ~/Bulk/steam.")
+    return rc
+
+
+def move_game(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
+    """One game's move, logged: ok | space | running | busy | changed | failed (an error)."""
+    log = b.out.log
+    name = f"{a['id']} {a['name']}"
+    how = [
+        f"reflink {gib(a['reflink_bytes'])}" if a["reflink_bytes"] else "",
+        f"real copy {gib(a['copy_bytes'])}" if a["copy_bytes"] else "",
+    ]
+    log(f"{'start:':<10} {name}: {', '.join(x for x in how if x) or 'reflink'}")
+    t0 = b.host.now()
+    try:
+        res = steam_move(b, sv, a)
+    except (OSError, RuntimeError, Unexpected) as e:
+        log(f"NEEDS A LOOK: {name}: {e}; no further game moved this run")
+        return "failed"
+    if res == "ok":
+        log(f"{'done:':<10} {name}: in ~/Bulk/steam now ({hms(b.host.now() - t0)})")
+    elif res == "space":
+        log(
+            f"NEEDS A LOOK: {name}: not enough free space in ~/Bulk for a real copy of "
+            f"{gib(a['copy_bytes'])} (needs {gib(steam_copy_need(b, a))}: {gib(steam_copy_floor(b))} must stay "
+            "free so the /home snapshots are not purged): skipped, nothing changed for it"
+        )
+    else:
+        log(
+            f"{'stopped:':<10} {name}: "
+            + {
+                "running": "Steam started: undone, nothing moved; close it and run again",
+                "busy": "in use (open files): undone; close what uses it and run again",
+                "changed": "written to during the move: undone; run again",
+            }[res]
+        )
+    return res
 
 
 def boot(b: Bulk) -> int:

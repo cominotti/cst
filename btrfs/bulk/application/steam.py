@@ -176,9 +176,26 @@ def new_app(appid: str) -> SteamApp:
 
 def steam_app(b: Bulk, pair: VdfPair, appid: str, explicit: bool) -> SteamApp:
     """One app: state move | ok | skip | update | look, with why, parts, size."""
+    A = new_app(appid)
+    info = app_in_main_library(b, pair, appid, A)
+    if info is None or app_held(b, A, info, explicit=explicit):
+        return A
+    parts = app_parts(b, A, info)
+    if parts is None or not measure_parts(b, A, parts):
+        return A
+    if workshop_problem := steam_workshop_check(b, parts, appid):
+        A["why"] = workshop_problem
+        return A
+    A["state"], A["parts"] = "move", parts
+    return A
+
+
+def app_in_main_library(b: Bulk, pair: VdfPair, appid: str, app: SteamApp) -> dict[str, str] | None:
+    """The app's manifest (acf_app) when it is installed in the main library
+    and listed there (its name and size noted in app); else None, with app's
+    state and why set."""
     ctx, t = b.ctx, b.tree
     src, T = steam_roots(ctx)
-    A = new_app(appid)
     tree = pair["tree"]
     lf = lf_libraries(tree)
     s_idx, d_idx = lf_index(tree, src, t.realpath), lf_index(tree, T, t.realpath)
@@ -187,52 +204,70 @@ def steam_app(b: Bulk, pair: VdfPair, appid: str, explicit: bool) -> SteamApp:
     m_dst = os.path.join(T, "steamapps", f"appmanifest_{appid}.acf")
     ks, kd = t.kind(m_src), t.kind(m_dst)
     if ks != "absent" and kd != "absent":
-        A["why"] = "a manifest in both libraries"
-        return A
+        app["why"] = "a manifest in both libraries"
+        return None
     mpath = m_dst if kd != "absent" else m_src
     if t.kind(mpath) == "absent":
-        A["why"] = "not installed in the main library"
-        return A
+        app["why"] = "not installed in the main library"
+        return None
     try:
         r = read_file(b, mpath)
         if r is None:
             raise Unexpected("is missing")
         info = acf_app(vdf_parse(r["data"]), appid)
     except Unexpected as e:
-        A["why"] = f"{ctx.short(mpath)}: {e}"
-        return A
-    A["name"] = info["name"]
+        app["why"] = f"{ctx.short(mpath)}: {e}"
+        return None
+    app["name"] = info["name"]
     if kd != "absent":
         if listed != [d_idx]:
-            A["why"] = (
+            app["why"] = (
                 f"its manifest is in ~/Bulk/steam, but libraryfolders.vdf lists it under {listed or 'no library'}"
             )
-            return A
-        A["state"] = "ok"
-        return A
+            return None
+        app["state"] = "ok"
+        return None
     if listed != [s_idx]:
-        A["why"] = f"libraryfolders.vdf lists it under {listed or 'no library'}, its manifest is in library {s_idx}"
-        return A
+        app["why"] = f"libraryfolders.vdf lists it under {listed or 'no library'}, its manifest is in library {s_idx}"
+        return None
     s_idx = present(s_idx, "the main library's entry")
-    A["size"] = vdf_text(lf_apps(tree, s_idx)[appid], f"app {appid}")
+    app["size"] = vdf_text(lf_apps(tree, s_idx)[appid], f"app {appid}")
+    return info
+
+
+def app_held(b: Bulk, app: SteamApp, info: dict[str, str], *, explicit: bool) -> bool:
+    """A tool not named with --app, a game mid-update, or one with a Proton
+    prefix stays (True, app's state and why set)."""
+    appid = app["id"]
     why = is_tool(appid, info["name"], info["installdir"])
     if why and not explicit:
-        A["state"], A["why"] = "skip", why
-        return A
-    sa = os.path.join(src, "steamapps")
+        app["state"], app["why"] = "skip", why
+        return True
+    sa = os.path.join(steam_roots(b.ctx)[0], "steamapps")
     busy = [info["mid"]] if info["mid"] else []
     for rel in (f"downloading/{appid}", f"temp/{appid}", f"workshop/downloads/{appid}", f"workshop/temp/{appid}"):
         if nonempty(b, os.path.join(sa, rel)):
             busy.append(f"steamapps/{rel} is not empty")
     if busy:
-        A["state"], A["why"] = "update", "; ".join(busy)
-        return A
+        app["state"], app["why"] = "update", "; ".join(busy)
+        return True
     if nonempty(b, os.path.join(sa, "compatdata", appid)):
-        A["why"] = (
+        app["why"] = (
             f"steamapps/compatdata/{appid} has data (a Proton prefix: saves may be there): move it with "
             "Steam's own Properties > Installed Files > Move install folder"
         )
-        return A
+        return True
+    return False
+
+
+def app_parts(b: Bulk, app: SteamApp, info: dict[str, str]) -> list[SteamPart] | None:
+    """The parts that move (game folder, workshop content and file, manifest),
+    each with its names in both libraries; None (app's why set) when one is not
+    what it must be."""
+    ctx, t = b.ctx, b.tree
+    src, T = steam_roots(ctx)
+    appid = app["id"]
+    sa = os.path.join(src, "steamapps")
     ts = time.strftime("%Y%m%dT%H%M%S")
     parts: list[SteamPart] = []
     for name, rel, what, optional in (
@@ -247,8 +282,8 @@ def steam_app(b: Bulk, pair: VdfPair, appid: str, explicit: bool) -> SteamApp:
             continue
         want = "dir" if what == "dir" else "other"
         if k != want or (what == "file" and not t.is_regular(p_src)):
-            A["why"] = f"{ctx.short(p_src)} is {'missing' if k == 'absent' else 'a ' + k + ', not a ' + what}"
-            return A
+            app["why"] = f"{ctx.short(p_src)} is {'missing' if k == 'absent' else 'a ' + k + ', not a ' + what}"
+            return None
         dst = os.path.join(T, "steamapps", rel)
         parts.append(
             {
@@ -260,51 +295,56 @@ def steam_app(b: Bulk, pair: VdfPair, appid: str, explicit: bool) -> SteamApp:
                 "kind": what,
             }
         )
+    return parts
+
+
+def measure_parts(b: Bulk, app: SteamApp, parts: Sequence[SteamPart]) -> bool:
+    """Each part's checks, size and how it moves (reflink, or a real copy for
+    NOCOW data), added up in app; False (app's why set) at the first that cannot move."""
+    _, T = steam_roots(b.ctx)
     uid = ctx_uid(b)
     for p in parts:
-        for x in (p["dst"], p["new"]):
-            if t.kind(x) != "absent":
-                A["why"] = f"{ctx.short(x)} exists already: remove it or move it back (nothing is merged)"
-                return A
-        c = t.chain(T, posixpath.relpath(os.path.dirname(p["dst"]), T))
-        if c.startswith(("symlink:", "file:")):
-            A["why"] = f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder"
-            return A
-        if cow_problem := steam_target_cow(b, T, p["dst"]):
-            A["why"] = cow_problem
-            return A
-        if p["kind"] == "file":
-            if t.owner(p["src"]) != uid:
-                A["why"] = f"{ctx.short(p['src'])} is not yours"
-                return A
-            size = t.size(p["src"])
-        else:
-            if t.is_subvol(p["src"]) or t.has_mount(p["src"]):
-                A["why"] = f"{ctx.short(p['src'])} is a subvolume or a mount point"
-                return A
-            _, size, foreign, others = t.tree_stats(p["src"], uid)
-            if foreign:
-                A["why"] = f"{ctx.short(p['src'])} contains another subvolume or a mount"
-                return A
-            if others or t.owner(p["src"]) != uid:
-                A["why"] = f"{ctx.short(p['src'])}: entries there are not yours (made by sudo or a container?)"
-                return A
-        nocow_files, first_nocow, sample = t.steam_nocow_scan(p["src"])
+        problem, size = part_size(b, p, uid, T)
+        if problem:
+            app["why"] = problem
+            return False
+        nocow_files, first_nocow, sample = b.tree.steam_nocow_scan(p["src"])
         # A NOCOW file cannot be cloned into copy-on-write ~/Bulk/steam: the
         # whole part is copied byte by byte instead (see steam_nocow_scan).
         # copy_bytes is the size of such parts, not the size of the +C files
         # (one empty +C file is enough): the messages give both.
         p["mode"], p["bytes"] = ("copy" if nocow_files else "reflink"), size
         p["sample"] = "" if nocow_files else sample
-        A["bytes"] += size
-        A["copy_bytes" if nocow_files else "reflink_bytes"] += size
-        A["nocow_files"] += nocow_files
-        A["nocow_sample"] = A["nocow_sample"] or first_nocow
-    if workshop_problem := steam_workshop_check(b, parts, appid):
-        A["why"] = workshop_problem
-        return A
-    A["state"], A["parts"] = "move", parts
-    return A
+        app["bytes"] += size
+        app["copy_bytes" if nocow_files else "reflink_bytes"] += size
+        app["nocow_files"] += nocow_files
+        app["nocow_sample"] = app["nocow_sample"] or first_nocow
+    return True
+
+
+def part_size(b: Bulk, p: SteamPart, uid: int, library: str) -> tuple[str, int]:
+    """('', its size) for a part that may move into library, else (why not, 0)."""
+    ctx, t = b.ctx, b.tree
+    for x in (p["dst"], p["new"]):
+        if t.kind(x) != "absent":
+            return f"{ctx.short(x)} exists already: remove it or move it back (nothing is merged)", 0
+    c = t.chain(library, posixpath.relpath(os.path.dirname(p["dst"]), library))
+    if c.startswith(("symlink:", "file:")):
+        return f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder", 0
+    if cow_problem := steam_target_cow(b, library, p["dst"]):
+        return cow_problem, 0
+    if p["kind"] == "file":
+        if t.owner(p["src"]) != uid:
+            return f"{ctx.short(p['src'])} is not yours", 0
+        return "", t.size(p["src"])
+    if t.is_subvol(p["src"]) or t.has_mount(p["src"]):
+        return f"{ctx.short(p['src'])} is a subvolume or a mount point", 0
+    _, size, foreign, others = t.tree_stats(p["src"], uid)
+    if foreign:
+        return f"{ctx.short(p['src'])} contains another subvolume or a mount", 0
+    if others or t.owner(p["src"]) != uid:
+        return f"{ctx.short(p['src'])}: entries there are not yours (made by sudo or a container?)", 0
+    return "", size
 
 
 def steam_target_cow(b: Bulk, library: str, dst: str) -> str:

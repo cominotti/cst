@@ -808,6 +808,7 @@ class BulkTest(BulkBase):
         # steamapps is never linked or moved.
         self.assertFalse(os.path.islink(self.H(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps")))
         self.fake(bulk_items, "BIG", 1)
+        self.fake(bulk_domain, "BIG", 1)  # gib() reads it there
         _, text = self.report()
         self.assertIn("of games here, in /home snapshots", text)
 

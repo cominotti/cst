@@ -233,6 +233,19 @@ def u_read(path: str) -> dict[str, Json] | None:
     }
 
 
+def back_up_pair(files: Sequence[str], olds: Sequence[FileRead], ts: str) -> None:
+    """u_write_vdf_pair's backups: FILE.cst-bak-TS of each (once per run), the newest STEAM_BACKUPS kept."""
+    for f, r in zip(files, olds, strict=False):
+        bak = f"{f}.cst-bak-{ts}"
+        if kind(bak) == "absent":
+            u_write_new(bak, base64.b64decode(r["b64"]), r["mode"])
+            fsync_dir(os.path.dirname(f))
+        d, base = os.path.split(f)
+        baks = sorted(n for n in os.listdir(d) if n.startswith(base + ".cst-bak-"))
+        for n in baks[:-STEAM_BACKUPS]:
+            os.unlink(os.path.join(d, n))
+
+
 def json_int(value: Json) -> int:
     """An int that crossed as_user's JSON (bool is not one)."""
     if not isinstance(value, int) or isinstance(value, bool):
@@ -475,33 +488,41 @@ class UserFiles:
         if link and kind(link) == "link" and self.tree.link_target(link) == target:
             os.unlink(link)
         if kind(old) == "dir":
-            if src == target:
-                # In place: the target holds the copy (if the switch got that far).
-                if kind(target) == "dir" and kind(new) == "absent":
-                    os.rename(target, new)  # the copy goes back out of the way
-            elif kind(src) == "absent" and kind(new) == "absent" and kind(target) == "dir":
-                os.rename(target, new)
-            if kind(src) != "absent":
-                raise Unexpected(
-                    f"{src} was created again while the data waited in {old}: move what you need from "
-                    f"{src} into {old}, delete {src}, then run bulk apply again (it puts the data back)"
-                )
-            os.rename(old, src)
+            self.put_old_back(src, target, new, old)
         if kind(new) != "absent":
-            # The copy may have been written to through the link (a kill after
-            # the undo was decided while the user kept working, or a tool that
-            # removed the link): then it is kept, not deleted.
-            if (
-                "stamp2" in j
-                and kind(new) == "dir"
-                and (os.lstat(new).st_mtime_ns >= j["stamp2"] or self.tree.changed_since(new, j["stamp2"], mindepth=1))
-            ):
-                raise Unexpected(
-                    f"the data is back at {src}, but the copy {new} was written to as well: copy what you "
-                    f"need from it into {src}, delete {new}, then run bulk apply again"
-                )
-            self.u_rmtree(new)
+            self.drop_copy(j, src, new)
         return True
+
+    def put_old_back(self, src: str, target: str, new: str, old: str) -> None:
+        """u_rollback while the data waits in old: the copy goes out of the way, old back to src."""
+        if src == target:
+            # In place: the target holds the copy (if the switch got that far).
+            if kind(target) == "dir" and kind(new) == "absent":
+                os.rename(target, new)  # the copy goes back out of the way
+        elif kind(src) == "absent" and kind(new) == "absent" and kind(target) == "dir":
+            os.rename(target, new)
+        if kind(src) != "absent":
+            raise Unexpected(
+                f"{src} was created again while the data waited in {old}: move what you need from "
+                f"{src} into {old}, delete {src}, then run bulk apply again (it puts the data back)"
+            )
+        os.rename(old, src)
+
+    def drop_copy(self, j: ItemJournal, src: str, new: str) -> None:
+        """u_rollback's last step: the copy goes, unless it was written to."""
+        # The copy may have been written to through the link (a kill after
+        # the undo was decided while the user kept working, or a tool that
+        # removed the link): then it is kept, not deleted.
+        if (
+            "stamp2" in j
+            and kind(new) == "dir"
+            and (os.lstat(new).st_mtime_ns >= j["stamp2"] or self.tree.changed_since(new, j["stamp2"], mindepth=1))
+        ):
+            raise Unexpected(
+                f"the data is back at {src}, but the copy {new} was written to as well: copy what you "
+                f"need from it into {src}, delete {new}, then run bulk apply again"
+            )
+        self.u_rmtree(new)
 
     def rollback(self, j: ItemJournal) -> bool:
         return as_user(self.pw, self.home, self.u_rollback, j)
@@ -645,36 +666,40 @@ class UserFiles:
         uid = os.getuid()
         try:
             for p in parts:
-                if p["kind"] == "dir":
-                    _, _, foreign, others = self.tree.tree_stats(p["src"], uid)
-                    if foreign:
-                        raise Unexpected(f"{p['src']} contains another subvolume or a mount")
-                    if others:
-                        raise Unexpected(f"{others} entries in {p['src']} are not yours")
-                label = f"{p['name']} ({os.path.basename(p['src'])})"
-                if p.get("mode") == "copy":
-                    if self.machine.is_nocow(os.path.dirname(p["new"])):
-                        raise Unexpected(f"{os.path.dirname(p['new'])} has +C: the copy would be NOCOW too")
-                    self.machine.copy_bytes(p["src"], p["new"], label, p.get("bytes", 0))
-                else:
-                    self.machine.copy_reflink(p["src"], p["new"])
-                a, b = listing(p["src"]), listing(p["new"])
-                if a != b:
-                    diff = (
-                        next((x for x, y in zip(a, b, strict=False) if x != y), None) or f"{len(a)} vs {len(b)} entries"
-                    )
-                    raise RuntimeError(f"copy check failed for {p['src']} (first difference: {diff})")
-                if p.get("mode") == "copy":
-                    if n := self.nocow_entries(p["new"]):
-                        raise RuntimeError(
-                            f"the copy of {p['src']} has {n} NOCOW (+C) entries; it must be copy-on-write"
-                        )
-                    if bad := self.u_verify_content(p["src"], p["new"], label, p.get("bytes", 0)):
-                        raise RuntimeError(f"copy check failed for {p['src']}: the content of {bad} differs")
+                self.prepare_part(p, uid)
         except BaseException:
             self.u_steam_drop_news({"parts": list(parts)})
             raise
         return stamp
+
+    def prepare_part(self, p: SteamPart, uid: int) -> None:
+        """One part of u_steam_prepare: its copy, then the checks of the copy."""
+        if p["kind"] == "dir":
+            _, _, foreign, others = self.tree.tree_stats(p["src"], uid)
+            if foreign:
+                raise Unexpected(f"{p['src']} contains another subvolume or a mount")
+            if others:
+                raise Unexpected(f"{others} entries in {p['src']} are not yours")
+        label = f"{p['name']} ({os.path.basename(p['src'])})"
+        if p.get("mode") == "copy":
+            if self.machine.is_nocow(os.path.dirname(p["new"])):
+                raise Unexpected(f"{os.path.dirname(p['new'])} has +C: the copy would be NOCOW too")
+            self.machine.copy_bytes(p["src"], p["new"], label, p.get("bytes", 0))
+        else:
+            self.machine.copy_reflink(p["src"], p["new"])
+        self.check_part_copy(p, label)
+
+    def check_part_copy(self, p: SteamPart, label: str) -> None:
+        """The copy of a part has the same tree; a real copy also no +C and the same bytes."""
+        a, b = listing(p["src"]), listing(p["new"])
+        if a != b:
+            diff = next((x for x, y in zip(a, b, strict=False) if x != y), None) or f"{len(a)} vs {len(b)} entries"
+            raise RuntimeError(f"copy check failed for {p['src']} (first difference: {diff})")
+        if p.get("mode") == "copy":
+            if n := self.nocow_entries(p["new"]):
+                raise RuntimeError(f"the copy of {p['src']} has {n} NOCOW (+C) entries; it must be copy-on-write")
+            if bad := self.u_verify_content(p["src"], p["new"], label, p.get("bytes", 0)):
+                raise RuntimeError(f"copy check failed for {p['src']}: the content of {bad} differs")
 
     def steam_prepare(self, parts: Sequence[SteamPart], *, idle: bool) -> int:
         return as_user(self.pw, self.home, self.u_steam_prepare, parts, idle)
@@ -747,7 +772,12 @@ class UserFiles:
         for p in parts:
             if kind(p["old"]) != "absent":
                 os.rename(p["old"], p["src"])
-        for p in parts:
+        self.drop_steam_copies(j)
+        return True
+
+    def drop_steam_copies(self, j: SteamJournal) -> None:
+        """u_steam_rollback's last step: the copies go, unless one was written to."""
+        for p in j["parts"]:
             if kind(p["new"]) != "absent":
                 if "stamp2" in j and self.written_since(p["new"], j["stamp2"]):
                     raise Unexpected(
@@ -755,7 +785,6 @@ class UserFiles:
                         f"copy what you need from it, delete it, then run 'bulk steam apply' again"
                     )
                 self.u_rmtree(p["new"])
-        return True
 
     def steam_rollback(self, j: SteamJournal) -> bool:
         return as_user(self.pw, self.home, self.u_steam_rollback, j)
@@ -799,15 +828,7 @@ class UserFiles:
                 raise Unexpected(f"{f} changed meanwhile (Steam started?): nothing written; close Steam, run again")
             olds.append(file_read(r))
         if backup:
-            for f, r in zip(files, olds, strict=False):
-                bak = f"{f}.cst-bak-{ts}"
-                if kind(bak) == "absent":
-                    u_write_new(bak, base64.b64decode(r["b64"]), r["mode"])
-                    fsync_dir(os.path.dirname(f))
-                d, base = os.path.split(f)
-                baks = sorted(n for n in os.listdir(d) if n.startswith(base + ".cst-bak-"))
-                for n in baks[:-STEAM_BACKUPS]:
-                    os.unlink(os.path.join(d, n))
+            back_up_pair(files, olds, ts)
         out: list[Json] = []  # mtimes (ints): they come back through as_user's JSON
         for f, r in zip(files, olds, strict=False):
             tmp = f + ".cst-tmp"

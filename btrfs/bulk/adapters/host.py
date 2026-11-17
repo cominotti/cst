@@ -97,6 +97,10 @@ class Host:
         """Why Steam seems to run (empty: it does not). Every process of the
         host (a Flatpak's processes are visible there too), Flatpak instances of
         Steam, and Steam's own pid files."""
+        return sorted(set(self.steam_processes() + self.steam_instances() + self.steam_pid_files(ctx)))
+
+    def steam_processes(self) -> list[str]:
+        """Processes of Steam (by name or binary) among all of the host's."""
         proc = self.proc
         why: list[str] = []
         try:
@@ -120,6 +124,11 @@ class Host:
                 or exe.endswith(("/ubuntu12_32/steam", "/ubuntu12_64/steamwebhelper", "/ubuntu12_32/reaper"))
             ):
                 why.append(f"process {pid} ({comm})")
+        return why
+
+    def steam_instances(self) -> list[str]:
+        """Running Flatpak instances of Steam, of every user."""
+        why: list[str] = []
         try:
             uids = os.listdir(self.run_user)
         except OSError:
@@ -130,20 +139,31 @@ class Host:
                 insts = os.listdir(base)
             except OSError:
                 continue
-            for inst in insts:
-                try:
-                    with open(os.path.join(base, inst, "info")) as f:
-                        info = f.read()
-                    with open(os.path.join(base, inst, "pid")) as f:
-                        pid = f.read().strip()
-                except OSError:
-                    continue
-                if (
-                    f"\nname={STEAM_APP}\n" in "\n" + info + "\n"
-                    and pid.isdigit()
-                    and os.path.exists(os.path.join(proc, pid))
-                ):
-                    why.append(f"Flatpak instance {inst} (pid {pid})")
+            why += [
+                f"Flatpak instance {inst} (pid {pid})" for inst in insts if (pid := self.steam_instance_pid(base, inst))
+            ]
+        return why
+
+    def steam_instance_pid(self, base: str, inst: str) -> str:
+        """The live pid of the Flatpak instance base/inst if it is Steam's, else ''."""
+        try:
+            with open(os.path.join(base, inst, "info")) as f:
+                info = f.read()
+            with open(os.path.join(base, inst, "pid")) as f:
+                pid = f.read().strip()
+        except OSError:
+            return ""
+        if (
+            f"\nname={STEAM_APP}\n" in "\n" + info + "\n"
+            and pid.isdigit()
+            and os.path.exists(os.path.join(self.proc, pid))
+        ):
+            return pid
+        return ""
+
+    def steam_pid_files(self, ctx: Ctx) -> list[str]:
+        """Steam's own pid files in the home that name a live Steam process."""
+        why: list[str] = []
         for rel in (".steam/steam.pid", ".var/app/com.valvesoftware.Steam/.steam/steam.pid"):
             if (
                 self.tree.chain(ctx.home, os.path.dirname(rel)) != "ok"
@@ -154,13 +174,13 @@ class Host:
             try:
                 with open(os.path.join(ctx.home, rel)) as f:
                     pid = f.read(32).strip()
-                with open(os.path.join(proc, pid, "comm")) as f:
+                with open(os.path.join(self.proc, pid, "comm")) as f:
                     comm = f.read().strip()
             except OSError, ValueError:
                 continue
             if pid.isdigit() and comm.startswith("steam"):
                 why.append(f"~/{rel} names the live process {pid}")
-        return sorted(set(why))
+        return why
 
     def snapshot_guard(self) -> dict[str, int]:
         """btrfs-snapshot's space guard, in bytes: {'pause': no new /home

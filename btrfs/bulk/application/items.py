@@ -42,9 +42,23 @@ def classify(b: Bulk, item: Item, done: set[str], kept: set[str] | None = None) 
     States: kept, ok, mkdir, link, move, move-subvol, nocow, wait, unexpected;
     ok and mkdir carry 'nolink' in detail when the tool's parent folder is
     absent; kept carries 'linked' when the link into ~/Bulk is still there."""
-    ctx, t = b.ctx, b.tree
     if kept is None:
         kept = b.state.read_keep()[0]
+    chosen = classify_kept(b, item, done, kept)
+    if chosen is not None:
+        return chosen
+    ts = b.tree.target_state(b.ctx, item)
+    if ts.startswith("bad:"):
+        return "unexpected", ts[4:]
+    if item.link is None:
+        return ("mkdir" if ts == "absent" else "ok"), ""
+    return classify_link(b, item, item.link, ts)
+
+
+def classify_kept(b: Bulk, item: Item, done: set[str], kept: set[str]) -> tuple[str, str] | None:
+    """classify for an item kept in /home, or one that waits for the item it
+    is `after`; None for the others."""
+    ctx, t = b.ctx, b.tree
     if item.id in kept:
         L = ctx.link(item)
         linked = L is not None and t.kind(L) == "link" and t.link_target(L) == ctx.target(item)
@@ -61,15 +75,15 @@ def classify(b: Bulk, item: Item, done: set[str], kept: set[str] | None = None) 
         return "wait", f"{why}: keep {item.id} too, or 'bulk unkeep {item.after}'"
     if item.after and item.after not in done:
         return "wait", f"after ~/{BY_ID[item.after].link} is in place"
-    ts = t.target_state(ctx, item)
-    if ts.startswith("bad:"):
-        return "unexpected", ts[4:]
+    return None
+
+
+def classify_link(b: Bulk, item: Item, link: str, ts: str) -> tuple[str, str]:
+    """classify for an item with a link (link: item.link), its target in state ts."""
+    ctx, t = b.ctx, b.tree
     T = ctx.target(item)
-    if item.link is None:
-        return ("mkdir" if ts == "absent" else "ok"), ""
     L = present(ctx.link(item), THE_LINK)
-    parent = os.path.dirname(item.link)
-    c = t.chain(ctx.home, parent)
+    c = t.chain(ctx.home, os.path.dirname(link))
     if c == "absent":
         if ts == "absent":
             return "mkdir", "nolink"
@@ -88,15 +102,21 @@ def classify(b: Bulk, item: Item, done: set[str], kept: set[str] | None = None) 
         return nocow_check(b, item, ts) or ("ok", "")
     if k == "other":
         return "unexpected", "a file, not a folder"
-    if t.has_mount(L):
+    return classify_folder(b, item, L, ts)
+
+
+def classify_folder(b: Bulk, item: Item, path: str, ts: str) -> tuple[str, str]:
+    """classify for an item whose old path (path) is a real folder."""
+    t = b.tree
+    if t.has_mount(path):
         return "unexpected", "is or contains a mount point"
-    if not t.is_subvol(L) and t.empty_dir(L):
+    if not t.is_subvol(path) and t.empty_dir(path):
         return "move", "empty"  # nothing to lose, also next to a filled target
     if ts == "data":
-        if item.disposable and not t.is_subvol(L):
+        if item.disposable and not t.is_subvol(path):
             return "move", "stale"  # the tool replaced its link: the ~/Bulk side is stale
-        return "unexpected", f"data in both ~/{item.link} and {ctx.short(T)}"
-    if t.is_subvol(L):
+        return "unexpected", f"data in both ~/{item.link} and {b.ctx.short(b.ctx.target(item))}"
+    if t.is_subvol(path):
         return ("move", "subvolume") if item.nocow else ("move-subvol", "")
     return "move", ""
 
@@ -137,7 +157,7 @@ def committed(b: Bulk, j: ItemJournal) -> bool:
 def recover(b: Bulk) -> list[str]:
     """Finish or undo what an interrupted run left (kill, power loss).
     Returns the ids whose journal stays (they need a look)."""
-    ctx, kind, state, user, log = b.ctx, b.tree.kind, b.state, b.user, b.out.log
+    state, log = b.state, b.out.log
     stuck: list[str] = []
     for item in ITEMS:
         j = state.jread_item(item.id)
@@ -147,60 +167,78 @@ def recover(b: Bulk) -> list[str]:
                 log(f"NEEDS A LOOK: {item.id}: unreadable journal {state.jpath(item.id)}")
             continue
         try:
-            if j.get("conflict"):
-                if kind(j["old"]) != "absent":
-                    raise Unexpected(conflict_text(ctx, j))
-                log(f"  {item.id}: the old tree is gone: the move is complete")
-            elif j.get("finishing"):
-                # The last check had passed and the old tree was being deleted:
-                # what is left of it is a partial copy (each deletion changes
-                # ctimes there, so the late-write check cannot be made again).
-                user.finish(j)
-                log(f"  {item.id}: deleted the old copy left by an interrupted run (its deletion was cut short)")
-            elif j["kind"] == "subvol":
-                L, T = present(j["link"], "the journal's link"), j["target"]
-                if kind(L) == "absent" and kind(T) == "dir":
-                    user.symlink(L, T)
-                    log(f"  {item.id}: finished an interrupted move")
-                elif not (kind(L) == "link" and b.tree.link_target(L) == T) and b.tree.entries_nofollow(T):
-                    # Moved, then the old path was created again (an app)
-                    # before the link: the moved subvolume is the full data.
-                    raise Unexpected(
-                        f"{L} was created again after its data was moved to {T}: move what you need "
-                        f"from {L} into {T}, delete {L}, then run bulk apply again (it makes the link)"
-                    )
-            elif not j.get("undo") and committed(b, j):
-                # The same last check as right after a switch (migrate): a
-                # write into the old tree in the instant of the switch (or the
-                # crash) must not be deleted with it.
-                if b.host.busy_paths([j["old"]], ctx.home) or user.late_write(j):
-                    if "stamp2" not in j or user.new_written(j):
-                        # Both sides written (or a journal of an older
-                        # version, without stamp2: cannot tell): keep both.
-                        j["conflict"] = True
-                        state.jwrite(item.id, j)
-                        raise Unexpected(conflict_text(ctx, j))
-                    j["undo"] = True
-                    state.jwrite(item.id, j)
-                    user.rollback(j)
-                    log(
-                        f"  {item.id}: undid an interrupted move: the old folder was written to during the "
-                        f"switch (the data is back at {ctx.short(j['src'])})"
-                    )
-                else:
-                    j["finishing"] = True  # a kill now: the next repair goes on deleting
-                    state.jwrite(item.id, j)
-                    user.finish(j)
-                    log(f"  {item.id}: deleted the old copy left by an interrupted run")
-            else:
-                user.rollback(j)
-                log(f"  {item.id}: undid an interrupted move (the data is back at {ctx.short(j['src'])})")
+            recover_item(b, item, j)
             state.jdrop(item.id)
         except (OSError, RuntimeError, Unexpected) as e:
             stuck.append(item.id)
             wait = "" if j.get("bulk_only") else "; snapshots wait until it is gone"
             log(f"NEEDS A LOOK: {item.id}: an interrupted move: {e} (journal kept in {state.jpath(item.id)}{wait})")
     return stuck + steam_recover_all(b)
+
+
+def recover_item(b: Bulk, item: Item, j: ItemJournal) -> None:
+    """Finish or undo the move journal j recorded (ItemRecover); an exception: it stays."""
+    ctx, user, log = b.ctx, b.user, b.out.log
+    if j.get("conflict"):
+        if b.tree.kind(j["old"]) != "absent":
+            raise Unexpected(conflict_text(ctx, j))
+        log(f"  {item.id}: the old tree is gone: the move is complete")
+    elif j.get("finishing"):
+        # The last check had passed and the old tree was being deleted:
+        # what is left of it is a partial copy (each deletion changes
+        # ctimes there, so the late-write check cannot be made again).
+        user.finish(j)
+        log(f"  {item.id}: deleted the old copy left by an interrupted run (its deletion was cut short)")
+    elif j["kind"] == "subvol":
+        recover_subvol(b, item, j)
+    elif not j.get("undo") and committed(b, j):
+        recover_switched(b, item, j)
+    else:
+        user.rollback(j)
+        log(f"  {item.id}: undid an interrupted move (the data is back at {ctx.short(j['src'])})")
+
+
+def recover_subvol(b: Bulk, item: Item, j: ItemJournal) -> None:
+    """recover_item for a subvolume renamed into ~/Bulk: the link, if it is missing."""
+    kind = b.tree.kind
+    L, T = present(j["link"], "the journal's link"), j["target"]
+    if kind(L) == "absent" and kind(T) == "dir":
+        b.user.symlink(L, T)
+        b.out.log(f"  {item.id}: finished an interrupted move")
+    elif not (kind(L) == "link" and b.tree.link_target(L) == T) and b.tree.entries_nofollow(T):
+        # Moved, then the old path was created again (an app)
+        # before the link: the moved subvolume is the full data.
+        raise Unexpected(
+            f"{L} was created again after its data was moved to {T}: move what you need "
+            f"from {L} into {T}, delete {L}, then run bulk apply again (it makes the link)"
+        )
+
+
+def recover_switched(b: Bulk, item: Item, j: ItemJournal) -> None:
+    """recover_item for a switch that completed: the same last check as right
+    after a switch (migrate), then the old tree goes, or the switch is undone."""
+    ctx, user, state, log = b.ctx, b.user, b.state, b.out.log
+    # A write into the old tree in the instant of the switch (or the crash)
+    # must not be deleted with it.
+    if b.host.busy_paths([j["old"]], ctx.home) or user.late_write(j):
+        if "stamp2" not in j or user.new_written(j):
+            # Both sides written (or a journal of an older
+            # version, without stamp2: cannot tell): keep both.
+            j["conflict"] = True
+            state.jwrite(item.id, j)
+            raise Unexpected(conflict_text(ctx, j))
+        j["undo"] = True
+        state.jwrite(item.id, j)
+        user.rollback(j)
+        log(
+            f"  {item.id}: undid an interrupted move: the old folder was written to during the "
+            f"switch (the data is back at {ctx.short(j['src'])})"
+        )
+    else:
+        j["finishing"] = True  # a kill now: the next repair goes on deleting
+        state.jwrite(item.id, j)
+        user.finish(j)
+        log(f"  {item.id}: deleted the old copy left by an interrupted run")
 
 
 # ---- the actions ------------------------------------------------------------------------------
@@ -270,7 +308,7 @@ def migrate(b: Bulk, item: Item, src: str, link: str | None) -> str:
 
 def act(b: Bulk, item: Item, state: str, detail: str) -> str:
     """Apply one item; returns ok | busy | changed | unexpected:<why> | wait."""
-    ctx, user, busy = b.ctx, b.user, b.host.busy_paths
+    ctx, user = b.ctx, b.user
     T, L = ctx.target(item), ctx.link(item)
     if state == "kept":
         return "kept"
@@ -283,34 +321,9 @@ def act(b: Bulk, item: Item, state: str, detail: str) -> str:
         user.symlink(L, T)
         return "ok"
     if state == "move":
-        L = present(L, THE_LINK)
-        if detail == "empty":
-            if busy([L], ctx.home):
-                return "busy"
-            user.mkdirs(ctx.bulk, item.target, nocow=item.nocow)
-            user.rmdir(L)
-            user.symlink(L, T)
-            return "ok"
-        if detail == "stale":
-            if busy([L, T], ctx.home):
-                return "busy"
-            b.out.log(
-                f"  {item.id}: ~/{item.link} is a real folder again (its tool's clean command removed the "
-                f"link): deleting the stale copy in {ctx.short(T)} (a cache: downloaded again when needed)"
-            )
-            user.rmtree(T)
-        user.mkdirs(ctx.bulk, item.target, nocow=item.nocow)
-        return migrate(b, item, L, L)
+        return act_move(b, item, detail, present(L, THE_LINK))
     if state == "move-subvol":
-        L = present(L, THE_LINK)
-        if busy([L], ctx.home):
-            return "busy"
-        user.mkdirs(ctx.bulk, os.path.dirname(item.target), nocow=False)
-        b.state.flag_add(item.id)
-        b.state.jwrite(item.id, {"kind": "subvol", "src": L, "target": T, "new": "", "old": "", "link": L, "stamp": 0})
-        user.move_subvol(L, T)
-        b.state.jdrop(item.id)
-        return "ok"
+        return act_move_subvol(b, item, present(L, THE_LINK))
     if state == "nocow":
         # The folders above it (~/Bulk/emulators...) get +C in any case.
         user.mkdirs(ctx.bulk, os.path.dirname(item.target), nocow=True)
@@ -321,6 +334,45 @@ def act(b: Bulk, item: Item, state: str, detail: str) -> str:
     if state == "wait":
         return "wait"
     return "unexpected:" + detail
+
+
+def act_move(b: Bulk, item: Item, detail: str, path: str) -> str:
+    """act for a move of the real folder at path (detail: empty, stale, subvolume or '')."""
+    ctx, user, busy = b.ctx, b.user, b.host.busy_paths
+    T = ctx.target(item)
+    if detail == "empty":
+        if busy([path], ctx.home):
+            return "busy"
+        user.mkdirs(ctx.bulk, item.target, nocow=item.nocow)
+        user.rmdir(path)
+        user.symlink(path, T)
+        return "ok"
+    if detail == "stale":
+        if busy([path, T], ctx.home):
+            return "busy"
+        b.out.log(
+            f"  {item.id}: ~/{item.link} is a real folder again (its tool's clean command removed the "
+            f"link): deleting the stale copy in {ctx.short(T)} (a cache: downloaded again when needed)"
+        )
+        user.rmtree(T)
+    user.mkdirs(ctx.bulk, item.target, nocow=item.nocow)
+    return migrate(b, item, path, path)
+
+
+def act_move_subvol(b: Bulk, item: Item, path: str) -> str:
+    """act for an old subvolume at path: renamed into ~/Bulk, with its journal."""
+    ctx, user = b.ctx, b.user
+    T = ctx.target(item)
+    if b.host.busy_paths([path], ctx.home):
+        return "busy"
+    user.mkdirs(ctx.bulk, os.path.dirname(item.target), nocow=False)
+    b.state.flag_add(item.id)
+    b.state.jwrite(
+        item.id, {"kind": "subvol", "src": path, "target": T, "new": "", "old": "", "link": path, "stamp": 0}
+    )
+    user.move_subvol(path, T)
+    b.state.jdrop(item.id)
+    return "ok"
 
 
 def convert_bulk_dir(b: Bulk) -> bool:
@@ -358,12 +410,12 @@ def exit_status(b: Bulk, deferred: Sequence[str], problems: Sequence[str]) -> in
 
 def apply(b: Bulk) -> tuple[list[str], list[str]]:
     """Bring every item to its declared state. Returns (deferred, problems)."""
-    ctx, user, log = b.ctx, b.user, b.out.log
+    log = b.out.log
     deferred: list[str] = []
     problems: list[str] = []
     b.bulk_only.clear()
     # Before taking the lock: btrfs-snapshot convert-one takes it itself.
-    if b.tree.bulk_state(ctx) == "plain":
+    if b.tree.bulk_state(b.ctx) == "plain":
         log("~/Bulk is a plain folder: turning it into a subvolume first")
         if not convert_bulk_dir(b):
             log("~/Bulk: in use or failed (see above): everything waits for the next boot")
@@ -374,33 +426,8 @@ def apply(b: Bulk) -> tuple[list[str], list[str]]:
         stuck = recover(b)
         problems += stuck
         prune_convert_plan(b)
-        bs = b.tree.bulk_state(ctx)
-        if bs == "bad":
-            log(f"{ctx.short(ctx.bulk)} is a file or a symlink: nothing done (move it away, then run again)")
+        if not bulk_in_place(b, problems):
             return [], ["bulk"]
-        if bs == "create":
-            try:
-                user.create_bulk(ctx.bulk)
-            except (OSError, RuntimeError) as e:
-                log(f"cannot create ~/Bulk as a subvolume ({e}): nothing done")
-                return [], ["bulk"]
-            log("created:   ~/Bulk (a subvolume, yours: left out of /home snapshots)")
-        # Every run (cheap): also a ~/Bulk made by an older run or by hand.
-        user.relabel(ctx.bulk)
-        if not b.tree.is_subvol(ctx.bulk):
-            log("~/Bulk is not a subvolume after creating it: stopped")
-            return [], ["bulk"]
-        t = b.tree.tag_state(ctx)
-        if t == "create":
-            try:
-                user.write_tag(ctx.bulk)
-                log("created:   ~/Bulk/CACHEDIR.TAG")
-            except (OSError, RuntimeError) as e:
-                problems.append("CACHEDIR.TAG")
-                log(f"NEEDS A LOOK: ~/Bulk/CACHEDIR.TAG: {e}")
-        elif t == "bad":
-            problems.append("CACHEDIR.TAG")
-            log("NEEDS A LOOK: ~/Bulk/CACHEDIR.TAG is not a cache tag (left as it is)")
         done: set[str] = set()
         try:
             kept, unknown = b.state.read_keep()
@@ -414,58 +441,131 @@ def apply(b: Bulk) -> tuple[list[str], list[str]]:
         for ident in unknown:
             log(f"{b.paths.keep}: unknown item '{ident}' (ignored; valid: {', '.join(BY_ID)})")
         for item in ITEMS:
-            state, detail = "", ""
-            if item.id in stuck:
-                log(f"{'skipped:':<10} {describe_paths(ctx, item)}: its interrupted move needs a look (above)")
-                continue
-            try:
-                state, detail = classify(b, item, done, kept)
-                res = act(b, item, state, detail)
-            except Unexpected as e:
-                res = f"unexpected:{e}"
-            except (OSError, RuntimeError) as e:
-                res = f"failed:{e}"
-            name = describe_paths(ctx, item)
-            if res == "kept":
-                log(f"{'kept:':<10} {name}: {kept_text(item, detail)}")
-                continue
-            if res == "ok":
-                after, _ = classify(b, item, done, kept)
-                if after == "ok":
-                    done.add(item.id)
-                if state != "ok":
-                    log(
-                        f"{'done:':<10} {name}{'  (folder only: ~/' + os.path.dirname(item.link or '') + ' absent)' if detail == 'nolink' else ''}"
-                    )
-            elif res == "busy":
-                deferred.append(item.id)
-                log(f"{'busy:':<10} {name}: moved at the next boot, before login")
-            elif res == "changed":
-                deferred.append(item.id)
-                log(f"{'busy:':<10} {name}: written to during the move; undone, moved at the next boot")
-            elif res == "wait":
-                if item.after in deferred:
-                    deferred.append(item.id)
-                log(f"{'waits:':<10} {name}: {detail}")
-            else:
-                why = res.split(":", 1)[1]
-                problems.append(item.id)
-                if state == "nocow":
-                    b.bulk_only.add(item.id)
-                    why += "; inside ~/Bulk only, no data of it in /home: snapshots do not wait for it"
-                log(f"NEEDS A LOOK: {name}: {why} (nothing touched)")
-            if item.flatpak and b.tree.kind(ctx.target(item)) == "dir":
-                try:
-                    f = user.flatpak(item.flatpak, ctx.target(item))
-                    if f == "added":
-                        log(f"{'done:':<10} flatpak override --user --filesystem={ctx.target(item)} {item.flatpak}")
-                except (OSError, RuntimeError) as e:
-                    problems.append(item.id)
-                    log(f"NEEDS A LOOK: {item.flatpak}: {e}")
+            apply_item(b, item, stuck, done, kept, deferred, problems)
     finally:
         b.state.release(lock)
     b.state.write_flag(deferred)
     return deferred, problems
+
+
+def bulk_in_place(b: Bulk, problems: list[str]) -> bool:
+    """~/Bulk as a subvolume (created if absent, relabelled) and its
+    CACHEDIR.TAG (a problem added when that fails); False: nothing can be done."""
+    ctx, user, log = b.ctx, b.user, b.out.log
+    bs = b.tree.bulk_state(ctx)
+    if bs == "bad":
+        log(f"{ctx.short(ctx.bulk)} is a file or a symlink: nothing done (move it away, then run again)")
+        return False
+    if bs == "create":
+        try:
+            user.create_bulk(ctx.bulk)
+        except (OSError, RuntimeError) as e:
+            log(f"cannot create ~/Bulk as a subvolume ({e}): nothing done")
+            return False
+        log("created:   ~/Bulk (a subvolume, yours: left out of /home snapshots)")
+    # Every run (cheap): also a ~/Bulk made by an older run or by hand.
+    user.relabel(ctx.bulk)
+    if not b.tree.is_subvol(ctx.bulk):
+        log("~/Bulk is not a subvolume after creating it: stopped")
+        return False
+    t = b.tree.tag_state(ctx)
+    if t == "create":
+        try:
+            user.write_tag(ctx.bulk)
+            log("created:   ~/Bulk/CACHEDIR.TAG")
+        except (OSError, RuntimeError) as e:
+            problems.append("CACHEDIR.TAG")
+            log(f"NEEDS A LOOK: ~/Bulk/CACHEDIR.TAG: {e}")
+    elif t == "bad":
+        problems.append("CACHEDIR.TAG")
+        log("NEEDS A LOOK: ~/Bulk/CACHEDIR.TAG is not a cache tag (left as it is)")
+    return True
+
+
+def apply_item(
+    b: Bulk,
+    item: Item,
+    stuck: Sequence[str],
+    done: set[str],
+    kept: set[str],
+    deferred: list[str],
+    problems: list[str],
+) -> None:
+    """One item of apply(): its step, what came of it, its Flatpak permission."""
+    log = b.out.log
+    state, detail = "", ""
+    if item.id in stuck:
+        log(f"{'skipped:':<10} {describe_paths(b.ctx, item)}: its interrupted move needs a look (above)")
+        return
+    try:
+        state, detail = classify(b, item, done, kept)
+        res = act(b, item, state, detail)
+    except Unexpected as e:
+        res = f"unexpected:{e}"
+    except (OSError, RuntimeError) as e:
+        res = f"failed:{e}"
+    if res == "kept":
+        log(f"{'kept:':<10} {describe_paths(b.ctx, item)}: {kept_text(item, detail)}")
+        return
+    record_result(b, item, (state, detail), res, done, kept, deferred, problems)
+    if item.flatpak and b.tree.kind(b.ctx.target(item)) == "dir":
+        allow_flatpak(b, item, item.flatpak, problems)
+
+
+def record_result(
+    b: Bulk,
+    item: Item,
+    classified: tuple[str, str],
+    res: str,
+    done: set[str],
+    kept: set[str],
+    deferred: list[str],
+    problems: list[str],
+) -> None:
+    """What act() did with an item (classified: its state and detail): logged, and noted in done, deferred or problems."""
+    state, detail = classified
+    log, name = b.out.log, describe_paths(b.ctx, item)
+    if res == "ok":
+        record_done(b, item, classified, done, kept)
+    elif res == "busy":
+        deferred.append(item.id)
+        log(f"{'busy:':<10} {name}: moved at the next boot, before login")
+    elif res == "changed":
+        deferred.append(item.id)
+        log(f"{'busy:':<10} {name}: written to during the move; undone, moved at the next boot")
+    elif res == "wait":
+        if item.after in deferred:
+            deferred.append(item.id)
+        log(f"{'waits:':<10} {name}: {detail}")
+    else:
+        why = res.split(":", 1)[1]
+        problems.append(item.id)
+        if state == "nocow":
+            b.bulk_only.add(item.id)
+            why += "; inside ~/Bulk only, no data of it in /home: snapshots do not wait for it"
+        log(f"NEEDS A LOOK: {name}: {why} (nothing touched)")
+
+
+def record_done(b: Bulk, item: Item, classified: tuple[str, str], done: set[str], kept: set[str]) -> None:
+    """record_result for an item act() brought in place: in done once classify agrees; logged unless it was already."""
+    state, detail = classified
+    after, _ = classify(b, item, done, kept)
+    if after == "ok":
+        done.add(item.id)
+    if state != "ok":
+        absent = f"  (folder only: ~/{os.path.dirname(item.link or '')} absent)" if detail == "nolink" else ""
+        b.out.log(f"{'done:':<10} {describe_paths(b.ctx, item)}{absent}")
+
+
+def allow_flatpak(b: Bulk, item: Item, app: str, problems: list[str]) -> None:
+    """The Flatpak app of an item may use its folder in ~/Bulk (a problem added when that fails)."""
+    T = b.ctx.target(item)
+    try:
+        if b.user.flatpak(app, T) == "added":
+            b.out.log(f"{'done:':<10} flatpak override --user --filesystem={T} {app}")
+    except (OSError, RuntimeError) as e:
+        problems.append(item.id)
+        b.out.log(f"NEEDS A LOOK: {app}: {e}")
 
 
 def row(b: Bulk, name: str, text: str) -> None:
@@ -482,17 +582,7 @@ def item_text(b: Bulk, item: Item, state: str, detail: str) -> str:
     if state == "mkdir" and detail == "nolink":
         return f"create the folder (no link: ~/{parent} absent)"
     if state == "move":
-        L = present(L, THE_LINK)
-        if detail == "empty":
-            return "empty: replaced by the link"
-        how = "real copy into a +C folder" if item.nocow else "reflink clone, no data written"
-        stale = (
-            f"a real folder again (its tool's clean command removed the link): delete the stale "
-            f"{du_text(du(T))} in ~/Bulk, then "
-            if detail == "stale"
-            else ""
-        )
-        return f"{stale}move {du_text(du(L))} into ~/Bulk ({how}), then the link"
+        return move_text(b, item, detail, present(L, THE_LINK))
     if state == "nocow":
         return f"rewrite without copy-on-write ({detail}, {du_text(du(T))})"
     if state == "unexpected":
@@ -502,50 +592,27 @@ def item_text(b: Bulk, item: Item, state: str, detail: str) -> str:
     return STATE_TEXT.get(state, state) + (f" ({detail})" if detail else "")
 
 
+def move_text(b: Bulk, item: Item, detail: str, path: str) -> str:
+    """item_text for an item whose folder (at path) moves into ~/Bulk."""
+    du = b.tree.du_bytes
+    if detail == "empty":
+        return "empty: replaced by the link"
+    how = "real copy into a +C folder" if item.nocow else "reflink clone, no data written"
+    stale = (
+        f"a real folder again (its tool's clean command removed the link): delete the stale "
+        f"{du_text(du(b.ctx.target(item)))} in ~/Bulk, then "
+        if detail == "stale"
+        else ""
+    )
+    return f"{stale}move {du_text(du(path))} into ~/Bulk ({how}), then the link"
+
+
 def report(b: Bulk, mode: str) -> int:
     """plan / status text. Returns the number of items not in place."""
-    ctx, t, state, say = b.ctx, b.tree, b.state, b.out.say
-    left = 0
+    ctx, state, say = b.ctx, b.state, b.out.say
     flagged = set(state.read_flag())
-    bs = t.bulk_state(ctx)
-    say("~/Bulk: everything in it can be downloaded again: no snapshots, no NAS backup.")
-    btxt = {
-        "ok": "ok (subvolume)",
-        "create": "create (a subvolume, yours)",
-        "plain": "a plain folder: converted into a subvolume first",
-        "bad": "NEEDS A LOOK: a file or symlink (nothing done)",
-    }[bs]
-    left += bs != "ok"
-    row(b, "~/Bulk", btxt)
-    if bs in ("ok", "plain"):
-        tag = t.tag_state(ctx)
-        ttxt = {"ok": "ok", "create": "create", "bad": "NEEDS A LOOK: not a cache tag"}[tag]
-        row(b, "~/Bulk/CACHEDIR.TAG", ttxt)
-    for item in ITEMS:
-        if not state.jexists(item.id):
-            continue
-        left += 1
-        j = state.jread_item(item.id)
-        if j and j.get("conflict") and t.kind(j["old"]) != "absent":
-            say(f"  {item.id}: NEEDS A LOOK: {conflict_text(ctx, j)}")
-        elif j:
-            say(f"  {item.id}: an interrupted move is recorded ({ctx.short(j['old'] or j['src'])}): the next")
-            say(
-                "      apply (or boot) finishes or undoes it; "
-                + ("inside ~/Bulk only, snapshots do not wait" if j.get("bulk_only") else "snapshots wait until then")
-            )
-        else:
-            say(f"  {item.id}: NEEDS A LOOK: unreadable journal {state.jpath(item.id)}")
-    for ident in state.steam_journal_ids():
-        left += 1
-        sj = state.jread_steam(ident)
-        if sj and sj.get("conflict"):
-            say(f"  {ident}: NEEDS A LOOK: {steam_conflict_text(b, sj)}")
-        elif sj:
-            say(f"  {ident}: an interrupted Steam game move is recorded (phase {sj.get('phase')}): the next")
-            say("      apply, 'bulk steam apply' or boot finishes or undoes it; snapshots wait until then")
-        else:
-            say(f"  {ident}: NEEDS A LOOK: unreadable journal {state.jpath(ident)}")
+    bs = b.tree.bulk_state(ctx)
+    left = report_bulk(b, bs) + report_journals(b)
     try:
         kept, unknown = state.read_keep()
     except OSError as e:
@@ -557,43 +624,116 @@ def report(b: Bulk, mode: str) -> int:
     # Before ~/Bulk exists nothing waits for anything.
     done: set[str] = set() if bs == "ok" else {i.id for i in ITEMS}
     for item in ITEMS:
-        st, detail = classify(b, item, done, kept)
-        if st == "kept":
-            row(b, describe_paths(ctx, item), kept_text(item, detail))
-            continue
-        if st == "ok":
-            done.add(item.id)
-        else:
-            left += 1
-        text = item_text(b, item, st, detail)
-        if item.id in flagged and st != "ok":
-            text += "; waits for the next boot (busy)"
-        row(b, describe_paths(ctx, item), text)
-        T = ctx.target(item)
-        if item.nocow and mode == "status" and t.chain(ctx.bulk, item.target) == "ok":
-            files, dirs_cow = t.cow_data(T)
-            parents = t.nocow_parents(ctx, item)
-            nc = ("yes" if not files and not dirs_cow else f"NO ({files} copy-on-write file(s))") + (
-                f"; NO on {', '.join(ctx.short(p) for p in parents)}" if parents else ""
-            )
-            row(b, "", f"+C (NOCOW): {nc}")
-        if item.flatpak:
-            try:
-                f = b.user.flatpak_state(item.flatpak, T)
-            except OSError, RuntimeError:
-                f = "?"
-            ftxt = {
-                "absent": "app not installed (nothing to do)",
-                "ok": "ok",
-                "?": "? (flatpak not usable here)",
-                "missing": "add" if mode == "plan" else "MISSING (run bulk apply)",
-            }[f]
-            row(b, f"  flatpak override: {item.flatpak} may use it", ftxt)
+        left += report_item(b, item, mode, (done, kept, flagged))
     if "steam" not in kept:
         old_steam(b)
     if "bulk" in flagged:
         say("  ~/Bulk itself was busy: converted at the next boot, before login")
     return left
+
+
+def report_bulk(b: Bulk, bs: str) -> int:
+    """report's lines on ~/Bulk itself (bs: its bulk_state) and its CACHEDIR.TAG; 1 if it is not in place."""
+    b.out.say("~/Bulk: everything in it can be downloaded again: no snapshots, no NAS backup.")
+    btxt = {
+        "ok": "ok (subvolume)",
+        "create": "create (a subvolume, yours)",
+        "plain": "a plain folder: converted into a subvolume first",
+        "bad": "NEEDS A LOOK: a file or symlink (nothing done)",
+    }[bs]
+    row(b, "~/Bulk", btxt)
+    if bs in ("ok", "plain"):
+        tag = b.tree.tag_state(b.ctx)
+        ttxt = {"ok": "ok", "create": "create", "bad": "NEEDS A LOOK: not a cache tag"}[tag]
+        row(b, "~/Bulk/CACHEDIR.TAG", ttxt)
+    return int(bs != "ok")
+
+
+def report_journals(b: Bulk) -> int:
+    """report's lines on the journals of interrupted moves; how many there are."""
+    ctx, state, say = b.ctx, b.state, b.out.say
+    left = 0
+    for item in ITEMS:
+        if not state.jexists(item.id):
+            continue
+        left += 1
+        j = state.jread_item(item.id)
+        if j and j.get("conflict") and b.tree.kind(j["old"]) != "absent":
+            say(f"  {item.id}: NEEDS A LOOK: {conflict_text(ctx, j)}")
+        elif j:
+            say(f"  {item.id}: an interrupted move is recorded ({ctx.short(j['old'] or j['src'])}): the next")
+            say(
+                "      apply (or boot) finishes or undoes it; "
+                + ("inside ~/Bulk only, snapshots do not wait" if j.get("bulk_only") else "snapshots wait until then")
+            )
+        else:
+            say(f"  {item.id}: NEEDS A LOOK: unreadable journal {state.jpath(item.id)}")
+    return left + report_steam_journals(b)
+
+
+def report_steam_journals(b: Bulk) -> int:
+    """report's lines on the journals of interrupted Steam game moves; how many there are."""
+    state, say = b.state, b.out.say
+    left = 0
+    for ident in state.steam_journal_ids():
+        left += 1
+        sj = state.jread_steam(ident)
+        if sj and sj.get("conflict"):
+            say(f"  {ident}: NEEDS A LOOK: {steam_conflict_text(b, sj)}")
+        elif sj:
+            say(f"  {ident}: an interrupted Steam game move is recorded (phase {sj.get('phase')}): the next")
+            say("      apply, 'bulk steam apply' or boot finishes or undoes it; snapshots wait until then")
+        else:
+            say(f"  {ident}: NEEDS A LOOK: unreadable journal {state.jpath(ident)}")
+    return left
+
+
+def report_item(b: Bulk, item: Item, mode: str, seen: tuple[set[str], set[str], set[str]]) -> int:
+    """report's lines on one item; 1 if it is not in place. seen: the ids in
+    place so far (done, added to), kept by choice, and waiting for the boot."""
+    done, kept, flagged = seen
+    ctx = b.ctx
+    st, detail = classify(b, item, done, kept)
+    if st == "kept":
+        row(b, describe_paths(ctx, item), kept_text(item, detail))
+        return 0
+    if st == "ok":
+        done.add(item.id)
+    text = item_text(b, item, st, detail)
+    if item.id in flagged and st != "ok":
+        text += "; waits for the next boot (busy)"
+    row(b, describe_paths(ctx, item), text)
+    T = ctx.target(item)
+    if item.nocow and mode == "status" and b.tree.chain(ctx.bulk, item.target) == "ok":
+        report_nocow(b, item, T)
+    if item.flatpak:
+        report_flatpak(b, item.flatpak, T, mode)
+    return int(st != "ok")
+
+
+def report_nocow(b: Bulk, item: Item, target: str) -> None:
+    """status's +C line of a NOCOW item whose target exists."""
+    files, dirs_cow = b.tree.cow_data(target)
+    parents = b.tree.nocow_parents(b.ctx, item)
+    nc = ("yes" if not files and not dirs_cow else f"NO ({files} copy-on-write file(s))") + (
+        f"; NO on {', '.join(b.ctx.short(p) for p in parents)}" if parents else ""
+    )
+    row(b, "", f"+C (NOCOW): {nc}")
+
+
+def report_flatpak(b: Bulk, app: str, target: str, mode: str) -> None:
+    """report's line on whether the Flatpak app may use target."""
+    try:
+        f = b.user.flatpak_state(app, target)
+    except OSError, RuntimeError:
+        f = "?"
+    ftxt = {
+        "absent": "app not installed (nothing to do)",
+        "ok": "ok",
+        "?": "? (flatpak not usable here)",
+        "missing": "add" if mode == "plan" else "MISSING (run bulk apply)",
+    }[f]
+    row(b, f"  flatpak override: {app} may use it", ftxt)
 
 
 def old_steam(b: Bulk) -> None:

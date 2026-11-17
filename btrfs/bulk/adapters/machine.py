@@ -232,6 +232,18 @@ class Primitives:
                 raise RuntimeError(f"copy failed: {err.read().decode(errors='replace').strip()[:300]}")
 
 
+def stat_files(root: str, names: list[str], uid: int | None) -> tuple[int, int]:
+    """tree_stats for the files of one level: (how many are not uid's, bytes of the regular ones)."""
+    others = size = 0
+    for n in names:
+        st = os.lstat(os.path.join(root, n))
+        if uid is not None and st.st_uid != uid:
+            others += 1
+        if stat.S_ISREG(st.st_mode):
+            size += st.st_size
+    return others, size
+
+
 class HomeTree:
     """HomeTreePort over the Primitives: lstat-only looks at the home."""
 
@@ -315,20 +327,27 @@ class HomeTree:
         files, dirs_cow = 0, not is_nocow(top)
         dev = os.lstat(top).st_dev
         for root, dirs, names in os.walk(top):
-            keep = []
-            for d in dirs:
-                st = os.lstat(os.path.join(root, d))
-                if stat.S_ISDIR(st.st_mode) and st.st_dev == dev:
-                    keep.append(d)
-                    if not is_nocow(os.path.join(root, d)):
-                        dirs_cow = True
+            keep, cow = self.same_dev_dirs_cow(root, dirs, dev)
             dirs[:] = keep
+            dirs_cow = dirs_cow or cow
             for n in names:
                 p = os.path.join(root, n)
                 st = os.lstat(p)
                 if stat.S_ISREG(st.st_mode) and st.st_size and not is_nocow(p):
                     files += 1
         return files, dirs_cow
+
+    def same_dev_dirs_cow(self, root: str, dirs: list[str], dev: int) -> tuple[list[str], bool]:
+        """The folders of one level on dev (to walk into), and whether one of them lacks +C."""
+        keep: list[str] = []
+        cow = False
+        for d in dirs:
+            st = os.lstat(os.path.join(root, d))
+            if stat.S_ISDIR(st.st_mode) and st.st_dev == dev:
+                keep.append(d)
+                if not self.machine.is_nocow(os.path.join(root, d)):
+                    cow = True
+        return keep, cow
 
     def is_subvol(self, path: str) -> bool:
         return self.machine.is_subvol(path)
@@ -342,25 +361,31 @@ class HomeTree:
         dev = os.lstat(top).st_dev
         for root, dirs, names in os.walk(top):
             entries += len(dirs) + len(names)
-            keep = []
-            for d in dirs:
-                st = os.lstat(os.path.join(root, d))
-                if uid is not None and st.st_uid != uid:
-                    others += 1
-                if not stat.S_ISDIR(st.st_mode):
-                    continue
-                if st.st_dev != dev or self.machine.is_subvol(os.path.join(root, d)):
-                    foreign = True
-                    continue
-                keep.append(d)
+            keep, dir_others, crossed = self.stat_dirs(root, dirs, dev, uid)
             dirs[:] = keep
-            for n in names:
-                st = os.lstat(os.path.join(root, n))
-                if uid is not None and st.st_uid != uid:
-                    others += 1
-                if stat.S_ISREG(st.st_mode):
-                    size += st.st_size
+            file_others, file_bytes = stat_files(root, names, uid)
+            others += dir_others + file_others
+            size += file_bytes
+            foreign = foreign or crossed
         return entries, size, foreign, others
+
+    def stat_dirs(self, root: str, dirs: list[str], dev: int, uid: int | None) -> tuple[list[str], int, bool]:
+        """tree_stats for the folders of one level: (those to walk into, how
+        many are not uid's, whether one is another subvolume or filesystem)."""
+        keep: list[str] = []
+        others = 0
+        foreign = False
+        for d in dirs:
+            st = os.lstat(os.path.join(root, d))
+            if uid is not None and st.st_uid != uid:
+                others += 1
+            if not stat.S_ISDIR(st.st_mode):
+                continue
+            if st.st_dev != dev or self.machine.is_subvol(os.path.join(root, d)):
+                foreign = True
+                continue
+            keep.append(d)
+        return keep, others, foreign
 
     def changed_since(self, top: str, stamp: int, mindepth: int = 0) -> bool:
         """True if anything at/below top has a ctime >= stamp (ns). ctime cannot
@@ -454,15 +479,10 @@ class HomeTree:
         file that has data, so such a file can only move by a real copy. Any +C
         file counts, empty ones too (the clone is refused before its length is
         looked at). The sample is for the reflink test (u_reflink_probe)."""
-        is_nocow = self.machine.is_nocow
-        nocow, first, sample = 0, "", ""
         st = os.lstat(top)
         if not stat.S_ISDIR(st.st_mode):
-            if stat.S_ISREG(st.st_mode):
-                if is_nocow(top):
-                    return 1, top, ""
-                return 0, "", (top if st.st_size else "")
-            return 0, "", ""
+            return self.nocow_scan_file(top, st)
+        nocow, first, sample = 0, "", ""
         dev = st.st_dev
         for root, dirs, names in os.walk(top):
             dirs[:] = [d for d in dirs if os.lstat(os.path.join(root, d)).st_dev == dev]
@@ -471,9 +491,17 @@ class HomeTree:
                 st = os.lstat(p)
                 if not stat.S_ISREG(st.st_mode):
                     continue
-                if is_nocow(p):
+                if self.machine.is_nocow(p):
                     nocow += 1
                     first = first or p
                 elif st.st_size and not sample:
                     sample = p
         return nocow, first, sample
+
+    def nocow_scan_file(self, top: str, st: os.stat_result) -> tuple[int, str, str]:
+        """steam_nocow_scan of a TOP that is not a folder."""
+        if stat.S_ISREG(st.st_mode):
+            if self.machine.is_nocow(top):
+                return 1, top, ""
+            return 0, "", (top if st.st_size else "")
+        return 0, "", ""
