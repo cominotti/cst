@@ -261,6 +261,20 @@ class LocalFileSystemAdapter:
 type FileOwner = Literal["caller", "root"]
 
 
+def _umask() -> int:
+    """The process's umask, read from /proc (os.umask would change it for a moment, in every thread)."""
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except OSError, ValueError, IndexError:
+        pass
+    old = os.umask(0o022)
+    os.umask(old)
+    return old
+
+
 def _fsync_dir(folder: str) -> None:
     fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
@@ -291,20 +305,33 @@ def _relabel(path: str) -> None:
         print(f"warning: restorecon {path}: {why} (its SELinux label may be wrong)", file=sys.stderr)
 
 
-def write_atomic(path: str, data: bytes | str, *, mode: int, durable: bool = True, owner: FileOwner = "caller") -> None:
+def write_atomic(
+    path: str,
+    data: bytes | str,
+    *,
+    mode: int | Literal["umask"],
+    durable: bool | Literal["file"] = True,
+    owner: FileOwner = "caller",
+    relabel: bool = True,
+) -> None:
     """Replace the file at path with data, atomically: path holds the old or the new file, never a part.
 
     - A unique temporary file in the same folder (mkstemp), mode set exactly
       with fchmod (the umask does not reduce it), then os.replace. A link at
       path is replaced, never followed. Missing folders are created 0755
       (ensure_dir). The temporary file is removed on every error.
-    - durable (the default): the file is fsynced before the rename and the
-      folder after it, so the new content survives a power loss or a hard
-      reset (a boot counter must not lose its increment).
+    - mode "umask": what open(path, "w") gives a new file, 0666 minus the
+      process's umask (for a writer that never set a mode).
+    - durable True (the default): the file is fsynced before the rename and
+      the folder after it, so the new content survives a power loss or a
+      hard reset (a boot counter must not lose its increment). "file": the
+      file only (after a power loss the folder may still name the old file,
+      never a part of the new one). False: no fsync.
     - owner: "caller" leaves the file to whoever writes it; "root" also makes
       it 0:0 when running as root (the installer's files).
-    - As root, the file is relabelled (restorecon); a failure is reported on
-      stderr, not raised.
+    - relabel (the default): as root, the file is relabelled (restorecon); a
+      failure is reported on stderr, not raised. False: the file keeps the
+      label it gets from its folder, and no program is started.
     - str data is written as UTF-8 (surrogateescape: bytes read with it come
       back as they were).
     """
@@ -312,10 +339,11 @@ def write_atomic(path: str, data: bytes | str, *, mode: int, durable: bool = Tru
     parent = os.path.dirname(abs_path)
     ensure_dir(parent, 0o755)
     content = data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data
+    bits = 0o666 & ~_umask() if mode == "umask" else mode
     fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(abs_path)}.", dir=parent)
     try:
         try:
-            os.fchmod(fd, mode)
+            os.fchmod(fd, bits)
             if owner == "root" and os.geteuid() == 0:
                 os.fchown(fd, 0, 0)
             view = memoryview(content)
@@ -330,9 +358,9 @@ def write_atomic(path: str, data: bytes | str, *, mode: int, durable: bool = Tru
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
-    if durable:
+    if durable is True:
         _fsync_dir(parent)
-    if os.geteuid() == 0:
+    if relabel and os.geteuid() == 0:
         _relabel(abs_path)
 
 

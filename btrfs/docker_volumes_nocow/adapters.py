@@ -14,6 +14,7 @@ import subprocess
 import time
 from typing import Any
 
+from cst_core.adapters.files import write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 
@@ -296,12 +297,9 @@ def note_postponed(why: str) -> None:
     if not boots or rec.get("boot_id") != boot:
         boots += 1
     os.makedirs(os.path.dirname(POSTPONED), exist_ok=True)
-    tmp = POSTPONED + ".new"
-    with open(tmp, "w") as f:
-        json.dump({"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}, f)
-        f.write("\n")
-    os.chmod(tmp, 0o644)  # cst doctor reads it as the user
-    os.replace(tmp, POSTPONED)
+    record = {"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
+    # 0644: cst doctor reads it as the user.
+    write_atomic(POSTPONED, json.dumps(record) + "\n", mode=0o644, durable=False, relabel=False)
 
 
 def clear_postponed() -> None:

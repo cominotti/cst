@@ -17,14 +17,20 @@ import pwd
 import signal
 import struct
 import sys
-import tempfile
 import time
 from types import FrameType
 from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter, nocow as inode_attrs
-from cst_core.adapters.files import ensure_dir, is_masked_unit, owned_file_state_at, read_text, unit_file_state_at
+from cst_core.adapters.files import (
+    ensure_dir,
+    is_masked_unit,
+    owned_file_state_at,
+    read_text,
+    unit_file_state_at,
+    write_atomic,
+)
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.domain.errors import Refused
@@ -350,19 +356,8 @@ def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
-    fd, tmp = tempfile.mkstemp(prefix=".vm-backups.", suffix=".tmp", dir=d)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump({"version": 1, "backups": list(entries)}, f, indent=2, sort_keys=True)
-            f.write("\n")
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    text = json.dumps({"version": 1, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
+    write_atomic(path, text, mode=0o644, durable=False, relabel=False)
 
 
 def flag_state(flags: int | None) -> bool | None:

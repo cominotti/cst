@@ -73,6 +73,7 @@ from btrfs.snapshot.domain import (
     snapshot_name,
     wall_to_epoch,
 )
+from cst_core.adapters.files import write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Usage
@@ -129,21 +130,8 @@ class Run:
                 pass
             return
         os.makedirs(self.args.state_dir, mode=0o755, exist_ok=True)
-        tmp = f"{path}.tmp.{os.getpid()}"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644)
-        os.fchmod(fd, 0o644)  # whatever the umask (sudo keeps a user's 077)
-        with os.fdopen(fd, "w") as f:
-            f.write("".join(f"{e}\n" for e in entries))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        if not sync_dir:
-            return
-        dfd = os.open(self.args.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        # 0644 whatever the umask (sudo keeps a user's 077).
+        write_atomic(path, "".join(f"{e}\n" for e in entries), mode=0o644, durable=sync_dir or "file", relabel=False)
 
     def list_add(self, name: str, entry: str) -> None:
         entries = self.read_list(name)

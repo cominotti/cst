@@ -41,7 +41,7 @@ from btrfs.bulk.domain import (
     TreeSize,
     Unexpected,
 )
-from cst_core.adapters.files import read_text
+from cst_core.adapters.files import read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
 from cst_core.domain.text import describe_problems, parse_shell_assignments
@@ -768,18 +768,8 @@ def jpath(ident: str) -> str:
 
 def jwrite(ident: str, j: Mapping[str, Any]) -> None:
     os.makedirs(STATE, mode=0o755, exist_ok=True)
-    tmp = jpath(ident) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(j, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp, jpath(ident))
-    # The rename itself is durable before anything it protects is done.
-    fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    # durable: the rename itself is on disk before anything it protects is done.
+    write_atomic(jpath(ident), json.dumps(j), mode="umask", relabel=False)
 
 
 def jread(ident: str) -> dict[str, Any] | None:
@@ -834,12 +824,7 @@ def flag_add(ident: str) -> None:
 def write_flag(ids: Sequence[str]) -> None:
     if ids:
         os.makedirs(ETC, mode=0o755, exist_ok=True)
-        tmp = FLAG + ".tmp"
-        with open(tmp, "w") as f:
-            f.write("".join(i + "\n" for i in ids))
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, FLAG)
+        write_atomic(FLAG, "".join(i + "\n" for i in ids), mode="umask", durable="file", relabel=False)
     else:
         try:
             os.remove(FLAG)
@@ -880,13 +865,7 @@ def edit_keep(add: Sequence[str], remove: Collection[str]) -> None:
     have = {ln.split("#", 1)[0].strip() for ln in lines}
     lines += [i + "\n" for i in add if i not in have]
     os.makedirs(ETC, mode=0o755, exist_ok=True)
-    tmp = KEEP + ".tmp"
-    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.writelines(lines)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
-    os.rename(tmp, KEEP)
+    write_atomic(KEEP, "".join(lines), mode=0o644, durable="file", relabel=False)  # UTF-8, surrogateescape
 
 
 # ---- Steam: journal (journal-steam-<appid>.json) and the move ----

@@ -17,7 +17,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 from typing import TYPE_CHECKING, Any
@@ -777,10 +776,8 @@ def write_state(home: str, tid: str, data: Mapping[str, Any]) -> None:
     path = state_path(home, tid)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=f".{os.path.basename(path)}.")
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        # 0600: what the temporary file it used to rename into place had.
+        write_atomic(path, json.dumps(data), mode=0o600, durable=False, relabel=False)
     except OSError as e:
         say(f"{tid}: could not save the run summary: {e}", 4)
 
