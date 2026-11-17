@@ -30,6 +30,7 @@ from tests.duplication import (
     BARRIER,
     clones,
     declared_lines,
+    measured_python,
     normalized_python,
     normalized_shell,
     python_clones,
@@ -120,8 +121,7 @@ def _shell_files() -> list[str]:
 
 def measured_lines(source: str, *, type2: bool) -> list[str]:
     """What the measure reads of one source: the bootstrap removed, the declared lines as barriers."""
-    text = without_bootstrap(source)
-    return normalized_python(text, type2=type2, skip=declared_lines(text, records=type2))
+    return measured_python(without_bootstrap(source), type2=type2)
 
 
 def same_names_defined() -> set[str]:
@@ -227,9 +227,9 @@ class DuplicationRatchetTest(unittest.TestCase):
             declared_lines(defaults, records=True), {5, 6, 7, 8}, "fields with defaults, not a plain assignment"
         )
         self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in records.items()}, 8).cross_file, 27)
-        kept = {p: measured_lines(s, type2=True) for p, s in records.items()}
-        self.assertEqual(clones(kept, 8).duplicated, 0)
-        self.assertEqual(sum(len(v) - v.count(BARRIER) for v in kept.values()), 7, "fields are no code lines")
+        report = clones({p: measured_lines(s, type2=True) for p, s in records.items()}, 8)
+        self.assertEqual(report.duplicated, 0)
+        self.assertEqual(report.code_lines, 7, "fields are no code lines")
         # Type 1 still finds a field list copied word for word.
         same = {p: measured_lines(records["dc"].replace("class A", f"class {p}"), type2=False) for p in ("X", "Y")}
         self.assertEqual(clones(same, 8).cross_file, 18)

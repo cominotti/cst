@@ -1030,8 +1030,7 @@ class ArchitectureGateTest(unittest.TestCase):
         }
         # No ports, application, wiring or presenter: nothing counts against it ...
         self.assertEqual(io_measure(light, full=frozenset()), {"vm cli": 0})
-        for rel in ("vm/domain.py",):
-            self.assertEqual(architecture_problems(light[rel], rel, "domain"), [])
+        self.assertEqual(architecture_problems(light["vm/domain.py"], "vm/domain.py", "domain"), [])
         # ... and it does not meet the full profile, so it is never told to join HEXAGONAL_PACKAGES.
         self.assertTrue(hexagonal_problems("vm", "vm/wiring.py", light))
         # Its domain is still held pure and its cli.py's other I/O still counts.

@@ -195,6 +195,11 @@ def _assigns_parameters_only(node: ast.FunctionDef) -> bool:
     return True
 
 
+def _lines(node: ast.stmt) -> range:
+    """The 1-based lines a statement spans."""
+    return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+
 def declared_lines(source: str, *, records: bool) -> set[int]:
     """The lines the measure leaves out (1-based): `Protocol` bodies; with `records`, also record
     fields and `__init__` bodies that only assign their parameters (see the module docstring)."""
@@ -204,15 +209,21 @@ def declared_lines(source: str, *, records: bool) -> set[int]:
         return set()
     out: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and any(_simple_name(b) == "Protocol" for b in node.bases):
-            out.update(range(node.body[0].lineno, (node.end_lineno or node.lineno) + 1))
-        elif records and isinstance(node, ast.ClassDef) and _is_record(node):
-            for stmt in node.body:
-                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                    out.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+        if isinstance(node, ast.ClassDef):
+            if any(_simple_name(b) == "Protocol" for b in node.bases):
+                out.update(range(node.body[0].lineno, _lines(node).stop))
+            elif records and _is_record(node):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        out.update(_lines(stmt))
         elif records and isinstance(node, ast.FunctionDef) and _assigns_parameters_only(node):
-            out.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+            out.update(_lines(node))
     return out
+
+
+def measured_python(source: str, *, type2: bool) -> list[str]:
+    """What the measure reads of one source: normalized, with its `declared_lines` as barriers."""
+    return normalized_python(source, type2=type2, skip=declared_lines(source, records=type2))
 
 
 def normalized_shell(source: str) -> list[str]:
@@ -265,8 +276,7 @@ def python_clones(
     norm: dict[str, list[str]] = {}
     for rel in files:
         with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
-            text = prepare(fh.read())
-        norm[rel] = normalized_python(text, type2=type2, skip=declared_lines(text, records=type2))
+            norm[rel] = measured_python(prepare(fh.read()), type2=type2)
     return clones(norm, window)
 
 

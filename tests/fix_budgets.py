@@ -30,6 +30,7 @@ Standard library only.
 import ast
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
+import functools
 import os
 import re
 import sys
@@ -85,15 +86,18 @@ class Plan:
 ARCH: Final = "tests/test_architecture.py"
 DUP: Final = "tests/test_duplication.py"
 TYPING: Final = "tests/test_typing_budget.py"
+# Each of these measures two tables: measure once per run.
+_primitives: Final = functools.cache(arch.measure_primitives)
+_typing: Final = functools.cache(typing_budget.measure)
 TABLES: Final[tuple[Table, ...]] = (
     Table(ARCH, "CLI_CEILINGS", "budget", arch.cli_sizes),
     Table(ARCH, "IO_BUDGETS", "budget", arch.measure_io),
-    Table(ARCH, "PRIMITIVE_BUDGETS", "budget", lambda: arch.measure_primitives()[0]),
-    Table(ARCH, "LITERAL_BUDGETS", "budget", lambda: arch.measure_primitives()[1]),
+    Table(ARCH, "PRIMITIVE_BUDGETS", "budget", lambda: _primitives()[0]),
+    Table(ARCH, "LITERAL_BUDGETS", "budget", lambda: _primitives()[1]),
     Table(ARCH, "UNLAYERED_ALLOWED", "names", arch.unlayered_modules),
     Table(ARCH, "CORE_NAMES_WITHOUT_USER", "names", arch.core_names_missing_a_user),
-    Table(TYPING, "ANY_BUDGETS", "budget", lambda: typing_budget.measure()[0]),
-    Table(TYPING, "CAST_BUDGETS", "budget", lambda: typing_budget.measure()[1]),
+    Table(TYPING, "ANY_BUDGETS", "budget", lambda: _typing()[0]),
+    Table(TYPING, "CAST_BUDGETS", "budget", lambda: _typing()[1]),
     Table(DUP, "CEILINGS", "ceiling", dup.measure),
     Table(DUP, "ALLOWED_SAME_NAMES", "names", dup.same_names_defined),
     Table(DUP, "ALLOWED_SHELL_SAME_NAMES", "names", dup.shell_same_names_defined),
@@ -105,10 +109,12 @@ TABLES: Final[tuple[Table, ...]] = (
 def table_node(source: str, name: str) -> ast.Dict:
     """The dict literal assigned to the module-level `name` in `source`."""
     for node in ast.parse(source).body:
-        target = node.target if isinstance(node, ast.AnnAssign) else None
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-        value = node.value if isinstance(node, ast.Assign | ast.AnnAssign) else None
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        else:
+            continue
         if isinstance(target, ast.Name) and target.id == name and isinstance(value, ast.Dict):
             return value
     raise ValueError(f"{name}: no module-level dict literal of that name")
@@ -195,7 +201,7 @@ def rewrite(source: str, name: str, new: Mapping[str, object]) -> str:
         if value_node.end_lineno != value_node.lineno:
             raise ValueError(f"{name}: {key!r}: a number written over several lines")
         line = lines[row]
-        text = repr(new[key]).encode()
+        text = repr(to).encode()
         edits.append((row, row, [line[: value_node.col_offset] + text + line[value_node.end_col_offset or 0 :]]))
     for first, last, repl in sorted(edits, reverse=True):
         lines[first : last + 1] = repl
