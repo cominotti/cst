@@ -2018,16 +2018,71 @@ class ToolboxTest(Scratch):
         self.assertEqual(doc_adapters.Host(env).path("/var/lib/cst-alerts"), "/var/lib/cst-alerts")
 
     def test_missing_flatpak_spawn(self) -> None:
-        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1"))
+        # The Host's own PATH finds the commands (only the stub folder here: no real flatpak-spawn).
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1", PATH=self.bin))
         os.unlink(os.path.join(self.bin, "flatpak-spawn"))
-        old = os.environ["PATH"]
-        os.environ["PATH"] = self.bin
-        try:
-            rc, _, err = host.run(["systemctl", "--failed"])
-        finally:
-            os.environ["PATH"] = old
+        rc, _, err = host.run(["systemctl", "--failed"])
         self.assertEqual(rc, 127)
         self.assertIn("flatpak-spawn", err)
+
+
+class HermeticTest(Scratch):
+    """No command the doctor starts may reach the real host: each one, and
+    the command flatpak-spawn --host would run, resolves in the stub folder
+    through the PATH the command really gets (the Host's env)."""
+
+    def run_recorded(self, container: str) -> list[tuple[str, str | None]]:
+        """Every check in-process; [(command, where it resolves)] of what it
+        started. A check that crashed (also on a command the recorder could
+        not take) fails the test: it would hide its commands."""
+        real_run = subprocess.run
+        seen: list[tuple[str, str | None]] = []
+
+        def recording_run(
+            args: Sequence[str],
+            *,
+            check: bool,
+            capture_output: bool,
+            text: bool,
+            timeout: float,
+            stdin: int,
+            env: Mapping[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            path = (os.environ if env is None else env).get("PATH")
+            args = list(args)
+            names = [args[0]] + ([args[2]] if args[:2] == ["flatpak-spawn", "--host"] and len(args) > 2 else [])
+            found = [(n, shutil.which(n, path=path)) for n in names]
+            seen.extend(found)
+            if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
+                return subprocess.CompletedProcess(args, 127, "", "not run: outside the stub folder")
+            return real_run(
+                args, check=check, capture_output=capture_output, text=text, timeout=timeout, stdin=stdin, env=env
+            )
+
+        os.makedirs(self.virsh_dir, exist_ok=True)
+        with open(os.path.join(self.virsh_dir, "list.txt"), "w") as f:
+            f.write("vm1\n")
+        self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(doc_adapters.subprocess, "run", recording_run):
+            results = doc_app.run_checks(host, doc_cli.wired_checks(doc_adapters.VmTools()))
+        crashed = [r.message for _, r in results if "the check itself failed" in r.message]
+        self.assertEqual(crashed, [])
+        return seen
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.virsh_dir = os.path.join(self.tmp, "virsh")
+
+    def test_every_command_is_a_stub(self) -> None:
+        for container in ("0", "1"):
+            with self.subTest(container=container):
+                seen = self.run_recorded(container)
+                self.assertTrue(seen, "the doctor ran no command at all")
+                outside = [(n, w) for n, w in seen if w is None or os.path.dirname(w) != self.bin]
+                self.assertEqual(outside, [], "commands that would reach the real host")
+                self.assertIn("rpm-ostree", {n for n, _ in seen})
+                self.assertIn("virsh", {n for n, _ in seen})
 
 
 class CstIntegrationTest(Scratch):

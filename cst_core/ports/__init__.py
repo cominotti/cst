@@ -1,7 +1,7 @@
 """Port interfaces (typing.Protocol) and shared boundary errors for CST adapters."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from cst_core.domain.install import OnDisk
@@ -14,6 +14,8 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    # The command that ran, for messages (a fake may leave it empty); not compared.
+    argv: tuple[str, ...] = field(default=(), compare=False)
 
 
 class CommandFailed(RuntimeError):

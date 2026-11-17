@@ -20,6 +20,7 @@ from swap.domain import (
     SwapStatusReport,
     ZswapSummary,
     human,
+    killed_text,
     pct,
 )
 
@@ -264,6 +265,8 @@ def run_command(cmd: str, service: SwapApplicationService, *, hint: str, out: Te
             if text:
                 _write_raw(text, stream)
                 stream.flush()
+        if exc.returncode < 0:
+            print(killed_text(service.prog, exc.argv, exc.returncode), file=err)
         return shell_exit_status(exc.returncode)
     except (MissingDesiredFileError, OSError) as exc:
         print(f"{service.prog}: ERROR: {exc}", file=err)

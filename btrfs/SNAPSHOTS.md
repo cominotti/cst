@@ -1392,7 +1392,7 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | `snapshots nas setup ...` | See [section 7](#7-optional-backup-on-the-nas-restic). |
 | `snapshots nas status / run / disable / enable` | See [section 7](#other-nas-commands). |
 | `snapshots chrome-cache [status\|apply\|off]` | Only Chrome's cache flags ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)): show their state and the old cache left on the disk, add them (also done by `setup`), or remove them for good (`off`). Runs as your user. |
-| `bulk plan` | Dry run of the `~/Bulk` step: each item and what would happen, with sizes ([section 3](#order-with-snapshots-setup)). Changes nothing. |
+| `bulk plan` | Dry run of the `~/Bulk` step: each item and what would happen, with sizes ([section 3](#order-with-snapshots-setup)); a size `du` could not read whole (a folder it may not enter) shows as `at least ...`. Changes nothing. |
 | `bulk apply` | Fills `~/Bulk` (also done by `snapshots setup`). Safe to re-run; busy items wait for the next boot. |
 | `bulk status` | The state of each `~/Bulk` item, the `+C` state of the emulator folders (`~/Bulk/emulators` and the AVD folder), items waiting for the boot, old game data still in /home. |
 | `bulk keep ID...` | Keeps these items in /home on purpose: `bulk apply` leaves them alone, and they are not reported as problems ([section 3](#bulk-one-folder-for-everything-you-can-download-again) has the ids). Wrong ids are refused, with the list of valid ones. |
@@ -1574,7 +1574,10 @@ also runs when such a record exists). Otherwise run
 was already complete) or undoes it (the data goes back to the old path), then
 tries again. Snapshots wait until the record is gone (except for the `+C`
 repair inside `~/Bulk`, whose data is not in /home: there `status` says
-`snapshots do not wait`).
+`snapshots do not wait`). If the folder in `~/Bulk` that the move wrote has
+become a symbolic link, the repair (which runs as root) does not follow it: it
+says `NEEDS A LOOK: ... is a symbolic link (not followed)` and keeps the
+record.
 
 **`bulk status` says `NEEDS A LOOK: ... was created again while the data waited in ...`.**
 A move was interrupted halfway, and before it was undone a program (or you)

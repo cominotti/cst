@@ -21,6 +21,7 @@ from btrfs.bulk.adapters import (
     chain,
     cow_data,
     du_bytes,
+    entries_nofollow,
     empty_dir,
     flag_add,
     free_bytes,
@@ -70,9 +71,11 @@ from btrfs.bulk.domain import (
     MARGIN,
     STATE_TEXT,
     STEAMAPPS,
+    TreeSize,
     Unexpected,
     gib,
     kept_text,
+    du_text,
 )
 from btrfs.bulk.steam import steam_conflict_text, steam_recover_all
 
@@ -209,7 +212,7 @@ def recover(ctx: Ctx) -> list[str]:
                 if kind(L) == "absent" and kind(T) == "dir":
                     as_user(ctx, u_symlink, L, T)
                     log(f"  {item.id}: finished an interrupted move")
-                elif not (kind(L) == "link" and link_target(L) == T) and kind(T) == "dir" and os.listdir(T):
+                elif not (kind(L) == "link" and link_target(L) == T) and entries_nofollow(T):
                     # Moved, then the old path was created again (an app)
                     # before the link: the moved subvolume is the full data.
                     raise Unexpected(
@@ -261,9 +264,9 @@ def migrate(ctx: Ctx, item: Item, src: str, link: str | None) -> str:
         return "busy"
     if item.nocow:
         # A real copy: the data exists twice until the old tree is deleted.
-        need = du_bytes(src) + MARGIN
-        if free_bytes(ctx.bulk) < need:
-            raise RuntimeError(f"not enough free space for a {gib(need - MARGIN)} copy (plus {gib(MARGIN)} kept free)")
+        size = du_bytes(src)
+        if free_bytes(ctx.bulk) < size.total + MARGIN:
+            raise RuntimeError(f"not enough free space for a {du_text(size)} copy (plus {gib(MARGIN)} kept free)")
     as_user(ctx, u_mkdirs, ctx.bulk, os.path.dirname(item.target), item.nocow)
     stamp = as_user(ctx, u_prepare, src, new, item.nocow)
     j: dict[str, Any] = {
@@ -553,16 +556,16 @@ def item_text(ctx: Ctx, item: Item, state: str, detail: str, mode: str) -> str:
         how = "real copy into a +C folder" if item.nocow else "reflink clone, no data written"
         stale = (
             f"a real folder again (its tool's clean command removed the link): delete the stale "
-            f"{gib(du_bytes(T))} in ~/Bulk, then "
+            f"{du_text(du_bytes(T))} in ~/Bulk, then "
             if detail == "stale"
             else ""
         )
-        return f"{stale}move {gib(du_bytes(L))} into ~/Bulk ({how}), then the link"
+        return f"{stale}move {du_text(du_bytes(L))} into ~/Bulk ({how}), then the link"
     if state == "nocow":
-        return f"rewrite without copy-on-write ({detail}, {gib(du_bytes(T))})"
+        return f"rewrite without copy-on-write ({detail}, {du_text(du_bytes(T))})"
     if state == "unexpected":
-        size = du_bytes(L) if L and kind(L) == "dir" else 0
-        there = f"; {gib(size)} there, still in /home snapshots" if size >= BIG else ""
+        size = du_bytes(L) if L and kind(L) == "dir" else TreeSize(0, True)
+        there = f"; {du_text(size)} there, still in /home snapshots" if size.total >= BIG else ""
         return f"NEEDS A LOOK: {detail} (nothing touched{there})"
     return STATE_TEXT.get(state, state) + (f" ({detail})" if detail else "")
 
@@ -670,7 +673,7 @@ def old_steam(ctx: Ctx) -> None:
         row("~/" + STEAMAPPS, "a subvolume (earlier setup): left out of snapshots")
         return
     size = du_bytes(p)
-    if size >= BIG:
-        row("~/" + STEAMAPPS, f"still {gib(size)} of games here, in /home snapshots: move them to")
+    if size.total >= BIG:
+        row("~/" + STEAMAPPS, f"still {du_text(size)} of games here, in /home snapshots: move them to")
         row("", "~/Bulk/steam with Steam closed: 'cst btrfs bulk steam plan', then 'bulk steam apply'")
         row("", "(btrfs/SNAPSHOTS.md, section 3)")

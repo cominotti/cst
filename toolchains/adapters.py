@@ -57,6 +57,7 @@ from toolchains.domain import (
     TOOL_FILES_MAX,
     TRASH_NAME,
     TRASH_PREFIX,
+    UV_LOCK_TIMED_OUT,
     UV_LOCK_WAIT,
     WORKSPACE_REL,
     WRAPPER_REL,
@@ -832,6 +833,27 @@ def uv_lock_busy(cache: str) -> bool:
         return True
     finally:
         os.close(fd)
+
+
+def uv_prune_preview(
+    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]], cache: str
+) -> tuple[list[str], bool]:
+    """(lines, ok) of `uv cache prune --dry-run` on cache (run: uv with these
+    arguments). A uv that fails, cannot start or does not end is a failure
+    line, and plan exits 1; waiting in vain for the cache lock another uv
+    holds is not a failure (apply skips that case too)."""
+    try:
+        r = run(["cache", "prune", "--dry-run", "--cache-dir", cache, "--no-progress"])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"uv cache prune --dry-run failed: {e}"], False
+    text = (r.stdout + r.stderr).strip()
+    lines = [f"uv: {line}" for line in text.splitlines()]
+    if r.returncode == 0:
+        return lines, True
+    if UV_LOCK_TIMED_OUT.search(text) or uv_lock_busy(cache):
+        lines.append("uv cache prune --dry-run waited for the cache lock (another uv runs): no preview this time")
+        return lines, True
+    return lines + [f"uv cache prune --dry-run failed (exit {r.returncode})"], False
 
 
 def rustup_home(home: str) -> str:

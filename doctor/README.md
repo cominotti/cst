@@ -547,4 +547,7 @@ and stub `rpm-ostree`, `systemctl`, `findmnt`, `stat`,
 `virsh` and `flatpak-spawn` programs that log every call. They check the tricky
 names, the fix command, the btrfs levels and layouts, the exit codes, the
 toolbox path, the `cst status` section, and that only read-only queries were
-made.
+made. The doctor runs its commands with the environment it was given (its
+`PATH` finds them), so the stubs reach every command; a test checks that no
+command a run starts, nor the one `flatpak-spawn --host` would run, resolves
+outside the stub folder.

@@ -1,8 +1,9 @@
 """Pure domain model, parsing, and calculations for the swap module."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import re
+import shlex
 from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec
@@ -453,6 +454,12 @@ class SwapStatusReport:
     devices: tuple[SwapDeviceRow, ...]
     cgroups: tuple[CgroupSwapRow, ...]
     psi_lines: tuple[str, ...]
+
+
+def killed_text(prog: str, argv: Sequence[str], returncode: int) -> str:
+    """The line for a command that signal N killed (returncode -N), as bash
+    printed "Terminated" for one: "PROG: COMMAND was killed by signal N"."""
+    return f"{prog}: {shlex.join(argv) or 'a command'} was killed by signal {-returncode}"
 
 
 @dataclass(frozen=True, slots=True)

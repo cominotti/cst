@@ -104,6 +104,7 @@ from vm.domain import (
     WINDOWS_STEPS,
     agent_state,
     convert_lines,
+    disk_label,
     domain_parts,
     forget_args,
     guest_kind,
@@ -641,7 +642,7 @@ def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], li
                 continue
             if OVERLAY_MARK in d["source"] or d["backing"]:
                 raise Refused(
-                    f"{vm}: disk {d['target']} runs on {d['source']} with a backing chain (an overlay "
+                    f"{vm}: {disk_label(d['target'], word='disk ')} runs on {d['source']} with a backing chain (an overlay "
                     f"left by an earlier backup?). Put it back first; `{CST} doctor` shows the commands"
                 )
             base = os.path.realpath(d["source"])

@@ -41,6 +41,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
+from toolchains import adapters as tc_adapters
 from toolchains.tests.test_prune_rust_build import NOW, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
@@ -363,7 +364,12 @@ class UvBase(RulesBase):
         os.environ["FAKE_UV_LOG"] = self.uv_log
         self.fake_uv()
 
-    def fake_uv(self, prune: str = 'echo "Removed 3 files (1.5MiB)"', help_extra: str = "") -> None:
+    def fake_uv(
+        self,
+        prune: str = 'echo "Removed 3 files (1.5MiB)"',
+        help_extra: str = "",
+        dry: str = 'echo "Would remove 2 files (1.0MiB)"',
+    ) -> None:
         self.exe(
             os.path.join(self.bin, "uv"),
             f"""#!/bin/sh
@@ -371,7 +377,7 @@ echo "$* | $UV_LOCK_TIMEOUT" >>"$FAKE_UV_LOG"
 case "$*" in
     --version) echo "uv 0.0.0-test" ;;
     "cache prune --help") echo "Usage: uv cache prune [OPTIONS]"; echo "      --force"; echo "{help_extra}" ;;
-    "cache prune --dry-run"*) echo "Would remove 2 files (1.0MiB)" ;;
+    "cache prune --dry-run"*) {dry} ;;
     "cache prune"*) {prune} ;;
 esac
 """,
@@ -415,9 +421,37 @@ class UvTest(UvBase):
     def test_dry_run_when_uv_has_one(self) -> None:
         os.makedirs(self.cache)
         self.fake_uv(help_extra="      --dry-run")
-        _rc, out = self.run_main("prune", "plan", "python")
+        rc, out = self.run_main("prune", "plan", "python")
+        self.assertEqual(rc, 0, out)
         self.assertIn("uv: Would remove 2 files", out)
+        self.assertNotIn("failed", out)
         self.assertTrue(self.uv_calls()[0].startswith("cache prune --dry-run"))
+
+    def test_a_failed_dry_run_is_marked_failed(self) -> None:
+        os.makedirs(self.cache)
+        self.fake_uv(help_extra="      --dry-run", dry='echo "error: cache is corrupt" >&2; exit 2')
+        rc, out = self.run_main("prune", "plan", "python:uv")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("  uv: error: cache is corrupt\n  uv cache prune --dry-run failed (exit 2)\n", out)
+        self.assertIn("(plan: nothing deleted)", out)
+        # A uv that cannot start or does not end is a failure too.
+        for exc in (PermissionError(13, "Permission denied"), subprocess.TimeoutExpired(["uv"], 60)):
+
+            def run(_args: Sequence[str], exc: Exception = exc) -> subprocess.CompletedProcess[str]:
+                raise exc
+
+            lines, ok = tc_adapters.uv_prune_preview(run, self.cache)
+            self.assertFalse(ok)
+            self.assertEqual(lines, [f"uv cache prune --dry-run failed: {exc}"])
+
+    def test_a_dry_run_that_waits_for_another_uv_is_no_failure(self) -> None:
+        os.makedirs(self.cache)
+        wait = 'echo "error: Timeout (5s) when waiting for lock on `/c/.lock` at `/c`, is another uv process running?" >&2; exit 2'
+        self.fake_uv(help_extra="      --dry-run", dry=wait)
+        rc, out = self.run_main("prune", "plan", "python:uv")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("waited for the cache lock (another uv runs): no preview this time", out)
+        self.assertNotIn("dry-run failed", out)
 
     def test_held_lock_skips(self) -> None:
         os.makedirs(self.cache)

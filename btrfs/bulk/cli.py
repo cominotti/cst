@@ -49,6 +49,7 @@ from btrfs.bulk.domain import (
     Unexpected,
     gib,
     hms,
+    du_text,
 )
 from btrfs.bulk.items import apply, classify, exit_status, recover, report, row
 from btrfs.bulk.steam import (
@@ -187,8 +188,8 @@ def steam_print(ctx: Ctx, sv: Mapping[str, Any]) -> None:
     for a in sv["apps"]:
         sc = os.path.join(src, "steamapps", "shadercache", a["id"])
         if a["state"] in ("move", "ok") and kind(sc) == "dir" and not empty_dir(sc):
-            row(f"shader cache of {a['id']}", f"{gib(du_bytes(sc))} stays (steamapps/shadercache/{a['id']} of the main")
-            row("", "library): Steam builds a new one in ~/Bulk/steam; then delete the old one")
+            row(f"shader cache of {a['id']}", f"{du_text(du_bytes(sc))} stays (steamapps/shadercache/{a['id']}")
+            row("", "of the main library): Steam builds a new one in ~/Bulk/steam; then delete the old one")
     if sv["space"]:
         row("free space", f"NEEDS A LOOK: {sv['space']}")
     if sv["copy_bytes"]:

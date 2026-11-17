@@ -19,7 +19,6 @@ from btrfs.docker_gc.adapters import (
     KEEP_IMAGE_DAYS,
     LAST_RUN,
     LAST_USED,
-    PROTECTED,
     STATE_DIR,
     ask,
     container_use,
@@ -27,6 +26,7 @@ from btrfs.docker_gc.adapters import (
     docker,
     docker_up,
     inspect_all,
+    is_protected,
     load_state,
     locked,
     log,
@@ -131,11 +131,6 @@ def record() -> None:
 
 
 # ---- collection -----------------------------------------------------------------------
-def is_protected(im: Mapping[str, Any]) -> bool:
-    refs = (im.get("RepoTags") or []) + (im.get("RepoDigests") or [])
-    return any(r.startswith(PROTECTED) for r in refs)
-
-
 def plan(now: float, timed: bool = True) -> dict[str, Any]:
     """What to remove. timed=True: the weekly run (the recorder's start counts
     as a use; protected registries never; no images without the recorder).
@@ -285,7 +280,10 @@ def apply(p: Mapping[str, Any]) -> int:
         if why:
             log(5, f"kept image {(img['tags'] or [img['id']])[0]}: {why}")
     # --all: unused cache of any kind; until= is measured from its last use.
-    docker("builder", "prune", "-f", "--all", "--filter", f"until={KEEP_BUILD_CACHE_DAYS * 24}h", check=False)
+    r = docker("builder", "prune", "-f", "--all", "--filter", f"until={KEEP_BUILD_CACHE_DAYS * 24}h", check=False)
+    if r.returncode != 0:
+        failed += 1
+        log(4, f"could not prune the build cache: {r.stderr.strip()[:100]}")
     return failed
 
 

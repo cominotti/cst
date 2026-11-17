@@ -51,21 +51,21 @@ class SubprocessCommandRunner:
         except FileNotFoundError as exc:
             if check:
                 raise CommandFailed(cmd, 127, "", str(exc)) from None
-            return CommandResult(returncode=127, stdout="", stderr=str(exc))
+            return CommandResult(returncode=127, stdout="", stderr=str(exc), argv=tuple(cmd))
         except subprocess.TimeoutExpired as exc:
             msg = f"timed out after {timeout}s" if timeout is not None else "command timed out"
             out = _decode_stream(exc.stdout)
             err = _decode_stream(exc.stderr) or msg
             if check:
                 raise CommandFailed(cmd, 124, out, err) from None
-            return CommandResult(returncode=124, stdout=out, stderr=err)
+            return CommandResult(returncode=124, stdout=out, stderr=err, argv=tuple(cmd))
         except OSError as exc:
             if check:
                 raise CommandFailed(cmd, 126, "", str(exc)) from None
-            return CommandResult(returncode=126, stdout="", stderr=str(exc))
+            return CommandResult(returncode=126, stdout="", stderr=str(exc), argv=tuple(cmd))
         if check and proc.returncode != 0:
             raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
-        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, argv=tuple(cmd))
 
 
 class HostExecutionContext:

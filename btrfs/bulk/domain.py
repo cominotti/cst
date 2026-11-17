@@ -6,6 +6,7 @@ Steam's file formats (VDF text, libraryfolders.vdf and appmanifest rules).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from typing import NoReturn
 import os
@@ -108,6 +109,20 @@ KEEP_HEADER = (
 def gib(n: int) -> str:
     """GiB from 0.1 GiB on, else whole MiB (floored)."""
     return format_bytes_gib_mib(n, gib_threshold=BIG / 10)
+
+
+@dataclass(frozen=True, slots=True)
+class TreeSize:
+    """What du counted under a path. complete is False when du could not
+    read all of it: total is then only a lower bound."""
+
+    total: int
+    complete: bool
+
+
+def du_text(size: TreeSize) -> str:
+    """gib(total), as "at least ..." when part of the tree could not be read."""
+    return gib(size.total) if size.complete else f"at least {gib(size.total)}"
 
 
 def kept_text(item: Item, detail: str) -> str:

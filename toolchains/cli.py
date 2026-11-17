@@ -69,6 +69,7 @@ from toolchains.adapters import (
     user_cargo,
     uv_env,
     uv_lock_busy,
+    uv_prune_preview,
     workspace_metadata,
     wrapper_path,
     write_cfg,
@@ -980,18 +981,15 @@ class PythonUv(Target):
         if wait:
             say(f"  the timer would skip it: {wait}; named on the command line it runs")
         if dry:
-            try:
-                r = self.run_uv(uv, ["cache", "prune", "--dry-run", "--cache-dir", c, "--no-progress"], UV_TIMEOUT)
-                for line in (r.stdout + r.stderr).strip().splitlines():
-                    say(f"  uv: {line}")
-            except (OSError, subprocess.TimeoutExpired) as e:
-                say(f"  uv cache prune --dry-run: {e}")
-        else:
-            say(
-                "  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
-                "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
-                "only known afterwards"
-            )
+            lines, ok = uv_prune_preview(lambda args: self.run_uv(uv, args, UV_TIMEOUT), c)
+            for line in lines:
+                say(f"  {line}")
+            return 0 if ok else 1
+        say(
+            "  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
+            "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
+            "only known afterwards"
+        )
         return 0
 
     def apply(self) -> int:

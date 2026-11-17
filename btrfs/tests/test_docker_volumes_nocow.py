@@ -288,7 +288,8 @@ class FakeSystem:
                 raise AssertionError(f"unexpected chcon call: {args}")
             if self.chcon_rc == 0:
                 self.copy_label(args[2], args[3])
-            return done(self.chcon_rc)
+                return done()
+            return done(self.chcon_rc, "", f"chcon: failed to change context of '{args[3]}': Operation not permitted\n")
         if args[0] == "btrfs":
             if args[:4] != ["btrfs", "filesystem", "usage", "-b"]:
                 raise AssertionError(f"unexpected btrfs call: {args}")
@@ -993,6 +994,26 @@ class MigrateTest(Base):
                 self.migrate_refused(
                     self.fs.copy_then(change), f"copy check failed (SELinux label of {why})", self.labelled_volume
                 )
+
+    def test_a_failed_chcon_refuses_the_copy_when_labels_are_kept(self) -> None:
+        # chcon --reference labels the empty copy first; cp -a only fixes the
+        # top folder, so a failed chcon is refused before anything is copied.
+        self.fs.chcon_rc = 1
+        new = os.path.join(self.vols, "cow", "_data.nocow-new")
+        why = f"SELinux label not copied: chcon: failed to change context of '{new}': Operation not permitted"
+        self.migrate_refused(self.fs.copy, why, self.labelled_volume)
+        self.assertEqual(self.fs.commands("cp"), [])
+
+    def test_a_failed_chcon_is_ignored_without_labels(self) -> None:
+        # SELinux disabled: no labels to copy, chcon cannot work, nothing changes.
+        top = self.volume("cow")
+        self.fs.chcon_rc = 1
+        self.schedule()
+        rc, out = self.call(nocow_cli.migrate)
+        self.assertEqual(rc, 0)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+        self.assertEqual(len(self.fs.commands("chcon")), 1)
 
     def test_labels_equal_up_to_the_trailing_nul(self) -> None:
         top = self.labelled_volume()

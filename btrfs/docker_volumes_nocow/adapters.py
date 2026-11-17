@@ -333,6 +333,18 @@ def label(path: str) -> bytes | None:
     return value.rstrip(b"\0")
 
 
+def reference_label(data: str, new: str) -> None:
+    """Give the empty folder new the SELinux label of data (chcon
+    --reference), before anything is copied into it. When data has a label
+    (SELinux keeps labels here) and chcon fails, new is removed and
+    RuntimeError raised: a container could not open the copy. Without labels
+    (SELinux disabled) chcon cannot work and its failure changes nothing."""
+    r = subprocess.run(["chcon", "--reference", data, new], check=False, capture_output=True, text=True)
+    if r.returncode != 0 and label(data) is not None:
+        shutil.rmtree(new, ignore_errors=True)
+        raise RuntimeError(f"SELinux label not copied: {r.stderr.strip()[:200] or f'chcon exit {r.returncode}'}")
+
+
 def labels(top: str) -> dict[str, bytes | None]:
     """{path relative to top: label} for top and every entry below it, walked
     like cow_files (a link is an entry; another filesystem is not entered)."""

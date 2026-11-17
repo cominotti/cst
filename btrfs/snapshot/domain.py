@@ -381,6 +381,12 @@ class Source:
     skips: list[str] = dataclasses.field(default_factory=list)  # --caches-skip, relative to path
 
 
+def require_absolute(option: str, path: str | None) -> None:
+    """Usage unless path is absolute (None: the option was not given)."""
+    if path is not None and not path.startswith("/"):
+        raise Usage(f"{option} must be absolute")
+
+
 def parse_source(text: str, need_policy: bool = True) -> Source:
     if "=" not in text:
         raise Usage(f"--source {text!r}: expected NAME=PATH:POLICY")

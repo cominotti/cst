@@ -15,10 +15,11 @@ import sys
 import tempfile
 from typing import NoReturn
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from cst_core.adapters import HostExecutionContext
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult
@@ -1220,6 +1221,53 @@ class SwapApplyOutputTest(_SwapScratch):
         fs = self._fs()
         killed = _ReloadKilled(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
         self.assertEqual(self._apply(self._service(systemd=killed, fs=fs)[0])[0], 128 + signal.SIGKILL)
+
+    def _killer_runner(self, program: str, results: Mapping[str, CommandResult]) -> _ScriptedRunner:
+        """A runner where program is a real child that SIGTERM kills (a stub in a scratch PATH), the rest scripted."""
+        stubs = tempfile.mkdtemp(prefix="cst-swap-killed-")
+        self.addCleanup(shutil.rmtree, stubs)
+        stub = os.path.join(stubs, program)
+        with open(stub, "w") as f:
+            f.write("#!/usr/bin/python3 -I\nimport os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n")
+        os.chmod(stub, 0o755)
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": stubs}))
+        real = SubprocessCommandRunner()
+
+        class _Killer(_ScriptedRunner):
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                check: bool = False,
+                timeout: float | None = None,
+                input_text: str | None = None,
+                env: Mapping[str, str] | None = None,
+            ) -> CommandResult:
+                if argv[0] != program:
+                    return super().run(argv, check=check, timeout=timeout, input_text=input_text, env=env)
+                self.calls.append(list(argv))
+                return real.run(argv, check=check, timeout=timeout, input_text=input_text, env=env)
+
+        return _Killer(results)
+
+    def test_a_command_killed_by_a_signal_says_so(self) -> None:
+        # bash printed "line N: PID Terminated  COMMAND"; cst swap names the command and the signal.
+        prog = self.env.prog
+        runner = self._killer_runner("blockdev", {})
+        rc, _out, err = self._apply(self._service(system=LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter()))[0])
+        self.assertEqual(rc, 128 + signal.SIGTERM)
+        self.assertEqual(err, f"{prog}: blockdev --getsize64 {self.spec.device_path} was killed by signal 15\n")
+
+    def test_a_killed_sysctl_says_so_after_its_output(self) -> None:
+        prog = self.env.prog
+        size = CommandResult(0, f"{self.spec.expected_size_bytes}\n", "")
+        runner = self._killer_runner("sysctl", {"blockdev": size})
+        rc, out, err = self._apply(self._service(system=LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter()))[0])
+        self.assertEqual(rc, 128 + signal.SIGTERM, err)
+        self.assertTrue(err.endswith(f"{prog}: sysctl -q -p {self.env.sysctl_conf} was killed by signal 15\n"), err)
+        self.assertIn("== sysctl", out)
+        self.assertNotIn("== machine.slice", out)
+        self.assertEqual(D.killed_text("cst swap", (), -9), "cst swap: a command was killed by signal 9")
 
     def test_a_failing_write_is_an_error_line_not_a_traceback(self) -> None:
         fs = _ZswapWriteFails({self.spec.device_path: "/dev/nvme0n1p5"})

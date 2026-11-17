@@ -42,6 +42,12 @@ def docker(*args: str, timeout: int = 600, check: bool = True) -> subprocess.Com
     return r
 
 
+def is_protected(im: Mapping[str, Any]) -> bool:
+    """An image of a protected registry (DOCKER_GC_PROTECT), by tag or digest."""
+    refs = (im.get("RepoTags") or []) + (im.get("RepoDigests") or [])
+    return any(r.startswith(PROTECTED) for r in refs)
+
+
 def inspect_all(kind: str, list_args: Sequence[str]) -> list[dict[str, Any]]:
     """Inspect every object listed. Objects that vanished in between are
     dropped; any other gap aborts (a container missing from the result would

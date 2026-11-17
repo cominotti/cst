@@ -575,7 +575,11 @@ docker volume rm <name>         # or one volume by name
   those `install` only leaves a flag file `/etc/btrfs-setup/docker-nocow-pending`.
   It also resets the counter of attempts (see below).
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
-  starts**. For each volume with copy-on-write data it makes a full NOCOW copy,
+  starts**. For each volume with copy-on-write data it makes a full NOCOW copy
+  (the empty copy folder first gets the volume folder's SELinux label with
+  `chcon --reference`; if that fails while the volume has a label, the copy is
+  refused before anything is copied; without labels, SELinux disabled, the
+  failure changes nothing),
   checks that the copy has the same number of entries and bytes and the same
   SELinux label on every entry (`cp -a` drops a label it cannot set without a
   word, and a container cannot open a file whose label changed), swaps the
@@ -1353,6 +1357,9 @@ Some Docker words:
 | Volumes | **anonymous** (no name) and used by no remaining container | **named** volumes, never |
 | Images | used by no container and **not used for 14+ days** | images from the protected registry `registry.example.com` (pulling them again needs the private tunnel) |
 | Build cache | unused for **14+ days** | |
+
+A removal that fails, and a failed `docker builder prune`, is logged (journal
+warning) and counted in the run's failures (`status`: `failures N`).
 
 **How "last used" is known.** Docker does not record when an image was last used.
 So `enable` also starts `docker-gc-recorder.service`. It follows `docker events`

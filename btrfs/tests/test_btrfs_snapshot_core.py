@@ -1865,6 +1865,20 @@ class LatestTests(CliTestCase):
         self.assertEqual(self.cli(h, "latest", "--name", "Workspace", sources=[]), 1)
         self.assertEqual(self.out, "")
 
+    def test_latest_refuses_a_relative_source_path(self) -> None:
+        # Like --snapdir: a relative path (or one that reads as an option) is a usage error, never passed to btrfs.
+        h = self.host("2026-10-13 14:07")
+        h.add_snapshot("home.20261013T1200", "/top/home", 300)
+        for bad in ("top/home", "-x", ""):
+            with self.subTest(path=bad):
+                h.calls.clear()
+                rc = self.cli(h, "latest", "--name", "home", f"--source-path={bad}", sources=[])
+                self.assertEqual((rc, self.out), (2, ""))
+                self.assertIn("btrfs-snapshot-core: --source-path must be absolute", self.err)
+                self.assertEqual(h.calls, [])
+        self.assertEqual(self.cli(h, "latest", "--name", "home", sources=[], snapdir="top/snapshots"), 2)
+        self.assertIn("btrfs-snapshot-core: --snapdir must be absolute", self.err)
+
 
 # ---- cache folders (CACHEDIR.TAG) ----------------------------------------------------------
 TAG_TEXT = core.CACHE_SIGNATURE.decode() + "\n# This file is a cache directory tag.\n"

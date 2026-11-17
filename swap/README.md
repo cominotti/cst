@@ -232,8 +232,9 @@ What `apply` does, in order:
 Files are written only when they differ, always atomically. Each step's lines
 are printed while `apply` runs. A command that fails (`blockdev`,
 `systemctl`, `sysctl`) stops `apply` there with that command's own message
-and exit status (128+N when signal N killed it, as from bash); the steps
-before it stay done. A closed pipe (`cst swap status | head`) stops it
+and exit status (128+N when signal N killed it, as from bash, with a line
+`cst swap: COMMAND was killed by signal N` where bash printed `Terminated`);
+the steps before it stay done. A closed pipe (`cst swap status | head`) stops it
 quietly. `/etc/fstab` and
 `/etc/crypttab` are read and rewritten byte for byte: the lines that are not
 CST's come back exactly as they were, also bytes that are not UTF-8.

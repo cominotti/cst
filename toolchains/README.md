@@ -641,7 +641,10 @@ uv cache prune --cache-dir ~/.cache/uv --no-progress
 - **`plan`** shows the cache size and whether the lock is held. uv 0.12 has
   no `--dry-run` for `cache prune`, so how much it frees is only known
   afterwards (the journal shows uv's own line, `Removed N files (...)`); if a
-  later uv has `--dry-run`, `plan` uses it.
+  later uv has `--dry-run`, `plan` uses it. A dry run that fails (or cannot
+  start, or does not end) is shown as `uv cache prune --dry-run failed`, and
+  `plan` exits 1; one that only waited for the lock of another uv is not a
+  failure.
 - It always works on `~/.cache/uv`. If you moved uv's cache elsewhere
   (`UV_CACHE_DIR`, or `cache-dir` in `uv.toml`), set `PYTHON_UV_ENABLED=no`.
 

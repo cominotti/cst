@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from cst_core.adapters.runtime import sibling_program
 from typing import Any
 from typing import cast
+import errno
 import fcntl
 import json
 import os
@@ -35,6 +36,7 @@ from btrfs.bulk.domain import (
     SUBVOL_CREATE,
     TAG_SIGNATURE,
     TAG_TEXT,
+    TreeSize,
     Unexpected,
 )
 from cst_core.adapters.files import read_text
@@ -178,12 +180,15 @@ def busy_paths(paths: Sequence[str], home: str) -> set[str]:
     return {line for line in r.stdout.splitlines() if line}
 
 
-def du_bytes(path: str) -> int:
+def du_bytes(path: str) -> TreeSize:
+    """du -sxb: the apparent size of the tree at path (this filesystem only).
+    A part du cannot read is left out of its sum, and it exits 1: the size
+    is then incomplete, a lower bound (also when du printed no sum at all)."""
     r = subprocess.run(["du", "-sxb", "--", path], check=False, capture_output=True, text=True)
     try:
-        return int(r.stdout.split()[0])
+        return TreeSize(int(r.stdout.split()[0]), r.returncode == 0)
     except IndexError, ValueError:
-        return 0
+        return TreeSize(0, False)
 
 
 def free_bytes(path: str) -> int:
@@ -306,6 +311,26 @@ def kind(path: str) -> str:
     if stat.S_ISLNK(st.st_mode):
         return "link"
     return "dir" if stat.S_ISDIR(st.st_mode) else "other"
+
+
+def entries_nofollow(path: str) -> list[str]:
+    """The names in the folder path; [] when it is absent or not a folder.
+    A symbolic link at path is not followed (root reads paths under the
+    user's ~/Bulk): Unexpected."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        if e.errno not in (errno.ENOTDIR, errno.ELOOP):
+            raise
+        if kind(path) == "link":
+            raise Unexpected(f"{path} is a symbolic link (not followed)") from None
+        return []
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
 
 
 def chain(base: str, rel: str) -> str:

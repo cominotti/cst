@@ -23,6 +23,9 @@ class Host:
 
     def __init__(self, env: Mapping[str, str] | None = None, repo: str = "") -> None:
         env = os.environ if env is None else env
+        # The commands run with this environment (its PATH finds them), not
+        # with the process's: a test's stub folder reaches every command.
+        self.env = env
         # The checkout the doctor runs from ("" = none: repo_path then names nothing that exists).
         self.repo = repo
         prog = env.get("CST_PROG") or NAME
@@ -107,7 +110,13 @@ class Host:
         full = (["flatpak-spawn", "--host"] + cmd) if self.container else cmd
         try:
             p = subprocess.run(
-                full, check=False, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+                full,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+                env=dict(self.env),
             )
         except FileNotFoundError as e:
             return 127, "", f"{full[0]}: not found ({e.strerror})"

@@ -68,6 +68,7 @@ from btrfs.snapshot.domain import (
     parse_source,
     parse_state,
     plan,
+    require_absolute,
     snapshot_name,
     wall_to_epoch,
 )
@@ -1165,9 +1166,9 @@ def main(argv: Sequence[str] | None = None, host: Host | None = None) -> int:
         if not hasattr(args, attr):
             setattr(args, attr, default)
     try:
-        if not args.snapdir.startswith("/"):
-            raise Usage("--snapdir must be absolute")
+        require_absolute("--snapdir", args.snapdir)
         if args.cmd == "latest":
+            require_absolute("--source-path", args.source_path)
             if not NAME_RE.fullmatch(args.name):
                 raise Usage("--name must match [A-Za-z0-9._-]+")
             return cmd_latest(args, host)

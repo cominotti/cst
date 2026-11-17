@@ -111,7 +111,9 @@ The paths come from the VM's definition
 
 CD-ROM drives are skipped. The backup refuses, and copies nothing, when a
 disk is a block device, a network disk or a pool volume, or a qcow2 overlay
-with a backing file. Back those up by hand.
+with a backing file. Back those up by hand. Messages name a disk by its target
+(`sda`); a disk whose definition has no target name is an `unnamed disk`,
+with its source path when it has one.
 
 A disk, UEFI variables file or TPM folder that is a symbolic link is copied
 through the link: the backup holds the data of the file it points to, under

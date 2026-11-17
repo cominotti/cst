@@ -160,11 +160,39 @@ class ProgramTest(unittest.TestCase):
             ],
         )
 
+    def test_a_failed_build_cache_prune_is_logged_and_counted(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def docker(*args: str, **_kw: object) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args[:2] == ("builder", "prune"):
+                return subprocess.CompletedProcess(["docker", *args], 1, "", "Error response from daemon: busy\n")
+            return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+        self.v.docker = docker
+        plan: dict[str, Any] = {"at": 0, "containers": [], "volumes": [], "images": []}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            failed = gc_cli.apply(plan)
+        self.assertEqual(failed, 1)
+        self.assertEqual(
+            out.getvalue(), "<4>docker-gc: could not prune the build cache: Error response from daemon: busy\n"
+        )
+        self.assertEqual([c[:2] for c in calls], [("builder", "prune")])
+        # A prune that works is no failure and no line.
+        self.v.docker = lambda *args, **_kw: subprocess.CompletedProcess(["docker", *args], 0, "", "")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(gc_cli.apply(plan), 0)
+        self.assertEqual(out.getvalue(), "")
+
     def test_is_protected_reads_tags_and_digests(self) -> None:
         self.v.PROTECTED = ("registry.example.com/",)
-        self.assertTrue(gc_cli.is_protected({"RepoTags": ["registry.example.com/org/app:1"]}))
-        self.assertTrue(gc_cli.is_protected({"RepoTags": None, "RepoDigests": ["registry.example.com/o/a@sha256:1"]}))
-        self.assertFalse(gc_cli.is_protected({"RepoTags": ["alpine:latest"]}))
+        self.assertTrue(gc_adapters.is_protected({"RepoTags": ["registry.example.com/org/app:1"]}))
+        self.assertTrue(
+            gc_adapters.is_protected({"RepoTags": None, "RepoDigests": ["registry.example.com/o/a@sha256:1"]})
+        )
+        self.assertFalse(gc_adapters.is_protected({"RepoTags": ["alpine:latest"]}))
 
 
 class EntryTest(unittest.TestCase):
