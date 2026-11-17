@@ -11,6 +11,8 @@ import tempfile
 from cst_core.adapters import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_bytes_atomic
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.runtime import checkout_commit, checkout_root, install_payload
+from cst_core.application.install import InstallService
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
 from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
@@ -164,3 +166,16 @@ class SystemdUnitVerifier:
                 if tmp in line or any(line.startswith(n + ":") or f" {n} " in line for n in units)
             )
             return UnitVerdict(ok=False, lines=mine or tuple(r.stdout.splitlines()[-5:]))
+
+
+def program_installer(entry_file: str, fallback_root: str = "") -> InstallService:
+    """The installer's use case for the files a CST program writes itself (cst-vm's timer, cst-toolchains'
+    copies and units, cst swap's files), entry_file being that program (a checkout file or its zipapp):
+    this machine's files, the JSON install records, payloads as `install` builds them, and the commit
+    of the checkout it runs from (fallback_root when it runs from none)."""
+    return InstallService(
+        LocalInstallTarget(),
+        lambda e: install_payload(e.src, entry_file),
+        record=JsonInstallRecord(),
+        commit=checkout_commit(checkout_root(entry_file) or fallback_root),
+    )

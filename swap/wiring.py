@@ -14,16 +14,13 @@ from typing import NoReturn
 
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import (
-    checkout_commit,
     checkout_root,
-    install_payload,
     lc_ctype_handover,
     sibling_program,
     undo_python_start,
 )
-from cst_core.application.install import InstallService
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
@@ -74,16 +71,13 @@ def build_service(
     systemd = SystemctlAdapter(cmd_runner)
     swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
     paths = desired_paths(prog, ctx, fallback_root=fallback_root)
-    return SwapApplicationService(paths, file_sys, systemd, swap_system, installer(fallback_root))
-
-
-def installer(fallback_root: str) -> InstallService:
-    """The installer's use case for swap's files (written through it, listed in the install record)."""
-    return InstallService(
-        LocalInstallTarget(),
-        lambda e: install_payload(e.src, __file__),
-        record=JsonInstallRecord(),
-        commit=checkout_commit(checkout_root(__file__) or fallback_root),
+    # swap's files are written through the installer and listed in the install record.
+    return SwapApplicationService(
+        paths,
+        file_sys,
+        systemd,
+        swap_system,
+        installer=program_installer(sibling_program("swap/cli.py", __file__), fallback_root),
     )
 
 

@@ -32,8 +32,8 @@ from cst_core.adapters.files import (
     write_atomic,
 )
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
-from cst_core.adapters.runtime import checkout_commit, checkout_root, install_payload, restore_default_signals
+from cst_core.adapters.install import program_installer
+from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
@@ -548,12 +548,7 @@ def timer_files(entry_file: str) -> dict[str, tuple[bytes, int]]:
 def timer_installer(entry_file: str) -> InstallService:
     """The installer's use case for backup-timer's files: written only when they changed, and listed in
     the install record (INSTALL_RECORD) under the component vm:backup-timer."""
-    return InstallService(
-        LocalInstallTarget(),
-        lambda e: install_payload(e.src, entry_file),
-        record=JsonInstallRecord(),
-        commit=checkout_commit(checkout_root(entry_file)),
-    )
+    return program_installer(entry_file)
 
 
 def install_timer_files(

@@ -166,6 +166,7 @@ class SwapApplicationService:
         fs: FileSystemPort,
         systemd: SystemdPort,
         system: SwapSystemPort,
+        *,
         installer: InstallService,
     ) -> None:
         self._env = env

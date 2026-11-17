@@ -26,11 +26,8 @@ if TYPE_CHECKING:
 
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, on_host_argv
 from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
-from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import (
-    checkout_commit,
-    checkout_root,
-    install_payload,
     program_path,
     restore_default_signals,
 )
@@ -121,12 +118,7 @@ SCCACHE_COMPONENT = manifest_by_src()["toolchains/rustc-wrapper"].component
 def home_installer() -> InstallService:
     """The installer's use case for the files toolchains writes in the home (its copies, its units,
     the sccache wrapper): written only when they changed, listed in the user's install record."""
-    return InstallService(
-        LocalInstallTarget(),
-        lambda e: install_payload(e.src, Program.entry_file),
-        record=JsonInstallRecord(),
-        commit=checkout_commit(checkout_root(Program.entry_file)),
-    )
+    return program_installer(Program.entry_file)
 
 
 def put_home_file(
