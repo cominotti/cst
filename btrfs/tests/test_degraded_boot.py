@@ -642,6 +642,30 @@ next_overlay || :
         self.put(f"{entries}/ostree-2.conf", f"options ostree={self.tmp}/boot.1/0\ninitrd /ostree/next/initramfs.img\n")
         self.assertEqual(self.ok(code, stub_overlay=False), "")
 
+    def test_next_overlay_without_boot_entries_is_silent(self) -> None:
+        """No boot entry: no overlay and nothing on stderr. The unmatched
+        pattern reached awk, which said "cannot open" on every install and
+        status; an entry awk really cannot read still shows."""
+        self.status_json(fixture("unpinned.json"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "next"))
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/deploy/next"; else real_ostree_query "$1"; fi; }}
+ov="$(next_overlay)"
+echo "[$ov]"
+"""
+        entries = self.at("/boot/loader/entries")
+        for case in ("no entries folder", "an empty entries folder"):
+            with self.subTest(case):
+                if case == "an empty entries folder":
+                    os.makedirs(entries)
+                r = self.run_bash(code, stub_overlay=False)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "[]\n", ""))
+        os.makedirs(os.path.join(entries, "odd.conf"))  # not a file: awk says so
+        r = self.run_bash(code, stub_overlay=False)
+        self.assertEqual((r.returncode, r.stdout), (0, "[]\n"))
+        self.assertIn("odd.conf", r.stderr)
+
     # ---------------------------------------------------- overlay_in_sync --
     def overlay_rc(self, overlay: str) -> str:
         return self.ok(f'next_overlay() {{ echo "{overlay}"; }}; rc=0; overlay_in_sync || rc=$?; echo "$rc"').strip()

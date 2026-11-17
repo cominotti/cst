@@ -191,6 +191,8 @@ PY
     fi
     next="$(realpath "$(ostree_query next-root)")"
     for entry in "${BOOT_DIR}"/loader/entries/*.conf; do
+        # No entry at all: the pattern stays as it is (no nullglob); not a file to read.
+        [[ -e "${entry}" ]] || continue
         opts="$(awk '$1 == "options" {sub(/^options[ \t]+/, ""); print}' "${entry}")"
         path="$(grep -o 'ostree=[^ ]*' <<<"${opts}" | cut -d= -f2)"
         [[ -n "${path}" && "$(realpath "${path}" 2>/dev/null)" == "${next}" ]] || continue
