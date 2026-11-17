@@ -1624,6 +1624,7 @@ class PackageTest(unittest.TestCase):
             stdin: int | None = None,
             env: Mapping[str, str] | None = None,
             start_new_session: bool = False,
+            errors: str | None = None,
         ) -> subprocess.CompletedProcess[str]:
             recorded.append((list(cmd), start_new_session, (env or {}).get("LC_ALL", "")))
             return subprocess.CompletedProcess(list(cmd), 0, "shut off\n", "")
@@ -1712,6 +1713,22 @@ class VmLockTest(unittest.TestCase):
             os.umask(old)
         with open(lock.path) as f:
             self.assertEqual(f.read(), "", "the pid is cleared when the lock is released")
+
+
+class NotUtf8OutputTest(unittest.TestCase):
+    """run() and virsh(): bytes of a command's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_run_and_virsh(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-vm-bytes-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "virsh")
+        with open(stub, "w") as f:
+            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'shut \\xff off\\n')\n")
+        os.chmod(stub, 0o755)
+        printf = ["printf", "\\377abc"]
+        self.assertEqual(vm_adapters.run(printf), (0, "\ufffdabc", ""))
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            self.assertEqual(vm_adapters.virsh("domstate", "win"), (0, "shut \ufffd off\n", ""))
 
 
 if __name__ == "__main__":

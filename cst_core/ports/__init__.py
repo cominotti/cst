@@ -21,8 +21,8 @@ type StdinMode = Literal["devnull", "inherit"]
 # result's stdout and stderr are then empty).
 type OutputMode = Literal["capture", "merge", "stdout", "inherit"]
 
-# Captured output that is not UTF-8: U+FFFD for the bad bytes, or a
-# UnicodeDecodeError out of run() (what some callers still expect).
+# Captured output that is not UTF-8: U+FFFD for the bad bytes (every CST
+# caller), or a UnicodeDecodeError out of run().
 type DecodeErrors = Literal["replace", "strict"]
 
 

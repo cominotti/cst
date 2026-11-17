@@ -123,11 +123,11 @@ SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"]
 DETACH = {"on": False}
 
 # The commands cst-vm runs (where it runs: not moved to the host from a
-# toolbox), and virsh over the same runner. Output that is not UTF-8 raises
-# UnicodeDecodeError, as text=True did.
+# toolbox), and virsh over the same runner. Bytes of their output that are
+# not UTF-8 become U+FFFD.
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
-VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False, decode_errors="strict")
+VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False)
 
 
 def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
@@ -150,14 +150,13 @@ def run(
 ) -> tuple[int, str, str]:
     """(rc, stdout, stderr); rc 127 when the command does not exist. In the
     C locale (virsh translates its answers: "shut off" is "desligado" in
-    pt_BR); extra_env on top. Output that is not UTF-8 raises."""
+    pt_BR); extra_env on top. Bytes that are not UTF-8 become U+FFFD."""
     r = RUNNER.run(
         cmd,
         timeout=timeout,
         env=extra_env,
         locale_c=True,
         new_session=DETACH["on"] if detach is None else detach,
-        decode_errors="strict",
     )
     return _triple(r, cmd[0], timeout)
 

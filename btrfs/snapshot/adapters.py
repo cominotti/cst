@@ -380,9 +380,9 @@ class Host:
 
     def run(self, argv: Sequence[str]) -> tuple[int, str, str]:
         """(rc, stdout, stderr) of argv in the C locale, within CMD_TIMEOUT; stdin
-        is ours; output that is not UTF-8 raises. A command that cannot start
-        raises (as subprocess.run did)."""
-        r = RUNNER.run(argv, timeout=CMD_TIMEOUT, locale_c=True, stdin="inherit", decode_errors="strict")
+        is ours; bytes that are not UTF-8 become U+FFFD. A command that cannot
+        start raises (as subprocess.run did)."""
+        r = RUNNER.run(argv, timeout=CMD_TIMEOUT, locale_c=True, stdin="inherit")
         if r.fault == "missing":
             return 127, "", f"{argv[0]}: not found"
         if r.fault == "timeout":

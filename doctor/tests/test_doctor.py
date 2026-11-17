@@ -2164,6 +2164,7 @@ class HermeticTest(Scratch):
             timeout: float,
             stdin: int,
             env: Mapping[str, str] | None = None,
+            errors: str | None = None,
         ) -> subprocess.CompletedProcess[str]:
             path = (os.environ if env is None else env).get("PATH")
             args = list(args)
@@ -2176,7 +2177,14 @@ class HermeticTest(Scratch):
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
                 return subprocess.CompletedProcess(args, 127, "", "not run: outside the stub folder")
             return real_run(
-                args, check=check, capture_output=capture_output, text=text, timeout=timeout, stdin=stdin, env=env
+                args,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                timeout=timeout,
+                stdin=stdin,
+                env=env,
+                errors=errors,
             )
 
         os.makedirs(self.virsh_dir, exist_ok=True)
@@ -2374,6 +2382,17 @@ class DoctorFactsTest(unittest.TestCase):
         doc_app.domain_xml(host, "win")
         doc_app.deployments(host)
         self.assertEqual([n for n in vars(host) if n in ("_domains", "_dumpxml", "_ostree", "_ostree_list")], [])
+
+
+class NotUtf8OutputTest(Scratch):
+    """Host.run and Host.virsh: bytes that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_run_and_virsh(self) -> None:
+        with open(os.path.join(self.bin, "virsh"), "w") as f:
+            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'win\\xff\\n')\n")
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="0"))
+        self.assertEqual(host.run(["printf", "\\377abc"]), (0, "\ufffdabc", ""))
+        self.assertEqual(host.virsh(read_only=True).domains(), ["win\ufffd"])
 
 
 if __name__ == "__main__":

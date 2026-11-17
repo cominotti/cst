@@ -112,9 +112,9 @@ RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
     """(exit status, stdout) of CMD; 127 when it does not exist, 124 on timeout.
-    stdin is ours; output that is not UTF-8 raises; a command that cannot
-    start raises (as subprocess.run did)."""
-    r = RUNNER.run(cmd, timeout=timeout, stdin="inherit", decode_errors="strict")
+    stdin is ours; bytes that are not UTF-8 become U+FFFD; a command that
+    cannot start raises (as subprocess.run did)."""
+    r = RUNNER.run(cmd, timeout=timeout, stdin="inherit")
     if r.fault in ("missing", "timeout"):
         return r.returncode, ""
     if r.cause is not None:

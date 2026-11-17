@@ -42,10 +42,10 @@ log = partial(journal_log, tag="docker-gc")
 
 
 def docker(*args: str, timeout: int = 600, check: bool = True) -> CommandResult:
-    """docker ARGS (stdin ours; output that is not UTF-8 raises). No answer
-    within timeout, or a failure with check: RuntimeError. A docker that
-    cannot be started raises (as subprocess.run did)."""
-    r = RUNNER.run(["docker", *args], timeout=timeout, stdin="inherit", decode_errors="strict")
+    """docker ARGS (stdin ours; bytes that are not UTF-8 become U+FFFD). No
+    answer within timeout, or a failure with check: RuntimeError. A docker
+    that cannot be started raises (as subprocess.run did)."""
+    r = RUNNER.run(["docker", *args], timeout=timeout, stdin="inherit")
     if r.fault == "timeout":
         raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from r.cause
     if r.cause is not None:

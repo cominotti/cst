@@ -111,17 +111,16 @@ class Host:
 
     def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
         """(rc, stdout, stderr) of a read-only query command on the host;
-        rc 127 when it cannot be started, 124 on a timeout. locale_c: LC_ALL=C
+        rc 127 when it cannot be started, 124 on a timeout; bytes that are not
+        UTF-8 become U+FFFD. locale_c: LC_ALL=C
         on top of the Host's environment; in a toolbox it goes through
         flatpak-spawn --env (the host command does not get flatpak-spawn's own)."""
-        r = self._commands.run(cmd, timeout=timeout, locale_c=locale_c, on_host=True, decode_errors="strict")
+        r = self._commands.run(cmd, timeout=timeout, locale_c=locale_c, on_host=True)
         return r.returncode, r.stdout, r.stderr
 
     def virsh(self, *, read_only: bool) -> VirshPort:
         """virsh on the system connection, through the same commands as run()."""
-        return SubprocessVirshAdapter(
-            VIRSH_URI, self._commands, on_host=True, read_only=read_only, decode_errors="strict"
-        )
+        return SubprocessVirshAdapter(VIRSH_URI, self._commands, on_host=True, read_only=read_only)
 
 
 def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:

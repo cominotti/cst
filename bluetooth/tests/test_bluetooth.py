@@ -1606,5 +1606,12 @@ class WatcherRunTest(unittest.TestCase):
         self.assertEqual(bt_adapters.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3), (124, ""))
 
 
+class NotUtf8OutputTest(unittest.TestCase):
+    """run(): bytes of pw-dump's or pactl's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_replaced(self) -> None:
+        self.assertEqual(bt_adapters.run(["printf", "\\377abc"]), (0, "\ufffdabc"))
+
+
 if __name__ == "__main__":
     unittest.main()

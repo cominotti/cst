@@ -1340,5 +1340,38 @@ class CommandFaultTextTest(unittest.TestCase):
             self.assertIn("sccache server abc: no answer", tc_cli.sccache_status_lines(tmp))
 
 
+class NotUtf8OutputTest(unittest.TestCase):
+    """cargo, ionice'd commands, rm, rustup, sccache and systemctl: bytes of
+    their output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-tc-bytes-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def stub(self, name: str, out: bytes) -> str:
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as f:
+            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write({out!r})\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_replaced(self) -> None:
+        env = {"PATH": "/usr/bin:/bin"}
+        cargo = self.stub("cargo", b'{"build_directory": "/t/\xff"}')
+        self.assertEqual(tc_adapters.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
+        self.assertEqual(tc_adapters.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
+        self.stub("rm", b"rm: \xff\n")
+        with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:/usr/bin:/bin"}):
+            self.assertEqual(tc_adapters.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
+        rustup = self.stub("rustup", b"stable\xff (default)\n")
+        with mock.patch.object(tc_adapters.shutil, "which", return_value=rustup):
+            self.assertEqual(tc_adapters.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
+        sccache = self.stub("sccache", b"Compile requests  7\nCache location  /t/\xff\n")
+        self.assertEqual(tc_adapters.sccache_stats(sccache, env).get("Compile requests"), "7")
+        systemctl = self.stub("systemctl", b"enabled\xff\n")
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
+            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
+
+
 if __name__ == "__main__":
     unittest.main()

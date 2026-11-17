@@ -324,5 +324,19 @@ class DockerCommandTest(unittest.TestCase):
         self.assertEqual(str(stop.exception), "docker info: daemon down")
 
 
+class NotUtf8OutputTest(unittest.TestCase):
+    """docker(): bytes of docker's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_replaced(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-gc-bytes-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "docker")
+        with open(stub, "w") as f:
+            f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write(b'img\\xff\\n')\n")
+        os.chmod(stub, 0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            self.assertEqual(gc_adapters.docker("image", "ls", "-q").stdout, "img\ufffd\n")
+
+
 if __name__ == "__main__":
     unittest.main()

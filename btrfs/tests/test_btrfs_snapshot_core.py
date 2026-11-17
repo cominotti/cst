@@ -2489,5 +2489,12 @@ class HostRunTest(unittest.TestCase):
             )
 
 
+class NotUtf8OutputTest(unittest.TestCase):
+    """Host.run: bytes that are not UTF-8 (a path in btrfs's output, say) become U+FFFD (they raised UnicodeDecodeError)."""
+
+    def test_replaced(self) -> None:
+        self.assertEqual(snap_adapters.Host().run(["printf", "\\377abc"]), (0, "\ufffdabc", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
