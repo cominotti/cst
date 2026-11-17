@@ -69,6 +69,67 @@ def run(
     )
 
 
+# The checkout is bind-mounted into the containers (/opt/cst, read-only, no
+# :z relabel) and its scripts run from there. Under SELinux in enforcing
+# mode, files labelled for a home folder (user_home_t, a fresh clone or a git
+# worktree) cannot be read or run by the container ("Permission denied" on
+# /opt/cst/cst in test_01) unless it starts with label=disable, which
+# host_lsm_security_opts adds only where /sys/fs/selinux is visible (not
+# inside a toolbox). The fix is the label containers may use.
+SELINUX_ENFORCE = Path("/sys/fs/selinux/enforce")
+# Inside a toolbox the host's selinuxfs is not mounted at /sys/fs/selinux; it is under /run/host.
+SELINUX_ENFORCE_FROM_TOOLBOX = Path("/run/host/sys/fs/selinux/enforce")
+CONTAINER_FILE_TYPE = "container_file_t"
+
+
+def selinux_type(path: Path) -> str | None:
+    """The SELinux type of a file (container_file_t), or None when it has no label."""
+    try:
+        raw = os.getxattr(path, "security.selinux")
+    except OSError:
+        return None
+    parts = raw.rstrip(b"\0").decode("ascii", "replace").split(":")
+    return parts[2] if len(parts) >= 3 else None
+
+
+def checkout_label_problem(
+    *, enforcing: bool, types: Mapping[str, str | None], repo: Path, label_disabled: bool = False
+) -> str | None:
+    """Why the containers could not use the checkout (types: path -> SELinux type), with the fix; None if fine.
+
+    label_disabled: the containers start with --security-opt label=disable
+    (host_lsm_security_opts), so labels do not matter.
+    """
+    if not enforcing or label_disabled:
+        return None
+    wrong = sorted(path for path, kind in types.items() if kind is not None and kind != CONTAINER_FILE_TYPE)
+    if not wrong:
+        return None
+    found = ", ".join(f"{p} ({types[p]})" for p in wrong)
+    return (
+        f"[e2e] SELinux is enforcing and the checkout is not labelled {CONTAINER_FILE_TYPE}: {found}.\n"
+        "The containers bind-mount it and run its scripts; with this label they get 'Permission denied'.\n"
+        f"Fix (once per checkout or worktree): chcon -R -t {CONTAINER_FILE_TYPE} {repo}\n"
+    )
+
+
+def checkout_preflight(repo: Path = REPO_ROOT) -> str | None:
+    """checkout_label_problem for this machine and checkout."""
+    enforcing = False
+    for flag in (SELINUX_ENFORCE, SELINUX_ENFORCE_FROM_TOOLBOX):
+        try:
+            enforcing = flag.read_text().strip() == "1"
+            break
+        except OSError:
+            continue
+    return checkout_label_problem(
+        enforcing=enforcing,
+        types={str(p): selinux_type(p) for p in (repo, repo / "cst")},
+        repo=repo,
+        label_disabled="label=disable" in host_lsm_security_opts(),
+    )
+
+
 def host_lsm_security_opts() -> list[str]:
     opts: list[str] = []
     if Path("/sys/fs/selinux/enforce").exists():
@@ -326,6 +387,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if 2 in args.tier and not privileged_allowed(args.allow_privileged):
         print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
+        return 2
+    problem = checkout_preflight()
+    if problem is not None:
+        print(problem, file=sys.stderr, end="")
         return 2
     if args.check_only:
         return 0
