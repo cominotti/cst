@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MPL-2.0
 """Adapters implementing the `doctor` ports against Linux/toolbox hosts."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import os
 import pwd
-import subprocess
 import time
 from typing import Any, BinaryIO, TextIO
 
-from cst_core.adapters import c_locale
-from doctor.domain import NAME, Deployment, OstreeAnswer
+from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter
+from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
+from doctor.domain import NAME, VIRSH_URI, Deployment, OstreeAnswer
 from vm import adapters as vm_adapters
 
 
@@ -43,6 +43,8 @@ class Host:
         self.uid = os.getuid()
         self.arch = os.uname().machine
         self.state_home = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        # Every command (virsh too) starts from self.env, in doctor's words for a fault.
+        self._commands: CommandRunnerPort = SubprocessCommandRunner(self, base_env=env, words=host_words)
 
     def path(self, p: str) -> str:
         """A host path, as this process can read it."""
@@ -106,31 +108,36 @@ class Host:
         except KeyError:
             return None
 
+    def is_container(self) -> bool:
+        """Inside a toolbox (CST_DOCTOR_CONTAINER, or detected): commands then run on the host."""
+        return self.container
+
     def run(self, cmd: list[str], timeout: float = 60, *, locale_c: bool = False) -> tuple[int, str, str]:
         """(rc, stdout, stderr) of a read-only query command on the host;
         rc 127 when it cannot be started, 124 on a timeout. locale_c: LC_ALL=C
         on top of the Host's environment; in a toolbox it goes through
         flatpak-spawn --env (the host command does not get flatpak-spawn's own)."""
-        extra = c_locale() if locale_c else {}
-        spawn = ["flatpak-spawn", "--host", *(f"--env={k}={v}" for k, v in extra.items())]
-        full = (spawn + cmd) if self.container else cmd
-        try:
-            p = subprocess.run(
-                full,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                stdin=subprocess.DEVNULL,
-                env={**self.env, **extra},
-            )
-        except FileNotFoundError as e:
-            return 127, "", f"{full[0]}: not found ({e.strerror})"
-        except subprocess.TimeoutExpired:
-            return 124, "", f"{' '.join(cmd)}: no answer within {timeout} s"
-        except OSError as e:
-            return 126, "", f"{full[0]}: {e.strerror}"
-        return p.returncode, p.stdout, p.stderr
+        r = self._commands.run(cmd, timeout=timeout, locale_c=locale_c, on_host=True, decode_errors="strict")
+        return r.returncode, r.stdout, r.stderr
+
+    def virsh(self, *, read_only: bool) -> VirshPort:
+        """virsh on the system connection, through the same commands as run()."""
+        return SubprocessVirshAdapter(
+            VIRSH_URI, self._commands, on_host=True, read_only=read_only, decode_errors="strict"
+        )
+
+
+def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:
+    """The doctor's text for a query that could not run (SubprocessCommandRunner's words); no output kept."""
+    spawned = r.argv[0] if r.argv else argv[0]
+    reason = r.cause.strerror if isinstance(r.cause, OSError) else ""
+    if r.fault == "missing":
+        text = f"{spawned}: not found ({reason})"
+    elif r.fault == "timeout":
+        text = f"{' '.join(argv)}: no answer within {timeout} s"
+    else:
+        text = f"{spawned}: {reason}"
+    return CommandResult(r.returncode, "", text, argv=r.argv, fault=r.fault, cause=r.cause)
 
 
 class VmTools:

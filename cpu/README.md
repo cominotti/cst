@@ -1451,7 +1451,7 @@ this is harmless.
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
 | `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |
-| `adapters.py` | What reads the host: `cpu-setup.conf`, `virsh`, sysfs, procfs, cgroups, the recorded runs |
+| `adapters.py` | What reads the host: `cpu-setup.conf`, `virsh` (cst_core's `SubprocessVirshAdapter`), sysfs, procfs, cgroups, the recorded runs |
 | `cli.py` | The command lines of `vm-pin` and `cpu-watch` (the two entry points above only call it) |
 | `gamemode.ini` | `~/.config/gamemode.ini` |
 | `cpu-game.rules.in` | polkit rule (`@USER@` replaced by your user) |

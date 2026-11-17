@@ -1055,8 +1055,8 @@ def virsh(host: DoctorHostPort, *args: str, ro: bool = True) -> tuple[int, str, 
     """virsh on the system connection; -r (read-only) where libvirt allows it.
     In the C locale: the checks compare its answers ("running", "shut off"),
     which virsh translates."""
-    cmd = ["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args)
-    return host.run(cmd, timeout=20, locale_c=True)
+    r = host.virsh(read_only=ro).call(*args, timeout=20)
+    return r.returncode, r.stdout, r.stderr
 
 
 def virsh_problem(rc: int, err: str) -> str:

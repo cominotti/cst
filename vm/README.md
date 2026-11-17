@@ -999,7 +999,8 @@ The Python code inside `vm/` (standard library only at run time):
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
   `render_timer`), the command line (`parse_args`).
 - `vm/adapters.py`: what reaches the host: `virsh`, `rpm`, `rpm-ostree`,
-  `systemctl`, `restic` (with `LC_ALL=C`), the backup index, the NOCOW flag
+  `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
+  `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the backup index, the NOCOW flag
   and the image folders (`probe_dir`), the per-VM lock, the paths
   (`CST_VM_*` moves them, for the tests only).
 - `vm/cli.py`: the commands (`backup`, the NAS backup, `backup-timer`,

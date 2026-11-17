@@ -16,7 +16,6 @@ import os
 import pwd
 import signal
 import struct
-import subprocess
 import sys
 import tempfile
 import time
@@ -24,13 +23,14 @@ from types import FrameType
 from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
-from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter, nocow as inode_attrs
 from cst_core.adapters.files import ensure_dir, is_masked_unit, owned_file_state_at, read_text, unit_file_state_at
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
+from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
     describe_problems,
@@ -116,6 +116,25 @@ SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"]
 # `blockcommit --wait` on SIGINT).
 DETACH = {"on": False}
 
+# The commands cst-vm runs (where it runs: not moved to the host from a
+# toolbox), and virsh over the same runner. Output that is not UTF-8 raises
+# UnicodeDecodeError, as text=True did.
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
+
+VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False, decode_errors="strict")
+
+
+def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
+    """(rc, stdout, stderr) of r with cst-vm's own words for a command that is
+    missing or does not answer; one that cannot start raises (as subprocess.run did)."""
+    if r.fault == "missing":
+        return 127, "", f"{name}: not found"
+    if r.fault == "timeout":
+        return 124, "", f"{name}: no answer within {timeout} s"
+    if r.cause is not None:
+        raise r.cause
+    return r.returncode, r.stdout, r.stderr
+
 
 def run(
     cmd: Sequence[str],
@@ -123,29 +142,34 @@ def run(
     extra_env: Mapping[str, str] | None = None,
     detach: bool | None = None,
 ) -> tuple[int, str, str]:
-    """(rc, stdout, stderr); rc 127 when the command does not exist."""
-    # LC_ALL=C: virsh translates its answers ("shut off" is "desligado" in pt_BR).
-    env = {**os.environ, "LC_ALL": "C", **(extra_env or {})}
-    try:
-        p = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            start_new_session=DETACH["on"] if detach is None else detach,
-        )
-    except FileNotFoundError:
-        return 127, "", f"{cmd[0]}: not found"
-    except subprocess.TimeoutExpired:
-        return 124, "", f"{cmd[0]}: no answer within {timeout} s"
-    return p.returncode, p.stdout, p.stderr
+    """(rc, stdout, stderr); rc 127 when the command does not exist. In the
+    C locale (virsh translates its answers: "shut off" is "desligado" in
+    pt_BR); extra_env on top. Output that is not UTF-8 raises."""
+    r = RUNNER.run(
+        cmd,
+        timeout=timeout,
+        env=extra_env,
+        locale_c=True,
+        new_session=DETACH["on"] if detach is None else detach,
+        decode_errors="strict",
+    )
+    return _triple(r, cmd[0], timeout)
+
+
+def run_on_terminal(cmd: Sequence[str]) -> int:
+    """Exit status of cmd in the C locale, on our terminal (stdin and output:
+    sudo may ask for the password). A command that cannot start raises (as
+    subprocess.run did)."""
+    r = RUNNER.run(cmd, locale_c=True, stdin="inherit", output="inherit")
+    if r.cause is not None:
+        raise r.cause
+    return r.returncode
 
 
 def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
-    return run(["virsh", "-c", URI, *args], timeout=timeout, detach=detach)
+    """virsh -c URI ARGS through VIRSH, with run()'s answers."""
+    r = VIRSH.call(*args, timeout=timeout, start_new_session=DETACH["on"] if detach is None else detach)
+    return _triple(r, "virsh", timeout)
 
 
 def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:

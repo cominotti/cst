@@ -2095,7 +2095,7 @@ class HermeticTest(Scratch):
             f.write("vm1\n")
         self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
         host = doc_adapters.Host(self.env, repo=REPO)
-        with mock.patch.object(doc_adapters.subprocess, "run", recording_run):
+        with mock.patch.object(subprocess, "run", recording_run):
             results = doc_app.run_checks(host, doc_cli.wired_checks(doc_adapters.VmTools()))
         crashed = [r.message for _, r in results if "the check itself failed" in r.message]
         self.assertEqual(crashed, [])
