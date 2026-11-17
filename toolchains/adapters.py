@@ -276,6 +276,28 @@ def scan(root: str, now: float) -> tuple[list[Folder], list[Folder], list[tuple[
     return folders, trash, others
 
 
+def _own_processes(target_uid: int) -> Iterator[tuple[str, str, str]]:
+    """(pid, comm, /proc/PID) of each process of target_uid but this one; a
+    process that ended or cannot be read meanwhile is left out."""
+    me = os.getpid()
+    try:
+        pids = [p for p in os.listdir(PROC) if p.isdigit()]
+    except OSError:
+        return
+    for pid in pids:
+        if int(pid) == me:
+            continue
+        base = os.path.join(PROC, pid)
+        try:
+            if os.stat(base).st_uid != target_uid:
+                continue
+            with open(os.path.join(base, "comm")) as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        yield pid, comm, base
+
+
 def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[str, str]]], int]:
     """({folder key: [(pid, comm), ...]}, unreadable): the processes of the
     user that have their cwd, executable, an open file or a mapped file
@@ -286,7 +308,6 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     rustc, clippy-driver, rust-analyzer, build scripts: by their name)."""
     target_uid = os.getuid() if uid is None else uid
     pre = prefixes(root)
-    me = os.getpid()
     found: dict[str, list[tuple[str, str]]] = {}
     unreadable = 0
 
@@ -302,21 +323,7 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
                     lst.append((pid, comm))
                 return
 
-    try:
-        pids = [p for p in os.listdir(PROC) if p.isdigit()]
-    except OSError:
-        return found, 0
-    for pid in pids:
-        if int(pid) == me:
-            continue
-        base = os.path.join(PROC, pid)
-        try:
-            if os.stat(base).st_uid != target_uid:
-                continue
-            with open(os.path.join(base, "comm")) as f:
-                comm = f.read().strip()
-        except OSError:
-            continue
+    for pid, comm, base in _own_processes(target_uid):
         try:
             note(pid, comm, os.readlink(os.path.join(base, "cwd")))
         except PermissionError:
@@ -411,23 +418,8 @@ def cargo_procs(uid: int | None = None) -> list[dict[str, Any]]:
     cargo-clippy, ...): [{pid, comm, cwd, exe, args, env}]. cwd is None when
     it cannot be read."""
     target_uid = os.getuid() if uid is None else uid
-    me = os.getpid()
     out: list[dict[str, Any]] = []
-    try:
-        pids = [p for p in os.listdir(PROC) if p.isdigit()]
-    except OSError:
-        return out
-    for pid in pids:
-        if int(pid) == me:
-            continue
-        base = os.path.join(PROC, pid)
-        try:
-            if os.stat(base).st_uid != target_uid:
-                continue
-            with open(os.path.join(base, "comm")) as f:
-                comm = f.read().strip()
-        except OSError:
-            continue
+    for pid, comm, base in _own_processes(target_uid):
         if not CARGO_COMM.fullmatch(comm):
             continue
         p: dict[str, Any] = {"pid": pid, "comm": comm, "cwd": None, "exe": "", "args": [], "env": {}}

@@ -7,8 +7,10 @@ the copies cannot come back. The run prints the numbers measured.
 
 Where the hexagonal conversion left them (main before it, same method):
 - python type 1, W=8, cross-file lines: 0 (main: 0);
-- python type 2, W=8: 1.37 % (main: 0.85 %; the rest is the shape of thin
-  adapters, ports' implementations and property lists, see the PR);
+- python type 2, W=8: 1.04 % (main: 0.85 %; 1.37 % before PR-A merged the
+  /proc walk and the flag and config-state checks of toolchains; the rest is
+  the shape of thin adapters, ports' implementations and property lists, see
+  the PR);
 - shell, W=5: 0.47 % (main: 1.28 %);
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its
   reason (main: 43 names, none allowed).
@@ -34,9 +36,9 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
 # One table: metric -> ceiling. Lower a number when a change brings it down.
 CEILINGS: Final[dict[str, float]] = {
-    "python type-1 W=8 duplicated %": 0.2,
+    "python type-1 W=8 duplicated %": 0.09,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 1.37,
+    "python type-2 W=8 duplicated %": 1.04,
     "shell W=5 duplicated %": 0.47,
     "same-name definitions in >1 file": 0,
 }

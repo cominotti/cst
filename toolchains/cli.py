@@ -1478,28 +1478,22 @@ def config_items(home: str) -> list[tuple[str, str, str, str]]:
     """[(name, path, state, text to append)]; state: set | by-hand | write |
     unreadable."""
     out: list[tuple[str, str, str, str]] = []
-    path = os.path.join(home, CARGO_CFG_REL)
-    text = read_cfg(path)
-    if text is None:
-        st = "unreadable"
-    elif CARGO_HAS_BUILD_DIR.search(text):
-        st = "set"
-    elif CARGO_HAS_BUILD.search(text):
-        st = "by-hand"
-    else:
-        st = "write"
-    out.append(("cargo", path, st, cargo_text(home)))
-    path = os.path.join(home, UV_CFG_REL)
-    text = read_cfg(path)
-    if text is None:
-        st = "unreadable"
-    elif UV_HAS_LINK_MODE.search(text):
-        st = "set"
-    elif UV_HAS_TABLE.search(text):
-        st = "by-hand"
-    else:
-        st = "write"
-    out.append(("uv", path, st, UV_TEXT))
+    # (name, file, "our setting is there", "the table is there, set by hand", what apply appends)
+    for name, rel, ours, by_hand, append in (
+        ("cargo", CARGO_CFG_REL, CARGO_HAS_BUILD_DIR, CARGO_HAS_BUILD, cargo_text(home)),
+        ("uv", UV_CFG_REL, UV_HAS_LINK_MODE, UV_HAS_TABLE, UV_TEXT),
+    ):
+        path = os.path.join(home, rel)
+        text = read_cfg(path)
+        if text is None:
+            st = "unreadable"
+        elif ours.search(text):
+            st = "set"
+        elif by_hand.search(text):
+            st = "by-hand"
+        else:
+            st = "write"
+        out.append((name, path, st, append))
     return out
 
 
@@ -1556,13 +1550,18 @@ def lean_state(home: str) -> LeanState:
     return st
 
 
-def lean_wanted(settings: Settings | None, lean: bool | None) -> tuple[bool, str]:
-    if lean is not None:
-        return lean, ("--lean-debuginfo" if lean else "--no-lean-debuginfo")
+def _flag_wanted(settings: Settings | None, flag: bool | None, option: str, name: str) -> tuple[bool, str]:
+    """(wanted, why) of a yes/no setting: the --NAME / --no-NAME option when given, else OPTION."""
+    if flag is not None:
+        return flag, (f"--{name}" if flag else f"--no-{name}")
     if settings is None:
         return False, "bad settings"
-    val = bool(settings.options["RUST_LEAN_DEBUGINFO"])
-    return val, "RUST_LEAN_DEBUGINFO=" + ("yes" if val else "no")
+    val = bool(settings.options[option])
+    return val, f"{option}=" + ("yes" if val else "no")
+
+
+def lean_wanted(settings: Settings | None, lean: bool | None) -> tuple[bool, str]:
+    return _flag_wanted(settings, lean, "RUST_LEAN_DEBUGINFO", "lean-debuginfo")
 
 
 def lean_lines(home: str, verb: str, settings: Settings | None, lean: bool | None) -> list[tuple[str, str, str]]:
@@ -1747,12 +1746,7 @@ def sccache_state(home: str) -> SccacheState:
 
 
 def sccache_wanted(settings: Settings | None, flag: bool | None) -> tuple[bool, str]:
-    if flag is not None:
-        return flag, ("--sccache" if flag else "--no-sccache")
-    if settings is None:
-        return False, "bad settings"
-    val = bool(settings.options["RUST_SCCACHE"])
-    return val, "RUST_SCCACHE=" + ("yes" if val else "no")
+    return _flag_wanted(settings, flag, "RUST_SCCACHE", "sccache")
 
 
 def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues) -> list[tuple[str, str, str]]:
