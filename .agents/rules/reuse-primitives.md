@@ -47,9 +47,17 @@ one place only.
 
 ## The gates that catch a copy
 
-`tests/test_duplication.py` (clones and names defined twice) and
-`tests/test_architecture.py` (no I/O in `domain` or `application`): see
-[docs/architecture.md, "Static gates beyond lint and types"](../../docs/architecture.md#static-gates-beyond-lint-and-types).
-A gate that names the owner of each primitive and fails on a second
-implementation under another name is planned in PR-D; until then this rule
-and the review catch it.
+- `tests/test_duplication.py`: clones, and the same name defined in several
+  files (Python top-level names and shell functions).
+- `tests/test_architecture.py`: no I/O in `domain` or `application`; and
+  `PRIMITIVE_OWNERS` / `PRIMITIVE_LITERALS`, which name the owner of each
+  primitive (running a command, replacing or syncing a file, temporary files,
+  locks, the NOCOW ioctl) and of the literals that betray a copy of one
+  (`/run/.containerenv`, `/.dockerenv`, `flatpak-spawn`, `qemu:///system`,
+  `LC_ALL`, `restorecon`, `systemd-escape`). A call or a literal anywhere
+  else counts against its package's budget (`PRIMITIVE_BUDGETS`,
+  `LITERAL_BUDGETS`), which only goes down: a new copy fails. Every public
+  name of cst_core's shared layers must have a user outside its file
+  (`CORE_NAMES_WITHOUT_USER` lists today's exceptions).
+
+See [docs/architecture.md, "Static gates beyond lint and types"](../../docs/architecture.md#static-gates-beyond-lint-and-types).

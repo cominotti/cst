@@ -7,8 +7,8 @@ the copies cannot come back. The run prints the numbers measured.
 
 Where the hexagonal conversion left them (main before it, same method):
 - python type 1, W=8, cross-file lines: 0 (main: 0);
-- python type 2, W=8: 1.04 % (main: 0.85 %; 1.37 % before PR-A merged the
-  /proc walk and the flag and config-state checks of toolchains; the rest is
+- python type 2, W=8: 1.04 % (main: 0.85 %; 1.37 % before the /proc walk and
+  the flag and config-state checks of toolchains were merged; the rest is
   the shape of thin adapters, ports' implementations and property lists, see
   the PR);
 - shell, W=5: 0.47 % (main: 1.28 %);
@@ -23,15 +23,18 @@ import unittest
 from tests.code_graph import production_python
 from tests.duplication import (
     clones,
-    is_shell,
     normalized_python,
     normalized_shell,
     python_clones,
     same_name_definitions,
     shell_clones,
+    shell_function_names,
+    shell_same_name_definitions,
     without_protocol_bodies,
 )
-from tests.repo_files import REPO, repo_files
+from tests.budgets import is_test_file
+from tests.repo_files import REPO
+from tests.shell_files import shell_files
 from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
 # One table: metric -> ceiling. Lower a number when a change brings it down.
@@ -87,12 +90,30 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 }
 
 
+# Shell functions that several shell files may define, and why. A copy of a
+# helper is listed as one, with where it should live once; the installed
+# programs (btrfs-notify, btrfs-snapshot, cpu/game-profile) run without the
+# checkout and cannot source a file of it.
+ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
+    "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
+    "cpuset_delegated": "cpu-setup.sh's check and the installed cpu/game-profile's, which cannot source the checkout",
+    "die": "each script's own error exit with its own program name",
+    "in_container": "a copy in four setup scripts: the same toolbox check; to share in a sourced file",
+    "install_all": "the install step of btrfs-setup.sh and of cpu-setup.sh: different files",
+    "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
+    "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",
+    "log": "each program's journal tag; the installed programs cannot source a shared file",
+    "remove_game_dropins": "cpu-setup.sh's uninstall vs the installed game-profile's off",
+    "root_fs_uuid": "a copy in btrfs-setup.sh and the degraded-boot setup: the same query; to share in a sourced file",
+    "section": "each setup script's heading for its status output",
+    "status": "each setup script's own status subcommand",
+    "uninstall": "each setup script's own uninstall subcommand",
+    "usage": "each script's help, printed from its own header",
+}
+
+
 def _shell_files() -> list[str]:
-    return [
-        rel
-        for rel in repo_files()
-        if not rel.startswith((".idea/", "tests/")) and "/tests/" not in rel and is_shell(rel, REPO)
-    ]
+    return [rel for rel in shell_files() if not is_test_file(rel)]
 
 
 def without_declared_copies(source: str) -> str:
@@ -192,6 +213,20 @@ class DuplicationRatchetTest(unittest.TestCase):
         src = 'def f():\n    """doc"""\n    # comment\n    return (\n        1\n    )\n'
         self.assertEqual(normalized_python(src, type2=False), ["def f ( ) :", "return (", "1"])
         self.assertEqual(normalized_shell("# c\nif x; then\n  a  b\nfi\n"), ["if x; then", "a b"])
+
+    def test_shell_functions_are_not_defined_twice(self) -> None:
+        every = shell_same_name_definitions(REPO, _shell_files(), [])
+        self.assertEqual(
+            {name: files for name, files in every.items() if name not in ALLOWED_SHELL_SAME_NAMES},
+            {},
+            "a shell function defined in several files: share it, or add it to ALLOWED_SHELL_SAME_NAMES with the reason",
+        )
+        stale = sorted(set(ALLOWED_SHELL_SAME_NAMES) - set(every))
+        self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SHELL_SAME_NAMES")
+
+    def test_shell_function_names(self) -> None:
+        src = "f() {\n  :\n}\nfunction g {\n:\n}\n  h_2 ()\n{ :; }\nfunction k() { :; }\necho x() # not one\n"
+        self.assertEqual(shell_function_names(src), {"f", "g", "h_2", "k"})
 
     def test_every_allowed_name_is_still_defined_twice(self) -> None:
         defined = same_name_definitions(REPO, production_python(), ["main"])

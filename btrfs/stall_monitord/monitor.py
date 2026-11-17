@@ -60,7 +60,7 @@ from btrfs.stall_monitord.domain import (
     TIMED_WAIT_FRAME,
     VERSION,
     VMSTAT_KEYS,
-    _DTaskSince,
+    DTaskSince,
     mmap_lock_only,
     parse_stack,
     stack_signature,
@@ -88,7 +88,7 @@ class Monitor:
         self.last_alert: dict[str, float] = {}
         self.stack_ok = self.probe_stack_access()
         self.stack_fail = 0
-        self.d_since: dict[str, _DTaskSince] = {}  # tid -> {first (stuck since), busy (in D since), comm, pid, slices}
+        self.d_since: dict[str, DTaskSince] = {}  # tid -> {first (stuck since), busy (in D since), comm, pid, slices}
         self.hung_reported: dict[tuple[str, str], float] = {}  # (pid, kind) -> time of the last report
         self.kmsg_fd: int | None = None
         self.psi_fd: int | None = None
@@ -383,7 +383,7 @@ class Monitor:
     def track_hung(self, d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]], now: float) -> None:
         """Per task seen in D: 'busy' = in D at every sample since then;
         'first' = in D since then *without running in between* (stuck)."""
-        current: dict[str, _DTaskSince] = {}
+        current: dict[str, DTaskSince] = {}
         info: dict[str, tuple[list[str], str | None, str]] = {}
         for pid, tid, comm, frames, wchan, kind in d_tasks:
             prev = self.d_since.get(tid)
@@ -526,7 +526,7 @@ class Monitor:
         live = {v["pid"] for v in current.values()}
         self.hung_reported = {k: t for k, t in self.hung_reported.items() if k[0] in live or now - t < HUNG_REPEAT}
 
-    def report_io_busy(self, t: _DTaskSince, tid: str, frames: list[str], wchan: str | None, now: float) -> None:
+    def report_io_busy(self, t: DTaskSince, tid: str, frames: list[str], wchan: str | None, now: float) -> None:
         """In D at every sample for HUNG_SECONDS while still being scheduled
         (typically an fsync loop): an informational event; an alert once it
         lasts BUSY_ALERT_SECONDS (a device slowed to a crawl also completes

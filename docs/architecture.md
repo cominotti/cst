@@ -32,8 +32,10 @@ for a program's commands). Only swap, doctor and `cst_core` have an
 application layer with ports; in the other packages `cli.py` orchestrates
 the commands and still does some I/O itself. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
-each `cli.py` so it only shrinks: new logic goes into `domain` (pure) or
-`adapters` (I/O).
+each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
+`application` (with ports) or `adapters` (I/O). The I/O left outside the
+adapters has a budget per package and layer that only goes down
+(`IO_BUDGETS`, see "Static gates beyond lint and types" below).
 
 ## Most helpers are Python scripts with no `.py` extension
 
@@ -60,11 +62,19 @@ when it lacks an option: the rule [reuse-primitives](../.agents/rules/reuse-prim
 
 All of them run in the unit suite:
 
-- `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules).
-- `tests/test_distribution.py`: the manifest and the repository agree; every python-entry zipapp holds what it imports (AST import closure) and loads no code by path; modes fit the runner; entries with a known help mode run it from `/` with `/usr/bin/python3 -I`; sourced shell files exist. Its tier 1 twin (`test_11_...` in `tests/e2e/suites/suite_tier1_systemd.py`) installs the whole manifest for real and runs every entry as root and as a user.
+- `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
+  - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table that only shrinks;
+  - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so);
+  - no module imports a private name (`_x`) from another module of the repository;
+  - each shared primitive has an owner in cst_core (`PRIMITIVE_OWNERS`: `subprocess`, `os.replace`, `os.fsync`, temporary files, `fcntl.flock`, the NOCOW ioctl), and so do the literals that betray a copy of one (`PRIMITIVE_LITERALS`); a call or a literal outside its owner counts against its package's budget (`PRIMITIVE_BUDGETS`, `LITERAL_BUDGETS`), docstrings aside;
+  - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons, only shrinks).
+- Budgets (`tests/budgets.py`) are counts per package and layer that only go down: a count above its entry fails, and a count below it fails too until the lower number is written down, so that what was removed cannot come back. A key missing from a table is 0. A failing gate prints the measured table to paste in.
+- `tests/test_distribution.py`: the manifest and the repository agree; every python-entry zipapp holds what it imports (AST import closure) and loads no code by path; modes fit the runner; entries with a known help mode run it from `/` with `/usr/bin/python3 -I`; sourced shell files exist; every shell file of the checkout (`tests/shell_files.py`, the list `invowk cmd test lint` runs bash -n and shellcheck on) is an installed shell program, a setup entry point or sourced library, a checkout-only executable or an E2E script (`SHELL_TEST_SCRIPTS`), and parses. Its tier 1 twin (`test_11_...` in `tests/e2e/suites/suite_tier1_systemd.py`) installs the whole manifest for real and runs every entry as root and as a user.
+- `tests/test_unit_contract.py`: every unit CST installs or generates (`tests/unit_files.py`) names, in its `Exec*=` lines, only programs the manifest installs (kind python-entry or shell, with a mode its runner can run), and in its `Condition*=`/`Assert*=` lines only files the manifest installs, for every path under `/usr/local/` or `%h/.local/`. Tier 1's `test_16` runs `systemd-analyze verify` and `security` on the same units.
 - `tests/test_bytecode.py`: every `python3 -I` that starts a CST program from the checkout (setup scripts, Python argv lists) passes `-B`, so no `__pycache__` lands in the checkout (as root it would be root's and block `git clean`); `-I -c` and `-I -` (inline code) are exempt.
 - `tests/test_docs.py`: every relative link and anchor in the Markdown files resolves; every document is in the AGENTS.md index; every skill in `.agents/skills` has a SKILL.md with its name and a description, every rule a description; `.claude/rules` and `.claude/skills` link to `.agents`.
-- `tests/test_duplication.py`: a ratchet on copied code (Python type 1 and type 2 clones, shell clones, the same top-level name defined in several files). Its `CEILINGS` only go down: lower a number in the change that removes copies. The entry bootstrap and the bodies of `Protocol` classes are the same by design and are not counted; type 2 skips lines of literals only (type 1 still counts them). A name in `ALLOWED_SAME_NAMES` carries its reason, and an entry that is no longer defined twice fails.
+- `tests/test_duplication.py`: a ratchet on copied code (Python type 1 and type 2 clones, shell clones, the same top-level name defined in several files, the same shell function defined in several shell files: `ALLOWED_SHELL_SAME_NAMES` holds each allowed one with its reason). Its `CEILINGS` only go down: lower a number in the change that removes copies. The entry bootstrap and the bodies of `Protocol` classes are the same by design and are not counted; type 2 skips lines of literals only (type 1 still counts them). A name in `ALLOWED_SAME_NAMES` carries its reason, and an entry that is no longer defined twice fails.
 
 ## Toolbox vs host
 
@@ -81,7 +91,7 @@ It prints ok/info/WARN/ERROR lines.
 
 ## CI
 
-CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks.
+CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: the fast-gates job runs `invowk cmd ci audit` (the JSON report and the job summary) and then `invowk cmd check`, the same task people and agents run; the nightly workflow runs the same two. A pull request that changes only Markdown still runs the fast gates (the docs gate is in the unit suite); only the E2E tiers are skipped.
 
 - `invowk` is pinned by SHA256 and verified with cosign in `.github/actions/setup-invowk`.
 - Change the version with `invowk cmd ci pin-invowk <tag>`, not by editing the hashes.

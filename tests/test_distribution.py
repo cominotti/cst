@@ -11,8 +11,12 @@ files:
 - where an entry has a known safe help mode, its zipapp runs it from `/`
   with `/usr/bin/python3 -I` and no PYTHONPATH (exit as expected, no
   ImportError), staged under a temporary root;
-- shell files parse (bash -n) and every file a shell script sources is
-  named by a `# shellcheck source=` line and exists in the checkout.
+- every file a shell script sources is named by a `# shellcheck source=`
+  line and exists in the checkout;
+- every shell file of the checkout (tests/shell_files.py, the list
+  `invowk cmd test lint` lints) is a known kind: an installed shell
+  program, a setup entry point or sourced library, a checkout-only
+  executable or an E2E script, and parses with bash -n.
 
 Nothing here touches the machine: zipapps are built in memory or staged
 under temporary folders.
@@ -42,7 +46,9 @@ from cst_core.domain.install import (
     python_entry_srcs,
 )
 from cst_core.domain.values import OctalMode
+from tests.duplication import is_shell
 from tests.repo_files import REPO, repo_files
+from tests.shell_files import SHELL_TEST_SCRIPTS, shell_files
 
 SYSTEM_PYTHON: Final = "/usr/bin/python3"
 
@@ -67,7 +73,7 @@ HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
 # them must be a manifest source (or checkout-only, with a reason).
 _INSTALLABLE_DIRS: Final = ("/units/", "/sysctl/", "/tmpfiles/", "/snapshots/")
 _INSTALLABLE_SUFFIXES: Final = (".in", ".conf", ".ini", ".rules", ".service", ".timer", ".slice", ".mount")
-_NOT_SHIPPED_PREFIXES: Final = ("tests/", ".github/", "docs/", ".idea/")
+_NOT_SHIPPED_PREFIXES: Final = ("tests/", ".github/", "docs/")
 
 
 def _is_production(rel: str) -> bool:
@@ -237,23 +243,61 @@ class DistributionGateTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "/usr/local/sbin/btrfs-snapshot"), r.stderr)
 
-    def test_shell_files_parse_and_source_only_checkout_files(self) -> None:
+    def test_shell_files_source_only_checkout_files(self) -> None:
         problems: list[str] = []
         shell = [e.src for e in INSTALL_MANIFEST if e.kind == "shell"]
+        # bash -n: test_every_shell_file_is_known_and_parses, on every shell file.
         for rel in sorted(set(shell) | SETUP_ENTRYPOINTS):
-            path = os.path.join(REPO, rel)
-            r = subprocess.run(
-                ["bash", "-n", path], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-            )
-            if r.returncode != 0:
-                problems.append(f"{rel}: bash -n: {r.stderr.strip()}")
-            problems.extend(source_problems(rel, Path(path).read_text(encoding="utf-8")))
+            problems.extend(source_problems(rel, Path(REPO, rel).read_text(encoding="utf-8")))
         # An installed shell program runs without the checkout: it may source nothing of CST.
         for rel in shell:
             for i, line in enumerate(Path(REPO, rel).read_text(encoding="utf-8").splitlines()):
                 if _SOURCE_LINE.match(line):
                     problems.append(f"{rel}:{i + 1}: an installed shell program sources a file")
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_every_shell_file_is_known_and_parses(self) -> None:
+        installed = {e.src for e in INSTALL_MANIFEST if e.kind == "shell"}
+        known = installed | SETUP_ENTRYPOINTS | CHECKOUT_ONLY_EXECUTABLES | SHELL_TEST_SCRIPTS
+        files = shell_files()
+        problems = [
+            f"{rel}: a shell file of no known kind: add it to INSTALL_MANIFEST (kind shell), SETUP_ENTRYPOINTS "
+            "or CHECKOUT_ONLY_EXECUTABLES (cst_core/domain/install.py), or SHELL_TEST_SCRIPTS (tests/shell_files.py)"
+            for rel in files
+            if rel not in known
+        ]
+        problems += [
+            f"{rel}: in SHELL_TEST_SCRIPTS but not a shell file" for rel in sorted(SHELL_TEST_SCRIPTS - set(files))
+        ]
+        for rel in files:
+            r = subprocess.run(
+                ["bash", "-n", os.path.join(REPO, rel)],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            if r.returncode != 0:
+                problems.append(f"{rel}: bash -n: {r.stderr.strip()}")
+        self.assertEqual(problems, [], "\n".join(problems))
+        # Every shell kind in the lists is found by the inventory (a lint list cannot miss one).
+        missing = sorted(rel for rel in installed | SETUP_ENTRYPOINTS if rel not in files)
+        self.assertEqual(missing, [], "shell entries tests/shell_files.py does not find")
+
+    def test_shell_detection(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-shell-")
+        self.addCleanup(shutil.rmtree, tmp)
+        for name, first in (
+            ("a", "#!/usr/bin/env bash"),
+            ("b", "#!/usr/bin/bash"),
+            ("c", "#!/bin/sh"),
+            ("d", "# shellcheck shell=bash"),
+            ("e", "#!/usr/bin/python3 -I"),
+            ("f.bash", ""),
+            ("g", "# a comment"),
+        ):
+            Path(tmp, name).write_text(first + "\n:\n")
+        self.assertEqual([n for n in sorted(os.listdir(tmp)) if is_shell(n, tmp)], ["a", "b", "c", "d", "f.bash"])
 
     def test_source_checker(self) -> None:
         self.assertTrue(source_problems("x.sh", 'source "$DIR/a.bash"\n'))

@@ -62,6 +62,7 @@ def asset_name(tag: str, arch: str) -> str:
 def download(url: str, dest: Path, attempts: int = 3) -> None:
     if not url.startswith("https://"):
         raise PinError(f"refusing a non-HTTPS URL: {url}")
+    err: OSError | None = None
     for attempt in range(1, attempts + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "cst-pin-invowk"})

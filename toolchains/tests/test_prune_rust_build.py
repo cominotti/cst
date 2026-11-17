@@ -32,9 +32,9 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
-from tests.package_view import PackageView  # noqa: E402
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
+from cst_core.adapters.zipapp import build_python_zipapp
+from tests.package_view import PackageView
+from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
 
 sys.dont_write_bytecode = True
 
@@ -98,7 +98,7 @@ class _TargetProto(Protocol):
     ID: str
 
 
-class _ToolchainsModule(Protocol):
+class ToolchainsModule(Protocol):
     JOURNAL: bool
     TRASH_PREFIX: str
     SERVICE: str
@@ -157,7 +157,7 @@ class _ToolchainsModule(Protocol):
     restore: Callable[[], object]
 
 
-def load() -> _ToolchainsModule:
+def load() -> ToolchainsModule:
     """The toolchains package as one namespace (cli, adapters, domain): a
     name set on it reaches every module that uses it; restore() undoes that.
     The program is the checkout's cst-toolchains (what main() would be told)."""
@@ -165,7 +165,7 @@ def load() -> _ToolchainsModule:
     view = PackageView(tc_cli, tc_adapters, tc_domain)
     # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
     view.restore_default_signals = lambda: None
-    return cast("_ToolchainsModule", cast("object", view))
+    return cast("ToolchainsModule", cast("object", view))
 
 
 class Base(unittest.TestCase):

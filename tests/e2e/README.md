@@ -24,6 +24,7 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_11`: the real installer writes the whole install manifest (staged, as root and as the user), a second run changes nothing, and every Python program runs its help from `/` with no import error.
 - `test_12`: `cst vm backup-timer on` installs the zipapp, the service and the timer; a second `on` writes nothing; `off` removes everything.
 - `test_13`: `cst btrfs degraded-boot` with fakes for rpm-ostree, findmnt, btrfs, lsblk and the udevd part of udevadm: install, `udevadm verify` on the rule and `systemd-analyze verify` on the units, a second install that writes nothing and changes no deployment, a `status` that changes nothing, and an uninstall that removes everything.
+- `test_16`: every unit CST installs (the manifest, staged by the real installer) or generates (`tests/unit_files.py`: cst-vm, cst-toolchains, the LDAC watcher, the degraded-boot setup) passes `systemd-analyze verify` with no output under `--root` of the stage, and `systemd-analyze security --offline` of each service stays at its entry in `SECURITY_CEILINGS` (only goes down).
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
@@ -36,8 +37,17 @@ Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
 Both commands take `--keep_logs` (keep the journald/systemd logs in
 `tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).
-`invowk cmd test all` runs the fast gates (`test unit`, `test lint`, `test pylint`,
-`test types`), then both tiers.
+The containers read and run the checkout from a bind mount. Where SELinux is
+on, a checkout or git worktree labelled for a home folder (`user_home_t`)
+would give "Permission denied" inside them, so `run.py` starts them with
+`--security-opt label=disable` whenever it sees SELinux: at
+`/sys/fs/selinux` on the host, or at `/run/host/sys/fs/selinux` inside a
+toolbox (whose `docker` talks to the host's daemon). If SELinux is enforcing
+and that option is not added, the run stops before any container starts and
+prints the fix, `chcon -R -t container_file_t <checkout>`.
+
+`invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
+`test lint`, `test pylint`, `test types`, `test unit`), then both tiers.
 
 ## Tier 2 needs an explicit opt-in
 

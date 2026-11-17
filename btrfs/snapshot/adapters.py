@@ -30,7 +30,7 @@ from btrfs.snapshot.domain import (
     ParseError,
     Snap,
     WALK_PRUNE,
-    _SubvolInfo,
+    SubvolInfo,
     err_text,
     name_regex,
     other_parent,
@@ -421,7 +421,7 @@ class Btrfs:
     def __init__(self, host: Host) -> None:
         self.host = host
 
-    def show(self, path: str) -> _SubvolInfo:
+    def show(self, path: str) -> SubvolInfo:
         rc, out, err = self.host.run(["btrfs", "subvolume", "show", path])
         if rc != 0:
             raise ParseError(f"btrfs subvolume show failed (rc={rc}): {err.strip()}")

@@ -69,9 +69,83 @@ def run(
     )
 
 
+# The checkout is bind-mounted into the containers (/opt/cst, read-only, no
+# :z relabel) and its scripts run from there. Under SELinux in enforcing
+# mode, files labelled for a home folder (user_home_t, a fresh clone or a git
+# worktree) cannot be read or run by the container ("Permission denied" on
+# /opt/cst/cst in test_01) unless it starts with label=disable, which
+# host_lsm_security_opts adds whenever it sees the host's SELinux: at
+# /sys/fs/selinux, or under /run/host inside a toolbox (whose docker is the
+# host's daemon). checkout_preflight is the fallback for any other case: it
+# stops the run and prints the label containers may use.
+SELINUX_ENFORCE = Path("/sys/fs/selinux/enforce")
+# Inside a toolbox the host's selinuxfs is not mounted at /sys/fs/selinux; it is under /run/host.
+SELINUX_ENFORCE_FROM_TOOLBOX = Path("/run/host/sys/fs/selinux/enforce")
+# podman and toolbox create this file in every container they start.
+CONTAINER_MARKER = Path("/run/.containerenv")
+CONTAINER_FILE_TYPE = "container_file_t"
+# The types a container may read and run besides container_file_t.
+CONTAINER_READABLE_TYPES = frozenset({CONTAINER_FILE_TYPE, "container_ro_file_t"})
+
+
+def selinux_type(path: Path) -> str | None:
+    """The SELinux type of a file (container_file_t), or None when it has no label."""
+    try:
+        raw = os.getxattr(path, "security.selinux")
+    except OSError:
+        return None
+    parts = raw.rstrip(b"\0").decode("ascii", "replace").split(":")
+    return parts[2] if len(parts) >= 3 else None
+
+
+def checkout_label_problem(
+    *, enforcing: bool, types: Mapping[str, str | None], repo: Path, label_disabled: bool = False
+) -> str | None:
+    """Why the containers could not use the checkout (types: path -> SELinux type), with the fix; None if fine.
+
+    label_disabled: the containers start with --security-opt label=disable
+    (host_lsm_security_opts), so labels do not matter.
+    """
+    if not enforcing or label_disabled:
+        return None
+    wrong = sorted(path for path, kind in types.items() if kind is not None and kind not in CONTAINER_READABLE_TYPES)
+    if not wrong:
+        return None
+    found = ", ".join(f"{p} ({types[p]})" for p in wrong)
+    return (
+        f"[e2e] SELinux is enforcing and the checkout is not labelled {CONTAINER_FILE_TYPE}: {found}.\n"
+        "The containers bind-mount it and run its scripts; with this label they get 'Permission denied'.\n"
+        f"Fix (once per checkout or worktree): chcon -R -t {CONTAINER_FILE_TYPE} {repo}\n"
+    )
+
+
+def checkout_preflight(repo: Path = REPO_ROOT) -> str | None:
+    """checkout_label_problem for this machine and checkout."""
+    enforcing = False
+    for flag in (SELINUX_ENFORCE, SELINUX_ENFORCE_FROM_TOOLBOX):
+        try:
+            enforcing = flag.read_text().strip() == "1"
+            break
+        except OSError:
+            continue
+    return checkout_label_problem(
+        enforcing=enforcing,
+        types={str(p): selinux_type(p) for p in (repo, repo / "cst")},
+        repo=repo,
+        label_disabled="label=disable" in host_lsm_security_opts(),
+    )
+
+
+def host_selinux(
+    enforce: Path = SELINUX_ENFORCE, marker: Path = CONTAINER_MARKER, host_enforce: Path = SELINUX_ENFORCE_FROM_TOOLBOX
+) -> bool:
+    """SELinux is on in the kernel the containers run on: here, or on the host of this toolbox."""
+    return enforce.exists() or (marker.exists() and host_enforce.exists())
+
+
 def host_lsm_security_opts() -> list[str]:
     opts: list[str] = []
-    if Path("/sys/fs/selinux/enforce").exists():
+    if host_selinux():
         opts.extend(["--security-opt", "label=disable"])
     apparmor = Path("/sys/module/apparmor/parameters/enabled")
     try:
@@ -206,6 +280,8 @@ def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         os.environ["CST_E2E_NAS_CONTAINER"] = nas
         os.environ["CST_E2E_SYSTEMD_IMAGE"] = IMG_SYSTEMD
         os.environ["CST_E2E_REPO_ROOT"] = str(REPO_ROOT)
+        # test_01 starts containers of its own on the checkout: the same options.
+        os.environ["CST_E2E_SECURITY_OPTS"] = " ".join(host_lsm_security_opts())
 
         suite = load_suite("suite_tier1_systemd.py")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -326,6 +402,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if 2 in args.tier and not privileged_allowed(args.allow_privileged):
         print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
+        return 2
+    problem = checkout_preflight()
+    if problem is not None:
+        print(problem, file=sys.stderr, end="")
         return 2
     if args.check_only:
         return 0

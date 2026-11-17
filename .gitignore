@@ -5,3 +5,6 @@ __pycache__/
 tests/e2e/.artifacts/
 .venv/
 .ruff_cache/
+# An IDE's project folder (JetBrains)
+.idea/
+audit-report.json

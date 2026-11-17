@@ -140,16 +140,10 @@ jobs:
           # would not be writable by the ci user.
           enable-cache: 'false'
 
-      - name: Validate invowk module
-        run: runuser -u ci -- env "PATH=${PATH}" invowk validate cst.invowkmod
-
-      - name: Audit invowk module security
-        run: |
-          set -euo pipefail
-          rc=0
-          runuser -u ci -- env "PATH=${PATH}" invowk audit --format json --severity low cst.invowkmod > audit-report.json || rc=$?
-          python3 .github/scripts/audit_summary.py audit-report.json "${rc}"
-          exit "${rc}"
+      - name: Audit invowk module security (JSON report)
+        # As root, like the summary step it replaces: the report goes into the
+        # checkout and the summary into GITHUB_STEP_SUMMARY, which the ci user cannot write.
+        run: invowk cmd ci audit
 
       - name: Upload invowk audit report
         if: always()
@@ -160,17 +154,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Run shell syntax and ShellCheck gate
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test lint
-
-      - name: Run Python lint gate (ruff)
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test pylint
-
-      - name: Run Python type gate (ty, annotations)
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test types
-
-      - name: Run unit tests
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test unit
+      # Every fast gate, the same task people and agents run: validate, audit,
+      # test lint, test pylint, test types, test unit (invowkfile.cue).
+      - name: Run the fast gates (invowk cmd check)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
   e2e-tier1:
     name: E2E Tier 1 (Fedora 45 systemd + NAS)

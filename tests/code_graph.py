@@ -19,7 +19,7 @@ from cst_core.domain.install import CHECKOUT_ONLY_EXECUTABLES, INSTALL_MANIFEST
 from tests.repo_files import REPO, repo_files
 
 # Programs that are development tools, not part of what CST runs.
-_DEV_ONLY: Final = ("tests/", ".github/", ".idea/", "docs/")
+_DEV_ONLY: Final = ("tests/", ".github/", "docs/")
 
 
 def is_python(rel: str, repo: str = REPO) -> bool:
