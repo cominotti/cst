@@ -2216,6 +2216,15 @@ class InstallAreaTest(Scratch):
         self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
         self.assertIn("btrfs:docker-gc: installed before the install record; 1 of 1 file(s) differ", res[0].message)
 
+    def test_without_a_checkout_to_compare_with_nothing_is_said_to_differ(self) -> None:
+        # desired_sha256 cannot say (no checkout): a plain-script copy is not reported as differing.
+        gc = os.path.join(self.root, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(gc))
+        with open(gc, "w") as f:
+            f.write("#!/usr/bin/python3\n# a plain-script copy of an older CST\n")
+        res = list(doc_app.check_install(self.host, installed=doc_adapters.InstalledFiles("")))
+        self.assertEqual(res, [])
+
     def test_a_component_the_record_does_not_list_is_compared_as_before_the_record(self) -> None:
         # The record lists docker-gc; swap was installed by an older CST and is not in it.
         self.install("btrfs:docker-gc")
@@ -2252,6 +2261,8 @@ class InstallAreaTest(Scratch):
         text = (
             "[Service]\nExecStartPre=-/usr/sbin/btrfs x\nExecStart=/usr/bin/python3 -I /usr/local/sbin/a run\n"
             "ExecStopPost=-%h/.local/lib/cst/b\nEnvironment=X=/usr/local/c\n"
+            # Folders, not programs: never "missing or not executable".
+            "ExecSearchPath=/usr/local/sbin:/usr/bin\nExecPaths=/usr/local/sbin\n"
         )
         self.assertEqual(doc_domain.unit_exec_paths(text, "/home/u"), ["/usr/local/sbin/a", "/home/u/.local/lib/cst/b"])
         self.assertEqual(doc_domain.unit_exec_paths(text, ""), ["/usr/local/sbin/a"])

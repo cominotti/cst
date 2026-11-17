@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import posixpath
 
+from cst_core.domain.errors import Refused
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import (
     InstallEntry,
@@ -49,8 +50,11 @@ from cst_core.ports import InstallRecordPort, InstallTargetPort, UnitVerifierPor
 type PayloadFn = Callable[[InstallEntry], bytes]
 
 
-class InstallRefused(Exception):
-    """An install that must not run as asked (wrong user, bad arguments, a record of a newer CST)."""
+class InstallRefused(Refused):
+    """An install that must not run as asked (wrong user, bad arguments, a record of a newer CST).
+
+    A Refused: a module that writes through InstallService (swap, vm, toolchains) reports it as its
+    own refusals."""
 
 
 @dataclass(frozen=True, slots=True)

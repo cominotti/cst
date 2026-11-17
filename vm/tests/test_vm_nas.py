@@ -1023,6 +1023,17 @@ class ConstantsTest(unittest.TestCase):
 
 
 class TimerTest(Nas):
+    def test_on_with_a_record_of_a_newer_cst_is_refused_with_a_message(self) -> None:
+        record = self.env["CST_VM_INSTALL_RECORD"]
+        os.makedirs(os.path.dirname(record))
+        with open(record, "w") as f:
+            f.write('{"format": 99}')
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("written by a newer CST", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse(os.path.exists(self.env["CST_VM_SBIN_COPY"]))
+
     def test_on_status_off(self) -> None:
         r = self.run_tool("backup-timer", "status", "win")
         self.assertEqual(r.returncode, 0, r.stderr)

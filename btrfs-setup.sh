@@ -740,7 +740,6 @@ docker_gc() {
     local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer f purge=0 shown=0
     local -a files units
     [[ $# -gt 0 ]] && shift
-    mapfile -t units < <(cst_component_units btrfs:docker-gc)
     case "${action}" in
         enable)
             check_component_syntax btrfs:docker-gc
@@ -763,6 +762,9 @@ docker_gc() {
                 *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
             esac
             (( $# <= 1 )) || { echo "docker-gc disable: unknown argument '${2}' (only --purge)" >&2; exit 2; }
+            # The installer lists the units (a failure would leave the timer enabled behind a "disabled").
+            mapfile -t units < <(cst_component_units btrfs:docker-gc)
+            (( ${#units[@]} )) || { echo "docker-gc disable: cannot list its units" >&2; exit 1; }
             # While the unit files are still there: clean needs the timer loaded.
             disable_timers "${units[@]}"
             if (( ! purge )); then
@@ -770,7 +772,6 @@ docker_gc() {
                 echo "To also remove its program, units and recorded state: ${PROG} docker-gc disable --purge"
                 return 0
             fi
-            (( ${#units[@]} )) || { echo "docker-gc disable --purge: cannot list its installed files" >&2; exit 1; }
             cst_remove --component btrfs:docker-gc
             if [[ -e "${DOCKER_GC_STATE}" ]]; then
                 rm -rf "${DOCKER_GC_STATE}"
@@ -828,6 +829,27 @@ stop_monitoring() {
     systemctl stop btrfs-stall-alert.service 2>/dev/null || true
 }
 
+# remove_tuning_files: the tmpfiles and sysctl files of btrfs:core, with their
+# lines in the install record, also when a file is already gone (cst doctor
+# would call it missing). A reclaim file without CST's marker is kept.
+remove_tuning_files() {
+    if grep -qs 'Managed by btrfs-setup.sh' "${RECLAIM_FILE}"; then
+        cst_remove "${RECLAIM_SRC}"
+        echo "Automatic reclaim stays enabled in sysfs until the next reboot."
+    elif [[ -e "${RECLAIM_FILE}" ]]; then
+        echo "Kept ${RECLAIM_FILE}: not created by this script."
+    else
+        cst_remove "${RECLAIM_SRC}"
+    fi
+    if [[ -e "${SYSCTL_FILE}" ]]; then
+        cst_remove "${SYSCTL_SRC}"
+        # Restore the tuned profile values (dirty_ratio) at runtime.
+        systemctl try-restart tuned.service || true
+    else
+        cst_remove "${SYSCTL_SRC}"
+    fi
+}
+
 uninstall() {
     local -a srcs units
     # btrfs:core, but the sysctl and tmpfiles files: removed below, each with its own care.
@@ -857,23 +879,13 @@ uninstall() {
     fi
     cst_remove --component btrfs:below
     rm -fv "${OLD_BELOW_DROPIN}"
-    if grep -qs 'Managed by btrfs-setup.sh' "${RECLAIM_FILE}"; then
-        cst_remove "${RECLAIM_SRC}"
-        echo "Automatic reclaim stays enabled in sysfs until the next reboot."
-    elif [[ -e "${RECLAIM_FILE}" ]]; then
-        echo "Kept ${RECLAIM_FILE}: not created by this script."
-    fi
+    remove_tuning_files
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
     if [[ -n "${shim}" ]] && grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
         rm -fv "${shim}"
     fi
     systemctl daemon-reload
-    if [[ -e "${SYSCTL_FILE}" ]]; then
-        cst_remove "${SYSCTL_SRC}"
-        # Restore the tuned profile values (dirty_ratio) at runtime.
-        systemctl try-restart tuned.service || true
-    fi
     echo "Not touched: snapshots and the NAS backup ('${PROG} snapshots disable [--purge]' stops them / deletes"
     echo "             the local snapshots; the restic repository on the NAS, its password in"
     echo "             /etc/btrfs-setup/restic-password and the layered 'restic' package stay)."

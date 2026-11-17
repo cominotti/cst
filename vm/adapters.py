@@ -563,6 +563,7 @@ def install_timer_files(
     Its own refusals (a foreign or masked file) come first, in cmd_timer."""
     svc = timer_installer(entry_file)
     as_root = os.geteuid() == 0
+    program_entry = manifest_by_src()["vm/cst-vm"]
     for p, (text, mode) in files.items():
         program = p == SBIN_COPY
         place = Placement(
@@ -570,8 +571,8 @@ def install_timer_files(
             dest=p,
             record=INSTALL_RECORD,
             component=TIMER_COMPONENT,
-            src="vm/cst-vm" if program else None,
-            kind="python-entry" if program else "text",
+            src=program_entry.src if program else None,
+            kind=program_entry.kind if program else "text",
             owner="root",
             mode=mode,
         )

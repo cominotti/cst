@@ -1206,6 +1206,10 @@ EOF
             if grep -v '^unchanged: ' <<<"$lgain"; then echo "a link to the same content was rewritten" >&2; exit 1; fi
             [[ -L "$d" ]] || {{ echo "the link was replaced" >&2; exit 1; }}
             rm -f "$d" /home/tester/.e2e-link-target
+            # The file again (the install record still lists it, as installed): the record checks below
+            # compare every recorded destination with the stage.
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user >/dev/null
+            [[ -f "$d" && ! -L "$d" ]] || {{ echo "the user file was not installed again" >&2; exit 1; }}
             # At a root destination a link is replaced, even one to the same content; and as root
             # a root file owned by a user (a hand copy) is rewritten, owned by root again.
             r="{stage}/usr/local/sbin/btrfs-notify"
@@ -1346,8 +1350,13 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         cleanup = f"{run}{installer} remove {home} --component {comp} >/dev/null"
         self.addCleanup(exec_bash, c, cleanup, check=False)
         for need in self.COMPONENT_NEEDS.get(comp, ()):
-            exec_bash(c, f"{installer} install --component {need} >/dev/null")
-            self.addCleanup(exec_bash, c, f"{installer} remove --component {need} >/dev/null", check=False)
+            # Installed (and removed after) only when none of its files is there: another test's stay.
+            present = f"$({installer} dests --component {need} | while read -r d; do [[ ! -e $d ]] || echo $d; done)"
+            made = exec_bash(
+                c, f'if [[ -z "{present}" ]]; then {installer} install --component {need} >/dev/null; echo made; fi'
+            ).stdout
+            if "made" in made:
+                self.addCleanup(exec_bash, c, f"{installer} remove --component {need} >/dev/null", check=False)
         out = exec_bash(
             c,
             f"""

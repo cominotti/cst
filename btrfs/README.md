@@ -200,7 +200,10 @@ written first: the units of the next one run `btrfs-notify`), `btrfs:core`
 `btrfs:below` (the below drop-in). `snapshots setup` installs
 `btrfs:snapshots` and `btrfs:top-mount` (and `btrfs:alerts` again);
 `docker-gc enable`, `btrfs:docker-gc`. `uninstall` removes the files of the
-manifest's components, not a list of its own.
+manifest's components, not a list of its own, and their lines in the install
+record (also of a writeback or reclaim file that was already deleted by hand).
+`docker-gc disable` stops with an error, before it disables anything, when the
+installer cannot list docker-gc's units.
 
 The launcher `~/.local/bin/btrfs-stall-report` and the link
 `~/.local/bin/cst` are created for **the user who ran `sudo`** (the script

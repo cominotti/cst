@@ -2159,6 +2159,6 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
-    except (Refused, ConfigError) as e:
+    except (Refused, ConfigError, WriteFailed) as e:
         say(f"{NAME}: {e}", 3, err=True)
         return 1

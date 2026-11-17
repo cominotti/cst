@@ -27,6 +27,7 @@ from cst_core.adapters import c_locale
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
+from cst_core.ports import WriteFailed
 from cst_core.domain.units import masked_refusal
 from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import (
@@ -1458,7 +1459,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         if a["nas"]:
             return cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
         return cmd_backup(vm, a["full"])
-    except (Refused, Stop) as e:
+    except (Refused, Stop, WriteFailed) as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         if cmd == "backup" and a["nas"] and os.environ.get("INVOCATION_ID") and "DISK NOT MERGED" not in str(e):
             # Started by systemd (the weekly timer): nobody reads the terminal.

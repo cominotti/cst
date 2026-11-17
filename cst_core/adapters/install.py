@@ -9,7 +9,7 @@ import stat
 import tempfile
 
 from cst_core.adapters import SubprocessCommandRunner
-from cst_core.adapters.files import write_bytes_atomic
+from cst_core.adapters.files import ensure_dir, write_bytes_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
@@ -86,7 +86,8 @@ class JsonInstallRecord:
         path = checked_path(path)
         folder = os.path.dirname(path)
         try:
-            _make_folders(folder)
+            # 0755 whatever the umask (sudo's 077 would give 0700; cst doctor reads the record as a user).
+            ensure_dir(folder, 0o755)
             fd = take_lock(path + ".lock", wait=True, mode=0o644)
         except OSError as e:
             raise WriteFailed(path, e.strerror or str(e)) from None
@@ -100,9 +101,10 @@ class JsonInstallRecord:
                 old = None  # not a record (cut short, edited by hand): started again, the next install fills it
             before = old or EMPTY_RECORD
             after = change(before)
-            if render_record(after) == render_record(before) and (old is not None or after == EMPTY_RECORD):
+            text = render_record(after)
+            if text == render_record(before) and (old is not None or after == EMPTY_RECORD):
                 return False  # no change; and no empty record where there was none (a mark with nothing listed)
-            write_bytes_atomic(path, render_record(after).encode("utf-8"), mode=0o644)
+            write_bytes_atomic(path, text.encode("utf-8"), mode=0o644)
             return True
         except OSError as e:
             raise WriteFailed(path, e.strerror or str(e)) from None
@@ -112,21 +114,6 @@ class JsonInstallRecord:
     def sha256(self, data: bytes) -> str:
         """hashlib.sha256 in hex."""
         return hashlib.sha256(data).hexdigest()
-
-
-def _make_folders(folder: str) -> None:
-    """folder and its missing parents, each 0755 whatever the umask (sudo's 077 would make them 0700,
-    and cst doctor reads the record as a user)."""
-    missing: list[str] = []
-    while folder and not os.path.isdir(folder):
-        missing.append(folder)
-        folder = os.path.dirname(folder)
-    for d in reversed(missing):
-        try:
-            os.mkdir(d, 0o755)
-        except FileExistsError:
-            continue
-        os.chmod(d, 0o755)
 
 
 class SystemdUnitVerifier:

@@ -5,8 +5,8 @@ from collections.abc import Mapping, Sequence
 import sys
 from typing import TextIO
 
-from cst_core.domain.errors import shell_exit_status
-from cst_core.ports import CommandFailed
+from cst_core.domain.errors import Refused, shell_exit_status
+from cst_core.ports import CommandFailed, WriteFailed
 from swap.application import MissingDesiredFileError, SwapApplicationService
 from swap.domain import (
     PAGE,
@@ -269,6 +269,7 @@ def run_command(cmd: str, service: SwapApplicationService, *, hint: str, out: Te
         if exc.returncode < 0:
             print(killed_text(service.prog, exc.argv, exc.returncode), file=err)
         return shell_exit_status(exc.returncode)
-    except (MissingDesiredFileError, OSError) as exc:
+    # WriteFailed and Refused: a file or the install record could not be written through the installer.
+    except (MissingDesiredFileError, OSError, WriteFailed, Refused) as exc:
         print(f"{service.prog}: ERROR: {exc}", file=err)
         return 1

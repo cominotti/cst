@@ -1043,6 +1043,15 @@ class AutoTest(Scratch):
             rec = json.load(f)
         self.assertEqual((rec["files"], rec["components"]), ({}, {}))
 
+    def test_auto_on_with_a_record_of_a_newer_cst_is_refused_with_a_message(self) -> None:
+        self.csts_cargo_config()
+        self.write(".local/state/cst/installed.json", '{"format": 99}')
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("written by a newer CST", out)
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".local/lib/cst/cst-toolchains")))
+
     def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self) -> None:
         # A running timer whose file is there but not CST's is not the
         # orphan that auto off stops: the manager is not even asked about it.

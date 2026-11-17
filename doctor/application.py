@@ -10,7 +10,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.install import COMPONENTS, INSTALL_MANIFEST, InstallEntry, expand_dest
+from cst_core.domain.install import COMPONENTS, INSTALL_MANIFEST, InstallEntry, expand_dest, manifest_by_src
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.domain.record import ROOT_RECORD, USER_RECORD_REL, InstallRecord, RecordedFile, RecordFormatError
 from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments, parse_snapshots_conf
@@ -1646,7 +1646,7 @@ def _file_findings(
 def _older(files: InstalledFilesPort, f: RecordedFile) -> bool:
     """The record's bytes differ from what this checkout installs (a manifest file only; a template with
     its recorded values; never a file its module renders itself, such as the sccache wrapper)."""
-    entry = next((e for e in INSTALL_MANIFEST if e.src == f.src), None)
+    entry = manifest_by_src().get(f.src) if f.src else None
     if entry is None or (f.values is not None and not entry.is_template):
         return False
     want = files.desired_sha256(entry.src, f.values)
@@ -1720,8 +1720,11 @@ def _without_record(
                 sha = files.file_sha256(host.path(HostPath(dest)))
             except OSError:
                 continue
+            want = files.desired_sha256(e.src, None)
+            if want is None:
+                continue  # this checkout cannot say (no checkout, a source that does not build)
             found += 1
-            if sha != files.desired_sha256(e.src, None):
+            if sha != want:
                 differ.append(dest)
         if differ:
             yield Result(

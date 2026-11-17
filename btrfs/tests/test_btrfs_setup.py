@@ -524,6 +524,7 @@ class ComponentInstallTest(unittest.TestCase):
                         "disable_timers",
                         "docker_gc_files",
                         "docker_gc",
+                        "remove_tuning_files",
                     )
                 ),
                 body,
@@ -588,6 +589,43 @@ class ComponentInstallTest(unittest.TestCase):
         # btrfs-notify, which the snapshot units' runs alert through, is written before them.
         out = r.stdout
         self.assertLess(out.index("/usr/local/sbin/btrfs-notify"), out.index("/btrfs-snapshot.service"))
+
+    def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
+        # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
+        script = "\n".join([STAGED_INSTALLER, "cst_component_units() { return 1; }", "docker_gc disable"])
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "\n".join([STUBS, *(shell_function(SETUP, f) for f in ("docker_gc_files", "docker_gc")), script]),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("cannot list its units", r.stderr)
+        self.assertNotIn("docker-gc disabled", r.stdout)
+
+    def test_uninstall_forgets_a_tuning_file_already_gone(self) -> None:
+        # btrfs:core's sysctl and tmpfiles files, installed (staged) and recorded; the sysctl file was
+        # deleted by hand. remove_tuning_files removes the other and drops both record lines.
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        self.run_bash(
+            "cst_install --set UUID=00000000-0000-0000-0000-000000000000 "
+            "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in >/dev/null"
+        )
+        self.assertEqual(sorted(self.record()["files"]), [sysctl, reclaim])
+        os.unlink(self.stage + sysctl)
+        self.run_bash(
+            f'SYSCTL_FILE="$T/stage{sysctl}"; RECLAIM_FILE="$T/stage{reclaim}"\n'
+            f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
+        )
+        self.assertEqual(self.staged(), [])
+        self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
 
     def test_a_program_that_does_not_parse_installs_nothing(self) -> None:
         r = subprocess.run(

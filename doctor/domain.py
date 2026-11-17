@@ -524,6 +524,10 @@ def scrub_dropin_limit(text: str) -> str:
     return m.group(1) if m else ""
 
 
+# The settings whose value is a command line (ExecSearchPath=, ExecPaths= hold folders, not programs).
+_EXEC_COMMANDS = frozenset(
+    ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
+)
 _UNIT_SUFFIXES = (".service", ".timer", ".socket", ".path", ".mount", ".automount", ".slice", ".target")
 
 
@@ -533,13 +537,14 @@ def is_unit_file(dest: str) -> bool:
 
 
 def unit_exec_paths(text: str, home: str) -> list[str]:
-    """The CST programs a unit runs: every word of its Exec*= lines under /usr/local/ or %h/ (%h as home),
-    in order, without the prefixes systemd allows before the command (-@:+!|)."""
+    """The CST programs a unit runs: every word of its command lines (ExecStart= and the like) under
+    /usr/local/ or %h/ (%h as home), in order, without the prefixes systemd allows before the command
+    (-@:+!|)."""
     out: list[str] = []
     roots = ("/usr/local/", home.rstrip("/") + "/") if home else ("/usr/local/",)
     for line in text.splitlines():
         key, sep, value = line.strip().partition("=")
-        if not sep or not key.startswith("Exec"):
+        if not sep or key.strip() not in _EXEC_COMMANDS:
             continue
         for word in value.split():
             word = word.lstrip("-@:+!|")

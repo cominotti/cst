@@ -905,6 +905,23 @@ class SwapApplicationTest(_SwapScratch):
                 rec["files"]["/etc/sysctl.d/99-swap-tuning.conf"]["sha256"], hashlib.sha256(f.read()).hexdigest()
             )
 
+    def test_apply_with_a_record_of_a_newer_cst_is_an_error_line_not_a_traceback(self) -> None:
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        os.makedirs(os.path.dirname(record))
+        with open(record, "w") as f:
+            f.write('{"format": 99, "files": {}}')
+        env = dataclasses.replace(self.env, install_record=record)
+        fs = self._fs(mapper_present=False)
+        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, _installer())
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(run_command("apply", service, hint="", out=out, err=err), 1)
+        self.assertIn("cst swap: ERROR: ", err.getvalue())
+        self.assertIn("written by a newer CST", err.getvalue())
+        with open(record) as f:
+            self.assertEqual(f.read(), '{"format": 99, "files": {}}', "the newer record was changed")
+
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
         os.makedirs(os.path.join(self.env.etc_dir, "sysctl.d"), exist_ok=True)
