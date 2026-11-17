@@ -18,9 +18,13 @@ from typing import TypedDict
 import os
 import re
 
+from cst_core.domain.contracts import StateFormat, state_format
+from cst_core.domain.install import manifest_by_src
 from cst_core.domain.values import format_bytes_gib_mib
 
-NOTIFY = "/usr/local/sbin/btrfs-notify"
+NOTIFY = manifest_by_src()["btrfs/btrfs-notify"].dest
+# The journals of moves not finished yet (read back by any later btrfs-bulk).
+JOURNAL: StateFormat = state_format("bulk-journal")
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
 TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
@@ -502,8 +506,8 @@ class BulkPaths:
     convert_plan: str = "/etc/btrfs-setup/convert-plan"
     snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
     notify: str = NOTIFY
-    state: str = "/var/lib/btrfs-bulk"
-    attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
+    state: str = JOURNAL.folder  # the journals and the boot counter
+    attempts: str = f"{JOURNAL.folder}/boot-attempts"
     lock: str = "/run/btrfs-snapshot.lock"  # shared with btrfs-snapshot
 
     @classmethod

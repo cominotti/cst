@@ -8,12 +8,14 @@ from typing import Any
 from typing import TypedDict
 import re
 
+from cst_core.domain.contracts import state_format
+
 # v7: reads /proc and /sys files to the end (zswap counters were 0 before).
 # v8: a "memory" wait kind (reclaim, swap-in, zswap, page faults and mmap calls
 #     waiting for the memory map lock). Samples count it in "d_mem", not in "d"; it opens no
 #     episode; episodes record "max_d_mem". Daemons before v8 counted these
 #     waits as storage.
-VERSION = 8
+VERSION = state_format("stall-records").version  # the number lives in cst_core/domain/contracts.py
 BASE_INTERVAL = 5.0  # s between full samples
 EPISODE_INTERVAL = 1.0  # s between full samples during an episode
 PROBE_INTERVAL = 1.0  # s between cheap commit_stats probes

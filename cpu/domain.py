@@ -15,11 +15,12 @@ import re
 from typing import Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 
 URI = "qemu:///system"
-GAME_STATE = "/run/cpu-setup/game.state"  # cpu/game-profile: the profile is on
+GAME_STATE = state_format("game-state").path  # cpu/game-profile: the profile is on
 # The columns of a cpu-watch run's samples.csv (watch writes them, summarize reads them by name).
 SAMPLE_FIELDS = (
     "t",

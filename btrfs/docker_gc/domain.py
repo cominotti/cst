@@ -10,8 +10,12 @@ from datetime import datetime
 import os
 import re
 
+from cst_core.domain.contracts import StateFormat, state_format
 from cst_core.domain.values import format_bytes_decimal
 
+# The recorder's state and the last run's summary (the files of GcPaths).
+STATE_FORMAT: StateFormat = state_format("docker-gc-state")
+LAST_RUN_FORMAT: StateFormat = state_format("docker-gc-last-run")
 DAY = 86400
 HEARTBEAT_SECONDS = 300
 MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up
@@ -96,7 +100,7 @@ class GcSettings:
 class GcPaths:
     """Where docker-gc keeps its state (StateDirectory) and its run lock (RuntimeDirectory)."""
 
-    state_dir: str = "/var/lib/docker-gc"
+    state_dir: str = STATE_FORMAT.folder
     # In docker-gc.service's RuntimeDirectory= (kept after the run): with the state folder, the
     # places the sandboxed unit may write. Shared with runs outside it (cleanup-now,
     # run --dry-run), which make the folder; a tmpfs, so they leave no file in the state folder.
@@ -104,11 +108,11 @@ class GcPaths:
 
     @property
     def last_used(self) -> str:
-        return os.path.join(self.state_dir, "last-used.json")
+        return os.path.join(self.state_dir, STATE_FORMAT.file_name)
 
     @property
     def last_run(self) -> str:
-        return os.path.join(self.state_dir, "last-run.json")
+        return os.path.join(self.state_dir, LAST_RUN_FORMAT.file_name)
 
     @property
     def lock(self) -> str:

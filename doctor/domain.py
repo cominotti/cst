@@ -13,6 +13,7 @@ from typing import Any, NewType, Self
 import xml.etree.ElementTree as ET
 
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
@@ -45,6 +46,7 @@ STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
 ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
 ALERT_MAX_FILE = 16384
 ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
+ALERT_PENDING = HostPath(state_format("alert-spool").folder)  # btrfs-notify keeps them there
 
 # The machine's own architecture: a bare name installs this one (or noarch).
 ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64", "src"})
@@ -58,7 +60,7 @@ TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
 BTRFS_SYSFS = HostPath("/sys/fs/btrfs")
 RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
-HEALTH_CHECK_HOST = HostPath("/usr/local/sbin/btrfs-health-check")
+HEALTH_CHECK_HOST = HostPath(manifest_by_src()["btrfs/btrfs-health-check"].dest)
 # btrfs-notify, which a VM backup that fails alerts through (its manifest dest).
 NOTIFY_HOST = HostPath(manifest_by_src()["btrfs/btrfs-notify"].dest)
 UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
@@ -93,13 +95,13 @@ ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
-GAME_RUN = HostPath("/run/cpu-setup")
-GAME_STATE = HostPath(f"{GAME_RUN}/game.state")
-GAME_INTENDED = HostPath(f"{GAME_RUN}/game.intended")
+GAME_RUN = HostPath(state_format("game-state").folder)
+GAME_STATE = HostPath(state_format("game-state").path)
+GAME_INTENDED = HostPath(state_format("game-intended").path)
 GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
 GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
-GAME_PROFILE_HOST = "/usr/local/sbin/cpu-game-profile"
+GAME_PROFILE_HOST = manifest_by_src()["cpu/game-profile"].dest
 
 # The top-level slices of the user manager that CST knows: app.slice (desktop
 # apps and the game), session.slice (gnome-shell), background.slice (GNOME's
@@ -112,7 +114,7 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 VIRSH_URI = "qemu:///system"
 CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
-VM_INDEX = HostPath("/var/lib/cst/vm-backups.json")
+VM_INDEX = HostPath(state_format("vm-index").path)
 VM_CONF = HostPath("/etc/cst/vm.conf")
 VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
 VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works

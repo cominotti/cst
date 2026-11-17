@@ -17,6 +17,7 @@ import subprocess
 import time
 
 from cst_core.adapters.files import write_atomic
+from cst_core.domain.contracts import state_format
 from btrfs.stall_monitord.adapters import (
     CGROUP_ROOT,
     Topology,
@@ -673,9 +674,9 @@ class Monitor:
         if not self.run_dir:
             return
         try:
-            # Plain-text queue for /usr/local/sbin/btrfs-notify --queue:
+            # Plain-text queue for /usr/local/sbin/btrfs-notify --queue (the stall-queue format):
             # line 1 urgency, line 2 title, rest body.
-            path = os.path.join(self.run_dir, f"alert-{time.time_ns()}.txt")
+            path = os.path.join(self.run_dir, state_format("stall-queue").file_name.replace("*", str(time.time_ns())))
             text = f"{'critical' if level == 'crit' else 'normal'}\n{title.replace(chr(10), ' ')}\n{body}\n"
             write_atomic(path, text.encode("utf-8"), mode="umask", durable=False, relabel=False)
             subprocess.Popen(

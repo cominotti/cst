@@ -206,6 +206,7 @@ include = [
     "cst_core/application/install.py",
     "cst_core/cli.py",
     "cst_core/domain/__init__.py",
+    "cst_core/domain/contracts.py",
     "cst_core/domain/dispatch.py",
     "cst_core/domain/errors.py",
     "cst_core/domain/files.py",

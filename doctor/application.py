@@ -20,6 +20,7 @@ from doctor.domain import (
     ALERT_KEEP_DAYS,
     ALERT_MAX_FILE,
     ALERT_NAME,
+    ALERT_PENDING,
     BTRFS_SYSFS,
     CET_ISSUE,
     CPU_CONF,
@@ -382,9 +383,9 @@ def mtime_matches(recorded: str, st: os.stat_result) -> bool:
 
 @check("alerts")
 def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
-    pending = host.path(HostPath("/var/lib/cst-alerts/pending"))
+    pending = host.path(ALERT_PENDING)
     if not host.isdir(pending):
-        yield Result(INFO, f"no alert folder /var/lib/cst-alerts/pending (installed by {host.cst} btrfs install)")
+        yield Result(INFO, f"no alert folder {ALERT_PENDING} (installed by {host.cst} btrfs install)")
         return
     try:
         names = sorted(n for n in host.listdir(pending) if ALERT_NAME.match(n))

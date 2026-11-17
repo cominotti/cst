@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Literal
+from typing import Final, Literal
 import unittest
 from unittest import mock
 
@@ -33,6 +33,8 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
+from cst_core.domain.contracts import state_format
+from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
 from cst_core.domain.dispatch import MODULES, ROUTING, Routed, format_cst_usage, route_command, script_help
@@ -1273,6 +1275,62 @@ class CoreWiringTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True), mock.patch.object(sys, "argv", []):
             core_wiring.cst_dispatcher(fallback_root="/fallback", stdout=io.StringIO(), stderr=err).dispatch(["nope"])
         self.assertTrue(err.getvalue().startswith("cst: unknown command or module 'nope'\n"), err.getvalue())
+
+
+class StateContractsTest(unittest.TestCase):
+    """cst_core/domain/contracts.py: every shared state format, and the programs that use its paths."""
+
+    KEYS: Final = ("alert-spool", "stall-records", "stall-queue", "bulk-journal", "docker-gc-state", "docker-gc-last-run",
+            "vm-index", "install-record", "game-state", "game-intended")  # fmt: skip
+
+    def test_every_format_names_real_writers_and_readers(self) -> None:
+        for key in self.KEYS:
+            f = state_format(key)
+            with self.subTest(key):
+                self.assertEqual(f.key, key)
+                self.assertTrue(f.path.startswith("/") and f.folder and f.file_name, f.path)
+                self.assertGreaterEqual(f.version, 0)
+                self.assertTrue(f.writers and f.readers)
+                for rel in f.writers + f.readers:
+                    self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, rel)), rel)
+
+    def test_the_programs_use_the_registered_paths(self) -> None:
+        from btrfs.bulk.domain import BulkPaths
+        from btrfs.docker_gc.domain import GcPaths
+        from btrfs.stall_monitord.domain import VERSION
+        from btrfs.stall_report.adapters import LOG_DIR
+        from cpu.domain import GAME_STATE
+        from cst_core.domain.record import ROOT_RECORD
+        from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX
+
+        self.assertEqual(GcPaths().last_used, state_format("docker-gc-state").path)
+        self.assertEqual(GcPaths().last_run, state_format("docker-gc-last-run").path)
+        self.assertEqual(BulkPaths().state, state_format("bulk-journal").folder)
+        self.assertEqual(
+            (VERSION, LOG_DIR), (state_format("stall-records").version, state_format("stall-records").folder)
+        )
+        self.assertEqual(GAME_STATE, state_format("game-state").path)
+        self.assertEqual(GAME_INTENDED, state_format("game-intended").path)
+        self.assertEqual(ALERT_PENDING, state_format("alert-spool").folder)
+        self.assertEqual(VM_INDEX, state_format("vm-index").path)
+        self.assertEqual(ROOT_RECORD, state_format("install-record").path)
+
+    def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:
+        from btrfs.bulk.domain import BulkPaths
+        from btrfs.docker_volumes_nocow.domain import NocowPaths
+        from doctor.domain import GAME_PROFILE_HOST, HEALTH_CHECK_HOST, NOTIFY_HOST
+        from toolchains.domain import DEFAULTS_REL, PROG_REL, WRAPPER_REL
+
+        dest = {e.src: e.dest for e in INSTALL_MANIFEST}
+        notify = dest["btrfs/btrfs-notify"]
+        self.assertEqual(notify, "/usr/local/sbin/btrfs-notify")
+        self.assertEqual((BulkPaths().notify, NocowPaths().notify, NOTIFY_HOST), (notify, notify, notify))
+        self.assertEqual(HEALTH_CHECK_HOST, dest["btrfs/btrfs-health-check"])
+        self.assertEqual(GAME_PROFILE_HOST, dest["cpu/game-profile"])
+        self.assertEqual(
+            ("~/" + PROG_REL, "~/" + DEFAULTS_REL, "~/" + WRAPPER_REL),
+            (dest["toolchains/cst-toolchains"], dest["toolchains/toolchains.conf"], dest["toolchains/rustc-wrapper"]),
+        )
 
 
 if __name__ == "__main__":

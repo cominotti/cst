@@ -28,10 +28,11 @@ from dataclasses import dataclass, replace
 import json
 from typing import Final, Literal
 
+from cst_core.domain.contracts import state_format
 from cst_core.domain.install import Owner
 
-_FORMAT: Final = 1
-ROOT_RECORD: Final = "/var/lib/cst/installed.json"
+_FORMAT: Final = state_format("install-record").version
+ROOT_RECORD: Final = state_format("install-record").path
 # Relative to the user's home.
 USER_RECORD_REL: Final = ".local/state/cst/installed.json"
 

@@ -35,6 +35,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.application.install import InstallService, Placement
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
@@ -75,7 +76,7 @@ CPU_CONF = os.environ.get("CST_VM_CPU_CONF") or "/etc/cpu-setup/cpu-setup.conf" 
 # Overridable for the tests only (scratch folders instead of the host's).
 BACKUP_DIR = os.environ.get("CST_VM_BACKUP_DIR") or "/var/lib/libvirt/cst-backups"
 
-INDEX = os.environ.get("CST_VM_INDEX") or "/var/lib/cst/vm-backups.json"
+INDEX = os.environ.get("CST_VM_INDEX") or state_format("vm-index").path
 
 SWTPM_DIR = os.environ.get("CST_VM_SWTPM_DIR") or "/var/lib/libvirt/swtpm"
 
@@ -101,7 +102,7 @@ NAS_STAGE = os.environ.get("CST_VM_NAS_STAGE") or "/var/lib/cst/vm-nas"
 
 RUN_DIR = os.environ.get("CST_VM_RUN_DIR") or "/run/cst-vm"  # per-VM lock (holds the pid)
 
-NOTIFY = os.environ.get("CST_VM_NOTIFY") or "/usr/local/sbin/btrfs-notify"
+NOTIFY = os.environ.get("CST_VM_NOTIFY") or manifest_by_src()["btrfs/btrfs-notify"].dest
 
 # The merge back (every blockcommit of a run together; it copies the guest's
 # writes of the backup's duration). The timer's TimeoutStopSec leaves room
