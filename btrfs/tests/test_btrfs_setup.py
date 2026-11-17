@@ -31,9 +31,9 @@ SETUP = os.path.join(REPO, "btrfs-setup.sh")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from btrfs.tests.test_snapshot_runtime import shell_function  # noqa: E402
-from cst_core.adapters.files import read_text  # noqa: E402
-from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf  # noqa: E402
+from btrfs.tests.test_snapshot_runtime import shell_function
+from cst_core.adapters.files import read_text
+from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 
 # The log says, for each clean, whether the unit file was still there.
 STUBS = """

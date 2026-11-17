@@ -188,7 +188,7 @@ class ProgramTest(unittest.TestCase):
             return subprocess.CompletedProcess(["docker", *args], 0, "", "")
 
         self.v.docker = docker
-        plan: dict[str, Any] = {"at": 0, "containers": [], "volumes": [], "images": []}
+        plan = {"at": 0, "containers": [], "volumes": [], "images": []}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             failed = gc_cli.apply(plan)
