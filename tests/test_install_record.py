@@ -440,6 +440,23 @@ class CheckoutCommitTest(unittest.TestCase):
         self.assertEqual(checkout_commit(os.path.join(self.tmp, "nothing")), "unknown")
         self.assertEqual(checkout_commit(None), "unknown")
 
+    def test_a_crafted_head_cannot_point_outside_the_git_folder(self) -> None:
+        # A file outside .git that holds a commit-shaped text: HEAD must not reach it.
+        Path(self.tmp, "outside").write_text("e" * 40 + "\n")
+        for ref in (
+            "../outside",
+            "refs/../../outside",
+            "/etc/hostname",
+            "refs/heads/../../../outside",
+            "refs/heads/a b",
+        ):
+            with self.subTest(ref=ref):
+                self.git(".git/HEAD", text=f"ref: {ref}\n")
+                self.assertEqual(checkout_commit(self.tmp), "unknown")
+        self.git(".git/HEAD", text="ref: refs/heads/fix/a-b_c.1\n")
+        self.git(".git/refs/heads/fix/a-b_c.1", text="f" * 40 + "\n")
+        self.assertEqual(checkout_commit(self.tmp), "f" * 40)
+
 
 class InstallerRecordCliTest(unittest.TestCase):
     """installer.py as the setup scripts run it, staged under --root (the record goes there too)."""

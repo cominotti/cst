@@ -141,6 +141,8 @@ def checkout_commit(root: str | None) -> str:
         if not head.startswith("ref:"):
             return head if _is_sha(head) else "unknown"
         ref = head.split(":", 1)[1].strip()
+        if not _is_ref_name(ref):
+            return "unknown"
         for folder in (git, common):
             p = os.path.join(folder, ref)
             if os.path.isfile(p):
@@ -155,6 +157,17 @@ def checkout_commit(root: str | None) -> str:
     except OSError, UnicodeDecodeError:
         return "unknown"
     return "unknown"
+
+
+def _is_ref_name(ref: str) -> bool:
+    """A branch ref as git writes it in HEAD (refs/heads/...): no absolute path, no '..' and no
+    odd characters, so a crafted HEAD (the checkout belongs to the user, the installer runs as
+    root) cannot make this read a file outside the git folder."""
+    parts = ref.split("/")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+@")
+    return (
+        len(parts) >= 3 and parts[0] == "refs" and all(p and p not in (".", "..") and set(p) <= allowed for p in parts)
+    )
 
 
 def _is_sha(text: str) -> bool:
