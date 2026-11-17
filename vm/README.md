@@ -769,7 +769,8 @@ In `/etc/cst/vm.conf` (all optional):
 (`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,
 and a byte that is not UTF-8 (in a comment, say) no longer stops the program.
 `cpu-setup.conf` and `snapshots.conf`, which bash also sources, are read exactly
-as bash reads them (`NAS_ENABLED=1 # on` is `1`). `vm.conf`, which only
+as bash reads them (`NAS_ENABLED=1 # on` is `1`; in `snapshots.conf` also a
+value an older CST wrote with backslashes, `a\ b`). `vm.conf`, which only
 Python reads, also allows blanks around `=` (`VM_NOCOW = 0`). A line that is
 not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
 a backtick or a backslash outside single quotes, an unclosed quote) sets

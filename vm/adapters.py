@@ -28,7 +28,14 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
+from cst_core.domain.text import (
+    ShellAssignments,
+    describe_problems,
+    first_line,
+    is_yes,
+    parse_shell_assignments,
+    parse_snapshots_conf,
+)
 from vm.domain import (
     BTRFS_MAGIC,
     DEFAULT_VM,
@@ -142,7 +149,17 @@ def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
     accepts blanks around = (`VM_NOCOW = 0`), as cst-vm always did. A line
     that is not an assignment sets nothing (prepare_command reports it).
     Undecodable bytes are replaced (main's cst-vm stopped with a traceback)."""
-    return dict(parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).values)
+    return dict(settings_file(path, bash_sourced=bash_sourced).values)
+
+
+def settings_file(path: str, *, bash_sourced: bool) -> ShellAssignments:
+    """A settings file through cst_core's one reader ("" when it cannot be read).
+    snapshots.conf (NAS_CONF) also takes the lines an older CST wrote there with
+    printf %q, read as bash reads them (parse_snapshots_conf)."""
+    text = read_text(path, "")
+    if path == NAS_CONF:
+        return parse_snapshots_conf(text)
+    return parse_shell_assignments(text, bash_sourced=bash_sourced)
 
 
 def conf_files(cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
@@ -172,7 +189,7 @@ def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> Non
         return
     found = []
     for path, bash_sourced in conf_files(cmd, nas, vm):
-        problems = parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).problems
+        problems = settings_file(path, bash_sourced=bash_sourced).problems
         if problems:
             found.append(describe_problems(path, problems))
     changes = cmd == "backup" or sub in ("apply", "on", "off")

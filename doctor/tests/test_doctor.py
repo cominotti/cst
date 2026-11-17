@@ -1741,6 +1741,21 @@ class VmNasBackupTest(VmTest):
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
         self.assertNotIn("vm.conf line 1", r.stdout)
 
+    def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
+        # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/My\\ restic\nNAS_HOST=$'nas\\x2d1'\n")
+        r = self.run_tool()
+        self.assertIn("The NAS backup works with the VM running", r.stdout)
+        self.assertNotIn("snapshots.conf line", r.stdout)
+        # Anything else with a backslash still warns, there too.
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "a") as f:
+            f.write("NAS_USER=a\\ $USER\n")
+        r = self.run_tool()
+        self.assertIn("/etc/btrfs-setup/snapshots.conf line 4: NAS_USER=a\\ $USER: $", r.stdout)
+
     def test_nas_backup_counts_and_fix_names_it(self) -> None:
         self.deployments(rollback_pinned=True)
         os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))

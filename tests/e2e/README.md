@@ -28,6 +28,8 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_15`: `cst toolchains auto off` removes the user timer's stamp in `~/.local/share/systemd/timers`.
 - `test_16`: every unit CST installs (the manifest, staged by the real installer) or generates (`tests/unit_files.py`: cst-vm, cst-toolchains, the LDAC watcher, the degraded-boot setup) passes `systemd-analyze verify` with no output under `--root` of the stage, and `systemd-analyze security --offline` of each service stays at its entry in `SECURITY_CEILINGS` (only goes down).
 
+- `test_17`: a `snapshots.conf` an older CST wrote with `printf %q` (`a\ b`): `cst btrfs snapshots nas disable` rewrites it in quotes with the same values as bash reads them, cst_core's reader finds no problem, and a second run leaves the file as it is.
+
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
 - `test_01`: a loopback btrfs RAID1 for `/sysroot`, `/var` and `/var/home`, with the host's kernel files shadowed.

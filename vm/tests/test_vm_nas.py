@@ -1207,6 +1207,25 @@ class TimerTest(Nas):
         self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
         self.assertIn("Off: cst-vm-backup@win.timer", r.stdout)
 
+    def test_lines_an_older_cst_wrote_with_printf_q_are_read_as_bash_reads_them(self) -> None:
+        # snap_conf_set wrote values with printf %q until values went in quotes: a\ b is "a b" for
+        # btrfs-snapshot (bash), so the backup reads it the same way instead of refusing.
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/My\\ restic\nNAS_RESTIC_HOST=$'sophia\\x2dpc'\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.conf, r.stderr)
+        backup = self.restic_calls()[1]
+        self.assertEqual(backup["env"]["RESTIC_REPOSITORY"], "sftp:btrfs-setup-nas:/volume1/My restic")
+        self.assertEqual(backup["args"][2:4], ["--host", "sophia-pc"])
+        # Only snapshots.conf: the same line in vm.conf is still a problem there.
+        with open(self.env["CST_VM_CONF"], "w") as f:
+            f.write("VM_TUNE_NIC=a\\ b\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn("vm.conf line 1: VM_TUNE_NIC=a\\ b", r.stderr)
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")

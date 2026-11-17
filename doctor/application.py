@@ -8,7 +8,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments, parse_snapshots_conf
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
@@ -792,10 +792,14 @@ def game_again(host: DoctorHostPort) -> str:
 
 def settings_of(host: DoctorHostPort, path: str, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
-    bash_sourced), or None when it cannot be read."""
+    bash_sourced), or None when it cannot be read. snapshots.conf also takes the
+    lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
     try:
         with host.open_text(host.path(path)) as f:
-            return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
+            text = f.read()
+        if path == SNAP_CONF:
+            return parse_snapshots_conf(text)
+        return parse_shell_assignments(text, bash_sourced=bash_sourced)
     except OSError:
         return None
 

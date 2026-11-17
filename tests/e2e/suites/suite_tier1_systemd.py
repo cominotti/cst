@@ -1451,3 +1451,57 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_17_snapshots_conf_written_by_an_older_cst_is_rewritten_in_quotes(self) -> None:
+        """An older CST wrote snapshots.conf values with printf %q (a backslash
+        before a blank, $'...').
+        The real `cst btrfs snapshots nas disable` (as root, the real systemctl)
+        rewrites them in quotes with the values bash read from the old file,
+        the cst_core reader then finds no problem, and a second run leaves the
+        file as it is (same inode, same time)."""
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"rm -f {conf}; if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            conf={conf}
+            mkdir -p /etc/btrfs-setup
+            if [ -e "$conf" ]; then cp -a "$conf" /var/tmp/e2e-snapconf.bak; fi
+            # The old writer's form, made by bash's own printf %q.
+            {{
+                echo "# Managed by btrfs-setup.sh (CST); read by /usr/local/sbin/btrfs-snapshot."
+                printf 'NAS_ENABLED=%q\\nNAS_PATH=%q\\nNAS_RESTIC_HOST=%q\\nNAS_USER=%q\\n' \\
+                    1 '/volume1/My Backups' "host #1 it's" "$(printf 'a\\tb')"
+            }} >"$conf"
+            grep -qF 'NAS_PATH=/volume1/My\\ Backups' "$conf"
+            values() {{ (. "$conf"; printf '%s|' "$NAS_ENABLED" "$NAS_PATH" "$NAS_RESTIC_HOST" "$NAS_USER"); }}
+            before="$(values)"
+            /opt/cst-rw/cst btrfs snapshots nas disable
+            after="$(values)"
+            [ "$after" = "0|${{before#1|}}" ] || {{ echo "values changed: $before -> $after" >&2; exit 1; }}
+            grep -qx "NAS_PATH='/volume1/My Backups'" "$conf"
+            grep -qx 'NAS_RESTIC_HOST="host #1 it'"'"'s"' "$conf"
+            if grep -q '\\\\' "$conf"; then echo "a backslash is left:" >&2; cat "$conf" >&2; exit 1; fi
+            python3 -I -B -c '
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from cst_core.domain.text import parse_shell_assignments
+got = parse_shell_assignments(open(sys.argv[1], encoding="utf-8").read())
+assert got.problems == (), got.problems
+assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
+' "$conf"
+            st="$(stat -c '%i %y' "$conf")"
+            cp "$conf" /var/tmp/e2e-snapconf.first
+            /opt/cst-rw/cst btrfs snapshots nas disable
+            [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            rm -f /var/tmp/e2e-snapconf.first
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

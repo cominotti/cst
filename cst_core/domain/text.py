@@ -179,3 +179,64 @@ def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAss
         elif isinstance(got, str):
             problems.append(SettingsProblem(number, line, got))
     return ShellAssignments(tuple(entries), tuple(problems))
+
+
+# What printf %q writes, as an older CST's snapshots.conf writer (snap_conf_set in
+# btrfs/setup-snapshots.bash) left values there: plain characters and backslash-escaped
+# ones, or $'...' with the escapes %q uses. Neither form expands anything in bash (no
+# unescaped $, backtick, quote, blank or command syntax; the ~ rule is checked apart).
+_OLD_WRITER_LINE: Final = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.S)
+_PRINTF_Q_WORD: Final = re.compile(r"(?:[^ \t\n\r\f\v'\"\\$`;&|<>()]|\\.)+", re.S)
+_PRINTF_Q_ANSI_C: Final = re.compile(r"\$'((?:[^'\\]|\\(?:[abeEfnrtv\\'\"?]|[0-7]{1,3}|x[0-9A-Fa-f]{1,2}))*)'", re.S)
+_ANSI_C_ESCAPE: Final = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9A-Fa-f]{1,2}))")
+_ANSI_C_CHARS: Final = {
+    "a": 7, "b": 8, "e": 27, "E": 27, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63,
+}  # fmt: skip
+
+
+def _ansi_c_value(body: str) -> str:
+    """The value bash gives $'BODY' (BODY already matched _PRINTF_Q_ANSI_C). The escapes
+    give bytes (an octal one above \\377 keeps its low 8 bits, as in bash); the result is
+    read as UTF-8 with bad bytes replaced, as read_text reads the rest of the file. A NUL
+    ends the value, as in bash."""
+    out = bytearray()
+    pos = 0
+    for m in _ANSI_C_ESCAPE.finditer(body):
+        out += body[pos : m.start()].encode("utf-8", "surrogatepass")
+        char, octal, hexa = m.groups()
+        out.append(_ANSI_C_CHARS[char] if char else int(octal or hexa, 8 if octal else 16) & 0xFF)
+        pos = m.end()
+    out += body[pos:].encode("utf-8", "surrogatepass")
+    return bytes(out).split(b"\0", 1)[0].decode("utf-8", "replace")
+
+
+def _printf_q_value(token: str) -> str | None:
+    """The value bash gives an assignment of TOKEN when TOKEN is what printf %q writes (a word
+    of plain and backslash-escaped characters, or $'...' with %q's escapes), else None. A word
+    that starts with ~ or holds :~ is None too: bash would put a home folder there."""
+    m = _PRINTF_Q_ANSI_C.fullmatch(token)
+    if m:
+        return _ansi_c_value(m.group(1))
+    if not _PRINTF_Q_WORD.fullmatch(token) or token.startswith("~") or ":~" in token:
+        return None
+    return re.sub(r"\\(.)", lambda e: e.group(1), token, flags=re.S)
+
+
+def parse_snapshots_conf(text: str) -> ShellAssignments:
+    """/etc/btrfs-setup/snapshots.conf, which bash sources: parse_shell_assignments, and also
+    the KEY=VALUE lines an older CST wrote there with printf %q (`NAS_PATH=/a\\ b`,
+    `K=$'a\\tb'`), read as bash reads them. Only that file: in every other file a
+    backslash outside single quotes stays a problem. `cst btrfs snapshots setup` rewrites
+    these lines in single quotes."""
+    strict = parse_shell_assignments(text)
+    entries = list(strict.entries)
+    problems: list[SettingsProblem] = []
+    for p in strict.problems:
+        m = _OLD_WRITER_LINE.fullmatch(p.text)
+        value = _printf_q_value(m.group(2)) if m and "\\" in m.group(2) else None
+        if m is None or value is None:
+            problems.append(p)
+        else:
+            entries.append(Assignment(p.line, m.group(1), value))
+    entries.sort(key=lambda a: a.line)
+    return ShellAssignments(tuple(entries), tuple(problems))

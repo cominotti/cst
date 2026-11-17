@@ -32,7 +32,7 @@ one place only.
 | Managed lines and files, safe paths | `cst_core.domain.files`: `MarkedLineSpec`, `owned_file_state`, `inspect_managed_file`, `effective_lines`, `checked_path` | |
 | One run at a time | `cst_core.adapters.locks.take_lock` | A lock file it creates gets exactly its mode; refuses a link. |
 | A journal line | `cst_core.adapters.journal.log` | `<prio>tag: msg`, flushed. |
-| A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. |
+| A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. `parse_snapshots_conf`: the same for `snapshots.conf` only, which also reads the `printf %q` lines an older CST wrote there. |
 | Lines, first line, yes/no | `cst_core.domain.text`: `file_lines` (as bash's `read -r` sees them), `first_line`, `is_yes` | |
 | Sizes, durations, CPU lists, modes | `cst_core.domain.values`: `ByteSize`, `Duration`, `CpuSet`, `OctalMode`, `KIB`, `MIB`, `GIB`, `format_bytes_human`, `format_bytes_gib_mib`, `format_bytes_decimal` | |
 | A systemd unit or timer text | `cst_core.domain.units`: `render_unit_file`, `render_timer` | |

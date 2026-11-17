@@ -1791,7 +1791,7 @@ After `snapshots setup`:
 | `/etc/systemd/system/btrfs-bulk-boot.service` | moves busy items into `~/Bulk` at boot (enabled; does nothing unless the flag below exists) |
 | `/etc/systemd/system/var-mnt-btrfs\x2dtop.{mount,automount}` | on-demand mount of the top level at `/var/mnt/btrfs-top` |
 | `/var/mnt/btrfs-top/snapshots/` | the snapshots |
-| `/etc/btrfs-setup/snapshots.conf` | settings (your manual edits are kept) |
+| `/etc/btrfs-setup/snapshots.conf` | settings (your manual edits are kept; see [below](#how-cst-writes-snapshotsconf)) |
 | `/etc/btrfs-setup/convert-plan` | the folder list for your home |
 | `/etc/btrfs-setup/convert-at-boot` | flag, only while a boot conversion is pending |
 | `/etc/btrfs-setup/bulk.conf` | whose `~/Bulk` the boot step handles (`BULK_USER=`) |
@@ -1820,6 +1820,24 @@ After `snapshots nas setup`, in addition:
 | on the NAS | the repository folder; the public key in the user's `authorized_keys` |
 
 ---
+
+
+### How CST writes snapshots.conf
+
+`setup`, `nas setup`, `nas disable` and the other commands that set a key
+write its value in single quotes (`NAS_PATH='/volume1/backup'`), or in double
+quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
+file) and CST's Python programs (`cst doctor`, `cst vm`) read these alike.
+A value no such form can hold (a line break, or a `'` together with `"`,
+`$`, a backtick or a backslash) is refused, and nothing is written. The file
+is written only when its content changes.
+
+Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
+`K=$'a\tb'`). `cst doctor` and `cst vm` read those lines as bash does, so
+nothing needs to be done. The next command that writes the file (`setup`
+lists it in its plan) puts them in quotes, with the same values. Your other
+lines stay as they are, and in any other CST settings file a backslash outside
+single quotes is still a problem.
 
 ## 12. How to undo
 
