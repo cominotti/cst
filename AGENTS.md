@@ -135,8 +135,10 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
 - Budgets and ceilings (`IO_BUDGETS`, `RUFF_BUDGETS`, `CEILINGS`, the
-  allow-lists, ...) fail only when the code is above an entry: never above;
-  lowered with `invowk cmd fix budgets`. A change that removes something
+  allow-lists `invowk cmd fix budgets` lists, ...) fail only when the code is
+  above an entry: never above; lowered with `invowk cmd fix budgets`. The
+  sets that must stay empty (`NOT_YET_CLEAN`, `ORPHAN_ALLOWED`, ...) and
+  `LICENSE_EXEMPT` still fail on a stale entry. A change that removes something
   need not edit them; run `invowk cmd fix budgets --apply` when you want the
   lower numbers recorded. It never raises an entry or adds one; raising one
   by hand needs its reason in the pull request.
