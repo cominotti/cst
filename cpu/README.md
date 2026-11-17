@@ -1475,7 +1475,7 @@ this is harmless.
 | `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer` | `/etc/systemd/system/` |
 | `units/machine.slice.d-10-cpu-setup.conf` | `machine.slice.d/10-cpu-setup.conf` |
 | `units/user@.service.d-50-cpu-setup-cpuset.conf` | `user@.service.d/50-cpu-setup-cpuset.conf` |
-| `units/builds.slice` | `/etc/systemd/system/builds.slice` (by `docker-slice install`) |
+| `units/builds.slice.in` | `/etc/systemd/system/builds.slice` (by `docker-slice install`; `@ALLOWED@` becomes `AllowedCPUs=` with the E-cores, or nothing when there are none) |
 
 ---
 

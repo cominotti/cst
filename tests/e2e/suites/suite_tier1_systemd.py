@@ -1168,7 +1168,10 @@ EOF
         stage = "/var/tmp/e2e-dist"
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
         out = exec_bash(
             self.SYSTEMD_CONTAINER,
             f"""
@@ -1504,7 +1507,10 @@ EOF
         not_in_image = "/usr/sbin/btrfs"
         self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
         exec_bash(
             c,
             f"""

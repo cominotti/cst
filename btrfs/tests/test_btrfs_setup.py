@@ -35,6 +35,7 @@ if REPO not in sys.path:
 from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
+from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 
@@ -248,7 +249,6 @@ disable_timers x.service
         real cst_installed_dests (read-only: the manifest's destinations)."""
         return [
             f'. "{REPO}/cst-install.bash"',
-            assignment("DOCKER_GC_UNITS"),
             'DOCKER_GC_STATE="$T/docker-gc-state"',
             shell_function(SETUP, "docker_gc_files"),
             shell_function(SETUP, "docker_gc"),
@@ -459,6 +459,126 @@ def writable(value: str) -> bool:
     if "\n" in value or "\r" in value:
         return False
     return "'" not in value or not any(c in value for c in '"$`\\')
+
+
+# cst-install.bash with the real installer, every write staged under $T/stage
+# (dests and srcs list the manifest's real paths; --root changes only where files go).
+STAGED_INSTALLER = f"""
+. "{REPO}/cst-install.bash"
+_cst_installer_as() {{
+    shift
+    local command="$1"
+    shift
+    /usr/bin/python3 -I -B "$CST_INSTALLER" "$command" --root "$T/stage" "$@"
+}}
+"""
+
+
+def manifest_dests(*components: str) -> list[str]:
+    """The manifest's destinations of these components (root ones: no ~/ entries among them)."""
+    return sorted(e.dest for e in INSTALL_MANIFEST if e.component in components)
+
+
+class ComponentInstallTest(unittest.TestCase):
+    """Each install path of btrfs-setup.sh and setup-snapshots.bash writes
+    exactly the files of its components: the functions taken from the
+    scripts, the real installer staged under the test's folder, systemctl
+    and the other host commands as logging shell functions."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-component-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.stage = os.path.join(self.tmp, "stage")
+        os.makedirs(self.stage)
+        self.log = os.path.join(self.tmp, "log")
+
+    def run_bash(self, body: str) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                STUBS,
+                STAGED_INSTALLER,
+                'install() { echo "install $*" >>"$LOG"; }',
+                "restorecon() { :; }",
+                f'SRC={BTRFS}; UNIT_DIR=/etc/systemd/system; PROG=cst-btrfs-test; target_user=""',
+                'ALERTS_DIR="$T/alerts"; OLD_ALERTS_DIR="$T/old-alerts"; USER_UNIT_DIR=/etc/systemd/user',
+                "PENDING_UNIT=cst-pending-alerts.service; OLD_PENDING_UNIT=f44-pending-alerts.service",
+                'OLD_PENDING_READER="$T/f44-pending-alerts"',
+                *(
+                    shell_function(SETUP, f)
+                    for f in (
+                        "check_syntax",
+                        "check_component_syntax",
+                        "remove_old_reader",
+                        "migrate_old_alerts",
+                        "install_pending_alerts",
+                        "forget_timer_state",
+                        "disable_timers",
+                        "docker_gc_files",
+                        "docker_gc",
+                    )
+                ),
+                body,
+            ]
+        )
+        r = subprocess.run(
+            ["bash", "-c", script, "_"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def staged(self) -> list[str]:
+        out = []
+        for dirpath, _dirs, names in os.walk(self.stage):
+            out += ["/" + os.path.relpath(os.path.join(dirpath, n), self.stage) for n in names]
+        return sorted(out)
+
+    def test_alerts_install_writes_btrfs_alerts(self) -> None:
+        self.run_bash("install_pending_alerts")
+        self.assertEqual(self.staged(), manifest_dests("btrfs:alerts"))
+
+    def test_docker_gc_enable_writes_btrfs_docker_gc(self) -> None:
+        r = self.run_bash("docker_gc enable")
+        self.assertEqual(self.staged(), manifest_dests("btrfs:docker-gc"))
+        self.assertIn("docker-gc enabled", r.stdout)
+
+    def test_snapshot_runtime_writes_alerts_then_snapshots(self) -> None:
+        r = self.run_bash('. "$SRC/setup-snapshots.bash"\nsnap_install_runtime')
+        self.assertEqual(self.staged(), manifest_dests("btrfs:alerts", "btrfs:snapshots"))
+        # btrfs-notify, which the snapshot units' runs alert through, is written before them.
+        out = r.stdout
+        self.assertLess(out.index("/usr/local/sbin/btrfs-notify"), out.index("/btrfs-snapshot.service"))
+
+    def test_a_program_that_does_not_parse_installs_nothing(self) -> None:
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "\n".join(
+                    [
+                        STAGED_INSTALLER,
+                        shell_function(SETUP, "check_syntax"),
+                        shell_function(SETUP, "check_component_syntax"),
+                        f"SRC={self.tmp}/cst/btrfs",
+                        "check_component_syntax btrfs:docker-gc",
+                    ]
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        # The source is missing under that SRC: refused before anything is written.
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("docker-gc", r.stderr)
+        self.assertEqual(self.staged(), [])
 
 
 class SnapshotsConfTest(unittest.TestCase):

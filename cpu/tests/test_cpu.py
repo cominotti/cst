@@ -1906,5 +1906,48 @@ class QuietNumbersTest(unittest.TestCase):
             self.assertEqual(root.findall("cpu/feature"), [], mode)
 
 
+class DockerSliceInstallTest(unittest.TestCase):
+    """`docker-slice install` writes cpu:docker-slice (builds.slice, a
+    template) through the real installer, staged under the test's folder;
+    its bytes are what the shell wrote before it was a template: the file,
+    plus AllowedCPUs= only when there are E-cores."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-slice-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def install(self, ecores: str) -> str:
+        script = f"""
+set -Eeuo pipefail
+. {REPO!r}/cst-install.bash
+_cst_installer_as() {{ shift; local c="$1"; shift; /usr/bin/python3 -I -B "$CST_INSTALLER" "$c" --root "$T/stage" "$@"; }}
+systemctl() {{ echo "systemctl $*"; }}
+e_cores() {{ printf '%s' {ecores!r}; }}
+UNIT_DIR=/etc/systemd/system; SRC={CPU!r}; DAEMON_JSON="$T/daemon.json"; PROG=cst-cpu-test
+eval "$(sed -n '/^docker_slice()/,/^}}/p' {SETUP!r})"
+docker_slice install
+"""
+        r = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("written:   " + self.tmp + "/stage/etc/systemd/system/builds.slice", r.stdout)
+        with open(os.path.join(self.tmp, "stage/etc/systemd/system/builds.slice")) as f:
+            return f.read()
+
+    def test_with_and_without_e_cores(self) -> None:
+        with open(os.path.join(CPU, "units/builds.slice.in")) as f:
+            plain = f.read().replace("@ALLOWED@\n", "")
+        self.assertEqual(self.install("16-23"), plain + "AllowedCPUs=16-23\n")
+        shutil.rmtree(os.path.join(self.tmp, "stage"))
+        self.assertEqual(self.install(""), plain)
+        self.assertNotIn("@", plain.split("[Slice]")[1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -91,13 +91,13 @@ class UnitContractTest(unittest.TestCase):
         )
         by_dest = {
             "~/.local/lib/cst/x.conf": InstallEntry(
-                "m/x.conf", "~/.local/lib/cst/x.conf", OctalMode(0o644), "user", "data", "user"
+                "m/x.conf", "~/.local/lib/cst/x.conf", OctalMode(0o644), "user", "data", "user", "m:x"
             ),
             "~/.local/lib/cst/tool": InstallEntry(
-                "m/tool", "~/.local/lib/cst/tool", OctalMode(0o700), "user", "python-entry", "user"
+                "m/tool", "~/.local/lib/cst/tool", OctalMode(0o700), "user", "python-entry", "user", "m:x"
             ),
             "/usr/local/sbin/data": InstallEntry(
-                "m/data", "/usr/local/sbin/data", OctalMode(0o644), "root", "data", "root"
+                "m/data", "/usr/local/sbin/data", OctalMode(0o644), "root", "data", "root", "m:x"
             ),
         }
         user = UnitText("u.service", text, "user", "m")

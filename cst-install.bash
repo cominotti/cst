@@ -65,8 +65,27 @@ cst_install_text_plan() {
     _cst_installer_text text-plan "$@"
 }
 
-# cst_installed_dests [--home DIR] (--module M | SRC...) [--kind K]: the
-# destinations, one per line (for uninstall).
+# cst_installed_dests [--home DIR] (--module M | --component C | SRC...) [--kind K]:
+# the destinations, one per line (for uninstall).
 cst_installed_dests() {
     cst_installer dests "$@"
+}
+
+# cst_component_programs COMPONENT: the sources (relative to the CST folder)
+# of its programs (python-entry and shell), one per line: what a setup script
+# checks for syntax errors before it installs anything.
+cst_component_programs() {
+    cst_installer srcs --component "$1" --kind python-entry &&
+        cst_installer srcs --component "$1" --kind shell
+}
+
+# cst_component_units COMPONENT: the names of its unit files (drop-ins left
+# out: they are no unit of their own), one per line, for systemctl.
+cst_component_units() {
+    local d dests
+    dests="$(cst_installer dests --component "$1" --kind unit)" || return 1
+    while IFS= read -r d; do
+        [[ -n "${d}" ]] || continue
+        [[ "${d%/*}" == *.d ]] || printf '%s\n' "${d##*/}"
+    done <<<"${dests}"
 }

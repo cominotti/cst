@@ -410,8 +410,12 @@ everything with `plan`, `status` or `doctor` before changing anything:
 - `cst-install.bash`: how every module installs its files, from one table
   (`INSTALL_MANIFEST` in `cst_core/domain/install.py`). A file is written only
   when it changed, and the output says `unchanged:` or `written:` per file;
-  `cst_core/installer.py plan SRC...` (or `--module btrfs`) shows what an
-  install would write, without writing. In a home folder, a link to a file
+  `cst_core/installer.py plan SRC...` (or `--module btrfs`, or
+  `--component btrfs:core`) shows what an install would write, without
+  writing. Each file belongs to a **component**, the part of a module that
+  one command installs as a whole (`btrfs:core` by `cst btrfs install`,
+  `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: `COMPONENTS` in
+  the same file). In a home folder, a link to a file
   that already holds the wanted content stays a link (a dotfiles manager's
   link). The Python helpers are installed as **zipapps**, one file that runs
   without this folder. The details:

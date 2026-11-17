@@ -18,11 +18,14 @@ Usage:
   installer.py text-plan DEST MODE [--root DIR]
                                           unchanged:/would write: for that content; changes nothing
   installer.py payload SRC                the bytes install writes for SRC, to stdout
-  installer.py dests [--home DIR] [--module M] [--kind K]
+  installer.py dests [--home DIR] [--module M] [--kind K] [--component C]
                                           the destination of each matching entry, one per line
+  installer.py srcs [--module M] [--kind K] [--component C]
+                                          the source (in the CST folder) of each matching entry
 OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
-         --set KEY=VALUE (templates), --module M / --kind K / --owner root|user
-         (select entries instead of naming them)
+         --set KEY=VALUE (templates), --module M / --kind K / --owner root|user /
+         --component C (select entries instead of naming them; C as in
+         COMPONENTS, e.g. btrfs:core: every file one command installs)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
 A @KEY@ of a template without a --set value, or a --set KEY no template of the
 call uses, is a usage error (exit 2) and nothing is written. A file that
@@ -48,7 +51,15 @@ from typing import NoReturn
 
 from cst_core import wiring
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, Owner, expand_dest, select_entries
+from cst_core.domain.install import (
+    COMPONENTS,
+    INSTALL_MANIFEST,
+    ArtifactKind,
+    InstallEntry,
+    Owner,
+    expand_dest,
+    select_entries,
+)
 from cst_core.domain.values import DomainValidationError, OctalMode
 from cst_core.ports import WriteFailed
 
@@ -67,7 +78,9 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser() -> _Parser:
     p = _Parser(prog=NAME, add_help=False)
-    p.add_argument("command", choices=["install", "plan", "check", "text", "text-plan", "payload", "dests", "help"])
+    p.add_argument(
+        "command", choices=["install", "plan", "check", "text", "text-plan", "payload", "dests", "srcs", "help"]
+    )
     p.add_argument("args", nargs="*")
     p.add_argument("--home")
     p.add_argument("--root", default="")
@@ -75,6 +88,7 @@ def _parser() -> _Parser:
     p.add_argument("--module")
     p.add_argument("--kind", choices=["python-entry", "shell", "unit", "data"])
     p.add_argument("--owner", choices=["root", "user"])
+    p.add_argument("--component")
     return p
 
 
@@ -89,16 +103,24 @@ def _values(pairs: Sequence[str]) -> dict[str, str]:
 
 
 def _entries(
-    srcs: Sequence[str], module: str | None, kind: ArtifactKind | None, owner: Owner | None = None
+    srcs: Sequence[str],
+    module: str | None,
+    kind: ArtifactKind | None,
+    owner: Owner | None = None,
+    component: str | None = None,
 ) -> tuple[InstallEntry, ...]:
     by_src = {e.src: e for e in INSTALL_MANIFEST}
-    if srcs and (module or kind or owner):
-        raise _UsageError("name the files (SRC...) or select them (--module/--kind/--owner), not both")
+    if srcs and (module or kind or owner or component):
+        raise _UsageError("name the files (SRC...) or select them (--module/--kind/--owner/--component), not both")
+    if component is not None and component not in COMPONENTS:
+        raise _UsageError(f"--component {component!r}: no such component (known: {', '.join(COMPONENTS)})")
     if not srcs:
-        if not (module or kind or owner):
+        if not (module or kind or owner or component):
             raise _UsageError("no file named")
         return tuple(
-            e for e in select_entries(INSTALL_MANIFEST, module=module, kind=kind) if owner is None or e.owner == owner
+            e
+            for e in select_entries(INSTALL_MANIFEST, module=module, kind=kind, component=component)
+            if owner is None or e.owner == owner
         )
     unknown = [s for s in srcs if s not in by_src]
     if unknown:
@@ -122,6 +144,36 @@ def _text(service: InstallService, command: str, args: Sequence[str], root: str)
     return f"unchanged: {dest}" if current else f"would write: {dest}"
 
 
+def _command(service: InstallService, a: argparse.Namespace) -> int:
+    """One command of the parsed command line; its exit status."""
+    if a.command in ("text", "text-plan"):
+        print(_text(service, a.command, a.args, a.root))
+        return 0
+    entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
+    if a.command in ("dests", "srcs"):
+        for e in entries:
+            if a.command == "srcs":
+                print(e.src)
+            else:
+                print(expand_dest(e.dest, a.home) if e.dest.startswith("~") and a.home else e.dest)
+        return 0
+    if a.command == "payload":
+        if len(entries) != 1:
+            raise _UsageError("payload SRC (one file)")
+        sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
+        return 0
+    req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=os.geteuid() == 0)
+    if a.command == "install":
+        for line in service.install(entries, req):
+            print(line, flush=True)
+        return 0
+    lines, todo = service.plan(entries, req)
+    if a.command == "plan":
+        print("\n".join(lines))
+        return 0
+    return 0 if todo == 0 else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one installer command; 0 ok, 1 refused or not current, 2 usage."""
     # A reader that stops early (`cmp -s <(installer.py payload ...)`) ends this quietly, as it ended cp or cat;
@@ -135,29 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         service = wiring.install_service()
         if service is None:
             raise _UsageError("runs from a CST checkout only")
-        if a.command in ("text", "text-plan"):
-            print(_text(service, a.command, a.args, a.root))
-            return 0
-        if a.command == "dests":
-            for e in _entries(a.args, a.module, a.kind, a.owner):
-                print(expand_dest(e.dest, a.home) if e.dest.startswith("~") and a.home else e.dest)
-            return 0
-        entries = _entries(a.args, a.module, a.kind, a.owner)
-        if a.command == "payload":
-            if len(entries) != 1:
-                raise _UsageError("payload SRC (one file)")
-            sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
-            return 0
-        req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=os.geteuid() == 0)
-        if a.command == "install":
-            for line in service.install(entries, req):
-                print(line, flush=True)
-            return 0
-        lines, todo = service.plan(entries, req)
-        if a.command == "plan":
-            print("\n".join(lines))
-            return 0
-        return 0 if todo == 0 else 1
+        return _command(service, a)
     except (_UsageError, DomainValidationError, ValueError) as e:
         print(f"{NAME}: {e}", file=sys.stderr)
         return 2

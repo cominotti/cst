@@ -77,7 +77,6 @@ SRC="$(dirname "${SELF}")/cpu"
 source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 CONF=/etc/cpu-setup/cpu-setup.conf
-POLKIT_RULE=/etc/polkit-1/rules.d/50-cpu-setup-game.rules
 # Baseline drop-ins start with 10-: systemd reads drop-ins in file-name order
 # (the last one read wins), and the game profile's runtime overrides from
 # `systemctl set-property` are named 50-<Property>.conf. A 50-cpu-setup.conf
@@ -93,10 +92,10 @@ DAEMON_JSON=/etc/docker/daemon.json
 # systemd-tmpfiles, and at once by install.
 HWP_BOOST=/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost
 HWP_TMPFILES=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
-# Programs (in cpu/) that install copies; their destinations are in the
-# install manifest (cst_core/domain/install.py).
-BINARIES=(game-profile vm-pin cpu-watch)
-UNITS=(cpu-game.service cpu-game-watchdog.service cpu-game-watchdog.timer)
+# What `install` copies is the install manifest's (cst_core/domain/install.py)
+# components cpu:core (programs, units, drop-ins, the polkit rule) and
+# cpu:gamemode (the user's gamemode.ini); `docker-slice install` writes
+# cpu:docker-slice.
 # The game profile's MemoryLow drop-ins (GAME_DROPIN in cpu/game-profile):
 # 'off' removes them; uninstall also removes any left behind.
 GAME_DROPINS_GLOB="/run/systemd/system/*.d/zz-cst-game.conf"
@@ -201,12 +200,13 @@ gamemode_ini() { echo "$(user_home)/.config/gamemode.ini"; }
 
 # ---- install ---------------------------------------------------------------------
 install_all() {
-    local f ini group_line ecores
+    local f srcs ini group_line ecores
     [[ -n "${target_user}" && "${target_user}" != root ]] ||
         { echo "install: run through sudo from your user account (needs SUDO_USER)" >&2; exit 1; }
-    for f in "${BINARIES[@]}"; do
-        check_syntax "${SRC}/${f}" || { echo "${SRC}/${f}: syntax error" >&2; exit 1; }
-    done
+    srcs="$(cst_component_programs cpu:core)" || { echo "cannot list the programs of cpu:core" >&2; exit 1; }
+    while IFS= read -r f; do
+        check_syntax "${SRC%/*}/${f}" || { echo "${SRC%/*}/${f}: syntax error" >&2; exit 1; }
+    done <<<"${srcs}"
     install -d -m 0755 "$(dirname "${CONF}")"
     if [[ ! -e "${CONF}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST); values may be edited." \
@@ -214,8 +214,8 @@ install_all() {
             "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='no'" "VM_NAME='win11-devbox'" "VM_VCPUS=12" \
             "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'" | cst_install_text "${CONF}" 0644
     fi
-    cst_install "${BINARIES[@]/#/cpu/}" "${UNITS[@]/#/cpu/units/}" "cpu/units/machine.slice.d-${DROPIN_NAME}" \
-        cpu/units/user@.service.d-50-cpu-setup-cpuset.conf
+    # cpu:core: the programs, their units, the drop-ins and the polkit rule (for this user).
+    cst_install --set "USER=${target_user}" --component cpu:core
     if [[ -w "${HWP_BOOST}" ]]; then
         printf '%s\n' "# Managed by cpu-setup.sh (CST): intel_pstate HWP dynamic boost on." \
             "w ${HWP_BOOST} - - - - 1" | cst_install_text "${HWP_TMPFILES}" 0644
@@ -242,14 +242,13 @@ install_all() {
         rm -fv "$(helper_dropin)"
     fi
     remove_old_dropins   # the daemon-reloads below then read without them
-    cst_install --set "USER=${target_user}" cpu/cpu-game.rules.in
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
     link_cst_command "${target_user}"
     # GameMode: our ini unless the user has one of their own.
     ini="$(gamemode_ini)"
     if [[ ! -e "${ini}" ]] || grep -q 'Managed by cpu-setup.sh' "${ini}"; then
-        cst_install_as "${target_user}" cpu/gamemode.ini
+        cst_install_as "${target_user}" --component cpu:gamemode
     else
         echo "NOTE: ${ini} is your own: add [custom] start/end from ${SRC}/gamemode.ini by hand" >&2
     fi
@@ -286,16 +285,16 @@ uninstall() {
     # Without the watchdog nothing would remove one left behind (the reload
     # below then drops its MemoryLow).
     remove_game_dropins
-    for f in "${UNITS[@]}"; do rm -fv "${UNIT_DIR}/${f}"; done
-    rm -fv "${MACHINE_DROPIN}" "${DELEGATE_DROPIN}" "${POLKIT_RULE}"
+    # cpu:core: programs, units, drop-ins (MACHINE_DROPIN, DELEGATE_DROPIN) and the polkit rule.
+    mapfile -t f < <(cst_installed_dests --component cpu:core)
+    (( ${#f[@]} )) || { echo "uninstall: cannot list the files of cpu:core" >&2; exit 1; }
+    rm -fv "${f[@]}"
     remove_old_dropins
     if [[ -f "${HWP_TMPFILES}" ]]; then
         rm -fv "${HWP_TMPFILES}"
         [[ -w "${HWP_BOOST}" ]] && echo 0 >"${HWP_BOOST}" && echo "set:       ${HWP_BOOST} = 0"
     fi
     rmdir "$(dirname "${MACHINE_DROPIN}")" "$(dirname "${DELEGATE_DROPIN}")" 2>/dev/null || true
-    mapfile -t f < <(cst_installed_dests "${BINARIES[@]/#/cpu/}")
-    rm -fv "${f[@]}"
     if [[ -n "${target_user}" ]]; then
         rm -fv "$(toolbox_dropin)" "$(helper_dropin)"
         rmdir "$(dirname "$(toolbox_dropin)")" "$(dirname "$(helper_dropin)")" 2>/dev/null || true
@@ -312,15 +311,14 @@ uninstall() {
 
 # ---- docker builds.slice ---------------------------------------------------------
 docker_slice() {
-    local action="${1:-status}"
+    local action="${1:-status}" ecores
     case "${action}" in
         install)
             # Docker builds (also those Claude Code starts through flatpak-spawn
             # --host: dockerd is a system service) on the E-cores, like the toolboxes.
-            {
-                cat "${SRC}/units/builds.slice"
-                if [[ -n "$(e_cores)" ]]; then echo "AllowedCPUs=$(e_cores)"; fi
-            } | cst_install_text "${UNIT_DIR}/builds.slice" 0644
+            # cpu:docker-slice: builds.slice with AllowedCPUs= for the E-cores (none found: no line).
+            ecores="$(e_cores)"
+            cst_install --set "ALLOWED=${ecores:+AllowedCPUs=${ecores}}" --component cpu:docker-slice
             systemctl daemon-reload
             systemctl start builds.slice
             python3 -I - "${DAEMON_JSON}" <<'PY'
