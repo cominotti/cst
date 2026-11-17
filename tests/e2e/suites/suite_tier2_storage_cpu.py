@@ -1088,3 +1088,189 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_08_snapshots_disable_cycle(self) -> None:
+        """`cst btrfs snapshots disable` on hourly snapshots set up the way
+        test_03 sets them up (the installer's runtime and units, the top level
+        mounted by hand: the automount cannot be started here, since device
+        units never appear without udev). `snapshots status` and the plan of
+        `snapshots setup` (no terminal: it prints the plan, then refuses)
+        change nothing; `disable` stops and disables both timers, forgets
+        their last runs, drops the convert-at-boot flag and the btrbk settings
+        an older CST wrote (not anyone else's), keeps the snapshots, the
+        ~/Bulk boot step and the top-level units; a second `disable` changes
+        nothing; `disable --purge` deletes the snapshots the core owns (not a
+        foreign subvolume next to them) and the top-level units, and unmounts
+        it. `snapshots setup` itself (setup again) is not run: it starts the
+        automount, which cannot work in this container."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_08 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            TOP=/var/mnt/btrfs-top
+            SNAPS=$TOP/snapshots
+            CONF=/etc/btrfs-setup/snapshots.conf
+            saved=/var/tmp/e2e-test08-snapshots.conf
+            convert_flag=/etc/btrfs-setup/convert-at-boot
+            bulk_flag=/etc/btrfs-setup/bulk-at-boot
+            ours=/etc/btrbk/btrbk.conf
+            theirs=/etc/btrbk/btrbk-nas.conf
+            stamp=/var/lib/systemd/timers/stamp-btrfs-snapshot.timer
+            nas_stamp=/var/lib/systemd/timers/stamp-btrfs-snapshot-nas.timer
+            unit="$(systemd-escape --path "$TOP")"
+            dev0="$(head -n1 /run/e2e-loop-devs)"
+            """
+            + TOP_LEVEL_OPTS_FN
+            + r"""
+            opts="$(top_level_opts)"
+            made_bulk_flag=0
+            cleanup() {
+                systemctl disable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service \
+                    "$unit.automount" 2>/dev/null || true
+                if ! mountpoint -q "$TOP"; then mount -o "$opts" "$dev0" "$TOP" 2>/dev/null || true; fi
+                if mountpoint -q "$TOP"; then
+                    /usr/local/sbin/btrfs-snapshot purge >/dev/null 2>&1 || true
+                    btrfs subvolume delete "$SNAPS/e2e-foreign" >/dev/null 2>&1 || true
+                    umount "$TOP" 2>/dev/null || true
+                fi
+                rm -f "/etc/systemd/system/$unit.mount" "/etc/systemd/system/$unit.automount" "$convert_flag" \
+                    "$ours" "$theirs" "$stamp" "$nas_stamp"
+                if (( made_bulk_flag )); then rm -f "$bulk_flag"; fi
+                rmdir /etc/btrbk 2>/dev/null || true
+                rm -f "$CONF"
+                if [[ -e "$saved" ]]; then mv "$saved" "$CONF"; fi
+                systemctl daemon-reload
+            }
+            trap cleanup EXIT
+            show() { sed "s/^/test_08 $1: /" <<<"$2" >&2; }   # the CI log
+            # Everything the commands may change, one line each.
+            state() {
+                local u
+                for u in btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service \
+                    "$unit.automount"; do
+                    printf '%s %s %s\n' "$u" "$(systemctl is-enabled "$u" 2>/dev/null || true)" \
+                        "$(systemctl is-active "$u" 2>/dev/null || true)"
+                done
+                { find /etc/btrfs-setup /etc/btrbk /etc/systemd/system /var/lib/btrfs-snapshot /var/lib/btrfs-bulk \
+                    "$stamp" "$nas_stamp" -printf '%p %y %m %s %T@ %l\n' 2>/dev/null || true; } | sort
+                { find "$SNAPS" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null || true; } | sort
+                if mountpoint -q "$TOP"; then echo "top level mounted"; fi
+                sha256sum /var/home/tester/.cargo/config.toml /var/home/tester/.config/uv/uv.toml 2>/dev/null || true
+            }
+            same() {   # same LABEL BEFORE: the state is still BEFORE
+                local now
+                now="$(state)"
+                [[ "$now" == "$2" ]] && return 0
+                echo "$1 changed the state:" >&2
+                diff <(printf '%s\n' "$2") <(printf '%s\n' "$now") >&2 || true
+                return 1
+            }
+            owned() { find "$SNAPS" -mindepth 1 -maxdepth 1 -regextype posix-extended \
+                -regex '.*/(home|Workspace)\.[0-9]{8}T[0-9]{4}(_[0-9]+)?' -printf '%f\n' | sort; }
+
+            # Set up as test_03 does: settings, runtime and units from the installer, the top level by hand.
+            [[ ! -e "$bulk_flag" ]]   # this test makes it; a leftover would mean ~/Bulk items wait for a boot
+            if [[ -e "$CONF" ]]; then cp -a "$CONF" "$saved"; fi
+            install -d -m 0755 /etc/btrfs-setup /var/lib/btrfs-snapshot
+            printf '%s\n' HOME_DIR=/var/home/tester HOME_MOUNT=/var/home HOME_SUBVOL=home "TOP=$TOP" \
+                SNAP_DIR_NAME=snapshots SKIP_AT_OR_BELOW_GIB=0 RESUME_ABOVE_GIB=0 EMERGENCY_AT_OR_BELOW_GIB=0 \
+                NAS_ENABLED=0 >"$CONF"
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot \
+                btrfs/btrfs-snapshot-core btrfs/btrfs-notify btrfs/units/btrfs-snapshot.service \
+                btrfs/units/btrfs-snapshot.timer btrfs/units/btrfs-snapshot-nas.service \
+                btrfs/units/btrfs-snapshot-nas.timer btrfs/units/btrfs-subvol-convert.service >/dev/null
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --set "UUID=$(cat /run/e2e-loop-uuid)" \
+                --set "OPTIONS=$opts" btrfs/snapshots/top.mount.in btrfs/snapshots/top.automount.in >/dev/null
+            systemctl daemon-reload
+            systemctl enable "$unit.automount"
+            mkdir -p "$TOP"
+            mountpoint -q "$TOP" || mount -o "$opts" "$dev0" "$TOP"
+            install -d -m 0700 "$SNAPS"
+            systemctl enable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer
+            test -e "$stamp"
+            test -e "$nas_stamp"
+            # The hourly timer must not fire during the test (it would take a snapshot): wait out an elapse
+            # that is due in the next three minutes.
+            next="$(systemctl show -P NextElapseUSecRealtime --timestamp=unix btrfs-snapshot.timer)"
+            next="${next#@}"
+            if [[ "$next" =~ ^[0-9]+$ ]] && (( next - $(date +%s) < 180 )); then
+                sleep "$(( next - $(date +%s) + 5 ))"
+                for _ in $(seq 1 120); do
+                    [[ "$(systemctl is-active btrfs-snapshot.service || true)" =~ ^(inactive|failed)$ ]] && break
+                    sleep 1
+                done
+            fi
+            /usr/local/sbin/btrfs-snapshot hourly >/dev/null
+            snaps="$(owned)"
+            grep -q '^home\.' <<<"$snaps"
+            # Left by earlier steps of a setup (both flags stop the hourly run, so they come after it).
+            touch "$convert_flag"
+            systemctl enable btrfs-subvol-convert.service
+            printf 'avd\n' >"$bulk_flag"
+            made_bulk_flag=1
+            install -d -m 0755 /etc/btrbk
+            printf '# Managed by btrfs-snapshot (CST); an older version used btrbk\n' >"$ours"
+            printf '# my own btrbk settings\n' >"$theirs"
+            btrfs subvolume create "$SNAPS/e2e-foreign" >/dev/null
+
+            # 1. Plans: status, and setup without a terminal (it prints its plan, then refuses).
+            before="$(state)"
+            out="$(cst btrfs snapshots status 2>&1)" || { show status "$out"; exit 1; }
+            show status "$out"
+            grep -qx 'hourly snapshots: enabled, keep .*' <<<"$out"
+            grep -qF 'conversion of busy directories pending' <<<"$out"
+            same "snapshots status" "$before"
+            rc=0
+            out="$(cst btrfs snapshots setup </dev/null 2>&1)" || rc=$?
+            show "setup plan" "$out"
+            [[ "$rc" == 1 ]]
+            grep -qxF 'No terminal to confirm: re-run with --yes.' <<<"$out"
+            same "snapshots setup without a terminal" "$before"
+
+            # 2. disable.
+            out="$(cst btrfs snapshots disable 2>&1)" || { show disable "$out"; exit 1; }
+            show disable "$out"
+            grep -qxF 'Hourly snapshots and the NAS backup are stopped; existing snapshots are kept.' <<<"$out"
+            grep -qxF 'Delete them all with: cst btrfs snapshots disable --purge' <<<"$out"
+            grep -qF "Note: ~/Bulk items wait for the next boot (avd ) and are still moved" <<<"$out"
+            for u in btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service; do
+                [[ "$(systemctl is-enabled "$u" || true)" == disabled ]]
+                [[ "$(systemctl is-active "$u" || true)" == inactive ]]
+            done
+            test ! -e "$stamp"
+            test ! -e "$nas_stamp"
+            test ! -e "$convert_flag"
+            test -e "$bulk_flag"                        # ~/Bulk's boot step is not part of the snapshots
+            test ! -e "$ours"
+            grep -qxF '# my own btrbk settings' "$theirs"
+            [[ "$(owned)" == "$snaps" ]]                # the snapshots are kept
+            test -d "$SNAPS/e2e-foreign"
+            test -f "/etc/systemd/system/$unit.mount"
+            test -f "/etc/systemd/system/$unit.automount"
+            out="$(cst btrfs snapshots status 2>&1)"
+            grep -qx 'hourly snapshots: off, keep .*' <<<"$out"
+
+            # 3. A second disable changes nothing.
+            after="$(state)"
+            out="$(cst btrfs snapshots disable 2>&1)" || { show "second disable" "$out"; exit 1; }
+            show "second disable" "$out"
+            grep -qxF 'Hourly snapshots and the NAS backup are stopped; existing snapshots are kept.' <<<"$out"
+            same "a second disable" "$after"
+
+            # 4. disable --purge: the core's snapshots and the top-level units go; anything else stays.
+            out="$(cst btrfs snapshots disable --purge 2>&1)" || { show purge "$out"; exit 1; }
+            show purge "$out"
+            grep -qF 'Snapshots purged and their configuration removed' <<<"$out"
+            test ! -e "/etc/systemd/system/$unit.mount"
+            test ! -e "/etc/systemd/system/$unit.automount"
+            if mountpoint -q "$TOP"; then echo "purge left the top level mounted" >&2; exit 1; fi
+            mount -o "$opts" "$dev0" "$TOP"
+            [[ -z "$(owned)" ]]
+            test -d "$SNAPS/e2e-foreign"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
