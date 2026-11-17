@@ -1326,8 +1326,9 @@ EOF
         exists here, so a wrong path still fails. User units are checked by the
         system manager's parser (verify has no --root for --user). Then
         `systemd-analyze security --offline` of every service stays at or under
-        its SECURITY_CEILINGS entry, and equal to it (lower the entry when a unit
-        gets better). Drop-ins (below, machine.slice, user@.service) are not
+        its SECURITY_CEILINGS entry (lower the entry when a unit gets better; a
+        score under it does not fail, so a systemd update in the image that
+        rates a unit better does not turn tier 1 red). Drop-ins (below, machine.slice, user@.service) are not
         units of their own and are not verified here."""
         c = self.SYSTEMD_CONTAINER
         stage = "/var/tmp/e2e-units"
@@ -1375,8 +1376,6 @@ EOF
                     check=False,
                 )
                 self.assertEqual(s.returncode, 0, f"exposure above {ceiling / 10}:\n{s.stdout[-600:]}")
-                score = s.stdout.rsplit("Overall exposure level for", 1)[-1].split(":", 1)[1].split()[0]
-                self.assertEqual(round(float(score) * 10), ceiling, f"{name} is now {score}: lower its entry")
 
     def test_14_stall_monitor_unit_keeps_queued_alerts_across_a_restart(self) -> None:
         """btrfs-stall-monitor.service as shipped (read from the checkout), only
