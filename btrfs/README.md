@@ -1421,7 +1421,25 @@ list). It needs a terminal.
 - `/usr/local/sbin/docker-gc`;
 - `docker-gc.service`, `docker-gc.timer` and `docker-gc-recorder.service` in
   `/etc/systemd/system`;
-- its state in `/var/lib/docker-gc`.
+- its state in `/var/lib/docker-gc`: `last-used.json` (the recorder's
+  record), `last-run.json` and `run.lock` (one run at a time, shared by the
+  weekly run, `run` and `cleanup-now`).
+
+Both services run sandboxed: no capabilities, the whole file system read-only
+except `/var/lib/docker-gc` (`ProtectSystem=strict` with
+`StateDirectory=docker-gc`), `/root` read-only (the docker CLI reads its
+settings there), only Unix sockets (`/run/docker.sock`, systemd), and the
+usual kernel and system-call limits. `docker builder prune` runs the buildx
+plugin, which keeps its state in `~/.docker/buildx`: the weekly run points it
+to `/var/lib/docker-gc/buildx` instead (`BUILDX_CONFIG`), so it uses the
+default builder (the Docker daemon's own build cache) even if root picked
+another one with `docker buildx use`. As root they still own
+`/run/docker.sock` and `/var/lib/docker-gc`, so they need no capability.
+`systemd-analyze security docker-gc-recorder.service` rates them about 2.1
+(it was 9.4). Versions before this one kept the lock in `/run/docker-gc.lock`:
+until `enable` installs the new program, an old installed copy and
+`cleanup-now` or `run --dry-run` from the checkout do not see each other's
+lock, so run `enable` again after an update.
 
 `disable` stops the timer and the recorder, and makes systemd forget the
 timer's last run (`systemctl clean --what=state docker-gc.timer`). **The files stay**, including the

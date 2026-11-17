@@ -22,7 +22,9 @@ from cst_core.ports import CommandResult, CommandRunnerPort
 STATE_DIR = os.environ.get("DOCKER_GC_STATE", "/var/lib/docker-gc")  # override: tests
 LAST_USED = os.path.join(STATE_DIR, "last-used.json")
 LAST_RUN = os.path.join(STATE_DIR, "last-run.json")
-LOCK = "/run/docker-gc.lock"
+# In the state folder: the one place the sandboxed units may write (StateDirectory=), and
+# shared with runs outside them (cleanup-now, run --dry-run).
+LOCK = os.path.join(STATE_DIR, "run.lock")
 KEEP_CONTAINER_DAYS = int(os.environ.get("KEEP_CONTAINER_DAYS", 7))
 KEEP_IMAGE_DAYS = int(os.environ.get("KEEP_IMAGE_DAYS", 14))
 KEEP_BUILD_CACHE_DAYS = int(os.environ.get("KEEP_BUILD_CACHE_DAYS", 14))
@@ -161,6 +163,7 @@ def remove_image(img: Mapping[str, Any], plan_at: float) -> str:
 
 def locked() -> int:
     """The run lock's fd, held until the process ends; exit 0 when another run holds it."""
+    os.makedirs(os.path.dirname(LOCK), mode=0o755, exist_ok=True)
     fd = take_lock(LOCK, wait=False, mode=0o644, nofollow=False)
     if fd is None:
         log(5, "another docker-gc run is active; skipped")

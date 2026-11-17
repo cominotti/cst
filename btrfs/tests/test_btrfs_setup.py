@@ -32,6 +32,7 @@ SETUP = os.path.join(REPO, "btrfs-setup.sh")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
+from btrfs.docker_gc import adapters as gc_adapters
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
@@ -666,6 +667,59 @@ class StallMonitorUnitTest(unittest.TestCase):
         self.assertIn("RuntimeDirectory=btrfs-stall-monitor", lines)
         self.assertIn("Restart=on-failure", lines)
         self.assertIn("RuntimeDirectoryPreserve=restart", lines)
+
+
+class DockerGcUnitsTest(unittest.TestCase):
+    """btrfs/units/docker-gc-recorder.service and docker-gc.service as shipped: sandboxed, with
+    /var/lib/docker-gc (docker-gc's state and run lock) as the one place they may write."""
+
+    UNITS = ("docker-gc-recorder.service", "docker-gc.service")
+
+    def service(self, name: str) -> dict[str, list[str]]:
+        with open(os.path.join(BTRFS, "units", name)) as f:
+            text = f.read()
+        m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+        assert m is not None, text
+        keys: dict[str, list[str]] = {}
+        for ln in m.group(1).splitlines():
+            if ln and not ln.startswith("#"):
+                k, _, v = ln.partition("=")
+                keys.setdefault(k, []).append(v)
+        return keys
+
+    def test_both_run_sandboxed_with_no_capability(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                s = self.service(name)
+                self.assertEqual(s.get("CapabilityBoundingSet"), [""])
+                for key, value in (
+                    ("NoNewPrivileges", "yes"),
+                    ("ProtectSystem", "strict"),
+                    ("ProtectHome", "read-only"),
+                    ("PrivateTmp", "yes"),
+                    ("RestrictAddressFamilies", "AF_UNIX"),
+                    ("SystemCallFilter", "@system-service"),
+                    ("MemoryDenyWriteExecute", "yes"),
+                ):
+                    self.assertEqual(s.get(key), [value], key)
+
+    def test_buildx_keeps_its_state_in_the_state_directory(self) -> None:
+        # docker builder prune runs buildx, which fails to mkdir ~/.docker under ProtectHome=read-only.
+        self.assertEqual(
+            self.service("docker-gc.service").get("Environment"), ["BUILDX_CONFIG=/var/lib/docker-gc/buildx"]
+        )
+
+    def test_the_paths_docker_gc_writes_are_the_units_state_directory(self) -> None:
+        for name in self.UNITS:
+            with self.subTest(unit=name):
+                s = self.service(name)
+                self.assertEqual(s.get("StateDirectory"), ["docker-gc"])
+                self.assertNotIn("ReadWritePaths", s)
+        state = "/var/lib/docker-gc"
+        if os.environ.get("DOCKER_GC_STATE") is None:
+            self.assertEqual(gc_adapters.STATE_DIR, state)
+        for path in (gc_adapters.LOCK, gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
+            self.assertEqual(os.path.dirname(path), gc_adapters.STATE_DIR, path)
 
 
 if __name__ == "__main__":

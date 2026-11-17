@@ -52,6 +52,34 @@ top_level_opts() {
 }
 """
 
+# For the docker-gc tests (test_09, test_13): Docker up, as the units see it.
+# The DinD daemon (e2e-dind.service, test_05) on the loop btrfs, and a stub
+# docker.service (a oneshot that stays active, as in test_05a): the unit the
+# recorder is bound to (BindsTo=) and docker-gc.service's ExecCondition asks.
+DOCKER_UP_FN = r"""
+stub=/run/systemd/system/docker.service
+docker_up() {
+    printf '[Unit]\nDescription=E2E stub of docker.service (dockerd runs in e2e-dind.service)\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' \
+        >"$stub"
+    systemctl daemon-reload
+    [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
+    # As in test_05a: Fedora's generic service.d drop-ins may apply; one of docker.service may not.
+    local dropins _
+    dropins="$(systemctl show -P DropInPaths docker.service)"
+    if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
+        echo "a docker.service drop-in applies to the stub: $dropins" >&2
+        return 1
+    fi
+    systemctl start e2e-dind.service
+    for _ in $(seq 1 30); do
+        docker info >/dev/null 2>&1 && break
+        sleep 0.5
+    done
+    docker info >/dev/null
+    systemctl start docker.service
+}
+"""
+
 # test_05a: docker-volumes-nocow migrate on the real btrfs, with a stub
 # docker.service (no dockerd: a oneshot that stays active) so that only its
 # ActiveState matters. The helper and its unit come from test_02's
@@ -1346,12 +1374,12 @@ EOF
         second purge changes nothing; `enable` after it writes everything again."""
         out = exec_bash(
             self.PRIV_CONTAINER,
-            r"""
+            DOCKER_UP_FN
+            + r"""
             set -E
             trap 'echo "test_09 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
-            stub=/run/systemd/system/docker.service
             bin=/usr/local/sbin/docker-gc
             units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
             stamp=/var/lib/systemd/timers/stamp-docker-gc.timer
@@ -1401,23 +1429,7 @@ EOF
             # Docker up: the DinD daemon, and a stub docker.service for the recorder's BindsTo=.
             remove_all
             systemctl reset-failed "${units[@]}" 2>/dev/null || true
-            printf '[Unit]\nDescription=E2E stub of docker.service (dockerd runs in e2e-dind.service)\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n' \
-                >"$stub"
-            systemctl daemon-reload
-            [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
-            # As in test_05a: Fedora's generic service.d drop-ins may apply; one of docker.service may not.
-            dropins="$(systemctl show -P DropInPaths docker.service)"
-            if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
-                echo "a docker.service drop-in applies to the stub: $dropins" >&2
-                exit 1
-            fi
-            systemctl start e2e-dind.service
-            for _ in $(seq 1 30); do
-                docker info >/dev/null 2>&1 && break
-                sleep 0.5
-            done
-            docker info >/dev/null
-            systemctl start docker.service
+            docker_up
 
             # 1. enable.
             out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
@@ -1831,6 +1843,101 @@ echo E2E-OK
             rc=0
             out="$(cst btrfs bulk steam bogus 2>&1)" || rc=$?
             [[ "$rc" == 2 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_13_docker_gc_sandboxed_units_record_and_run_with_real_docker(self) -> None:
+        """docker-gc-recorder.service and docker-gc.service as shipped, sandboxed
+        (ProtectSystem=strict, no capability, AF_UNIX only; /var/lib/docker-gc
+        the one writable place), against the real DinD daemon behind a stub
+        docker.service: the recorder runs without restarts and writes an
+        image use it saw in `docker events` (an image imported offline, then
+        tagged) to last-used.json; `cst btrfs docker-gc run` starts
+        docker-gc.service, which ends in success, takes its lock in
+        /var/lib/docker-gc and writes last-run.json with no failed step
+        (the build-cache prune runs buildx, whose state is in
+        /var/lib/docker-gc/buildx). A runner booted less than
+        10 minutes ago would make the run skip itself (MIN_UPTIME): then, and
+        only then, a test drop-in shows the unit a later /proc/uptime."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            DOCKER_UP_FN
+            + r"""
+            set -E
+            trap 'echo "test_13 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            cst() { SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst "$@"; }
+            units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
+            state=/var/lib/docker-gc
+            uptime_dropin=/run/systemd/system/docker-gc.service.d/90-e2e-uptime.conf
+            show() { sed "s/^/test_13 $1: /" <<<"$2" >&2; }   # the CI log
+            cleanup() {
+                cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
+                docker image rm -f e2e-gc-probe:1 e2e-gc-probe:2 >/dev/null 2>&1 || true
+                rm -rf "$(dirname "$uptime_dropin")" /run/e2e-uptime /var/tmp/e2e-gc-probe
+                systemctl stop docker.service e2e-dind.service 2>/dev/null || true
+                rm -f "$stub"
+                systemctl daemon-reload
+                systemctl reset-failed "${units[@]}" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            journal() { journalctl -q --no-pager -o cat -u "$1" -n 30 >&2 || true; }
+
+            docker_up
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
+            for u in docker-gc-recorder.service docker-gc.service; do
+                [[ "$(systemctl show -P ProtectSystem "$u")" == strict ]]
+                [[ "$(systemctl show -P CapabilityBoundingSet "$u")" == "" ]]
+                [[ "$(systemctl show -P StateDirectory "$u")" == docker-gc ]]
+            done
+            for _ in $(seq 1 30); do
+                [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] && break
+                sleep 1
+            done
+            [[ "$(systemctl is-active docker-gc-recorder.service || true)" == active ]] ||
+                { journal docker-gc-recorder.service; exit 1; }
+
+            # An image use, offline: import a one-file image, then tag it.
+            rm -rf /var/tmp/e2e-gc-probe && mkdir -p /var/tmp/e2e-gc-probe
+            echo probe >/var/tmp/e2e-gc-probe/probe.txt
+            tar -C /var/tmp/e2e-gc-probe -cf - probe.txt | docker import - e2e-gc-probe:1 >/dev/null
+            docker tag e2e-gc-probe:1 e2e-gc-probe:2
+            iid="$(docker image inspect --format '{{.Id}}' e2e-gc-probe:1)"
+            # The recorder saves what it saw every 30 s (DOCKER_GC_FLUSH): its startup write only
+            # makes the file, so wait for this image's id in it.
+            seen=0
+            for _ in $(seq 1 50); do
+                if python3 -I -c 'import json, sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1]))["images"])' \
+                    "$state/last-used.json" "$iid" 2>/dev/null; then
+                    seen=1
+                    break
+                fi
+                sleep 1
+            done
+            (( seen )) || { echo "the recorder did not record $iid" >&2; journal docker-gc-recorder.service; exit 1; }
+            [[ "$(systemctl is-active docker-gc-recorder.service)" == active ]]
+            [[ "$(systemctl show -P NRestarts docker-gc-recorder.service)" == 0 ]]
+
+            # The weekly run, as 'cst btrfs docker-gc run' starts it.
+            if (( $(cut -d. -f1 /proc/uptime) < 610 )); then
+                echo "test_13: uptime under 10 minutes: the run sees a later /proc/uptime" >&2
+                echo '100000.00 100000.00' >/run/e2e-uptime
+                mkdir -p "$(dirname "$uptime_dropin")"
+                printf '[Service]\nBindReadOnlyPaths=/run/e2e-uptime:/proc/uptime\n' >"$uptime_dropin"
+                systemctl daemon-reload
+            fi
+            rm -f "$state/last-run.json"
+            out="$(cst btrfs docker-gc run 2>&1)" || { show run "$out"; journal docker-gc.service; exit 1; }
+            show run "$out"
+            [[ "$(systemctl show -P Result docker-gc.service)" == success ]]
+            [[ "$(systemctl show -P ExecMainStatus docker-gc.service)" == 0 ]]
+            # Every step worked under the sandbox: a failed removal or build-cache prune is only counted.
+            python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(d["failed"] != 0)' \
+                "$state/last-run.json" || { cat "$state/last-run.json" >&2; journal docker-gc.service; exit 1; }
+            test -f "$state/run.lock"
+            test ! -e /run/docker-gc.lock
             echo E2E-OK
             """,
         ).stdout

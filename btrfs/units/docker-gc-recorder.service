@@ -12,6 +12,30 @@ ExecStart=/usr/local/sbin/docker-gc record
 Restart=on-failure
 RestartSec=10
 Nice=10
+# Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so
+# no capability), `systemctl is-active` and writes in /var/lib/docker-gc (its
+# state and the run lock), the one writable place (StateDirectory=).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+StateDirectory=docker-gc
+# The docker CLI reads its settings from /root/.docker.
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=docker.service
