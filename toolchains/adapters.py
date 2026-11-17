@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
@@ -927,7 +927,8 @@ def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str]
 
 
 def in_container() -> bool:
-    return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+    """Inside a toolbox or container (cst_core's one detection, HostExecutionContext)."""
+    return HostExecutionContext().is_container()
 
 
 def run_context(home: str | None) -> tuple[str, float]:

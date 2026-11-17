@@ -2396,6 +2396,25 @@ class NotUtf8OutputTest(Scratch):
         self.assertEqual(host.virsh(read_only=True).domains(), ["win\ufffd"])
 
 
+class HostProbeTest(unittest.TestCase):
+    """Host: CST_DOCTOR_CONTAINER wins; without it, cst_core's detection (a probe) tells."""
+
+    class _Probe:
+        def __init__(self, *, container: bool) -> None:
+            self.container = container
+
+        def is_container(self) -> bool:
+            return self.container
+
+    def test_the_probe_decides_without_the_override(self) -> None:
+        for container, root in ((True, "/run/host"), (False, "/")):
+            host = doc_adapters.Host({"PATH": "/usr/bin:/bin"}, probe=self._Probe(container=container))
+            self.assertEqual((host.container, host.root, host.is_container()), (container, root, container))
+        for forced, container in (("1", True), ("0", False)):
+            host = doc_adapters.Host({"CST_DOCTOR_CONTAINER": forced}, probe=self._Probe(container=not container))
+            self.assertEqual(host.container, container)
+
+
 class DoctorWiringTest(unittest.TestCase):
     """doctor/wiring.py: what cst doctor takes from the process (the composition root)."""
 

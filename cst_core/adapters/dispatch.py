@@ -9,7 +9,9 @@ import signal
 import subprocess
 import sys
 
+from cst_core.adapters import HostExecutionContext
 from cst_core.domain.errors import shell_exit_status
+from cst_core.ports import ContainerProbePort
 
 # The signals a bash script waiting for a foreground command leaves to that
 # command: the command may handle them (a cleanup trap). bash dies of SIGINT
@@ -38,13 +40,17 @@ def _start_failure(argv: Sequence[str], exc: OSError) -> int:
 class LocalCstDispatchAdapter:
     """Concrete `CstDispatchPort` backed by the host OS, with bash's exec and foreground semantics."""
 
+    def __init__(self, probe: ContainerProbePort | None = None) -> None:
+        """probe: host or container (None: HostExecutionContext, the one detection)."""
+        self._probe = HostExecutionContext() if probe is None else probe
+
     def is_file(self, path: str) -> bool:
         """Return True when `path` exists as a regular file."""
         return os.path.isfile(path)
 
     def is_container(self) -> bool:
         """Return True inside a Podman toolbox or Docker container."""
-        return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+        return self._probe.is_container()
 
     def euid(self) -> int:
         """Return effective user ID."""

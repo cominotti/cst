@@ -10,6 +10,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments, parse_snapshots_conf
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
@@ -135,25 +136,15 @@ def facts(host: DoctorHostPort) -> DoctorFacts:
 # ---- rpm-ostree ----------------------------------------------------------------------------------
 def ostree_deployments(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deployment]]:
     """((booted, pending, error), every deployment in the order ostree admin
-    status numbers them). pending is the deployment of the next boot
-    when it is not the booted one: rpm-ostree lists it first (for the booted
-    system's osname), staged or not (rpm-ostree rollback leaves an unstaged
-    one there). It is the one rpm-ostree install/uninstall edit."""
+    status numbers them), from cst_core's one rpm-ostree query
+    (cst_core.domain.ostree: pending is the next boot's deployment when it
+    is not the booted one)."""
     if not host.exists(host.path(HostPath("/run/ostree-booted"))):
         return (None, None, "not an rpm-ostree system"), []
-    rc, out, err = host.run(["rpm-ostree", "status", "--json"])
-    if rc != 0:
-        return (None, None, f"rpm-ostree status --json failed: {first_line(err) or f'exit {rc}'}"), []
-    try:
-        data = json.loads(out)
-        deps = [d for d in data["deployments"] if isinstance(d, dict)]
-    except (ValueError, KeyError, TypeError) as e:
-        return (None, None, f"rpm-ostree status --json: unreadable output ({e})"), []
-    booted = next((d for d in deps if d.get("booted")), None)
-    osname = booted.get("osname") if booted else None
-    first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
-    pending = first if first is not None and first is not booted else None
-    return (booted, pending, ""), deps
+    status = query_status(host.run)
+    if not isinstance(status, OstreeStatus):
+        return (None, None, status), []
+    return (status.booted, status.pending, ""), status.deployments
 
 
 def installed_packages(host: DoctorHostPort, d: Deployment) -> list[str] | None:

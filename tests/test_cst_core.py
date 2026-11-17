@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import fcntl
 import io
+import json
 import os
 import re
 import select
@@ -29,6 +30,7 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
+from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
@@ -887,6 +889,81 @@ class CstCommandTest(unittest.TestCase):
             with self.subTest(caller=caller):
                 proc = self._run(script, "swap", env={**path, **caller})
                 self.assertEqual(proc.stdout, f"LC_CTYPE={seen}\n", proc.stderr)
+
+
+class OstreeQueryTest(unittest.TestCase):
+    """cst_core.domain.ostree: the one `rpm-ostree status --json` query, in the words doctor always used."""
+
+    @staticmethod
+    def _answer(rc: int, out: str, err: str = "") -> tuple[list[list[str]], OstreeStatus | str]:
+        calls: list[list[str]] = []
+
+        def run(argv: list[str]) -> tuple[int, str, str]:
+            calls.append(argv)
+            return rc, out, err
+
+        return calls, query_status(run)
+
+    def test_the_query_and_its_failures(self) -> None:
+        calls, got = self._answer(1, "", "error: no daemon\nmore\n")
+        self.assertEqual(calls, [["rpm-ostree", "status", "--json"]])
+        self.assertEqual(got, "rpm-ostree status --json failed: error: no daemon")
+        self.assertEqual(self._answer(3, "")[1], "rpm-ostree status --json failed: exit 3")
+        prefix = "rpm-ostree status --json: unreadable output "
+        for out, why in (
+            ("{", "(Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"),
+            ("{}", "('deployments')"),
+            ("[]", "(list indices must be integers or slices, not str)"),
+            ('"x"', "(string indices must be integers, not 'str')"),
+            ('{"deployments": null}', "('NoneType' object is not iterable)"),
+            ('{"deployments": 5}', "('int' object is not iterable)"),
+        ):
+            with self.subTest(out=out):
+                self.assertEqual(self._answer(0, out)[1], prefix + why)
+
+    def test_booted_and_pending(self) -> None:
+        booted = {"booted": True, "osname": "fedora", "checksum": "b"}
+        staged = {"osname": "fedora", "checksum": "s", "staged": True}
+        other = {"osname": "other", "checksum": "o"}
+        rollback = {"osname": "fedora", "checksum": "r"}
+        cases = (
+            ([staged, booted], staged),  # staged: listed first
+            ([rollback, booted], rollback),  # after rpm-ostree rollback: first, not staged
+            ([other, booted, rollback], None),  # another osname first: the booted one is the next boot
+            ([booted, rollback], None),
+        )
+        for deps, pending in cases:
+            with self.subTest(deps=deps):
+                got = self._answer(0, json.dumps({"deployments": ["junk", *deps, 3]}))[1]
+                assert isinstance(got, OstreeStatus), got
+                self.assertEqual(got.deployments, deps, "only the objects, in order")
+                self.assertEqual(got.booted, booted)
+                self.assertEqual(got.pending, pending)
+        got = self._answer(0, json.dumps({"deployments": [staged, rollback]}))[1]
+        assert isinstance(got, OstreeStatus), got
+        self.assertEqual((got.booted, got.pending), (None, staged), "no booted one: the first of any osname")
+        got = self._answer(0, '{"deployments": []}')[1]
+        self.assertEqual(got, OstreeStatus([], None, None))
+
+
+class HostDetectionTest(unittest.TestCase):
+    """One host-or-toolbox detection (HostExecutionContext), injected where a module asks."""
+
+    class _Probe:
+        def __init__(self, *, container: bool) -> None:
+            self.container = container
+
+        def is_container(self) -> bool:
+            return self.container
+
+    def test_the_dispatcher_asks_the_probe(self) -> None:
+        for container in (True, False):
+            self.assertIs(LocalCstDispatchAdapter(self._Probe(container=container)).is_container(), container)
+        markers = {"/run/.containerenv"}
+        ctx = HostExecutionContext(exists=lambda p: p in markers)
+        self.assertTrue(LocalCstDispatchAdapter(ctx).is_container())
+        markers.clear()
+        self.assertFalse(LocalCstDispatchAdapter(ctx).is_container())
 
 
 class CoreWiringTest(unittest.TestCase):

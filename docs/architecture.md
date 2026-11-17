@@ -111,7 +111,10 @@ All of them run in the unit suite:
 
 ## Toolbox vs host
 
-The scripts detect a container through `/run/.containerenv` or `/.dockerenv`.
+The scripts detect a container through `/run/.containerenv` or `/.dockerenv`. In Python
+one class does it, `HostExecutionContext` (`cst_core.adapters`); the `cst` dispatcher,
+doctor's `Host` and toolchains ask it (`PRIMITIVE_LITERALS` keeps the markers out of
+every other module).
 
 - Inside one, read-only commands still work, sometimes by moving to the host with `flatpak-spawn --host`.
 - Root commands refuse to run there. Keep that split when adding commands.
