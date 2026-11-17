@@ -152,7 +152,7 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(read_int(self.path("missing"), 0), 0)
 
     def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
-        # PRIM-07: "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
+        # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
         superscript_two, arabic_three = chr(0xB2).encode(), chr(0x663).encode()
         for i, data in enumerate((b"--5", superscript_two, b"-", b"", b"1.5", b"+3", b"\xff", arabic_three)):
             with self.subTest(data=data):
@@ -211,7 +211,7 @@ class AdaptersTest(unittest.TestCase):
         link = self.path("link")
         os.symlink(theirs, self.path("link-theirs"))
         os.symlink(self.path("missing"), self.path("dangling"))
-        # One link rule with the installer (pr-a preexisting #11): at a root destination a link is
+        # One link rule with the installer: at a root destination a link is
         # always replaced ("change", whatever it points to); at a user destination its target counts.
         self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="root"), "change")
         self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="root"), "change")
@@ -241,7 +241,7 @@ class AdaptersTest(unittest.TestCase):
         os.close(fd2)
 
     def test_a_lock_file_it_creates_gets_exactly_the_mode(self) -> None:
-        # PRIM-03: under a 077 umask (sudo keeps a user's) the 0644 lock cst doctor reads came out 0600.
+        # Under a 077 umask (sudo keeps a user's) the 0644 lock cst doctor reads came out 0600.
         lock = self.path("pid.lock")
         old = os.umask(0o077)
         try:
@@ -339,7 +339,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_a_failed_restorecon_is_reported(self) -> None:
-        # PRIM-08: its result was dropped.
+        # Its result was dropped.
         dest = os.path.join(self.tmp, "f")
         _, err = self.restorecon(dest, 255, "restorecon: lstat(f) failed: Permission denied\n")
         self.assertEqual(
@@ -351,7 +351,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
             self.assertEqual(fh.read(), b"x")
 
     def test_a_link_at_dest_is_never_removed_before_the_rename(self) -> None:
-        # PRIM-08: dest was unlinked first, a moment with no file at all.
+        # Dest was unlinked first, a moment with no file at all.
         target = os.path.join(self.tmp, "target")
         with open(target, "wb") as fh:
             fh.write(b"keep")
@@ -466,7 +466,7 @@ class ForceSymlinkAndRunnerTest(unittest.TestCase):
         with open(link, "w") as fh:
             fh.write("old\n")
         fs = core_files.LocalFileSystemAdapter()
-        # PRIM-08: unlink then symlink left a moment with nothing at the path.
+        # Unlink then symlink left a moment with nothing at the path.
         with mock.patch.object(core_files.os, "unlink", side_effect=AssertionError("unlink called")):
             fs.force_symlink("/dev/null", link)
             fs.force_symlink("/dev/zero", link)
@@ -474,7 +474,7 @@ class ForceSymlinkAndRunnerTest(unittest.TestCase):
         self.assertEqual(os.listdir(self.tmp), ["zram.conf"], "a temporary link was left")
 
     def test_runner_decodes_bytes_that_are_not_utf8(self) -> None:
-        # PRIM-04 (decode part): printf '\\377abc' raised UnicodeDecodeError out of run().
+        # Printf '\\377abc' raised UnicodeDecodeError out of run().
         res = core_adapters.SubprocessCommandRunner().run(["printf", "\\377abc"])
         self.assertEqual((res.returncode, res.stdout), (0, chr(0xFFFD) + "abc"))
 
@@ -503,6 +503,10 @@ STRICT_TABLE: tuple[tuple[str, str | None], ...] = (
     ("K=user@host:22", "user@host:22"),
     ("K=/volume1/backups/sophia", "/volume1/backups/sophia"),
     ("K={a,b}", "{a,b}"),
+    ("K=a{1..3}", "a{1..3}"),  # an assignment word is not brace-expanded...
+    ("export K={a,b}", PROBLEM),  # ...but an argument of export is: bash sets K=b
+    ("export K=a{1..3}", PROBLEM),
+    ("export K=*", "*"),
     ("K=*", "*"),
     ("K='$HOME'", "$HOME"),
     ("K=a=b", "a=b"),
@@ -600,6 +604,9 @@ class ShellAssignmentsTest(unittest.TestCase):
             "/etc/x.conf line 3: B = 2: blanks around =: bash runs it as a command and sets nothing",
         )
         self.assertEqual([(a.line, a.key) for a in got.entries], [(1, "A")])
+        # An escaped blank (printf %q) is named for its backslash, not as a command after a blank.
+        (escaped,) = parse_shell_assignments("NAS_PATH=/volume1/My\\ Backups\n").problems
+        self.assertIn("outside single quotes: bash would expand it", escaped.reason)
 
     def test_the_last_assignment_wins_and_only_a_newline_ends_a_line(self) -> None:
         self.assertEqual(dict(parse_shell_assignments("K=1\nK=2\n").values), {"K": "2"})
@@ -609,7 +616,7 @@ class ShellAssignmentsTest(unittest.TestCase):
                 self.assertEqual(dict(parse_shell_assignments(f"A=1{sep}B=2\n").values), {"A": f"1{sep}B=2"})
 
     def test_python_only_files_keep_what_their_readers_accepted(self) -> None:
-        # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (PR-A pinned VM_NOCOW = 0),
+        # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (VM_NOCOW = 0 has always worked in vm.conf),
         # several words, a Windows line end; still no $, backtick or backslash.
         text = "VM_NOCOW = 0\nA = 'a b' # c\nB = x y  # z\n  C=1h\nD=v\r\nE=$X\n"
         got = parse_shell_assignments(text, bash_sourced=False)
@@ -638,6 +645,9 @@ class ShellAssignmentsTest(unittest.TestCase):
                 self.assertEqual(got.problems, ())
                 self.assertEqual(dict(got.values), self.bash_values(text, sorted(got.values)))
         self.assertEqual(parse_shell_assignments(generated).values["VM_CPU_DISABLE"].split()[0], "cet-ss")
+        # btrfs-bulk reads bulk.conf as a Python-only file (bulk_user): the same value there.
+        bulk = parse_shell_assignments("# Managed by btrfs-setup.sh (CST)\nBULK_USER=alice\n", bash_sourced=False)
+        self.assertEqual((dict(bulk.values), bulk.problems), ({"BULK_USER": "alice"}, ()))
         for rel in ("toolchains/toolchains.conf", "bluetooth/bluetooth.conf"):
             with self.subTest(rel=rel), open(os.path.join(REPO, rel), encoding="utf-8") as fh:
                 self.assertEqual(parse_shell_assignments(fh.read(), bash_sourced=False).problems, ())

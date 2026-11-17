@@ -402,7 +402,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(self.m.merged_settings(["LE_AUDIO=off\nLE_AUDIO=on\n"])["LE_AUDIO"], "on")
 
     def test_one_reader_for_export_lines_and_problem_lines(self) -> None:
-        # PRIM-01: bluetooth's own reader saw "export LE_AUDIO" as an unknown key, and settings_set
+        # Bluetooth's own reader saw "export LE_AUDIO" as an unknown key, and settings_set
         # then appended a second LE_AUDIO line instead of replacing the one that counts.
         self.assertEqual(self.m.parse_settings("export LE_AUDIO=on\n"), {"LE_AUDIO": "on"})
         self.assertEqual(self.m.settings_set("export LE_AUDIO=on\n", "LE_AUDIO", "off"), ("LE_AUDIO=off\n", True))
@@ -665,6 +665,12 @@ class LeAudioEffectTest(unittest.TestCase):
         self.assertEqual(f(new, "LE_AUDIO", "off"), (new, False))
         self.assertEqual(f("LE_AUDIO = off  # mine\n", "LE_AUDIO", "off"), ("LE_AUDIO = off  # mine\n", False))
         self.assertEqual(f("A=1\r\n", "LE_AUDIO", "on"), ("A=1\r\nLE_AUDIO=on\r\n", True))
+        # A broken line of the key (a problem line, which sets nothing) is replaced, not kept beside
+        # the new one; a commented-out one is left alone.
+        self.assertEqual(f("LE_AUDIO=$X\n", "LE_AUDIO", "on"), ("LE_AUDIO=on\n", True))
+        self.assertEqual(
+            f("# LE_AUDIO=$X\nexport LE_AUDIO = 'on' x\n", "LE_AUDIO", "off"), ("# LE_AUDIO=$X\nLE_AUDIO=off\n", True)
+        )
         p = os.path.join(self.tmp, "s.conf")
         r = subprocess.run(
             [sys.executable, "-I", HELPER, "settings-set", p, "LE_AUDIO", "on"],

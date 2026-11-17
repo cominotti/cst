@@ -764,7 +764,10 @@ a backtick or a backslash outside single quotes, an unclosed quote) sets
 nothing and is named with its line number: `status` and the `plan`s print it
 and go on; `backup`, `tune apply`, `nocow apply` and `backup-timer on`
 refuse to start until it is fixed (a default never stands in for it);
-`backup-timer off` prints it and still turns the timer off.
+`backup-timer off` prints it and still turns the timer off. A `backup` or
+`backup-timer` of a VM named on the command line reads nothing from
+`cpu-setup.conf` (only `VM_NAME`, when no VM is named), so a line there does
+not stop it.
 
 The commands that only read (`status`, `list`, the `plan`s, `backup-timer
 status`, `help`) end quietly when their reader goes away (`cst vm status |

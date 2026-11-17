@@ -145,28 +145,33 @@ def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
     return dict(parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).values)
 
 
-def conf_files(cmd: str, sub: str | None, nas: bool) -> list[tuple[str, bool]]:
-    """[(settings file, bash_sourced)] that a cst-vm command reads."""
+def conf_files(cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
+    """[(settings file, bash_sourced)] that a cst-vm command reads; vm: the VM named on the command line."""
     files = [(VM_CONF, False)]
-    if cmd != "nocow":
-        files.append((CPU_CONF, True))  # VM_NAME, VM_CPU_DISABLE
+    # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
+    # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
+    if cmd != "nocow" and not (vm and cmd in ("backup", "backup-timer")):
+        files.append((CPU_CONF, True))
     if nas or cmd == "backup-timer":
         files.append((NAS_CONF, True))
     return files
 
 
-def prepare_command(cmd: str, sub: str | None, nas: bool) -> None:
-    """Before a cst-vm command runs. Problem lines of the settings files it
+def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> None:
+    """Before a cst-vm command runs (help: only the SIGPIPE default below). Problem lines of the settings files it
     reads: a command that changes the machine with them (backup, tune/nocow
     apply, backup-timer on) refuses to start, since a default must never
     stand in for a line that says something else; the others print them on
     stderr and go on (backup-timer off too: it reads no setting, and it is
     the way back). A command that only reads (status, list, the plans,
-    backup-timer status) also gets SIGPIPE back at its default, so `| head`
+    backup-timer status, help) also gets SIGPIPE back at its default, so `| head`
     ends it quietly; commands that change the machine keep Python's handling
     (backup: SafeStream), so a closed pipe never cuts their cleanup short."""
+    if cmd == "help":
+        restore_default_signals()
+        return
     found = []
-    for path, bash_sourced in conf_files(cmd, sub, nas):
+    for path, bash_sourced in conf_files(cmd, nas, vm):
         problems = parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).problems
         if problems:
             found.append(describe_problems(path, problems))

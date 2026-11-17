@@ -1133,7 +1133,7 @@ class ParseSizeTest(unittest.TestCase):
 
 class ClosedPipeTest(Scratch):
     def test_status_and_plans_stop_quietly_on_a_closed_pipe(self) -> None:
-        # pr-a preexisting #12: `cst toolchains status | head -1` ended in "Exception ignored ...
+        # `cst toolchains status | head -1` ended in "Exception ignored ...
         # BrokenPipeError" (exit 120). The read-only commands now end on SIGPIPE, silently.
         # Only what needs no fake of this process (the subprocess sees none): help and the brief status.
         env = {**self.env, "PATH": "/usr/bin:/bin"}

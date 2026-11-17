@@ -1101,7 +1101,7 @@ class MigrateTest(Base):
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
 
     def test_attempts_counter_is_durable_before_the_rewrite_starts(self) -> None:
-        # PRIM-02: the counter was written with open("w") and no fsync, then the long rewrite
+        # The counter was written with open("w") and no fsync, then the long rewrite
         # started; a hang or hard reset before the next btrfs commit lost the increment, so
         # "gave up after two boots" could never trip.
         self.volume("cow")

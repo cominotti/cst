@@ -141,15 +141,14 @@ def parse_conf(text: str, known: AbstractSet[str]) -> dict[str, str]:
     that is not an assignment, or that sets a key not in KNOWN, is an error:
     a typo must not silently fall back to a default."""
     parsed = parse_shell_assignments(text, bash_sourced=False)
-    issues = [(p.line, f"{p.text.strip()}: {p.reason}") for p in parsed.problems]
+    issues = [(p.line, str(p)) for p in parsed.problems]
     issues += [
-        (a.line, f"unknown setting '{a.key}' (known: {', '.join(sorted(known))})")
+        (a.line, f"line {a.line}: unknown setting '{a.key}' (known: {', '.join(sorted(known))})")
         for a in parsed.entries
         if a.key not in known
     ]
     if issues:
-        n, why = min(issues)
-        raise ConfigError(f"line {n}: {why}")
+        raise ConfigError(min(issues)[1])
     return dict(parsed.values)
 
 

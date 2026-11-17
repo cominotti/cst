@@ -88,7 +88,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(render_template("@U@ @U@\n", {"U": "danilo"}), "danilo danilo\n")
 
     def test_render_template_refuses_a_placeholder_without_a_value(self) -> None:
-        # CONTRACT-05: without --set UUID=..., top.mount.in was written with What=/dev/disk/by-uuid/@UUID@.
+        # Without --set UUID=..., top.mount.in was written with What=/dev/disk/by-uuid/@UUID@.
         with self.assertRaisesRegex(DomainValidationError, "@UUID@"):
             render_template("What=/dev/disk/by-uuid/@UUID@\nOptions=@OPTIONS@\n", {"OPTIONS": "o"})
         self.assertEqual(template_keys("@A@ @B_2@ @a@ user@host @@"), {"A", "B_2"})
@@ -108,7 +108,7 @@ class DomainTest(unittest.TestCase):
         self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=True))
         self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=False))
         self.assertTrue(is_current(link, b"x", 0o644, "user", as_root=False))
-        # As root, a root entry must be owned by 0:0 (CONTRACT-11); a staged run as a user cannot check it.
+        # As root, a root entry must be owned by 0:0; a staged run as a user cannot check it.
         foreign = OnDisk(b"x", 0o644, 1000, 1000, False)
         self.assertFalse(is_current(foreign, b"x", 0o644, "root", as_root=True))
         self.assertTrue(is_current(foreign, b"x", 0o644, "root", as_root=False))
@@ -498,7 +498,7 @@ class InstallerCliTest(unittest.TestCase):
         self.assertTrue(Path(self.stage, "home/u/.config/gamemode.ini").is_file())
 
     def test_a_template_value_missing_or_unused_is_a_usage_error_and_writes_nothing(self) -> None:
-        # CONTRACT-05: no --set USER wrote a polkit rule with "@USER@" in it, and reported success.
+        # No --set USER wrote a polkit rule with "@USER@" in it, and reported success.
         srcs = ("btrfs/btrfs-notify", "cpu/cpu-game.rules.in")
         for sets, why in (((), b"@USER@"), (("--set", "USER=u", "--set", "USR=u"), b"--set USR")):
             for command in ("install", "plan", "check"):
@@ -517,7 +517,7 @@ class InstallerCliTest(unittest.TestCase):
         self.assertNotIn("@USER@", rule)
 
     def test_a_file_that_cannot_be_written_is_named_after_the_lines_already_printed(self) -> None:
-        # CONTRACT-06: a traceback, and no line for the file already written.
+        # A traceback, and no line for the file already written.
         if os.geteuid() == 0:
             self.skipTest("root writes into a read-only folder")
         units = Path(self.stage, "etc/systemd/system")

@@ -374,10 +374,15 @@ def settings_problems(text: str) -> tuple[SettingsProblem, ...]:
     return parse_shell_assignments(text, bash_sourced=False).problems
 
 
+_LINE_KEY: Final = re.compile(r"\s*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
 def line_key(line: str) -> str | None:
-    """The key one line assigns (also `export KEY=...`), as parse_settings reads it; None otherwise."""
-    entries = parse_shell_assignments(line, bash_sourced=False).entries
-    return entries[0].key if entries else None
+    """The key one line sets, or tries to: also `export KEY=...` and a problem line
+    (`KEY=$X`, which sets nothing), so settings_set replaces it; None for a
+    comment or any other line."""
+    m = _LINE_KEY.match(line)
+    return m.group(1) if m else None
 
 
 def set_keys(text: str) -> list[str]:

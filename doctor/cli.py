@@ -45,7 +45,7 @@ def main(
     env = os.environ if env is None else env
     stdout = sys.stdout if out is None else out
     prog = env.get("CST_PROG") or NAME
-    restore_default_signals()  # read-only, help too: `cst doctor | head` ends quietly (pr-a preexisting #12)
+    restore_default_signals()  # read-only, help too: `cst doctor | head` ends quietly
     try:
         cmd, brief = parse_args(argv)
     except Usage as e:

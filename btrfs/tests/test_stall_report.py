@@ -692,7 +692,7 @@ class ClassifyBranchesTest(unittest.TestCase):
 
 class ClosedPipeTest(unittest.TestCase):
     def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
-        # pr-a preexisting #12: `btrfs-stall-report | head -1` ended in "Exception ignored ...
+        # `btrfs-stall-report | head -1` ended in "Exception ignored ...
         # BrokenPipeError" (exit 120). Now it ends on SIGPIPE, silently. An empty log folder: the
         # report still prints its window and verdict.
         tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")

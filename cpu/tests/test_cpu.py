@@ -1660,7 +1660,7 @@ class VmPinCliTest(unittest.TestCase):
         )
 
     def test_conf_reads_values_as_bash_does_and_refuses_problem_lines_on_apply(self) -> None:
-        # PRIM-01: the header says "values may be edited"; BUILD_CPUS='12-23' # E-cores was
+        # The header says "values may be edited"; BUILD_CPUS='12-23' # E-cores was
         # "12-23' # E-cores" for vm-pin (written into the cpuset) and 12-23 for game-profile (bash).
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "cpu-setup.conf")
@@ -1771,7 +1771,7 @@ class CpuWatchCliTest(unittest.TestCase):
 
 class ClosedPipeTest(unittest.TestCase):
     def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
-        # pr-a preexisting #12: `cst cpu watch report | head -1` ended in "Exception ignored ...
+        # `cst cpu watch report | head -1` ended in "Exception ignored ...
         # BrokenPipeError" (exit 120). A read-only report now ends on SIGPIPE, silently.
         tool = os.path.join(REPO, "cpu", "cpu-watch")
         with tempfile.TemporaryDirectory() as home:

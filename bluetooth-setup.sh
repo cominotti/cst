@@ -992,7 +992,7 @@ apply() {
         die "${LE_CONF} was not written by CST (or is a symlink): move it away, then run apply again."
     if (( LW_WANT )); then
         [[ "${LW_UNIT_ST}" != conflict ]] || die "${LW_UNIT_FILE} was not written by CST (or is a symlink): move it away, then run apply again."
-        [[ "${LW_PROG_ST}" != conflict ]] || die "${LW_PROG} was not written by CST (or is a symlink): move it away, then run apply again."
+        [[ "${LW_PROG_ST}" != conflict ]] || die "${LW_PROG} was not written by CST: move it away, then run apply again."
     fi
 
     echo "== BlueZ: ${MAIN_CONF}"

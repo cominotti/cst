@@ -76,51 +76,55 @@ def _rest_is_comment(rest: str, blanks: str) -> bool:
     return stripped == "" or (stripped != rest and stripped.startswith("#"))
 
 
-def _value(raw: str, *, bash_sourced: bool) -> tuple[str | None, str]:
-    """(value, "") or (None, why the line is a problem) for the text after the = sign."""
-    blanks = _BLANKS if bash_sourced else None
+def _value(raw: str, *, bash_sourced: bool, exported: bool = False) -> tuple[str | None, str]:
+    """(value, "") or (None, why the line is a problem) for the text after the = sign.
+
+    exported: the line starts with `export `, so bash reads the value as an
+    argument of a command, which is brace-expanded (`export K={a,b}` sets b).
+    """
+    blanks = _BLANKS if bash_sourced else " \t\f\v\r"
     if raw[:1] in ("'", '"'):
         quote = raw[0]
         end = raw.find(quote, 1)
         if end < 0:
             return None, f"no closing {quote}"
         inner, rest = raw[1:end], raw[end + 1 :]
-        if quote == '"' and _EXPANDING & set(inner):
+        if quote == '"' and not _EXPANDING.isdisjoint(inner):
             return None, "$, ` or \\ inside double quotes: bash would expand it (use single quotes)"
-        if not _rest_is_comment(rest, blanks or " \t\f\v\r"):
+        if not _rest_is_comment(rest, blanks):
             return None, "text after the closing quote (only a # comment may follow)"
         return inner, ""
     if bash_sourced:
-        word = raw
-        for i, ch in enumerate(raw):
-            if ch in _BLANKS:
-                word = raw[:i]
-                if not _rest_is_comment(raw[i:], _BLANKS):
-                    return None, "a blank in an unquoted value: bash runs the rest as a command (quote the value)"
-                break
+        cut = next((i for i, ch in enumerate(raw) if ch in _BLANKS), len(raw))
+        word, after = raw[:cut], raw[cut:]
+        # A $, ` or \ before the blank is named below (`a\ b` is one escaped word, not a command).
+        if _EXPANDING.isdisjoint(word) and not _rest_is_comment(after, _BLANKS):
+            return None, "a blank in an unquoted value: bash runs the rest as a command (quote the value)"
     else:
         word = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
-    if _EXPANDING & set(word):
+    if not _EXPANDING.isdisjoint(word):
         return None, "$, ` or \\ outside single quotes: bash would expand it (use single quotes)"
     if "'" in word or '"' in word:
         return None, "a quote inside an unquoted value (quote the whole value)"
     if bash_sourced:
-        if _SHELL_SYNTAX & set(word):
+        if not _SHELL_SYNTAX.isdisjoint(word):
             return None, "shell syntax (; & | < > ( )) in an unquoted value (quote the value)"
         if word.startswith("~") or ":~" in word:
             return None, "an unquoted ~ that bash would expand to a home folder (quote the value)"
+        if exported and "{" in word:
+            return None, "a { in an unquoted value after export: bash brace-expands it (quote the value)"
     return word, ""
 
 
 def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | None:
     """(key, value), a problem's reason, or None for a blank or comment line."""
-    blanks = _BLANKS if bash_sourced else None
-    s = line.lstrip(blanks) if blanks else line.strip()
+    s = line.lstrip(_BLANKS) if bash_sourced else line.strip()
     if not s or s.startswith("#"):
         return None
     if "\r" in line and bash_sourced:
         return "a carriage return (Windows line end): bash keeps it in the value"
-    if s.startswith("export") and s[6:7] and s[6] in _BLANKS:
+    exported = s.startswith("export") and s[6:7] != "" and s[6] in _BLANKS
+    if exported:
         s = s[6:].lstrip(_BLANKS)
     m = _KEY.match(s)
     if not m:
@@ -141,7 +145,7 @@ def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | Non
         if not rest.startswith("="):
             return "not a KEY=VALUE line"
         raw = rest[1:].strip()
-    value, why = _value(raw, bash_sourced=bash_sourced)
+    value, why = _value(raw, bash_sourced=bash_sourced, exported=exported)
     return why if value is None else (key, value)
 
 

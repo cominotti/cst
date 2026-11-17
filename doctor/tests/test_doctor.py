@@ -1650,7 +1650,7 @@ class VmNasBackupTest(VmTest):
         self.assertIn("info   VM win: weekly NAS backup timer: on", r.stdout)
 
     def test_settings_are_read_as_bash_reads_them_and_problem_lines_warn(self) -> None:
-        # PRIM-01: "NAS_ENABLED=1 # on" is 1 for btrfs-snapshot (bash); doctor's own copy of the
+        # "NAS_ENABLED=1 # On" is 1 for btrfs-snapshot (bash); doctor's own copy of the
         # reader saw "1 # on" and called the NAS backup not set up.
         self.deployments(rollback_pinned=True)
         os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
@@ -1668,6 +1668,12 @@ class VmNasBackupTest(VmTest):
         r = self.run_tool()
         self.assertIn("WARN", r.stdout)
         self.assertIn("/etc/btrfs-setup/snapshots.conf line 3: NAS_HOST = nas: blanks around =", r.stdout)
+        # btrfs-snapshot (bash) still sources snapshots.conf: the warning does not claim the line is ignored.
+        self.assertIn(
+            "NAS_HOST = nas: blanks around =: bash runs it as a command and sets nothing. CST's Python "
+            "programs take nothing from the line (bash, which also sources this file",
+            r.stdout,
+        )
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
         self.assertNotIn("vm.conf line 1", r.stdout)
 
@@ -1811,7 +1817,7 @@ class VmHardwareTest(VmTest):
 
 class CommandLineTest(Scratch):
     def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
-        # pr-a preexisting #12: `cst doctor | head -1` ended in "Exception ignored ... BrokenPipeError"
+        # `cst doctor | head -1` ended in "Exception ignored ... BrokenPipeError"
         # (exit 120). The doctor only reads: it now ends on SIGPIPE, silently (its help too).
         for args in ([], ["help"]):
             with self.subTest(args=args):

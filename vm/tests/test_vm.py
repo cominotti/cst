@@ -395,7 +395,7 @@ class BackupTest(Scratch):
         self.assertNotIn("s3cret", r.stdout + r.stderr)
 
     def test_read_only_commands_stop_quietly_on_a_closed_pipe_and_a_backup_does_not(self) -> None:
-        # pr-a preexisting #12: `cst vm status | head -1` ended in "Exception ignored ... BrokenPipeError",
+        # `cst vm status | head -1` ended in "Exception ignored ... BrokenPipeError",
         # exit 120. A read-only command now dies of SIGPIPE, silently, as a shell tool does.
         def closed_pipe(*args: str) -> subprocess.CompletedProcess[bytes]:
             r, w = os.pipe()
@@ -413,8 +413,9 @@ class BackupTest(Scratch):
             finally:
                 os.close(w)
 
-        p = closed_pipe("status", "win")
-        self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+        for args in (("status", "win"), ("help",)):
+            p = closed_pipe(*args)
+            self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
         # A local backup keeps going with nowhere to print, and leaves a complete backup.
         p = closed_pipe("backup", "win")
         self.assertEqual((p.returncode, p.stderr), (0, b""))
@@ -1578,7 +1579,7 @@ class PackageTest(unittest.TestCase):
         ):
             self.assertEqual(vm_cli.main(["list", "win"], doc="DOC", entry_file=TOOL), 0)
         self.assertIn("no VM backups of win", out.getvalue())
-        self.assertEqual(restored, [True], "a read-only command keeps Python's SIGPIPE handling")
+        self.assertEqual(restored, [True], "a read-only command must get SIGPIPE back at its default")
 
     def test_virsh_runs_with_the_c_locale(self) -> None:
         recorded: list[tuple[list[str], bool, str]] = []
@@ -1657,7 +1658,7 @@ class PackageTest(unittest.TestCase):
 
 class VmLockTest(unittest.TestCase):
     def test_lock_folder_and_pid_file_are_readable_under_a_077_umask(self) -> None:
-        # PRIM-03: `sudo cst vm backup --nas` keeps a user's 077 umask; /run/cst-vm came out 0700 and the
+        # `sudo cst vm backup --nas` keeps a user's 077 umask; /run/cst-vm came out 0700 and the
         # lock 0600, so cst doctor (not root) could not read the pid and called a running backup's
         # overlay "left behind".
         tmp = tempfile.mkdtemp(prefix="cst-vm-lock-")

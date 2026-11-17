@@ -1048,7 +1048,7 @@ class TimerTest(Nas):
         self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
 
     def test_settings_are_read_as_bash_reads_them_and_a_problem_line_refuses_the_backup(self) -> None:
-        # PRIM-01: snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
+        # Snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
         # but cst-vm read "1 # on" and called the NAS backup "not set up".
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=1 # on\nNAS_PATH='/volume1/restic'\nNAS_RESTIC_HOST=sophia\n")
@@ -1071,10 +1071,15 @@ class TimerTest(Nas):
         cpu = self.env["CST_VM_CPU_CONF"]
         with open(cpu, "w") as f:
             f.write("VM_NAME=$HOSTNAME\n")  # bash would expand it
-        r = self.run_tool("backup", "win")
+        r = self.run_tool("backup")  # no VM named: VM_NAME would choose it
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn(f"{cpu} line 1: VM_NAME=$HOSTNAME: $", r.stderr)
         self.assertEqual(self.calls(), [])
+        # A backup of a named VM reads nothing from cpu-setup.conf: a line there does not stop it
+        # (the weekly timer names the VM).
+        r = self.run_tool("backup", "win")
+        self.assertNotIn(cpu, r.stderr)
+        self.assertNotEqual(self.calls(), [], "the backup of a named VM did not start")
         # The way back is never blocked: off reads no setting; it prints the lines and turns the timer off.
         r = self.run_tool("backup-timer", "off", "win")
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -808,11 +808,12 @@ def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
 def settings_file_warnings(host: DoctorHostPort, path: str, *, bash_sourced: bool) -> Iterator[Result]:
     """WARN for each line of a settings file that is not a plain assignment."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
+    bash = " (bash, which also sources this file, reads it its own way)" if bash_sourced else ""
     for p in parsed.problems if parsed else ():
         yield Result(
             WARN,
-            f"{path} {p}. The line sets nothing for CST's programs, and the commands that change the "
-            "machine with these settings refuse to run until it is fixed",
+            f"{path} {p}. CST's Python programs take nothing from the line{bash}, and the cst commands "
+            "that change the machine with these settings refuse to run until it is fixed",
         )
 
 
@@ -1136,7 +1137,9 @@ def newest_vm_backup(host: DoctorHostPort) -> float:
 
 def nas_configured(host: DoctorHostPort) -> bool:
     """The /home NAS backup is set up (snapshots.conf is world-readable; read as btrfs-snapshot reads it)."""
-    return conf_value(host, SNAP_CONF, "NAS_ENABLED") == "1" and bool(conf_value(host, SNAP_CONF, "NAS_PATH"))
+    parsed = settings_of(host, SNAP_CONF)
+    values = parsed.values if parsed else {}
+    return values.get("NAS_ENABLED") == "1" and bool(values.get("NAS_PATH"))
 
 
 @check("vm")

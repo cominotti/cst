@@ -1451,11 +1451,11 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
         return 2
     cmd, vm = a["cmd"], a["vm"]
-    if cmd == "help":
-        print(doc)
-        return 0
     try:
-        prepare_command(cmd, a["sub"], a["nas"])
+        prepare_command(cmd, a["sub"], a["nas"], vm)
+        if cmd == "help":
+            print(doc)
+            return 0
         if cmd == "list":
             return cmd_list(vm)
         if cmd == "nocow":

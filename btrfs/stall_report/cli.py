@@ -151,7 +151,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, verbose: bool) -> None:
 
 
 def main() -> None:
-    restore_default_signals()  # a read-only report (and --help): `| head` ends it quietly (pr-a preexisting #12)
+    restore_default_signals()  # a read-only report (and --help): `| head` ends it quietly
     ap = argparse.ArgumentParser(
         prog="btrfs-stall-report", description="Summarise recorded IO/btrfs stalls for a time window."
     )

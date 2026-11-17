@@ -920,10 +920,14 @@ EOF
             rm -rf {stage} && install -d -m 0755 {stage} {stage}/home && install -d -o tester {stage}/home/tester
             {installer} install --root {stage} --owner root {sets}
             runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user
-            # A --set no template of the call uses is refused, and nothing is written.
-            if runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets}; then
-                echo "an unused --set was accepted" >&2; exit 1
-            fi
+            # A --set no template of the call uses is refused (exit 2), and nothing is written: a user
+            # file removed first is still missing afterwards.
+            u1="{stage}$(runuser -u tester -- {installer} dests --owner user --home /home/tester | head -n 1)"
+            rm -f "$u1"
+            rc=0; runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user {sets} || rc=$?
+            [[ "$rc" == 2 ]] || {{ echo "an unused --set was not refused with exit 2 (exit $rc)" >&2; exit 1; }}
+            [[ ! -e "$u1" ]] || {{ echo "a refused install wrote $u1" >&2; exit 1; }}
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user >/dev/null
             again="$({installer} install --root {stage} --owner root {sets})"
             if grep -v '^unchanged: ' <<<"$again"; then echo "second root run changed files" >&2; exit 1; fi
             ugain="$(runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user)"

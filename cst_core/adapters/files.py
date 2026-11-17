@@ -194,7 +194,7 @@ class LocalFileSystemAdapter:
 
     def write_atomic(self, dest: str, content: str, mode: int = 0o644) -> None:
         """Write content to dest atomically via a temporary file in the target directory."""
-        write_bytes_atomic(dest, content.encode("utf-8", "surrogateescape"), mode=mode)
+        write_atomic(dest, content, mode=mode, owner="root")  # str: UTF-8 with surrogateescape
 
     def write_text_direct(self, path: str, content: str) -> None:
         """Write content directly in place (for sysfs/procfs pseudo-files)."""
@@ -317,4 +317,4 @@ def write_atomic(path: str, data: bytes | str, *, mode: int, durable: bool = Tru
 
 def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
     """The installer's write: write_atomic, durable, owned by root as root (and relabelled)."""
-    write_atomic(dest, content, mode=mode, durable=True, owner="root")
+    write_atomic(dest, content, mode=mode, owner="root")

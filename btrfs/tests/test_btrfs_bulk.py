@@ -544,7 +544,7 @@ class BulkTest(BulkBase):
 
     @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
     def test_root_reads_bulk_user_with_the_one_settings_reader(self) -> None:
-        # PRIM-01: a hand-rolled reader took "BULK_USER=" lines only, quotes stripped by hand; a
+        # A hand-rolled reader took "BULK_USER=" lines only, quotes stripped by hand; a
         # value bash would expand ended in a KeyError traceback from pwd as root.
         me = pwd.getpwuid(os.getuid()).pw_name
         self.m.ROOT = True
@@ -563,7 +563,7 @@ class BulkTest(BulkBase):
             self.m.user_ctx([])
 
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
-        # PRIM-02: the counter was written with open("w") and no fsync before the moves; a hang
+        # The counter was written with open("w") and no fsync before the moves; a hang
         # or hard reset before the next btrfs commit lost it, and the give-up never tripped.
         self.write("Programs/a", "a")
         self.busy = {self.H("Programs")}
