@@ -76,6 +76,7 @@ core() {   # core CMD [args...]: rc in $rc, output in ${OUT}
     local extra=()
     case "${cmd}" in
         snapshot|prune) extra=(--lock "${LOCK}") ;;
+        *) ;;   # list, latest, ...: no lock
     esac
     python3 -I "${CORE}" "${cmd}" --snapdir "${SNAPS}" --source "t=${SRC}:${POLICY}" \
         --state-dir "${STATE}" --pin-file "${PINS}" --assume-clock-ok "${extra[@]}" "$@" >"${OUT}" 2>&1
@@ -84,10 +85,17 @@ core() {   # core CMD [args...]: rc in $rc, output in ${OUT}
 count() { find "${SNAPS}" -mindepth 1 -maxdepth 1 -name 't.*' -inum 256 | wc -l; }
 listing() { (cd "${SNAPS}" && find . -mindepth 1 -maxdepth 1 -printf '%f %i %y\n' | sort); }
 old_snapshot() {   # NAME.TS from SRC, read-only, with an old date in the name
-    btrfs subvolume snapshot -r "${SRC}" "${SNAPS}/$1" >/dev/null
+    local name="$1"
+    btrfs subvolume snapshot -r "${SRC}" "${SNAPS}/${name}" >/dev/null
 }
-uuid_of() { btrfs subvolume show "$1" | awk -F':[[:space:]]*' '$1 ~ /^[[:space:]]*UUID$/ {print $2}'; }
-parent_of() { btrfs subvolume show "$1" | awk -F':[[:space:]]*' '$1 ~ /^[[:space:]]*Parent UUID$/ {print $2}'; }
+uuid_of() {
+    local path="$1"
+    btrfs subvolume show "${path}" | awk -F':[[:space:]]*' '$1 ~ /^[[:space:]]*UUID$/ {print $2}'
+}
+parent_of() {
+    local path="$1"
+    btrfs subvolume show "${path}" | awk -F':[[:space:]]*' '$1 ~ /^[[:space:]]*Parent UUID$/ {print $2}'
+}
 
 # 1. First run creates a read-only snapshot of SRC.
 core snapshot
