@@ -18,6 +18,7 @@ done (mark).
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+import posixpath
 
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import (
@@ -41,7 +42,7 @@ from cst_core.domain.record import (
     without_files,
 )
 from cst_core.domain.values import DomainValidationError
-from cst_core.ports import InstallRecordPort, InstallTargetPort
+from cst_core.ports import InstallRecordPort, InstallTargetPort, UnitVerifierPort
 
 # The bytes install writes for an entry (a zipapp for a python-entry, the
 # file for the rest), before template rendering.
@@ -105,11 +106,13 @@ class InstallService:
         *,
         record: InstallRecordPort | None = None,
         commit: str = "unknown",
+        verifier: UnitVerifierPort | None = None,
     ) -> None:
         self._target = target
         self._payload = payload
         self._record = record
         self._commit = commit
+        self._verifier = verifier
 
     def desired(self, entry: InstallEntry, values: Mapping[str, str] | None = None) -> bytes:
         """The bytes the entry's dest must hold (DomainValidationError: a template value missing or unused)."""
@@ -220,18 +223,50 @@ class InstallService:
         """
         todo = self._prepare(entries, req)
         todo.sort(key=lambda pd: pd[0].kind == "unit")
-        return self._write_all(todo, req.as_root)
+        return self._write_all(todo, req)
 
-    def _write_all(self, todo: Sequence[tuple[Placement, bytes]], as_root: bool) -> Iterator[str]:
+    def _write_all(self, todo: Sequence[tuple[Placement, bytes]], req: InstallRequest) -> Iterator[str]:
         trees = self._trees(todo)
         done: list[tuple[Placement, bytes, bool]] = []
+        verified = False
         try:
             for p, data in todo:
-                line = self.write_if_changed(p.path, data, p.mode, p.owner, as_root=as_root)
+                if p.kind == "unit" and not verified:
+                    # The programs are in place: the units that change are verified before any is written.
+                    verified = True
+                    note = self._verify_units(todo, req)
+                    if note:
+                        yield f"note:      {note}"
+                line = self.write_if_changed(p.path, data, p.mode, p.owner, as_root=req.as_root)
                 done.append((p, data, line.startswith("written")))
                 yield line
         finally:
             self._save(done, trees)
+
+    def _verify_units(self, todo: Sequence[tuple[Placement, bytes]], req: InstallRequest) -> str:
+        """systemd-analyze verify of the units this install changes, as root on the real root only;
+        InstallRefused (nothing of them written) when they fail; the verifier's note, if any.
+
+        Not verified: drop-ins (a NAME.d/ file is no unit of its own), templates (NAME@.service: only
+        an instance can be verified), and the units of a staged install (--root: the programs they
+        run are not where systemd looks)."""
+        if self._verifier is None or not req.as_root or req.root:
+            return ""
+        units = {
+            posixpath.basename(p.dest): data
+            for p, data in todo
+            if p.kind == "unit"
+            and not posixpath.dirname(p.dest).endswith(".d")
+            and "@." not in posixpath.basename(p.dest)
+            and not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root)
+        }
+        verdict = self._verifier.verify(units)
+        if not verdict.ok:
+            raise InstallRefused(
+                f"systemd-analyze verify failed, none of these units written: {', '.join(sorted(units))}"
+                + "".join(f"\n  {line}" for line in verdict.lines)
+            )
+        return verdict.note
 
     def _trees(self, todo: Sequence[tuple[Placement, bytes]]) -> dict[str, str]:
         if self._record is None:

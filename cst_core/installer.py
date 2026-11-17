@@ -38,7 +38,12 @@ Every file install writes or finds current is listed in the install record
 (/var/lib/cst/installed.json for root's files, ~/.local/state/cst/installed.json
 for the user's, under --root when staged): see cst_core/domain/record.py.
 A @KEY@ of a template without a --set value, or a --set KEY no template of the
-call uses, is a usage error (exit 2) and nothing is written. A file that
+call uses, is a usage error (exit 2) and nothing is written. Programs are
+written before units; as root on the real root (no --root), the units an
+install changes are first checked with `systemd-analyze verify
+--recursive-errors=no` on copies under their own names (drop-ins and
+template units are not), and when that fails none of them is written (exit 1,
+the lines about them on stderr; a note when systemd-analyze is missing). A file that
 cannot be written ends the run with "cst installer: cannot write DEST: REASON"
 (exit 1), after the lines of the files written before it.
 """

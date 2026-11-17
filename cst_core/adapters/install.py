@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
 """Local files for the install use case: atomic writes, modes, root ownership, SELinux labels."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import hashlib
 import os
+import shutil
 import stat
+import tempfile
 
+from cst_core.adapters import SubprocessCommandRunner
 from cst_core.adapters.files import write_bytes_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
 from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
-from cst_core.ports import WriteFailed
+from cst_core.ports import CommandRunnerPort, UnitVerdict, WriteFailed
 
 
 class LocalInstallTarget:
@@ -124,3 +127,53 @@ def _make_folders(folder: str) -> None:
         except FileExistsError:
             continue
         os.chmod(d, 0o755)
+
+
+class SystemdUnitVerifier:
+    """UnitVerifierPort: `systemd-analyze verify --man=no --recursive-errors=no` on copies of the units,
+    under their own names in a temporary folder, all in one call.
+
+    --recursive-errors=no: without it, verify only warns about a problem in
+    the named units (an unknown key) and exits 0; with it, any problem in
+    them fails, and the units they only refer to (docker.service, the
+    targets) do not. The exit status decides; the lines shown are the ones
+    about these units (their paths or names). Run only where systemd runs
+    the machine (/run/systemd/system): in a toolbox or a plain container
+    the answer would be about the wrong system.
+    """
+
+    def __init__(
+        self,
+        runner: CommandRunnerPort | None = None,
+        *,
+        which: Callable[[str], str | None] = shutil.which,
+        booted: Callable[[], bool] = lambda: os.path.isdir("/run/systemd/system"),
+    ) -> None:
+        self._runner = runner or SubprocessCommandRunner()
+        self._which = which
+        self._booted = booted
+
+    def verify(self, units: Mapping[str, bytes]) -> UnitVerdict:
+        """The verdict on the units (ok with a note when they cannot be verified here)."""
+        if not units or not self._booted():
+            return UnitVerdict(ok=True)
+        if self._which("systemd-analyze") is None:
+            return UnitVerdict(ok=True, note="systemd-analyze not found: the units are written without verification")
+        with tempfile.TemporaryDirectory(prefix="cst-verify-") as tmp:
+            paths = []
+            for name, data in units.items():
+                p = os.path.join(tmp, name)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                paths.append(p)
+            r = self._runner.run(
+                ["systemd-analyze", "verify", "--man=no", "--recursive-errors=no", *paths], timeout=120, output="merge"
+            )
+            if r.returncode == 0:
+                return UnitVerdict(ok=True)
+            mine = tuple(
+                line.replace(tmp + "/", "")
+                for line in r.stdout.splitlines()
+                if tmp in line or any(line.startswith(n + ":") or f" {n} " in line for n in units)
+            )
+            return UnitVerdict(ok=False, lines=mine or tuple(r.stdout.splitlines()[-5:]))

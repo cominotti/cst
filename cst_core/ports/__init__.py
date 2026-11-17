@@ -312,6 +312,24 @@ class InstallTargetPort(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class UnitVerdict:
+    """systemd-analyze verify on units before they are written: ok, the lines about them, and a note
+    when they could not be verified (no systemd-analyze)."""
+
+    ok: bool
+    lines: tuple[str, ...] = ()
+    note: str = ""
+
+
+class UnitVerifierPort(Protocol):
+    """Checks unit files before the installer replaces the installed ones."""
+
+    def verify(self, units: Mapping[str, bytes]) -> UnitVerdict:
+        """{unit file name: bytes}, verified together (a timer next to its service)."""
+        ...
+
+
 class InstallRecordPort(Protocol):
     """The install record files (cst_core.domain.record): read, and changed under a lock."""
 

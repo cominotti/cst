@@ -1390,6 +1390,45 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-CYCLE-OK", out)
 
+    def test_20_units_are_verified_before_they_replace_the_installed_ones(self) -> None:
+        """As root on the container's /, the installer runs the real `systemd-analyze verify
+        --recursive-errors=no` on the units an install changes, after their programs and before any of
+        them is written. Negative control: a scratch copy of the checkout whose docker-gc.service has an
+        unknown key (only a warning without --recursive-errors=no) is refused with exit 1, naming the
+        key, and none of the component's units is written (its program is). The same install from the
+        real checkout writes them. Not verified (and not tested here): drop-ins, template units, a
+        staged install (--root)."""
+        c = self.SYSTEMD_CONTAINER
+        dests = "/usr/local/sbin/docker-gc /etc/systemd/system/docker-gc-recorder.service /etc/systemd/system/docker-gc.service /etc/systemd/system/docker-gc.timer"
+        if exec_bash(c, f"for f in {dests}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("docker-gc is installed already (another test's)")
+        copy = "/var/tmp/e2e-cst-verify"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {copy}; /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --component btrfs:docker-gc",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            rm -rf {copy} && cp -a /opt/cst-rw {copy}
+            sed -i 's/^\\[Service\\]$/[Service]\\nBogusKeyE2E=1/' {copy}/btrfs/units/docker-gc.service
+            grep -q '^BogusKeyE2E=1$' {copy}/btrfs/units/docker-gc.service || {{ echo "the unit was not broken" >&2; exit 1; }}
+            rc=0; err="$(/usr/bin/python3 -I -B {copy}/cst_core/installer.py install --component btrfs:docker-gc 2>&1 >/dev/null)" || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "a broken unit was not refused (exit $rc): $err" >&2; exit 1; }}
+            grep -qF "BogusKeyE2E" <<<"$err" || {{ echo "the refusal does not name the problem: $err" >&2; exit 1; }}
+            for u in docker-gc-recorder.service docker-gc.service docker-gc.timer; do
+                [[ ! -e /etc/systemd/system/$u ]] || {{ echo "$u was written although verify failed" >&2; exit 1; }}
+            done
+            [[ -x /usr/local/sbin/docker-gc ]] || {{ echo "the program was not written first" >&2; exit 1; }}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --component btrfs:docker-gc >/dev/null
+            [[ -f /etc/systemd/system/docker-gc.service ]] || {{ echo "the good unit was not written" >&2; exit 1; }}
+            echo E2E-VERIFY-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-VERIFY-OK", out)
+
     def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
         """`cst vm backup-timer on` with the real systemd: it installs cst-vm
         as the zipapp `install` builds (replacing the plain-script copy an

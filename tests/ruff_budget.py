@@ -70,7 +70,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "cpu FBT002": 1,
     "cpu tests FBT001": 1,
     "cpu tests FBT002": 1,
-    "cst_core FBT001": 3,
+    "cst_core FBT001": 2,
     "cst_core FBT002": 1,
     "doctor BLE001": 2,
     "doctor C901": 3,

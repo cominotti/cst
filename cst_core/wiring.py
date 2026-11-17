@@ -94,7 +94,7 @@ def install_service() -> InstallService | None:
     """The installer's use case over this machine's files, building payloads from this
     checkout (None: it runs from no checkout). Its modules are imported here, so cst and the
     router do not load them."""
-    from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+    from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, SystemdUnitVerifier
     from cst_core.adapters.runtime import checkout_commit
     from cst_core.adapters.zipapp import entry_payload
     from cst_core.application.install import InstallService
@@ -107,4 +107,5 @@ def install_service() -> InstallService | None:
         lambda e: entry_payload(root, e),
         record=JsonInstallRecord(),
         commit=checkout_commit(root),
+        verifier=SystemdUnitVerifier(),
     )

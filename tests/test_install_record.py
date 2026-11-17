@@ -11,7 +11,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest tests.test_install_record -v
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
 import os
@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import unittest
 
-from cst_core.adapters.install import JsonInstallRecord
+from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
 from cst_core.domain.install import INSTALL_MANIFEST
@@ -38,7 +38,7 @@ from cst_core.domain.record import (
     with_state,
     without_files,
 )
-from cst_core.ports import WriteFailed
+from cst_core.ports import CommandResult, UnitVerdict, WriteFailed
 from tests.test_install import INSTALLER, SYSTEM_PYTHON, MemoryTarget, entry
 
 
@@ -226,6 +226,109 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.assertEqual(list(svc.install([self.a], InstallRequest())), ["written:   /usr/local/sbin/a"])
         svc.mark(self.ROOT, "m:t")
         self.assertEqual(self.record.texts, {})
+
+
+class _Verifier:
+    """UnitVerifierPort that records what it was asked and answers as told."""
+
+    def __init__(self, verdict: UnitVerdict) -> None:
+        self.verdict = verdict
+        self.asked: list[list[str]] = []
+
+    def verify(self, units: Mapping[str, bytes]) -> UnitVerdict:
+        self.asked.append(sorted(units))
+        return self.verdict
+
+
+class VerifyBeforeReplaceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.payloads = {
+            "m/p": b"P\n",
+            "m/s.service": b"[Service]\nExecStart=/usr/local/sbin/p\n",
+            "m/s.timer": b"[Timer]\n",
+            "m/d.conf": b"[Service]\n",
+            "m/t@.service": b"[Service]\n",
+        }
+        self.p = entry("m/p", "/usr/local/sbin/p", mode=0o755, kind="shell")
+        self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind="unit")
+        self.t = entry("m/s.timer", "/etc/systemd/system/s.timer", kind="unit")
+        self.d = entry("m/d.conf", "/etc/systemd/system/x.service.d/d.conf", kind="unit")
+        self.tpl = entry("m/t@.service", "/etc/systemd/system/t@.service", kind="unit")
+        self.target = MemoryTarget()
+
+    def svc(self, verdict: UnitVerdict) -> tuple[InstallService, _Verifier]:
+        v = _Verifier(verdict)
+        return InstallService(self.target, lambda e: self.payloads[e.src], verifier=v), v
+
+    def test_the_changed_units_are_verified_together_after_the_programs_drop_ins_and_templates_aside(self) -> None:
+        svc, v = self.svc(UnitVerdict(ok=True))
+        self.target.files["/etc/systemd/system/s.timer"] = (b"[Timer]\n", 0o644)  # already current
+        lines = list(svc.install([self.s, self.t, self.d, self.tpl, self.p], InstallRequest(as_root=True)))
+        self.assertEqual(v.asked, [["s.service"]])
+        self.assertEqual(lines[0], "written:   /usr/local/sbin/p")
+
+    def test_failing_units_are_not_written_and_say_why(self) -> None:
+        svc, _ = self.svc(UnitVerdict(ok=False, lines=("s.service:2: Unknown key 'X' in section [Service]",)))
+        it = svc.install([self.s, self.t, self.p], InstallRequest(as_root=True))
+        self.assertEqual(next(it), "written:   /usr/local/sbin/p")
+        with self.assertRaises(InstallRefused) as cm:
+            list(it)
+        self.assertIn("none of these units written: s.service, s.timer", str(cm.exception))
+        self.assertIn("Unknown key 'X'", str(cm.exception))
+        self.assertNotIn("/etc/systemd/system/s.service", self.target.files)
+        self.assertNotIn("/etc/systemd/system/s.timer", self.target.files)
+
+    def test_a_note_when_they_cannot_be_verified(self) -> None:
+        svc, _ = self.svc(
+            UnitVerdict(ok=True, note="systemd-analyze not found: the units are written without verification")
+        )
+        lines = list(svc.install([self.s], InstallRequest(as_root=True)))
+        self.assertEqual(lines[0], "note:      systemd-analyze not found: the units are written without verification")
+        self.assertEqual(lines[1], "written:   /etc/systemd/system/s.service")
+
+    def test_not_verified_as_a_user_or_under_a_staging_root(self) -> None:
+        for req in (InstallRequest(), InstallRequest(as_root=True, root="/stage")):
+            with self.subTest(req=req):
+                svc, v = self.svc(UnitVerdict(ok=False))
+                list(svc.install([self.s], req))
+                self.assertEqual(v.asked, [])
+
+
+class _Runner:
+    """CommandRunnerPort that answers one CommandResult and keeps the argv."""
+
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+        self.argv: list[str] = []
+
+    def run(self, argv: Sequence[str], **_options: object) -> CommandResult:
+        self.argv = list(argv)
+        return self.result
+
+
+class SystemdUnitVerifierTest(unittest.TestCase):
+    def test_the_strict_call_on_copies_and_only_the_lines_about_these_units(self) -> None:
+        out = "x.service:6: Unknown key 'BogusKey' in section [Service], ignoring.\nother.service: something else\n"
+        runner = _Runner(CommandResult(1, out, ""))
+        v = SystemdUnitVerifier(runner, which=lambda _n: "/usr/bin/systemd-analyze", booted=lambda: True)
+        verdict = v.verify({"x.service": b"[Service]\nBogusKey=1\n"})
+        self.assertEqual(runner.argv[:4], ["systemd-analyze", "verify", "--man=no", "--recursive-errors=no"])
+        self.assertTrue(runner.argv[4].endswith("/x.service"))
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.lines, ("x.service:6: Unknown key 'BogusKey' in section [Service], ignoring.",))
+
+    def test_ok_not_booted_and_no_systemd_analyze(self) -> None:
+        ok = SystemdUnitVerifier(_Runner(CommandResult(0, "", "")), which=lambda _n: "/x", booted=lambda: True)
+        self.assertEqual(ok.verify({"x.service": b""}), UnitVerdict(ok=True))
+        never = _Runner(CommandResult(1, "", ""))
+        self.assertTrue(
+            SystemdUnitVerifier(never, which=lambda _n: "/x", booted=lambda: False).verify({"x.service": b""}).ok
+        )
+        self.assertEqual(never.argv, [])
+        missing = SystemdUnitVerifier(never, which=lambda _n: None, booted=lambda: True).verify({"x.service": b""})
+        self.assertEqual(
+            (missing.ok, missing.note), (True, "systemd-analyze not found: the units are written without verification")
+        )
 
 
 class JsonRecordTest(unittest.TestCase):
