@@ -11,10 +11,12 @@ script writes are pointed into the temporary folder, and the re-exec
 through sudo is never taken. Nothing reads the real disks or writes outside
 the temporary folder.
 
-The guards of the install path read /run/ostree-booted, /boot and the
-deployment folders, which only a real (or containerised) root can fake;
-the tier 1 E2E test test_13_degraded_boot_install_cycle in
-tests/e2e/suites/suite_tier1_systemd.py runs the whole script there.
+The host paths the guards and next_overlay read (/run/ostree-booted,
+/run/ostree/staged-deployment, /boot) are path settings of the prelude
+too, so the tests point them into the fake root like the rest; the argument
+dispatch is cut out and run on its own. The tier 1 E2E test
+test_13_degraded_boot_install_cycle in tests/e2e/suites/suite_tier1_systemd.py
+runs the whole script, through `cst btrfs degraded-boot`.
 These tests know the script's function names and section comments: they go
 when the script becomes Python, and the E2E test stays as the safety net.
 
@@ -48,8 +50,8 @@ DOCTOR_FIXTURES: Final = os.path.join(REPO, "doctor", "tests", "fixtures")
 
 UUID: Final = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DISPATCH: Final = 'case "${1:-}" in'
-# The section comments of the install path. "guards" is only cut off: it
-# ends the prelude, and no test runs it (the tier 1 test does).
+# The section comments of the install path; the argument dispatch is the
+# part between the prelude and "guards".
 SECTIONS: Final = ("guards", "files", "self-test", "initramfs overlay")
 SECTION: Final = re.compile(r"^# -+ (" + "|".join(map(re.escape, SECTIONS)) + r") -+$", re.M)
 
@@ -76,6 +78,10 @@ SERVICE="${UNIT_DIR}/btrfs-last-resort@.service"
 TIMER="${UNIT_DIR}/btrfs-last-resort@.timer"
 FLAG_DIR="${R}/run/btrfs-allow-degraded"
 STATE_DIR="${R}/var/lib/btrfs-degraded-boot"
+OSTREE_BOOTED="${R}/run/ostree-booted"
+STAGED_DEPLOYMENT="${R}/run/ostree/staged-deployment"
+STAGED_INITRDS="${R}/run/ostree/staged-initrds"
+BOOT_DIR="${R}/boot"
 TRACKED=("${RULE}" "${SERVICE}" "${TIMER}" "${HELPER}")
 OLD_RULE="${R}/etc/udev/rules.d/64-btrfs.rules"
 OLD_FILES=("${CONF_DIR}/upstream-64-btrfs.rules.sha256")
@@ -187,10 +193,17 @@ WantedBy=multi-user.target
 FAKES: Final[dict[str, str]] = {
     "rpm-ostree": """case "$1" in
     status) cat "${FAKE}/status.json" ;;
+    kargs) cat "${FAKE}/kargs" ;;
     initramfs-etc) exit 0 ;;
     *) exit 64 ;;
 esac""",
-    "findmnt": 'echo "${FAKE_UUID}"',
+    "findmnt": """case "$*" in
+    *FSTYPE*) echo "${FAKE_FSTYPE:-btrfs}" ;;
+    *) echo "${FAKE_UUID}" ;;
+esac""",
+    "btrfs": """[[ "$1 $2" == "filesystem show" ]] || exit 64
+printf 'Label: none  uuid: %s\n\tTotal devices %s FS bytes used 1.00GiB\n' "$3" "${FAKE_NDEV:-2}"
+""",
     "systemctl": """case "$1" in
     is-enabled) if [[ -e "${FAKE}/enabled" ]]; then [[ "$2" == -q ]] || echo enabled; else echo disabled; exit 1; fi ;;
 esac""",
@@ -225,7 +238,7 @@ def script_parts() -> dict[str, str]:
     names = [m.group(1) for m in marks]
     if tuple(names) != SECTIONS:
         raise AssertionError(f"unexpected section comments in {SCRIPT}: {names}")
-    parts = {"prelude": text[: text.index(DISPATCH)]}
+    parts = {"prelude": text[: text.index(DISPATCH)], "dispatch": text[text.index(DISPATCH) : marks[0].start()]}
     ends = [m.start() for m in marks[1:]] + [len(text)]
     for m, end in zip(marks, ends, strict=True):
         parts[m.group(1).replace(" ", "-")] = text[m.start() : end]
@@ -280,9 +293,22 @@ class DegradedBootTest(unittest.TestCase):
         self.put("status.json", json.dumps(data))
 
     def run_bash(
-        self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None
+        self,
+        code: str,
+        *,
+        repoint: bool = True,
+        env: dict[str, str] | None = None,
+        stub_overlay: bool = True,
+        argv0: str = "degraded-boot-test",
     ) -> subprocess.CompletedProcess[str]:
-        """Source the prelude, then run code with the fakes first on PATH."""
+        """Source the prelude, then run code with the fakes first on PATH.
+
+        stub_overlay=False keeps the real next_overlay: only with repoint,
+        so that it reads the fake root's /boot and /run/ostree.
+        """
+        if not (repoint or stub_overlay):
+            raise AssertionError("the real next_overlay needs the repointed paths")
+        stub = 'next_overlay() { echo "next_overlay is not stubbed" >&2; return 97; }' if stub_overlay else ""
         lib = os.path.join(self.tmp, "lib", "btrfs")
         script = f"""
 # Never re-exec through sudo: the prelude does that when not root.
@@ -292,12 +318,12 @@ unset -f exec
 PATH="{self.tmp}/bin:/usr/bin:/bin"
 R="{self.root}"
 {REPOINT if repoint else ""}
-# It reads the host's /boot and /run/ostree: a test that reaches it stubs it.
-next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
+# It reads /boot and /run/ostree: a test that reaches it stubs it, or repoints them.
+{stub}
 {code}
 """
         return subprocess.run(
-            ["bash", "-c", script, "degraded-boot-test"],
+            ["bash", "-c", script, argv0],
             check=False,
             env={"PATH": "/usr/bin:/bin", "FAKE": self.tmp, "FAKE_UUID": UUID, "LC_ALL": "C", **(env or {})},
             capture_output=True,
@@ -306,8 +332,10 @@ next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
             timeout=60,
         )
 
-    def ok(self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None) -> str:
-        r = self.run_bash(code, repoint=repoint, env=env)
+    def ok(
+        self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None, stub_overlay: bool = True
+    ) -> str:
+        r = self.run_bash(code, repoint=repoint, env=env, stub_overlay=stub_overlay)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
@@ -434,6 +462,167 @@ write_if_changed() {{
         self.put("root/usr/lib/udev/rules.d/64-btrfs.rules", changed)
         self.assertEqual(self.ok(f'upstream_ok "{rule}" || echo changed'), "changed\n")
         self.assertEqual(self.ok('upstream_ok "${R}/missing" || echo changed'), "changed\n")
+
+    # ------------------------------------------------------------ dispatch --
+    def dispatch(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """The argument dispatch, with status and uninstall stubbed; "install path" when it falls through."""
+        code = (
+            "status() { echo STATUS; }\nuninstall() { echo UNINSTALL; }\n"
+            f'set -- {" ".join(args)}\n. "{self.tmp}/lib/btrfs/dispatch.sh"\necho "install path"'
+        )
+        return self.run_bash(code, argv0=SCRIPT)
+
+    def test_dispatch_runs_status_and_uninstall_and_stops(self) -> None:
+        for arg, word in (("--status", "STATUS"), ("--uninstall", "UNINSTALL")):
+            with self.subTest(arg):
+                r = self.dispatch(arg)
+                self.assertEqual((r.returncode, r.stdout), (0, f"{word}\n"), r.stderr)
+
+    def test_dispatch_lets_install_and_files_only_through(self) -> None:
+        for args in ((), ("--files-only",)):
+            with self.subTest(args):
+                r = self.dispatch(*args)
+                self.assertEqual((r.returncode, r.stdout), (0, "install path\n"), r.stderr)
+
+    def test_dispatch_prints_the_help_on_an_unknown_argument(self) -> None:
+        for arg in ("--bogus", "status", "--status=x"):
+            with self.subTest(arg):
+                r = self.dispatch(arg)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertTrue(r.stdout.startswith("\nbtrfs-degraded-boot-setup.sh\n"), r.stdout)
+                self.assertIn("cst btrfs degraded-boot --status", r.stdout)
+                self.assertNotIn("install path", r.stdout)
+                self.assertNotIn("set -Eeuo pipefail", r.stdout)
+
+    # -------------------------------------------------------------- guards --
+    GOOD_KARGS: Final = f"root=UUID={UUID} rootflags=subvol=root,degraded rd.luks.uuid=luks-1111 quiet\n"
+
+    def guards(self, *, kargs: str = GOOD_KARGS, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        """The guards section; the next deployment's root is $FAKE/next. Prints UUID, ndev and NEXT_ROOT."""
+        self.put("kargs", kargs)
+        self.put("calls", "")
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/next"; else real_ostree_query "$1"; fi; }}
+{self.section("guards")}
+echo "UUID=$UUID ndev=$ndev NEXT_ROOT=$NEXT_ROOT"
+"""
+        return self.run_bash(code, env=env)
+
+    def guard_root(self) -> None:
+        """A fake root and next deployment the guards accept."""
+        self.put("root/run/ostree-booted", "")
+        self.put("next/usr/.keep", "")
+        self.put("next" + self.at("/usr/lib/udev/rules.d/64-btrfs.rules"), UPSTREAM_64)
+
+    def test_guards_accept_a_multi_device_btrfs_root_and_change_nothing(self) -> None:
+        self.guard_root()
+        before = self.tree()
+        r = self.guards()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, f"UUID={UUID} ndev=2 NEXT_ROOT={self.tmp}/next\n")
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertIn(f"btrfs filesystem show {UUID}", self.calls())
+
+    def test_guards_refuse(self) -> None:
+        upstream = "/usr/lib/udev/rules.d/64-btrfs.rules"
+        changed = UPSTREAM_64.replace('ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"\n', "")
+        cases: dict[str, tuple[dict[str, str], str, str]] = {
+            "not ostree": ({"rm": "root/run/ostree-booted"}, "", "not an ostree-booted system"),
+            "not btrfs": ({}, "FAKE_FSTYPE=ext4", "/sysroot is not btrfs"),
+            "bad uuid": ({}, "FAKE_UUID=not-a-uuid", "unexpected root fs UUID 'not-a-uuid'"),
+            "one device": ({}, "FAKE_NDEV=1", f"root btrfs {UUID} is not multi-device (devices: 1)"),
+            "other root": (
+                {"kargs": "root=UUID=11111111-2222-3333-4444-555555555555 rootflags=degraded\n"},
+                "",
+                f"next-boot root= is not UUID={UUID}",
+            ),
+            "no degraded": (
+                {"kargs": f"root=UUID={UUID} rootflags=subvol=root,noatime\n"},
+                "",
+                "'degraded' missing from next-boot rootflags",
+            ),
+            "no next deployment": ({"rm": "next/usr/.keep"}, "", "cannot resolve next-boot deployment"),
+            "booted 64-btrfs changed": (
+                {"put": "root" + upstream},
+                "",
+                f"UPSTREAM CHANGED: {self.at(upstream)} no longer sets SYSTEMD_READY=0",
+            ),
+            "next-boot 64-btrfs changed": (
+                {"put": "next" + self.at(upstream)},
+                "",
+                f"UPSTREAM CHANGED: {self.tmp}/next{self.at(upstream)} no longer sets SYSTEMD_READY=0",
+            ),
+        }
+        for label, (change, env, error) in cases.items():
+            with self.subTest(label):
+                self.guard_root()
+                self.put("root" + upstream, UPSTREAM_64)
+                if "rm" in change:
+                    os.remove(os.path.join(self.tmp, change["rm"]))
+                    if change["rm"].endswith(".keep"):
+                        os.rmdir(os.path.join(self.tmp, "next", "usr"))
+                if "put" in change:
+                    self.put(change["put"], changed)
+                before = self.tree()
+                key, _, value = env.partition("=")
+                r = self.guards(kargs=change.get("kargs", self.GOOD_KARGS), env={key: value} if key else None)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"ERROR: {error}", r.stderr)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.mutating_calls(), [])
+
+    def test_guards_only_warn_without_rd_luks_uuid(self) -> None:
+        self.guard_root()
+        r = self.guards(kargs=f"root=UUID={UUID} rootflags=degraded\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: no rd.luks.uuid= in next-boot kargs", r.stderr)
+
+    # -------------------------------------------------------- next_overlay --
+    def test_next_overlay_of_a_staged_deployment(self) -> None:
+        """A staged deployment: the overlay named after "overlay-initrds" in /run/ostree/staged-deployment."""
+        self.status_json(fixture("staged-clean.json"))
+        before, after = "a" * 64, "c" * 64
+        staged = self.at("/run/ostree/staged-deployment")
+        os.makedirs(os.path.dirname(staged))
+        with open(staged, "wb") as f:
+            f.write(b"\x00" + before.encode() + b"\x00overlay-initrds\x00\x01" + after.encode() + b"\x00")
+        out = self.ok("next_overlay", stub_overlay=False)
+        self.assertEqual(out, self.at(f"/run/ostree/staged-initrds/{after}") + "\n")
+        with open(staged, "wb") as f:
+            f.write(b"\x00" + before.encode() + b"\x00no overlay here\x00")
+        self.assertEqual(self.ok("next_overlay", stub_overlay=False), "")
+
+    def test_next_overlay_of_the_booted_deployment_reads_its_boot_entry(self) -> None:
+        """No staged deployment: the overlay initrd of the boot entry whose ostree= is the next root."""
+        self.status_json(fixture("unpinned.json"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "next"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "other"))
+        os.makedirs(os.path.join(self.tmp, "boot.1"))
+        os.symlink("../deploy/next", os.path.join(self.tmp, "boot.1", "0"))
+        entries = "root/boot/loader/entries"
+        self.put(
+            f"{entries}/ostree-1.conf",
+            f"title old\noptions root=UUID={UUID} ostree={self.tmp}/deploy/other\n"
+            "initrd /ostree/old/initramfs.img /ostree/initramfs-overlays/old.img\n",
+        )
+        self.put(
+            f"{entries}/ostree-2.conf",
+            f"title next\noptions root=UUID={UUID} ostree={self.tmp}/boot.1/0 rw\n"
+            "initrd /ostree/next/initramfs.img /ostree/initramfs-overlays/next.img\n",
+        )
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/deploy/next"; else real_ostree_query "$1"; fi; }}
+# Its callers read its output only (an entry with no overlay ends in a failed grep).
+next_overlay || :
+"""
+        self.assertEqual(self.ok(code, stub_overlay=False), self.at("/boot/ostree/initramfs-overlays/next.img") + "\n")
+        self.put(f"{entries}/ostree-2.conf", f"options ostree={self.tmp}/boot.1/0\ninitrd /ostree/next/initramfs.img\n")
+        self.assertEqual(self.ok(code, stub_overlay=False), "")
 
     # ---------------------------------------------------- overlay_in_sync --
     def overlay_rc(self, overlay: str) -> str:

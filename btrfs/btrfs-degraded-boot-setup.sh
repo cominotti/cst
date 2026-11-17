@@ -73,6 +73,12 @@
 #   cst btrfs degraded-boot --files-only write /etc files + self-test only,
 #                                             leave the initramfs alone (testing)
 #   cst btrfs degraded-boot --uninstall  remove everything, untrack from initramfs
+#
+# Test seams: OSTREE_BOOTED, STAGED_DEPLOYMENT, STAGED_INITRDS and BOOT_DIR
+# below name the host paths the guards and next_overlay read; their values
+# are the real ones. Like every path setting above the argument dispatch,
+# only btrfs/tests/test_degraded_boot.py changes them, after sourcing that
+# part into a fake root. Nothing reads them from the environment.
 
 set -Eeuo pipefail
 
@@ -87,6 +93,11 @@ TIMER="${UNIT_DIR}/btrfs-last-resort@.timer"
 RECORD_UNIT="btrfs-degraded-boot-record.service"
 FLAG_DIR="/run/btrfs-allow-degraded"
 STATE_DIR="/var/lib/btrfs-degraded-boot"
+# Host paths the guards and next_overlay read (test seams, see the header).
+OSTREE_BOOTED="/run/ostree-booted"
+STAGED_DEPLOYMENT="/run/ostree/staged-deployment"
+STAGED_INITRDS="/run/ostree/staged-initrds"
+BOOT_DIR="/boot"
 # Files that must be in the initramfs overlay.
 TRACKED=("${RULE}" "${SERVICE}" "${TIMER}" "${HELPER}")
 # Left behind by the first version of this script (full shadow of upstream).
@@ -140,23 +151,23 @@ elif what == "summary":
 next_overlay() {
     local next entry opts path initrds
     if [[ "$(ostree_query next-staged)" == "yes" ]]; then
-        python3 - <<'PY'
-import re
-d = open("/run/ostree/staged-deployment", "rb").read()
+        python3 - "${STAGED_DEPLOYMENT}" "${STAGED_INITRDS}" <<'PY'
+import re, sys
+d = open(sys.argv[1], "rb").read()
 i = d.find(b"overlay-initrds")
 m = re.search(rb"[0-9a-f]{64}", d[i:]) if i >= 0 else None
 if m:
-    print("/run/ostree/staged-initrds/" + m.group().decode())
+    print(sys.argv[2] + "/" + m.group().decode())
 PY
         return
     fi
     next="$(realpath "$(ostree_query next-root)")"
-    for entry in /boot/loader/entries/*.conf; do
+    for entry in "${BOOT_DIR}"/loader/entries/*.conf; do
         opts="$(awk '$1 == "options" {sub(/^options[ \t]+/, ""); print}' "${entry}")"
         path="$(grep -o 'ostree=[^ ]*' <<<"${opts}" | cut -d= -f2)"
         [[ -n "${path}" && "$(realpath "${path}" 2>/dev/null)" == "${next}" ]] || continue
         initrds="$(awk '$1 == "initrd" {for (i = 2; i <= NF; i++) print $i}' "${entry}")"
-        grep -m1 'initramfs-overlays' <<<"${initrds}" | sed 's|^|/boot|'
+        grep -m1 'initramfs-overlays' <<<"${initrds}" | sed "s|^|${BOOT_DIR}|"
         return
     done
 }
@@ -342,7 +353,7 @@ case "${1:-}" in
 esac
 
 # ---------------------------------------------------------------- guards ----
-[[ -e /run/ostree-booted ]] || die "not an ostree-booted system"
+[[ -e "${OSTREE_BOOTED}" ]] || die "not an ostree-booted system"
 command -v rpm-ostree >/dev/null || die "rpm-ostree not found"
 [[ "$(findmnt -rn -o FSTYPE --target /sysroot | head -n1)" == "btrfs" ]] || die "/sysroot is not btrfs"
 UUID="$(root_fs_uuid)"
