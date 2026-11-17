@@ -46,7 +46,7 @@ import tempfile
 import time
 import unittest
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -189,13 +189,13 @@ class FakeSystem:
         self.docker_state = "inactive"
         self.systemctl_rc = 0
         self.systemctl_out_on_error = False  # a failing systemctl still prints docker_state
-        self.systemctl_missing = False
         self.free = 1 << 50
         self.btrfs_out: str | None = None  # None: a normal `btrfs filesystem usage -b` answer
         self.chcon_rc = 0
         self.syncs = 0
         self.cp: Callable[[str, str], tuple[int, str]] = self.copy
         self.notify = ""  # btrfs-notify's path in the test folder
+        self.missing: set[str] = set()  # programs that are not installed
 
     # ---- the ioctls -------------------------------------------------------
 
@@ -267,6 +267,9 @@ class FakeSystem:
         """CommandRunnerPort.run: each command the helper may run, answered by the fake."""
         args = list(argv)
         self.calls.append(args)
+        not_found = self.not_found(args, kw)
+        if not_found is not None:
+            return not_found
 
         def done(rc: int = 0, out: str = "", err: str = "") -> CommandResult:
             return CommandResult(rc, out, err, argv=tuple(args))
@@ -274,9 +277,6 @@ class FakeSystem:
         if args[0] == "systemctl":
             if args != ["systemctl", "show", "-P", "ActiveState", "docker.service"]:
                 raise AssertionError(f"unexpected systemctl call: {args}")
-            if self.systemctl_missing:
-                missing = FileNotFoundError(2, "No such file or directory", "systemctl")
-                return CommandResult(127, "", str(missing), argv=tuple(args), fault="missing", cause=missing)
             answers = self.systemctl_rc == 0 or self.systemctl_out_on_error
             return done(self.systemctl_rc, self.docker_state + "\n" if answers else "")
         if args[0] == "chcon":
@@ -309,6 +309,19 @@ class FakeSystem:
         if args[0] == self.notify:
             return done()
         raise AssertionError(f"unexpected command: {args}")
+
+    def not_found(self, args: list[str], kw: Mapping[str, object]) -> CommandResult | None:
+        """Checks the options of a command, and answers for one that is missing (None: it is installed).
+
+        As subprocess.run(capture_output=True, text=True) ran them: stdin ours, strict
+        decoding; btrfs-notify's output was never decoded."""
+        want = {"stdin": "inherit"} if args[0] == self.notify else {"stdin": "inherit", "decode_errors": "strict"}
+        if kw != want:
+            raise AssertionError(f"{args[0]} run with {kw}, not {want}")
+        if args[0] not in self.missing:
+            return None
+        missing = FileNotFoundError(2, "No such file or directory", args[0])
+        return CommandResult(127, "", str(missing), argv=tuple(args), fault="missing", cause=missing)
 
     def sync(self) -> None:
         self.syncs += 1
@@ -378,17 +391,21 @@ class Commands:
     def __init__(self, service: DockerVolumesNocow) -> None:
         self.service = service
 
+    # Called directly, not through the cli: an OSError reaches the test (the cli would log it).
     def status(self) -> int:
-        return nocow_cli.nocow_cli(["status"], service=self.service)
+        self.service.status()
+        return 0
 
     def mark(self) -> int:
-        return nocow_cli.nocow_cli(["mark"], service=self.service)
+        return 1 if self.service.mark() else 0
 
     def migrate(self) -> int:
-        return nocow_cli.nocow_cli(["migrate"], service=self.service)
+        self.service.migrate()
+        return 0
 
     def unmark(self) -> int:
-        return nocow_cli.nocow_cli(["unmark"], service=self.service)
+        self.service.unmark()
+        return 0
 
     def recover(self) -> None:
         self.service.recover()
@@ -475,8 +492,12 @@ class Base(unittest.TestCase):
 
     def main(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = nocow_cli.nocow_cli(list(argv), service=self.cli.service)
+        with (
+            mock.patch.object(sys, "argv", [TOOL, *argv]),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            rc = nocow_cli.nocow_cli(service=self.cli.service)
         return rc, out.getvalue(), err.getvalue()
 
     # ---- checks -----------------------------------------------------------
@@ -729,6 +750,47 @@ class MainTest(Base):
                     rc, out, _ = self.main(cmd)
                     self.assertEqual(rc, want)
                     self.assertIn(f"<3>{TAG}: {self.vols}: [Errno 25] Inappropriate ioctl for device\n", out)
+
+
+class MissingProgramTest(Base):
+    """A program the helper runs is missing: it stops as when subprocess.run raised."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fs.set(self.vols, True)
+        self.top = self.volume("cow")
+        schedule(self)
+
+    def test_btrfs_missing_stops_the_run_with_one_line(self) -> None:
+        self.fs.missing.add("btrfs")
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.endswith(f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: 'btrfs'\n"), out)
+        self.assertEqual(read_attempts(self), "1")  # counted before the rewrite
+        self.assertTrue(os.path.exists(self.flag))
+
+    def test_cp_missing_leaves_the_volume_as_it_was(self) -> None:
+        self.fs.missing.add("cp")
+        before = tree(self.top)
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertIn(f"<3>{TAG}: cow: [Errno 2] No such file or directory: 'cp'; left as it was\n", out)
+        self.assertEqual(tree(self.top), before)
+        # The empty twin stays, as before; recover() removes it at the next boot.
+        self.assertEqual(sorted(os.listdir(os.path.join(self.vols, "cow"))), ["_data", "_data.nocow-new"])
+
+    def test_notify_missing_after_giving_up(self) -> None:
+        self.set_attempts("2")
+        self.fs.missing.add(self.notify)
+        rc, out, _ = self.main("migrate")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out,
+            f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n"
+            f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: '{self.notify}'\n",
+        )
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
 
 
 class MigrateTest(Base):
@@ -1284,7 +1346,7 @@ class DockerRunningTest(PostponeBase):
     def test_no_systemctl_postpones(self) -> None:
         # subprocess.run raises FileNotFoundError: postponed like an unknown
         # state, nothing touched, attempts not counted.
-        self.fs.systemctl_missing = True
+        self.fs.missing.add("systemctl")
         rc, out, _ = self.main("migrate")
         self.assertEqual(rc, 0)
         self.assert_postponed(

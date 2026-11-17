@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Protocol
 
 from btrfs.docker_volumes_nocow.domain import TreeScan
@@ -33,9 +33,9 @@ class VolumeTreePort(Protocol):
 
     def set_nocow(self, path: str, *, on: bool) -> None: ...
 
-    def restore_interrupted(self) -> list[str]:
-        """Undo what an interrupted migration left (kill, timeout, power loss); the
-        volumes whose original was put back."""
+    def restore_interrupted(self) -> Iterator[str]:
+        """Undo what an interrupted migration left (kill, timeout, power loss), yielding
+        each volume whose original was put back as soon as it is."""
         ...
 
     def make_twin(self, data: str, new: str) -> None:

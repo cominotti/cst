@@ -166,10 +166,9 @@ class LocalVolumeTree:
     def set_nocow(self, path: str, *, on: bool) -> None:
         set_nocow(path, on)
 
-    def restore_interrupted(self) -> list[str]:
-        restored: list[str] = []
+    def restore_interrupted(self) -> Iterator[str]:
         if not os.path.isdir(self.paths.volumes):
-            return restored
+            return
         for name in os.listdir(self.paths.volumes):
             d = os.path.join(self.paths.volumes, name)
             if not os.path.isdir(d) or os.path.islink(d):
@@ -180,11 +179,10 @@ class LocalVolumeTree:
                 # Died between the two renames: the original goes back.
                 os.rename(os.path.join(d, olds[-1]), data)
                 olds = olds[:-1]
-                restored.append(name)
+                yield name
             if os.path.isdir(data):
                 for x in olds + [x for x in os.listdir(d) if x == "_data.nocow-new"]:
                     shutil.rmtree(os.path.join(d, x), ignore_errors=True)
-        return restored
 
     def make_twin(self, data: str, new: str) -> None:
         if os.path.lexists(new):
