@@ -20,7 +20,6 @@ from btrfs.docker_gc.adapters import (
     KEEP_IMAGE_DAYS,
     LAST_RUN,
     LAST_USED,
-    STATE_DIR,
     ask,
     container_use,
     df,
@@ -34,6 +33,7 @@ from btrfs.docker_gc.adapters import (
     recorder_alive,
     remove_image,
     save_state,
+    save_summary,
 )
 from btrfs.docker_gc.domain import DAY, HEARTBEAT_SECONDS, MIN_UPTIME, day, ephemeral, ts
 from cst_core.adapters.runtime import restore_default_signals
@@ -287,9 +287,7 @@ def run(dry: bool) -> int:
         "before": before,
         "after": after,
     }
-    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
-    with open(LAST_RUN, "w") as f:
-        json.dump(summary, f)
+    save_summary(summary)
     log(
         5,
         f"removed {summary['containers']} container(s), {summary['volumes']} anonymous volume(s), "
