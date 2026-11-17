@@ -372,7 +372,10 @@ import time
 answer = sys.argv[1].encode() + b"\n"
 pid, fd = pty.fork()
 if pid == 0:
-    os.execvp(sys.argv[2], sys.argv[2:])
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)  # exec failed: never run the loop below in the child
 out = bytearray()
 searched = 0
 deadline = time.monotonic() + 300
@@ -1047,6 +1050,8 @@ EOF
                 systemctl --global disable f44-pending-alerts.service 2>/dev/null || true
                 rm -rf "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin"
                 rm -f "$new/pending/$alert" "$new/pending/$dup"
+                # The test started from an uninstalled btrfs part: a failure half way leaves none for the next tests.
+                cst btrfs uninstall >/dev/null 2>&1 || true
             }
             trap cleanup EXIT
             show() { sed "s/^/test_07 $1: /" <<<"$2" >&2; }   # the CI log
@@ -1190,6 +1195,7 @@ EOF
                     "$ours" "$theirs" "$stamp" "$nas_stamp"
                 if (( made_bulk_flag )); then rm -f "$bulk_flag"; fi
                 rmdir /etc/btrbk 2>/dev/null || true
+                rm -rf /run/systemd/system/btrfs-snapshot.timer.d /run/systemd/system/btrfs-snapshot-nas.timer.d
                 rm -f "$CONF"
                 if [[ -e "$saved" ]]; then mv "$saved" "$CONF"; fi
                 systemctl daemon-reload
@@ -1239,20 +1245,17 @@ EOF
             mkdir -p "$TOP"
             mountpoint -q "$TOP" || mount -o "$opts" "$dev0" "$TOP"
             install -d -m 0700 "$SNAPS"
+            # Neither timer may fire during the test (the hourly one would take a snapshot, both touch their
+            # stamps): a runtime drop-in moves their calendar far ahead; enable, disable and the stamps
+            # work as without it.
+            for t in btrfs-snapshot.timer btrfs-snapshot-nas.timer; do
+                install -d -m 0755 "/run/systemd/system/$t.d"
+                printf '[Timer]\nOnCalendar=\nOnCalendar=2099-01-01 00:00:00\n' >"/run/systemd/system/$t.d/e2e-never.conf"
+            done
+            systemctl daemon-reload
             systemctl enable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer
             test -e "$stamp"
             test -e "$nas_stamp"
-            # The hourly timer must not fire during the test (it would take a snapshot): wait out an elapse
-            # that is due in the next three minutes.
-            next="$(systemctl show -P NextElapseUSecRealtime --timestamp=unix btrfs-snapshot.timer)"
-            next="${next#@}"
-            if [[ "$next" =~ ^[0-9]+$ ]] && (( next - $(date +%s) < 180 )); then
-                sleep "$(( next - $(date +%s) + 5 ))"
-                for _ in $(seq 1 120); do
-                    [[ "$(systemctl is-active btrfs-snapshot.service || true)" =~ ^(inactive|failed)$ ]] && break
-                    sleep 1
-                done
-            fi
             /usr/local/sbin/btrfs-snapshot hourly >/dev/null
             snaps="$(owned)"
             grep -q '^home\.' <<<"$snaps"
@@ -1395,6 +1398,12 @@ EOF
                 >"$stub"
             systemctl daemon-reload
             [[ "$(systemctl show -P FragmentPath docker.service)" == "$stub" ]]
+            # As in test_05a: Fedora's generic service.d drop-ins may apply; one of docker.service may not.
+            dropins="$(systemctl show -P DropInPaths docker.service)"
+            if tr ' ' '\n' <<<"$dropins" | grep -q '/docker\.service\.d/'; then
+                echo "a docker.service drop-in applies to the stub: $dropins" >&2
+                exit 1
+            fi
             systemctl start e2e-dind.service
             for _ in $(seq 1 30); do
                 docker info >/dev/null 2>&1 && break
@@ -1438,6 +1447,8 @@ EOF
             for f in "${units[@]/#//etc/systemd/system/}"; do test -f "$f"; done
             out="$(cst btrfs docker-gc status 2>&1)" || { show "status after disable" "$out"; exit 1; }
             show "status after disable" "$out"
+            # Not one exact line: is-enabled prints "disabled" and exits 1, so the "|| echo off" fallback of
+            # btrfs-setup.sh adds "off" on a line of its own (a known bug, left for its fix to tighten this).
             grep -q '^timer disabled' <<<"$out"
             grep -qF 'recorder inactive' <<<"$out"
             out="$(cst btrfs status 2>&1)" || { show "btrfs status" "$out"; exit 1; }
@@ -1534,7 +1545,10 @@ same() {   # same LABEL BEFORE
     return 1
 }
 
-# This namespace's /sysroot is the encrypted btrfs (the outer one is the loop RAID1).
+# This namespace's /sysroot is the encrypted btrfs (the outer one is the loop RAID1). The loop RAID1 is
+# unmounted here first: on a stacked mount, findmnt --target lists the lower one first, and crypt-perf
+# (root_fs_uuid: its first line) would read the RAID1.
+umount -l /sysroot
 mount "/dev/mapper/$name" /sysroot
 uuid="$(findmnt -rn -o UUID --target /sysroot)"
 [[ "$(ls "/sys/fs/btrfs/$uuid/devices")" == dm-* ]]
@@ -1666,10 +1680,12 @@ echo E2E-OK
             steam_dir=/var/tmp/e2e-steam
             steam_pid=""
             made_T=0
+            unkept=0
             cleanup() {
                 if [[ -n "$steam_pid" ]]; then kill "$steam_pid" 2>/dev/null || true; fi
                 rm -rf "$fake" "$fp" "$steam_dir" "$app_root"
                 if (( made_T )); then rmdir "$T" 2>/dev/null || true; fi
+                if (( unkept )); then cst btrfs bulk keep steam >/dev/null 2>&1 || true; fi
             }
             trap cleanup EXIT
             show() { sed "s/^/test_11 $1: /" <<<"$2" >&2; }   # the CI log
@@ -1727,7 +1743,7 @@ echo E2E-OK
                 sh "$sa"
 
             # ~/Bulk/steam as `bulk apply` makes it (with the Flatpak's access to it).
-            if grep -qsx steam /etc/btrfs-setup/bulk-keep; then cst btrfs bulk unkeep steam >/dev/null; fi
+            if grep -qsx steam /etc/btrfs-setup/bulk-keep; then cst btrfs bulk unkeep steam >/dev/null; unkept=1; fi
             [[ -e "$T" ]] || made_T=1
             out="$(cst btrfs bulk apply 2>&1)" || { show "bulk apply" "$out"; exit 1; }
             show "bulk apply" "$out"
@@ -1786,6 +1802,14 @@ echo E2E-OK
         and the report it saves covers the end of the run (the wait for the
         recorder's next write works), with samples and a verdict that is not
         NO DATA. `uninstall` at the end leaves the machine as test_06 left it."""
+        # Registered first: an install that fails half way is undone too.
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall >/dev/null; "
+            "rm -rf /var/tmp/e2e-watch2 /home/tester/e2e-watch.bin",
+            check=False,
+        )
         exec_bash(
             self.PRIV_CONTAINER,
             r"""
@@ -1793,13 +1817,6 @@ echo E2E-OK
             systemctl is-active btrfs-stall-monitor.service
             rm -rf /var/tmp/e2e-watch2 && install -d -m 0777 /var/tmp/e2e-watch2
             """,
-        )
-        self.addCleanup(
-            exec_bash,
-            self.PRIV_CONTAINER,
-            "SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst btrfs uninstall >/dev/null; "
-            "rm -rf /var/tmp/e2e-watch2 /home/tester/e2e-watch.bin",
-            check=False,
         )
         out = as_tester_bash(
             self.PRIV_CONTAINER,
