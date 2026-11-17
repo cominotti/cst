@@ -19,7 +19,7 @@ import struct
 import sys
 import time
 from types import FrameType
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter, nocow as inode_attrs
@@ -467,7 +467,7 @@ def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str
     return out, ""
 
 
-def notify(urgency: str, title: str, body: str) -> None:
+def notify(urgency: Literal["low", "normal", "critical"], title: str, body: str) -> None:
     """A CST desktop alert (btrfs-notify keeps it for the next login when no
     session shows it). Sent first, then printed (best effort)."""
     if os.access(NOTIFY, os.X_OK):

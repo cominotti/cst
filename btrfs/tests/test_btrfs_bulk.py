@@ -35,6 +35,7 @@ if _CHECKOUT not in sys.path:
 
 from btrfs.bulk import adapters as bulk_adapters, cli as bulk_cli, domain as bulk_domain, items as bulk_items
 from btrfs.bulk import steam as bulk_steam
+from cst_core.domain.values import Json
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -1642,6 +1643,38 @@ class GibTest(unittest.TestCase):
         self.assertEqual(bulk_domain.gib(bulk_domain.BIG // 10), "102 MiB")  # just under a tenth
         self.assertEqual(bulk_domain.gib(3 * bulk_domain.BIG), "3.0 GiB")
         self.assertEqual(bulk_domain.gib((5 << 20) + (1 << 19)), "5 MiB")  # floored
+
+
+def _u_echo(a: int, *, b: str) -> dict[str, Json]:
+    return {"a": a, "b": b, "uid": os.getuid()}
+
+
+def _u_refuse(path: str) -> bool:
+    raise bulk_domain.Unexpected(f"{path} appeared meanwhile")
+
+
+class AsUserTest(unittest.TestCase):
+    """as_user runs fn in a child process as the user (the uid and group calls faked: the run is not root)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-bulk-as-user-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.ctx = bulk_adapters.Ctx(self.tmp, pwd.getpwuid(os.getuid()))
+        for name in ("setgroups", "setresgid", "setresuid"):
+            patcher = mock.patch.object(bulk_adapters.os, name, lambda *_a: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_positional_and_keyword_arguments_reach_the_child_and_the_result_comes_back(self) -> None:
+        got = bulk_adapters.as_user(self.ctx, _u_echo, 7, b="x")
+        self.assertEqual(got, {"a": 7, "b": "x", "uid": os.getuid()})
+
+    def test_without_a_user_it_runs_here_with_the_same_arguments(self) -> None:
+        self.assertEqual(bulk_adapters.as_user(bulk_adapters.Ctx(self.tmp), _u_echo, 1, b="y")["b"], "y")
+
+    def test_unexpected_in_the_child_is_raised_again(self) -> None:
+        with self.assertRaisesRegex(bulk_domain.Unexpected, "/x appeared meanwhile"):
+            bulk_adapters.as_user(self.ctx, _u_refuse, "/x")
 
 
 if __name__ == "__main__":

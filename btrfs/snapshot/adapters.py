@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
+from typing import Literal
 import dataclasses
 import datetime as dt
 import errno
@@ -31,6 +32,7 @@ from btrfs.snapshot.domain import (
     Snap,
     WALK_PRUNE,
     SubvolInfo,
+    SubvolPath,
     err_text,
     name_regex,
     other_parent,
@@ -301,7 +303,7 @@ def tree(
     return out
 
 
-def walk_caches(root: str, skips: Sequence[str] = (), mode: str = "count") -> CacheWalk:
+def walk_caches(root: str, skips: Sequence[str] = (), mode: Literal["count", "drop"] = "count") -> CacheWalk:
     """The cache folders below ROOT (never ROOT itself): folders holding a
     CACHEDIR.TAG with the signature (has_cache_tag). Not followed: symlinks;
     not entered: .git, node_modules, the paths in SKIPS (relative to ROOT,
@@ -422,7 +424,7 @@ class Host:
     def mkdir(self, path: str, mode: int) -> None:
         os.mkdir(path, mode)
 
-    def walk_caches(self, root: str, skips: Sequence[str], mode: str) -> CacheWalk:
+    def walk_caches(self, root: str, skips: Sequence[str], mode: Literal["count", "drop"]) -> CacheWalk:
         return walk_caches(root, skips, mode)
 
 
@@ -430,13 +432,13 @@ class Btrfs:
     def __init__(self, host: Host) -> None:
         self.host = host
 
-    def show(self, path: str) -> SubvolInfo:
+    def show(self, path: SubvolPath) -> SubvolInfo:
         rc, out, err = self.host.run(["btrfs", "subvolume", "show", path])
         if rc != 0:
             raise ParseError(f"btrfs subvolume show failed (rc={rc}): {err.strip()}")
         return parse_subvolume_show(out)
 
-    def readonly(self, path: str) -> bool:
+    def readonly(self, path: SubvolPath) -> bool:
         rc, out, err = self.host.run(["btrfs", "property", "get", "-ts", path, "ro"])
         if rc != 0:
             raise ParseError(f"btrfs property get failed (rc={rc}): {err.strip()}")
@@ -447,13 +449,13 @@ class Btrfs:
             return False
         raise ParseError(f"unexpected property output {value!r}")
 
-    def snapshot(self, source: str, dest: str, readonly: bool = True) -> tuple[int, str, str]:
+    def snapshot(self, source: SubvolPath, dest: str, readonly: bool = True) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "snapshot"] + (["-r"] if readonly else []) + [source, dest])
 
-    def set_readonly(self, path: str) -> tuple[int, str, str]:
+    def set_readonly(self, path: SubvolPath) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "property", "set", "-ts", path, "ro", "true"])
 
-    def delete(self, path: str) -> tuple[int, str, str]:
+    def delete(self, path: SubvolPath) -> tuple[int, str, str]:
         return self.host.run(["btrfs", "subvolume", "delete", path])
 
 
@@ -491,8 +493,8 @@ def scan_snapshots(host: Host, btrfs: Btrfs, snapdir: str, name: str, source_uui
             ignored.append((path, "not a subvolume" if kind != "symlink" else "symlink"))
             continue
         try:
-            info = btrfs.show(path)
-            ro = btrfs.readonly(path)
+            info = btrfs.show(SubvolPath(path))  # host.kind said so
+            ro = btrfs.readonly(SubvolPath(path))
         except ParseError as e:
             unverifiable.append((path, str(e)))
             continue

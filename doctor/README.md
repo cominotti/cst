@@ -522,8 +522,12 @@ The code is split into four layers under `doctor/`:
 Each check is a small function in `doctor/application.py`, registered with
 `@check("area")`. It gets a `DoctorHostPort` (how to run a query and where
 host files are) and yields `Result(status, message, fix)`. Areas are printed
-in the order their first check was registered. A check that crashes becomes
-one `ERROR` line; the others still run. A check must never change anything:
+in the order their first check was registered. A host file is named by a
+`HostPath` (`/etc/cst/vm.conf`) and read through `host.path(...)`, which
+gives the `ViewPath` this process can open (`/run/host/...` in a toolbox);
+the host's file methods take a `ViewPath` only, so ty catches a path that
+was not mapped or was mapped twice (`view_join` and `host_join` join on each
+side). A check that crashes becomes one `ERROR` line; the others still run. A check must never change anything:
 only read files and run query commands. Modules can add their own checks
 here later.
 

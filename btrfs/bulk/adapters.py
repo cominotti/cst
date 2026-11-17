@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from cst_core.adapters.runtime import sibling_program
 from typing import Any
-from typing import cast
 import errno
 import fcntl
 import json
@@ -45,6 +44,7 @@ from cst_core.adapters.files import read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
 from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.values import Json
 
 ROOT = os.geteuid() == 0
 
@@ -280,11 +280,12 @@ def user_ctx(args: Sequence[str]) -> Ctx:
     return Ctx(os.environ.get("BTRFS_BULK_HOME") or os.path.expanduser("~"))
 
 
-def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:
-    """fn(*args) in a child process with the user's uid, gids and HOME.
-    Returns its JSON-able result; an exception there is raised here again."""
+def as_user[**P, R: Json](ctx: Ctx, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+    """fn(*args, **kwargs) in a child process with the user's uid, gids and HOME.
+    Returns its result, which crosses back as JSON (R: a Json value, so it
+    comes back as it was); an exception there is raised here again."""
     if ctx.pw is None:
-        return fn(*args)
+        return fn(*args, **kwargs)
     sys.stdout.flush()
     sys.stderr.flush()
     r, w = os.pipe()
@@ -302,7 +303,7 @@ def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:
             for k in [k for k in os.environ if k.startswith("XDG_")]:
                 del os.environ[k]
             os.environ.update(HOME=pw.pw_dir, USER=pw.pw_name, LOGNAME=pw.pw_name)
-            out = {"ok": fn(*args)}
+            out = {"ok": fn(*args, **kwargs)}
         except Unexpected as e:
             out = {"unexpected": str(e)}
         except BaseException as e:  # noqa: BLE001 - reported to the parent
@@ -331,7 +332,7 @@ def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:
         raise Unexpected(out["unexpected"])
     if "ok" not in out:
         raise RuntimeError(out.get("error", "child process died"))
-    return cast("R", out["ok"])
+    return out["ok"]  # json.loads's value: R by the bound above
 
 
 # ---- inspection (read-only; fine as root: lstat never follows a link) -------------------

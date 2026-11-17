@@ -54,6 +54,7 @@ from btrfs.snapshot.domain import (
     UUID_RE,
     WRITABLE_FILE,
     SubvolInfo,
+    SubvolPath,
     epoch_to_wall,
     err_text,
     fmt_epoch,
@@ -328,7 +329,7 @@ class Run:
         kind = self.host.kind(src.path)
         if kind != "subvol":
             raise ParseError(f"{src.path} is not a subvolume ({kind})")
-        return self.btrfs.show(src.path)
+        return self.btrfs.show(SubvolPath(src.path))
 
     def decide(
         self, src: Source, scan: Scan, extra: Sequence[Snap] = ()
@@ -550,7 +551,7 @@ def process_source(run: Run, src: Source, create: bool) -> Result:
             res.worse(EXIT_REFUSED)
             res.kept += 1
             continue
-        rc, _, err = run.btrfs.delete(s.path)
+        rc, _, err = run.btrfs.delete(SubvolPath(s.path))
         if rc != 0:
             log(3, f"{src.name}: deleting {s.path} failed (rc={rc}): {err.strip()}; stopping deletions")
             res.worse(EXIT_ERROR)
@@ -568,8 +569,8 @@ def recheck(run: Run, snap: Snap, source_uuid: str) -> str | None:
     if run.host.kind(snap.path) != "subvol":
         return "no longer a subvolume"
     try:
-        info = run.btrfs.show(snap.path)
-        ro = run.btrfs.readonly(snap.path)
+        info = run.btrfs.show(SubvolPath(snap.path))
+        ro = run.btrfs.readonly(SubvolPath(snap.path))
     except ParseError as e:
         return str(e)
     if info["uuid"] != snap.uuid:
@@ -616,7 +617,7 @@ def create_snapshot(run: Run, src: Source, info: SubvolInfo, dest: str, entry: s
                 f"{src.name}: cannot record {entry} in {run.state_file(UNFINISHED_FILE)} "
                 f"({err_text(e)}); this snapshot keeps its cache folders",
             )
-    rc, _, err = run.btrfs.snapshot(src.path, dest, readonly=not tracked)
+    rc, _, err = run.btrfs.snapshot(SubvolPath(src.path), dest, readonly=not tracked)
     if rc != 0:
         log(3, f"{src.name}: creating {dest} failed (rc={rc}): {err.strip()}")
         if tracked and run.host.kind(dest) == "missing":
@@ -639,8 +640,8 @@ def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str
     if kind != "subvol":
         return ("missing" if kind == "missing" else f"not a subvolume ({kind})"), None
     try:
-        info = run.btrfs.show(dest)
-        ro = run.btrfs.readonly(dest)
+        info = run.btrfs.show(SubvolPath(dest))  # host.kind said so
+        ro = run.btrfs.readonly(SubvolPath(dest))
     except ParseError as e:
         return str(e), None
     other = other_parent(info, source_uuid)
@@ -674,7 +675,7 @@ def seal(
     elif ro is False and run.args.exclude_caches:
         drop_caches(run, src, dest, entry)
     if ro is not True:
-        rc, _, err = run.btrfs.set_readonly(dest)
+        rc, _, err = run.btrfs.set_readonly(SubvolPath(dest))  # the snapshot this run checked or made
         if rc != 0:
             log(
                 3,
@@ -685,7 +686,7 @@ def seal(
             return "error"
         ro_state: bool | str
         try:
-            ro_state = run.btrfs.readonly(dest)
+            ro_state = run.btrfs.readonly(SubvolPath(dest))
         except ParseError as e:
             ro_state = f"cannot check: {e}"
         if ro_state is not True:

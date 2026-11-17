@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Mapping
-from typing import TypedDict
+from typing import NewType, TypedDict
 import dataclasses
 import datetime as dt
 import os
@@ -320,6 +320,11 @@ def err_text(e: BaseException) -> str:
 
 
 # ---- btrfs ---------------------------------------------------------------------------
+# The path of a btrfs subvolume (a snapshot or a source), as the btrfs
+# commands of adapters.Btrfs take it; a plain folder path is not one.
+SubvolPath = NewType("SubvolPath", str)
+
+
 class SubvolInfo(TypedDict):
     uuid: str
     parent_uuid: str | None

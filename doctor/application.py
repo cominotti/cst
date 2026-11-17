@@ -55,6 +55,7 @@ from doctor.domain import (
     ZSWAP_CONF,
     ZSWAP_PARAMS,
     Deployment,
+    HostPath,
     OstreeAnswer,
     Request,
     Result,
@@ -73,8 +74,11 @@ from doctor.domain import (
     read_intended,
     unit_results,
     unpin_command,
+    view_join,
     virt_changes,
     virt_versions,
+    ViewPath,
+    host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from swap.domain import parse_tmpfiles_params
@@ -104,7 +108,7 @@ def ostree_deployments(host: DoctorHostPort) -> OstreeAnswer:
     when it is not the booted one: rpm-ostree lists it first (for the booted
     system's osname), staged or not (rpm-ostree rollback leaves an unstaged
     one there). It is the one rpm-ostree install/uninstall edit."""
-    if not host.exists(host.path("/run/ostree-booted")):
+    if not host.exists(host.path(HostPath("/run/ostree-booted"))):
         return None, None, "not an rpm-ostree system"
     rc, out, err = host.run(["rpm-ostree", "status", "--json"])
     if rc != 0:
@@ -311,7 +315,7 @@ def check_user_units(host: DoctorHostPort) -> Iterator[Result]:
 
 
 # ---- alerts --------------------------------------------------------------------------------------
-def read_alert(host: DoctorHostPort, path: str) -> tuple[str, str, int] | None:
+def read_alert(host: DoctorHostPort, path: ViewPath) -> tuple[str, str, int] | None:
     """(urgency, title, last) of a pending alert file, or None."""
     try:
         with host.open_bytes(path) as f:
@@ -324,12 +328,12 @@ def read_alert(host: DoctorHostPort, path: str) -> tuple[str, str, int] | None:
 def seen_record(host: DoctorHostPort) -> dict[str, str]:
     """name -> recorded mtime string, from cst-pending-alerts' record of what
     this user saw (the f44-tools one while the new one does not exist)."""
-    new = os.path.join(host.state_home, "cst-alerts")
-    old = os.path.join(host.state_home, "f44-alerts")
+    new = view_join(host.state_home, "cst-alerts")
+    old = view_join(host.state_home, "f44-alerts")
     d = old if not host.exists(new) and host.isdir(old) and not host.islink(old) else new
     rec: dict[str, str] = {}
     try:
-        with host.open_text(os.path.join(d, "delivered")) as f:
+        with host.open_text(view_join(d, "delivered")) as f:
             for line in f:
                 p = line.split()
                 if len(p) >= 2 and ALERT_NAME.match(p[0]):
@@ -346,7 +350,7 @@ def mtime_matches(recorded: str, st: os.stat_result) -> bool:
 
 @check("alerts")
 def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
-    pending = host.path("/var/lib/cst-alerts/pending")
+    pending = host.path(HostPath("/var/lib/cst-alerts/pending"))
     if not host.isdir(pending):
         yield Result(INFO, f"no alert folder /var/lib/cst-alerts/pending (installed by {host.cst} btrfs install)")
         return
@@ -359,7 +363,7 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
     unseen: list[tuple[str, str, int]] = []
     seen_n = 0
     for n in names:
-        p = os.path.join(pending, n)
+        p = view_join(pending, n)
         try:
             st = host.lstat(p)
         except OSError:
@@ -392,7 +396,7 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
 
 @check("alerts")
 def check_legacy_alerts(host: DoctorHostPort) -> Iterator[Result]:
-    old = host.path("/var/lib/f44-alerts")
+    old = host.path(HostPath("/var/lib/f44-alerts"))
     if host.islink(old):
         yield Result(
             WARN,
@@ -414,7 +418,7 @@ def check_legacy_alerts(host: DoctorHostPort) -> Iterator[Result]:
 def unalloc_thresholds(host: DoctorHostPort, *, health_check_repo: str | None = None) -> tuple[int, int]:
     """(warn_gib, crit_gib) from btrfs-health-check (the repository copy, else
     the installed one), so both always agree; the defaults if neither reads."""
-    repo_path = host.repo_path(HEALTH_CHECK_SRC) if health_check_repo is None else health_check_repo
+    repo_path = host.repo_path(HEALTH_CHECK_SRC) if health_check_repo is None else ViewPath(health_check_repo)
     for path in (repo_path, host.path(HEALTH_CHECK_HOST)):
         try:
             with host.open_text(path) as f:
@@ -427,7 +431,7 @@ def unalloc_thresholds(host: DoctorHostPort, *, health_check_repo: str | None = 
     return UNALLOC_DEFAULTS
 
 
-def read_int(host: DoctorHostPort, path: str) -> int | None:
+def read_int(host: DoctorHostPort, path: ViewPath) -> int | None:
     try:
         with host.open_text(path) as f:
             v = f.read(64).strip()
@@ -436,7 +440,7 @@ def read_int(host: DoctorHostPort, path: str) -> int | None:
     return int(v) if v.isdigit() else None
 
 
-def read_text(host: DoctorHostPort, path: str, limit: int = 256) -> str:
+def read_text(host: DoctorHostPort, path: ViewPath, limit: int = 256) -> str:
     try:
         with host.open_text(path) as f:
             return f.read(limit).strip()
@@ -457,7 +461,7 @@ def btrfs_mounts(host: DoctorHostPort) -> dict[str, list[str]]:
             continue
         src = re.sub(r"\[.*\]$", "", f[0])
         target = f[1].replace("\\x20", " ")
-        dev = os.path.basename(host.realpath(host.path(src))) if src.startswith("/dev/") else ""
+        dev = os.path.basename(host.realpath(host.path(HostPath(src)))) if src.startswith("/dev/") else ""
         if dev:
             mounts.setdefault(dev, [])
             if target not in mounts[dev]:
@@ -465,19 +469,19 @@ def btrfs_mounts(host: DoctorHostPort) -> dict[str, list[str]]:
     return mounts
 
 
-def btrfs_profiles(host: DoctorHostPort, alloc: str) -> dict[str, dict[str, int]]:
+def btrfs_profiles(host: DoctorHostPort, alloc: ViewPath) -> dict[str, dict[str, int]]:
     """{kind: {profile: logical chunk bytes}} for data, metadata, system."""
     out: dict[str, dict[str, int]] = {}
     for kind in ("data", "metadata", "system"):
-        d = os.path.join(alloc, kind)
+        d = view_join(alloc, kind)
         prof: dict[str, int] = {}
         try:
             names = sorted(host.listdir(d))
         except OSError:
             names = []
         for name in names:
-            total = read_int(host, os.path.join(d, name, "total_bytes"))
-            if total is not None and host.isdir(os.path.join(d, name)):
+            total = read_int(host, view_join(d, name, "total_bytes"))
+            if total is not None and host.isdir(view_join(d, name)):
                 prof[name] = total
         out[kind] = prof
     return out
@@ -499,24 +503,24 @@ def btrfs_device_bytes(host: DoctorHostPort, mnt: str, profiles: Mapping[str, Ma
     return int(f[0]) * int(f[1]) * factor
 
 
-def btrfs_devices(host: DoctorHostPort, base: str) -> tuple[list[tuple[str, str, int]], str]:
+def btrfs_devices(host: DoctorHostPort, base: ViewPath) -> tuple[list[tuple[str, str, int]], str]:
     """([(name, label, size bytes)], problem): the members, from
     devices/ (block size in 512-byte sectors) and devinfo/ (missing flag)."""
     try:
-        names = sorted(host.listdir(os.path.join(base, "devices")))
-        ids = sorted(host.listdir(os.path.join(base, "devinfo")))
+        names = sorted(host.listdir(view_join(base, "devices")))
+        ids = sorted(host.listdir(view_join(base, "devinfo")))
     except OSError:
         return [], "no device list in sysfs"
-    if any(read_int(host, os.path.join(base, "devinfo", i, "missing")) == 1 for i in ids):
+    if any(read_int(host, view_join(base, "devinfo", i, "missing")) == 1 for i in ids):
         return [], "a member device is missing"
     if len(names) != len(ids):
         return [], f"{len(ids)} members but {len(names)} device(s) present"
     devs: list[tuple[str, str, int]] = []
     for n in names:
-        sectors = read_int(host, os.path.join(base, "devices", n, "size"))
+        sectors = read_int(host, view_join(base, "devices", n, "size"))
         if not sectors:
             return [], f"no size for {n}"
-        dm = read_text(host, os.path.join(base, "devices", n, "dm", "name"))
+        dm = read_text(host, view_join(base, "devices", n, "dm", "name"))
         devs.append((n, f"/dev/mapper/{dm}" if dm else f"/dev/{n}", sectors * 512))
     return devs, ""
 
@@ -526,7 +530,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
     sysfs = host.path(BTRFS_SYSFS)
     try:
         uuids = sorted(
-            n for n in host.listdir(sysfs) if FS_UUID.match(n) and host.isdir(os.path.join(sysfs, n, "allocation"))
+            n for n in host.listdir(sysfs) if FS_UUID.match(n) and host.isdir(view_join(sysfs, n, "allocation"))
         )
     except OSError:
         uuids = []
@@ -538,12 +542,12 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
     conf = read_text(host, host.path(RECLAIM_CONF), 65536)
     readme = "btrfs/README.md, section 13: 'No space left' but df shows free space"
     for uuid in uuids:
-        base = os.path.join(sysfs, uuid)
-        alloc = os.path.join(base, "allocation")
+        base = view_join(sysfs, uuid)
+        alloc = view_join(base, "allocation")
         devs, dev_problem = btrfs_devices(host, base)
         targets: list[str] = []
         try:
-            for n in host.listdir(os.path.join(base, "devices")):
+            for n in host.listdir(view_join(base, "devices")):
                 targets += [t for t in mounts.get(n, []) if t not in targets]
         except OSError:
             pass
@@ -555,8 +559,8 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
         # How full the chunks are (logical bytes: one copy).
         fill: dict[str, tuple[int, int] | None] = {}
         for kind in ("data", "metadata"):
-            total = read_int(host, os.path.join(alloc, kind, "total_bytes"))
-            used = read_int(host, os.path.join(alloc, kind, "bytes_used"))
+            total = read_int(host, view_join(alloc, kind, "total_bytes"))
+            used = read_int(host, view_join(alloc, kind, "bytes_used"))
             fill[kind] = (used, total) if total and used is not None else None
         profiles = btrfs_profiles(host, alloc)
         layout = "/".join(sorted({p.upper() for prof in profiles.values() for p in prof})) or "?"
@@ -576,14 +580,14 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
             yield Result(INFO, f"{name}: chunk usage not readable in sysfs")
 
         # Automatic reclaim of half-empty data chunks (Linux 6.11+, set by cst btrfs install).
-        dyn = read_int(host, os.path.join(alloc, "data", "dynamic_reclaim"))
-        per = read_int(host, os.path.join(alloc, "data", "periodic_reclaim"))
+        dyn = read_int(host, view_join(alloc, "data", "dynamic_reclaim"))
+        per = read_int(host, view_join(alloc, "data", "periodic_reclaim"))
         configured = f"/sys/fs/btrfs/{uuid}/allocation/data/" in conf
         if dyn is None or per is None:
             yield Result(INFO, f"{name}: this kernel has no automatic reclaim switches (Linux 6.11 or later)")
         elif dyn == 1 and per == 1:
-            count = read_int(host, os.path.join(alloc, "data", "reclaim_count"))
-            errs = read_int(host, os.path.join(alloc, "data", "reclaim_errors"))
+            count = read_int(host, view_join(alloc, "data", "reclaim_count"))
+            errs = read_int(host, view_join(alloc, "data", "reclaim_errors"))
             extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
             if errs:
                 yield Result(
@@ -637,7 +641,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
             if not exact:
                 listed = "at most " + listed
             meta_free = (fill["metadata"][1] - fill["metadata"][0]) if fill["metadata"] else None
-            rsv = read_int(host, os.path.join(alloc, "global_rsv_size")) or 0
+            rsv = read_int(host, view_join(alloc, "global_rsv_size")) or 0
             if low < crit_gib * GIB:
                 yield Result(
                     ERROR,
@@ -671,7 +675,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
         # Mixed or striped layout: only the sum over all devices is exact.
         disk_total = 0
         for kind in ("data", "metadata", "system"):
-            disk_total += read_int(host, os.path.join(alloc, kind, "disk_total")) or 0
+            disk_total += read_int(host, view_join(alloc, kind, "disk_total")) or 0
         total_free = sum(size for _, _, size in devs) - disk_total
         if disk_total and total_free < warn_gib * GIB * len(devs):
             yield Result(
@@ -690,7 +694,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
 
 
 # ---- btrfs: snapshots left writable & docker NOCOW -----------------------------------------------
-def read_entries(host: DoctorHostPort, path: str) -> list[str] | None:
+def read_entries(host: DoctorHostPort, path: HostPath) -> list[str] | None:
     """The non-empty lines of a small state file: [] if missing, None if unreadable."""
     try:
         with host.open_text(host.path(path)) as f:
@@ -778,7 +782,7 @@ def game_dropins_left(host: DoctorHostPort) -> list[str]:
     return [
         f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"
         for n in names
-        if n.endswith(".d") and host.isfile(host.path(f"{GAME_DROPIN_DIR}/{n}/{GAME_DROPIN}"))
+        if n.endswith(".d") and host.isfile(host.path(host_join(GAME_DROPIN_DIR, n, GAME_DROPIN)))
     ]
 
 
@@ -791,7 +795,7 @@ def game_again(host: DoctorHostPort) -> str:
     return "sudo systemctl restart cpu-game.service"
 
 
-def settings_of(host: DoctorHostPort, path: str, *, bash_sourced: bool = True) -> ShellAssignments | None:
+def settings_of(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
     bash_sourced), or None when it cannot be read. snapshots.conf also takes the
     lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
@@ -805,7 +809,7 @@ def settings_of(host: DoctorHostPort, path: str, *, bash_sourced: bool = True) -
         return None
 
 
-def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
+def conf_value(host: DoctorHostPort, path: HostPath, key: str) -> str | None:
     """The value of KEY in a settings file that bash also sources (the last
     assignment wins, as in bash and in vm-pin), or None. A problem line sets
     nothing; check_settings_files reports it."""
@@ -813,7 +817,7 @@ def conf_value(host: DoctorHostPort, path: str, key: str) -> str | None:
     return None if parsed is None else parsed.values.get(key)
 
 
-def settings_file_warnings(host: DoctorHostPort, path: str, *, bash_sourced: bool) -> Iterator[Result]:
+def settings_file_warnings(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool) -> Iterator[Result]:
     """WARN for each line of a settings file that is not a plain assignment."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
     bash = " (bash, which also sources this file, reads it its own way)" if bash_sourced else ""
@@ -921,7 +925,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
                 drifted.append(f"{r[2]} {r[3]} is {current[key] or 'not set'} (the profile set {r[5]})")
         elif r[3]:
             try:
-                with host.open_text(host.path(r[1])) as f:
+                with host.open_text(host.path(HostPath(r[1]))) as f:
                     now = f.read(256).strip()
             except OSError:
                 continue  # the cgroup is gone: nothing to compare
@@ -945,7 +949,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(INFO, "game profile: ON, no recorded setting to compare")
 
 
-def user_manager_cgroup(host: DoctorHostPort) -> str | None:
+def user_manager_cgroup(host: DoctorHostPort) -> HostPath | None:
     """The cgroup folder of the user manager to look at (the doctor's own
     user, or TARGET_USER when run as root), or None."""
     uid = host.uid
@@ -957,16 +961,16 @@ def user_manager_cgroup(host: DoctorHostPort) -> str | None:
         if found is None:
             return None
         uid = found
-    return f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service"
+    return HostPath(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service")
 
 
-def cpu_seconds(host: DoctorHostPort, path: str) -> float | None:
+def cpu_seconds(host: DoctorHostPort, path: ViewPath) -> float | None:
     """CPU time a cgroup used since it was created (cpu.stat usage_usec),
     in seconds, or None."""
-    return parse_cpu_stat_seconds(read_text(host, os.path.join(path, "cpu.stat"), 4096))
+    return parse_cpu_stat_seconds(read_text(host, view_join(path, "cpu.stat"), 4096))
 
 
-def cgroup_units(host: DoctorHostPort, path: str) -> list[tuple[str, str]]:
+def cgroup_units(host: DoctorHostPort, path: ViewPath) -> list[tuple[str, ViewPath]]:
     """[(unit, cgroup folder)] of the child cgroups of PATH; systemd puts a
     '_' before a name that could clash with a controller file (cpu.slice ->
     _cpu.slice)."""
@@ -974,9 +978,7 @@ def cgroup_units(host: DoctorHostPort, path: str) -> list[tuple[str, str]]:
         names = sorted(host.listdir(path))
     except OSError:
         return []
-    return [
-        (n[1:] if n.startswith("_") else n, os.path.join(path, n)) for n in names if host.isdir(os.path.join(path, n))
-    ]
+    return [(n[1:] if n.startswith("_") else n, view_join(path, n)) for n in names if host.isdir(view_join(path, n))]
 
 
 @check("cpu")
@@ -1001,7 +1003,7 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
             f"start it with --slice=user-{name}.slice",
         )
     jobs = [
-        (u, cpu_seconds(host, d)) for u, d in cgroup_units(host, os.path.join(base, "app.slice")) if TRANSIENT.match(u)
+        (u, cpu_seconds(host, d)) for u, d in cgroup_units(host, view_join(base, "app.slice")) if TRANSIENT.match(u)
     ]
     if jobs:
         jobs.sort(key=lambda j: -(j[1] or 0))
@@ -1259,21 +1261,21 @@ def nas_backup_running(host: DoctorHostPort, vm: str) -> int:
     must still be cst-vm: a lock file a killed run left keeps its pid, and
     the kernel reuses pids."""
     try:
-        with host.open_text(host.path(os.path.join(VM_RUN_DIR, f"nas-{vm}.lock"))) as f:
+        with host.open_text(host.path(host_join(VM_RUN_DIR, f"nas-{vm}.lock"))) as f:
             pid = f.read().strip()
     except OSError:
         return 0
     if not pid.isdigit():
         return 0
     try:
-        with host.open_bytes(host.path(f"/proc/{pid}/cmdline")) as f:
+        with host.open_bytes(host.path(HostPath(f"/proc/{pid}/cmdline"))) as f:
             cmdline = f.read()
     except OSError:
         return 0
     return int(pid) if b"cst-vm" in cmdline else 0
 
 
-def file_newer(host: DoctorHostPort, a: str, b: str) -> bool | None:
+def file_newer(host: DoctorHostPort, a: HostPath, b: HostPath) -> bool | None:
     """True when file a was written after file b, None when unknown."""
     try:
         return host.stat(host.path(a)).st_mtime_ns > host.stat(host.path(b)).st_mtime_ns
@@ -1337,7 +1339,7 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                     else "unknown"
                 )
             elif state in ("shut off", "crashed"):
-                kind = "offline" if file_newer(host, path, base) else "unknown"
+                kind = "offline" if file_newer(host, HostPath(path), HostPath(base)) else "unknown"
             else:
                 kind = "unknown"
             if kind == "live":
@@ -1461,7 +1463,7 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = 
         return
     system = vm_tools.system_images
     for d in vm_tools.image_dirs():
-        p = vm_tools.probe_dir(d, host.path if d["path"] == system else (lambda x: x))
+        p = vm_tools.probe_dir(d, (lambda x: host.path(HostPath(x))) if d["path"] == system else (lambda x: x))
         if not p["present"] or p["btrfs"] is False:
             continue
         path = p["path"]

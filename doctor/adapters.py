@@ -9,7 +9,7 @@ from typing import Any, BinaryIO, TextIO
 
 from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
-from doctor.domain import NAME, VIRSH_URI, Deployment, OstreeAnswer
+from doctor.domain import NAME, VIRSH_URI, Deployment, OstreeAnswer, ViewPath
 from vm import adapters as vm_adapters
 
 
@@ -42,57 +42,59 @@ class Host:
         self.now = float(env.get("CST_DOCTOR_NOW") or time.time())
         self.uid = os.getuid()
         self.arch = os.uname().machine
-        self.state_home = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        self.state_home = ViewPath(
+            env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        )
         # Every command (virsh too) starts from self.env, in doctor's words for a fault.
         self._commands: CommandRunnerPort = SubprocessCommandRunner(self, base_env=env, words=host_words)
 
-    def path(self, p: str) -> str:
+    def path(self, p: str) -> ViewPath:
         """A host path, as this process can read it."""
-        return os.path.join(self.root, p.lstrip("/"))
+        return ViewPath(os.path.join(self.root, p.lstrip("/")))
 
-    def repo_path(self, rel: str) -> str:
+    def repo_path(self, rel: str) -> ViewPath:
         """The checkout's file rel (a path that does not exist when there is no checkout)."""
-        return os.path.join(self.repo, rel) if self.repo else os.path.join("/nonexistent-cst-checkout", rel)
+        return ViewPath(os.path.join(self.repo, rel) if self.repo else os.path.join("/nonexistent-cst-checkout", rel))
 
-    def open_text(self, path: str) -> TextIO:
+    def open_text(self, path: ViewPath) -> TextIO:
         """open(path) as UTF-8, undecodable bytes replaced."""
         return open(path, encoding="utf-8", errors="replace")
 
-    def open_bytes(self, path: str) -> BinaryIO:
+    def open_bytes(self, path: ViewPath) -> BinaryIO:
         """open(path, "rb")."""
         return open(path, "rb")
 
-    def listdir(self, path: str) -> list[str]:
+    def listdir(self, path: ViewPath) -> list[str]:
         """os.listdir."""
         return os.listdir(path)
 
-    def exists(self, path: str) -> bool:
+    def exists(self, path: ViewPath) -> bool:
         """os.path.exists."""
         return os.path.exists(path)
 
-    def isdir(self, path: str) -> bool:
+    def isdir(self, path: ViewPath) -> bool:
         """os.path.isdir."""
         return os.path.isdir(path)
 
-    def isfile(self, path: str) -> bool:
+    def isfile(self, path: ViewPath) -> bool:
         """os.path.isfile."""
         return os.path.isfile(path)
 
-    def islink(self, path: str) -> bool:
+    def islink(self, path: ViewPath) -> bool:
         """os.path.islink."""
         return os.path.islink(path)
 
-    def stat(self, path: str) -> os.stat_result:
+    def stat(self, path: ViewPath) -> os.stat_result:
         """os.stat."""
         return os.stat(path)
 
-    def lstat(self, path: str) -> os.stat_result:
+    def lstat(self, path: ViewPath) -> os.stat_result:
         """os.lstat."""
         return os.lstat(path)
 
-    def realpath(self, path: str) -> str:
+    def realpath(self, path: ViewPath) -> ViewPath:
         """os.path.realpath."""
-        return os.path.realpath(path)
+        return ViewPath(os.path.realpath(path))
 
     def user_name(self, uid: int) -> str:
         """pwd.getpwuid(uid).pw_name, or "" for an unknown uid."""

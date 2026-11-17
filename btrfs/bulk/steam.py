@@ -73,6 +73,7 @@ from btrfs.bulk.domain import (
     vdf_load,
     vdf_parse,
 )
+from cst_core.domain.values import Json
 
 
 def lf_validate(tree: Mapping[str, Any]) -> dict[str, Any]:
@@ -992,7 +993,7 @@ def u_write_vdf_pair(
     data_b64: str,
     ts: str,
     backup: bool,
-) -> list[int]:
+) -> list[Json]:
     """Write DATA over both libraryfolders.vdf (config/ first): each must
     still be what was read; a backup of each (once per run, 5 kept); then a
     temp file, fsync, rename over it, fsync of the folder. Returns the new
@@ -1014,7 +1015,7 @@ def u_write_vdf_pair(
             baks = sorted(n for n in os.listdir(d) if n.startswith(base + ".cst-bak-"))
             for n in baks[:-STEAM_BACKUPS]:
                 os.unlink(os.path.join(d, n))
-    out = []
+    out: list[Json] = []  # mtimes (ints): they come back through as_user's JSON
     for f, r in zip(files, olds, strict=False):
         tmp = f + ".cst-tmp"
         if kind(tmp) != "absent":

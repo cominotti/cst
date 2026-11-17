@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal, NewType, Protocol
 
 from cst_core.domain.install import OnDisk
 
@@ -182,6 +182,12 @@ class ClockPort(Protocol):
     def sleep(self, seconds: float) -> None: ...
 
 
+# A libvirt domain name ("win11-devbox"), as virsh lists and takes it.
+VmName = NewType("VmName", str)
+# A systemd unit name with its suffix ("dev-zram0.swap", "foo@x.service").
+UnitName = NewType("UnitName", str)
+
+
 class VirshPort(Protocol):
     """Consolidated interface to libvirt (`virsh`) domain queries and control.
 
@@ -197,9 +203,9 @@ class VirshPort(Protocol):
         start_new_session: bool = False,
     ) -> CommandResult: ...
 
-    def domains(self, *, all_domains: bool = True) -> list[str]: ...
+    def domains(self, *, all_domains: bool = True) -> list[VmName]: ...
 
-    def dumpxml(self, domain: str, *, inactive: bool = False) -> str | None: ...
+    def dumpxml(self, domain: VmName, *, inactive: bool = False) -> str | None: ...
 
 
 class CstDispatchPort(Protocol):
@@ -229,19 +235,19 @@ class SystemdPort(Protocol):
 
     def daemon_reload(self) -> None: ...
 
-    def start(self, unit: str) -> CommandResult:
+    def start(self, unit: UnitName) -> CommandResult:
         """`systemctl start unit`: its exit status and what it printed."""
         ...
 
-    def stop(self, unit: str) -> CommandResult:
+    def stop(self, unit: UnitName) -> CommandResult:
         """`systemctl stop unit`: its exit status and what it printed."""
         ...
 
-    def restart(self, unit: str) -> CommandResult:
+    def restart(self, unit: UnitName) -> CommandResult:
         """`systemctl restart unit`: its exit status and what it printed."""
         ...
 
-    def escape_path(self, path: str, *, suffix: str) -> str: ...
+    def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
 
 class InstallTargetPort(Protocol):

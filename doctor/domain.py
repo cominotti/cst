@@ -6,15 +6,35 @@ layers).
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+import os.path
 import re
 import shlex
-from typing import Any, Self
+from typing import Any, NewType, Self
 import xml.etree.ElementTree as ET
 
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.errors import Usage
 
 NAME = "cst-doctor"
+
+# A path on the host machine ("/etc/cst/vm.conf"), and where this process
+# reads it: the same path on the host, /run/host/... in a toolbox
+# (DoctorHostPort.path maps one to the other). The host's file methods take
+# a ViewPath only: a host path passed unmapped would read the toolbox's own
+# file, and a ViewPath mapped again would point nowhere.
+HostPath = NewType("HostPath", str)
+ViewPath = NewType("ViewPath", str)
+
+
+def host_join(base: HostPath, *parts: str) -> HostPath:
+    """os.path.join on the host side."""
+    return HostPath(os.path.join(base, *parts))
+
+
+def view_join(base: ViewPath, *parts: str) -> ViewPath:
+    """os.path.join on this process's side (a name inside a folder already mapped)."""
+    return ViewPath(os.path.join(base, *parts))
+
 
 OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
 SEVERITY: dict[str, int] = {OK: 0, INFO: 1, WARN: 2, ERROR: 3}
@@ -34,9 +54,9 @@ NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d[^-]*\
 
 TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
-BTRFS_SYSFS = "/sys/fs/btrfs"
-RECLAIM_CONF = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
-HEALTH_CHECK_HOST = "/usr/local/sbin/btrfs-health-check"
+BTRFS_SYSFS = HostPath("/sys/fs/btrfs")
+RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
+HEALTH_CHECK_HOST = HostPath("/usr/local/sbin/btrfs-health-check")
 UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of
@@ -50,23 +70,23 @@ ONE_DEVICE_FACTOR: dict[str, int] = {"single": 1, "dup": 2}
 RESIZE_SLACK = 16 * 2**20
 
 # What btrfs-snapshot-core writes (its state folder and the two lists in it).
-SNAP_STATE = DEFAULT_STATE_DIR
-SNAP_UNFINISHED = f"{SNAP_STATE}/{UNFINISHED_FILE}"
-SNAP_WRITABLE = f"{SNAP_STATE}/{WRITABLE_FILE}"
-SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"  # also read by the VM NAS check
+SNAP_STATE = HostPath(DEFAULT_STATE_DIR)
+SNAP_UNFINISHED = HostPath(f"{SNAP_STATE}/{UNFINISHED_FILE}")
+SNAP_WRITABLE = HostPath(f"{SNAP_STATE}/{WRITABLE_FILE}")
+SNAP_CONF = HostPath("/etc/btrfs-setup/snapshots.conf")  # also read by the VM NAS check
 
-NOCOW_POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
+NOCOW_POSTPONED = HostPath("/var/lib/docker-volumes-nocow/postponed")
 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
-ZSWAP_CONF = "/etc/tmpfiles.d/zswap.conf"
-ZSWAP_PARAMS = "/sys/module/zswap/parameters"
+ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
+ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
-GAME_RUN = "/run/cpu-setup"
-GAME_STATE = f"{GAME_RUN}/game.state"
-GAME_INTENDED = f"{GAME_RUN}/game.intended"
-GAME_MANUAL = f"{GAME_RUN}/manual"
-GAME_DROPIN_DIR = "/run/systemd/system"
+GAME_RUN = HostPath("/run/cpu-setup")
+GAME_STATE = HostPath(f"{GAME_RUN}/game.state")
+GAME_INTENDED = HostPath(f"{GAME_RUN}/game.intended")
+GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
+GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
 GAME_PROFILE_HOST = "/usr/local/sbin/cpu-game-profile"
 
@@ -79,14 +99,14 @@ USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.sli
 LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
-CPU_CONF = "/etc/cpu-setup/cpu-setup.conf"
+CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
-VM_INDEX = "/var/lib/cst/vm-backups.json"
-VM_CONF = "/etc/cst/vm.conf"
+VM_INDEX = HostPath("/var/lib/cst/vm-backups.json")
+VM_CONF = HostPath("/etc/cst/vm.conf")
 VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
 VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works
-VM_RUN_DIR = "/run/cst-vm"  # nas-<vm>.lock: the pid of a NAS backup in progress
-VM_TIMER_WANTS = "/etc/systemd/system/timers.target.wants"
+VM_RUN_DIR = HostPath("/run/cst-vm")  # nas-<vm>.lock: the pid of a NAS backup in progress
+VM_TIMER_WANTS = HostPath("/etc/systemd/system/timers.target.wants")
 # Packages that make up the guest's virtual hardware: name prefixes.
 VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 # The ones named in the message (the others are only counted).

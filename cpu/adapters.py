@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Literal
 
 from cpu.domain import CPU_DISABLE_DEFAULT, GAME_STATE, QUIET_LIMITS, URI, lows, pressure_field
 from cst_core.adapters import SubprocessVirshAdapter
@@ -86,7 +86,7 @@ def virsh(*args: str, check: bool = True) -> str:
     return r.stdout
 
 
-def cpus_of(kind: str) -> list[int]:
+def cpus_of(kind: Literal["cpu_core", "cpu_atom"]) -> list[int]:
     """CPU numbers of core type kind ('cpu_core' or 'cpu_atom')."""
     text = read_text(f"/sys/devices/{kind}/cpus", "").strip()
     return list(CpuSet.parse(text).sorted_cpus()) if text else []  # no such core type: none
@@ -98,7 +98,7 @@ def mean_mhz(cpus: Sequence[int]) -> int:
     return round(sum(vals) / len(vals) / 1000) if vals else 0
 
 
-def pressure_total(path: str, kind: str) -> int | None:
+def pressure_total(path: str, kind: Literal["some", "full"]) -> int | None:
     """Cumulative stall microseconds ('some' or 'full') of a pressure file."""
     v = pressure_field(read_text(path, ""), kind, "total")
     return int(v) if v is not None else None
