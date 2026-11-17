@@ -1168,7 +1168,10 @@ EOF
         stage = "/var/tmp/e2e-dist"
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
         out = exec_bash(
             self.SYSTEMD_CONTAINER,
             f"""
@@ -1203,6 +1206,10 @@ EOF
             if grep -v '^unchanged: ' <<<"$lgain"; then echo "a link to the same content was rewritten" >&2; exit 1; fi
             [[ -L "$d" ]] || {{ echo "the link was replaced" >&2; exit 1; }}
             rm -f "$d" /home/tester/.e2e-link-target
+            # The file again (the install record still lists it, as installed): the record checks below
+            # compare every recorded destination with the stage.
+            runuser -u tester -- {installer} install --root {stage} --home /home/tester --owner user >/dev/null
+            [[ -f "$d" && ! -L "$d" ]] || {{ echo "the user file was not installed again" >&2; exit 1; }}
             # At a root destination a link is replaced, even one to the same content; and as root
             # a root file owned by a user (a hand copy) is rewritten, owned by root again.
             r="{stage}/usr/local/sbin/btrfs-notify"
@@ -1221,6 +1228,54 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-INSTALLED", out)
+        # The install records list every destination with the sha256 of the file on disk (root's under
+        # the stage's /var/lib/cst, tester's in tester's home), keyed by the destination as installed.
+        check_records = f"""
+import hashlib, json, sys
+stage = {stage!r}
+for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/home/tester/.local/state/cst/installed.json", "/home/")):
+    rec = json.load(open(path))
+    assert rec["format"] == 1, rec["format"]
+    for dest, f in rec["files"].items():
+        data = open(stage + dest, "rb").read()
+        assert f["sha256"] == hashlib.sha256(data).hexdigest(), dest
+        assert dest.startswith(prefix), dest
+    print(len(rec["files"]), sorted(rec["files"])[0])
+"""
+        rec = exec_bash(self.SYSTEMD_CONTAINER, f"/usr/bin/python3 -I -c {shlex.quote(check_records)}").stdout.split()
+        counts = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"{installer} dests --owner root | wc -l; {installer} dests --owner user | wc -l",
+        ).stdout.split()
+        self.assertEqual(rec[0], counts[0], "the root record does not list every root destination")
+        self.assertEqual(rec[2], counts[1], "tester's record does not list every user destination")
+        # An edited file: check says not current; a second install puts it back; remove --component takes a
+        # component's files and record lines away.
+        cycle = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            f={stage}/usr/local/sbin/docker-gc
+            echo '# edited' >>"$f"
+            rc=0; {installer} check --root {stage} --owner root {sets} || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
+            # cst doctor, pointed at the stage, names it (its install area reads the stage's record).
+            doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
+                {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
+            # Captured first: under pipefail, `install | grep -q` fails when grep stops reading at the
+            # match and the installer, still printing, ends on SIGPIPE (141).
+            restore="$({installer} install --root {stage} --owner root {sets})"
+            grep -qxF "written:   $f" <<<"$restore" ||
+                {{ echo "a second install did not restore the edited file: $restore" >&2; exit 1; }}
+            {installer} check --root {stage} --owner root {sets}
+            {installer} remove --root {stage} --component btrfs:docker-gc
+            [[ ! -e "$f" ]] || {{ echo "remove --component left $f" >&2; exit 1; }}
+            grep -q docker-gc {stage}/var/lib/cst/installed.json && {{ echo "the record still lists docker-gc" >&2; exit 1; }}
+            {installer} install --root {stage} --component btrfs:docker-gc >/dev/null
+            echo E2E-RECORD-CYCLE
+            """,
+        ).stdout
+        self.assertIn("E2E-RECORD-CYCLE", cycle)
         # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
         entries = {
             "/usr/local/sbin/btrfs-bulk": ("--help", 2),
@@ -1250,6 +1305,146 @@ EOF
                     )
                     self.assertNotRegex(p.stderr, r"ImportError|ModuleNotFoundError|Traceback", p.stderr)
                     self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+
+    # The --set values of the components with templates (as their setup commands pass them).
+    COMPONENT_SETS: Mapping[str, str] = {
+        "btrfs:core": "--set UUID=00000000-0000-0000-0000-000000000000",
+        "btrfs:top-mount": "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5",
+        "cpu:core": "--set USER=tester",
+        "cpu:docker-slice": "--set ALLOWED=AllowedCPUs=0",
+    }
+    # Components whose units run a program of another one (btrfs-stall-alert.service runs btrfs-notify):
+    # installed first, as btrfs-setup.sh install does, and removed after.
+    COMPONENT_NEEDS: Mapping[str, tuple[str, ...]] = {"btrfs:core": ("btrfs:alerts",)}
+
+    def test_19_every_component_full_cycle_on_the_container_root(self) -> None:
+        """Each component of the manifest, installed for real on the container's / (root's as root,
+        the user's as tester): plan changes nothing; install over a plain-script copy of each of its
+        Python programs (what CST installed before the zipapps) writes the zipapps and lists every
+        file in the install record; once marked done, cst doctor's install area has no WARN about it;
+        a second install changes nothing, the record included; remove --component removes the
+        files and their record lines. A component with a file already in place (another test's) is
+        skipped, so nothing of another test is removed. /usr/sbin/btrfs, which a btrfs unit runs and
+        the image lacks, is an empty program for the time of the test (as in test_16)."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        stub = "/usr/sbin/btrfs"
+        made_stub = exec_bash(c, f"[[ -e {stub} ]] || {{ install -m 0755 /dev/null {stub}; echo made; }}").stdout
+        if "made" in made_stub:
+            self.addCleanup(exec_bash, c, f"rm -f {stub}", check=False)
+        script = 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.domain.install import COMPONENTS; print(" ".join(COMPONENTS))'
+        components = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
+        self.assertIn("btrfs:core", components)
+        for comp in components:
+            with self.subTest(component=comp):
+                self._component_cycle(c, installer, comp)
+
+    def _component_cycle(self, c: str, installer: str, comp: str) -> None:
+        sets = self.COMPONENT_SETS.get(comp, "")
+        owner = exec_bash(c, f"{installer} dests --component {comp} | head -n 1").stdout.strip()
+        user = owner.startswith("~")
+        run = "runuser -u tester -- " if user else ""
+        home = "--home /home/tester" if user else ""
+        record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
+        dests = exec_bash(c, f"{installer} dests {home} --component {comp}").stdout.split()
+        present = exec_bash(c, " ".join(f"[[ ! -e {shlex.quote(d)} ]] || echo {shlex.quote(d)};" for d in dests)).stdout
+        if present.strip():
+            self.skipTest(f"{comp}: already there (another test's): {present.split()}")
+        cleanup = f"{run}{installer} remove {home} --component {comp} >/dev/null"
+        self.addCleanup(exec_bash, c, cleanup, check=False)
+        made_needs: list[str] = []
+        for need in self.COMPONENT_NEEDS.get(comp, ()):
+            # Installed (and removed after) only when none of its files is there: another test's stay.
+            present = f"$({installer} dests --component {need} | while read -r d; do [[ ! -e $d ]] || echo $d; done)"
+            made = exec_bash(
+                c, f'if [[ -z "{present}" ]]; then {installer} install --component {need} >/dev/null; echo made; fi'
+            ).stdout
+            if "made" in made:
+                made_needs.append(need)
+                self.addCleanup(exec_bash, c, f"{installer} remove --component {need} >/dev/null", check=False)
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            plan="$({run}{installer} plan {home} {sets} --component {comp})"
+            for d in {" ".join(shlex.quote(d) for d in dests)}; do
+                [[ ! -e "$d" ]] || {{ echo "plan wrote $d" >&2; exit 1; }}
+            done
+            [[ "$(grep -c '^would write: ' <<<"$plan")" == {len(dests)} ]] || {{ echo "plan: $plan" >&2; exit 1; }}
+            # What an older CST installed: each Python program as the plain script.
+            for s in $({installer} srcs --component {comp} --kind python-entry); do
+                d="$({installer} dests {home} "$s")"
+                {run}install -D -m 0755 "/opt/cst-rw/$s" "$d"
+            done
+            {run}{installer} install {home} {sets} --component {comp} >/dev/null
+            {run}{installer} mark {home} --component {comp} done
+            for s in $({installer} srcs --component {comp} --kind python-entry); do
+                d="$({installer} dests {home} "$s")"
+                /usr/bin/python3 -I -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$d" ||
+                    {{ echo "$d is still the plain script" >&2; exit 1; }}
+            done
+            before="$(sha256sum {record})"
+            again="$({run}{installer} install {home} {sets} --component {comp})"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
+            [[ "$(sha256sum {record})" == "$before" ]] || {{ echo "a second install changed the record" >&2; exit 1; }}
+            doc="$({run}env HOME={"/home/tester" if user else "/root"} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            # Only its install area: the other areas report on the container itself.
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            [[ -n "$inst" ]] || {{ echo "doctor has no install area: $doc" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e '{comp}' {" ".join(f"-e {shlex.quote(d)}" for d in dests)}; then
+                echo "doctor warns about {comp}" >&2; exit 1
+            fi
+            {run}{installer} remove {home} --component {comp} >/dev/null
+            for d in {" ".join(shlex.quote(d) for d in dests)}; do
+                [[ ! -e "$d" ]] || {{ echo "remove left $d" >&2; exit 1; }}
+            done
+            if grep -qF '"{comp}"' {record}; then echo "the record still lists {comp}" >&2; exit 1; fi
+            echo E2E-CYCLE-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CYCLE-OK", out)
+        # Removed now, not at the end of the test: the component's own cycle (a later subTest) needs it gone.
+        for need in made_needs:
+            exec_bash(c, f"{installer} remove --component {need} >/dev/null")
+
+    def test_20_units_are_verified_before_they_replace_the_installed_ones(self) -> None:
+        """As root on the container's /, the installer runs the real `systemd-analyze verify
+        --recursive-errors=no` on the units an install changes, after their programs and before any of
+        them is written. Negative control: a scratch copy of the checkout whose docker-gc.service has an
+        unknown key (only a warning without --recursive-errors=no) is refused with exit 1, naming the
+        key, and none of the component's units is written (its program is). The same install from the
+        real checkout writes them. Not verified (and not tested here): drop-ins, template units, a
+        staged install (--root)."""
+        c = self.SYSTEMD_CONTAINER
+        dests = "/usr/local/sbin/docker-gc /etc/systemd/system/docker-gc-recorder.service /etc/systemd/system/docker-gc.service /etc/systemd/system/docker-gc.timer"
+        if exec_bash(c, f"for f in {dests}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("docker-gc is installed already (another test's)")
+        copy = "/var/tmp/e2e-cst-verify"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {copy}; /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py remove --component btrfs:docker-gc",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            rm -rf {copy} && cp -a /opt/cst-rw {copy}
+            sed -i 's/^\\[Service\\]$/[Service]\\nBogusKeyE2E=1/' {copy}/btrfs/units/docker-gc.service
+            grep -q '^BogusKeyE2E=1$' {copy}/btrfs/units/docker-gc.service || {{ echo "the unit was not broken" >&2; exit 1; }}
+            rc=0; err="$(/usr/bin/python3 -I -B {copy}/cst_core/installer.py install --component btrfs:docker-gc 2>&1 >/dev/null)" || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "a broken unit was not refused (exit $rc): $err" >&2; exit 1; }}
+            grep -qF "BogusKeyE2E" <<<"$err" || {{ echo "the refusal does not name the problem: $err" >&2; exit 1; }}
+            for u in docker-gc-recorder.service docker-gc.service docker-gc.timer; do
+                [[ ! -e /etc/systemd/system/$u ]] || {{ echo "$u was written although verify failed" >&2; exit 1; }}
+            done
+            [[ -x /usr/local/sbin/docker-gc ]] || {{ echo "the program was not written first" >&2; exit 1; }}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --component btrfs:docker-gc >/dev/null
+            [[ -f /etc/systemd/system/docker-gc.service ]] || {{ echo "the good unit was not written" >&2; exit 1; }}
+            echo E2E-VERIFY-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-VERIFY-OK", out)
 
     def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
         """`cst vm backup-timer on` with the real systemd: it installs cst-vm
@@ -1504,7 +1699,10 @@ EOF
         not_in_image = "/usr/sbin/btrfs"
         self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        sets = "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
         exec_bash(
             c,
             f"""

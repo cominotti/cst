@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.errors import Usage
+from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
 
 NAME = "cst-doctor"
@@ -58,6 +59,8 @@ TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 BTRFS_SYSFS = HostPath("/sys/fs/btrfs")
 RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
 HEALTH_CHECK_HOST = HostPath("/usr/local/sbin/btrfs-health-check")
+# btrfs-notify, which a VM backup that fails alerts through (its manifest dest).
+NOTIFY_HOST = HostPath(manifest_by_src()["btrfs/btrfs-notify"].dest)
 UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of
@@ -519,3 +522,34 @@ def scrub_dropin_limit(text: str) -> str:
     """The limit the scrub service's drop-in sets, or "" (no drop-in, no limit)."""
     m = _SCRUB_DROPIN_LIMIT.search(text)
     return m.group(1) if m else ""
+
+
+# The settings whose value is a command line (ExecSearchPath=, ExecPaths= hold folders, not programs).
+_EXEC_COMMANDS = frozenset(
+    ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
+)
+_UNIT_SUFFIXES = (".service", ".timer", ".socket", ".path", ".mount", ".automount", ".slice", ".target")
+
+
+def is_unit_file(dest: str) -> bool:
+    """A unit file (a drop-in, in a NAME.d folder, is not one: it runs nothing of its own)."""
+    return dest.endswith(_UNIT_SUFFIXES) and not os.path.dirname(dest).endswith(".d")
+
+
+def unit_exec_paths(text: str, home: str) -> list[str]:
+    """The CST programs a unit runs: every word of its command lines (ExecStart= and the like) under
+    /usr/local/ or %h/ (%h as home), in order, without the prefixes systemd allows before the command
+    (-@:+!|)."""
+    out: list[str] = []
+    roots = ("/usr/local/", home.rstrip("/") + "/") if home else ("/usr/local/",)
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip() not in _EXEC_COMMANDS:
+            continue
+        for word in value.split():
+            word = word.lstrip("-@:+!|")
+            if word.startswith("%h/") and home:
+                word = home.rstrip("/") + word[2:]
+            if word.startswith(roots) and word not in out:
+                out.append(word)
+    return out

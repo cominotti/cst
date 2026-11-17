@@ -1,34 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
 """The `cst doctor` command line: argv to the checks, the report to a stream.
 
-It takes the Host (the machine, or the host seen from a toolbox) and the VM
-tools from doctor/wiring.py, wires the checks that reuse the vm package,
-runs them all and prints the report.
+It takes the Host (the machine, or the host seen from a toolbox), the VM
+tools and the install records from doctor/wiring.py, hands them to the
+checks that take them (application.wired_checks), runs them all and prints
+the report.
 """
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import sys
 from typing import TextIO
 
 from doctor import application as app, wiring
 from cst_core.domain.errors import Usage
-from doctor.domain import NAME, Result, parse_args
-from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from doctor.domain import NAME, parse_args
 from doctor.presenter import render
-
-
-def wired_checks(vm: VmToolsPort) -> list[tuple[str, CheckFn]]:
-    """The registered checks, in order; the VM hardware and image-folder checks get vm."""
-
-    def check_vm_hardware(host: DoctorHostPort) -> Iterator[Result]:
-        return app.check_vm_hardware(host, vm_tools=vm)
-
-    def check_vm_image_dirs(host: DoctorHostPort) -> Iterator[Result]:
-        return app.check_vm_image_dirs(host, vm_tools=vm)
-
-    wired: dict[CheckFn, CheckFn] = {app.check_vm_hardware: check_vm_hardware}
-    wired[app.check_vm_image_dirs] = check_vm_image_dirs
-    return [(area, wired.get(fn, fn)) for area, fn in app.CHECKS]
 
 
 def main(
@@ -53,4 +39,5 @@ def main(
         print(doc.replace("doctor [--brief]", f"{prog} [--brief]", 1), file=stdout)
         return 0
     host = wiring.host(env, entry_file)
-    return render(app.run_checks(host, wired_checks(wiring.vm_tools())), brief, stdout, host.container, prog)
+    checks = app.wired_checks(wiring.vm_tools(), wiring.installed_files(entry_file))
+    return render(app.run_checks(host, checks), brief, stdout, host.container, prog)

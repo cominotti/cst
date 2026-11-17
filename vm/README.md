@@ -692,6 +692,11 @@ cst vm backup-timer status [VM]   # on or off, up to date, next run, last NAS ba
 cst vm backup-timer off [VM]      # (root) stops it; removes the files when no VM uses them
 ```
 
+Both write and remove these files through CST's installer, which lists them in
+the install record `/var/lib/cst/installed.json` (component `vm:backup-timer`,
+marked complete once the timer is enabled; `off` takes them out again), where
+`cst doctor` checks them.
+
 `off` also makes systemd forget that VM's last run
 (`systemctl clean --what=state`, which removes
 `/var/lib/systemd/timers/stamp-cst-vm-backup@<VM>.timer`), before the files go.

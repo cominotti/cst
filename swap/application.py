@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import posixpath
 import re
 
+from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
@@ -102,6 +103,10 @@ class SwapEnvironment:
     cpu_run_dir: str = "/run/cpu-setup"
     prog: str = "cst swap"
     spec: SwapHardwareSpec = SwapHardwareSpec()
+    # The install record that lists swap's three files ("": not recorded) and whether apply runs as
+    # root (a root file owned by another account is then rewritten, as by the installer).
+    install_record: str = ""
+    as_root: bool = False
 
     @property
     def crypttab(self) -> str:
@@ -161,11 +166,14 @@ class SwapApplicationService:
         fs: FileSystemPort,
         systemd: SystemdPort,
         system: SwapSystemPort,
+        *,
+        installer: InstallService,
     ) -> None:
         self._env = env
         self._fs = fs
         self._systemd = systemd
         self._system = system
+        self._installer = installer
 
     @property
     def prog(self) -> str:
@@ -597,14 +605,23 @@ class SwapApplicationService:
         events.append(ApplyEvent("out", "line", f"written:   {path} ({name} entry)"))
         return True, True, True
 
-    def _apply_managed_file(self, src: str, dest: str, mode: int, events: list[ApplyEvent]) -> bool:
-        """Ensure dest matches src atomically. Returns True if dest was written."""
+    def _apply_managed_file(self, entry: InstallEntry, src: str, dest: str, events: list[ApplyEvent]) -> bool:
+        """Ensure dest matches src, through the installer (atomic; listed in the install record, also when
+        it was already current). Returns True if dest was written."""
         st = self._inspect_file(src, dest)
-        if st == "ok":
+        place = Placement(
+            path=dest,
+            dest=entry.dest,
+            record=self._env.install_record,
+            component=entry.component,
+            src=entry.src,
+            kind=entry.kind,
+            owner=entry.owner,
+            mode=entry.mode.bits,
+        )
+        if not self._installer.put(place, self._desired_text(src).encode("utf-8"), as_root=self._env.as_root):
             events.append(ApplyEvent("out", "line", f"unchanged: {dest}"))
             return False
-        desired = self._desired_text(src)
-        self._fs.write_atomic(dest, desired, mode)
         if st == "adopt":
             events.append(ApplyEvent("out", "line", f"adopted:   {dest} (comments renewed, settings unchanged)"))
         else:
@@ -717,7 +734,7 @@ class SwapApplicationService:
                 return self._stopped(rc, events)
 
         events.append(ApplyEvent("out", "section", "== zswap"))
-        self._apply_managed_file(env.src_tmpfiles, env.tmpfiles_conf, TMPFILES_ENTRY.mode.bits, events)
+        self._apply_managed_file(TMPFILES_ENTRY, env.src_tmpfiles, env.tmpfiles_conf, events)
         for name, val in parse_tmpfiles_params(tmpfiles_text):
             param_path = posixpath.join(env.zswap_params_dir, name)
             live = self._read_first(param_path, "")
@@ -771,7 +788,7 @@ class SwapApplicationService:
         if self._fs.exists(env.old_sysctl_conf):
             self._fs.remove_file(env.old_sysctl_conf)
             events.append(ApplyEvent("out", "line", f"removed:   {env.old_sysctl_conf} (legacy)"))
-        self._apply_managed_file(env.src_sysctl, env.sysctl_conf, SYSCTL_ENTRY.mode.bits, events)
+        self._apply_managed_file(SYSCTL_ENTRY, env.src_sysctl, env.sysctl_conf, events)
         exp_name, exp_key = WSF_EXPERIMENT
         if self._fs.exists(posixpath.join(env.cpu_run_dir, "exp-" + exp_name)):
             live_wsf = self._read_first(posixpath.join(env.proc_dir, "sys", "vm", "watermark_scale_factor"), "?")
@@ -791,8 +808,10 @@ class SwapApplicationService:
             return self._stopped(sysctl.returncode, events)
 
         events.append(ApplyEvent("out", "section", "== machine.slice"))
-        if self._apply_managed_file(env.src_dropin, env.slice_dropin, DROPIN_ENTRY.mode.bits, events):
+        if self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events):
             self._systemd.daemon_reload()
+        # swap:core's files are all in place: the install record says the component is complete.
+        self._installer.mark(env.install_record, DROPIN_ENTRY.component)
 
         settings = self.build_settings_report(self.zswap_params())
         fail = settings.has_diff

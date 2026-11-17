@@ -22,6 +22,8 @@ class InstallEntry:
     owner: Owner
     kind: ArtifactKind
     runner: Owner
+    # The part of its module this file belongs to (COMPONENTS: the command that installs it).
+    component: str
 
     @property
     def module(self) -> str:
@@ -46,8 +48,9 @@ _KINDS: Final[Mapping[str, ArtifactKind]] = {
 def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
     """The entries of a manifest table, in order.
 
-    One row per file: `src dest mode owner kind runner`, separated by blanks;
-    `mode` is octal; `#` starts a comment. A malformed row raises ValueError.
+    One row per file: `src dest mode owner kind runner component`, separated
+    by blanks; `mode` is octal; `#` starts a comment. A malformed row raises
+    ValueError.
     """
     entries: list[InstallEntry] = []
     for number, raw in enumerate(table.splitlines(), 1):
@@ -55,9 +58,11 @@ def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
         if not fields:
             continue
         try:
-            src, dest, mode, owner, kind, runner = fields
+            src, dest, mode, owner, kind, runner, component = fields
             entries.append(
-                InstallEntry(src, dest, OctalMode(int(mode, 8)), _OWNERS[owner], _KINDS[kind], _OWNERS[runner])
+                InstallEntry(
+                    src, dest, OctalMode(int(mode, 8)), _OWNERS[owner], _KINDS[kind], _OWNERS[runner], component
+                )
             )
         except (ValueError, KeyError) as exc:
             raise ValueError(f"manifest row {number}: {raw.strip()!r}: {exc}") from None
@@ -65,71 +70,97 @@ def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
 
 
 # What `install` writes: every installable file of the repository, once.
-# runner: the account that runs or reads the installed file.
+# runner: the account that runs or reads the installed file; component: the
+# part of the module it belongs to, installed and removed as a whole by one
+# command (COMPONENTS).
 INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = parse_manifest(
     r"""
-# src                                               dest                                                          mode owner kind          runner
+# src                                               dest                                                          mode owner kind          runner  component
 # btrfs: Python helpers (self-contained zipapps)
-btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root
-btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root
-btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root
-btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user
-btrfs/docker-gc                                     /usr/local/sbin/docker-gc                                     755  root  python-entry  root
-btrfs/docker-volumes-nocow                          /usr/local/sbin/docker-volumes-nocow                          755  root  python-entry  root
+btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root   btrfs:snapshots
+btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root   btrfs:snapshots
+btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root   btrfs:core
+btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user   btrfs:core
+btrfs/docker-gc                                     /usr/local/sbin/docker-gc                                     755  root  python-entry  root   btrfs:docker-gc
+btrfs/docker-volumes-nocow                          /usr/local/sbin/docker-volumes-nocow                          755  root  python-entry  root   btrfs:core
 # btrfs: standalone shell helpers
-btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  shell         root
-btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify                                  755  root  shell         root
-btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root
-btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-alerts                             755  root  shell         user
+btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  shell         root   btrfs:core
+btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify                                  755  root  shell         root   btrfs:alerts
+btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root   btrfs:snapshots
+btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-alerts                             755  root  shell         user   btrfs:alerts
 # btrfs: systemd units and data
-btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root
-btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root
-btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root
-btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root
-btrfs/units/btrfs-scrub-weekly.service              /etc/systemd/system/btrfs-scrub-weekly.service                644  root  unit          root
-btrfs/units/btrfs-scrub-weekly.timer                /etc/systemd/system/btrfs-scrub-weekly.timer                  644  root  unit          root
-btrfs/units/btrfs-snapshot-nas.service              /etc/systemd/system/btrfs-snapshot-nas.service                644  root  unit          root
-btrfs/units/btrfs-snapshot-nas.timer                /etc/systemd/system/btrfs-snapshot-nas.timer                  644  root  unit          root
-btrfs/units/btrfs-snapshot.service                  /etc/systemd/system/btrfs-snapshot.service                    644  root  unit          root
-btrfs/units/btrfs-snapshot.timer                    /etc/systemd/system/btrfs-snapshot.timer                      644  root  unit          root
-btrfs/units/btrfs-stall-alert.service               /etc/systemd/system/btrfs-stall-alert.service                 644  root  unit          root
-btrfs/units/btrfs-stall-monitor.service             /etc/systemd/system/btrfs-stall-monitor.service               644  root  unit          root
-btrfs/units/btrfs-subvol-convert.service            /etc/systemd/system/btrfs-subvol-convert.service              644  root  unit          root
-btrfs/units/docker-gc-recorder.service              /etc/systemd/system/docker-gc-recorder.service                644  root  unit          root
-btrfs/units/docker-gc.service                       /etc/systemd/system/docker-gc.service                         644  root  unit          root
-btrfs/units/docker-gc.timer                         /etc/systemd/system/docker-gc.timer                           644  root  unit          root
-btrfs/units/docker-volumes-nocow.service            /etc/systemd/system/docker-volumes-nocow.service              644  root  unit          root
-btrfs/units/user/cst-pending-alerts.service         /etc/systemd/user/cst-pending-alerts.service                  644  root  unit          user
-btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-btrfs\x2dtop.mount                644  root  unit          root
-btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root
-btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root
-btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root
+btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root   btrfs:below
+btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root   btrfs:snapshots
+btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root   btrfs:core
+btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root   btrfs:core
+btrfs/units/btrfs-scrub-weekly.service              /etc/systemd/system/btrfs-scrub-weekly.service                644  root  unit          root   btrfs:core
+btrfs/units/btrfs-scrub-weekly.timer                /etc/systemd/system/btrfs-scrub-weekly.timer                  644  root  unit          root   btrfs:core
+btrfs/units/btrfs-snapshot-nas.service              /etc/systemd/system/btrfs-snapshot-nas.service                644  root  unit          root   btrfs:snapshots
+btrfs/units/btrfs-snapshot-nas.timer                /etc/systemd/system/btrfs-snapshot-nas.timer                  644  root  unit          root   btrfs:snapshots
+btrfs/units/btrfs-snapshot.service                  /etc/systemd/system/btrfs-snapshot.service                    644  root  unit          root   btrfs:snapshots
+btrfs/units/btrfs-snapshot.timer                    /etc/systemd/system/btrfs-snapshot.timer                      644  root  unit          root   btrfs:snapshots
+btrfs/units/btrfs-stall-alert.service               /etc/systemd/system/btrfs-stall-alert.service                 644  root  unit          root   btrfs:core
+btrfs/units/btrfs-stall-monitor.service             /etc/systemd/system/btrfs-stall-monitor.service               644  root  unit          root   btrfs:core
+btrfs/units/btrfs-subvol-convert.service            /etc/systemd/system/btrfs-subvol-convert.service              644  root  unit          root   btrfs:snapshots
+btrfs/units/docker-gc-recorder.service              /etc/systemd/system/docker-gc-recorder.service                644  root  unit          root   btrfs:docker-gc
+btrfs/units/docker-gc.service                       /etc/systemd/system/docker-gc.service                         644  root  unit          root   btrfs:docker-gc
+btrfs/units/docker-gc.timer                         /etc/systemd/system/docker-gc.timer                           644  root  unit          root   btrfs:docker-gc
+btrfs/units/docker-volumes-nocow.service            /etc/systemd/system/docker-volumes-nocow.service              644  root  unit          root   btrfs:core
+btrfs/units/user/cst-pending-alerts.service         /etc/systemd/user/cst-pending-alerts.service                  644  root  unit          user   btrfs:alerts
+btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-btrfs\x2dtop.mount                644  root  unit          root   btrfs:top-mount
+btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root   btrfs:top-mount
+btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root   btrfs:core
+btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root   btrfs:core
 # cpu
-cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root
-cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user
-cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  shell         root
-cpu/units/builds.slice                              /etc/systemd/system/builds.slice                              644  root  unit          root
-cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root
-cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root
-cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root
-cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root
-cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root
-cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user
-cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root
+cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
+cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
+cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  shell         root   cpu:core
+cpu/units/builds.slice.in                           /etc/systemd/system/builds.slice                              644  root  unit          root   cpu:docker-slice
+cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root   cpu:core
+cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root   cpu:core
+cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root   cpu:core
+cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root   cpu:core
+cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root   cpu:core
+cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user   cpu:gamemode
+cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root   cpu:core
 # bluetooth
-bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user
+bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user   bluetooth:ldac
 # swap
-swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root
-swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root
-swap/units/machine.slice.d-50-memory-low.conf       /etc/systemd/system/machine.slice.d/50-memory-low.conf        644  root  unit          root
+swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root   swap:core
+swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root   swap:core
+swap/units/machine.slice.d-50-memory-low.conf       /etc/systemd/system/machine.slice.d/50-memory-low.conf        644  root  unit          root   swap:core
 # toolchains
-toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user
-toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user
-toolchains/toolchains.conf                          ~/.local/lib/cst/toolchains.conf                              644  user  data          user
+toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user   toolchains:auto
+toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user   toolchains:sccache
+toolchains/toolchains.conf                          ~/.local/lib/cst/toolchains.conf                              644  user  data          user   toolchains:auto
 # vm
-vm/cst-vm                                           /usr/local/sbin/cst-vm                                        755  root  python-entry  root
+vm/cst-vm                                           /usr/local/sbin/cst-vm                                        755  root  python-entry  root   vm:backup-timer
 """
 )
+
+
+# The components of the manifest: each is a part of one module whose files one
+# command installs (and refreshes) together, in one installer call; the value
+# is that command, as a user types it.
+COMPONENTS: Final[Mapping[str, str]] = {
+    "btrfs:core": "cst btrfs install",
+    # btrfs-notify and the login-time reader of the alerts it keeps: `cst btrfs install` always installs
+    # them; `snapshots setup` (which alerts through them too) installs them as well.
+    "btrfs:alerts": "cst btrfs install",
+    "btrfs:below": "cst btrfs install",
+    "btrfs:snapshots": "cst btrfs snapshots setup",
+    "btrfs:top-mount": "cst btrfs snapshots setup",
+    "btrfs:docker-gc": "cst btrfs docker-gc enable",
+    "cpu:core": "cst cpu install",
+    "cpu:gamemode": "cst cpu install",
+    "cpu:docker-slice": "cst cpu docker-slice install",
+    "bluetooth:ldac": "cst bluetooth apply",
+    "swap:core": "cst swap apply",
+    "toolchains:auto": "cst toolchains auto on",
+    "toolchains:sccache": "cst toolchains config apply",
+    "vm:backup-timer": "cst vm backup-timer on",
+}
+
 
 SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
     """
@@ -276,10 +307,13 @@ def select_entries(
     *,
     module: str | None = None,
     kind: ArtifactKind | None = None,
+    component: str | None = None,
 ) -> tuple[InstallEntry, ...]:
-    """The entries of one module and/or one kind, in manifest order."""
+    """The entries of one module, one kind and/or one component, in manifest order."""
     return tuple(
         entry
         for entry in entries
-        if (module is None or entry.module == module) and (kind is None or entry.kind == kind)
+        if (module is None or entry.module == module)
+        and (kind is None or entry.kind == kind)
+        and (component is None or entry.component == component)
     )

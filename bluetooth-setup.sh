@@ -1120,7 +1120,7 @@ apply_watcher() {
 # lw_install: the watcher's program and unit (as the user, atomically), then
 # enabled and started; restarted when it ran with older files.
 lw_install() {
-    local tmp changed=0
+    local out changed=0
     if [[ "${LW_PROG_ST}" != ok ]]; then
         python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${LW_SRC}"
         # The zipapp of the manifest (dest ~/.local/lib/cst/bt-ldac-watch, i.e. LW_PROG).
@@ -1128,12 +1128,9 @@ lw_install() {
         changed=1
     fi
     if [[ "${LW_UNIT_ST}" != ok ]]; then
-        mkdir -p "$(dirname "${LW_UNIT_FILE}")"
-        tmp="$(mktemp -p "$(dirname "${LW_UNIT_FILE}")" ".${LW_UNIT}.XXXXXX")"
-        helper ldac-unit "${DEVICE_MAC}" "${LDAC_RATE}" >"${tmp}"
-        chmod 0644 "${tmp}"
-        mv -f "${tmp}" "${LW_UNIT_FILE}"
-        echo "written:   ${LW_UNIT_FILE} (LDAC to ${LDAC_RATE} Hz)"
+        # Generated text through the installer (atomic, as this user), listed in the install record.
+        out="$(helper ldac-unit "${DEVICE_MAC}" "${LDAC_RATE}" | cst_installer text --home "${HOME}" "${LW_UNIT_FILE}" 0644 --component bluetooth:ldac)"
+        echo "${out} (LDAC to ${LDAC_RATE} Hz)"
         changed=1
         systemctl --user daemon-reload
     fi
@@ -1151,6 +1148,7 @@ lw_install() {
         echo "unchanged: ${LW_UNIT} enabled and active"
     fi
     LW_ACTIVE="$(systemctl --user is-active "${LW_UNIT}" 2>/dev/null || true)"
+    cst_installer mark --home "${HOME}" --component bluetooth:ldac "done"
 }
 
 # lw_remove: the watcher stopped, disabled and removed, if CST installed it
@@ -1168,12 +1166,12 @@ lw_remove() {
     fi
     if [[ "${LW_UNIT_ST}" == ok || "${LW_UNIT_ST}" == change ]]; then
         systemctl --user disable --now "${LW_UNIT}" 2>/dev/null || true
-        rm -f "${LW_UNIT_FILE}"
+        cst_installer remove-text --home "${HOME}" "${LW_UNIT_FILE}" >/dev/null
         echo "removed:   ${LW_UNIT_FILE} (stopped and disabled)"
         systemctl --user daemon-reload
     fi
     if [[ "${LW_PROG_ST}" == ok || "${LW_PROG_ST}" == change ]]; then
-        rm -f "${LW_PROG}"
+        cst_installer remove --home "${HOME}" bluetooth/bt-ldac-watch >/dev/null
         rmdir "$(dirname "${LW_PROG}")" 2>/dev/null || true
         echo "removed:   ${LW_PROG}"
     fi

@@ -18,6 +18,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
+import hashlib
 import io
 import json
 import os
@@ -55,6 +57,11 @@ from doctor import (
     wiring as doc_wiring,
 )
 from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.zipapp import entry_payload
+from cst_core.application.install import InstallRequest, InstallService
+from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.record import InstallRecord
 from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
@@ -792,6 +799,14 @@ class BtrfsTest(Scratch):
             f.write(f"4096 {2 * DEV_SECTORS * 512 // 2 // 4096 - 3}\n")
         r = self.run_tool()
         self.assertIn("ok     btrfs /var: unallocated per device /dev/mapper/luks-0 586.0 GiB", r.stdout)
+
+    def test_the_installed_health_check_s_thresholds_win_over_the_checkout_s(self) -> None:
+        # The installed copy is the one that alerts: with both there, its values count.
+        hc = os.path.join(self.root, "usr", "local", "sbin")
+        os.makedirs(hc)
+        with open(os.path.join(hc, "btrfs-health-check"), "w") as f:
+            f.write("UNALLOC_MIN_GIB=70\nUNALLOC_CRIT_GIB=9\n")
+        self.assertEqual(doc_app.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (70, 9))
 
     def test_thresholds_come_from_the_health_check(self) -> None:
         self.assertEqual(doc_app.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (50, 5))
@@ -2052,7 +2067,7 @@ class CommandLineTest(Scratch):
                 calls.append(path)
                 return {"VM_NOCOW": False}
 
-        wired = doc_cli.wired_checks(Tools())
+        wired = doc_app.wired_checks(Tools())
         self.assertEqual([(a, fn.__name__) for a, fn in wired], [(a, fn.__name__) for a, fn in doc_app.CHECKS])
         by_name = {fn.__name__: fn for _, fn in wired}
         host = doc_adapters.Host(self.env, repo=REPO)
@@ -2067,7 +2082,198 @@ class CommandLineTest(Scratch):
         for a, _ in doc_app.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm"])
+        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "install"])
+
+
+class InstallAreaTest(Scratch):
+    """The install area: the install records under the fixture root (written by the real installer's
+    use case, staged there), the files as they are, and this checkout."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host = doc_adapters.Host(self.env, repo=REPO)
+        self.files = doc_adapters.InstalledFiles(REPO)
+        self.svc = InstallService(
+            LocalInstallTarget(), lambda e: entry_payload(REPO, e), record=JsonInstallRecord(), commit="c"
+        )
+        self.record = os.path.join(self.root, "var/lib/cst/installed.json")
+
+    def install(self, component: str, **values: str) -> None:
+        entries = [e for e in INSTALL_MANIFEST if e.component == component]
+        list(self.svc.install(entries, InstallRequest(root=self.root, values=values or None)))
+
+    def mark(self, component: str) -> None:
+        self.svc.mark(self.record, component)
+
+    def results(self) -> list[Result]:
+        return list(doc_app.check_install(self.host, installed=self.files))
+
+    def warns(self) -> list[Result]:
+        return [r for r in self.results() if r.status == doc_domain.WARN]
+
+    def test_a_complete_current_install_is_ok(self) -> None:
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertIn("4 file(s) as CST installed them", res[0].message)
+
+    def test_pending_changed_and_missing_are_warnings_with_the_refresh_command(self) -> None:
+        self.install("btrfs:docker-gc")
+        warns = self.warns()
+        self.assertEqual(len(warns), 1, warns)
+        self.assertIn("btrfs:docker-gc: installed only in part", warns[0].message)
+        self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
+        self.mark("btrfs:docker-gc")
+        with open(os.path.join(self.root, "etc/systemd/system/docker-gc.timer"), "a") as f:
+            f.write("# edited\n")
+        os.unlink(os.path.join(self.root, "etc/systemd/system/docker-gc.service"))
+        msgs = sorted(r.message for r in self.warns())
+        self.assertEqual(len(msgs), 2, msgs)
+        self.assertIn("/etc/systemd/system/docker-gc.service: missing (CST installed it, btrfs:docker-gc)", msgs[0])
+        self.assertIn("/etc/systemd/system/docker-gc.timer: changed since CST installed it", msgs[1])
+        self.assertTrue(all(r.fix == "cst btrfs docker-gc enable" for r in self.warns()))
+
+    def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
+        # What an older CST installed: other bytes, recorded as such.
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        old = os.path.join(self.root, "etc/systemd/system/docker-gc.timer")
+        with open(old, "a") as f:
+            f.write("# older\n")
+        with open(old, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        JsonInstallRecord().update(
+            self.record,
+            lambda rec: InstallRecord(
+                {
+                    **rec.files,
+                    "/etc/systemd/system/docker-gc.timer": replace(
+                        rec.files["/etc/systemd/system/docker-gc.timer"], sha256=sha
+                    ),
+                },
+                rec.components,
+            ),
+        )
+        res = self.results()
+        self.assertEqual(self.warns(), [], res)
+        older = [r for r in res if r.status == doc_domain.INFO]
+        self.assertEqual(len(older), 1, res)
+        self.assertIn(
+            "btrfs:docker-gc: 1 file(s) older than this checkout (/etc/systemd/system/docker-gc.timer)",
+            older[0].message,
+        )
+        self.assertIn("cst btrfs docker-gc enable installs them again", older[0].message)
+
+    def test_a_template_is_compared_with_its_recorded_values(self) -> None:
+        self.install("cpu:docker-slice", ALLOWED="AllowedCPUs=8-23")
+        self.mark("cpu:docker-slice")
+        self.assertEqual([r.status for r in self.results()], [doc_domain.OK])
+        with open(os.path.join(self.root, "etc/systemd/system/builds.slice"), "a") as f:
+            f.write("CPUWeight=99\n")
+        self.assertEqual(len(self.warns()), 1)
+
+    def test_a_changed_mode_is_info(self) -> None:
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        os.chmod(os.path.join(self.root, "etc/systemd/system/docker-gc.timer"), 0o600)
+        res = self.results()
+        self.assertIn(
+            doc_domain.Result(doc_domain.INFO, "/etc/systemd/system/docker-gc.timer: mode 0600, CST installed it 0644"),
+            res,
+        )
+        self.assertEqual(self.warns(), [])
+
+    def test_a_unit_whose_program_is_gone_is_a_warning(self) -> None:
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        os.unlink(os.path.join(self.root, "usr/local/sbin/docker-gc"))
+        msgs = [r.message for r in self.warns()]
+        self.assertIn("/usr/local/sbin/docker-gc: missing (CST installed it, btrfs:docker-gc)", msgs)
+        self.assertIn(
+            "/etc/systemd/system/docker-gc.service runs /usr/local/sbin/docker-gc, which is missing or not executable",
+            msgs,
+        )
+
+    def test_a_record_of_a_newer_cst_or_no_record_at_all(self) -> None:
+        os.makedirs(os.path.dirname(self.record))
+        with open(self.record, "w") as f:
+            f.write('{"format": 3}')
+        warns = self.warns()
+        self.assertEqual(len(warns), 1)
+        self.assertIn("written by a newer CST", warns[0].message)
+        with open(self.record, "w") as f:
+            f.write("{")
+        self.assertIn("no install record", self.warns()[0].message)
+        # No record: an install from before it, compared with this checkout, as INFO per component.
+        os.unlink(self.record)
+        self.assertEqual(self.results(), [], "nothing installed, nothing to say")
+        gc = os.path.join(self.root, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(gc))
+        with open(gc, "w") as f:
+            f.write("#!/usr/bin/python3\n# a plain-script copy of an older CST\n")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
+        self.assertIn("btrfs:docker-gc: installed before the install record; 1 of 1 file(s) differ", res[0].message)
+
+    def test_without_a_checkout_to_compare_with_nothing_is_said_to_differ(self) -> None:
+        # desired_sha256 cannot say (no checkout): a plain-script copy is not reported as differing.
+        gc = os.path.join(self.root, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(gc))
+        with open(gc, "w") as f:
+            f.write("#!/usr/bin/python3\n# a plain-script copy of an older CST\n")
+        res = list(doc_app.check_install(self.host, installed=doc_adapters.InstalledFiles("")))
+        self.assertEqual(res, [])
+
+    def test_a_component_the_record_does_not_list_is_compared_as_before_the_record(self) -> None:
+        # The record lists docker-gc; swap was installed by an older CST and is not in it.
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        old = os.path.join(self.root, "etc/sysctl.d/99-swap-tuning.conf")
+        os.makedirs(os.path.dirname(old))
+        with open(old, "w") as f:
+            f.write("vm.swappiness = 60\n")
+        infos = [r.message for r in self.results() if r.status == doc_domain.INFO]
+        self.assertEqual(len(infos), 1, infos)
+        self.assertIn("swap:core: installed before the install record; 1 of 1 file(s) differ", infos[0])
+
+    def test_the_users_record_in_the_home(self) -> None:
+        home = self.env["HOME"]
+        entries = [e for e in INSTALL_MANIFEST if e.component == "bluetooth:ldac"]
+        list(self.svc.install(entries, InstallRequest(root=self.root, home=home)))
+        self.svc.mark(self.root + home + "/.local/state/cst/installed.json", "bluetooth:ldac")
+        self.assertEqual([r.status for r in self.results()], [doc_domain.OK])
+
+    def test_a_vm_backup_timer_without_btrfs_notify_warns(self) -> None:
+        wants = os.path.join(self.root, "etc/systemd/system/timers.target.wants")
+        os.makedirs(wants)
+        res = list(doc_app.check_vm_backup_alerts(self.host))
+        self.assertEqual(res, [])
+        open(os.path.join(wants, "cst-vm-backup@win.timer"), "w").close()
+        res = list(doc_app.check_vm_backup_alerts(self.host))
+        self.assertEqual(len(res), 1)
+        self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
+        self.assertIn("a failed NAS backup of the VM alerts nobody", res[0].message)
+        self.install("btrfs:alerts")
+        self.assertEqual(list(doc_app.check_vm_backup_alerts(self.host)), [])
+
+    def test_unit_exec_paths(self) -> None:
+        text = (
+            "[Service]\nExecStartPre=-/usr/sbin/btrfs x\nExecStart=/usr/bin/python3 -I /usr/local/sbin/a run\n"
+            "ExecStopPost=-%h/.local/lib/cst/b\nEnvironment=X=/usr/local/c\n"
+            # Folders, not programs: never "missing or not executable".
+            "ExecSearchPath=/usr/local/sbin:/usr/bin\nExecPaths=/usr/local/sbin\n"
+        )
+        self.assertEqual(doc_domain.unit_exec_paths(text, "/home/u"), ["/usr/local/sbin/a", "/home/u/.local/lib/cst/b"])
+        self.assertEqual(doc_domain.unit_exec_paths(text, ""), ["/usr/local/sbin/a"])
+        self.assertTrue(doc_domain.is_unit_file("/etc/systemd/system/x.service"))
+        self.assertFalse(doc_domain.is_unit_file("/etc/systemd/system/x.service.d/10.conf"))
+        self.assertFalse(doc_domain.is_unit_file("/etc/sysctl.d/90.conf"))
+
+    def test_the_cli_wires_the_install_area(self) -> None:
+        self.install("btrfs:docker-gc")
+        r = self.run_tool()
+        self.assertIn("btrfs:docker-gc: installed only in part", r.stdout)
 
 
 class ToolboxTest(Scratch):
@@ -2195,7 +2401,7 @@ class HermeticTest(Scratch):
         self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
         host = doc_adapters.Host(self.env, repo=REPO)
         with mock.patch.object(subprocess, "run", recording_run):
-            results = doc_app.run_checks(host, doc_cli.wired_checks(doc_adapters.VmTools()))
+            results = doc_app.run_checks(host, doc_app.wired_checks(doc_adapters.VmTools()))
         crashed = [r.message for _, r in results if "the check itself failed" in r.message]
         self.assertEqual(crashed, [])
         return seen

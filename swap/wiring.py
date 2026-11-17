@@ -14,7 +14,14 @@ from typing import NoReturn
 
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import checkout_root, lc_ctype_handover, sibling_program, undo_python_start
+from cst_core.adapters.install import program_installer
+from cst_core.adapters.runtime import (
+    checkout_root,
+    lc_ctype_handover,
+    sibling_program,
+    undo_python_start,
+)
+from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application import SwapApplicationService, SwapEnvironment
@@ -64,14 +71,25 @@ def build_service(
     systemd = SystemctlAdapter(cmd_runner)
     swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
     paths = desired_paths(prog, ctx, fallback_root=fallback_root)
-    return SwapApplicationService(paths, file_sys, systemd, swap_system)
+    # swap's files are written through the installer and listed in the install record.
+    return SwapApplicationService(
+        paths,
+        file_sys,
+        systemd,
+        swap_system,
+        installer=program_installer(sibling_program("swap/cli.py", __file__), fallback_root),
+    )
 
 
 def desired_paths(prog: str, ctx: ExecutionContextPort, *, fallback_root: str) -> SwapEnvironment:
     """Where swap's desired files are (this checkout, else fallback_root: the bootstrap's root) and the host's /etc and /run."""
+    etc = ctx.etc_dir()
     return SwapEnvironment(
         src_dir=os.path.join(checkout_root(__file__) or fallback_root, "swap"),
-        etc_dir=ctx.etc_dir(),
+        etc_dir=etc,
         cpu_run_dir=ctx.host_run_dir("cpu-setup"),
         prog=prog,
+        # Next to the /etc it writes (the host's /var/lib/cst; under a test's folder, that folder's).
+        install_record=os.path.join(os.path.dirname(etc.rstrip("/")), ROOT_RECORD.lstrip("/")),
+        as_root=ctx.is_root(),
     )

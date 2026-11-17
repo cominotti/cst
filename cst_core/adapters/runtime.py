@@ -10,7 +10,9 @@ itself.
 
 import os
 from pathlib import Path
+import pwd
 import signal
+import stat
 import zipfile
 
 from cst_core.adapters.zipapp import build_python_zipapp
@@ -114,3 +116,94 @@ def restore_default_signals() -> None:
     """
     for sig in (signal.SIGPIPE, signal.SIGXFSZ):
         signal.signal(sig, signal.SIG_DFL)
+
+
+def checkout_commit(root: str | None) -> str:
+    """The commit the checkout at root has out (HEAD), read from .git by hand; "unknown" when it
+    cannot be read (no checkout, an installed program, an unusual layout).
+
+    No git command: as root in a user's checkout, git refuses to work
+    (safe.directory). A worktree's .git file names its own git folder; its
+    branches live in the common one (commondir); packed-refs holds the rest.
+
+    The checkout belongs to its user while the installer may run as root, so
+    every file is opened without following a link and read only when it is a
+    regular file owned by the checkout's owner: a crafted .git (a link, a
+    gitdir or ref pointing elsewhere) cannot make root copy another file's text
+    into the world-readable install record.
+    """
+    if not root:
+        return "unknown"
+    try:
+        owner = os.lstat(root).st_uid
+
+        def read(path: str) -> str | None:
+            return _read_owned(path, owner)
+
+        git = os.path.join(root, ".git")
+        if os.path.isfile(git) and not os.path.islink(git):
+            line = (read(git) or "").strip()
+            if not line.startswith("gitdir:"):
+                return "unknown"
+            git = os.path.normpath(os.path.join(root, line.split(":", 1)[1].strip()))
+        common = git
+        commondir = read(os.path.join(git, "commondir"))
+        if commondir is not None:
+            common = os.path.normpath(os.path.join(git, commondir.strip()))
+        head = (read(os.path.join(git, "HEAD")) or "").strip()
+        if not head.startswith("ref:"):
+            return head if _is_sha(head) else "unknown"
+        ref = head.split(":", 1)[1].strip()
+        if not _is_ref_name(ref):
+            return "unknown"
+        for folder in (git, common):
+            text = read(os.path.join(folder, ref))
+            if text is not None:
+                sha = text.strip()
+                return sha if _is_sha(sha) else "unknown"
+        for line in (read(os.path.join(common, "packed-refs")) or "").splitlines():
+            sha, _, name = line.partition(" ")
+            if name == ref and _is_sha(sha):
+                return sha
+    except OSError, UnicodeDecodeError:
+        return "unknown"
+    return "unknown"
+
+
+def _read_owned(path: str, owner: int) -> str | None:
+    """The text of path when it is a regular file owned by owner, opened without following a
+    link at its last part; None otherwise (absent, a link, a folder, someone else's file)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner:
+            return None
+        with os.fdopen(fd, encoding="utf-8", closefd=False) as fh:
+            return fh.read(1 << 20)
+    finally:
+        os.close(fd)
+
+
+def _is_ref_name(ref: str) -> bool:
+    """A branch ref as git writes it in HEAD (refs/heads/...): no absolute path, no '..' and no
+    odd characters, so a crafted HEAD (the checkout belongs to the user, the installer runs as
+    root) cannot make this read a file outside the git folder."""
+    parts = ref.split("/")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+@")
+    return (
+        len(parts) >= 3 and parts[0] == "refs" and all(p and p not in (".", "..") and set(p) <= allowed for p in parts)
+    )
+
+
+def _is_sha(text: str) -> bool:
+    return len(text) in (40, 64) and all(c in "0123456789abcdef" for c in text)
+
+
+def process_identity() -> tuple[bool, str]:
+    """(running as root, this account's home folder from the password database): whose files and
+    whose install record a process such as the installer writes. Not $HOME: runuser keeps root's."""
+    euid = os.geteuid()
+    return euid == 0, pwd.getpwuid(euid).pw_dir

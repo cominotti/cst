@@ -14,6 +14,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_btrfs_setup -v
 """
 
+import json
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ if REPO not in sys.path:
 from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
+from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 
@@ -245,10 +247,9 @@ disable_timers x.service
 
     def docker_gc_body(self) -> list[str]:
         """docker_gc as btrfs-setup.sh defines it, its recorded state in the test's folder and the
-        real cst_installed_dests (read-only: the manifest's destinations)."""
+        real installer, every file it writes or removes staged under $T/stage."""
         return [
-            f'. "{REPO}/cst-install.bash"',
-            assignment("DOCKER_GC_UNITS"),
+            STAGED_INSTALLER,
             'DOCKER_GC_STATE="$T/docker-gc-state"',
             shell_function(SETUP, "docker_gc_files"),
             shell_function(SETUP, "docker_gc"),
@@ -259,6 +260,9 @@ disable_timers x.service
         state = os.path.join(self.tmp, "docker-gc-state")
         os.makedirs(state)
         self.touch(os.path.join(state, "last-used.json"))
+        stage = os.path.join(self.tmp, "stage")
+        # Installed first (staged), so the record lists the component.
+        self.run_bash("\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"]))
         r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
         units = ["docker-gc-recorder.service", "docker-gc.service", "docker-gc.timer"]
         self.assertEqual(
@@ -267,13 +271,18 @@ disable_timers x.service
                 *(f"systemctl disable --now {u}" for u in units),
                 "systemctl clean --what=state docker-gc.timer",
                 "  (docker-gc.timer file present)",
-                "rm -fv /usr/local/sbin/docker-gc",
-                *(f"rm -fv /etc/systemd/system/{u}" for u in units),
                 f"rm -rf {state}",
                 "systemctl daemon-reload",
                 "systemctl reset-failed " + " ".join(units),
             ],
         )
+        for dest in ["/usr/local/sbin/docker-gc", *(f"/etc/systemd/system/{u}" for u in units)]:
+            self.assertIn(f"removed:   {stage}{dest}\n", r.stdout)
+            self.assertFalse(os.path.lexists(stage + dest), dest)
+        # The install record no longer lists the component (cst doctor would call its files missing).
+        with open(os.path.join(stage, "var/lib/cst/installed.json")) as f:
+            record = json.load(f)
+        self.assertEqual((record["files"], record["components"]), ({}, {}))
         self.assertFalse(os.path.exists(state))
         self.assertIn("docker-gc removed", r.stdout)
         # A second purge: the state is gone, so it is not removed again.
@@ -459,6 +468,190 @@ def writable(value: str) -> bool:
     if "\n" in value or "\r" in value:
         return False
     return "'" not in value or not any(c in value for c in '"$`\\')
+
+
+# cst-install.bash with the real installer, every write staged under $T/stage
+# (dests and srcs list the manifest's real paths; --root changes only where files go).
+STAGED_INSTALLER = f"""
+. "{REPO}/cst-install.bash"
+_cst_installer_as() {{
+    shift
+    local command="$1"
+    shift
+    /usr/bin/python3 -I -B "$CST_INSTALLER" "$command" --root "$T/stage" "$@"
+}}
+"""
+
+
+def manifest_dests(*components: str) -> list[str]:
+    """The manifest's destinations of these components (root ones: no ~/ entries among them)."""
+    return sorted(e.dest for e in INSTALL_MANIFEST if e.component in components)
+
+
+class ComponentInstallTest(unittest.TestCase):
+    """Each install path of btrfs-setup.sh and setup-snapshots.bash writes
+    exactly the files of its components: the functions taken from the
+    scripts, the real installer staged under the test's folder, systemctl
+    and the other host commands as logging shell functions."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-component-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.stage = os.path.join(self.tmp, "stage")
+        os.makedirs(self.stage)
+        self.log = os.path.join(self.tmp, "log")
+
+    def run_bash(self, body: str) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                STUBS,
+                STAGED_INSTALLER,
+                'install() { echo "install $*" >>"$LOG"; }',
+                "restorecon() { :; }",
+                f'SRC={BTRFS}; UNIT_DIR=/etc/systemd/system; PROG=cst-btrfs-test; target_user=""',
+                'ALERTS_DIR="$T/alerts"; OLD_ALERTS_DIR="$T/old-alerts"; USER_UNIT_DIR=/etc/systemd/user',
+                "PENDING_UNIT=cst-pending-alerts.service; OLD_PENDING_UNIT=f44-pending-alerts.service",
+                'OLD_PENDING_READER="$T/f44-pending-alerts"',
+                *(
+                    shell_function(SETUP, f)
+                    for f in (
+                        "check_syntax",
+                        "check_component_syntax",
+                        "remove_old_reader",
+                        "migrate_old_alerts",
+                        "install_pending_alerts",
+                        "forget_timer_state",
+                        "disable_timers",
+                        "docker_gc_files",
+                        "docker_gc",
+                        "remove_tuning_files",
+                    )
+                ),
+                body,
+            ]
+        )
+        r = subprocess.run(
+            ["bash", "-c", script, "_"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def staged(self) -> list[str]:
+        """The files written under the stage, the install record and its lock aside."""
+        out = []
+        for dirpath, _dirs, names in os.walk(self.stage):
+            out += ["/" + os.path.relpath(os.path.join(dirpath, n), self.stage) for n in names]
+        return sorted(p for p in out if not p.startswith("/var/lib/cst/installed.json"))
+
+    def record(self) -> dict[str, dict[str, object]]:
+        with open(os.path.join(self.stage, "var/lib/cst/installed.json")) as f:
+            return json.load(f)
+
+    def test_alerts_install_writes_btrfs_alerts(self) -> None:
+        self.run_bash("install_pending_alerts")
+        self.assertEqual(self.staged(), manifest_dests("btrfs:alerts"))
+        # Listed in the install record, and marked done once the step finished.
+        rec = self.record()
+        self.assertEqual(sorted(rec["files"]), manifest_dests("btrfs:alerts"))
+        self.assertEqual(rec["components"], {"btrfs:alerts": "done"})
+
+    def test_docker_gc_enable_writes_btrfs_docker_gc(self) -> None:
+        r = self.run_bash("docker_gc enable")
+        self.assertEqual(self.staged(), manifest_dests("btrfs:docker-gc"))
+        self.assertIn("docker-gc enabled", r.stdout)
+        self.assertEqual(self.record()["components"], {"btrfs:docker-gc": "done"})
+
+    def test_a_step_that_fails_after_the_install_leaves_the_component_pending(self) -> None:
+        # systemctl enable fails (set -e stops docker_gc there): the files are written and listed,
+        # but the record says pending, which cst doctor reports as a partial install.
+        r = subprocess.run(
+            ["bash", "-c", "\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"])],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.record()["components"], {"btrfs:docker-gc": "pending"})
+        self.assertEqual(sorted(self.record()["files"]), manifest_dests("btrfs:docker-gc"))
+
+    def test_snapshot_runtime_writes_alerts_then_snapshots(self) -> None:
+        r = self.run_bash('. "$SRC/setup-snapshots.bash"\nsnap_install_runtime')
+        self.assertEqual(self.staged(), manifest_dests("btrfs:alerts", "btrfs:snapshots"))
+        self.assertEqual(self.record()["components"], {"btrfs:alerts": "done", "btrfs:snapshots": "done"})
+        # btrfs-notify, which the snapshot units' runs alert through, is written before them.
+        out = r.stdout
+        self.assertLess(out.index("/usr/local/sbin/btrfs-notify"), out.index("/btrfs-snapshot.service"))
+
+    def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
+        # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
+        script = "\n".join([STAGED_INSTALLER, "cst_component_units() { return 1; }", "docker_gc disable"])
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "\n".join([STUBS, *(shell_function(SETUP, f) for f in ("docker_gc_files", "docker_gc")), script]),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LOG": self.log, "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("cannot list its units", r.stderr)
+        self.assertNotIn("docker-gc disabled", r.stdout)
+
+    def test_uninstall_forgets_a_tuning_file_already_gone(self) -> None:
+        # btrfs:core's sysctl and tmpfiles files, installed (staged) and recorded; the sysctl file was
+        # deleted by hand. remove_tuning_files removes the other and drops both record lines.
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        self.run_bash(
+            "cst_install --set UUID=00000000-0000-0000-0000-000000000000 "
+            "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in >/dev/null"
+        )
+        self.assertEqual(sorted(self.record()["files"]), [sysctl, reclaim])
+        os.unlink(self.stage + sysctl)
+        self.run_bash(
+            f'SYSCTL_FILE="$T/stage{sysctl}"; RECLAIM_FILE="$T/stage{reclaim}"\n'
+            f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
+        )
+        self.assertEqual(self.staged(), [])
+        self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
+
+    def test_a_program_that_does_not_parse_installs_nothing(self) -> None:
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "\n".join(
+                    [
+                        STAGED_INSTALLER,
+                        shell_function(SETUP, "check_syntax"),
+                        shell_function(SETUP, "check_component_syntax"),
+                        f"SRC={self.tmp}/cst/btrfs",
+                        "check_component_syntax btrfs:docker-gc",
+                    ]
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp},
+            stdin=subprocess.DEVNULL,
+        )
+        # The source is missing under that SRC: refused before anything is written.
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("docker-gc", r.stderr)
+        self.assertEqual(self.staged(), [])
 
 
 class SnapshotsConfTest(unittest.TestCase):

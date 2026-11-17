@@ -58,10 +58,18 @@ SYSTEM_PYTHON = "/usr/bin/python3"
 def entry(
     src: str, dest: str, *, mode: int = 0o644, kind: ArtifactKind = "data", owner: Owner = "root"
 ) -> InstallEntry:
-    return InstallEntry(src=src, dest=dest, mode=OctalMode(mode), owner=owner, kind=kind, runner=owner)
+    return InstallEntry(
+        src=src,
+        dest=dest,
+        mode=OctalMode(mode),
+        owner=owner,
+        kind=kind,
+        runner=owner,
+        component=f"{src.split('/')[0]}:t",
+    )
 
 
-class _MemoryTarget:
+class MemoryTarget:
     """InstallTargetPort in memory, recording writes; owners[path] = (uid, gid), links = paths that are links."""
 
     def __init__(self, files: Mapping[str, tuple[bytes, int]] | None = None) -> None:
@@ -85,6 +93,12 @@ class _MemoryTarget:
         self.owners.pop(path, None)
         self.links.discard(path)
         self.writes.append(path)
+
+    def remove(self, path: str) -> bool:
+        if path == self.fail_on:
+            raise WriteFailed(path, "Permission denied")
+        self.links.discard(path)
+        return self.files.pop(path, None) is not None
 
 
 class DomainTest(unittest.TestCase):
@@ -133,23 +147,36 @@ class DomainTest(unittest.TestCase):
         self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-watch"})
         self.assertTrue(all(e.module == "cpu" for e in select_entries(INSTALL_MANIFEST, module="cpu")))
 
+    def test_select_entries_by_component(self) -> None:
+        gc = select_entries(INSTALL_MANIFEST, component="btrfs:docker-gc")
+        self.assertEqual(
+            [e.src for e in gc],
+            [
+                "btrfs/docker-gc",
+                "btrfs/units/docker-gc-recorder.service",
+                "btrfs/units/docker-gc.service",
+                "btrfs/units/docker-gc.timer",
+            ],
+        )
+
     def test_parse_manifest_reads_rows_and_skips_comments(self) -> None:
-        table = "# header\n\na/b  /usr/local/bin/b  755 root python-entry user  # why\nc/d ~/.x 644 user data user\n"
+        table = "# header\n\na/b  /usr/local/bin/b  755 root python-entry user a:x  # why\nc/d ~/.x 644 user data user c:y\n"
         self.assertEqual(
             parse_manifest(table),
             (
-                InstallEntry("a/b", "/usr/local/bin/b", OctalMode(0o755), "root", "python-entry", "user"),
-                InstallEntry("c/d", "~/.x", OctalMode(0o644), "user", "data", "user"),
+                InstallEntry("a/b", "/usr/local/bin/b", OctalMode(0o755), "root", "python-entry", "user", "a:x"),
+                InstallEntry("c/d", "~/.x", OctalMode(0o644), "user", "data", "user", "c:y"),
             ),
         )
 
     def test_parse_manifest_rejects_a_malformed_row(self) -> None:
         for row in (
-            "a/b /x 755 root python-entry",
-            "a/b /x 9z root data root",
-            "a/b /x 644 admin data root",
-            "a/b /x 644 root binary root",
-            "a/b /x 644 root data root extra",
+            "a/b /x 755 root python-entry a:x",
+            "a/b /x 755 root python-entry user",
+            "a/b /x 9z root data root a:x",
+            "a/b /x 644 admin data root a:x",
+            "a/b /x 644 root binary root a:x",
+            "a/b /x 644 root data root a:x extra",
         ):
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "manifest row 2"):
                 parse_manifest("# header\n" + row)
@@ -173,7 +200,7 @@ class InstallServiceTest(unittest.TestCase):
         self.a = entry("m/a", "/etc/a")
         self.t = entry("m/t.in", "/etc/t")
         self.u = entry("m/u", "~/.config/u", owner="user")
-        self.target = _MemoryTarget()
+        self.target = MemoryTarget()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src])
 
     def test_plan_changes_nothing_then_install_then_second_run_is_a_no_op(self) -> None:
@@ -490,6 +517,49 @@ class InstallerCliTest(unittest.TestCase):
         for d in dests:
             os.unlink(self.stage + d)
         self.assertEqual(self.cli("check", *sel).returncode, 1, "uninstall left files current")
+
+    def test_component_selects_install_plan_dests_and_srcs(self) -> None:
+        sel = ["--root", self.stage, "--component", "btrfs:snapshots"]
+        want = [e for e in INSTALL_MANIFEST if e.component == "btrfs:snapshots"]
+        plan = self.cli("plan", *sel)
+        self.assertEqual(plan.stdout.decode().count("would write: "), len(want), plan.stdout)
+        self.assertEqual(self.files(), {}, "plan wrote something")
+        first = self.cli("install", *sel)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # The files, and the install record that lists them.
+        self.assertEqual(
+            sorted(self.files()),
+            sorted(
+                [*(e.dest.lstrip("/") for e in want), "var/lib/cst/installed.json", "var/lib/cst/installed.json.lock"]
+            ),
+        )
+        self.assertEqual(self.cli("check", *sel).returncode, 0)
+        dests = self.cli("dests", "--component", "btrfs:snapshots").stdout.decode().split()
+        self.assertEqual(dests, [e.dest for e in want])
+        srcs = self.cli("srcs", "--component", "btrfs:snapshots", "--kind", "shell").stdout.decode().split()
+        self.assertEqual(srcs, ["btrfs/btrfs-snapshot"])
+
+    def test_an_unknown_component_or_a_mix_with_names_is_a_usage_error(self) -> None:
+        for args in (
+            ["dests", "--component", "btrfs:nope"],
+            ["install", "--component", "btrfs:core", "btrfs/btrfs-notify"],
+        ):
+            with self.subTest(args=args):
+                r = self.cli(*args, "--root", self.stage)
+                self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.files(), {})
+
+    def test_builds_slice_is_the_file_with_or_without_the_e_cores_line(self) -> None:
+        # Byte for byte what docker-slice install wrote before builds.slice became a template:
+        # `cat cpu/units/builds.slice` plus "AllowedCPUs=<E-cores>" when there are E-cores.
+        old = Path(REPO, "cpu/units/builds.slice.in").read_text().replace("@ALLOWED@\n", "")
+        for value, want in (("", old), ("AllowedCPUs=16-23", old + "AllowedCPUs=16-23\n")):
+            with self.subTest(value=value):
+                r = self.cli(
+                    "install", "--root", self.stage, "--component", "cpu:docker-slice", "--set", f"ALLOWED={value}"
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(Path(self.stage, "etc/systemd/system/builds.slice").read_text(), want)
 
     def test_upgrade_from_a_plain_script_install(self) -> None:
         dest = Path(self.stage, "usr/local/sbin/btrfs-stall-monitord")

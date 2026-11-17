@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # setup-snapshots.bash: `cst btrfs snapshots ...` (sourced by the frontend,
-# runs as root; uses its helpers cst_install/cst_install_text (cst-install.bash), install_units/
-# check_syntax/root_fs_uuid/install_pending_alerts and
+# runs as root; uses its helpers cst_install/cst_install_text (cst-install.bash),
+# check_component_syntax/root_fs_uuid/install_pending_alerts and
 # variables SRC, UNIT_DIR, PROG, target_user). Nothing here runs unless one of these
 # explicit actions is called.
 
@@ -21,8 +21,6 @@ SNAP_RUNTIME=/usr/local/sbin/btrfs-snapshot
 # a day 1 week, a week 1 month, a month 3 months. ~/Workspace (its own
 # subvolume): every hour 2 days, a day 1 week. btrfs-snapshot has the values.
 SNAP_PRESERVE_TEXT="/home 72h 7d 4w 3m, ~/Workspace 48h 7d"
-SNAP_UNITS=(btrfs-snapshot.service btrfs-snapshot.timer btrfs-snapshot-nas.service
-            btrfs-snapshot-nas.timer btrfs-subvol-convert.service btrfs-bulk-boot.service)
 SNAP_BOOT_FLAG=/etc/btrfs-setup/convert-at-boot
 # Trees under $HOME made nested subvolumes: left out of /home's snapshots
 # (big and rewritten often: caches, user Flatpak installs), or snapshotted on
@@ -242,16 +240,15 @@ snap_conf_plan() {
     echo "      (printf %q) are rewritten in quotes, with the same values"
 }
 
+# snap_install_runtime: the components btrfs:alerts (btrfs-notify; alerts
+# raised before the login, by convert-boot, are shown at the next login) and
+# btrfs:snapshots (btrfs-snapshot, -core, btrfs-bulk and their units).
 snap_install_runtime() {
-    local f
-    for f in btrfs-snapshot btrfs-snapshot-core btrfs-notify btrfs-bulk; do
-        check_syntax "${SRC}/${f}" || { echo "${SRC}/${f}: syntax error, not installed" >&2; exit 1; }
-        cst_install "btrfs/${f}"
-    done
-    # Alerts raised before the login (convert-boot) are shown at the next login.
+    check_component_syntax btrfs:snapshots
     install_pending_alerts
-    install_units "${SNAP_UNITS[@]}"
+    cst_install --component btrfs:snapshots
     systemctl daemon-reload
+    cst_mark btrfs:snapshots
 }
 
 # State of one SNAP_EXCLUDE entry: done | todo | create | aside | absent | -.
@@ -478,11 +475,11 @@ snap_activate() {
     opts="subvolid=5${opts:+,${opts}}"
     unit="$(systemd-escape --path "${SNAP_TOP}")"
     install -d -m 0700 "${SNAP_TOP}"
-    # The manifest's dests for these two are the unit names of SNAP_TOP.
-    cst_install --set "UUID=${uuid}" --set "OPTIONS=${opts}" btrfs/snapshots/top.mount.in \
-        btrfs/snapshots/top.automount.in
+    # btrfs:top-mount: the manifest's dests for its two units are the unit names of SNAP_TOP.
+    cst_install --set "UUID=${uuid}" --set "OPTIONS=${opts}" --component btrfs:top-mount
     systemctl daemon-reload
     systemctl enable --now "${unit}.automount"
+    cst_mark btrfs:top-mount
     install -d -m 0700 "${SNAP_TOP}/${SNAP_DIR_NAME}"
     # Start the health check's clock now (not reset by re-running setup).
     install -d -m 0755 "${SNAP_STATE}"
@@ -532,7 +529,8 @@ snap_disable() {
     unit="$(systemd-escape --path "${SNAP_TOP}")"
     systemctl disable --now "${unit}.automount" 2>/dev/null || true
     systemctl stop "${unit}.mount" 2>/dev/null || true
-    rm -fv "${UNIT_DIR:?}/${unit:?}.mount" "${UNIT_DIR:?}/${unit:?}.automount"
+    # btrfs:top-mount: the two units of SNAP_TOP.
+    cst_remove --component btrfs:top-mount
     systemctl daemon-reload
     echo "Snapshots purged and their configuration removed (the subvolume exclusions stay;"
     echo "the restic repository on the NAS and ${SNAP_RESTIC_PW} are kept)."

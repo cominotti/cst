@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import io
+import json
 import os
 import shutil
 import signal
@@ -1011,6 +1012,45 @@ class AutoTest(Scratch):
         self.assertIn("not written by CST, left alone: ~/.local/lib/cst/cst-toolchains", out)
         with open(prog) as f:
             self.assertEqual(f.read(), "#!/bin/sh\necho mine\n")
+
+    def test_auto_on_lists_its_files_in_the_install_record_and_auto_off_removes_them(self) -> None:
+        self.csts_cargo_config()
+        record = os.path.join(self.home, ".local/state/cst/installed.json")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        with open(record) as f:
+            rec = json.load(f)
+        want = sorted(
+            os.path.join(self.home, rel)
+            for rel in (
+                ".local/lib/cst/cst-toolchains",
+                ".local/lib/cst/toolchains.conf",
+                ".config/systemd/user/cst-toolchains-prune.service",
+                ".config/systemd/user/cst-toolchains-prune.timer",
+            )
+        )
+        self.assertEqual(sorted(rec["files"]), want)
+        self.assertEqual(rec["files"][want[2]]["src"], "toolchains/cst-toolchains")
+        self.assertEqual(rec["components"], {"toolchains:auto": "done"})
+        with open(record, "rb") as f:
+            before = f.read()
+        rc, out = self.run_main("auto", "on")
+        with open(record, "rb") as f:
+            self.assertEqual(f.read(), before, "a second auto on changed the record")
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        with open(record) as f:
+            rec = json.load(f)
+        self.assertEqual((rec["files"], rec["components"]), ({}, {}))
+
+    def test_auto_on_with_a_record_of_a_newer_cst_is_refused_with_a_message(self) -> None:
+        self.csts_cargo_config()
+        self.write(".local/state/cst/installed.json", '{"format": 99}')
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("written by a newer CST", out)
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".local/lib/cst/cst-toolchains")))
 
     def test_auto_off_never_stops_a_foreign_timer_as_an_orphan(self) -> None:
         # A running timer whose file is there but not CST's is not the

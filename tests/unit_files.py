@@ -41,6 +41,7 @@ TEMPLATE_VALUES: Final[dict[str, str]] = {
     "UUID": "00000000-0000-0000-0000-000000000000",
     "OPTIONS": "subvolid=5",
     "USER": "tester",
+    "ALLOWED": "AllowedCPUs=0",
 }
 
 

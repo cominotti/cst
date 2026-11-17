@@ -24,10 +24,10 @@ from typing import Any
 import xml.etree.ElementTree as ET
 
 from cst_core.adapters import c_locale
-from cst_core.adapters.files import write_bytes_atomic
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
+from cst_core.ports import WriteFailed
 from cst_core.domain.units import masked_refusal
 from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import (
@@ -61,8 +61,10 @@ from vm.adapters import (
     domain_state_or_none,
     fingerprint,
     flag_state,
+    forget_timer_files,
     has_managed_save,
     image_dirs,
+    install_timer_files,
     readable_inode_flags,
     knobs,
     needs_mark,
@@ -85,6 +87,7 @@ from vm.adapters import (
     systemctl,
     timer_file_states,
     timer_files,
+    timer_record_done,
     tree_sizes,
     utc_now,
     virsh,
@@ -1019,14 +1022,12 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
         if why := masked_refusal([p for p, st in states.items() if st == "masked"], user=False):
             raise Refused(why + "; nothing was changed")
         nas_settings()
-        for p, (text, mode) in files.items():
-            if states[p] != "ok":
-                write_bytes_atomic(p, text, mode=mode)
-                print(f"  {'updated' if states[p] == 'change' else 'installed'}: {p}")
+        install_timer_files(files, states, entry_file)
         for args in (("daemon-reload",), ("enable", "--now", unit)):
             rc, _, err = systemctl(*args)
             if rc != 0:
                 raise Refused(f"systemctl {' '.join(args)}: {err or f'exit {rc}'}")
+        timer_record_done(entry_file)
         print(
             f"On: {unit} ({ON_CALENDAR}, then {CST} vm backup {vm} --nas). Run one now with: "
             f"sudo systemctl start {unit.replace('.timer', '.service')}"
@@ -1046,6 +1047,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
             elif st != "missing":
                 os.unlink(p)
                 print(f"  removed: {p}")
+        forget_timer_files(entry_file, [p for p, st in states.items() if st not in ("missing", "masked")])
         systemctl("daemon-reload")
     else:
         print(f"  kept the units and {SBIN_COPY}: still used by {', '.join(wants_links())}")
@@ -1457,7 +1459,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
         if a["nas"]:
             return cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
         return cmd_backup(vm, a["full"])
-    except (Refused, Stop) as e:
+    except (Refused, Stop, WriteFailed) as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         if cmd == "backup" and a["nas"] and os.environ.get("INVOCATION_ID") and "DISK NOT MERGED" not in str(e):
             # Started by systemd (the weekly timer): nobody reads the terminal.

@@ -720,9 +720,18 @@ systemctl() {
             ],
         )
         prog = os.path.join(home, ".local/lib/cst/bt-ldac-watch")
+        unit = os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")
         self.assertTrue(os.access(prog, os.X_OK))
-        with open(os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")) as f:
+        with open(unit) as f:
             self.assertIn("--rate 48000", f.read())
+        # Both are in the user's install record (in this HOME), the component marked done.
+        record = os.path.join(home, ".local/state/cst/installed.json")
+        with open(record) as f:
+            rec = json.load(f)
+        self.assertEqual(sorted(rec["files"]), sorted([prog, unit]))
+        self.assertEqual(rec["files"][unit]["src"], None)
+        self.assertEqual(rec["files"][prog]["src"], "bluetooth/bt-ldac-watch")
+        self.assertEqual(rec["components"], {"bluetooth:ldac": "done"})
 
         r, calls, _ = self.run_lw('lw_plan; echo "change=$LW_CHANGE"; lw_report; lw_install\n', home=home)
         self.assertIn("change=0", r.stdout)
@@ -746,7 +755,9 @@ systemctl() {
         )
         self.assertFalse(os.path.exists(prog))
         self.assertFalse(os.path.exists(os.path.dirname(prog)))
-        self.assertFalse(os.path.exists(os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")))
+        self.assertFalse(os.path.exists(unit))
+        with open(record) as f:
+            self.assertEqual(json.load(f)["files"], {}, "the removed files are still in the record")
         r, calls, _ = self.run_lw('lw_plan; echo "change=$LW_CHANGE"; lw_report\n', rate="", home=home)
         self.assertIn("change=0", r.stdout)
         self.assertIn("item ok LDAC rate watcher", r.stdout)

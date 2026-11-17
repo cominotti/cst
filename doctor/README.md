@@ -57,9 +57,14 @@ cst doctor help
 | `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no VM backup, local or on the NAS, was made since the booted deployment was built (fix: `cst vm backup --nas` when the NAS backup is set up, else `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
 | `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
 | `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
+| `vm` | A VM's weekly NAS backup timer is on, but `/usr/local/sbin/btrfs-notify` (which a failed backup alerts through) is missing, as `cst btrfs uninstall` leaves it when snapshots are not set up | `WARN`, fix: `cst btrfs install` (it installs `btrfs-notify` with the alerts kept for the next login); nothing when no timer is on |
+| `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; changed on disk since CST wrote it (its sha256 differs from the record's); a component installed only in part (its setup command started writing and did not finish: the record says `pending`); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST or that is no record | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
+| `install` | A recorded file older than this checkout (what CST installed differs from what this checkout installs now, a template rendered with the values it was installed with); a mode other than the one CST installed; a file not readable as your user (the record is then compared with this checkout only); a record you may not read | `info`, one line per component for the older files, naming the command that refreshes them. A file a module renders itself (the sccache wrapper) and generated files (units of `cst vm` and `cst toolchains`, the LDAC watcher's unit) are only checked against the record |
+| `install` | Without a record (an install from before it): each component's installed files compared with this checkout | `info` per component with files that differ, naming the command that installs and records them; nothing for a component that is not installed, or when this checkout cannot build a file to compare with |
+| `install` | Every recorded file as CST installed it | `ok`, with the number of files per record |
 | `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
-| `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
+| `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of the installed `btrfs-health-check`, the one that alerts, else of this checkout's copy; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
 | `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks); `info` for one boot, or when the record cannot be read; nothing when there is no record |
 
@@ -497,7 +502,41 @@ indexer) and `session.slice` (gnome-shell) are known and not reported. The
 user manager looked at is your own, or, when the doctor runs as root, the
 `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
 
-## 9. Adding a check and internal layout
+## 9. The install check
+
+`cst btrfs install`, `cst cpu install`, `cst vm backup-timer on` and the other
+commands that install CST's files list each file they write in an **install
+record**: `/var/lib/cst/installed.json` for the files root owns,
+`~/.local/state/cst/installed.json` for the files in your home. A line per
+file: where it came from in CST, its component (the part of a module one
+command installs: `btrfs:core`, `btrfs:docker-gc`, ...), its sha256, mode and
+owner, a template's values, and the commit of the CST folder that installed
+it. A component is "pending" from the first write until its command finishes.
+
+The `install` area compares three things: the record, the files as they are,
+and what this CST folder would install now.
+
+- A file the record lists that is gone, or whose bytes differ from the
+  record's: something other than CST changed it. `WARN`, with the command
+  that installs the component again.
+- A component still "pending": its command was interrupted (an error, a
+  Ctrl-C) between its first write and its end. `WARN`, same fix.
+- A unit whose program is missing (a unit of one component running a program
+  of another that was removed, for example). `WARN`.
+- The record's bytes differ from what this folder installs now: the
+  installed copy is **older** (or newer) than this checkout, the normal
+  state after a `git pull` until the next install. `info`, once per component,
+  naming the command that brings it up to date. The programs that timers run
+  are the installed copies, not this folder's.
+- No record at all (CST installed the files before it kept one): each
+  component's files are compared with this checkout directly, as `info`.
+  The next install of that component records them.
+
+A file root may read only (the polkit rule's folder is
+`drwxr-x--- root:polkitd`) is checked against the record only: `info`
+"not readable as your user".
+
+## 10. Adding a check and internal layout
 
 The code is split into four layers under `doctor/`:
 
@@ -543,7 +582,7 @@ function has type annotations, so a new check reads
 `def check_name(host: DoctorHostPort) -> Iterator[Result]:`, and
 `invowk cmd test types` (ty and ruff's ANN rules) fails until it does.
 
-## 10. Tests
+## 11. Tests
 
 ```
 python3 -I -B -m unittest discover -s doctor/tests -t . -v

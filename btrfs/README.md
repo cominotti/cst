@@ -192,6 +192,19 @@ Unit files go to `/etc/systemd/system/`.
 | Desktop alerts (4.9) | `/usr/local/sbin/btrfs-notify`, `btrfs-stall-alert.service`; for alerts kept until the next login: `/usr/local/bin/cst-pending-alerts`, the user unit `/etc/systemd/user/cst-pending-alerts.service` (enabled for every user) and the folder `/var/lib/cst-alerts/` | when a part has an alert; the user unit at each desktop login |
 | Docker volumes NOCOW (4.10) | `/usr/local/sbin/docker-volumes-nocow`, `docker-volumes-nocow.service` | at every boot, before Docker |
 
+In CST's install manifest (`cst_core/domain/install.py`) these files form
+three **components**, each installed as a whole by one installer call:
+`btrfs:alerts` (`btrfs-notify`, `cst-pending-alerts` and its user unit,
+written first: the units of the next one run `btrfs-notify`), `btrfs:core`
+(the other programs and units, the writeback and reclaim files) and
+`btrfs:below` (the below drop-in). `snapshots setup` installs
+`btrfs:snapshots` and `btrfs:top-mount` (and `btrfs:alerts` again);
+`docker-gc enable`, `btrfs:docker-gc`. `uninstall` removes the files of the
+manifest's components, not a list of its own, and their lines in the install
+record (also of a writeback or reclaim file that was already deleted by hand).
+`docker-gc disable` stops with an error, before it disables anything, when the
+installer cannot list docker-gc's units.
+
 The launcher `~/.local/bin/btrfs-stall-report` and the link
 `~/.local/bin/cst` are created for **the user who ran `sudo`** (the script
 reads this from `sudo`). If you run `install` directly as root (not through

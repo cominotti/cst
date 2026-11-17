@@ -2,14 +2,20 @@
 """Adapters implementing the `doctor` ports against Linux/toolbox hosts."""
 
 from collections.abc import Callable, Mapping, Sequence
+import hashlib
 import os
 import pwd
 import time
 from typing import Any, BinaryIO, TextIO
 
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SubprocessVirshAdapter
+from cst_core.adapters.install import JsonInstallRecord
+from cst_core.adapters.zipapp import entry_payload
+from cst_core.domain.install import manifest_by_src, render_template
+from cst_core.domain.record import InstallRecord
+from cst_core.domain.values import DomainValidationError
 from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
-from doctor.domain import NAME, VIRSH_URI, ViewPath
+from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
 
 
@@ -44,6 +50,8 @@ class Host:
         self.state_home = ViewPath(
             env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
         )
+        # The user's home on the host (the same path in a toolbox).
+        self.home = HostPath(env.get("HOME") or _home(self.uid))
         # Every command (virsh too) starts from self.env, in doctor's words for a fault.
         self._commands: CommandRunnerPort = SubprocessCommandRunner(self, base_env=env, words=host_words)
 
@@ -125,6 +133,51 @@ class Host:
     def virsh(self, *, read_only: bool) -> VirshPort:
         """virsh on the system connection, through the same commands as run()."""
         return SubprocessVirshAdapter(VIRSH_URI, self._commands, on_host=True, read_only=read_only)
+
+
+def _home(uid: int) -> str:
+    """uid's home folder from the password database ("/" for an unknown uid)."""
+    try:
+        return pwd.getpwuid(uid).pw_dir
+    except KeyError:
+        return "/"
+
+
+class InstalledFiles:
+    """InstalledFilesPort: the install records (read as JSON), files hashed as they are, and what the
+    checkout at repo would install (built once per source and values; "" = no checkout)."""
+
+    def __init__(self, repo: str) -> None:
+        self._repo = repo
+        self._desired: dict[tuple[str, tuple[tuple[str, str], ...]], str | None] = {}
+
+    def record(self, path: ViewPath) -> InstallRecord | None:
+        """JsonInstallRecord.read."""
+        return JsonInstallRecord().read(path)
+
+    def file_sha256(self, path: ViewPath) -> str:
+        """sha256 of the file's bytes (OSError when it cannot be read)."""
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def desired_sha256(self, src: str, values: Mapping[str, str] | None) -> str | None:
+        """sha256 of the installer's bytes for src from this checkout (a template rendered with values)."""
+        key = (src, tuple(sorted((values or {}).items())))
+        if key not in self._desired:
+            self._desired[key] = self._build(src, values)
+        return self._desired[key]
+
+    def _build(self, src: str, values: Mapping[str, str] | None) -> str | None:
+        entry = manifest_by_src().get(src)
+        if not self._repo or entry is None or (entry.is_template and values is None):
+            return None
+        try:
+            data = entry_payload(self._repo, entry)
+            if entry.is_template:
+                data = render_template(data.decode("utf-8"), values or {}).encode("utf-8")
+        except OSError, ValueError, SyntaxError, DomainValidationError:
+            return None
+        return hashlib.sha256(data).hexdigest()
 
 
 def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:

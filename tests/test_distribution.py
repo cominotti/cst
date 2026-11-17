@@ -9,6 +9,8 @@ files:
   (function-level ones too, by AST) is the standard library or a package in
   the archive, and no member loads code from a file path at run time;
 - modes let the runner read (and run) the file;
+- every entry belongs to a component COMPONENTS knows (with the command
+  that installs it again), of its own module, with one owner per component;
 - where an entry has a known safe help mode, its zipapp runs it from `/`
   with `/usr/bin/python3 -I` and no PYTHONPATH (exit as expected, no
   ImportError), staged under a temporary root;
@@ -41,6 +43,7 @@ from cst_core.domain.imports import imported_modules, loads_code_by_path
 from cst_core.domain.install import (
     CHECKOUT_ONLY_EXECUTABLES,
     CHECKOUT_ONLY_FILES,
+    COMPONENTS,
     INSTALL_MANIFEST,
     SETUP_ENTRYPOINTS,
     InstallEntry,
@@ -208,8 +211,23 @@ class DistributionGateTest(unittest.TestCase):
     def test_modes_let_the_runner_use_the_file(self) -> None:
         problems = [p for e in INSTALL_MANIFEST for p in mode_problems(e)]
         self.assertEqual(problems, [], "\n".join(problems))
-        bad = InstallEntry("m/x", "/usr/local/bin/x", OctalMode(0o750), "root", "shell", "user")
+        bad = InstallEntry("m/x", "/usr/local/bin/x", OctalMode(0o750), "root", "shell", "user", "m:x")
         self.assertTrue(mode_problems(bad))
+
+    def test_every_entry_has_a_known_component_and_every_component_a_refresh_command(self) -> None:
+        used = {e.component for e in INSTALL_MANIFEST}
+        self.assertEqual(sorted(used - set(COMPONENTS)), [], "manifest components COMPONENTS does not know")
+        self.assertEqual(sorted(set(COMPONENTS) - used), [], "components no manifest entry belongs to")
+        for name, refresh in COMPONENTS.items():
+            with self.subTest(component=name):
+                module = name.split(":", 1)[0]
+                entries = [e for e in INSTALL_MANIFEST if e.component == name]
+                # The component is a part of one module, and the command that refreshes it is that module's.
+                self.assertEqual({e.module for e in entries}, {module})
+                self.assertTrue(refresh.startswith(f"cst {module} "), refresh)
+                # One installer call per component: root and user files never share one (the user's are
+                # written by a process running as the user).
+                self.assertEqual(len({e.owner for e in entries}), 1, [e.src for e in entries])
 
     def test_help_modes_name_python_entries(self) -> None:
         self.assertLessEqual(set(HELP_MODES), {e.src for e in python_entry_srcs()})
