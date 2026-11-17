@@ -85,7 +85,6 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "doctor C901": 3,
     "doctor FBT001": 4,
     "doctor FBT002": 1,
-    "doctor SLF001": 8,
     "doctor tests FBT001": 5,
     "doctor tests FBT002": 5,
     "swap C901": 1,

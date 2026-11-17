@@ -55,6 +55,7 @@ from doctor import (
 )
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.domain.errors import Usage
+from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
 from vm import adapters as vm_adapters
@@ -2262,6 +2263,45 @@ class PackageRulesEdgeTest(unittest.TestCase):
         old = {"qemu-kvm": "1", "a": "1", "b": "1", "c": "1"}
         new = {"qemu-kvm": "2", "a": "2", "b": "2", "c": "2"}
         self.assertEqual(doc_domain.virt_changes(old, new), "qemu-kvm 1 -> 2, and 3 more virtualization package(s)")
+
+
+class DoctorFactsTest(unittest.TestCase):
+    """What several checks ask (the domains, each definition, rpm-ostree) is
+    asked once per Host and kept by the application, not on the host port."""
+
+    def setUp(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def host(self) -> doc_adapters.Host:
+        tmp = tempfile.mkdtemp(prefix="cst-doctor-facts-")
+        self.addCleanup(shutil.rmtree, tmp)
+        host = doc_adapters.Host({"PATH": tmp, "CST_DOCTOR_CONTAINER": "0", "CST_DOCTOR_ROOT": tmp})
+        calls = self.calls
+
+        class Virsh:
+            def call(self, *args: str, timeout: float | None = 60) -> CommandResult:
+                calls.append(args)
+                return CommandResult(0, "win\n" if args[0] == "list" else "<domain/>", "")
+
+        mock.patch.object(host, "virsh", lambda *, read_only: Virsh()).start()
+        self.addCleanup(mock.patch.stopall)
+        return host
+
+    def test_each_host_is_asked_once(self) -> None:
+        a, b = self.host(), self.host()
+        for _ in range(2):
+            self.assertEqual(doc_app.libvirt_domains(a), (["win"], ""))
+            self.assertEqual(doc_app.domain_xml(a, "win"), (0, "<domain/>", ""))
+        self.assertEqual(self.calls, [("list", "--all", "--name"), ("dumpxml", "--inactive", "win")])
+        doc_app.libvirt_domains(b)
+        self.assertEqual(len(self.calls), 3, "a new Host starts with no answers")
+
+    def test_the_answers_are_not_kept_on_the_host(self) -> None:
+        host = self.host()
+        doc_app.libvirt_domains(host)
+        doc_app.domain_xml(host, "win")
+        doc_app.deployments(host)
+        self.assertEqual([n for n in vars(host) if n in ("_domains", "_dumpxml", "_ostree", "_ostree_list")], [])
 
 
 if __name__ == "__main__":

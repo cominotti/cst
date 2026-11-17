@@ -6,7 +6,7 @@ import os
 from typing import Any, BinaryIO, Protocol, TextIO
 
 from cst_core.ports import VirshPort
-from doctor.domain import Deployment, HostPath, OstreeAnswer, Result, ViewPath
+from doctor.domain import HostPath, Result, ViewPath
 
 
 class DoctorHostPort(Protocol):
@@ -22,10 +22,6 @@ class DoctorHostPort(Protocol):
     arch: str
     # The doctor's own XDG state folder (a path of this process: never mapped).
     state_home: ViewPath
-    _ostree: OstreeAnswer
-    _ostree_list: list[Deployment]
-    _domains: tuple[list[str] | None, str]
-    _dumpxml: dict[str, tuple[int, str, str]]
 
     def path(self, p: HostPath) -> ViewPath:
         """Map an absolute host path to this process's view (e.g. /run/host)."""

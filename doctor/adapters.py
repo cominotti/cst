@@ -9,7 +9,7 @@ from typing import Any, BinaryIO, TextIO
 
 from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
-from doctor.domain import NAME, VIRSH_URI, Deployment, OstreeAnswer, ViewPath
+from doctor.domain import NAME, VIRSH_URI, ViewPath
 from vm import adapters as vm_adapters
 
 
@@ -17,11 +17,6 @@ class Host:
     """How to reach the host: directly, or from a toolbox (flatpak-spawn
     --host for commands, /run/host for files). Tests set CST_DOCTOR_CONTAINER
     (1 or 0), CST_DOCTOR_ROOT (the host's / for files) and CST_DOCTOR_NOW."""
-
-    _ostree: OstreeAnswer
-    _ostree_list: list[Deployment]
-    _domains: tuple[list[str] | None, str]
-    _dumpxml: dict[str, tuple[int, str, str]]
 
     def __init__(self, env: Mapping[str, str] | None = None, repo: str = "") -> None:
         env = os.environ if env is None else env

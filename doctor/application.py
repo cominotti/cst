@@ -2,6 +2,7 @@
 """Application probes, check registry, runner, and renderer for `cst doctor`."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 import json
 import os
 import re
@@ -102,28 +103,54 @@ def check[F: CheckFn](area: str) -> Callable[[F], F]:
     return register
 
 
+# ---- what several checks ask, once per run ----------------------------------------------------
+@dataclass(slots=True)
+class DoctorFacts:
+    """Answers several checks need, asked once per Host (one check-up): the
+    rpm-ostree answer with every deployment, the libvirt domains, and each
+    VM's inactive definition. Kept here, not on the host port: the port
+    reaches the machine, this is the run's own state."""
+
+    ostree: tuple[OstreeAnswer, list[Deployment]] | None = None
+    domains: tuple[list[str] | None, str] | None = None
+    dumpxml: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+
+
+# id(host) -> (host, its facts). The host is kept with its facts, so its id
+# never names another Host while the entry is here.
+_FACTS: dict[int, tuple[DoctorHostPort, DoctorFacts]] = {}
+
+
+def facts(host: DoctorHostPort) -> DoctorFacts:
+    """The facts of this Host (by identity: a new Host starts with none)."""
+    known = _FACTS.get(id(host))
+    if known is None or known[0] is not host:
+        known = _FACTS[id(host)] = (host, DoctorFacts())
+    return known[1]
+
+
 # ---- rpm-ostree ----------------------------------------------------------------------------------
-def ostree_deployments(host: DoctorHostPort) -> OstreeAnswer:
-    """(booted, pending, error). pending is the deployment of the next boot
+def ostree_deployments(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deployment]]:
+    """((booted, pending, error), every deployment in the order ostree admin
+    status numbers them). pending is the deployment of the next boot
     when it is not the booted one: rpm-ostree lists it first (for the booted
     system's osname), staged or not (rpm-ostree rollback leaves an unstaged
     one there). It is the one rpm-ostree install/uninstall edit."""
     if not host.exists(host.path(HostPath("/run/ostree-booted"))):
-        return None, None, "not an rpm-ostree system"
+        return (None, None, "not an rpm-ostree system"), []
     rc, out, err = host.run(["rpm-ostree", "status", "--json"])
     if rc != 0:
-        return None, None, f"rpm-ostree status --json failed: {first_line(err) or f'exit {rc}'}"
+        return (None, None, f"rpm-ostree status --json failed: {first_line(err) or f'exit {rc}'}"), []
     try:
         data = json.loads(out)
         deps = [d for d in data["deployments"] if isinstance(d, dict)]
     except (ValueError, KeyError, TypeError) as e:
-        return None, None, f"rpm-ostree status --json: unreadable output ({e})"
-    host._ostree_list = deps  # every deployment, in the order ostree admin status numbers them
+        return (None, None, f"rpm-ostree status --json: unreadable output ({e})"), []
     booted = next((d for d in deps if d.get("booted")), None)
     osname = booted.get("osname") if booted else None
     first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
     pending = first if first is not None and first is not booted else None
-    return booted, pending, ""
+    return (booted, pending, ""), deps
 
 
 def installed_packages(host: DoctorHostPort, d: Deployment) -> list[str] | None:
@@ -138,11 +165,17 @@ def installed_packages(host: DoctorHostPort, d: Deployment) -> list[str] | None:
     return pkgs or None
 
 
-def deployments(host: DoctorHostPort) -> OstreeAnswer:
+def ostree_facts(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deployment]]:
     """ostree_deployments, asked once per run (several checks use it)."""
-    if not hasattr(host, "_ostree"):
-        host._ostree = ostree_deployments(host)
-    return host._ostree
+    known = facts(host)
+    if known.ostree is None:
+        known.ostree = ostree_deployments(host)
+    return known.ostree
+
+
+def deployments(host: DoctorHostPort) -> OstreeAnswer:
+    """(booted, pending, error) of ostree_facts."""
+    return ostree_facts(host)[0]
 
 
 @check("rpm-ostree")
@@ -1069,20 +1102,19 @@ def virsh_problem(rc: int, err: str) -> str:
 
 def libvirt_domains(host: DoctorHostPort) -> tuple[list[str] | None, str]:
     """(names, problem), asked once per run."""
-    if not hasattr(host, "_domains"):
+    known = facts(host)
+    if known.domains is None:
         rc, out, err = virsh(host, "list", "--all", "--name")
         if rc != 0:
-            host._domains = (None, virsh_problem(rc, err))
+            known.domains = (None, virsh_problem(rc, err))
         else:
-            host._domains = ([n.strip() for n in out.splitlines() if n.strip()], "")
-    return host._domains
+            known.domains = ([n.strip() for n in out.splitlines() if n.strip()], "")
+    return known.domains
 
 
 def domain_xml(host: DoctorHostPort, vm: str) -> tuple[int, str, str]:
     """(rc, xml, err) of `dumpxml --inactive` (no secrets), asked once per VM and run."""
-    if not hasattr(host, "_dumpxml"):
-        host._dumpxml = {}
-    cache = host._dumpxml
+    cache = facts(host).dumpxml
     if vm not in cache:
         cache[vm] = virsh(host, "dumpxml", "--inactive", vm)
     return cache[vm]
@@ -1199,7 +1231,7 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
     if err or booted is None:
         yield Result(INFO, f"virtualization packages: not compared ({err or 'no booted deployment'})")
         return
-    deps = getattr(host, "_ostree_list", [])
+    deps = ostree_facts(host)[1]  # the booted one among them: it answered
     i = next(n for n, d in enumerate(deps) if d is booted)
     rb = next(((n, d) for n, d in enumerate(deps) if n > i and d.get("osname") == booted.get("osname")), None)
     if rb is None:

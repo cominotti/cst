@@ -511,7 +511,9 @@ The code is split into four layers under `doctor/`:
   host's files for the checks, and knows where the CST checkout is) and `VmTools` (the knobs and
   the image folder probe of `vm.adapters`).
 - `doctor/application.py`: host probes, check implementations, `CHECKS` registry
-  and `run_checks`. No direct I/O: files and commands go through
+  and `run_checks`, and `DoctorFacts`: what several checks ask (rpm-ostree with
+  every deployment, the libvirt domains, each VM's definition), asked once per
+  `Host` and kept here, not on the host port. No direct I/O: files and commands go through
   `DoctorHostPort` (`tests/test_architecture.py` checks it).
 - `doctor/presenter.py`: `render`, the report as text.
 - `doctor/cli.py`: the command line: arguments, the `Host`, the VM checks
