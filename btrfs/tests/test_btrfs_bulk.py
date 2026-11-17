@@ -562,6 +562,36 @@ class BulkTest(BulkBase):
         with self.assertRaisesRegex(SystemExit, "needs --user NAME"):
             self.m.user_ctx([])
 
+    def test_a_bad_bulk_conf_line_at_boot_exits_non_zero_and_alerts(self) -> None:
+        # The boot service runs `btrfs-bulk boot` before any login. The refusal to guess whose home
+        # it moves only reached the boot console and the journal, every boot, unseen.
+        with open(os.path.join(os.path.dirname(HERE), "units", "btrfs-bulk-boot.service")) as f:
+            self.assertIn("ExecStart=/usr/local/sbin/btrfs-bulk boot\n", f.read())
+        self.m.ROOT = True
+        with open(self.m.CONF, "w") as f:
+            f.write("# CST\nBULK_USER=$USER\n")
+        with open(self.m.FLAG, "w") as f:
+            f.write("apps\n")
+        sent: list[tuple[str, str]] = []
+        self.m.alert = lambda title, body: sent.append((title, body))
+        with self.assertRaises(SystemExit) as cm:
+            bulk_cli.main(["btrfs-bulk", "boot"], TOOL)
+        code = cm.exception.code
+        # A text: Python prints it on stderr and exits 1.
+        self.assertIsInstance(code, str)
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", str(code))
+        self.assertEqual(len(sent), 1, sent)
+        title, body = sent[0]
+        self.assertEqual(title, "~/Bulk: nothing moved at boot")
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", body)
+        self.assertIn("journalctl -u btrfs-bulk-boot", body)
+        self.assertTrue(os.path.exists(self.m.FLAG), "the items wait for the next boot, once the line is fixed")
+        # Run by hand, the message is on the terminal: no alert.
+        sent.clear()
+        with self.assertRaises(SystemExit):
+            bulk_cli.main(["btrfs-bulk", "plan"], TOOL)
+        self.assertEqual(sent, [])
+
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
         # The counter was written with open("w") and no fsync before the moves; a hang
         # or hard reset before the next btrfs commit lost it, and the give-up never tripped.
@@ -1422,6 +1452,73 @@ class BulkTest(BulkBase):
         self.assertIn("go-mod", problems)
         self.assertTrue(os.path.exists(self.B("toolchains/go/pkg/mod/a")))
         self.assertTrue(os.path.exists(self.H("go/pkg/mod/b")))
+
+    def test_subvol_target_turned_into_a_symlink_is_not_followed(self) -> None:
+        # Recovery runs as root on a path under the user's ~/Bulk: a symbolic
+        # link there is reported (journal kept), never listed through.
+        self.write("go/pkg/mod/a", "data")
+        L = self.H("go/pkg/mod")
+        st = os.lstat(L)
+        self.subvols.add((st.st_dev, st.st_ino))
+        m = self.m
+
+        def mv(Lp: str, Tp: str) -> None:
+            if os.path.isdir(Tp):
+                os.rmdir(Tp)
+            os.rename(Lp, Tp)
+            raise Crash()
+
+        m.u_move_subvol = mv
+        with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
+            m.apply(self.ctx)
+        T = self.B("toolchains/go/pkg/mod")
+        os.rename(T, T + ".elsewhere")
+        empty = os.path.join(self.tmp, "empty-elsewhere")
+        os.mkdir(empty)
+        os.symlink(empty, T)
+        _deferred, problems = self.apply()
+        self.assertIn("go-mod", problems)
+        self.assertTrue(os.path.exists(self.m.jpath("go-mod")), "the journal stays")
+        self.assertIn(f"{T} is a symbolic link (not followed)", self.out)
+        self.assertTrue(os.path.islink(T))
+
+    def test_a_partly_unreadable_tree_is_at_least_its_sum(self) -> None:
+        # What du -sxb does then: the sum of what it read on stdout, exit 1.
+        answers = {
+            "partial": subprocess.CompletedProcess([], 1, "5368709120\t/x\n", "du: cannot read directory '/x/b'\n"),
+            "whole": subprocess.CompletedProcess([], 0, "5368709120\t/x\n", ""),
+            "nothing": subprocess.CompletedProcess([], 1, "", "du: cannot access '/x': No such file or directory\n"),
+        }
+        answer = answers["partial"]
+
+        def du(args: Sequence[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(list(args[:2]), ["du", "-sxb"])
+            return answer
+
+        with mock.patch.object(bulk_adapters.subprocess, "run", du):
+            self.assertEqual(bulk_adapters.du_bytes("/x"), bulk_domain.TreeSize(5368709120, False))
+            item = next(i for i in bulk_domain.ITEMS if i.id == "apps")
+            ctx = bulk_adapters.Ctx(self.home)
+            text = bulk_items.item_text(ctx, item, "nocow", "folder without +C", "plan")
+            self.assertEqual(text, "rewrite without copy-on-write (folder without +C, at least 5.0 GiB)")
+            answer = answers["whole"]
+            text = bulk_items.item_text(ctx, item, "nocow", "folder without +C", "plan")
+            self.assertEqual(text, "rewrite without copy-on-write (folder without +C, 5.0 GiB)")
+            answer = answers["nothing"]
+            self.assertEqual(bulk_adapters.du_bytes("/x"), bulk_domain.TreeSize(0, False))
+        self.assertEqual(bulk_domain.du_text(bulk_domain.TreeSize(0, False)), "at least 0 MiB")
+
+    def test_entries_nofollow(self) -> None:
+        d = os.path.join(self.tmp, "real")
+        os.makedirs(os.path.join(d, "sub"))
+        open(os.path.join(d, "f"), "w").close()
+        os.symlink(d, os.path.join(self.tmp, "link"))
+        self.assertEqual(sorted(bulk_adapters.entries_nofollow(d)), ["f", "sub"])
+        self.assertEqual(bulk_adapters.entries_nofollow(os.path.join(self.tmp, "absent")), [])
+        self.assertEqual(bulk_adapters.entries_nofollow(os.path.join(d, "f")), [])
+        with self.assertRaises(bulk_domain.Unexpected) as cm:
+            bulk_adapters.entries_nofollow(os.path.join(self.tmp, "link"))
+        self.assertIn("is a symbolic link (not followed)", str(cm.exception))
 
     def test_toolchain_targets_are_nested_and_their_parents_made_on_the_way(self) -> None:
         # toolchains/<language>/<tool>/<the folder's own name>, all copy-on-write;

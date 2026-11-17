@@ -22,9 +22,10 @@ import sys
 import tempfile
 from typing import Literal, overload
 
-from cst_core.domain.files import OwnedState, owned_file_state
+from cst_core.domain.files import OwnedState, UnitFileState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import first_line
+from cst_core.domain.units import MASK_TARGET
 
 
 @overload
@@ -120,6 +121,25 @@ def owned_file_state_at(
     except OSError:
         return "conflict"
     return owned_file_state(data, is_link=is_link, wanted=wanted, ours=is_ours(data), owner=owner)
+
+
+def is_masked_unit(path: str) -> bool:
+    """True when path is a link that leads to /dev/null: `systemctl mask` put it
+    there (systemd follows a chain of links too)."""
+    return os.path.islink(path) and os.path.realpath(path) == MASK_TARGET
+
+
+def unit_file_state_at(
+    path: str, wanted: bytes | None, is_ours: Callable[[bytes], bool], *, owner: Owner
+) -> UnitFileState:
+    """owned_file_state_at for a systemd unit file: "masked" first when the
+    unit is masked (is_masked_unit), which the link rule would otherwise replace
+    (root) or call someone else's file (user). A link to anything else follows
+    the link rule. Only for unit destinations: a program linked to /dev/null is
+    not a mask."""
+    if is_masked_unit(path):
+        return "masked"
+    return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
 class LocalFileSystemAdapter:

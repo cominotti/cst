@@ -25,7 +25,8 @@ Everything comes from the command line; it reads no configuration file.
       the cache folders --exclude-caches would drop from each source's next
       snapshot, with their files and sizes (read from the sources).
   btrfs-snapshot-core latest --snapdir DIR --name NAME [--source-path PATH]
-      prints the path of the newest snapshot of NAME (by "Gen at creation").
+      prints the path of the newest snapshot of NAME (by "Gen at creation");
+      DIR and PATH must be absolute.
 
 Cache folders (--exclude-caches): a new snapshot is first recorded in
 --state-dir/core-unfinished, then created writable, then every cache folder

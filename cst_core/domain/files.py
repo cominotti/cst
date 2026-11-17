@@ -10,6 +10,9 @@ from cst_core.domain.text import file_lines
 
 type ManagedState = Literal["ok", "adopt", "duplicate", "change", "missing", "conflict", "unreadable"]
 type OwnedState = Literal["ok", "change", "conflict", "missing"]
+# A systemd unit file CST writes whole: an OwnedState, or "masked" (systemctl mask left a link to
+# /dev/null there; cst_core.adapters.files.unit_file_state_at).
+type UnitFileState = OwnedState | Literal["masked"]
 
 _UNMARKED_KEY_RE = re.compile(r"^\s*([^\s#]\S*)")
 

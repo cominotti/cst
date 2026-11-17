@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from cst_core.adapters.runtime import sibling_program
 from typing import Any
 from typing import cast
+import errno
 import fcntl
 import json
 import os
@@ -32,9 +33,11 @@ from btrfs.bulk.domain import (
     Item,
     KEEP_HEADER,
     NOCOW_TOP,
+    NOTIFY,
     SUBVOL_CREATE,
     TAG_SIGNATURE,
     TAG_TEXT,
+    TreeSize,
     Unexpected,
 )
 from cst_core.adapters.files import read_text
@@ -62,21 +65,35 @@ KEEP = os.path.join(ETC, "bulk-keep")
 CONVERT_PLAN = os.path.join(ETC, "convert-plan")
 
 
+class BadSettings(SystemExit):
+    """bulk.conf has a line that is not a plain KEY=VALUE. A SystemExit with the
+    message: the run stops with exit 1 and the message on stderr. At boot,
+    main() also sends it as an alert (nobody reads the boot console); lines
+    names each bad line (file and line number)."""
+
+    def __init__(self, lines: str) -> None:
+        super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
+        self.lines = lines
+
+
 def bulk_user() -> str | None:
     """BULK_USER of bulk.conf (setup-bulk.bash writes it), or None when unset or
     the file cannot be read. A line that is not a plain assignment stops the
     run, naming the line: root must never guess whose home it moves."""
     parsed = parse_shell_assignments(read_text(CONF) or "", bash_sourced=False)
     if parsed.problems:
-        raise SystemExit(
-            f"btrfs-bulk: {describe_problems(CONF, parsed.problems)}\n"
-            "Fix the line (cst btrfs install writes the file) or pass --user NAME."
-        )
+        raise BadSettings(describe_problems(CONF, parsed.problems))
     return parsed.values.get("BULK_USER") or None
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def alert(title: str, body: str) -> None:
+    log(f"<4>btrfs-bulk: {title}: {body}")
+    if os.access(NOTIFY, os.X_OK):
+        subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True)
 
 
 class Program:
@@ -178,12 +195,15 @@ def busy_paths(paths: Sequence[str], home: str) -> set[str]:
     return {line for line in r.stdout.splitlines() if line}
 
 
-def du_bytes(path: str) -> int:
+def du_bytes(path: str) -> TreeSize:
+    """du -sxb: the apparent size of the tree at path (this filesystem only).
+    A part du cannot read is left out of its sum, and it exits 1: the size
+    is then incomplete, a lower bound (also when du printed no sum at all)."""
     r = subprocess.run(["du", "-sxb", "--", path], check=False, capture_output=True, text=True)
     try:
-        return int(r.stdout.split()[0])
+        return TreeSize(int(r.stdout.split()[0]), r.returncode == 0)
     except IndexError, ValueError:
-        return 0
+        return TreeSize(0, False)
 
 
 def free_bytes(path: str) -> int:
@@ -240,6 +260,23 @@ class Ctx:
 
     def short(self, path: str) -> str:
         return "~" + path[len(self.home) :] if path.startswith(self.home + "/") else path
+
+
+def user_ctx(args: Sequence[str]) -> Ctx:
+    """Ctx from --user NAME (root) or, not as root, the current user and
+    BTRFS_BULK_HOME (tests, dry runs)."""
+    name = None
+    if "--user" in args:
+        i = args.index("--user")
+        name = args[i + 1] if i + 1 < len(args) else None
+    if ROOT:
+        if not name:
+            name = bulk_user()
+        if not name or name == "root":
+            raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
+        pw = pwd.getpwnam(name)
+        return Ctx(pw.pw_dir, pw)
+    return Ctx(os.environ.get("BTRFS_BULK_HOME") or os.path.expanduser("~"))
 
 
 def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:
@@ -306,6 +343,26 @@ def kind(path: str) -> str:
     if stat.S_ISLNK(st.st_mode):
         return "link"
     return "dir" if stat.S_ISDIR(st.st_mode) else "other"
+
+
+def entries_nofollow(path: str) -> list[str]:
+    """The names in the folder path; [] when it is absent or not a folder.
+    A symbolic link at path is not followed (root reads paths under the
+    user's ~/Bulk): Unexpected."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        if e.errno not in (errno.ENOTDIR, errno.ELOOP):
+            raise
+        if kind(path) == "link":
+            raise Unexpected(f"{path} is a symbolic link (not followed)") from None
+        return []
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
 
 
 def chain(base: str, rel: str) -> str:

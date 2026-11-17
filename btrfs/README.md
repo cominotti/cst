@@ -127,7 +127,7 @@ cst btrfs help
 | `status` | root | One overview of everything (section 5). Read-only. |
 | `uninstall` | root | Removes what `install` added (section 6). |
 | `test-alert` | root | Sends a test desktop alert. |
-| `degraded-boot [install\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
+| `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
@@ -268,7 +268,10 @@ accident, the fingerprint no longer matches.
 need that file, and by then the other copy may be bad too.
 
 **How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` every
-Sunday at 02:00, with the lowest IO priority. If the PC was off, it runs at the
+Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
+only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
+so on this PC the scrub reads at the disks' full speed (see
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)). If the PC was off, it runs at the
 next boot. After the scrub, the health check runs at once. If the scrub fails,
 the health check also runs and alerts.
 
@@ -444,7 +447,10 @@ text is also written to the journal. When you start it from a terminal (as
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
-which sends it.
+which sends it. That folder survives a restart of the monitor, also an automatic
+one after a crash (`RuntimeDirectoryPreserve=restart`), so a queued alert is not
+lost; stopping the monitor removes it. The monitor's journal lines carry its
+own name: `journalctl -t btrfs-stall-monitord` (or `-u btrfs-stall-monitor`).
 
 **When nobody is logged in.** Some alerts happen when no desktop is there to
 show them: at boot, before the login screen, or at night when you are logged
@@ -569,7 +575,11 @@ docker volume rm <name>         # or one volume by name
   those `install` only leaves a flag file `/etc/btrfs-setup/docker-nocow-pending`.
   It also resets the counter of attempts (see below).
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
-  starts**. For each volume with copy-on-write data it makes a full NOCOW copy,
+  starts**. For each volume with copy-on-write data it makes a full NOCOW copy
+  (the empty copy folder first gets the volume folder's SELinux label with
+  `chcon --reference`; if that fails while the volume has a label, the copy is
+  refused before anything is copied; without labels, SELinux disabled, the
+  failure changes nothing),
   checks that the copy has the same number of entries and bytes and the same
   SELinux label on every entry (`cp -a` drops a label it cannot set without a
   word, and a container cannot open a file whose label changed), swaps the
@@ -714,7 +724,11 @@ cst btrfs uninstall
 
 It does not ask for confirmation; it starts at once. It stops and removes:
 
-- the health-check and scrub timers, the stall monitor and its alert service;
+- the health-check and scrub timers, the stall monitor and its alert service.
+  The last run that systemd keeps for a timer (`/var/lib/systemd/timers/stamp-*`)
+  goes too: `systemctl clean --what=state` while the timer is still loaded. So
+  does the stamp of `btrfs-scrub-monthly.timer`, a timer of older versions (that
+  one also at `install`);
 - the installed scripts in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher;
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
@@ -964,6 +978,7 @@ installed `btrfs-stall-report` command.
 
 ```
 cst btrfs degraded-boot            # install or update
+cst btrfs degraded-boot plan       # what install would change; changes nothing
 cst btrfs degraded-boot status
 cst btrfs degraded-boot uninstall
 cst btrfs degraded-boot files-only # for development only, see below
@@ -1026,15 +1041,31 @@ own checks:
   - Fedora's own rule `64-btrfs.rules` still works the way this part expects.
     If a Fedora update changed it, it stops with `UPSTREAM CHANGED: ...` and
     changes nothing.
-- It writes its files first, then runs a self-test: every disk must show as
-  ready. If the self-test fails, a **newly written** rule is removed again and
-  the initramfs is **not** changed. The other helper files stay in `/etc`;
-  without the rule they do nothing.
+- It checks the new udev rule with `udevadm verify` before it writes
+  anything: a rule that fails leaves nothing written.
+- It writes its files, then checks its units with `systemd-analyze verify`:
+  a problem such as a typo (an unknown key) stops the install there, with
+  the files written and the initramfs **not** changed.
+- Then it runs a self-test: every disk must show as ready, and `lsblk` must
+  list as many disks of the root filesystem as btrfs counts (none may go
+  unchecked). If the self-test fails, a **newly written** rule is removed
+  again and the initramfs is **not** changed. The other helper files stay in
+  `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).
   The change takes effect at the **next boot**. Running install again with
   nothing changed does not create one.
 - `uninstall` refuses while the current boot is degraded.
+
+`plan` runs the refusals above, `udevadm verify` on the rule and a syntax
+check of the helper, and prints `would write:` or `unchanged:` for each file
+and `would run: ...` for each change install would make (`rpm-ostree
+initramfs-etc`, `systemctl enable` when the record unit is not enabled, the
+removal of files an older version left). It writes no file, reloads nothing
+and creates no deployment. Two checks need the new files in place, so only
+install runs them: `systemd-analyze verify` on the units, and the self-test
+(`plan` says how many disks it would check). Install also reloads systemd
+and udev on every run; `plan` does not list that.
 
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.
@@ -1233,7 +1264,9 @@ What you should know:
   choice)` instead of a problem. Wrong ids are refused, with the valid ones.
 - **Busy items** (a running IDE, emulator, LM Studio) are moved at the next
   boot, before the login screen (`btrfs-bulk-boot.service`), or by `bulk
-  apply` once you close the program; snapshots wait for that. If an item
+  apply` once you close the program; snapshots wait for that. A bad line in
+  `/etc/btrfs-setup/bulk.conf` stops that boot step with a desktop alert that
+  names the line (SNAPSHOTS.md, "Nothing moved into ~/Bulk at boot"). If an item
   needs a look, `snapshots setup` says so before starting the snapshots and
   asks first (not for kept items, and not for a problem inside `~/Bulk`
   only, whose data is not in /home).
@@ -1321,7 +1354,9 @@ cst btrfs docker-gc disable
 `status` shows the timer and recorder state, since when image use is recorded,
 the date from which timed image removal is possible, the last run, and then the
 list. `run --dry-run` shows only the list, ends with `(dry run: nothing
-removed)`, and also works in the first 10 minutes after boot.
+removed)`, and also works in the first 10 minutes after boot. Both only read,
+so they end quietly when their reader goes away (`cst btrfs docker-gc status |
+head -3`).
 
 Some Docker words:
 
@@ -1344,6 +1379,9 @@ Some Docker words:
 | Images | used by no container and **not used for 14+ days** | images from the protected registry `registry.example.com` (pulling them again needs the private tunnel) |
 | Build cache | unused for **14+ days** | |
 
+A removal that fails, and a failed `docker builder prune`, is logged (journal
+warning) and counted in the run's failures (`status`: `failures N`).
+
 **How "last used" is known.** Docker does not record when an image was last used.
 So `enable` also starts `docker-gc-recorder.service`. It follows `docker events`
 and saves the time each image was used (container created, started or stopped;
@@ -1352,7 +1390,8 @@ image pulled, built, tagged, loaded) in `/var/lib/docker-gc`.
 Because of this:
 
 - **The first timed image removal happens 14 days after `enable`.**
-- If the recorder is not running, **no images are removed** at all.
+- If the recorder is not running, **no images are removed** at all. A
+  `systemctl is-active` that gives no answer within 10 s counts as "not running".
 - If the recorder was down for a while with Docker running, the 14-day clock
   starts again.
 - Right before removing an image, it checks again that nothing started using it.
@@ -1381,7 +1420,8 @@ list). It needs a terminal.
   `/etc/systemd/system`;
 - its state in `/var/lib/docker-gc`.
 
-`disable` stops the timer and the recorder. **The files stay**, including the
+`disable` stops the timer and the recorder, and makes systemd forget the
+timer's last run (`systemctl clean --what=state docker-gc.timer`). **The files stay**, including the
 recorded state; `uninstall` (section 6) does not touch docker-gc either. There
 is no command that removes the files. If you want them gone, remove them by
 hand after `disable`:
@@ -1879,8 +1919,8 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 |---|---|---|
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`; no I/O. `adapters.py`: the `Host` (commands, clock, directory entries; tests replace it), the btrfs commands, the scan of the snapshot folder, the cache-folder walk, the local time zone, and the safeguards (they resolve pinned paths on the filesystem). `cli.py`: one `Run` per invocation, the run lock, the argument parser and `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain.py`: the items (`Item`, `ITEMS`), the CACHEDIR.TAG text, sizes and texts, and Steam's file formats (VDF, `libraryfolders.vdf`, app manifests); no I/O. `adapters.py`: settings and state paths, btrfs and the filesystem (subvolumes, +C, mounts, busy files, copies), the child process that runs as the user (`Ctx`, `as_user`) and the steps it runs (`u_*`), the journals, the boot flag, the keep list, the run lock, and where `btrfs-snapshot` is (`snapshot_program()`: the checkout's copy from a checkout, the installed one from the zipapp). `steam.py`: one game's move into `~/Bulk/steam` with its journal and recovery. `items.py`: each item's state, its move and link, recovery, `apply`, the plan/status report. `cli.py`: `steam plan/apply`, `keep/unkeep`, `boot`, `main()`. |
-| `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes. `cli.py`: `status`, `plan`, `apply`, `off` and `main()`. |
-| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines and the run lock (cst_core's `log` and `take_lock`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
+| `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the one line of `plan` (`plan_line`). `cli.py`: `status`, `apply`, `off` and `main()`. |
+| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral; no I/O. `adapters.py`: the settings (environment: `DOCKER_GC_STATE`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), the `docker` commands, the last-used state, the journal lines, the run lock (cst_core's `log` and `take_lock`) and the last checks before an image is removed (`remove_image`). `cli.py`: `record`, the plan, what `run`, `cleanup-now` and `status` show and remove, and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | No rule of its own without I/O, so no `domain.py`. `adapters.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`), their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the postponed record, SELinux labels, the journal lines. `cli.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark`, `status` and `main()`. |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and keys, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`), the episode being recorded (`Episode`); no I/O. `adapters.py`: reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines and the `Writer` thread of the log files. `monitor.py`: the sampling loop (`Monitor`: probes, samples, episodes, hung and busy tasks, the kernel log, alerts). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain.py`: the record formats, the wait categories and hints, classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift), the open episode, the verdict lines and number formats; no I/O. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, below and the container names. `analysis.py`: `analyse()`, one window's coverage, totals, categories, episodes and events (it reads the clock, and runs below when asked). `cli.py`: the text report, the arguments and `main()`. |

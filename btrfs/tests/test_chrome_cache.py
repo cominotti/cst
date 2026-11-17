@@ -15,8 +15,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import signal
 import unittest
 from collections.abc import Callable, Sequence
+from unittest import mock
 from typing import Protocol, cast
 
 # Run directly (python3 -I -B btrfs/tests/test_chrome_cache.py): the checkout root holds the tests package.
@@ -421,6 +423,43 @@ class ChromeCacheTest(unittest.TestCase):
             self.assertEqual(self.m.main(["chrome-cache", "apply", "--home"]), 2)
             if os.getuid() != 0 and os.path.isdir("/") and os.stat("/").st_uid != os.getuid():
                 self.assertEqual(self.m.main(["chrome-cache", "apply", "--home", "/"]), 2)
+
+    @unittest.skipIf(os.geteuid() == 0, "chrome-cache refuses root (CI runs the unit tests as the user ci)")
+    def test_only_status_and_plan_get_sigpipe_back(self) -> None:
+        # They only read: `cst btrfs snapshots chrome-cache status | head` ends quietly.
+        # apply and off write the flags file and keep Python's handling.
+        restored: list[str] = []
+        with (
+            # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+            mock.patch.object(chrome_cli, "restore_default_signals", lambda: restored.append("x")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            for cmd in ("status", "plan"):
+                self.assertEqual(self.m.main(["chrome-cache", cmd, "--home", self.home]), 0, cmd)
+            self.assertEqual(restored, ["x", "x"])
+            for cmd in ("apply", "off", "undo"):
+                self.assertEqual(self.m.main(["chrome-cache", cmd, "--home", self.home]), 0, cmd)
+        self.assertEqual(restored, ["x", "x"], "apply and off must keep Python's handling")
+
+    @unittest.skipIf(os.geteuid() == 0, "chrome-cache refuses root (CI runs the unit tests as the user ci)")
+    def test_status_and_plan_into_a_closed_pipe_stop_quietly(self) -> None:
+        # `... chrome-cache status | head -1` ended in "Exception ignored ... BrokenPipeError", exit 120.
+        for cmd in ("status", "plan"):
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                p = subprocess.run(
+                    [sys.executable, "-I", "-B", TOOL, cmd, "--home", self.home],
+                    check=False,
+                    stdout=w,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    env={"PATH": "/usr/bin:/bin", "HOME": self.home},
+                    timeout=60,
+                )
+            finally:
+                os.close(w)
+            self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), cmd)
 
 
 class SnapExcludeTest(unittest.TestCase):

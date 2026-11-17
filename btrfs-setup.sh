@@ -42,10 +42,10 @@
 #   uninstall              (root) remove what `install` installed (keeps the
 #                          recorded data and the layered below package)
 #   test-alert             (root) send a test desktop notification
-#   degraded-boot [install|status|files-only|uninstall]
+#   degraded-boot [install|plan|status|files-only|uninstall]
 #                          (root) unattended degraded boot when one NVMe is
 #                          gone: udev rule + units in the initramfs. Separate
-#                          on purpose: it changes the boot path.
+#                          on purpose: it changes the boot path. plan = dry run.
 #   crypt-perf [status|enable|disable]
 #                          (root, asks the LUKS passphrase of each member)
 #                          dm-crypt no_read_workqueue/no_write_workqueue on
@@ -175,6 +175,8 @@ UNITS=(btrfs-health-check.service btrfs-health-check.timer btrfs-scrub-weekly.se
 TIMERS=(btrfs-health-check.timer btrfs-scrub-weekly.timer)
 # Superseded units from earlier versions; removed on install.
 OLD_UNITS=(btrfs-scrub-monthly.service btrfs-scrub-monthly.timer)
+# Where systemd keeps the last run of a Persistent= timer (stamp-<timer>).
+TIMER_STAMP_DIR=/var/lib/systemd/timers
 # Mount options every btrfs mount of the root fs is expected to carry.
 EXPECTED_OPTS=(compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd)
 
@@ -252,6 +254,36 @@ root_fs_uuid() {
 # install_units NAME...: unit files from btrfs/units (to UNIT_DIR, per the manifest).
 install_units() {
     cst_install "${@/#/btrfs/units/}"
+}
+
+# forget_timer_state UNIT...: for each timer among UNIT, forget its last run
+# (the stamp of a Persistent= timer in TIMER_STAMP_DIR, which systemd keeps
+# after the timer is gone). Call it after `disable --now` and before the unit
+# file is removed: `systemctl clean` needs the unit loaded and stopped. Only
+# timers: on a service, --what=state would delete its StateDirectory. A
+# failure is ignored (it only leaves that small file behind).
+forget_timer_state() {
+    local u
+    for u in "$@"; do
+        [[ "${u}" == *.timer ]] || continue
+        systemctl clean --what=state "${u}" 2>/dev/null || true
+    done
+}
+
+# remove_old_units: the units of earlier versions (OLD_UNITS) stopped, their
+# timers' last runs forgotten, and their files removed. A stamp left by an
+# earlier removal (its unit file already gone, so systemd cannot clean it)
+# is removed by hand.
+remove_old_units() {
+    local u
+    for u in "${OLD_UNITS[@]}"; do
+        if [[ -e "${UNIT_DIR}/${u}" ]]; then
+            systemctl disable --now "${u}" 2>/dev/null || true
+            forget_timer_state "${u}"
+            rm -fv "${UNIT_DIR}/${u}"
+        fi
+        [[ "${u}" != *.timer ]] || rm -fv "${TIMER_STAMP_DIR}/stamp-${u}"
+    done
 }
 
 # check_syntax FILE: bash -n or a Python parse, by shebang; fails on errors.
@@ -587,6 +619,7 @@ docker_gc() {
             ;;
         disable)
             systemctl disable --now "${DOCKER_GC_UNITS[@]}" 2>/dev/null || true
+            forget_timer_state "${DOCKER_GC_UNITS[@]}"
             echo "docker-gc disabled (recorded state kept in /var/lib/docker-gc)."
             ;;
         status)
@@ -611,13 +644,21 @@ docker_gc() {
     esac
 }
 
-uninstall() {
-    local unit dest dests
-    # One by one: a missing unit must not stop the others from being stopped.
+# stop_monitoring: the first step of uninstall. One by one: a missing unit
+# must not stop the others from being stopped. The timers' last runs are
+# forgotten while their files are still there.
+stop_monitoring() {
+    local unit
     for unit in "${TIMERS[@]}" btrfs-stall-monitor.service; do
         systemctl disable --now "${unit}" 2>/dev/null || true
     done
+    forget_timer_state "${TIMERS[@]}"
     systemctl stop btrfs-stall-alert.service 2>/dev/null || true
+}
+
+uninstall() {
+    local unit dest dests
+    stop_monitoring
     # New Docker volumes copy-on-write again; existing NOCOW files stay as they are.
     systemctl disable docker-volumes-nocow.service 2>/dev/null || true
     [[ -x /usr/local/sbin/docker-volumes-nocow ]] && /usr/local/sbin/docker-volumes-nocow unmark
@@ -625,7 +666,8 @@ uninstall() {
     systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
     # This script enabled below's recorder; the package itself stays layered.
     systemctl disable --now below.service 2>/dev/null || true
-    for unit in "${UNITS[@]}" "${OLD_UNITS[@]}"; do
+    remove_old_units
+    for unit in "${UNITS[@]}"; do
         rm -fv "${UNIT_DIR}/${unit}"
     done
     mapfile -t dests < <(cst_installed_dests "${BINARIES[@]/#/btrfs/}")
@@ -709,12 +751,7 @@ install_all() {
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
     link_cst_command "${target_user}"
-    for u in "${OLD_UNITS[@]}"; do
-        if [[ -e "${UNIT_DIR}/${u}" ]]; then
-            systemctl disable --now "${u}" 2>/dev/null || true
-            rm -fv "${UNIT_DIR}/${u}"
-        fi
-    done
+    remove_old_units
 
     # below.
     below_pending=0
@@ -812,7 +849,7 @@ case "${cmd}" in
     degraded-boot)
         case "${1:-install}" in
             install) shift $(( $# > 0 ? 1 : 0 )); exec "${DEGRADED}" "$@" ;;
-            status|uninstall|files-only) exec "${DEGRADED}" "--$1" ;;
+            plan|status|uninstall|files-only) exec "${DEGRADED}" "--$1" ;;
             *) exec "${DEGRADED}" "$@" ;;
         esac
         ;;

@@ -12,6 +12,7 @@ from btrfs.chrome_cache.adapters import (
     is_subvol,
     old_cache,
     allocated_bytes,
+    plan_line,
     write_flags,
 )
 from btrfs.chrome_cache.domain import (
@@ -25,6 +26,7 @@ from btrfs.chrome_cache.domain import (
     size_text,
     turn_off,
 )
+from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 
 
@@ -69,16 +71,6 @@ def off(home: str) -> tuple[str, bool, bool]:
     finally:
         if dfd is not None:
             os.close(dfd)
-
-
-def plan_line(home: str) -> str:
-    if not installed(home):
-        return "not installed: nothing to do"
-    dfd, text, _ = current(home, create=False)
-    if dfd is not None:
-        os.close(dfd)
-    state, _, msg = decide(text)
-    return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
 
 
 def status(home: str) -> int:
@@ -143,6 +135,8 @@ def main(argv: Sequence[str]) -> int:
     except OSError as e:
         print(f"chrome-cache: {home}: {e}", file=sys.stderr)
         return 2
+    if cmd in ("status", "plan"):
+        restore_default_signals()  # they only read: `| head` ends them quietly; apply and off keep Python's handling
     try:
         if cmd == "status":
             return status(home)

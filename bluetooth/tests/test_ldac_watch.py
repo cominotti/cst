@@ -678,6 +678,7 @@ systemctl() {
             self.STUBS
             + f'LDAC_RATE="{rate}"\n'
             + shell_functions(
+                "file_state",
                 "lw_plan",
                 "lw_ours_present",
                 "lw_unit_label",
@@ -790,6 +791,53 @@ systemctl() {
         self.assertFalse(os.path.islink(prog))
         with open(kept, "rb") as f:
             self.assertTrue(f.read().endswith(b"# old\n"), "the link was written through")
+
+    def test_a_linked_unit_is_judged_by_what_it_points_to(self) -> None:
+        # The installer's rule for a link in the home (cst_core.domain.install.link_read_through):
+        # the same text is up to date and stays a link; ours with other text is rewritten, the
+        # link replaced and its target untouched. Before, any link was a conflict.
+        r, _, home = self.run_lw("lw_plan; lw_install\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        unit = os.path.join(home, ".config/systemd/user/cst-bt-ldac48.service")
+        kept = os.path.join(home, "dotfiles-cst-bt-ldac48.service")
+        os.rename(unit, kept)
+        os.symlink(kept, unit)
+        r, calls, _ = self.run_lw('lw_plan; echo "st=$LW_UNIT_ST change=$LW_CHANGE"; lw_install\n', home=home)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("st=ok change=0", r.stdout)
+        self.assertEqual(calls, [])
+        self.assertTrue(os.path.islink(unit))
+        with open(kept, "a") as f:
+            f.write("# changed by hand\n")
+        r, calls, _ = self.run_lw('lw_plan; echo "st=$LW_UNIT_ST"; lw_install\n', home=home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("st=change", r.stdout)
+        self.assertIn(f"written:   {unit}", r.stdout)
+        self.assertIn("systemctl --user daemon-reload", calls)
+        self.assertFalse(os.path.islink(unit))
+        with open(kept) as f:
+            self.assertTrue(f.read().endswith("# changed by hand\n"), "the link was written through")
+        r, _, _ = self.run_lw('lw_plan; echo "st=$LW_UNIT_ST"\n', home=home, extra_env={"CMD": "plan"})
+        self.assertIn("st=ok", r.stdout)
+
+    def test_a_masked_or_foreign_linked_unit_stays_a_conflict(self) -> None:
+        # Judged by what it points to: /dev/null (a masked unit), a unit not ours or a folder is a conflict.
+        home = tempfile.mkdtemp(prefix="bt-test-")
+        units = os.path.join(home, ".config/systemd/user")
+        os.makedirs(units)
+        foreign = os.path.join(home, "foreign.service")
+        with open(foreign, "w") as f:
+            f.write("[Service]\nExecStart=/bin/true\n")
+        unit = os.path.join(units, "cst-bt-ldac48.service")
+        folder = os.path.join(home, "a-folder")
+        os.mkdir(folder)
+        for target in (foreign, os.devnull, folder):
+            os.symlink(target, unit)
+            r, calls, _ = self.run_lw('lw_plan; echo "st=$LW_UNIT_ST"\n', home=home, extra_env={"CMD": "plan"})
+            self.assertEqual(r.stderr, "", target)
+            self.assertIn("st=conflict", r.stdout, target)
+            self.assertEqual(calls, [])
+            os.unlink(unit)
 
     def test_foreign_unit_is_left_alone(self) -> None:
         home = tempfile.mkdtemp(prefix="bt-test-")

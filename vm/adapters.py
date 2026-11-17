@@ -9,6 +9,7 @@ Every path below can be moved by its CST_VM_* variable, for the tests only
 from collections.abc import Callable, Mapping, Sequence
 import ctypes
 import datetime
+import functools
 import json
 import os
 import pwd
@@ -23,23 +24,35 @@ from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import nocow as inode_attrs
-from cst_core.adapters.files import ensure_dir, read_text
+from cst_core.adapters.files import ensure_dir, is_masked_unit, owned_file_state_at, read_text, unit_file_state_at
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runtime import restore_default_signals
+from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.domain.errors import Refused
+from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
+from cst_core.domain.text import (
+    ShellAssignments,
+    describe_problems,
+    first_line,
+    is_yes,
+    parse_shell_assignments,
+    parse_snapshots_conf,
+)
 from vm.domain import (
     BTRFS_MAGIC,
     DEFAULT_VM,
     KNOBS,
     NAS_DEFAULTS,
     NOT_INSTALLED,
+    SERVICE,
+    TIMER,
     UNIT_MARKER,
     URI,
     USER_IMAGES,
     VIRT_PACKAGES,
     is_cst_vm_program,
+    render_service,
+    render_timer,
 )
 
 NAME = "cst-vm"
@@ -142,7 +155,17 @@ def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
     accepts blanks around = (`VM_NOCOW = 0`), as cst-vm always did. A line
     that is not an assignment sets nothing (prepare_command reports it).
     Undecodable bytes are replaced (main's cst-vm stopped with a traceback)."""
-    return dict(parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).values)
+    return dict(settings_file(path, bash_sourced=bash_sourced).values)
+
+
+def settings_file(path: str, *, bash_sourced: bool) -> ShellAssignments:
+    """A settings file through cst_core's one reader ("" when it cannot be read).
+    snapshots.conf (NAS_CONF) also takes the lines an older CST wrote there with
+    printf %q, read as bash reads them (parse_snapshots_conf)."""
+    text = read_text(path, "")
+    if path == NAS_CONF:
+        return parse_snapshots_conf(text)
+    return parse_shell_assignments(text, bash_sourced=bash_sourced)
 
 
 def conf_files(cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
@@ -172,7 +195,7 @@ def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> Non
         return
     found = []
     for path, bash_sourced in conf_files(cmd, nas, vm):
-        problems = parse_shell_assignments(read_text(path, ""), bash_sourced=bash_sourced).problems
+        problems = settings_file(path, bash_sourced=bash_sourced).problems
         if problems:
             found.append(describe_problems(path, problems))
     changes = cmd == "backup" or sub in ("apply", "on", "off")
@@ -476,6 +499,40 @@ def wants_links() -> list[str]:
         return sorted(n for n in os.listdir(d) if n.startswith("cst-vm-backup@") and n.endswith(".timer"))
     except OSError:
         return []
+
+
+def stop_timeout() -> str:
+    """A stop may arrive while the snapshot call is held (SNAPSHOT_TIMEOUT +
+    SNAPSHOT_SETTLE), then the merge runs (COMMIT_TIMEOUT, plus virsh's own
+    300 s), then the checks and the alert: 30 minutes of margin."""
+    return f"{(SNAPSHOT_TIMEOUT + SNAPSHOT_SETTLE + COMMIT_TIMEOUT + 300 + 1800 + 59) // 60}min"
+
+
+def timer_files(entry_file: str) -> dict[str, tuple[bytes, int]]:
+    """{path: (wanted bytes, mode)}: the program as `install` writes it (a
+    zipapp; entry_file is the running cst-vm), the service and the timer."""
+    return {
+        SBIN_COPY: (install_payload("vm/cst-vm", entry_file), 0o755),
+        os.path.join(UNIT_DIR, SERVICE): (render_service(SBIN_COPY, stop_timeout()).encode(), 0o644),
+        os.path.join(UNIT_DIR, TIMER): (render_timer().encode(), 0o644),
+    }
+
+
+def timer_file_states(files: Mapping[str, tuple[bytes, int]], instance_timer: str) -> dict[str, UnitFileState]:
+    """{path: state} of what backup-timer on writes (timer_files): the program by
+    the installer's link rule, the two units also "masked" (systemctl mask: a
+    link to /dev/null). instance_timer, the VM's own timer (cst-vm-backup@VM.timer
+    in UNIT_DIR, which `systemctl mask` of that one VM creates), is added only
+    when it is masked: CST never writes it."""
+    states: dict[str, UnitFileState] = {
+        p: (owned_file_state_at if p == SBIN_COPY else unit_file_state_at)(
+            p, t, functools.partial(is_ours, p), owner="root"
+        )
+        for p, (t, _) in files.items()
+    }
+    if is_masked_unit(instance_timer):
+        states[instance_timer] = "masked"
+    return states
 
 
 def systemctl(*args: str) -> tuple[int, str, str]:

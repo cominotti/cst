@@ -14,9 +14,11 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from typing import Any
 from unittest import mock
@@ -79,6 +81,9 @@ class ProgramTest(unittest.TestCase):
         self.v.LAST_USED = os.path.join(self.tmp, "last-used.json")
         self.v.LAST_RUN = os.path.join(self.tmp, "last-run.json")
         self.v.LOCK = os.path.join(self.tmp, "docker-gc.lock")
+        # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+        self.restored: list[str] = []
+        self.v.restore_default_signals = lambda: self.restored.append("x")
 
     def run_main(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -127,6 +132,19 @@ class ProgramTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, "image use not recorded yet (recorder not started)\nlast run: never\n")
 
+    def test_only_status_and_a_dry_run_get_sigpipe_back(self) -> None:
+        # They only read: `docker-gc status | head` ends quietly. The weekly run,
+        # cleanup-now and the recorder keep Python's handling (they remove things).
+        self.v.docker_up = lambda: False
+        self.assertEqual(self.run_main("status")[0], 0)
+        self.assertEqual(self.restored, ["x"])
+        self.assertEqual(self.run_main()[0], 0)  # no command: status
+        self.assertEqual(self.run_main("run", "--dry-run")[0], 0)
+        self.assertEqual(self.restored, ["x", "x", "x"])
+        for argv in (("run",), ("cleanup-now",), ("bogus",)):
+            self.run_main(*argv)
+        self.assertEqual(self.restored, ["x", "x", "x"], "run and cleanup-now must keep Python's handling")
+
     def test_status_shows_the_last_run_in_decimal_units(self) -> None:
         self.v.docker_up = lambda: False
         with open(gc_cli.LAST_RUN, "w") as f:
@@ -160,11 +178,61 @@ class ProgramTest(unittest.TestCase):
             ],
         )
 
+    def test_a_failed_build_cache_prune_is_logged_and_counted(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def docker(*args: str, **_kw: object) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args[:2] == ("builder", "prune"):
+                return subprocess.CompletedProcess(["docker", *args], 1, "", "Error response from daemon: busy\n")
+            return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+        self.v.docker = docker
+        plan = {"at": 0, "containers": [], "volumes": [], "images": []}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            failed = gc_cli.apply(plan)
+        self.assertEqual(failed, 1)
+        self.assertEqual(
+            out.getvalue(), "<4>docker-gc: could not prune the build cache: Error response from daemon: busy\n"
+        )
+        self.assertEqual([c[:2] for c in calls], [("builder", "prune")])
+        # A prune that works is no failure and no line.
+        self.v.docker = lambda *args, **_kw: subprocess.CompletedProcess(["docker", *args], 0, "", "")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(gc_cli.apply(plan), 0)
+        self.assertEqual(out.getvalue(), "")
+
     def test_is_protected_reads_tags_and_digests(self) -> None:
         self.v.PROTECTED = ("registry.example.com/",)
-        self.assertTrue(gc_cli.is_protected({"RepoTags": ["registry.example.com/org/app:1"]}))
-        self.assertTrue(gc_cli.is_protected({"RepoTags": None, "RepoDigests": ["registry.example.com/o/a@sha256:1"]}))
-        self.assertFalse(gc_cli.is_protected({"RepoTags": ["alpine:latest"]}))
+        self.assertTrue(gc_adapters.is_protected({"RepoTags": ["registry.example.com/org/app:1"]}))
+        self.assertTrue(
+            gc_adapters.is_protected({"RepoTags": None, "RepoDigests": ["registry.example.com/o/a@sha256:1"]})
+        )
+        self.assertFalse(gc_adapters.is_protected({"RepoTags": ["alpine:latest"]}))
+
+
+class RecorderAliveTest(unittest.TestCase):
+    """recorder_alive: systemctl is-active with no stdin and a time limit."""
+
+    def test_systemctl_gets_no_stdin_and_a_timeout(self) -> None:
+        done = subprocess.CompletedProcess(["systemctl"], 0)
+        with mock.patch.object(gc_adapters.subprocess, "run", return_value=done) as run:
+            self.assertTrue(gc_adapters.recorder_alive({"heartbeat": time.time()}))
+        self.assertEqual(run.call_args.args[0], ["systemctl", "-q", "is-active", "docker-gc-recorder.service"])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["timeout"], gc_adapters.SYSTEMCTL_TIMEOUT)
+
+    def test_a_systemctl_that_does_not_answer_holds_images_back(self) -> None:
+        hang = subprocess.TimeoutExpired(["systemctl"], gc_adapters.SYSTEMCTL_TIMEOUT)
+        out = io.StringIO()
+        with mock.patch.object(gc_adapters.subprocess, "run", side_effect=hang), contextlib.redirect_stdout(out):
+            self.assertFalse(gc_adapters.recorder_alive({"heartbeat": time.time()}))
+        self.assertEqual(
+            out.getvalue(),
+            "<4>docker-gc: systemctl is-active docker-gc-recorder.service: no answer in 10s; images are held back\n",
+        )
 
 
 class EntryTest(unittest.TestCase):
@@ -178,6 +246,31 @@ class EntryTest(unittest.TestCase):
             cwd="/",
         )
         self.assertEqual((r.returncode, r.stderr), (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status\n"))
+
+    def test_status_and_a_dry_run_into_a_closed_pipe_stop_quietly(self) -> None:
+        # `cst btrfs docker-gc status | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). Docker is a stub that is not running.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "docker"), "w") as f:
+                f.write("#!/bin/sh\nexit 1\n")
+            os.chmod(os.path.join(tmp, "docker"), 0o755)
+            env = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": tmp}
+            for args in (("status",), ("run", "--dry-run")):
+                r, w = os.pipe()
+                os.close(r)
+                try:
+                    p = subprocess.run(
+                        [sys.executable, "-I", "-B", TOOL, *args],
+                        check=False,
+                        stdout=w,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        env=env,
+                        timeout=60,
+                    )
+                finally:
+                    os.close(w)
+                self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
 
 
 if __name__ == "__main__":

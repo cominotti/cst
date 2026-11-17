@@ -10,24 +10,40 @@ import contextlib
 import io
 import os
 import re
+import shlex
 import shutil
 import stat
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from cst_core import adapters as core_adapters
 from cst_core.adapters import files as core_files, nocow
-from cst_core.adapters.files import ensure_dir, owned_file_state_at, read_bytes, read_int, read_text
+from cst_core.adapters.files import (
+    ensure_dir,
+    is_masked_unit,
+    owned_file_state_at,
+    read_bytes,
+    read_int,
+    read_text,
+    unit_file_state_at,
+)
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
-from cst_core.domain.text import describe_problems, first_line, is_yes, parse_shell_assignments
-from cst_core.domain.units import render_timer, render_unit_file
+from cst_core.domain.text import (
+    describe_problems,
+    first_line,
+    is_yes,
+    parse_shell_assignments,
+    parse_snapshots_conf,
+)
+from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
 from vm import domain as vm_domain
@@ -90,6 +106,18 @@ class DomainTest(unittest.TestCase):
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
         self.assertEqual(text, "# head\n[Unit]\nDescription=x\n\n[Service]\n# why\nType=oneshot\n")
+
+    def test_masked_refusal_names_each_unit_and_how_to_unmask_it(self) -> None:
+        self.assertIsNone(masked_refusal([], user=False))
+        self.assertEqual(
+            masked_refusal(["/etc/systemd/system/a@.timer", "/etc/systemd/system/a@vm.timer"], user=False),
+            "a@.timer is masked (systemctl mask); unmask it first: sudo systemctl unmask a@.timer; "
+            "a@vm.timer is masked (systemctl mask); unmask it first: sudo systemctl unmask a@vm.timer",
+        )
+        self.assertEqual(
+            masked_refusal(["/home/u/.config/systemd/user/b.timer"], user=True),
+            "b.timer is masked (systemctl mask); unmask it first: systemctl --user unmask b.timer",
+        )
 
     def test_render_timer_matches_the_toolchains_timer(self) -> None:
         # The timer cst-toolchains wrote before it used render_timer, byte for byte.
@@ -219,6 +247,38 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner="user"), "change")
         self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="user"), "conflict")
         self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner="user"), "missing")
+
+    def test_unit_file_state_at_sees_a_mask(self) -> None:
+        # `systemctl mask` leaves a link to /dev/null; the link rule alone replaced it (root) or
+        # called it someone else's file (user).
+        def mark(data: bytes) -> bool:
+            return b"MARK" in data
+
+        masked = self.path("masked.timer")
+        os.symlink("/dev/null", masked)
+        os.symlink("/dev/null", self.path("hop"))
+        chained = self.path("chained.timer")
+        os.symlink(self.path("hop"), chained)
+        ours = self.path("ours.timer", b"MARK v1\n")
+        os.symlink(ours, self.path("linked.timer"))
+        os.symlink(self.path("missing"), self.path("dangling.timer"))
+        empty = self.path("empty.timer", b"")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertTrue(is_masked_unit(masked))
+                self.assertTrue(is_masked_unit(chained))
+                self.assertEqual(unit_file_state_at(masked, b"MARK v1\n", mark, owner=owner), "masked")
+                self.assertEqual(unit_file_state_at(chained, b"MARK v1\n", mark, owner=owner), "masked")
+                # Anything else: the link rule, exactly as owned_file_state_at.
+                for path in (ours, self.path("linked.timer"), self.path("dangling.timer"), empty):
+                    self.assertFalse(is_masked_unit(path), path)
+                    self.assertEqual(
+                        unit_file_state_at(path, b"MARK v1\n", mark, owner=owner),
+                        owned_file_state_at(path, b"MARK v1\n", mark, owner=owner),
+                        path,
+                    )
+        self.assertFalse(is_masked_unit(self.path("missing")))
+        self.assertEqual(unit_file_state_at(self.path("linked.timer"), b"MARK v1\n", mark, owner="root"), "change")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()
@@ -623,6 +683,72 @@ class ShellAssignmentsTest(unittest.TestCase):
         self.assertEqual(dict(got.values), {"VM_NOCOW": "0", "A": "a b", "B": "x y", "C": "1h", "D": "v"})
         self.assertEqual([p.line for p in got.problems], [6])
 
+    # Lines an older CST's snap_conf_set wrote with printf %q, and what bash makes of them.
+    OLD_WRITER_LINES = (
+        "K=/volume1/My\\ Backups",
+        "K=it\\'s",
+        "K=\\~x",
+        "K=a:\\~b",
+        'K=say\\ \\"hi\\"',
+        "K=\\$HOME\\ \\`id\\`",
+        "K=back\\\\slash",
+        "K=\\#x\\ \\*\\?\\[a\\]\\{a\\,b\\}\\;\\&\\|\\<\\>\\(\\)",
+        "K=é\\ ü",
+        "K=$'a\\tb'",
+        "K=$'line1\\nline2'",
+        "K=$'\\303\\251 \\303\\274'",
+        "K=$'\\E[1m\\a\\b\\f\\r\\v\\\\\\'\\\"\\?'",
+        "K=$'\\x41\\x4a'",
+        "K=$'\\377raw'",
+        "K=$'a\\0b'",
+        "K=$'\\777'",
+    )
+    # Not what printf %q writes: still a problem in snapshots.conf too (never a guessed value).
+    NOT_OLD_WRITER_LINES = (
+        "K=$X",
+        "K=a\\ $X",
+        "K=a\\ `id`",
+        "K=~\\ x",
+        "K=a:~b\\ c",
+        'K="a\\ b"',
+        "K=$'" + "\\" + "u00e9'",
+        "K=$'\\cA'",
+        "K=$'a'b",
+        "K=a\\ b # c",
+        " K=a\\ b",
+        "export K=a\\ b",
+        "K=a\\ b;id",
+        "K=a\\",
+        "K = a\\ b",
+    )
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_snapshots_conf_reads_old_printf_q_lines_as_bash_does(self) -> None:
+        for line in self.OLD_WRITER_LINES:
+            with self.subTest(line=line):
+                got = parse_snapshots_conf(line + "\n")
+                self.assertEqual(got.problems, ())
+                want = self.bash_values(line + "\n", ["K"])
+                self.assertEqual(
+                    dict(got.values), {"K": want["K"].encode("utf-8", "surrogateescape").decode("utf-8", "replace")}
+                )
+                # The generic reader stays strict: in every other file the line is a problem.
+                self.assertEqual([p.line for p in parse_shell_assignments(line + "\n").problems], [1])
+
+    def test_snapshots_conf_keeps_other_backslash_lines_a_problem(self) -> None:
+        for line in self.NOT_OLD_WRITER_LINES:
+            with self.subTest(line=line):
+                got = parse_snapshots_conf(line + "\n")
+                self.assertEqual((dict(got.values), [p.line for p in got.problems]), ({}, [1]))
+                self.assertEqual(got.problems, parse_shell_assignments(line + "\n").problems)
+
+    def test_snapshots_conf_last_line_wins_in_file_order(self) -> None:
+        got = parse_snapshots_conf("A=1\nK='x'\nK=a\\ b\nB=$X\nC=c\\ d\n")
+        self.assertEqual(dict(got.values), {"A": "1", "K": "a b", "C": "c d"})
+        self.assertEqual([(a.line, a.key) for a in got.entries], [(1, "A"), (2, "K"), (3, "K"), (5, "C")])
+        self.assertEqual([p.line for p in got.problems], [4])
+        self.assertEqual(dict(parse_snapshots_conf("K=a\\ b\nK='c'\n").values), {"K": "c"})
+
     @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
     def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
         # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
@@ -632,12 +758,18 @@ class ShellAssignmentsTest(unittest.TestCase):
             snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
         assert cpu is not None and snap is not None
         generated = self.bash_text(f"target_user=alice; printf '%s\\n' {cpu.group(1)}")
+        # snapshots.conf as the real writer (snap_conf_set) leaves it, blanks and a ' included.
+        conf = os.path.join(self.tmp, "snapshots.conf")
         quoted = self.bash_text(
-            "printf 'NAS_HOST=%q\\nNAS_USER=%q\\nNAS_PATH=%q\\nNAS_PORT=%q\\n' nas.local danilo /volume1/backup/sophia 2204"
+            f"TMPDIR={shlex.quote(self.tmp)}; SRC={shlex.quote(os.path.join(REPO, 'btrfs'))}; "
+            f'. "$SRC/setup-snapshots.bash"; SNAP_CONF={shlex.quote(conf)}; '
+            "snap_conf_set NAS_HOST=nas.local NAS_USER=danilo NAS_PATH=/volume1/backup/sophia NAS_PORT=2204 "
+            'NAS_RESTIC_HOST="it\'s" HOME_DIR=\'/var/home/a b\' && cat "$SNAP_CONF"'
         )
+        self.assertIn("HOME_DIR='/var/home/a b'", quoted.splitlines())
         for name, text in (
             ("cpu-setup.conf", generated),
-            ("snapshots.conf", snap.group(1) + "\n" + quoted),
+            ("snapshots.conf", quoted),
             ("bulk.conf", "# Managed by btrfs-setup.sh (CST)\nBULK_USER=alice\n"),
         ):
             with self.subTest(name=name):
@@ -662,6 +794,19 @@ class ShellAssignmentsTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         return r.stdout
+
+    def test_old_ansi_c_line_without_closing_quote_fails_fast(self) -> None:
+        # Forty \NNNN escapes and no closing quote: with a backtracking regex each
+        # escape could be cut three ways (\1|111, \11|11, \111|1), which took
+        # minutes; the possessive form fails at once and reports the line.
+        line = "NAS_PATH=$'" + "\\1111" * 40 + "\n"
+        started = time.perf_counter()
+        parsed = parse_snapshots_conf(line)
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertEqual(parsed.entries, ())
+        self.assertEqual([p.line for p in parsed.problems], [1])
+        # The same escapes with the closing quote: bash takes up to three octal digits.
+        self.assertEqual(parse_snapshots_conf("K=$'\\1111'\n").entries[0].value, "\x491")
 
 
 if __name__ == "__main__":

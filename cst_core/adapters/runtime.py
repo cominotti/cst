@@ -67,7 +67,7 @@ def install_payload(src_rel: str, main_file: str) -> bytes:
     return build_python_zipapp(root, src_rel)
 
 
-def restore_lc_ctype(handed_over: str | None) -> None:
+def _restore_lc_ctype(handed_over: str | None) -> None:
     """Put the caller's LC_CTYPE back into the environment that cst's modules get.
 
     Under a C or POSIX locale Python sets LC_CTYPE=C.UTF-8 in its own
@@ -82,6 +82,26 @@ def restore_lc_ctype(handed_over: str | None) -> None:
         os.environ["LC_CTYPE"] = handed_over[1:]
     else:
         os.environ.pop("LC_CTYPE", None)
+
+
+def lc_ctype_handover() -> str:
+    """The CST_LC_CTYPE=... setting that hands this process's LC_CTYPE to a
+    CST program it starts again through sudo's `env` (the wrapper's form:
+    "" when unset, "=VALUE" when set)."""
+    value = os.environ.get("LC_CTYPE")
+    return "CST_LC_CTYPE=" + ("" if value is None else "=" + value)
+
+
+def undo_python_start() -> None:
+    """Undo what Python changes at start, for the commands this program runs.
+
+    SIGPIPE and SIGXFSZ go back to their default (restore_default_signals),
+    and LC_CTYPE to the caller's, as a shell wrapper (cst, swap-setup.sh,
+    cst-install.bash) hands it over in CST_LC_CTYPE (_restore_lc_ctype); the
+    setting itself is removed. Used by cst, `cst swap` and the installer.
+    """
+    restore_default_signals()
+    _restore_lc_ctype(os.environ.pop("CST_LC_CTYPE", None))
 
 
 def restore_default_signals() -> None:

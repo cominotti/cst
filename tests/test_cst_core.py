@@ -2,26 +2,31 @@
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import fcntl
 import io
 import os
+import re
+import select
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from cst_core.adapters import (
     HostExecutionContext,
     SubprocessCommandRunner,
+    SubprocessVirshAdapter,
     SystemClockAdapter,
     SystemctlAdapter,
 )
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import restore_lc_ctype
+from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core.cli import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
@@ -39,6 +44,7 @@ from cst_core.domain.values import (
 from cst_core.ports import CommandFailed, CommandResult
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SYSTEM_PYTHON = "/usr/bin/python3"
 _CLEAN_ENV: Mapping[str, str] = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 
 
@@ -212,6 +218,19 @@ class PlanAndOutcomeTest(unittest.TestCase):
 
 
 class AdaptersTest(unittest.TestCase):
+    def test_virsh_in_a_new_session_replaces_bytes_that_are_not_utf8(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-virsh-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "virsh")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\nprintf "\\377abc LC_ALL=%s" "$LC_ALL"\n')
+        os.chmod(stub, 0o755)
+        virsh = SubprocessVirshAdapter(ctx=HostExecutionContext(exists=lambda _path: False))
+        with mock.patch.dict(os.environ, {"PATH": f"{tmp}:/usr/bin:/bin"}):
+            res = virsh.call("domstate", "vm1", start_new_session=True)
+        self.assertEqual((res.returncode, res.stdout), (0, "\ufffdabc LC_ALL=C"))
+        self.assertEqual(res.argv, ("virsh", "-c", "qemu:///system", "domstate", "vm1"))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)
@@ -502,9 +521,51 @@ class LocalCstDispatchAdapterTest(unittest.TestCase):
             ("=C", {"LC_CTYPE": "C.UTF-8"}, "C"),
             ("=", {}, ""),
         ):
-            with self.subTest(handed_over=handed_over), mock.patch.dict(os.environ, before, clear=True):
-                restore_lc_ctype(handed_over)
+            env = before if handed_over is None else {**before, "CST_LC_CTYPE": handed_over}
+            with (
+                self.subTest(handed_over=handed_over),
+                mock.patch.dict(os.environ, env, clear=True),
+                mock.patch("cst_core.adapters.runtime.restore_default_signals"),
+            ):
+                undo_python_start()
                 self.assertEqual(os.environ.get("LC_CTYPE"), after)
+                self.assertNotIn("CST_LC_CTYPE", os.environ)
+
+    def test_undo_python_start_gives_a_child_the_caller_s_lc_ctype(self) -> None:
+        # A real Python under a C locale (no LC_ALL, LANG or LC_CTYPE: PEP 538 sets LC_CTYPE=C.UTF-8), and
+        # the command it then runs.
+        probe = (
+            f"import subprocess, sys; sys.path.insert(0, {REPO_ROOT!r})\n"
+            "from cst_core.adapters.runtime import undo_python_start\n"
+            "undo_python_start()\n"
+            "subprocess.run(['sh', '-c', 'echo \"${LC_CTYPE-unset} ${CST_LC_CTYPE-gone}\"'])\n"
+        )
+        for caller, seen in (
+            ({}, "C.UTF-8 gone"),  # no wrapper: Python's own change stays (the case this undoes)
+            ({"CST_LC_CTYPE": ""}, "unset gone"),
+            ({"LC_CTYPE": "C", "CST_LC_CTYPE": "=C"}, "C gone"),
+        ):
+            with self.subTest(caller=caller):
+                proc = subprocess.run(
+                    [SYSTEM_PYTHON, "-I", "-B", "-c", probe],
+                    env={"PATH": "/usr/bin:/bin", **caller},
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(proc.stdout, seen + "\n", proc.stderr)
+
+    def test_lc_ctype_handover(self) -> None:
+        # What `cst swap` puts in sudo's `env` when it starts itself again as root.
+        for env, setting in (
+            ({}, "CST_LC_CTYPE="),
+            ({"LC_CTYPE": "C"}, "CST_LC_CTYPE==C"),
+            ({"LC_CTYPE": ""}, "CST_LC_CTYPE=="),
+        ):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(lc_ctype_handover(), setting)
 
     def test_a_command_that_cannot_start(self) -> None:
         port = LocalCstDispatchAdapter()
@@ -649,6 +710,75 @@ class CstCommandTest(unittest.TestCase):
         self.assertIn("==== doctor", out)
         self.assertNotIn("Traceback", err)
         self.assertEqual(rc, 1)
+
+    def test_status_ignores_ctrl_backslash_between_two_modules(self) -> None:
+        # bash ignored SIGQUIT the whole time, also between two modules. A small stdout pipe that the
+        # test fills while the module runs holds cst in the next header, after the module ended.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        fcntl.fcntl(w, fcntl.F_SETPIPE_SZ, 4096)
+        proc = subprocess.Popen(
+            # No core file when it dies of the signal; SIGQUIT at its default, whatever this test got.
+            [
+                "bash",
+                "-c",
+                'ulimit -c 0; exec env --default-signal=QUIT "$0" status',
+                _cst_copy(self.tmp, 'echo "module $$"\nsleep 0.5\n'),
+            ],
+            stdout=w,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=dict(_CLEAN_ENV),
+            start_new_session=True,
+        )
+        assert proc.stderr is not None
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.wait, 30)
+        self.addCleanup(proc.kill)  # cleanups run last first: kill, wait, close
+        out = b""
+        while not (started := re.search(rb"^module (\d+)$", out, re.M)):
+            self.assertTrue(select.select([r], [], [], 10)[0], f"no module line: {out!r}")
+            out += os.read(r, 4096)
+        # The module sleeps, cst waits for it: neither writes while the pipe is non-blocking.
+        os.set_blocking(w, False)
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                os.write(w, b"x")
+        os.set_blocking(w, True)
+        os.close(w)
+        module_pid = int(started.group(1))
+        deadline = time.monotonic() + 10
+        while os.path.exists(f"/proc/{module_pid}") and time.monotonic() < deadline:  # until cst reaped it
+            time.sleep(0.01)
+        time.sleep(0.2)
+        os.kill(proc.pid, signal.SIGQUIT)
+        time.sleep(0.2)
+        while chunk := os.read(r, 65536):
+            out += chunk
+        _, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 1, err)  # 1: this copy has no doctor
+        self.assertIn(b"==== doctor", out)
+        self.assertNotIn(b"Traceback", err)
+
+    def test_programs_cst_starts_get_sigquit_at_its_default(self) -> None:
+        # cst ignores SIGQUIT with a handler, not SIG_IGN, which a module would inherit across exec.
+        module = "grep '^SigIgn:' /proc/self/status\n"
+        for args in (["status"], ["swap"]):
+            with self.subTest(args=args):
+                proc = subprocess.run(
+                    ["env", "--default-signal=INT,QUIT", _cst_copy(self.tmp, module), *args],
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    env=dict(_CLEAN_ENV),
+                    check=False,
+                    timeout=30,
+                )
+                lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("SigIgn:")]
+                self.assertEqual(len(lines), 1, proc.stdout + proc.stderr)
+                ignored = int(lines[0].split()[1], 16)
+                for sig in (signal.SIGQUIT, signal.SIGINT):
+                    self.assertFalse(ignored & (1 << (sig - 1)), f"{sig.name} ignored in a module: {lines[0]}")
 
     def test_status_goes_on_when_only_the_module_got_ctrl_c(self) -> None:
         # bash dies with a foreground command's SIGINT only when it got the signal too (Ctrl-C reaches

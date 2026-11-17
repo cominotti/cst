@@ -27,6 +27,7 @@ PROTECTED = tuple(
     r.strip() + "/" for r in os.environ.get("DOCKER_GC_PROTECT", "registry.example.com").split(",") if r.strip()
 )
 FLUSH_SECONDS = int(os.environ.get("DOCKER_GC_FLUSH", 30))
+SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
 
 # One journal line per message, "<prio>docker-gc: msg".
 log = partial(journal_log, tag="docker-gc")
@@ -40,6 +41,12 @@ def docker(*args: str, timeout: int = 600, check: bool = True) -> subprocess.Com
     if check and r.returncode != 0:
         raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
     return r
+
+
+def is_protected(im: Mapping[str, Any]) -> bool:
+    """An image of a protected registry (DOCKER_GC_PROTECT), by tag or digest."""
+    refs = (im.get("RepoTags") or []) + (im.get("RepoDigests") or [])
+    return any(r.startswith(PROTECTED) for r in refs)
 
 
 def inspect_all(kind: str, list_args: Sequence[str]) -> list[dict[str, Any]]:
@@ -84,8 +91,22 @@ def save_state(st: Mapping[str, Any]) -> None:
 
 
 def recorder_alive(st: Mapping[str, Any]) -> bool:
-    active = subprocess.run(["systemctl", "-q", "is-active", "docker-gc-recorder.service"], check=False).returncode == 0
-    return active and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
+    """The recorder runs and wrote its heartbeat lately. A systemctl that does
+    not answer counts as a recorder that is not running: images are held back."""
+    try:
+        done = subprocess.run(
+            ["systemctl", "-q", "is-active", "docker-gc-recorder.service"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=SYSTEMCTL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log(
+            4,
+            f"systemctl is-active docker-gc-recorder.service: no answer in {SYSTEMCTL_TIMEOUT}s; images are held back",
+        )
+        return False
+    return done.returncode == 0 and time.time() - st.get("heartbeat", 0) < 3 * HEARTBEAT_SECONDS
 
 
 def container_use(c: Mapping[str, Any]) -> float:
@@ -106,6 +127,35 @@ def df() -> dict[str, str]:
         except ValueError:
             pass
     return out
+
+
+def remove_image(img: Mapping[str, Any], plan_at: float) -> str:
+    """Re-checked right before removal: still unused (fresh container list and
+    recorder state), and each tag still pointing at this very image."""
+    iid = img["id"]
+    if iid in {c.get("Image") for c in inspect_all("container", ("ps", "-aq", "--no-trunc"))}:
+        return "now used by a container"
+    if load_state()["images"].get(iid, 0) > plan_at - 60:
+        return "used meanwhile"
+    for t in img["tags"]:
+        r = docker("image", "inspect", "--format", "{{.Id}}", t, check=False)
+        if r.returncode != 0 or r.stdout.strip() != iid:
+            continue  # re-pulled or retagged meanwhile: that tag is not ours
+        r = docker("image", "rm", t, check=False)
+        if r.returncode != 0:
+            return f"cannot remove {t}: {r.stderr.strip()[:100]}"
+    r = docker("image", "inspect", iid, check=False)
+    if r.returncode == 0:
+        try:
+            left = json.loads(r.stdout)[0].get("RepoTags") or []
+        except ValueError, IndexError:
+            left = ["?"]
+        if left:
+            return "got new tags meanwhile"
+        r = docker("image", "rm", iid, check=False)
+        if r.returncode != 0 and "no such image" not in r.stderr.lower():
+            return r.stderr.strip()[:120]
+    return ""
 
 
 def locked() -> int:

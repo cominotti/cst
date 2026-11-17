@@ -16,6 +16,12 @@ def _decode_stream(data: str | bytes | None) -> str:
     return data
 
 
+def c_locale(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """ENV (nothing when None) with LC_ALL=C on top: for a command whose
+    answers CST parses (virsh translates its answers)."""
+    return {**(env or {}), "LC_ALL": "C"}
+
+
 class SubprocessCommandRunner:
     """CommandRunnerPort backed by subprocess.run with explicit stdin handling."""
 
@@ -51,21 +57,21 @@ class SubprocessCommandRunner:
         except FileNotFoundError as exc:
             if check:
                 raise CommandFailed(cmd, 127, "", str(exc)) from None
-            return CommandResult(returncode=127, stdout="", stderr=str(exc))
+            return CommandResult(returncode=127, stdout="", stderr=str(exc), argv=tuple(cmd))
         except subprocess.TimeoutExpired as exc:
             msg = f"timed out after {timeout}s" if timeout is not None else "command timed out"
             out = _decode_stream(exc.stdout)
             err = _decode_stream(exc.stderr) or msg
             if check:
                 raise CommandFailed(cmd, 124, out, err) from None
-            return CommandResult(returncode=124, stdout=out, stderr=err)
+            return CommandResult(returncode=124, stdout=out, stderr=err, argv=tuple(cmd))
         except OSError as exc:
             if check:
                 raise CommandFailed(cmd, 126, "", str(exc)) from None
-            return CommandResult(returncode=126, stdout="", stderr=str(exc))
+            return CommandResult(returncode=126, stdout="", stderr=str(exc), argv=tuple(cmd))
         if check and proc.returncode != 0:
             raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
-        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, argv=tuple(cmd))
 
 
 class HostExecutionContext:
@@ -181,23 +187,24 @@ class SubprocessVirshAdapter:
                     check=False,
                     capture_output=True,
                     text=True,
+                    errors="replace",
                     timeout=timeout,
                     stdin=subprocess.DEVNULL,
-                    env={**os.environ, "LC_ALL": "C"},
+                    env=c_locale(os.environ),
                     start_new_session=True,
                 )
             except FileNotFoundError as exc:
                 if check:
                     raise CommandFailed(cmd, 127, "", str(exc)) from None
-                return CommandResult(127, "", str(exc))
+                return CommandResult(127, "", str(exc), argv=tuple(cmd))
             except subprocess.TimeoutExpired:
                 if check:
                     raise CommandFailed(cmd, 124, "", f"timed out after {timeout}s") from None
-                return CommandResult(124, "", f"timed out after {timeout}s")
+                return CommandResult(124, "", f"timed out after {timeout}s", argv=tuple(cmd))
             if check and proc.returncode != 0:
                 raise CommandFailed(cmd, proc.returncode, proc.stdout, proc.stderr)
-            return CommandResult(proc.returncode, proc.stdout, proc.stderr)
-        return self._runner.run(cmd, check=check, timeout=timeout, env={"LC_ALL": "C"})
+            return CommandResult(proc.returncode, proc.stdout, proc.stderr, argv=tuple(cmd))
+        return self._runner.run(cmd, check=check, timeout=timeout, env=c_locale())
 
     def domains(self, *, all_domains: bool = True) -> list[str]:
         """Return configured domain names, or empty list on failure."""

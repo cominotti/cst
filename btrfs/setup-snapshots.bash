@@ -103,13 +103,9 @@ snap_subvol() {
 
 is_subvol() { [[ -d "$1" && "$(stat -c %i "$1")" == 256 ]]; }
 
-# Update settings in snapshots.conf: KEY=VALUE arguments; everything else
-# (including manual edits) is kept. Created with defaults the first time.
-snap_conf_set() {
-    local kv key val tmp
-    install -d -m 0755 "$(dirname "${SNAP_CONF}")"
-    if [[ ! -e "${SNAP_CONF}" ]]; then
-        cat >"${SNAP_CONF}" <<'DEFAULTS'
+# snapshots.conf as created the first time, before any key is set.
+snap_conf_defaults() {
+    cat <<'DEFAULTS'
 # Managed by btrfs-setup.sh (CST); read by /usr/local/sbin/btrfs-snapshot.
 # Manual edits of values are kept when btrfs-setup.sh updates other keys.
 HOME_DIR=''
@@ -129,18 +125,120 @@ NAS_KEEP_DAILY=14
 NAS_KEEP_WEEKLY=8
 NAS_KEEP_MONTHLY=12
 DEFAULTS
-        chmod 0644 "${SNAP_CONF}"
+}
+
+# A value as snapshots.conf holds it: in single quotes, or in double quotes
+# when it holds a ' (and none of " $ ` \). bash and cst_core's strict reader
+# (parse_shell_assignments: doctor, cst vm) read these two forms alike. Fails
+# for a value no such form can hold: a line break, a carriage return, or a '
+# together with one of " $ ` \.
+snap_conf_quote() {   # value var: sets var
+    local v="$1"
+    if [[ "${v}" == *[$'\n\r']* ]]; then
+        return 1
+    elif [[ "${v}" != *\'* ]]; then
+        printf -v "$2" "'%s'" "${v}"
+    elif [[ "${v}" != *[\"\$\`\\]* ]]; then
+        printf -v "$2" '"%s"' "${v}"
+    else
+        return 1
     fi
+}
+
+# What an older CST's snap_conf_set wrote with printf %q: a word of plain
+# and backslash-escaped characters (a\ b), or $'...' with the escapes %q
+# uses. The same shapes as cst_core.domain.text.parse_snapshots_conf. Neither
+# expands anything (no unescaped $, backtick, quote, blank or command syntax;
+# a word starting with ~ or holding :~ is left out), so eval of one only
+# decodes it, as sourcing the file does (btrfs-snapshot sources it as root).
+SNAP_CONF_Q_WORD='^([^[:space:]'\''"\$`;&|<>()]|\\.)+$'
+SNAP_CONF_Q_ANSI='^\$'\''([^'\''\]|\\([abeEfnrtv\'\''"?]|[0-7]{1,3}|x[0-9A-Fa-f]{1,2}))*'\''$'
+snap_conf_old_value() {   # token: sets SNAP_CONF_VALUE; fails when token is not %q's output
+    local tok="$1"
+    [[ "${tok}" == *\\* ]] || return 1
+    if [[ ! "${tok}" =~ ${SNAP_CONF_Q_ANSI} ]]; then
+        [[ "${tok}" =~ ${SNAP_CONF_Q_WORD} && "${tok}" != '~'* && "${tok}" != *':~'* ]] || return 1
+    fi
+    eval "SNAP_CONF_VALUE=${tok}"
+}
+
+# snapshots.conf as snap_conf_set leaves it, on stdout. Each KEY=VALUE
+# argument replaces every line that starts with KEY= (or is added at the
+# end); a line an older CST wrote with printf %q is rewritten in quotes with
+# the value bash gives it (SNAP_CONF_REWRITTEN counts them); every other line
+# (manual edits too) is kept as it is. Fails, printing nothing, for a value
+# snap_conf_quote cannot hold.
+snap_conf_render() {   # KEY=VALUE...
+    local -A new=() replaced=()
+    local -a order=() lines=()
+    local kv key q line n=0
+    SNAP_CONF_REWRITTEN=0
     for kv in "$@"; do
-        key="${kv%%=*}"; val="${kv#*=}"
-        printf -v val '%q' "${val}"
-        tmp="$(mktemp)"
-        K="${key}" L="${key}=${val}" awk 'BEGIN {k = ENVIRON["K"]; line = ENVIRON["L"]; done = 0}
-            index($0, k "=") == 1 {print line; done = 1; next} {print}
-            END {if (!done) print line}' "${SNAP_CONF}" >"${tmp}"
-        install -m 0644 "${tmp}" "${SNAP_CONF}"
-        rm -f "${tmp}"
+        key="${kv%%=*}"
+        if ! snap_conf_quote "${kv#*=}" q; then
+            echo "snapshots: the value of ${key} has a line break, or a ' with one of \" \$ \` \\: it cannot be written to ${SNAP_CONF}; nothing was written" >&2
+            return 1
+        fi
+        [[ -v "new[${key}]" ]] || order+=("${key}")
+        new["${key}"]="${key}=${q}"
     done
+    if [[ -e "${SNAP_CONF}" ]]; then
+        mapfile -t lines <"${SNAP_CONF}" || return 1
+    else
+        mapfile -t lines < <(snap_conf_defaults)
+    fi
+    for line in "${lines[@]}"; do
+        n=$((n + 1))
+        if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            if [[ -v "new[${key}]" ]]; then
+                line="${new[${key}]}"
+                replaced["${key}"]=1
+            elif snap_conf_old_value "${BASH_REMATCH[2]}"; then
+                if snap_conf_quote "${SNAP_CONF_VALUE}" q; then
+                    line="${key}=${q}"
+                    SNAP_CONF_REWRITTEN=$((SNAP_CONF_REWRITTEN + 1))
+                else
+                    echo "snapshots: ${SNAP_CONF} line ${n} is kept as an older CST wrote it (bash still reads it): no quoted form holds its value" >&2
+                fi
+            fi
+        fi
+        printf '%s\n' "${line}"
+    done
+    for key in "${order[@]}"; do
+        [[ -v "replaced[${key}]" ]] || printf '%s\n' "${new[${key}]}"
+    done
+}
+
+# Update settings in snapshots.conf: KEY=VALUE arguments; everything else
+# (including manual edits) is kept. Created with defaults the first time.
+# Written only when its content changes.
+snap_conf_set() {   # KEY=VALUE...
+    local tmp
+    tmp="$(mktemp)"
+    if ! snap_conf_render "$@" >"${tmp}"; then
+        rm -f "${tmp}"
+        exit 1
+    fi
+    if [[ -e "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}"; then
+        rm -f "${tmp}"
+        # Same content: only a drifted mode is put back (doctor and cst vm read it as a user).
+        [[ "$(stat -c %a "${SNAP_CONF}")" == 644 ]] || chmod 0644 "${SNAP_CONF}"
+        return 0
+    fi
+    install -d -m 0755 "$(dirname "${SNAP_CONF}")"
+    install -m 0644 "${tmp}" "${SNAP_CONF}"
+    rm -f "${tmp}"
+}
+
+# For the setup preview: the lines of snapshots.conf that snap_conf_set
+# rewrites in quotes (an older CST wrote them with printf %q).
+snap_conf_plan() {
+    [[ -e "${SNAP_CONF}" ]] || return 0
+    snap_conf_render >/dev/null || return 0
+    (( SNAP_CONF_REWRITTEN )) || return 0
+    echo "      ${SNAP_CONF}: ${SNAP_CONF_REWRITTEN} line(s) that an older CST wrote with backslashes"
+    echo "      (printf %q) are rewritten in quotes, with the same values"
 }
 
 snap_install_runtime() {
@@ -228,6 +326,7 @@ snap_setup() {
     echo "      handled them (a snapshot taken before would keep their data in /home's history"
     echo "      for months). If a ~/Bulk item needs a look (its data still in /home), snapshots"
     echo "      start only if you say so; items you keep in /home (bulk keep ID) are fine."
+    snap_conf_plan
     echo
     if (( ! yes )); then
         [[ -t 0 ]] || { echo "No terminal to confirm: re-run with --yes." >&2; exit 1; }
@@ -404,6 +503,8 @@ snap_disable() {
     local purge=0 unit f
     [[ "${1:-}" == --purge ]] && purge=1
     systemctl disable --now btrfs-snapshot.timer btrfs-snapshot-nas.timer btrfs-subvol-convert.service 2>/dev/null || true
+    # Their last runs too (forget_timer_state, btrfs-setup.sh): an enable later starts afresh.
+    forget_timer_state btrfs-snapshot.timer btrfs-snapshot-nas.timer
     rm -f "${SNAP_BOOT_FLAG}"
     # ~/Bulk is not part of the snapshots: its boot step stays (it also
     # finishes interrupted moves).
@@ -817,6 +918,7 @@ snap_nas() {
             ;;
         disable)
             systemctl disable --now btrfs-snapshot-nas.timer 2>/dev/null || true
+            forget_timer_state btrfs-snapshot-nas.timer
             snap_conf_set NAS_ENABLED=0
             echo "NAS backup disabled (the repository on the NAS and ${SNAP_RESTIC_PW} are kept)."
             ;;

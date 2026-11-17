@@ -61,6 +61,15 @@ UNIT_MARKER = "# Managed by cst vm (CST)"
 ON_CALENDAR = "Sat *-*-* 04:30:00"
 
 
+def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
+    """A disk as a message names it: word + its target (sda). Without a
+    target name (libvirt requires one, but a definition read here may lack
+    it): "unnamed disk", with its source path when one is given."""
+    if dev:
+        return word + dev
+    return f"unnamed disk on {source}" if source else "unnamed disk"
+
+
 def domain_parts(xml_text: str) -> dict[str, Any]:
     """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
     problems}. problems are disks a file copy cannot back up (block, network,
@@ -74,23 +83,24 @@ def domain_parts(xml_text: str) -> dict[str, Any]:
         device = disk.get("device", "disk")
         kind = disk.get("type", "file")
         target = disk.find("target")
-        dev = target.get("dev") if target is not None else "?"
+        dev = target.get("dev") if target is not None else None
         src = disk.find("source")
         if device in ("cdrom", "floppy"):
-            skipped.append(f"{dev} ({device}, not copied)")
+            image = (src.get("file") or src.get("dev") or "") if src is not None else ""
+            skipped.append(f"{disk_label(dev, image)} ({device}, not copied)")
             continue
         if kind != "file":
             where = ""
             if src is not None:
                 where = src.get("dev") or src.get("name") or src.get("volume") or src.get("dir") or ""
             problems.append(
-                f"{dev}: a {kind} disk{f' ({where})' if where else ''}: only file disks "
+                f"{disk_label(dev)}: a {kind} disk{f' ({where})' if where else ''}: only file disks "
                 "can be copied; back it up by hand"
             )
             continue
         path = src.get("file") if src is not None else None
         if not path:
-            skipped.append(f"{dev} (no source file)")
+            skipped.append(f"{disk_label(dev)} (no source file)")
             continue
         if path not in disks:
             disks.append(path)
@@ -159,7 +169,7 @@ def live_disks(xml_text: str) -> list[dict[str, Any]]:
             src = s.get("file") or s.get("dev") or s.get("name") or s.get("volume") or ""
         out.append(
             {
-                "target": t.get("dev") if t is not None else "",
+                "target": (t.get("dev") if t is not None else None) or "",
                 "device": disk.get("device", "disk"),
                 "type": disk.get("type", "file"),
                 "source": src,
@@ -314,6 +324,7 @@ def render_service(program: str, stop_timeout: str) -> str:
                     "Type=oneshot",
                     'Environment="CST_PROG=cst vm"',
                     f"ExecStart=/usr/bin/python3 -I {program} backup %i --nas",
+                    "SyslogIdentifier=cst-vm",
                     "Nice=19",
                     "IOSchedulingClass=idle",
                     "CPUWeight=20",
@@ -330,6 +341,18 @@ def render_service(program: str, stop_timeout: str) -> str:
             ),
         ],
     )
+
+
+def timer_file_words(prog: str, vm: str) -> dict[str, str]:
+    """What `backup-timer status` says about each file of the timer, by its
+    owned-file state."""
+    return {
+        "ok": "installed, up to date",
+        "missing": "not installed",
+        "conflict": "not CST's file",
+        "change": f"installed, OLDER than this copy of CST: {prog} backup-timer on {vm} updates it",
+        "masked": f"masked (systemctl mask): unmask it first, then {prog} backup-timer on {vm} (off leaves it)",
+    }
 
 
 def is_cst_vm_program(data: bytes) -> bool:

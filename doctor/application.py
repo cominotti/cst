@@ -8,7 +8,7 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, first_line, parse_shell_assignments, parse_snapshots_conf
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.domain import (
@@ -51,6 +51,8 @@ from doctor.domain import (
     VM_RUN_DIR,
     VM_TIMER_WANTS,
     WARN,
+    ZSWAP_CONF,
+    ZSWAP_PARAMS,
     Deployment,
     OstreeAnswer,
     Request,
@@ -74,6 +76,7 @@ from doctor.domain import (
     virt_versions,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from swap.domain import parse_tmpfiles_params
 from vm.domain import guest_kind, tune_domain
 
 # The checkout's copies the doctor reads (host.repo_path gives where they are).
@@ -789,10 +792,14 @@ def game_again(host: DoctorHostPort) -> str:
 
 def settings_of(host: DoctorHostPort, path: str, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
-    bash_sourced), or None when it cannot be read."""
+    bash_sourced), or None when it cannot be read. snapshots.conf also takes the
+    lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
     try:
         with host.open_text(host.path(path)) as f:
-            return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
+            text = f.read()
+        if path == SNAP_CONF:
+            return parse_snapshots_conf(text)
+        return parse_shell_assignments(text, bash_sourced=bash_sourced)
     except OSError:
         return None
 
@@ -1009,10 +1016,46 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")
 
 
+# ---- swap: zswap --------------------------------------------------------------------------------
+@check("swap")
+def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN for each zswap parameter that swap's zswap.conf sets and this
+    kernel does not have: systemd-tmpfiles skips it at boot without a word
+    (a new kernel can rename or drop one). Nothing when that file is not
+    installed."""
+    try:
+        with host.open_text(host.path(ZSWAP_CONF)) as f:
+            wanted = [name for name, _ in parse_tmpfiles_params(f.read(65536))]
+    except FileNotFoundError:
+        return
+    except OSError:
+        yield Result(INFO, f"zswap: cannot read {ZSWAP_CONF}")
+        return
+    if not wanted:
+        return
+    try:
+        have = set(host.listdir(host.path(ZSWAP_PARAMS)))
+    except OSError:
+        yield Result(WARN, f"zswap: not in this kernel (no {ZSWAP_PARAMS}): {ZSWAP_CONF} sets nothing")
+        return
+    missing = [name for name in wanted if name not in have]
+    for name in missing:
+        yield Result(
+            WARN,
+            f"zswap {name}: this kernel has no such parameter; {ZSWAP_CONF} sets it, and systemd-tmpfiles "
+            "skips it at boot without a word (cst swap status shows the zswap settings)",
+        )
+    if not missing:
+        yield Result(OK, f"zswap: every parameter {ZSWAP_CONF} sets is in this kernel")
+
+
 # ---- vm: libvirt guests --------------------------------------------------------------------------
 def virsh(host: DoctorHostPort, *args: str, ro: bool = True) -> tuple[int, str, str]:
-    """virsh on the system connection; -r (read-only) where libvirt allows it."""
-    return host.run(["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args), timeout=20)
+    """virsh on the system connection; -r (read-only) where libvirt allows it.
+    In the C locale: the checks compare its answers ("running", "shut off"),
+    which virsh translates."""
+    cmd = ["virsh"] + (["-r"] if ro else []) + ["-c", VIRSH_URI] + list(args)
+    return host.run(cmd, timeout=20, locale_c=True)
 
 
 def virsh_problem(rc: int, err: str) -> str:

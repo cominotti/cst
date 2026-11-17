@@ -24,14 +24,15 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters.files import owned_file_state_at, write_atomic
+from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
-from cst_core.domain.files import OwnedState
+from cst_core.domain.files import OwnedState, UnitFileState
 from toolchains.domain import (
     CACHE_TAG,
     CARGO_COMM,
     CARGO_ENV,
+    CONF_REL,
     CMD_TIMEOUT,
     CRATE_DEPTH,
     ENUM_BUDGET,
@@ -42,8 +43,10 @@ from toolchains.domain import (
     INCREMENTAL,
     LOCK_NAMES,
     MARKER,
+    NAME,
     NOT_A_MEMBER,
     OFF_REL,
+    OLD_CONF_REL,
     PIN_NAMES,
     REPO_DEPTH,
     RUST_TOOLS,
@@ -56,6 +59,7 @@ from toolchains.domain import (
     TOOL_FILES_MAX,
     TRASH_NAME,
     TRASH_PREFIX,
+    UV_LOCK_TIMED_OUT,
     UV_LOCK_WAIT,
     WORKSPACE_REL,
     WRAPPER_REL,
@@ -833,6 +837,27 @@ def uv_lock_busy(cache: str) -> bool:
         os.close(fd)
 
 
+def uv_prune_preview(
+    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]], cache: str
+) -> tuple[list[str], bool]:
+    """(lines, ok) of `uv cache prune --dry-run` on cache (run: uv with these
+    arguments). A uv that fails, cannot start or does not end is a failure
+    line, and plan exits 1; waiting in vain for the cache lock another uv
+    holds is not a failure (apply skips that case too)."""
+    try:
+        r = run(["cache", "prune", "--dry-run", "--cache-dir", cache, "--no-progress"])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"uv cache prune --dry-run failed: {e}"], False
+    text = (r.stdout + r.stderr).strip()
+    lines = [f"uv: {line}" for line in text.splitlines()]
+    if r.returncode == 0:
+        return lines, True
+    if UV_LOCK_TIMED_OUT.search(text) or uv_lock_busy(cache):
+        lines.append("uv cache prune --dry-run waited for the cache lock (another uv runs): no preview this time")
+        return lines, True
+    return lines + [f"uv cache prune --dry-run failed (exit {r.returncode})"], False
+
+
 def rustup_home(home: str) -> str:
     rh = os.environ.get("RUSTUP_HOME", "")
     return rh if os.path.isabs(rh) else os.path.join(home, ".rustup")
@@ -972,6 +997,48 @@ def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     return r.stdout.strip()
 
 
+def before_removal(name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
+    """systemctl --user ARGS NAME for a timer, checked, before auto on/off
+    removes any file. When the user manager refuses or cannot be reached,
+    nothing has been removed yet: Refused, and a second run (once the
+    manager answers) can finish the job. Removing the files anyway would
+    leave a timer that keeps running with no file left to show it."""
+    try:
+        return systemctl(*args, name, check=True, ok=ok)
+    except Refused as e:
+        raise Refused(
+            f"{e}; nothing was removed and {name} may still be running: run this again once your user "
+            "manager answers (`systemctl --user status` shows whether it does)"
+        ) from None
+
+
+def reload_failed() -> bool:
+    """daemon-reload after unit files were removed: True (and an error line)
+    when it failed. The removal is not undone: the timer is already stopped,
+    and the manager forgets the files at its next reload or restart."""
+    try:
+        systemctl("daemon-reload", check=True)
+    except Refused as e:
+        say(
+            f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
+            "manager answers, so that it forgets them",
+            3,
+            err=True,
+        )
+        return True
+    return False
+
+
+def disable_timer(name: str) -> None:
+    """`disable --now` a timer, checked (see before_removal), then forget its
+    last run: systemd keeps the stamp of a Persistent= timer
+    (~/.local/share/systemd/timers/stamp-NAME) after the timer is gone.
+    `clean` needs the timer loaded and stopped, so this runs before its file
+    is removed; a failed clean only leaves that empty file behind."""
+    before_removal(name, "disable", "--now")
+    systemctl("clean", "--what=state", name)
+
+
 def manager_path() -> str | None:
     """PATH of the user manager (what the service runs with), or None when
     it cannot be read."""
@@ -991,6 +1058,23 @@ def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> O
     replaces the link itself."""
     want = wanted.encode() if isinstance(wanted, str) else wanted
     return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
+
+
+def timer_unit_state(path: str, wanted: str) -> UnitFileState:
+    """file_state of a unit file `auto on` writes: also "masked" when
+    `systemctl --user mask` left a link to /dev/null there (see
+    cst_core.adapters.files.unit_file_state_at)."""
+    return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner="user")
+
+
+def old_conf_note(home: str) -> None:
+    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
+        say(
+            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
+            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
+            4,
+            err=True,
+        )
 
 
 def turned_off(home: str) -> bool:

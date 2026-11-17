@@ -7,7 +7,6 @@ vm.adapters reads from the host, the answer printed.
 
 from collections.abc import Mapping, Sequence
 import difflib
-import functools
 import json
 import os
 import re
@@ -23,11 +22,11 @@ import time
 from typing import Any
 import xml.etree.ElementTree as ET
 
-from cst_core.adapters.files import owned_file_state_at, write_bytes_atomic
-from cst_core.adapters.runtime import install_payload
+from cst_core.adapters.files import write_bytes_atomic
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
+from cst_core.domain.units import masked_refusal
 from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import (
     BACKUP_DIR,
@@ -58,7 +57,6 @@ from vm.adapters import (
     describe_entry,
     domain_state,
     domain_state_or_none,
-    is_ours,
     fingerprint,
     flag_state,
     has_managed_save,
@@ -82,6 +80,8 @@ from vm.adapters import (
     mark_folder_nocow,
     signals_held,
     systemctl,
+    timer_file_states,
+    timer_files,
     tree_sizes,
     utc_now,
     virsh,
@@ -97,13 +97,12 @@ from vm.domain import (
     ON_CALENDAR,
     OVERLAY_MARK,
     RETRY_LOCK,
-    SERVICE,
     TAG,
-    TIMER,
     URI,
     WINDOWS_STEPS,
     agent_state,
     convert_lines,
+    disk_label,
     domain_parts,
     forget_args,
     guest_kind,
@@ -114,10 +113,9 @@ from vm.domain import (
     overlay_kind,
     overlay_recovery,
     parse_args,
-    render_service,
-    render_timer,
     restore_lines,
     stored,
+    timer_file_words,
     tune_domain,
     version_changes,
 )
@@ -640,7 +638,7 @@ def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], li
                 continue
             if OVERLAY_MARK in d["source"] or d["backing"]:
                 raise Refused(
-                    f"{vm}: disk {d['target']} runs on {d['source']} with a backing chain (an overlay "
+                    f"{vm}: {disk_label(d['target'], word='disk ')} runs on {d['source']} with a backing chain (an overlay "
                     f"left by an earlier backup?). Put it back first; `{CST} doctor` shows the commands"
                 )
             base = os.path.realpath(d["source"])
@@ -986,38 +984,16 @@ def retention(vm: str, nas: Mapping[str, Any]) -> None:
     )
 
 
-def stop_timeout() -> str:
-    """A stop may arrive while the snapshot call is held (SNAPSHOT_TIMEOUT +
-    SNAPSHOT_SETTLE), then the merge runs (COMMIT_TIMEOUT, plus virsh's own
-    300 s), then the checks and the alert: 30 minutes of margin."""
-    return f"{(SNAPSHOT_TIMEOUT + SNAPSHOT_SETTLE + COMMIT_TIMEOUT + 300 + 1800 + 59) // 60}min"
-
-
-def timer_files(entry_file: str) -> dict[str, tuple[bytes, int]]:
-    """{path: (wanted bytes, mode)}: the program as `install` writes it (a
-    zipapp; entry_file is the running cst-vm), the service and the timer."""
-    return {
-        SBIN_COPY: (install_payload("vm/cst-vm", entry_file), 0o755),
-        os.path.join(UNIT_DIR, SERVICE): (render_service(SBIN_COPY, stop_timeout()).encode(), 0o644),
-        os.path.join(UNIT_DIR, TIMER): (render_timer().encode(), 0o644),
-    }
-
-
 def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     unit = instance(vm)
     if sub != "status" and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
         raise Refused(f"backup-timer {sub} needs root: run it as `{PROG} backup-timer {sub}` (it calls sudo)")
     files = timer_files(entry_file)
-    states = {p: owned_file_state_at(p, t, functools.partial(is_ours, p), owner="root") for p, (t, _) in files.items()}
+    states = timer_file_states(files, os.path.join(UNIT_DIR, unit))
     if sub == "status":
         on = unit in wants_links()
         print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
-        words = {
-            "ok": "installed, up to date",
-            "missing": "not installed",
-            "conflict": "not CST's file",
-            "change": f"installed, OLDER than this copy of CST: {PROG} backup-timer on {vm} updates it",
-        }
+        words = timer_file_words(PROG, vm)
         for p, st in states.items():
             print(f"  {p}: {words[st]}")
         if on:
@@ -1037,6 +1013,8 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     if foreign:
         raise Refused("not CST's files, left as they are: " + ", ".join(foreign))
     if sub == "on":
+        if why := masked_refusal([p for p, st in states.items() if st == "masked"], user=False):
+            raise Refused(why + "; nothing was changed")
         nas_settings()
         for p, (text, mode) in files.items():
             if states[p] != "ok":
@@ -1054,10 +1032,15 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     rc, _, err = systemctl("disable", "--now", unit)
     if rc != 0 and unit in wants_links():
         raise Refused(f"systemctl disable --now {unit}: {err or f'exit {rc}'}")
+    # Forget the timer's last run (Persistent=: /var/lib/systemd/timers/stamp-UNIT): needs the unit loaded
+    # and stopped, so before its files go. A failure only leaves that small file behind.
+    systemctl("clean", "--what=state", unit)
     print(f"Off: {unit}")
     if not wants_links():
         for p, st in states.items():
-            if st != "missing":
+            if st == "masked":
+                print(f"  left as it is: {p} (masked with systemctl mask)")
+            elif st != "missing":
                 os.unlink(p)
                 print(f"  removed: {p}")
         systemctl("daemon-reload")

@@ -111,7 +111,9 @@ The paths come from the VM's definition
 
 CD-ROM drives are skipped. The backup refuses, and copies nothing, when a
 disk is a block device, a network disk or a pool volume, or a qcow2 overlay
-with a backing file. Back those up by hand.
+with a backing file. Back those up by hand. Messages name a disk by its target
+(`sda`); a disk whose definition has no target name is an `unnamed disk`,
+with its source path when it has one.
 
 A disk, UEFI variables file or TPM folder that is a symbolic link is copied
 through the link: the backup holds the data of the file it points to, under
@@ -688,6 +690,10 @@ cst vm backup-timer status [VM]   # on or off, up to date, next run, last NAS ba
 cst vm backup-timer off [VM]      # (root) stops it; removes the files when no VM uses them
 ```
 
+`off` also makes systemd forget that VM's last run
+(`systemctl clean --what=state`, which removes
+`/var/lib/systemd/timers/stamp-cst-vm-backup@<VM>.timer`), before the files go.
+
 `on` installs:
 
 - `/usr/local/sbin/cst-vm`: this program, as `install` writes every CST
@@ -698,9 +704,21 @@ cst vm backup-timer off [VM]      # (root) stops it; removes the files when no V
   copy installed by an older CST: `on` replaces it);
 - `/etc/systemd/system/cst-vm-backup@.service`: runs
   `cst-vm backup <VM> --nas` with low priority (`Nice=19`,
-  `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`);
+  `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`; the IO class only
+  works with the BFQ or Kyber IO schedulers and the weight with BFQ or iocost;
+  these NVMe disks use `none`:
+  see [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
+  Its journal lines carry the name `cst-vm` (`SyslogIdentifier=`), so
+  `journalctl -t cst-vm` finds them; a service written by an older CST shows
+  as `OLDER` in `backup-timer status`;
 - `/etc/systemd/system/cst-vm-backup@.timer`, and enables
   `cst-vm-backup@<VM>.timer`.
+
+A masked unit (`systemctl mask` leaves a link to `/dev/null` in
+`/etc/systemd/system`: the service, the timer, or the timer of one VM,
+`cst-vm-backup@<VM>.timer`) stays masked: `on` refuses, changes nothing and
+says how to unmask it; `status` shows it as `masked`; `off` leaves the link
+where it is.
 
 When: **Saturday 04:30**, up to 30 minutes later (`RandomizedDelaySec`).
 That keeps it away from the other jobs: the `/home` NAS backup starts every
@@ -710,7 +728,9 @@ If the machine was off at that time, it runs at the next boot
 restic waits up to 30 minutes for its lock (`--retry-lock 30m`).
 
 A failed run makes the unit `failed` (`cst doctor` lists failed units) and
-sends a desktop alert; the next week tries again. Run one now:
+sends a desktop alert; the next week tries again. A settings line that is not a
+plain `KEY=VALUE` (section 10.7) is such a failure: the alert names the file and
+the line. Run one now:
 `sudo systemctl start cst-vm-backup@win11-devbox.service`; its log:
 `journalctl -u cst-vm-backup@win11-devbox.service`.
 
@@ -757,7 +777,8 @@ In `/etc/cst/vm.conf` (all optional):
 (`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,
 and a byte that is not UTF-8 (in a comment, say) no longer stops the program.
 `cpu-setup.conf` and `snapshots.conf`, which bash also sources, are read exactly
-as bash reads them (`NAS_ENABLED=1 # on` is `1`). `vm.conf`, which only
+as bash reads them (`NAS_ENABLED=1 # on` is `1`; in `snapshots.conf` also a
+value an older CST wrote with backslashes, `a\ b`). `vm.conf`, which only
 Python reads, also allows blanks around `=` (`VM_NOCOW = 0`). A line that is
 not a plain `KEY=VALUE` (blanks around `=` in a bash file, a value with `$`,
 a backtick or a backslash outside single quotes, an unclosed quote) sets

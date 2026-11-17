@@ -14,6 +14,8 @@ Usage:
   installer.py check [OPTIONS] SRC...     exit 0 when every file is current, else 1; prints nothing
   installer.py text DEST MODE [--root DIR]
                                           generated content (stdin) to DEST, same rules
+  installer.py text-plan DEST MODE [--root DIR]
+                                          unchanged:/would write: for that content; changes nothing
   installer.py payload SRC                the bytes install writes for SRC, to stdout
   installer.py dests [--home DIR] [--module M] [--kind K]
                                           the destination of each matching entry, one per line
@@ -44,7 +46,7 @@ import sys
 from typing import NoReturn
 
 from cst_core.adapters.install import LocalInstallTarget
-from cst_core.adapters.runtime import checkout_root, restore_default_signals
+from cst_core.adapters.runtime import checkout_root, undo_python_start
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, InstallEntry, Owner, expand_dest, select_entries
@@ -66,7 +68,7 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser() -> _Parser:
     p = _Parser(prog=NAME, add_help=False)
-    p.add_argument("command", choices=["install", "plan", "check", "text", "payload", "dests", "help"])
+    p.add_argument("command", choices=["install", "plan", "check", "text", "text-plan", "payload", "dests", "help"])
     p.add_argument("args", nargs="*")
     p.add_argument("--home")
     p.add_argument("--root", default="")
@@ -105,10 +107,27 @@ def _entries(
     return tuple(by_src[s] for s in srcs)
 
 
+def _text(service: InstallService, command: str, args: Sequence[str], root: str) -> str:
+    """text (write) or text-plan (only judge) generated content from stdin; the report line."""
+    if len(args) != 2:
+        raise _UsageError(f"{command} DEST MODE")
+    mode = OctalMode.parse(args[1]).bits
+    as_root = os.geteuid() == 0
+    # Generated text as root goes to a root destination; as a user (cst_install_text DEST MODE USER), to theirs.
+    owner: Owner = "root" if as_root else "user"
+    dest = staged(root, args[0])
+    data = sys.stdin.buffer.read()
+    if command == "text":
+        return service.write_if_changed(dest, data, mode, owner, as_root=as_root)
+    current = service.is_current(dest, data, mode, owner, as_root=as_root)
+    return f"unchanged: {dest}" if current else f"would write: {dest}"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one installer command; 0 ok, 1 refused or not current, 2 usage."""
-    # A reader that stops early (`cmp -s <(installer.py payload ...)`) ends this quietly, as it ended cp or cat.
-    restore_default_signals()
+    # A reader that stops early (`cmp -s <(installer.py payload ...)`) ends this quietly, as it ended cp or cat;
+    # the commands it runs get the caller's LC_CTYPE (cst-install.bash hands it over).
+    undo_python_start()
     try:
         a = _parser().parse_intermixed_args(list(sys.argv[1:] if argv is None else argv))
         if a.command == "help":
@@ -118,15 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if root is None:
             raise _UsageError("runs from a CST checkout only")
         service = InstallService(LocalInstallTarget(), lambda e: entry_payload(root, e))
-        if a.command == "text":
-            if len(a.args) != 2:
-                raise _UsageError("text DEST MODE")
-            mode = OctalMode.parse(a.args[1]).bits
-            as_root = os.geteuid() == 0
-            # Generated text as root goes to a root destination; as a user (cst_install_text DEST MODE USER), to theirs.
-            owner: Owner = "root" if as_root else "user"
-            dest = staged(a.root, a.args[0])
-            print(service.write_if_changed(dest, sys.stdin.buffer.read(), mode, owner, as_root=as_root))
+        if a.command in ("text", "text-plan"):
+            print(_text(service, a.command, a.args, a.root))
             return 0
         if a.command == "dests":
             for e in _entries(a.args, a.module, a.kind, a.owner):

@@ -140,6 +140,44 @@ touch /run/ostree-booted
 )
 
 
+def stub_stall_monitor_unit(shipped: str) -> str:
+    """btrfs-stall-monitor.service as shipped, with the daemon replaced by a
+    sleep. Nice=-5 goes too: a negative nice needs CAP_SYS_NICE, which the
+    tier 1 container does not have (the unit would fail with 201/NICE).
+    Every other line stays, RuntimeDirectory= and its options included."""
+    out: list[str] = []
+    swapped = dropped = 0
+    for line in shipped.splitlines():
+        if line.startswith("ExecStart="):
+            out.append("ExecStart=/usr/bin/sleep infinity")
+            swapped += 1
+        elif line.startswith("Nice="):
+            out.append(f"# {line}: dropped, no CAP_SYS_NICE in the container")
+            dropped += 1
+        else:
+            out.append(line)
+    if (swapped, dropped) != (1, 1):
+        raise AssertionError(f"the shipped unit changed shape (ExecStart= {swapped}, Nice= {dropped}):\n{shipped}")
+    return "\n".join(out) + "\n"
+
+
+# journal_named IDENT MATCH: waits up to 60 s for journal lines under SyslogIdentifier=IDENT
+# (journalctl -t), as root, which also reads the user managers' services. On failure it shows the
+# identifiers that the lines of MATCH (a journal field, the run's unit) carry.
+JOURNAL_NAMED = """
+journal_named() {
+    journalctl --sync 2>/dev/null || true
+    for _ in $(seq 1 120); do
+        if [ -n "$(journalctl -q --no-pager -o cat -n 1 -t "$1")" ]; then echo "E2E-JOURNAL-OK $1"; return 0; fi
+        sleep 0.5
+    done
+    echo "journalctl -t $1 finds nothing; the identifiers of the run's lines:" >&2
+    journalctl -q --no-pager -o verbose -n 20 "$2" | grep -E 'SYSLOG_IDENTIFIER=|MESSAGE=' >&2 || true
+    return 1
+}
+"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
@@ -276,6 +314,12 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             grep -q 'cargo-build\\|toolchains' <<<"$st_out"
             """,
         )
+        # The run's journal lines carry the program's name (SyslogIdentifier=), not python3.
+        res = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            JOURNAL_NAMED + "journal_named cst-toolchains _SYSTEMD_USER_UNIT=cst-toolchains-prune.service",
+        )
+        self.assertIn("E2E-JOURNAL-OK cst-toolchains", res.stdout)
         self.toolchains_auto_off_without_a_user_manager()
         self.toolchains_auto_off()
         self.toolchains_auto_off_stops_an_orphan_timer()
@@ -1078,13 +1122,16 @@ EOF
         as the zipapp `install` builds (replacing the plain-script copy an
         older CST left), the service and the timer, and enables the timer;
         the installed copy runs from / without the checkout; a second `on`
-        writes nothing; `off` disables and removes everything. The NAS
-        settings and the program's path are scratch files (CST_VM_*)."""
+        writes nothing; one run of the service logs under its own name
+        (journalctl -t cst-vm); `off` disables and removes everything, the
+        timer's stamp too. The NAS settings and the program's path are
+        scratch files (CST_VM_*)."""
         w = "/var/tmp/e2e-vm-timer"
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"systemctl disable --now cst-vm-backup@e2evm.timer; rm -rf {w} "
+            f"systemctl disable --now cst-vm-backup@e2evm.timer; systemctl stop cst-vm-backup@e2evm.service; "
+            f"systemctl reset-failed cst-vm-backup@e2evm.service; rm -rf {w} "
             "/etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer; "
             "systemctl daemon-reload",
             check=False,
@@ -1109,6 +1156,7 @@ EOF
             systemctl is-enabled cst-vm-backup@e2evm.timer
             grep -qF "ExecStart=/usr/bin/python3 -I $w/sbin/cst-vm backup %i --nas" \
                 /etc/systemd/system/cst-vm-backup@.service
+            grep -qx 'SyslogIdentifier=cst-vm' /etc/systemd/system/cst-vm-backup@.service
             [ "$(head -n 1 "$w/sbin/cst-vm")" = "#!/usr/bin/python3 -I" ]
             python3 -c 'import sys, zipfile; sys.exit(not zipfile.is_zipfile(sys.argv[1]))' "$w/sbin/cst-vm"
             # The installed copy runs on its own, from /, as root and as tester.
@@ -1119,10 +1167,30 @@ EOF
             grep -q 'backup-timer on' "$w/help-tester"
             again="$(/usr/bin/python3 -I "$tool" backup-timer on e2evm)"
             if grep -E 'installed:|updated:' <<<"$again"; then echo "second on wrote files" >&2; exit 1; fi
+            # systemd made the stamp of the Persistent= timer when it started it; off must remove it.
+            stamp=/var/lib/systemd/timers/stamp-cst-vm-backup@e2evm.timer
+            if [ ! -e "$stamp" ]; then
+                echo "no $stamp while the timer is on: the check after off would prove nothing" >&2
+                ls -la /var/lib/systemd/timers >&2 || true
+                exit 1
+            fi
+            # One run of the service, for its journal name. It refuses at once: the service reads the
+            # default settings (not the CST_VM_* above), and no NAS backup is set up there.
+            systemctl start --no-block cst-vm-backup@e2evm.service
+            {JOURNAL_NAMED}
+            journal_named cst-vm _SYSTEMD_UNIT=cst-vm-backup@e2evm.service
+            for _ in $(seq 1 120); do
+                case "$(systemctl show -p ActiveState --value cst-vm-backup@e2evm.service)" in
+                    activating|active|deactivating) sleep 0.5 ;;
+                    *) break ;;
+                esac
+            done
+            systemctl reset-failed cst-vm-backup@e2evm.service 2>/dev/null || true
             /usr/bin/python3 -I "$tool" backup-timer status e2evm >"$w/status2"
             grep -q "$w/sbin/cst-vm: installed, up to date" "$w/status2"
             /usr/bin/python3 -I "$tool" backup-timer off e2evm
             if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
+            if [ -e "$stamp" ]; then echo "off left $stamp" >&2; exit 1; fi
             [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
             [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
             echo E2E-OK
@@ -1132,12 +1200,15 @@ EOF
 
     def test_13_degraded_boot_install_cycle(self) -> None:
         """`cst btrfs degraded-boot` with the real systemd and the real udevadm
-        verify: install writes the rule, the units and the helper, enables the
+        verify: `plan` first says what install would write and run and changes
+        nothing; install writes the rule, the units and the helper, enables the
         record unit and tracks the four files in the initramfs; the generated
         rule passes `udevadm verify` and the units `systemd-analyze verify`;
-        a second install writes nothing and makes no rpm-ostree change;
-        `status` changes nothing and ends in "verdict: OK"; uninstall removes
-        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        a second install writes nothing and makes no rpm-ostree change, and
+        `plan` then has nothing left to do; `status` changes nothing and ends
+        in "verdict: OK"; a typo in a unit (an unknown key in a drop-in of the
+        record unit) stops an install at its `systemd-analyze verify`, before
+        any rpm-ostree change; uninstall removes everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -1153,13 +1224,14 @@ EOF
         )
         record = "/etc/systemd/system/btrfs-degraded-boot-record.service"
         synced = "/etc/btrfs-degraded-boot/initramfs-synced.sha256"
+        typo = f"{record}.d"
         self.addCleanup(
             exec_bash,
             c,
             f"""
             systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
             rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
-                /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record}
+                /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record} {typo}
             systemctl daemon-reload
             """,
             check=False,
@@ -1174,6 +1246,22 @@ EOF
 
         def calls() -> list[str]:
             return exec_bash(c, f"cat {w}/calls").stdout.splitlines()
+
+        everything = f"{' '.join(files)} {record} {synced} /etc/btrfs-degraded-boot"
+        exists = f"for f in {everything}; do [[ ! -e $f ]] || echo $f; done"
+        plan = step("/opt/cst-rw/cst btrfs degraded-boot plan")
+        for dest in (*files, record, synced):
+            self.assertIn(f"would write: {dest}\n", plan)
+        self.assertIn("would run: rpm-ostree initramfs-etc " + " ".join(f"--track={f}" for f in files) + "\n", plan)
+        self.assertIn("would run: systemctl enable btrfs-degraded-boot-record.service\n", plan)
+        self.assertIn(f"self-test: runs at install; lsblk lists 2 member(s) of {uuid}, btrfs counts 2\n", plan)
+        self.assertTrue(plan.endswith("plan: nothing was changed\n"), plan)
+        self.assertEqual(step(exists), "")
+        self.assertEqual(step(f"cat {w}/tracked"), "")
+        self.assertEqual([x for x in calls() if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
+        self.assertNotEqual(
+            exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0
+        )
 
         first = step("/opt/cst-rw/cst btrfs degraded-boot")
         for dest in (*files, record, synced):
@@ -1203,6 +1291,10 @@ EOF
         self.assertNotIn("written:", second)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
         self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        again = step("/opt/cst-rw/cst btrfs degraded-boot plan")
+        self.assertNotIn("would ", again)
+        self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", again)
+        self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", again)
 
         sums = f"sha256sum {' '.join(files)} {record} {synced}"
         before = step(sums)
@@ -1214,13 +1306,23 @@ EOF
         self.assertEqual(step(sums), before)
         self.assertEqual([x for x in calls()[n:] if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
 
+        # verify reads a unit's drop-ins with it; an unknown key there is only
+        # a warning unless the script passes --recursive-errors=no.
+        with self.subTest("a typo in a unit stops the install"):
+            step(f"mkdir -p {typo} && printf '[Service]\\nTimeoutStratSec=5\\n' >{typo}/e2e-typo.conf")
+            n = len(calls())
+            bad = exec_bash(c, f". {w}/fakes.bash\n/opt/cst-rw/cst btrfs degraded-boot", check=False)
+            self.assertNotEqual(bad.returncode, 0, bad.stdout)
+            self.assertIn("Unknown key 'TimeoutStratSec'", bad.stdout + bad.stderr)
+            self.assertIn("ERROR: systemd-analyze verify failed", bad.stdout + bad.stderr)
+            self.assertNotIn("self-test:", bad.stdout)
+            self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        step(f"rm -rf {typo} && systemctl daemon-reload")
+
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
         self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
-        left = step(
-            f"for f in {' '.join(files)} {record} {synced} /etc/btrfs-degraded-boot; do [[ ! -e $f ]] || echo $f; done"
-        )
-        self.assertEqual(left, "")
+        self.assertEqual(step(exists), "")
         self.assertEqual(step(f"cat {w}/tracked"), "")
         self.assertNotEqual(
             exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0
@@ -1258,8 +1360,9 @@ EOF
         exists here, so a wrong path still fails. User units are checked by the
         system manager's parser (verify has no --root for --user). Then
         `systemd-analyze security --offline` of every service stays at or under
-        its SECURITY_CEILINGS entry, and equal to it (lower the entry when a unit
-        gets better). Drop-ins (below, machine.slice, user@.service) are not
+        its SECURITY_CEILINGS entry (lower the entry when a unit gets better; a
+        score under it does not fail, so a systemd update in the image that
+        rates a unit better does not turn tier 1 red). Drop-ins (below, machine.slice, user@.service) are not
         units of their own and are not verified here."""
         c = self.SYSTEMD_CONTAINER
         stage = "/var/tmp/e2e-units"
@@ -1307,5 +1410,207 @@ EOF
                     check=False,
                 )
                 self.assertEqual(s.returncode, 0, f"exposure above {ceiling / 10}:\n{s.stdout[-600:]}")
-                score = s.stdout.rsplit("Overall exposure level for", 1)[-1].split(":", 1)[1].split()[0]
-                self.assertEqual(round(float(score) * 10), ceiling, f"{name} is now {score}: lower its entry")
+
+    def test_14_stall_monitor_unit_keeps_queued_alerts_across_a_restart(self) -> None:
+        """btrfs-stall-monitor.service as shipped (read from the checkout), only
+        its daemon swapped for a sleep and Nice=-5 dropped (see
+        stub_stall_monitor_unit): a file in its RuntimeDirectory, where the
+        daemon queues alerts for btrfs-stall-alert.service, survives
+        `systemctl restart` (RuntimeDirectoryPreserve=restart; with the default
+        a restart deleted it), and `stop` removes the folder."""
+        shipped = docker_exec(
+            self.SYSTEMD_CONTAINER, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]
+        ).stdout
+        stub = stub_stall_monitor_unit(shipped)
+        unit = "e2e-stall-monitor.service"
+        path = f"/etc/systemd/system/{unit}"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"systemctl stop {unit}; rm -f {path}; systemctl daemon-reload; systemctl reset-failed {unit}",
+            check=False,
+        )
+        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=stub)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            diag() {{ systemctl status --no-pager {unit} >&2 || true; journalctl -q --no-pager -u {unit} -n 30 >&2 || true; }}
+            d=/run/btrfs-stall-monitor
+            systemctl daemon-reload
+            # Type=simple: start returns at the fork, and the stub runs (or fails) after it. Running, and
+            # never restarted: a failing stub would also keep the folder (Restart=on-failure + Preserve).
+            running() {{
+                for _ in $(seq 1 20); do
+                    [ "$(systemctl show -p ActiveState --value {unit})" = active ] && [ -d "$d" ] && break
+                    sleep 0.5
+                done
+                [ "$(systemctl show -p ActiveState --value {unit})" = active ] && [ -d "$d" ] &&
+                    [ "$(systemctl show -p NRestarts --value {unit})" = 0 ] ||
+                    {{ echo "$1: the unit derived from the shipped one is not running here" >&2; diag; exit 1; }}
+            }}
+            systemctl start {unit} || {{ diag; exit 1; }}
+            running "after start"
+            touch "$d/alert-e2e.txt"
+            systemctl restart {unit} || {{ diag; exit 1; }}
+            running "after restart"
+            [ -e "$d/alert-e2e.txt" ] || {{ echo "restart removed the queued alert in $d" >&2; ls -la "$d" >&2 || true; exit 1; }}
+            systemctl stop {unit}
+            [ ! -e "$d" ] || {{ echo "stop left $d" >&2; ls -la "$d" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_15_toolchains_auto_off_forgets_the_timer_stamp(self) -> None:
+        """systemd keeps the last run of a Persistent= timer (for a user timer
+        ~/.local/share/systemd/timers/stamp-NAME; made when the timer starts,
+        touched at each run) after the timer is gone. `auto off` removes it
+        (systemctl --user clean --what=state, before the unit file goes)."""
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            stamp=/home/tester/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            systemctl --user is-active cst-toolchains-prune.timer
+            systemctl --user start cst-toolchains-prune.service
+            if [ ! -e "$stamp" ]; then
+                echo "no $stamp after auto on and a run: the check below would prove nothing" >&2
+                ls -la /home/tester/.local/share/systemd/timers >&2 || true
+                exit 1
+            fi
+            /opt/cst-rw/cst toolchains auto off
+            if [ -e "$stamp" ]; then echo "auto off left $stamp" >&2; exit 1; fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_17_snapshots_conf_written_by_an_older_cst_is_rewritten_in_quotes(self) -> None:
+        """An older CST wrote snapshots.conf values with printf %q (a backslash
+        before a blank, $'...').
+        The real `cst btrfs snapshots nas disable` (as root, the real systemctl)
+        rewrites them in quotes with the values bash read from the old file,
+        the cst_core reader then finds no problem, and a second run leaves the
+        file as it is (same inode, same time)."""
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"rm -f {conf}; if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            conf={conf}
+            mkdir -p /etc/btrfs-setup
+            if [ -e "$conf" ]; then cp -a "$conf" /var/tmp/e2e-snapconf.bak; fi
+            # The old writer's form, made by bash's own printf %q.
+            {{
+                echo "# Managed by btrfs-setup.sh (CST); read by /usr/local/sbin/btrfs-snapshot."
+                printf 'NAS_ENABLED=%q\\nNAS_PATH=%q\\nNAS_RESTIC_HOST=%q\\nNAS_USER=%q\\n' \\
+                    1 '/volume1/My Backups' "host #1 it's" "$(printf 'a\\tb')"
+            }} >"$conf"
+            grep -qF 'NAS_PATH=/volume1/My\\ Backups' "$conf"
+            values() {{ (. "$conf"; printf '%s|' "$NAS_ENABLED" "$NAS_PATH" "$NAS_RESTIC_HOST" "$NAS_USER"); }}
+            before="$(values)"
+            /opt/cst-rw/cst btrfs snapshots nas disable
+            after="$(values)"
+            [ "$after" = "0|${{before#1|}}" ] || {{ echo "values changed: $before -> $after" >&2; exit 1; }}
+            grep -qx "NAS_PATH='/volume1/My Backups'" "$conf"
+            grep -qx 'NAS_RESTIC_HOST="host #1 it'"'"'s"' "$conf"
+            if grep -q '\\\\' "$conf"; then echo "a backslash is left:" >&2; cat "$conf" >&2; exit 1; fi
+            python3 -I -B -c '
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from cst_core.domain.text import parse_shell_assignments
+got = parse_shell_assignments(open(sys.argv[1], encoding="utf-8").read())
+assert got.problems == (), got.problems
+assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
+' "$conf"
+            st="$(stat -c '%i %y' "$conf")"
+            cp "$conf" /var/tmp/e2e-snapconf.first
+            /opt/cst-rw/cst btrfs snapshots nas disable
+            [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            rm -f /var/tmp/e2e-snapconf.first
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_18_a_masked_unit_stays_masked(self) -> None:
+        """`systemctl mask` leaves a link to /dev/null where the unit file goes.
+        `cst vm backup-timer on` (root, the system manager) and `cst toolchains
+        auto on` (tester, the user manager) refuse, write nothing and leave the
+        unit masked for the real systemctl; status says masked. Once unmasked,
+        `backup-timer on` works and `off` removes everything again."""
+        w = "/var/tmp/e2e-vm-mask"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            "systemctl unmask cst-vm-backup@e2emask.timer; systemctl disable --now cst-vm-backup@e2emask.timer; "
+            f"rm -rf {w} /etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/sbin"
+            printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
+            printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_SBIN_COPY="$w/sbin/cst-vm" CST_VM_INDEX="$w/index.json"
+            tool=/opt/cst-rw/vm/cst-vm
+            unit=cst-vm-backup@e2emask.timer
+            systemctl mask "$unit"
+            [ "$(readlink "/etc/systemd/system/$unit")" = /dev/null ] || {{ echo "mask made no link to /dev/null" >&2; exit 1; }}
+            rc=0
+            /usr/bin/python3 -I "$tool" backup-timer on e2emask >"$w/on.out" 2>&1 || rc=$?
+            [ "$rc" -ne 0 ] || {{ echo "on did not refuse a masked unit" >&2; cat "$w/on.out" >&2; exit 1; }}
+            grep -qF "$unit is masked (systemctl mask); unmask it first: sudo systemctl unmask $unit" "$w/on.out"
+            for f in /etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer "$w/sbin/cst-vm"; do
+                if [ -e "$f" ]; then echo "on wrote $f" >&2; exit 1; fi
+            done
+            [ "$(systemctl is-enabled "$unit" || true)" = masked ]
+            # grep reads all of it: status gets SIGPIPE back at its default, and pipefail would see it.
+            /usr/bin/python3 -I "$tool" backup-timer status e2emask | grep -F "/etc/systemd/system/$unit: masked" >/dev/null
+            systemctl unmask "$unit"
+            /usr/bin/python3 -I "$tool" backup-timer on e2emask >/dev/null
+            systemctl is-enabled "$unit"
+            /usr/bin/python3 -I "$tool" backup-timer off e2emask >/dev/null
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ] && [ ! -e "$w/sbin/cst-vm" ]
+            echo E2E-OK-VM
+            """,
+        ).stdout
+        self.assertIn("E2E-OK-VM", out)
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "systemctl --user unmask cst-toolchains-prune.timer; rm -f /home/tester/.config/cst/toolchains-auto.off",
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            d=/home/tester/.config/systemd/user
+            /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true
+            systemctl --user mask cst-toolchains-prune.timer
+            [ "$(readlink "$d/cst-toolchains-prune.timer")" = /dev/null ]
+            rc=0
+            /opt/cst-rw/cst toolchains auto on >/tmp/e2e-tc-mask.out 2>&1 || rc=$?
+            [ "$rc" -ne 0 ] || { echo "auto on did not refuse a masked unit" >&2; cat /tmp/e2e-tc-mask.out >&2; exit 1; }
+            grep -qF "cst-toolchains-prune.timer is masked (systemctl mask); unmask it first: systemctl --user unmask cst-toolchains-prune.timer" /tmp/e2e-tc-mask.out
+            if [ -e "$d/cst-toolchains-prune.service" ]; then echo "auto on wrote the service" >&2; exit 1; fi
+            [ "$(systemctl --user is-enabled cst-toolchains-prune.timer || true)" = masked ]
+            /opt/cst-rw/cst toolchains status | grep -F "cst-toolchains-prune.timer masked" >/dev/null
+            /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1
+            [ "$(readlink "$d/cst-toolchains-prune.timer")" = /dev/null ] || { echo "auto off removed the mask" >&2; exit 1; }
+            systemctl --user unmask cst-toolchains-prune.timer
+            rm -f /tmp/e2e-tc-mask.out
+            echo E2E-OK-TOOLCHAINS
+            """,
+        ).stdout
+        self.assertIn("E2E-OK-TOOLCHAINS", out)

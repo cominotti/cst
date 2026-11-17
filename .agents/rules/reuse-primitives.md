@@ -20,19 +20,20 @@ one place only.
 
 | Need | Use | Notes |
 |---|---|---|
-| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. |
+| Run a command | `CommandRunnerPort` (`cst_core.ports`), `SubprocessCommandRunner` (`cst_core.adapters`) | `CommandResult`, `CommandFailed` in `cst_core.ports`. Tests inject a fake through the port. A command whose answers are parsed runs in the C locale: `c_locale(env)` (`cst_core.adapters`), not an `LC_ALL` literal. |
 | Host or toolbox, run on the host | `HostExecutionContext` (`cst_core.adapters`), `ExecutionContextPort` | Root commands refuse inside a toolbox ([docs/architecture.md](../../docs/architecture.md#toolbox-vs-host)). |
 | systemd | `SystemdPort` (`cst_core.ports`), `SystemctlAdapter` (`cst_core.adapters`) | |
 | libvirt | `VirshPort` (`cst_core.ports`), `SubprocessVirshAdapter` (`cst_core.adapters`) | |
 | Write a file | `cst_core.adapters.files.write_atomic` | Unique temp file, exact mode, fsync of the file and its folder unless `durable=False`, owner `"caller"` or `"root"`. `write_bytes_atomic` is the installer's durable root-owned write. |
 | Create folders | `cst_core.adapters.files.ensure_dir` | The folders it creates get exactly their mode (the umask does not reduce it). |
 | Read a file | `cst_core.adapters.files`: `read_text`, `read_int`, `read_bytes` | `read_text` decodes leniently (bad bytes replaced): not for a file written back. For that, `LocalFileSystemAdapter.read_text` (byte-transparent). The two policies are on purpose. `FileSystemPort` is the port. |
-| Install a file of CST | a row of `INSTALL_MANIFEST` (`cst_core.domain.install`); from a setup script `cst-install.bash`: `cst_install`, `cst_install_as`, `cst_install_text`, `cst_installed_dests` | Never copy a file by hand ([docs/architecture.md](../../docs/architecture.md#each-module-has-two-parts)). |
+| Install a file of CST | a row of `INSTALL_MANIFEST` (`cst_core.domain.install`); from a setup script `cst-install.bash`: `cst_install`, `cst_install_as`, `cst_install_text` (`cst_install_text_plan` to only judge), `cst_installed_dests` | Never copy a file by hand ([docs/architecture.md](../../docs/architecture.md#each-module-has-two-parts)). |
 | A link at a destination | `cst_core.domain.install.link_read_through`, `cst_core.adapters.files.owned_file_state_at` | Replaced at a root destination, judged by its target in a home. |
+| A unit file CST writes (masked or not) | `cst_core.adapters.files.unit_file_state_at`, `is_masked_unit`; `cst_core.domain.units.masked_refusal` | A link to `/dev/null` is `masked` (`systemctl mask`): refuse, never unmask. |
 | Managed lines and files, safe paths | `cst_core.domain.files`: `MarkedLineSpec`, `owned_file_state`, `inspect_managed_file`, `effective_lines`, `checked_path` | |
 | One run at a time | `cst_core.adapters.locks.take_lock` | A lock file it creates gets exactly its mode; refuses a link. |
 | A journal line | `cst_core.adapters.journal.log` | `<prio>tag: msg`, flushed. |
-| A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. |
+| A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. `parse_snapshots_conf`: the same for `snapshots.conf` only, which also reads the `printf %q` lines an older CST wrote there. |
 | Lines, first line, yes/no | `cst_core.domain.text`: `file_lines` (as bash's `read -r` sees them), `first_line`, `is_yes` | |
 | Sizes, durations, CPU lists, modes | `cst_core.domain.values`: `ByteSize`, `Duration`, `CpuSet`, `OctalMode`, `KIB`, `MIB`, `GIB`, `format_bytes_human`, `format_bytes_gib_mib`, `format_bytes_decimal` | |
 | A systemd unit or timer text | `cst_core.domain.units`: `render_unit_file`, `render_timer` | |
@@ -40,7 +41,7 @@ one place only.
 | libvirt XML | `cst_core.domain.libvirt_xml.keep_prefixes` | |
 | NOCOW | `cst_core.adapters.nocow`: `set_nocow`, `inode_flags` | |
 | The program's own path, the checkout, a sibling program, the installed bytes | `cst_core.adapters.runtime`: `checkout_root`, `program_path`, `program_argv`, `sibling_program`, `install_payload` | Never compute paths from `__file__` by hand. |
-| Signals and locale at start | `cst_core.adapters.runtime`: `restore_default_signals`, `restore_lc_ctype` | `restore_default_signals` (SIGPIPE back to its default) only in `cst`, the installer, `cst swap` and commands that only read: `cst doctor`, `btrfs-stall-report`, `cst vm` status/list/plans, `cst toolchains` status/plans, `cst cpu vm-pin` status/plan, `cpu-watch report`. Never in a command with cleanup (a backup, a prune, bulk, snapshots, the daemons): a closed pipe must not cut the cleanup short. `restore_lc_ctype` gives the modules `cst` runs the caller's LC_CTYPE back. |
+| Signals and locale at start | `cst_core.adapters.runtime`: `restore_default_signals`, `undo_python_start` | `restore_default_signals` (SIGPIPE back to its default) only in `cst`, the installer, `cst swap` and commands that only read: `cst doctor`, `btrfs-stall-report`, `cst vm` status/list/plans, `cst toolchains` status/plans, `cst cpu vm-pin` status/plan, `cpu-watch report` and its help, `docker-gc status` and `run --dry-run`, `chrome-cache status` and `plan`. Never in a command with cleanup (a backup, a prune, bulk, snapshots, the daemons): a closed pipe must not cut the cleanup short. `undo_python_start` (in `cst`, `cst swap` and the installer) also gives the commands they run the caller's LC_CTYPE back. |
 | How `cst` runs a module | `cst_core.adapters.dispatch` (`LocalCstDispatchAdapter`) | `exec`, or in the foreground with bash's signal rules. |
 | Zipapps, import analysis | `cst_core.adapters.zipapp`, `cst_core.domain.imports` | |
 | The installer's use case | `cst_core.application.install` (`InstallService`) | |

@@ -123,6 +123,7 @@ FLATPAK_SPAWN = """#!/bin/sh
 echo "flatpak-spawn $*" >>"$STUB_LOG"
 [ "$1" = --host ] || exit 1
 shift
+while [ "${1#--env=}" != "$1" ]; do export "${1#--env=}"; shift; done
 exec "$@"
 """
 
@@ -868,6 +869,69 @@ class SnapshotsWritableTest(Scratch):
         os.mkdir(os.path.join(d, "core-unfinished"))
         r = self.run_tool()
         self.assertIn("info   snapshots: cannot read /var/lib/btrfs-snapshot/core-unfinished", r.stdout)
+
+
+class ZswapParamsTest(Scratch):
+    """check_zswap_params: a zswap parameter that swap's zswap.conf (as
+    installed) sets and this kernel does not have. systemd-tmpfiles skips
+    it at boot without a word."""
+
+    def install_conf(self) -> None:
+        d = os.path.join(self.root, "etc", "tmpfiles.d")
+        os.makedirs(d, exist_ok=True)
+        shutil.copy(os.path.join(REPO, "swap", "tmpfiles", "zswap.conf"), os.path.join(d, "zswap.conf"))
+
+    def params(self, *names: str) -> None:
+        d = os.path.join(self.root, "sys", "module", "zswap", "parameters")
+        os.makedirs(d, exist_ok=True)
+        for n in names:
+            with open(os.path.join(d, n), "w") as f:
+                f.write("Y\n")
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "zswap" in ln]
+
+    def test_nothing_without_the_installed_file(self) -> None:
+        self.params("enabled")
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_ok_when_every_parameter_is_there(self) -> None:
+        self.install_conf()
+        self.params("compressor", "max_pool_percent", "shrinker_enabled", "enabled", "accept_threshold_percent")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            ["  ok     zswap: every parameter /etc/tmpfiles.d/zswap.conf sets is in this kernel"],
+        )
+        self.assert_read_only()
+
+    def test_a_parameter_this_kernel_lacks_warns(self) -> None:
+        self.install_conf()
+        self.params("compressor", "max_pool_percent", "enabled")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   zswap shrinker_enabled: this kernel has no such parameter; /etc/tmpfiles.d/zswap.conf "
+                "sets it, and systemd-tmpfiles skips it at boot without a word (cst swap status shows the zswap "
+                "settings)"
+            ],
+        )
+        self.assert_read_only()
+
+    def test_no_zswap_in_the_kernel_warns_once(self) -> None:
+        self.install_conf()
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   zswap: not in this kernel (no /sys/module/zswap/parameters): "
+                "/etc/tmpfiles.d/zswap.conf sets nothing"
+            ],
+        )
 
 
 class DockerNocowPostponedTest(Scratch):
@@ -1677,6 +1741,21 @@ class VmNasBackupTest(VmTest):
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
         self.assertNotIn("vm.conf line 1", r.stdout)
 
+    def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
+        # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/My\\ restic\nNAS_HOST=$'nas\\x2d1'\n")
+        r = self.run_tool()
+        self.assertIn("The NAS backup works with the VM running", r.stdout)
+        self.assertNotIn("snapshots.conf line", r.stdout)
+        # Anything else with a backslash still warns, there too.
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "a") as f:
+            f.write("NAS_USER=a\\ $USER\n")
+        r = self.run_tool()
+        self.assertIn("/etc/btrfs-setup/snapshots.conf line 4: NAS_USER=a\\ $USER: $", r.stdout)
+
     def test_nas_backup_counts_and_fix_names_it(self) -> None:
         self.deployments(rollback_pinned=True)
         os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
@@ -1912,7 +1991,7 @@ class CommandLineTest(Scratch):
         for a, _ in doc_app.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "vm"])
+        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm"])
 
 
 class ToolboxTest(Scratch):
@@ -1954,17 +2033,86 @@ class ToolboxTest(Scratch):
         env["CST_DOCTOR_CONTAINER"] = "0"
         self.assertEqual(doc_adapters.Host(env).path("/var/lib/cst-alerts"), "/var/lib/cst-alerts")
 
+    def test_virsh_runs_in_the_c_locale(self) -> None:
+        # The checks compare virsh's answers ("running", "shut off"), which it translates ("desligado" in pt_BR).
+        with open(os.path.join(self.bin, "virsh"), "w") as f:
+            f.write('#!/bin/sh\necho "LC_ALL=${LC_ALL-unset} $*"\n')
+        env = dict(self.env, LANG="pt_BR.UTF-8", LC_ALL="pt_BR.UTF-8")
+        want = (0, "LC_ALL=C -r -c qemu:///system domstate vm1\n", "")
+        self.assertEqual(doc_app.virsh(doc_adapters.Host(env), "domstate", "vm1"), want)
+        # In a toolbox the host command does not get flatpak-spawn's environment: the setting goes in --env.
+        self.assertEqual(doc_app.virsh(doc_adapters.Host(dict(env, CST_DOCTOR_CONTAINER="1")), "domstate", "vm1"), want)
+        self.assertEqual(self.calls(), ["flatpak-spawn --host --env=LC_ALL=C virsh -r -c qemu:///system domstate vm1"])
+
     def test_missing_flatpak_spawn(self) -> None:
-        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1"))
+        # The Host's own PATH finds the commands (only the stub folder here: no real flatpak-spawn).
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1", PATH=self.bin))
         os.unlink(os.path.join(self.bin, "flatpak-spawn"))
-        old = os.environ["PATH"]
-        os.environ["PATH"] = self.bin
-        try:
-            rc, _, err = host.run(["systemctl", "--failed"])
-        finally:
-            os.environ["PATH"] = old
+        rc, _, err = host.run(["systemctl", "--failed"])
         self.assertEqual(rc, 127)
         self.assertIn("flatpak-spawn", err)
+
+
+class HermeticTest(Scratch):
+    """No command the doctor starts may reach the real host: each one, and
+    the command flatpak-spawn --host would run, resolves in the stub folder
+    through the PATH the command really gets (the Host's env)."""
+
+    def run_recorded(self, container: str) -> list[tuple[str, str | None]]:
+        """Every check in-process; [(command, where it resolves)] of what it
+        started. A check that crashed (also on a command the recorder could
+        not take) fails the test: it would hide its commands."""
+        real_run = subprocess.run
+        seen: list[tuple[str, str | None]] = []
+
+        def recording_run(
+            args: Sequence[str],
+            *,
+            check: bool,
+            capture_output: bool,
+            text: bool,
+            timeout: float,
+            stdin: int,
+            env: Mapping[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            path = (os.environ if env is None else env).get("PATH")
+            args = list(args)
+            spawned = (
+                [a for a in args[2:] if not a.startswith("--env=")] if args[:2] == ["flatpak-spawn", "--host"] else []
+            )
+            names = [args[0]] + spawned[:1]
+            found = [(n, shutil.which(n, path=path)) for n in names]
+            seen.extend(found)
+            if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
+                return subprocess.CompletedProcess(args, 127, "", "not run: outside the stub folder")
+            return real_run(
+                args, check=check, capture_output=capture_output, text=text, timeout=timeout, stdin=stdin, env=env
+            )
+
+        os.makedirs(self.virsh_dir, exist_ok=True)
+        with open(os.path.join(self.virsh_dir, "list.txt"), "w") as f:
+            f.write("vm1\n")
+        self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(doc_adapters.subprocess, "run", recording_run):
+            results = doc_app.run_checks(host, doc_cli.wired_checks(doc_adapters.VmTools()))
+        crashed = [r.message for _, r in results if "the check itself failed" in r.message]
+        self.assertEqual(crashed, [])
+        return seen
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.virsh_dir = os.path.join(self.tmp, "virsh")
+
+    def test_every_command_is_a_stub(self) -> None:
+        for container in ("0", "1"):
+            with self.subTest(container=container):
+                seen = self.run_recorded(container)
+                self.assertTrue(seen, "the doctor ran no command at all")
+                outside = [(n, w) for n, w in seen if w is None or os.path.dirname(w) != self.bin]
+                self.assertEqual(outside, [], "commands that would reach the real host")
+                self.assertIn("rpm-ostree", {n for n, _ in seen})
+                self.assertIn("virsh", {n for n, _ in seen})
 
 
 class CstIntegrationTest(Scratch):
@@ -1975,7 +2123,7 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("btrfs", "cst_core", "cpu", "vm"):  # doctor imports these packages
+        for pkg in ("btrfs", "cst_core", "cpu", "swap", "vm"):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )

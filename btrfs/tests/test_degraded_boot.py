@@ -11,10 +11,12 @@ script writes are pointed into the temporary folder, and the re-exec
 through sudo is never taken. Nothing reads the real disks or writes outside
 the temporary folder.
 
-The guards of the install path read /run/ostree-booted, /boot and the
-deployment folders, which only a real (or containerised) root can fake;
-the tier 1 E2E test test_13_degraded_boot_install_cycle in
-tests/e2e/suites/suite_tier1_systemd.py runs the whole script there.
+The host paths the guards and next_overlay read (/run/ostree-booted,
+/run/ostree/staged-deployment, /boot) are path settings of the prelude
+too, so the tests point them into the fake root like the rest; the argument
+dispatch is cut out and run on its own. The tier 1 E2E test
+test_13_degraded_boot_install_cycle in tests/e2e/suites/suite_tier1_systemd.py
+runs the whole script, through `cst btrfs degraded-boot`.
 These tests know the script's function names and section comments: they go
 when the script becomes Python, and the E2E test stays as the safety net.
 
@@ -48,8 +50,8 @@ DOCTOR_FIXTURES: Final = os.path.join(REPO, "doctor", "tests", "fixtures")
 
 UUID: Final = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DISPATCH: Final = 'case "${1:-}" in'
-# The section comments of the install path. "guards" is only cut off: it
-# ends the prelude, and no test runs it (the tier 1 test does).
+# The section comments of the install path; the argument dispatch is the
+# part between the prelude and "guards".
 SECTIONS: Final = ("guards", "files", "self-test", "initramfs overlay")
 SECTION: Final = re.compile(r"^# -+ (" + "|".join(map(re.escape, SECTIONS)) + r") -+$", re.M)
 
@@ -76,11 +78,34 @@ SERVICE="${UNIT_DIR}/btrfs-last-resort@.service"
 TIMER="${UNIT_DIR}/btrfs-last-resort@.timer"
 FLAG_DIR="${R}/run/btrfs-allow-degraded"
 STATE_DIR="${R}/var/lib/btrfs-degraded-boot"
+OSTREE_BOOTED="${R}/run/ostree-booted"
+STAGED_DEPLOYMENT="${R}/run/ostree/staged-deployment"
+STAGED_INITRDS="${R}/run/ostree/staged-initrds"
+BOOT_DIR="${R}/boot"
 TRACKED=("${RULE}" "${SERVICE}" "${TIMER}" "${HELPER}")
 OLD_RULE="${R}/etc/udev/rules.d/64-btrfs.rules"
 OLD_FILES=("${CONF_DIR}/upstream-64-btrfs.rules.sha256")
 """
+# Before the files section: the generated text keeps the real paths (the
+# prelude's settings are not repointed), and each file is written under $R.
+GENERATE: Final = """RULE="${R}${RULE}"
+eval "real_$(declare -f write_if_changed)"
+write_if_changed() {
+    local dest="$1"
+    [[ "${dest}" == "${R}"/* ]] || dest="${R}${dest}"
+    real_write_if_changed "${dest}" "$2"
+}"""
 REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.M))
+# sha256 of the generated files as the previous version of the script
+# wrote them (main at a2cbb82, the version installed today): an install of
+# it must stay current.
+PREVIOUS_SHA256: Final = {
+    RULE: "c8ab30283943b551730c0db39ae57db398e158b22a52f1a846bb0fcc1470b3b1",
+    SERVICE: "1dd1f77006551c98cda6826ca1d25f5ca6c60e3cad9b5bb0f0446f7a60fb8458",
+    TIMER: "75e29b95cd064f890be79c86cfabef7430b3ffd92ccc9c2d56c91b254917eda3",
+    HELPER: "6e8ccfcad2636e1ddff768cce0427b058bfa7e1bea6b1a1aae1a15ec2c70f891",
+    RECORD: "ed372e03b49cf9e731b29edb8f3fde89ee74868f43923cf8cd095585748142b5",
+}
 # Settings of the prelude that name no file.
 NOT_PATHS: Final = frozenset({"RECORD_UNIT", "OURS_MARK"})
 
@@ -187,12 +212,19 @@ WantedBy=multi-user.target
 FAKES: Final[dict[str, str]] = {
     "rpm-ostree": """case "$1" in
     status) cat "${FAKE}/status.json" ;;
+    kargs) cat "${FAKE}/kargs" ;;
     initramfs-etc) exit 0 ;;
     *) exit 64 ;;
 esac""",
-    "findmnt": 'echo "${FAKE_UUID}"',
+    "findmnt": """case "$*" in
+    *FSTYPE*) echo "${FAKE_FSTYPE:-btrfs}" ;;
+    *) echo "${FAKE_UUID}" ;;
+esac""",
+    "btrfs": """[[ "$1 $2" == "filesystem show" ]] || exit 64
+printf 'Label: none  uuid: %s\n\tTotal devices %s FS bytes used 1.00GiB\n' "$3" "${FAKE_NDEV:-2}"
+""",
     "systemctl": """case "$1" in
-    is-enabled) if [[ -e "${FAKE}/enabled" ]]; then [[ "$2" == -q ]] || echo enabled; else echo disabled; exit 1; fi ;;
+    is-enabled) if [[ -e "${FAKE}/enabled" ]]; then [[ "$2" == -q ]] || echo enabled; else [[ "$2" == -q ]] || echo disabled; exit 1; fi ;;
 esac""",
     "journalctl": """case "$*" in
     *"^Started"*) cat "${FAKE}/journal-started" 2>/dev/null ;;
@@ -203,7 +235,14 @@ esac""",
     test) cat "${FAKE}/udev-test-$(basename "${@: -1}")" ;;
     info) cat "${FAKE}/udev-info-$(basename "${@: -1}")" ;;
 esac""",
-    "systemd-analyze": 'exit "${FAKE_ANALYZE_RC:-0}"',
+    # FAKE_UNIT_TYPO: a unit with an unknown key, as the real verify sees it:
+    # a warning, and a failure only with --recursive-errors=no.
+    "systemd-analyze": """if [[ -n "${FAKE_UNIT_TYPO:-}" ]]; then
+    echo "btrfs-last-resort@.service:12: Unknown key 'TimeoutStratSec' in section [Service], ignoring." >&2
+    [[ " $* " == *" --recursive-errors=no "* ]] && exit 1
+fi
+exit "${FAKE_ANALYZE_RC:-0}"
+""",
     "lsblk": 'cat "${FAKE}/lsblk"',
     # The overlay in these tests is a tar archive: what the script checks is
     # which files come out and their bytes, not the archive format.
@@ -225,7 +264,7 @@ def script_parts() -> dict[str, str]:
     names = [m.group(1) for m in marks]
     if tuple(names) != SECTIONS:
         raise AssertionError(f"unexpected section comments in {SCRIPT}: {names}")
-    parts = {"prelude": text[: text.index(DISPATCH)]}
+    parts = {"prelude": text[: text.index(DISPATCH)], "dispatch": text[text.index(DISPATCH) : marks[0].start()]}
     ends = [m.start() for m in marks[1:]] + [len(text)]
     for m, end in zip(marks, ends, strict=True):
         parts[m.group(1).replace(" ", "-")] = text[m.start() : end]
@@ -280,9 +319,22 @@ class DegradedBootTest(unittest.TestCase):
         self.put("status.json", json.dumps(data))
 
     def run_bash(
-        self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None
+        self,
+        code: str,
+        *,
+        repoint: bool = True,
+        env: dict[str, str] | None = None,
+        stub_overlay: bool = True,
+        argv0: str = "degraded-boot-test",
     ) -> subprocess.CompletedProcess[str]:
-        """Source the prelude, then run code with the fakes first on PATH."""
+        """Source the prelude, then run code with the fakes first on PATH.
+
+        stub_overlay=False keeps the real next_overlay: only with repoint,
+        so that it reads the fake root's /boot and /run/ostree.
+        """
+        if not (repoint or stub_overlay):
+            raise AssertionError("the real next_overlay needs the repointed paths")
+        stub = 'next_overlay() { echo "next_overlay is not stubbed" >&2; return 97; }' if stub_overlay else ""
         lib = os.path.join(self.tmp, "lib", "btrfs")
         script = f"""
 # Never re-exec through sudo: the prelude does that when not root.
@@ -292,12 +344,12 @@ unset -f exec
 PATH="{self.tmp}/bin:/usr/bin:/bin"
 R="{self.root}"
 {REPOINT if repoint else ""}
-# It reads the host's /boot and /run/ostree: a test that reaches it stubs it.
-next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
+# It reads /boot and /run/ostree: a test that reaches it stubs it, or repoints them.
+{stub}
 {code}
 """
         return subprocess.run(
-            ["bash", "-c", script, "degraded-boot-test"],
+            ["bash", "-c", script, argv0],
             check=False,
             env={"PATH": "/usr/bin:/bin", "FAKE": self.tmp, "FAKE_UUID": UUID, "LC_ALL": "C", **(env or {})},
             capture_output=True,
@@ -306,8 +358,10 @@ next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
             timeout=60,
         )
 
-    def ok(self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None) -> str:
-        r = self.run_bash(code, repoint=repoint, env=env)
+    def ok(
+        self, code: str, *, repoint: bool = True, env: dict[str, str] | None = None, stub_overlay: bool = True
+    ) -> str:
+        r = self.run_bash(code, repoint=repoint, env=env, stub_overlay=stub_overlay)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
@@ -323,16 +377,7 @@ next_overlay() {{ echo "next_overlay is not stubbed" >&2; return 97; }}
 
     def write_files(self, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         """The files section with the real paths in the generated text, written under the fake root."""
-        code = f"""UUID={UUID}
-RULE="${{R}}${{RULE}}"
-write_if_changed() {{
-    local dest="$1"
-    [[ "${{dest}}" == "${{R}}"/* ]] || dest="${{R}}${{dest}}"
-    cst_install_text "${{dest}}" "$2"
-}}
-{self.section("files")}
-"""
-        return self.run_bash(code, repoint=False, env=env)
+        return self.run_bash(f"UUID={UUID}\n{GENERATE}\n{self.section('files')}", repoint=False, env=env)
 
     def install(self) -> None:
         """The four tracked files and the record unit, as an install leaves them."""
@@ -435,6 +480,167 @@ write_if_changed() {{
         self.assertEqual(self.ok(f'upstream_ok "{rule}" || echo changed'), "changed\n")
         self.assertEqual(self.ok('upstream_ok "${R}/missing" || echo changed'), "changed\n")
 
+    # ------------------------------------------------------------ dispatch --
+    def dispatch(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """The argument dispatch, with status and uninstall stubbed; "install path" when it falls through."""
+        code = (
+            "status() { echo STATUS; }\nuninstall() { echo UNINSTALL; }\n"
+            f'set -- {" ".join(args)}\n. "{self.tmp}/lib/btrfs/dispatch.sh"\necho "install path plan=$plan"'
+        )
+        return self.run_bash(code, argv0=SCRIPT)
+
+    def test_dispatch_runs_status_and_uninstall_and_stops(self) -> None:
+        for arg, word in (("--status", "STATUS"), ("--uninstall", "UNINSTALL")):
+            with self.subTest(arg):
+                r = self.dispatch(arg)
+                self.assertEqual((r.returncode, r.stdout), (0, f"{word}\n"), r.stderr)
+
+    def test_dispatch_lets_install_files_only_and_plan_through(self) -> None:
+        for args, plan in (((), 0), (("--files-only",), 0), (("--plan",), 1)):
+            with self.subTest(args):
+                r = self.dispatch(*args)
+                self.assertEqual((r.returncode, r.stdout), (0, f"install path plan={plan}\n"), r.stderr)
+
+    def test_dispatch_prints_the_help_on_an_unknown_argument(self) -> None:
+        for arg in ("--bogus", "status", "plan", "--status=x"):
+            with self.subTest(arg):
+                r = self.dispatch(arg)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertTrue(r.stdout.startswith("\nbtrfs-degraded-boot-setup.sh\n"), r.stdout)
+                self.assertIn("cst btrfs degraded-boot --status", r.stdout)
+                self.assertNotIn("install path", r.stdout)
+                self.assertNotIn("set -Eeuo pipefail", r.stdout)
+
+    # -------------------------------------------------------------- guards --
+    GOOD_KARGS: Final = f"root=UUID={UUID} rootflags=subvol=root,degraded rd.luks.uuid=luks-1111 quiet\n"
+
+    def guards(self, *, kargs: str = GOOD_KARGS, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        """The guards section; the next deployment's root is $FAKE/next. Prints UUID, ndev and NEXT_ROOT."""
+        self.put("kargs", kargs)
+        self.put("calls", "")
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/next"; else real_ostree_query "$1"; fi; }}
+{self.section("guards")}
+echo "UUID=$UUID ndev=$ndev NEXT_ROOT=$NEXT_ROOT"
+"""
+        return self.run_bash(code, env=env)
+
+    def guard_root(self) -> None:
+        """A fake root and next deployment the guards accept."""
+        self.put("root/run/ostree-booted", "")
+        self.put("next/usr/.keep", "")
+        self.put("next" + self.at("/usr/lib/udev/rules.d/64-btrfs.rules"), UPSTREAM_64)
+
+    def test_guards_accept_a_multi_device_btrfs_root_and_change_nothing(self) -> None:
+        self.guard_root()
+        before = self.tree()
+        r = self.guards()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, f"UUID={UUID} ndev=2 NEXT_ROOT={self.tmp}/next\n")
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertIn(f"btrfs filesystem show {UUID}", self.calls())
+
+    def test_guards_refuse(self) -> None:
+        upstream = "/usr/lib/udev/rules.d/64-btrfs.rules"
+        changed = UPSTREAM_64.replace('ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"\n', "")
+        cases: dict[str, tuple[dict[str, str], str, str]] = {
+            "not ostree": ({"rm": "root/run/ostree-booted"}, "", "not an ostree-booted system"),
+            "not btrfs": ({}, "FAKE_FSTYPE=ext4", "/sysroot is not btrfs"),
+            "bad uuid": ({}, "FAKE_UUID=not-a-uuid", "unexpected root fs UUID 'not-a-uuid'"),
+            "one device": ({}, "FAKE_NDEV=1", f"root btrfs {UUID} is not multi-device (devices: 1)"),
+            "other root": (
+                {"kargs": "root=UUID=11111111-2222-3333-4444-555555555555 rootflags=degraded\n"},
+                "",
+                f"next-boot root= is not UUID={UUID}",
+            ),
+            "no degraded": (
+                {"kargs": f"root=UUID={UUID} rootflags=subvol=root,noatime\n"},
+                "",
+                "'degraded' missing from next-boot rootflags",
+            ),
+            "no next deployment": ({"rm": "next/usr/.keep"}, "", "cannot resolve next-boot deployment"),
+            "booted 64-btrfs changed": (
+                {"put": "root" + upstream},
+                "",
+                f"UPSTREAM CHANGED: {self.at(upstream)} no longer sets SYSTEMD_READY=0",
+            ),
+            "next-boot 64-btrfs changed": (
+                {"put": "next" + self.at(upstream)},
+                "",
+                f"UPSTREAM CHANGED: {self.tmp}/next{self.at(upstream)} no longer sets SYSTEMD_READY=0",
+            ),
+        }
+        for label, (change, env, error) in cases.items():
+            with self.subTest(label):
+                self.guard_root()
+                self.put("root" + upstream, UPSTREAM_64)
+                if "rm" in change:
+                    os.remove(os.path.join(self.tmp, change["rm"]))
+                    if change["rm"].endswith(".keep"):
+                        os.rmdir(os.path.join(self.tmp, "next", "usr"))
+                if "put" in change:
+                    self.put(change["put"], changed)
+                before = self.tree()
+                key, _, value = env.partition("=")
+                r = self.guards(kargs=change.get("kargs", self.GOOD_KARGS), env={key: value} if key else None)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"ERROR: {error}", r.stderr)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.mutating_calls(), [])
+
+    def test_guards_only_warn_without_rd_luks_uuid(self) -> None:
+        self.guard_root()
+        r = self.guards(kargs=f"root=UUID={UUID} rootflags=degraded\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: no rd.luks.uuid= in next-boot kargs", r.stderr)
+
+    # -------------------------------------------------------- next_overlay --
+    def test_next_overlay_of_a_staged_deployment(self) -> None:
+        """A staged deployment: the overlay named after "overlay-initrds" in /run/ostree/staged-deployment."""
+        self.status_json(fixture("staged-clean.json"))
+        before, after = "a" * 64, "c" * 64
+        staged = self.at("/run/ostree/staged-deployment")
+        os.makedirs(os.path.dirname(staged))
+        with open(staged, "wb") as f:
+            f.write(b"\x00" + before.encode() + b"\x00overlay-initrds\x00\x01" + after.encode() + b"\x00")
+        out = self.ok("next_overlay", stub_overlay=False)
+        self.assertEqual(out, self.at(f"/run/ostree/staged-initrds/{after}") + "\n")
+        with open(staged, "wb") as f:
+            f.write(b"\x00" + before.encode() + b"\x00no overlay here\x00")
+        self.assertEqual(self.ok("next_overlay", stub_overlay=False), "")
+
+    def test_next_overlay_of_the_booted_deployment_reads_its_boot_entry(self) -> None:
+        """No staged deployment: the overlay initrd of the boot entry whose ostree= is the next root."""
+        self.status_json(fixture("unpinned.json"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "next"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "other"))
+        os.makedirs(os.path.join(self.tmp, "boot.1"))
+        os.symlink("../deploy/next", os.path.join(self.tmp, "boot.1", "0"))
+        entries = "root/boot/loader/entries"
+        self.put(
+            f"{entries}/ostree-1.conf",
+            f"title old\noptions root=UUID={UUID} ostree={self.tmp}/deploy/other\n"
+            "initrd /ostree/old/initramfs.img /ostree/initramfs-overlays/old.img\n",
+        )
+        self.put(
+            f"{entries}/ostree-2.conf",
+            f"title next\noptions root=UUID={UUID} ostree={self.tmp}/boot.1/0 rw\n"
+            "initrd /ostree/next/initramfs.img /ostree/initramfs-overlays/next.img\n",
+        )
+        code = f"""
+eval "real_$(declare -f ostree_query)"
+ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/deploy/next"; else real_ostree_query "$1"; fi; }}
+# Its callers read its output only (an entry with no overlay ends in a failed grep).
+next_overlay || :
+"""
+        self.assertEqual(self.ok(code, stub_overlay=False), self.at("/boot/ostree/initramfs-overlays/next.img") + "\n")
+        self.put(f"{entries}/ostree-2.conf", f"options ostree={self.tmp}/boot.1/0\ninitrd /ostree/next/initramfs.img\n")
+        self.assertEqual(self.ok(code, stub_overlay=False), "")
+
     # ---------------------------------------------------- overlay_in_sync --
     def overlay_rc(self, overlay: str) -> str:
         return self.ok(f'next_overlay() {{ echo "{overlay}"; }}; rc=0; overlay_in_sync || rc=$?; echo "$rc"').strip()
@@ -489,16 +695,36 @@ write_if_changed() {{
         self.assertEqual(len(lines), 5, r.stdout)
         self.assertTrue(all(line.startswith("unchanged: ") for line in lines), r.stdout)
 
-    def test_rule_that_fails_udevadm_verify_is_not_written(self) -> None:
+    def test_rule_that_fails_udevadm_verify_leaves_nothing_written(self) -> None:
+        """The rule is verified before the helper and the units are written: a bad one writes nothing."""
+        before = self.tree()
         r = self.write_files(env={"FAKE_VERIFY_RC": "1"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("ERROR: udevadm verify failed for the generated rule", r.stderr)
-        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(self.tree(), before)
+        self.assertFalse(os.path.exists(self.at("/etc")))
+        self.assertEqual(self.read("verified.rules"), EXPECTED_RULE)
+
+    def test_tracked_sums_fails_on_a_file_it_cannot_read(self) -> None:
+        """The recorded sums never hold an empty hash: a missing tracked file fails tracked_sums."""
+        self.install()
+        self.assertEqual(self.ok("tracked_sums"), self.ok('sha256sum "${TRACKED[@]}"'))
+        os.remove(self.at(TIMER))
+        r = self.run_bash("tracked_sums")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn(f"  {self.at(TIMER)}\n", r.stdout)
 
     # ---------------------------------------------------------- self-test --
     def selftest(
-        self, *, ready: dict[str, bool], rule_was_present: int = 0, env: dict[str, str] | None = None
+        self,
+        *,
+        ready: dict[str, bool],
+        rule_was_present: int = 0,
+        env: dict[str, str] | None = None,
+        ndev: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """The self-test with these lsblk members; ndev (the guards' btrfs device count) defaults to their number."""
         self.install()
         lsblk = "".join(f"{name} btrfs {UUID}\n" for name in ready) + "nvme2n1p1 vfat 1234-ABCD\n"
         self.put("lsblk", lsblk)
@@ -507,7 +733,9 @@ write_if_changed() {{
             props = "ID_BTRFS_READY=1\n" if is_ready else "ID_BTRFS_READY=0\nSYSTEMD_READY=0\n"
             self.put(f"udev-info-{name}", props)
         self.put("calls", "")
-        return self.run_bash(f"UUID={UUID}\nrule_was_present={rule_was_present}\n" + self.section("self-test"), env=env)
+        count = len(ready) if ndev is None else ndev
+        code = f"UUID={UUID}\nndev={count}\nrule_was_present={rule_was_present}\n" + self.section("self-test")
+        return self.run_bash(code, env=env)
 
     def test_selftest_passes_when_every_member_is_ready(self) -> None:
         r = self.selftest(ready={"dm-0": True, "dm-1": True})
@@ -523,7 +751,7 @@ write_if_changed() {{
             ],
         )
         self.assertIn(
-            f"systemd-analyze verify btrfs-last-resort@{UUID}.timer btrfs-last-resort@{UUID}.service "
+            f"systemd-analyze verify --recursive-errors=no btrfs-last-resort@{UUID}.timer btrfs-last-resort@{UUID}.service "
             "btrfs-degraded-boot-record.service",
             self.calls(),
         )
@@ -546,6 +774,30 @@ write_if_changed() {{
         self.assertEqual(r.returncode, 1)
         self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
         self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
+
+    def test_selftest_fails_when_lsblk_lists_another_member_count(self) -> None:
+        """Every member btrfs counts must be checked: fewer (or more) in lsblk fails, all ready or not."""
+        cases: dict[str, tuple[dict[str, bool], int, int]] = {
+            "no member listed": ({}, 2, 0),
+            "one of two": ({"dm-0": True}, 2, 1),
+            "three of two": ({"dm-0": True, "dm-1": True, "dm-2": True}, 2, 3),
+        }
+        for label, (ready, ndev, listed) in cases.items():
+            with self.subTest(label):
+                r = self.selftest(ready=ready, ndev=ndev)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"self-test: lsblk lists {listed} member(s) of {UUID}, btrfs counts {ndev}", r.stderr)
+                self.assertIn("ERROR: udev self-test failed; no initramfs change made", r.stderr)
+                self.assertFalse(os.path.exists(self.at(RULE)))
+
+    def test_selftest_stops_on_a_typo_in_a_unit(self) -> None:
+        """systemd-analyze verify only warns about an unknown key unless --recursive-errors=no."""
+        r = self.selftest(ready={"dm-0": True, "dm-1": True}, env={"FAKE_UNIT_TYPO": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Unknown key 'TimeoutStratSec'", r.stderr)
+        self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
+        self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
+        self.assertNotIn("self-test: dm-0", r.stdout)
 
     # -------------------------------------------------- initramfs overlay --
     def overlay_step(self, *args: str, overlay: str = "") -> str:
@@ -631,6 +883,192 @@ write_if_changed() {{
         self.overlay_step(overlay=overlay)
         self.assertNotIn("--untrack", "\n".join(self.mutating_calls()))
         self.assertTrue(os.path.exists(self.at(OLD_RULE)))
+
+    # ---------------------------------------------------------------- plan --
+    def udev_ready(self) -> None:
+        """lsblk lists two members of the root fs, udev loads the rule and sees both ready."""
+        self.put("lsblk", f"dm-0 btrfs {UUID}\ndm-1 btrfs {UUID}\nnvme2n1p1 vfat 1234-ABCD\n")
+        for name in ("dm-0", "dm-1"):
+            self.put(f"udev-test-{name}", f"Reading rules file: {self.at(RULE)}\n")
+            self.put(f"udev-info-{name}", "ID_BTRFS_READY=1\n")
+
+    def install_path(self, *, plan: bool, overlay: str = "") -> subprocess.CompletedProcess[str]:
+        """The files, self-test and initramfs overlay sections in one run, as install (or --plan) runs them; status stubbed."""
+        tmpdir = os.path.join(self.tmp, "tmpdir")
+        os.makedirs(tmpdir, exist_ok=True)
+        self.put("calls", "")
+        code = f"""UUID={UUID}
+ndev=2
+plan={int(plan)}
+{GENERATE}
+set -- {"--plan" if plan else ""}
+. "{self.tmp}/lib/btrfs/files.sh"
+{REPOINT}
+next_overlay() {{ echo "{overlay}"; }}
+status() {{ echo STATUS; }}
+. "{self.tmp}/lib/btrfs/self-test.sh"
+. "{self.tmp}/lib/btrfs/initramfs-overlay.sh"
+"""
+        r = self.run_bash(code, repoint=False, env={"TMPDIR": tmpdir})
+        self.assertEqual(os.listdir(tmpdir), [], "the work folder is removed")
+        return r
+
+    def plan(self, *, overlay: str = "") -> str:
+        """--plan, which must change nothing: no file of the fake root, no call that changes the machine."""
+        before = self.tree()
+        r = self.install_path(plan=True, overlay=overlay)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertTrue(r.stdout.endswith("plan: nothing was changed\n"), r.stdout)
+        self.assertNotIn("STATUS", r.stdout)
+        self.assertNotIn("written:", r.stdout)
+        return r.stdout
+
+    def installed(self) -> None:
+        """A first install (every file tracked from then on), the record unit enabled."""
+        self.udev_ready()
+        self.tracked_json([])
+        r = self.install_path(plan=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.tracked_json(list(TRACKED))
+        self.put("enabled", "")
+
+    def test_plan_on_a_clean_root(self) -> None:
+        self.udev_ready()
+        self.tracked_json([])
+        out = self.plan()
+        for dest in (HELPER, TIMER, SERVICE, RECORD, RULE, SYNCED):
+            self.assertIn(f"would write: {self.at(dest)}\n", out)
+        self.assertIn(f"self-test: runs at install; lsblk lists 2 member(s) of {UUID}, btrfs counts 2\n", out)
+        self.assertIn("would run: systemctl enable btrfs-degraded-boot-record.service\n", out)
+        track = " ".join(f"--track={self.at(p)}" for p in TRACKED)
+        self.assertIn(f"would run: rpm-ostree initramfs-etc {track}\n", out)
+        self.assertIn(f"udevadm verify --resolve-names=never --no-style {self.tmp}/tmpdir/", "\n".join(self.calls()))
+        self.assertEqual(self.read("verified.rules"), EXPECTED_RULE)
+
+    def test_plan_on_an_installed_root_would_change_nothing(self) -> None:
+        self.installed()
+        overlay = self.overlay(self.tracked_bytes())
+        out = self.plan(overlay=overlay)
+        self.assertEqual([line for line in out.splitlines() if line.startswith("would")], [], out)
+        for dest in (HELPER, TIMER, SERVICE, RECORD, RULE, SYNCED):
+            self.assertIn(f"unchanged: {self.at(dest)}\n", out)
+        self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", out)
+        self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", out)
+
+    def test_plan_stops_where_install_stops(self) -> None:
+        """A check plan shares with install stops it the same way: here a rule that fails udevadm verify.
+        (systemd-analyze verify and the self-test need the files written: install runs them, plan does not.)"""
+        self.udev_ready()
+        self.tracked_json([])
+        before = self.tree()
+        r = self.run_bash(
+            f"plan=1\nUUID={UUID}\n{GENERATE}\n{self.section('files', '--plan')}",
+            repoint=False,
+            env={"FAKE_VERIFY_RC": "1"},
+        )
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ERROR: udevadm verify failed for the generated rule", r.stderr)
+        self.assertEqual(self.tree(), before)
+
+    def test_plan_warns_when_the_self_test_would_fail(self) -> None:
+        self.udev_ready()
+        self.put("lsblk", f"dm-0 btrfs {UUID}\n")
+        self.tracked_json([])
+        r = self.install_path(plan=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(
+            "WARNING: the self-test of an install would fail: lsblk lists 1 member(s), btrfs counts 2", r.stderr
+        )
+
+    def assert_plan_predicts_install(self, *, overlay: str = "", runs: list[str] | None = None) -> None:
+        """What plan says it would write and run is what install then writes and runs."""
+        out = self.plan(overlay=overlay)
+        would_write = sorted(line.split(": ", 1)[1] for line in out.splitlines() if line.startswith("would write: "))
+        would_run = [
+            line.removeprefix("would run: ") for line in out.splitlines() if line.startswith("would run: rpm-ostree ")
+        ]
+        r = self.install_path(plan=False, overlay=overlay)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        written = sorted(line.split()[1] for line in r.stdout.splitlines() if line.startswith("written: "))
+        self.assertEqual(would_write, written)
+        self.assertEqual(would_run, [c for c in self.mutating_calls() if c.startswith("rpm-ostree ")])
+        if runs is not None:
+            self.assertEqual(would_run, runs)
+
+    def test_plan_predicts_a_first_install(self) -> None:
+        self.udev_ready()
+        self.tracked_json([])
+        self.assert_plan_predicts_install(
+            runs=[" ".join(["rpm-ostree initramfs-etc", *(f"--track={self.at(p)}" for p in TRACKED)])]
+        )
+
+    def test_plan_predicts_a_second_install(self) -> None:
+        self.installed()
+        self.assert_plan_predicts_install(overlay=self.overlay(self.tracked_bytes()), runs=[])
+
+    def test_plan_predicts_a_local_edit_put_back(self) -> None:
+        """/etc edited by hand, the overlay already holds what install writes: one file back, no deployment."""
+        self.installed()
+        overlay = self.overlay(self.tracked_bytes())
+        with open(self.at(TIMER), "a", encoding="utf-8") as f:
+            f.write("# local edit\n")
+        self.assertIn(f"would write: {self.at(TIMER)}\n", self.plan(overlay=overlay))
+        self.assert_plan_predicts_install(overlay=overlay, runs=[])
+
+    def test_plan_predicts_the_sync_after_an_older_version(self) -> None:
+        """/etc and the overlay both hold an older timer: comparing them would say "in sync"; install syncs."""
+        self.installed()
+        with open(self.at(TIMER), "w", encoding="utf-8") as f:
+            f.write("old timer\n")
+        overlay = self.overlay(self.tracked_bytes())
+        self.assert_plan_predicts_install(overlay=overlay, runs=["rpm-ostree initramfs-etc --force-sync"])
+
+    def test_plan_predicts_the_sync_without_an_overlay_or_sums(self) -> None:
+        self.installed()
+        os.remove(self.at(SYNCED))
+        self.assert_plan_predicts_install(runs=["rpm-ostree initramfs-etc --force-sync"])
+
+    def test_plan_predicts_the_migration_of_the_first_version(self) -> None:
+        self.installed()
+        self.put("root" + OLD_RULE, "# Generated by btrfs-degraded-boot-setup.sh (CST)\nold shadow rule\n")
+        self.put("root" + OLD_SUM, "abc\n")
+        self.tracked_json([*TRACKED, OLD_RULE])
+        overlay = self.overlay(self.tracked_bytes())
+        out = self.plan(overlay=overlay)
+        self.assertIn(f"would run: rm -fv {self.at(OLD_RULE)}\n", out)
+        self.assertIn(f"would run: rm -fv {self.at(OLD_SUM)}\n", out)
+        self.assert_plan_predicts_install(
+            overlay=overlay, runs=[f"rpm-ostree initramfs-etc --untrack={self.at(OLD_RULE)}"]
+        )
+        self.assertFalse(os.path.exists(self.at(OLD_RULE)))
+
+    # ------------------------------------------------------------- upgrade --
+    def test_an_install_of_the_previous_version_stays_current(self) -> None:
+        """The files and the sums file as the previous version wrote them: status, plan and a second install see them as current."""
+        self.installed()
+        for dest, digest in PREVIOUS_SHA256.items():
+            with open(self.at(dest), "rb") as f:
+                self.assertEqual(
+                    hashlib.sha256(f.read()).hexdigest(), digest, f"{dest} is not what the previous version wrote"
+                )
+        # The previous version recorded the sums with one `sha256sum` call.
+        self.ok('sha256sum "${TRACKED[@]}" >"${SYNCED_SUM_FILE}"')
+        overlay = self.overlay(self.tracked_bytes())
+        before = self.tree()
+        summary = self.summary(self.status(overlay=overlay))
+        self.assertIn("installed:        yes", summary)
+        self.assertIn("next boot:        ready (overlay in sync with /etc)", summary)
+        self.assertNotIn("would", self.plan(overlay=overlay))
+        for found in (overlay, ""):  # without an overlay, the recorded sums decide
+            with self.subTest(overlay=bool(found)):
+                r = self.install_path(plan=False, overlay=found)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn("written:", r.stdout)
+                self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", r.stdout)
+                self.assertEqual([c for c in self.mutating_calls() if c.startswith("rpm-ostree ")], [])
+                self.assertEqual(self.tree(), before)
 
     # ------------------------------------------------------------- status --
     def status(self, *, overlay: str = "") -> str:

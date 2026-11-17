@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
-from btrfs.chrome_cache.domain import APP, FLAGS_REL, OLD_CACHE_REL, SYSTEM_INSTALLS, USER_INSTALL_REL
+from btrfs.chrome_cache.domain import APP, FLAGS_REL, OLD_CACHE_REL, SYSTEM_INSTALLS, USER_INSTALL_REL, decide
 from cst_core.domain.errors import Refused
 
 RUNTIME_DIR = f"/run/user/{os.getuid()}"
@@ -166,3 +166,13 @@ def current(home: str, create: bool = False) -> tuple[int | None, str, os.stat_r
         os.close(dfd)
         raise
     return dfd, text, st
+
+
+def plan_line(home: str) -> str:
+    if not installed(home):
+        return "not installed: nothing to do"
+    dfd, text, _ = current(home, create=False)
+    if dfd is not None:
+        os.close(dfd)
+    state, _, msg = decide(text)
+    return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"

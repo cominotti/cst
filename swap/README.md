@@ -192,6 +192,7 @@ The words in the first column of `plan` and `status`:
 | `write`, `update`, `mask`, `remove` | `apply` would write, rewrite, mask or delete that file. |
 | `start`, `restart`, `swapoff` | `apply` would activate `swap0`, re-activate it, or swap off `zram0`. |
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
+| `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. It does not make `apply` fail; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
 | `?` | Could not be read without root. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: wrong partition, or an entry for `swap0` that was written by hand. |
@@ -231,8 +232,9 @@ What `apply` does, in order:
 Files are written only when they differ, always atomically. Each step's lines
 are printed while `apply` runs. A command that fails (`blockdev`,
 `systemctl`, `sysctl`) stops `apply` there with that command's own message
-and exit status (128+N when signal N killed it, as from bash); the steps
-before it stay done. A closed pipe (`cst swap status | head`) stops it
+and exit status (128+N when signal N killed it, as from bash, with a line
+`cst swap: COMMAND was killed by signal N` where bash printed `Terminated`);
+the steps before it stay done. A closed pipe (`cst swap status | head`) stops it
 quietly. `/etc/fstab` and
 `/etc/crypttab` are read and rewritten byte for byte: the lines that are not
 CST's come back exactly as they were, also bytes that are not UTF-8.

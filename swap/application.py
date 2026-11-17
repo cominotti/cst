@@ -30,6 +30,7 @@ from swap.domain import (
     find_swap_used_kib,
     human,
     is_safe_partition_type,
+    killed_text,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -71,12 +72,15 @@ class _EventLog(list[ApplyEvent]):
             self._emit(event)
 
 
-def _show_output(res: CommandResult, events: list[ApplyEvent]) -> None:
-    """What a command printed, passed on as it is (bash let it reach the terminal)."""
+def _show_output(res: CommandResult, events: list[ApplyEvent], prog: str) -> None:
+    """What a command printed, passed on as it is (bash let it reach the terminal),
+    then, for a command a signal killed, the line that says so (bash's "Terminated")."""
     if res.stdout:
         events.append(ApplyEvent("out", "raw", res.stdout))
     if res.stderr:
         events.append(ApplyEvent("err", "raw", res.stderr))
+    if res.returncode < 0:
+        events.append(ApplyEvent("err", "error", killed_text(prog, res.argv, res.returncode)))
 
 
 class MissingDesiredFileError(RuntimeError):
@@ -366,6 +370,9 @@ class SwapApplicationService:
             live = params.get(name)
             if live is not None:
                 rows.append(SettingCheckRow("ok" if same_param(live, want) else "DIFF", f"zswap {name}", live, want))
+            elif params:
+                # tmpfiles' w skips a file that is not there, without a word (renamed or removed by a kernel).
+                rows.append(SettingCheckRow("MISSING", f"zswap {name}", "this kernel has no such parameter", want))
         exp_name, exp_key = WSF_EXPERIMENT
         exp_on = self._fs.exists(posixpath.join(self._env.cpu_run_dir, "exp-" + exp_name))
         for key, want in parse_sysctl(self._desired_text(self._env.src_sysctl)):
@@ -617,7 +624,7 @@ class SwapApplicationService:
         """
         for call, unit in steps:
             res = call(unit)
-            _show_output(res, events)
+            _show_output(res, events, self._env.prog)
             if res.returncode != 0:
                 return res.returncode
         return 0
@@ -735,7 +742,7 @@ class SwapApplicationService:
             if can_evict_zram(zram_used, avail_kib):
                 events.append(ApplyEvent("out", "line", "zram0: swapping off"))
                 swapoff = self._systemd.stop("dev-zram0.swap")
-                _show_output(swapoff, events)
+                _show_output(swapoff, events, self._env.prog)
                 if swapoff.returncode == 0:
                     # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
                     self._systemd.stop("systemd-zram-setup@zram0.service")
@@ -778,7 +785,7 @@ class SwapApplicationService:
             sysctl = self._system.apply_sysctl_file(env.sysctl_conf, exclude_key=exp_key)
         else:
             sysctl = self._system.apply_sysctl_file(env.sysctl_conf)
-        _show_output(sysctl, events)
+        _show_output(sysctl, events, self._env.prog)
         if sysctl.returncode != 0:
             return self._stopped(sysctl.returncode, events)
 

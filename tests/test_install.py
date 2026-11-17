@@ -6,14 +6,18 @@ the machine is touched, no sudo, no runuser (a stub stands in for it).
 """
 
 from collections.abc import Mapping
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 from cst_core.adapters.install import LocalInstallTarget
@@ -41,6 +45,7 @@ from cst_core.domain.install import (
     template_keys,
 )
 from cst_core.domain.values import DomainValidationError, OctalMode
+from cst_core.installer import main as installer_main
 from cst_core.ports import WriteFailed
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -490,6 +495,34 @@ class InstallerCliTest(unittest.TestCase):
         self.assertEqual(r.stdout, f"unchanged: {self.stage}/etc/x.conf\n".encode())
         self.assertEqual(stat.S_IMODE(os.stat(f"{self.stage}/etc/x.conf").st_mode), 0o640)
 
+    def test_text_plan_judges_generated_content_and_writes_nothing(self) -> None:
+        dest = f"{self.stage}/etc/x.conf"
+        r = self.cli("text-plan", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+        self.assertEqual((r.returncode, r.stdout), (0, f"would write: {dest}\n".encode()))
+        self.assertEqual(self.files(), {})
+        self.cli("text", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+        before = self.files()
+        for label, data, mode, line in (
+            ("same", b"generated\n", "0640", "unchanged"),
+            ("other content", b"other\n", "0640", "would write"),
+            ("other mode", b"generated\n", "0644", "would write"),
+        ):
+            with self.subTest(label):
+                r = self.cli("text-plan", "/etc/x.conf", mode, "--root", self.stage, stdin=data)
+                self.assertEqual(r.stdout, f"{line}: {dest}\n".encode(), r.stderr)
+                self.assertEqual(self.files(), before)
+        os.remove(dest)
+        os.symlink(f"{self.stage}/etc/target", dest)
+        Path(self.stage, "etc/target").write_bytes(b"generated\n")
+        os.chmod(f"{self.stage}/etc/target", 0o640)
+        # As root (a root destination) a link is never current; as a user (a home destination,
+        # how CI runs) it is judged by its target, which holds the same bytes.
+        with self.subTest("a link to the same bytes: current only at a user destination"):
+            r = self.cli("text-plan", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+            want = "would write" if os.geteuid() == 0 else "unchanged"
+            self.assertEqual(r.stdout, f"{want}: {dest}\n".encode(), r.stderr)
+            self.assertTrue(os.path.islink(dest))
+
     def test_user_entries_need_a_home(self) -> None:
         r = self.cli("install", "--root", self.stage, "cpu/gamemode.ini")
         self.assertEqual(r.returncode, 2)
@@ -543,6 +576,8 @@ class InstallerCliTest(unittest.TestCase):
             ("text", "etc/x", "0644", "--root", self.stage),
             ("install", "--root", self.stage, "--set", "NOEQUALS", "cpu/vm-pin"),
             ("text", "/etc/x", "9999", "--root", self.stage),
+            ("text-plan", "etc/x", "0644", "--root", self.stage),
+            ("text-plan", "/etc/x", "--root", self.stage),
             ("bogus",),
         ):
             with self.subTest(args=args):
@@ -593,9 +628,44 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash(f'cst_install_text "{self.stage}/u" 0600 alice', stdin=b"y\n")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(Path(self.log).read_text().count("runuser -u alice"), 2)
+        r = self.bash(f'cst_install_text_plan "{self.stage}/u" 0600 alice', stdin=b"y\n")
+        self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/u\n", r.stderr)
+        self.assertEqual(Path(self.log).read_text().count("runuser -u alice"), 3)
         r = self.bash("cst_install_as nobody-here cpu/gamemode.ini")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"no home folder", r.stderr)
+
+    def test_cst_install_text_plan_changes_nothing(self) -> None:
+        r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        self.assertEqual((r.returncode, r.stdout.decode()), (0, f"would write: {self.stage}/etc/gen\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.stage))
+        self.bash(f'cst_install_text "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/etc/gen\n", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_the_installer_gets_the_caller_s_lc_ctype(self) -> None:
+        # Python sets LC_CTYPE=C.UTF-8 under a C locale (PEP 538); each of the three ways in hands the
+        # caller's value over for installer.py to put back.
+        probe = os.path.join(self.tmp, "probe.py")
+        Path(probe).write_text("import os, sys\nprint(sys.argv[1], repr(os.environ.get('CST_LC_CTYPE')))\n")
+        script = f'CST_INSTALLER="{probe}"\ncst_installer a\ncst_install_as alice b\ncst_install_text /x 0644 alice'
+        for caller, handed in (({}, "''"), ({"LC_CTYPE": "C"}, "'=C'")):
+            with self.subTest(caller=caller):
+                self.env.update(caller)
+                r = self.bash(script)
+                self.assertEqual(r.stdout.decode(), f"a {handed}\ninstall {handed}\ntext {handed}\n", r.stderr)
+
+    def test_installer_main_puts_the_caller_s_lc_ctype_back(self) -> None:
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGPIPE, signal.SIGXFSZ)}
+        for sig, handler in saved.items():
+            self.addCleanup(signal.signal, sig, handler)
+        with (
+            mock.patch.dict(os.environ, {"CST_LC_CTYPE": "", "LC_CTYPE": "C.UTF-8"}, clear=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(installer_main(["help"]), 0)
+            self.assertEqual(dict(os.environ), {}, "what the commands it runs inherit: LC_CTYPE unset, as the caller's")
 
 
 class RuntimeResolverTest(unittest.TestCase):

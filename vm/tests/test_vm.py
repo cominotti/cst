@@ -257,6 +257,30 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(p["problems"], [])
         self.assertEqual(p["skipped"], ["sdc (cdrom, not copied)"])
 
+    def test_a_disk_without_a_target_name_is_named_by_its_source(self) -> None:
+        # libvirt requires <target dev>; a definition without one must not print "None".
+        xml = """<domain><devices>
+          <disk type='file' device='cdrom'><source file='/iso/win.iso'/><target bus='sata'/></disk>
+          <disk type='file' device='cdrom'><target bus='sata'/></disk>
+          <disk type='block' device='disk'><source dev='/dev/vg/x'/><target bus='virtio'/></disk>
+          <disk type='file' device='disk'><target bus='virtio'/></disk>
+          <disk type='file' device='disk'><source file='/a.qcow2'/></disk></devices></domain>"""
+        p = vm_domain.domain_parts(xml)
+        self.assertEqual(
+            p["skipped"],
+            ["unnamed disk on /iso/win.iso (cdrom, not copied)", "unnamed disk (cdrom, not copied)",
+             "unnamed disk (no source file)"],
+        )  # fmt: skip
+        self.assertEqual(len(p["problems"]), 1)
+        self.assertTrue(p["problems"][0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p["problems"])
+        self.assertEqual(p["disks"], ["/a.qcow2"])
+        self.assertNotIn("None", repr(p))
+        live = vm_domain.live_disks(xml)
+        self.assertEqual([d["target"] for d in live], ["", "", "", "", ""])
+        self.assertEqual(vm_domain.disk_label(live[4]["target"], word="disk "), "unnamed disk")
+        self.assertEqual(vm_domain.disk_label("sda", "/a.qcow2", word="disk "), "disk sda")
+        self.assertEqual(vm_domain.disk_label(None, "/a.qcow2"), "unnamed disk on /a.qcow2")
+
     def test_block_and_network_disks_are_problems(self) -> None:
         xml = """<domain><devices>
           <disk type='block' device='disk'><source dev='/dev/vg/win'/><target dev='vda'/></disk>
@@ -1622,7 +1646,7 @@ class PackageTest(unittest.TestCase):
 
     def test_timer_units_and_installed_program(self) -> None:
         # The bytes of the service cst-vm wrote before render_unit_file (a
-        # change would rewrite every installed unit).
+        # change would rewrite every installed unit; status then calls it OLDER).
         before = (
             "# Managed by cst vm (CST): installed by `cst vm backup-timer on`; not edited by hand.\n"
             "# The weekly backup of the libvirt VM %i to the NAS (restic): a live\n"
@@ -1651,7 +1675,11 @@ class PackageTest(unittest.TestCase):
             "TimeoutStartSec=infinity\n"
             "TimeoutStopSec=75min\n"
         )
-        self.assertEqual(vm_domain.render_service("/usr/local/sbin/cst-vm", "75min"), before)
+        # The one change since: its journal lines carry the name cst-vm, not python3.
+        self.assertEqual(
+            vm_domain.render_service("/usr/local/sbin/cst-vm", "75min"),
+            before.replace(" %i --nas\n", " %i --nas\nSyslogIdentifier=cst-vm\n", 1),
+        )
         timer = vm_domain.render_timer()
         self.assertIn("\n[Timer]\nOnCalendar=Sat *-*-* 04:30:00\nRandomizedDelaySec=30min\nPersistent=true\n", timer)
         self.assertTrue(timer.endswith("\n\n[Install]\nWantedBy=timers.target\n"))

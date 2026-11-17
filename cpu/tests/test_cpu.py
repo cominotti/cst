@@ -1732,6 +1732,31 @@ class VmPinCliTest(unittest.TestCase):
                 cpu_adapters.virsh("dumpxml", "win11-devbox")
             self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox", check=False), "partial")
 
+    def test_virsh_runs_in_the_c_locale_with_no_stdin_and_a_timeout(self) -> None:
+        # virsh translates its answers ("shut off" is "desligado" in pt_BR); vm-pin compares them.
+        ok = subprocess.CompletedProcess(["virsh"], 0, "running\n", "")
+        caller = {"LC_ALL": "pt_BR.UTF-8", "LANG": "pt_BR.UTF-8"}
+        with (
+            unittest.mock.patch.dict(os.environ, caller),
+            unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=ok) as run,
+        ):
+            self.assertEqual(cpu_adapters.virsh("domstate", "win11-devbox"), "running\n")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(kwargs["env"]["LANG"], "pt_BR.UTF-8", "the rest of the environment is the caller's")
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], cpu_adapters.VIRSH_TIMEOUT)
+        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_a_virsh_that_does_not_answer(self) -> None:
+        # check: the run stops with one line (no traceback); without check it goes on, as after a failure.
+        hang = subprocess.TimeoutExpired(["virsh"], cpu_adapters.VIRSH_TIMEOUT)
+        with unittest.mock.patch.object(cpu_adapters.subprocess, "run", side_effect=hang):
+            with self.assertRaises(SystemExit) as stop:
+                cpu_adapters.virsh("domstate", "win11-devbox")
+            self.assertEqual(str(stop.exception.code), "virsh domstate win11-devbox: no answer within 60 s")
+            self.assertEqual(cpu_adapters.virsh("vcpucount", "win11-devbox", check=False), "")
+
 
 class CpuWatchCliTest(unittest.TestCase):
     """cpu-watch's numbers and command line, on the package (cpu.domain, cpu.cli)."""
@@ -1745,41 +1770,46 @@ class CpuWatchCliTest(unittest.TestCase):
         self.assertEqual((seconds, wait, as_json, limits["cpu"]), (5, None, True, 15.0))
 
     def test_dispatch(self) -> None:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.assertEqual(cpu_cli.cpu_watch(["quiet", "--for", "0"], doc="DOC"), 2)
-        self.assertIn("quiet: --for: a whole number of seconds", err.getvalue())
-        for argv in ([], ["bogus"]):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(cpu_cli.cpu_watch(argv, doc="DOC"), 2)
-            self.assertEqual(out.getvalue(), "DOC\n")
+        restored: list[str] = []
+        # In-process: SIGPIPE at its default would stay so for the rest of the test run.
+        with unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append("x")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cpu_cli.cpu_watch(["quiet", "--for", "0"], doc="DOC"), 2)
+                self.assertEqual(cpu_cli.cpu_watch(["watch", "--bogus"], doc="DOC"), 2)
+            self.assertIn("quiet: --for: a whole number of seconds", err.getvalue())
+            self.assertIn("unknown argument --bogus", err.getvalue())
+            self.assertEqual(restored, [], "watch and quiet keep Python's SIGPIPE handling")
+            for argv in ([], ["bogus"], ["--help"]):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(cpu_cli.cpu_watch(argv, doc="DOC"), 2)
+                self.assertEqual(out.getvalue(), "DOC\n")
+            self.assertEqual(restored, ["x", "x", "x"], "the help only reads: SIGPIPE back at its default")
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
-            restored: list[bool] = []
+            restored = []
             with (
                 unittest.mock.patch.object(cpu_cli, "RUNS", tmp),
                 unittest.mock.patch.object(cpu_adapters, "RUNS", tmp),
                 # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-                unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append(True)),
+                unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append("x")),
                 contextlib.redirect_stdout(out),
             ):
                 self.assertEqual(cpu_cli.cpu_watch(["report"], doc="DOC"), 0)
-            self.assertEqual(restored, [True])
+            self.assertEqual(restored, ["x"])
         self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
 
 
 class ClosedPipeTest(unittest.TestCase):
-    def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
-        # `cst cpu watch report | head -1` ended in "Exception ignored ...
-        # BrokenPipeError" (exit 120). A read-only report now ends on SIGPIPE, silently.
-        tool = os.path.join(REPO, "cpu", "cpu-watch")
+    def closed_pipe(self, *args: str) -> subprocess.CompletedProcess[bytes]:
+        """cpu-watch ARGS with its stdout a pipe whose reader is already gone."""
         with tempfile.TemporaryDirectory() as home:
             r, w = os.pipe()
             os.close(r)
             try:
-                p = subprocess.run(
-                    ["/usr/bin/python3", "-I", tool, "report"],
+                return subprocess.run(
+                    ["/usr/bin/python3", "-I", CPU_WATCH, *args],
                     check=False,
                     stdout=w,
                     stderr=subprocess.PIPE,
@@ -1789,7 +1819,18 @@ class ClosedPipeTest(unittest.TestCase):
                 )
             finally:
                 os.close(w)
+
+    def test_report_into_a_closed_pipe_stops_quietly(self) -> None:
+        # `cst cpu watch report | head -1` ended in "Exception ignored ...
+        # BrokenPipeError" (exit 120). A read-only report now ends on SIGPIPE, silently.
+        p = self.closed_pipe("report")
         self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+    def test_help_into_a_closed_pipe_stops_quietly(self) -> None:
+        # `cpu-watch | head -3` (the help) ended in "Exception ignored ... BrokenPipeError", exit 120.
+        for args in ((), ("help",), ("--help",)):
+            p = self.closed_pipe(*args)
+            self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
 
     def test_vm_pin_restores_sigpipe_only_for_what_only_reads(self) -> None:
         restored: list[str] = []

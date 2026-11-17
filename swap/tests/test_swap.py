@@ -15,20 +15,22 @@ import sys
 import tempfile
 from typing import NoReturn
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from cst_core.adapters import HostExecutionContext
+from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
-from swap.cli import execute_cli, format_usage
+from swap.cli import execute_cli, format_usage, main as swap_main
 import swap.domain as D
 from swap.domain import (
     DEBUG_HELP,
     PAGE,
+    SettingCheckRow,
     SwapHardwareSpec,
     cgroup_row,
     parse_kv,
@@ -341,6 +343,33 @@ class StatusMathTest(unittest.TestCase):
             if "watermark_scale" in line and not line.lstrip().startswith("exp:")
         ]
         return rows, out.getvalue()
+
+    def zswap_rows(self, params: dict[str, str]) -> tuple[list[SettingCheckRow], str]:
+        tmp = tempfile.mkdtemp(prefix="swap-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        service = self._service(os.path.join(tmp, "proc"), os.path.join(tmp, "cg"), os.path.join(tmp, "run"))
+        report = service.build_settings_report(params)
+        out = io.StringIO()
+        render_settings(report, out=out)
+        return [r for r in report.rows if r.label.startswith("zswap")], out.getvalue()
+
+    def test_a_zswap_parameter_the_kernel_lacks_is_a_missing_row(self) -> None:
+        # tmpfiles' w skips a parameter file that is not there without a word: status says it.
+        rows, text = self.zswap_rows({"compressor": "zstd", "max_pool_percent": "20", "enabled": "Y"})
+        self.assertEqual(
+            rows,
+            [
+                SettingCheckRow("ok", "zswap compressor", "zstd", "zstd"),
+                SettingCheckRow("ok", "zswap max_pool_percent", "20", "20"),
+                SettingCheckRow("MISSING", "zswap shrinker_enabled", "this kernel has no such parameter", "1"),
+                SettingCheckRow("ok", "zswap enabled", "Y", "1"),
+            ],
+        )
+        self.assertIn("MISSING zswap shrinker_enabled       this kernel has no such parameter   (desired 1)", text)
+
+    def test_no_zswap_at_all_is_one_bad_row(self) -> None:
+        rows, _ = self.zswap_rows({})
+        self.assertEqual(rows, [SettingCheckRow("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", "")])
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
         rows, text = self.settings_output("300", exp_on=True)
@@ -1193,6 +1222,53 @@ class SwapApplyOutputTest(_SwapScratch):
         killed = _ReloadKilled(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
         self.assertEqual(self._apply(self._service(systemd=killed, fs=fs)[0])[0], 128 + signal.SIGKILL)
 
+    def _killer_runner(self, program: str, results: Mapping[str, CommandResult]) -> _ScriptedRunner:
+        """A runner where program is a real child that SIGTERM kills (a stub in a scratch PATH), the rest scripted."""
+        stubs = tempfile.mkdtemp(prefix="cst-swap-killed-")
+        self.addCleanup(shutil.rmtree, stubs)
+        stub = os.path.join(stubs, program)
+        with open(stub, "w") as f:
+            f.write("#!/usr/bin/python3 -I\nimport os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n")
+        os.chmod(stub, 0o755)
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": stubs}))
+        real = SubprocessCommandRunner()
+
+        class _Killer(_ScriptedRunner):
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                check: bool = False,
+                timeout: float | None = None,
+                input_text: str | None = None,
+                env: Mapping[str, str] | None = None,
+            ) -> CommandResult:
+                if argv[0] != program:
+                    return super().run(argv, check=check, timeout=timeout, input_text=input_text, env=env)
+                self.calls.append(list(argv))
+                return real.run(argv, check=check, timeout=timeout, input_text=input_text, env=env)
+
+        return _Killer(results)
+
+    def test_a_command_killed_by_a_signal_says_so(self) -> None:
+        # bash printed "line N: PID Terminated  COMMAND"; cst swap names the command and the signal.
+        prog = self.env.prog
+        runner = self._killer_runner("blockdev", {})
+        rc, _out, err = self._apply(self._service(system=LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter()))[0])
+        self.assertEqual(rc, 128 + signal.SIGTERM)
+        self.assertEqual(err, f"{prog}: blockdev --getsize64 {self.spec.device_path} was killed by signal 15\n")
+
+    def test_a_killed_sysctl_says_so_after_its_output(self) -> None:
+        prog = self.env.prog
+        size = CommandResult(0, f"{self.spec.expected_size_bytes}\n", "")
+        runner = self._killer_runner("sysctl", {"blockdev": size})
+        rc, out, err = self._apply(self._service(system=LinuxSwapSystemAdapter(runner, LocalFileSystemAdapter()))[0])
+        self.assertEqual(rc, 128 + signal.SIGTERM, err)
+        self.assertTrue(err.endswith(f"{prog}: sysctl -q -p {self.env.sysctl_conf} was killed by signal 15\n"), err)
+        self.assertIn("== sysctl", out)
+        self.assertNotIn("== machine.slice", out)
+        self.assertEqual(D.killed_text("cst swap", (), -9), "cst swap: a command was killed by signal 9")
+
     def test_a_failing_write_is_an_error_line_not_a_traceback(self) -> None:
         fs = _ZswapWriteFails({self.spec.device_path: "/dev/nvme0n1p5"})
         rc, out, err = self._apply(self._service(fs=fs)[0])
@@ -1273,6 +1349,58 @@ class SwapArgumentsTest(unittest.TestCase):
                 err = io.StringIO()
                 self.assertEqual(execute_cli([cmd, "--nope", "--root"], env={}, out=io.StringIO(), err=err), 2)
                 self.assertEqual(err.getvalue(), f"{cmd}: unknown argument '--nope' (only --root)\n")
+
+
+class SwapLocaleHandoverTest(unittest.TestCase):
+    """The caller's LC_CTYPE reaches the commands `cst swap` runs (Python sets C.UTF-8 under a C locale, PEP 538)."""
+
+    def test_swap_setup_hands_lc_ctype_over(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-swap-lc-")
+        self.addCleanup(shutil.rmtree, tmp)
+        shutil.copy2(SETUP, tmp)
+        os.makedirs(os.path.join(tmp, "swap"))
+        with open(os.path.join(tmp, "swap", "cli.py"), "w", encoding="utf-8") as fh:
+            fh.write("import os\nprint(repr(os.environ.get('CST_LC_CTYPE')))\n")
+        for caller, handed in (({}, "''"), ({"LC_CTYPE": "C"}, "'=C'"), ({"LC_CTYPE": ""}, "'='")):
+            with self.subTest(caller=caller):
+                proc = subprocess.run(
+                    ["bash", os.path.join(tmp, "swap-setup.sh"), "help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    env={"PATH": "/usr/bin:/bin", **caller},
+                    timeout=60,
+                )
+                self.assertEqual(proc.stdout, handed + "\n", proc.stderr)
+
+    def test_main_puts_the_caller_s_lc_ctype_back(self) -> None:
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGPIPE, signal.SIGXFSZ)}
+        for sig, handler in saved.items():
+            self.addCleanup(signal.signal, sig, handler)
+        out = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"CST_LC_CTYPE": "=C", "LC_CTYPE": "C.UTF-8"}, clear=True),
+            mock.patch.object(sys, "argv", ["swap/cli.py", "help"]),
+            mock.patch.object(sys, "stdout", out),
+        ):
+            self.assertEqual(swap_main(), 0)
+            self.assertEqual(dict(os.environ), {"LC_CTYPE": "C"}, "what the commands it runs inherit")
+        self.assertIn("Usage: cst swap", out.getvalue())
+
+    def test_the_sudo_rerun_hands_lc_ctype_over(self) -> None:
+        called: list[list[str]] = []
+
+        def _fake_elevate(argv: list[str]) -> NoReturn:
+            called.append(argv)
+            raise SystemExit(99)
+
+        ctx = _FakeContext(container=False, root=False, etc_dir="/nonexistent", run_dir="/nonexistent")
+        for env, setting in (({}, "CST_LC_CTYPE="), ({"LC_CTYPE": "C"}, "CST_LC_CTYPE==C")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(SystemExit):
+                    execute_cli(["apply"], env={"CST_PROG": "cst swap"}, ctx=ctx, elevate=_fake_elevate)
+                self.assertEqual(called[-1][:5], ["sudo", "--", "env", "CST_PROG=cst swap", setting])
 
 
 if __name__ == "__main__":

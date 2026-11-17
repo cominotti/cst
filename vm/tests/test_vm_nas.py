@@ -211,6 +211,8 @@ case "$1" in
   enable) mkdir -p "$UNIT_DIR/timers.target.wants" && touch "$UNIT_DIR/timers.target.wants/$3" ;;
   disable) rm -f "$UNIT_DIR/timers.target.wants/$3" ;;
   show) echo "Sat 2026-11-21 04:41:12 UTC" ;;
+  # clean needs the unit loaded: the log says whether the timer's file was still there.
+  clean) [ -e "$UNIT_DIR/cst-vm-backup@.timer" ] && echo "  (timer file present)" >>"$STUB_LOG" ;;
 esac
 exit 0
 """
@@ -1083,11 +1085,51 @@ class TimerTest(Nas):
         self.assertIn("OLDER than this copy of CST", r.stdout)
         r = self.run_tool("status", "win")
         self.assertIn("weekly NAS backup timer: on", r.stdout)
+        # Neither on nor status forgets the timer's last run.
+        self.assertNotIn("clean", " ".join(self.calls()))
         r = self.run_tool("backup-timer", "off", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("systemctl disable --now cst-vm-backup@win.timer", self.calls())
+        # disable --now, then clean --what=state (the Persistent= stamp) while the timer file is still
+        # there (clean needs the unit loaded), then the files go.
+        calls = self.calls()
+        at = calls.index("systemctl disable --now cst-vm-backup@win.timer")
+        self.assertEqual(
+            calls[at : at + 3],
+            [
+                "systemctl disable --now cst-vm-backup@win.timer",
+                "systemctl clean --what=state cst-vm-backup@win.timer",
+                "  (timer file present)",
+            ],
+        )
         self.assertFalse(os.path.exists(copy))
         self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.service")))
+
+    def test_off_goes_on_when_clean_fails(self) -> None:
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.bin, "systemctl"), "w") as f:
+            f.write(SYSTEMCTL.replace('case "$1" in', 'case "$1" in\n  clean) exit 1 ;;', 1))
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("systemctl clean --what=state cst-vm-backup@win.timer", self.calls())
+        self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.timer")))
+
+    def test_status_calls_a_service_without_its_journal_name_older(self) -> None:
+        # The service as an older CST wrote it, before SyslogIdentifier=cst-vm (its journal lines read
+        # "python3"): status says it is older, and on rewrites it.
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        service = os.path.join(self.units, "cst-vm-backup@.service")
+        new = read(service)
+        self.assertIn("\nSyslogIdentifier=cst-vm\n", new)
+        with open(service, "w") as f:
+            f.write(new.replace("SyslogIdentifier=cst-vm\n", ""))
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn(f"  {service}: installed, OLDER than this copy of CST", r.stdout)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  updated: {service}", r.stdout)
+        self.assertEqual(read(service), new)
 
     def test_on_upgrades_a_plain_script_copy_and_refuses_a_foreign_program(self) -> None:
         copy = self.env["CST_VM_SBIN_COPY"]
@@ -1125,6 +1167,73 @@ class TimerTest(Nas):
         self.assertFalse(os.path.islink(timer))
         self.assertIn("Persistent=true\n", read(timer))
         self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
+
+    def test_a_masked_unit_refuses_on_and_is_left_by_off(self) -> None:
+        # `systemctl mask` leaves a link to /dev/null where the unit file goes. The installer's link
+        # rule replaces a link at a root destination, so `on` unmasked the unit without a word.
+        timer = os.path.join(self.units, "cst-vm-backup@.timer")
+        os.symlink("/dev/null", timer)
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"  {timer}: masked (systemctl mask): unmask it first", r.stdout)
+        open(self.log, "w").close()
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(
+            "cst-vm-backup@.timer is masked (systemctl mask); unmask it first: "
+            "sudo systemctl unmask cst-vm-backup@.timer; nothing was changed",
+            r.stderr,
+        )
+        self.assertEqual(os.readlink(timer), "/dev/null")
+        self.assertFalse(os.path.lexists(os.path.join(self.units, "cst-vm-backup@.service")))
+        self.assertFalse(os.path.lexists(self.env["CST_VM_SBIN_COPY"]))
+        self.assertEqual(self.calls(), [], "systemctl was called")
+        # off turns the VM's timer off and removes CST's files, never the user's mask.
+        os.makedirs(os.path.dirname(self.env["CST_VM_SBIN_COPY"]))
+        with open(self.env["CST_VM_SBIN_COPY"], "wb") as f:
+            f.write(build_python_zipapp(REPO, "vm/cst-vm"))
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  left as it is: {timer} (masked with systemctl mask)", r.stdout)
+        self.assertIn(f"  removed: {self.env['CST_VM_SBIN_COPY']}", r.stdout)
+        self.assertEqual(os.readlink(timer), "/dev/null")
+
+    def test_a_masked_timer_of_the_vm_refuses_on(self) -> None:
+        # `systemctl mask cst-vm-backup@win.timer` masks that VM only: a link CST never writes.
+        # `on` wrote the template files and only then failed at `enable`.
+        mask = os.path.join(self.units, "cst-vm-backup@win.timer")
+        os.symlink("/dev/null", mask)
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn(f"  {mask}: masked (systemctl mask)", r.stdout)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cst-vm-backup@win.timer is masked (systemctl mask); unmask it first", r.stderr)
+        self.assertEqual(sorted(os.listdir(self.units)), ["cst-vm-backup@win.timer"], "files were written")
+        # A link to /dev/null through another link is a mask too (systemd follows the chain).
+        os.remove(mask)
+        hop = os.path.join(self.tmp, "hop")
+        os.symlink("/dev/null", hop)
+        os.symlink(hop, os.path.join(self.units, "cst-vm-backup@.service"))
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cst-vm-backup@.service is masked (systemctl mask)", r.stderr)
+
+    def test_a_problem_line_fails_the_weekly_run_and_alerts(self) -> None:
+        # The service runs `cst-vm backup VM --nas`: a settings line that is not a plain KEY=VALUE
+        # must end it non-zero (no SuccessExitStatus=: the unit is failed, which cst doctor lists)
+        # and send the alert, naming the file and the line.
+        self.assertNotIn("SuccessExitStatus", vm_domain.render_service("/usr/local/sbin/cst-vm", "40min"))
+        with open(self.conf, "a") as f:
+            f.write("NAS_PATH=`hostname`\n")
+        self.env["INVOCATION_ID"] = "x"
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH=`hostname`", r.stderr)
+        alerts = [c for c in self.calls() if c.startswith("notify ")]
+        self.assertEqual(len(alerts), 1, self.calls())
+        self.assertIn("Weekly VM backup of win to the NAS failed", alerts[0])
+        self.assertIn(f"{self.conf} line 4: NAS_PATH=`hostname`", alerts[0])
+        self.assertIn("journalctl -u cst-vm-backup@win.service", alerts[0])
 
     def test_settings_are_read_as_bash_reads_them_and_a_problem_line_refuses_the_backup(self) -> None:
         # Snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
@@ -1164,6 +1273,25 @@ class TimerTest(Nas):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"{self.conf} line 4: NAS_PATH = /volume2/other", r.stderr)
         self.assertIn("Off: cst-vm-backup@win.timer", r.stdout)
+
+    def test_lines_an_older_cst_wrote_with_printf_q_are_read_as_bash_reads_them(self) -> None:
+        # snap_conf_set wrote values with printf %q until values went in quotes: a\ b is "a b" for
+        # btrfs-snapshot (bash), so the backup reads it the same way instead of refusing.
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/My\\ restic\nNAS_RESTIC_HOST=$'sophia\\x2dpc'\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.conf, r.stderr)
+        backup = self.restic_calls()[1]
+        self.assertEqual(backup["env"]["RESTIC_REPOSITORY"], "sftp:btrfs-setup-nas:/volume1/My restic")
+        self.assertEqual(backup["args"][2:4], ["--host", "sophia-pc"])
+        # Only snapshots.conf: the same line in vm.conf is still a problem there.
+        with open(self.env["CST_VM_CONF"], "w") as f:
+            f.write("VM_TUNE_NIC=a\\ b\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn("vm.conf line 1: VM_TUNE_NIC=a\\ b", r.stderr)
 
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:

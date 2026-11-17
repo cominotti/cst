@@ -358,7 +358,8 @@ it dropped: `dropped N cache folder(s) from Workspace.<time>: F files, S
 **Cost:** on this PC, dropping 26 cache folders (45,200 files, 15 GiB) from a
 copy of `~/Workspace` took 4.9 seconds and one btrfs commit of 165 ms, with no
 stall. It happens only when a snapshot is taken, at the hourly run's lowest
-CPU and disk priority.
+CPU priority and in the idle IO class (which only works with the BFQ or Kyber IO
+schedulers, see below).
 
 **Settings** in `/etc/btrfs-setup/snapshots.conf`:
 
@@ -976,7 +977,10 @@ cst btrfs snapshots clean-targets --apply   # delete
 - `btrfs-snapshot.timer` starts `btrfs-snapshot.service` **every hour**
   (with a random delay up to 5 minutes). If the computer was off or asleep,
   the missed run happens soon after it is on again.
-- It runs at the lowest CPU and disk priority.
+- It runs at the lowest CPU priority and in the idle IO class. That class only
+  works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`, so only
+  the CPU priority is lower here (see
+  [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
 - A snapshot is taken **only if something changed** since the newest snapshot.
   btrfs counts changes with a number called the *generation*; the program
   compares the subvolume's generation with the one recorded in the newest
@@ -1383,12 +1387,12 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | `snapshots caches [--json]` | The cache folders (`CACHEDIR.TAG`) the next snapshot of each source drops, with files and sizes ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)). Read-only; shown also when `SNAPSHOT_EXCLUDE_CACHES=no`. |
 | `snapshots prune [--confirm]` | The normal retention by hand, including what the circuit breaker held back. Without `--confirm` it is a dry run. |
 | `snapshots clean-targets [--apply]` | Old cargo `target/` folders: list, or delete with `--apply`. |
-| `snapshots disable` | Stops the hourly snapshots and the NAS timer, and cancels a pending conversion at boot. Keeps the snapshots. |
+| `snapshots disable` | Stops the hourly snapshots and the NAS timer (and makes systemd forget their last runs: `systemctl clean --what=state`), and cancels a pending conversion at boot. Keeps the snapshots. |
 | `snapshots disable --purge` | The same, then deletes **all snapshots owned by btrfs-snapshot-core** and removes the top-level mount units. |
 | `snapshots nas setup ...` | See [section 7](#7-optional-backup-on-the-nas-restic). |
 | `snapshots nas status / run / disable / enable` | See [section 7](#other-nas-commands). |
-| `snapshots chrome-cache [status\|apply\|off]` | Only Chrome's cache flags ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)): show their state and the old cache left on the disk, add them (also done by `setup`), or remove them for good (`off`). Runs as your user. |
-| `bulk plan` | Dry run of the `~/Bulk` step: each item and what would happen, with sizes ([section 3](#order-with-snapshots-setup)). Changes nothing. |
+| `snapshots chrome-cache [status\|apply\|off]` | Only Chrome's cache flags ([section 3](#chrome-flatpak-its-cache-in-ram-not-a-subvolume)): show their state and the old cache left on the disk, add them (also done by `setup`), or remove them for good (`off`). Runs as your user. `status` only reads: it ends quietly when its reader goes away (`\| head`). |
+| `bulk plan` | Dry run of the `~/Bulk` step: each item and what would happen, with sizes ([section 3](#order-with-snapshots-setup)); a size `du` could not read whole (a folder it may not enter) shows as `at least ...`. Changes nothing. |
 | `bulk apply` | Fills `~/Bulk` (also done by `snapshots setup`). Safe to re-run; busy items wait for the next boot. |
 | `bulk status` | The state of each `~/Bulk` item, the `+C` state of the emulator folders (`~/Bulk/emulators` and the AVD folder), items waiting for the boot, old game data still in /home. |
 | `bulk keep ID...` | Keeps these items in /home on purpose: `bulk apply` leaves them alone, and they are not reported as problems ([section 3](#bulk-one-folder-for-everything-you-can-download-again) has the ids). Wrong ids are refused, with the list of valid ones. |
@@ -1562,6 +1566,13 @@ items stay at their old place (their data is in the `/home` snapshots).
 Find what uses them (`sudo fuser -vm ~/<path>` or `lsof +D ~/<path>`), stop it,
 and run `cst btrfs bulk apply`. Log: `journalctl -u btrfs-bulk-boot`.
 
+**Nothing moved into ~/Bulk at boot** (alert `~/Bulk: nothing moved at boot`).
+A line of `/etc/btrfs-setup/bulk.conf` is not a plain `KEY=VALUE` (the alert
+names the file and the line), so the boot step cannot tell whose home it
+handles and moves nothing; it exits with 1, like a run that needs a look. The
+items keep waiting for the boot. Fix the line (`cst btrfs install` writes the
+file again), then run `cst btrfs bulk apply` or reboot.
+
 **`bulk status` says `an interrupted move is recorded`.**
 A move was interrupted (power loss, kill). Nothing is lost. Normally the next
 boot already handled it, before the login screen (`btrfs-bulk-boot.service`
@@ -1570,7 +1581,10 @@ also runs when such a record exists). Otherwise run
 was already complete) or undoes it (the data goes back to the old path), then
 tries again. Snapshots wait until the record is gone (except for the `+C`
 repair inside `~/Bulk`, whose data is not in /home: there `status` says
-`snapshots do not wait`).
+`snapshots do not wait`). If the folder in `~/Bulk` that the move wrote has
+become a symbolic link, the repair (which runs as root) does not follow it: it
+says `NEEDS A LOOK: ... is a symbolic link (not followed)` and keeps the
+record.
 
 **`bulk status` says `NEEDS A LOOK: ... was created again while the data waited in ...`.**
 A move was interrupted halfway, and before it was undone a program (or you)
@@ -1784,7 +1798,7 @@ After `snapshots setup`:
 | `/etc/systemd/system/btrfs-bulk-boot.service` | moves busy items into `~/Bulk` at boot (enabled; does nothing unless the flag below exists) |
 | `/etc/systemd/system/var-mnt-btrfs\x2dtop.{mount,automount}` | on-demand mount of the top level at `/var/mnt/btrfs-top` |
 | `/var/mnt/btrfs-top/snapshots/` | the snapshots |
-| `/etc/btrfs-setup/snapshots.conf` | settings (your manual edits are kept) |
+| `/etc/btrfs-setup/snapshots.conf` | settings (your manual edits are kept; see [below](#how-cst-writes-snapshotsconf)) |
 | `/etc/btrfs-setup/convert-plan` | the folder list for your home |
 | `/etc/btrfs-setup/convert-at-boot` | flag, only while a boot conversion is pending |
 | `/etc/btrfs-setup/bulk.conf` | whose `~/Bulk` the boot step handles (`BULK_USER=`) |
@@ -1813,6 +1827,25 @@ After `snapshots nas setup`, in addition:
 | on the NAS | the repository folder; the public key in the user's `authorized_keys` |
 
 ---
+
+
+### How CST writes snapshots.conf
+
+`setup`, `nas setup`, `nas disable` and the other commands that set a key
+write its value in single quotes (`NAS_PATH='/volume1/backup'`), or in double
+quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
+file) and CST's Python programs (`cst doctor`, `cst vm`) read these alike.
+A value no such form can hold (a line break, or a `'` together with `"`,
+`$`, a backtick or a backslash) is refused, and nothing is written. The file
+is written only when its content changes; a mode changed by hand goes back
+to 0644 (everyone may read it).
+
+Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
+`K=$'a\tb'`). `cst doctor` and `cst vm` read those lines as bash does, so
+nothing needs to be done. The next command that writes the file (`setup`
+lists it in its plan) puts them in quotes, with the same values. Your other
+lines stay as they are, and in any other CST settings file a backslash outside
+single quotes is still a problem.
 
 ## 12. How to undo
 
@@ -2063,7 +2096,7 @@ The **old tree** is the original folder after the swap, renamed to
 8. **Last check after the swap.** If something wrote into the old tree in that
    short moment, everything is renamed back, and tried again later.
 9. **Old tree deleted.** The old tree is deleted with `rm` at the lowest CPU
-   and disk priority, at most 15 minutes per tree each time; what is left is
+   priority and in the idle IO class (no effect with the `none` IO scheduler), at most 15 minutes per tree each time; what is left is
    retried on the next hourly run. Because of the reflinks, this frees no
    space and costs no space: the data is still used by the new subvolume.
    - During `setup` and in the hourly run, this happens **right away**, after

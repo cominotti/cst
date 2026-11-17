@@ -28,6 +28,7 @@ from btrfs.docker_volumes_nocow.adapters import (
     pending,
     postponed_line,
     recover,
+    reference_label,
     volumes,
 )
 from cst_core.adapters.files import write_atomic
@@ -43,7 +44,7 @@ def migrate_one(name: str, data: str) -> None:
     st = os.lstat(data)
     os.chown(new, st.st_uid, st.st_gid)
     os.chmod(new, stat.S_IMODE(st.st_mode))
-    subprocess.run(["chcon", "--reference", data, new], check=False, capture_output=True)
+    reference_label(data, new)
     set_nocow(new, True)
     # Real copy (NOCOW and CoW extents cannot share data); every file and
     # directory created below `new` inherits +C before any data is written.

@@ -106,19 +106,19 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # module docstring). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
-    "btrfs/bulk/cli.py": 415,
-    "btrfs/chrome_cache/cli.py": 131,
-    "btrfs/docker_gc/cli.py": 347,
+    "btrfs/bulk/cli.py": 404,
+    "btrfs/chrome_cache/cli.py": 125,
+    "btrfs/docker_gc/cli.py": 322,
     "btrfs/docker_volumes_nocow/cli.py": 193,
     "btrfs/snapshot/cli.py": 1069,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 158,
-    "cpu/cli.py": 257,
+    "cpu/cli.py": 245,
     "cst_core/cli.py": 165,
     "doctor/cli.py": 35,
     "swap/cli.py": 112,
-    "toolchains/cli.py": 1946,
-    "vm/cli.py": 1299,
+    "toolchains/cli.py": 1910,
+    "vm/cli.py": 1288,
 }
 
 
@@ -149,22 +149,22 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Only goes down; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
-    "btrfs/bulk cli": 15,
-    "btrfs/bulk unlayered": 111,
-    "btrfs/chrome_cache cli": 8,
+    "btrfs/bulk cli": 9,
+    "btrfs/bulk unlayered": 110,
+    "btrfs/chrome_cache cli": 7,
     "btrfs/docker_gc cli": 29,
-    "btrfs/docker_volumes_nocow cli": 40,
+    "btrfs/docker_volumes_nocow cli": 39,
     "btrfs/snapshot cli": 19,
     "btrfs/stall_monitord cli": 3,
     "btrfs/stall_monitord unlayered": 52,
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
     "cpu cli": 36,
-    "cst_core cli": 7,
+    "cst_core cli": 6,
     "cst_core entry": 3,
     "doctor cli": 1,
     "swap cli": 3,
-    "toolchains cli": 64,
+    "toolchains cli": 62,
     "vm cli": 83,
 }
 

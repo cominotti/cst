@@ -44,6 +44,7 @@ from cpu.adapters import (
 )
 from cpu.domain import (
     GAME_STATE,
+    SAMPLE_FIELDS,
     URI,
     cpu_line,
     features_note,
@@ -157,22 +158,9 @@ def watch(argv: Sequence[str]) -> int:
     rows: list[list[object]] = []
     pid: int | None = None
     cg = ""
-    fields = [
-        "t",
-        "profile_on",
-        "game_pid",
-        "game_cpu_wait_ms",
-        "game_mem_stall_ms",
-        "game_invol_switches",
-        "sys_cpu_some_ms",
-        "p_mhz",
-        "e_mhz",
-        "vm_cpus_used",
-        "builds_cpus_used",
-    ]
     with open(os.path.join(run_dir, "samples.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(fields)
+        w.writerow(SAMPLE_FIELDS)
         while not stop:
             if proc and proc.poll() is not None:
                 break
@@ -243,7 +231,6 @@ def watch(argv: Sequence[str]) -> int:
 
 
 def report(argv: Sequence[str]) -> int:
-    restore_default_signals()  # a read-only report: `cst cpu watch report | head` ends quietly
     runs = recorded_runs(argv)
     if not runs:
         print(f"no runs in {RUNS}; record one with: cst cpu watch -l <label> [-- <cmd>]")
@@ -311,10 +298,12 @@ def quiet(
 
 def cpu_watch(argv: Sequence[str], doc: str) -> int:
     """`cpu-watch watch|report|quiet ...` (argv without the program name); doc is its help."""
-    if len(argv) < 1 or argv[0] not in ("watch", "report", "quiet"):
+    cmd = argv[0] if argv else ""
+    if cmd not in ("watch", "quiet"):
+        restore_default_signals()  # report and the help only read: `cpu-watch report | head` ends quietly
+    if cmd not in ("watch", "report", "quiet"):
         print(doc)
         return 2
-    cmd = argv[0]
     if cmd == "watch":
         return watch(argv[1:])
     if cmd == "report":

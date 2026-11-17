@@ -24,16 +24,20 @@ if TYPE_CHECKING:
 from cst_core.adapters.files import read_bytes, read_text, write_atomic
 from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
-from cst_core.domain.files import OwnedState
+from cst_core.domain.files import UnitFileState
+from cst_core.domain.units import masked_refusal
 from toolchains.adapters import (
     PROG,
     where_text,
     Program,
     append_text,
     ask_cargo,
+    before_removal,
     cargo_procs,
     cargo_query,
+    disable_timer,
     file_state,
+    old_conf_note,
     find_manifests,
     find_worktrees,
     in_container,
@@ -46,6 +50,7 @@ from toolchains.adapters import (
     proc_users,
     read_cfg,
     read_state,
+    reload_failed,
     release,
     remove_tree,
     resolve_root,
@@ -63,9 +68,11 @@ from toolchains.adapters import (
     time_left,
     tree_size,
     turned_off,
+    timer_unit_state,
     user_cargo,
     uv_env,
     uv_lock_busy,
+    uv_prune_preview,
     workspace_metadata,
     wrapper_path,
     write_cfg,
@@ -91,7 +98,6 @@ from toolchains.domain import (
     MIN_KEEP_FLOOR,
     NAME,
     OFF_REL,
-    OLD_CONF_REL,
     OLD_DATA,
     OLD_FILES,
     OLD_MARKER,
@@ -977,18 +983,15 @@ class PythonUv(Target):
         if wait:
             say(f"  the timer would skip it: {wait}; named on the command line it runs")
         if dry:
-            try:
-                r = self.run_uv(uv, ["cache", "prune", "--dry-run", "--cache-dir", c, "--no-progress"], UV_TIMEOUT)
-                for line in (r.stdout + r.stderr).strip().splitlines():
-                    say(f"  uv: {line}")
-            except (OSError, subprocess.TimeoutExpired) as e:
-                say(f"  uv cache prune --dry-run: {e}")
-        else:
-            say(
-                "  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
-                "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
-                "only known afterwards"
-            )
+            lines, ok = uv_prune_preview(lambda args: self.run_uv(uv, args, UV_TIMEOUT), c)
+            for line in lines:
+                say(f"  {line}")
+            return 0 if ok else 1
+        say(
+            "  apply runs `uv cache prune`: it removes only what uv itself no longer uses (old versions of "
+            "cache entries, unused temporary environments); this uv has no --dry-run, so how much is "
+            "only known afterwards"
+        )
         return 0
 
     def apply(self) -> int:
@@ -1225,10 +1228,10 @@ def copies() -> dict[str, bytes]:
     return {PROG_REL: install_payload("toolchains/cst-toolchains", Program.entry_file), DEFAULTS_REL: defaults}
 
 
-def unit_states(home: str) -> dict[str, OwnedState]:
-    out = {rel: file_state(os.path.join(home, rel), text) for rel, text in copies().items()}
+def unit_states(home: str) -> dict[str, UnitFileState]:
+    out: dict[str, UnitFileState] = {rel: file_state(os.path.join(home, rel), text) for rel, text in copies().items()}
     for name, render in UNITS.items():
-        out[name] = file_state(os.path.join(home, UNIT_DIR_REL, name), render())
+        out[name] = timer_unit_state(os.path.join(home, UNIT_DIR_REL, name), render())
     return out
 
 
@@ -1248,38 +1251,6 @@ def stale_files(home: str) -> list[tuple[str, bool]]:
     return out
 
 
-def before_removal(name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
-    """systemctl --user ARGS NAME for a timer, checked, before auto on/off
-    removes any file. When the user manager refuses or cannot be reached,
-    nothing has been removed yet: Refused, and a second run (once the
-    manager answers) can finish the job. Removing the files anyway would
-    leave a timer that keeps running with no file left to show it."""
-    try:
-        return systemctl(*args, name, check=True, ok=ok)
-    except Refused as e:
-        raise Refused(
-            f"{e}; nothing was removed and {name} may still be running: run this again once your user "
-            "manager answers (`systemctl --user status` shows whether it does)"
-        ) from None
-
-
-def reload_failed() -> bool:
-    """daemon-reload after unit files were removed: True (and an error line)
-    when it failed. The removal is not undone: the timer is already stopped,
-    and the manager forgets the files at its next reload or restart."""
-    try:
-        systemctl("daemon-reload", check=True)
-    except Refused as e:
-        say(
-            f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
-            "manager answers, so that it forgets them",
-            3,
-            err=True,
-        )
-        return True
-    return False
-
-
 def remove_stale(home: str) -> bool:
     """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
     well; False when the daemon-reload after the removal failed (reported).
@@ -1289,7 +1260,7 @@ def remove_stale(home: str) -> bool:
         return True
     timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
     if (timer, True) in found:
-        before_removal(OLD_TIMER, "disable", "--now")
+        disable_timer(OLD_TIMER)
     reload = False
     for path, ours in found:
         if not ours:
@@ -1299,16 +1270,6 @@ def remove_stale(home: str) -> bool:
         say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
         reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
     return not (reload and reload_failed())
-
-
-def old_conf_note(home: str) -> None:
-    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
-        say(
-            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
-            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
-            4,
-            err=True,
-        )
 
 
 def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
@@ -1356,6 +1317,8 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
             err=True,
         )
     st = unit_states(home)
+    if why := masked_refusal([os.path.join(home, UNIT_DIR_REL, k) for k in UNITS if st[k] == "masked"], user=True):
+        raise Refused(why + "; nothing was written")
     conflicts = [k for k, v in st.items() if v == "conflict"]
     if conflicts:
         raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
@@ -1402,7 +1365,7 @@ def cmd_auto_off(home: str, now: float) -> int:
     # Both timers are stopped, checked, before anything is removed (see
     # before_removal); remove_stale stops the earlier one first.
     if st[TIMER] in ("ok", "change"):
-        before_removal(TIMER, "disable", "--now")
+        disable_timer(TIMER)
     elif st[TIMER] == "missing":
         stop_orphan_timer()
     rc = 0 if remove_stale(home) else 1
@@ -1412,8 +1375,9 @@ def cmd_auto_off(home: str, now: float) -> int:
             os.unlink(os.path.join(home, UNIT_DIR_REL, name))
             say(f"removed:   {label(name)}")
             removed = True
-        elif st[name] == "conflict":
-            say(f"left alone: {label(name)} (not written by CST)", 4, err=True)
+        elif st[name] in ("conflict", "masked"):
+            why = "masked with systemctl --user mask" if st[name] == "masked" else "not written by CST"
+            say(f"left alone: {label(name)} ({why})", 4, err=True)
     # `disable` removes the link that enables the timer. One left pointing
     # at nothing (also left by the earlier unchecked `auto off`) goes too.
     wants = os.path.join(home, WANTS_REL)
