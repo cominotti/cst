@@ -42,7 +42,7 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.09,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.95,
+    "python type-2 W=8 duplicated %": 0.92,
     "shell W=5 duplicated %": 0.47,
     "same-name definitions in >1 file": 0,
 }
@@ -53,20 +53,18 @@ CEILINGS: Final[dict[str, float]] = {
 ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "main": "every program has its own main(): the entry point convention",
     # Subcommands and use cases: each program's own verb, different work.
-    "apply": "the apply step of bulk items, chrome-cache and docker-gc: different machines changes",
-    "plan": "docker-gc's plan subcommand vs the snapshot retention plan",
-    "status": "the status subcommand of chrome-cache, docker-gc and docker-volumes-nocow",
+    "apply": "the apply step of bulk items and chrome-cache: different machines changes",
+    "status": "the status subcommand of chrome-cache and docker-volumes-nocow",
     "cmd_list": "`btrfs-snapshot-core list` vs `cst-vm list`",
     "cmd_status": "`cst-toolchains status` vs `cst-vm status`",
     "migrate": "bulk moves a folder into ~/Bulk; docker-volumes-nocow re-creates a volume NOCOW",
     "recover": "bulk finishes an interrupted move; docker-volumes-nocow an interrupted volume copy",
     "report": "bulk's per-item report vs cpu-watch's run comparison",
-    "run": "bluetooth's and vm's bindings over cst_core's SubprocessCommandRunner (their own options and words); docker-gc's run loop",
+    "run": "bluetooth's and vm's bindings over cst_core's SubprocessCommandRunner (their own options and words)",
     "parse_args": "each program's own argv grammar (doctor, toolchains, vm)",
     "classify": "a bulk folder, a kernel stack, a toolchain cache folder: three different classifications",
     "decide": "the LDAC bitrate, the Chrome cache place, a cache folder's fate: three different rules",
     "label": "a Docker volume's label vs a toolchain cache's display label",
-    "locked": "docker-gc exits when busy; the snapshot run returns EXIT_BUSY; both over cst_core take_lock",
     # Types with the same short name in different programs.
     "Episode": "the daemon's live episode object vs the report's record of it (a TypedDict)",
     "Host": "the snapshot run's host adapter vs doctor's read-only host adapter (different ports)",

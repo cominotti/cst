@@ -32,7 +32,7 @@ SETUP = os.path.join(REPO, "btrfs-setup.sh")
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from btrfs.docker_gc import adapters as gc_adapters
+from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
@@ -774,14 +774,13 @@ class DockerGcUnitsTest(unittest.TestCase):
                 s = self.service(name)
                 self.assertEqual(s.get("StateDirectory"), ["docker-gc"])
                 self.assertNotIn("ReadWritePaths", s)
-        if os.environ.get("DOCKER_GC_STATE") is None:
-            self.assertEqual(gc_adapters.STATE_DIR, "/var/lib/docker-gc")
-        for path in (gc_adapters.LAST_USED, gc_adapters.LAST_RUN):
-            self.assertEqual(os.path.dirname(path), gc_adapters.STATE_DIR, path)
+        paths = gc_wiring.paths_from({})  # the program's paths without the tests' overrides
+        self.assertEqual(paths.state_dir, "/var/lib/docker-gc")
+        for path in (paths.last_used, paths.last_run):
+            self.assertEqual(os.path.dirname(path), paths.state_dir, path)
         # The run lock: only the weekly run takes it (the recorder does not). Kept after the run
         # (Preserve=), so a cleanup-now that holds it then does not lose its file.
-        if os.environ.get("DOCKER_GC_RUNTIME") is None:
-            self.assertEqual(gc_adapters.LOCK, "/run/docker-gc/run.lock")
+        self.assertEqual(paths.lock, "/run/docker-gc/run.lock")
         gc = self.service("docker-gc.service")
         self.assertEqual((gc.get("RuntimeDirectory"), gc.get("RuntimeDirectoryPreserve")), (["docker-gc"], ["yes"]))
         self.assertNotIn("RuntimeDirectory", self.service("docker-gc-recorder.service"))

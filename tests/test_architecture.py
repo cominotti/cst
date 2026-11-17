@@ -19,7 +19,7 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor and cst_core) it still does I/O directly. CLI_CEILINGS caps the
+  doctor, cst_core and btrfs/docker_gc) it still does I/O directly. CLI_CEILINGS caps the
   size of each one so that layer only shrinks: new logic goes into domain
   (pure) or adapters (I/O), or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
@@ -112,7 +112,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 404,
     "btrfs/chrome_cache/cli.py": 125,
-    "btrfs/docker_gc/cli.py": 320,
+    "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 193,
     "btrfs/snapshot/cli.py": 1069,
     "btrfs/stall_monitord/cli.py": 11,
@@ -162,7 +162,6 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk cli": 9,
     "btrfs/bulk unlayered": 107,
     "btrfs/chrome_cache cli": 7,
-    "btrfs/docker_gc cli": 27,
     "btrfs/docker_volumes_nocow cli": 39,
     "btrfs/snapshot cli": 10,
     "btrfs/stall_monitord cli": 3,
@@ -179,6 +178,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # point: the one module, besides the adapters, that imports adapters and
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
+    "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
     "swap": "swap/wiring.py",
@@ -259,7 +259,6 @@ CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/
 # own copy, make it private when only its file uses it, or delete it; then
 # remove its line. Only shrinks.
 CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
-    "cst_core/adapters/__init__.py:SystemClockAdapter": "the adapter of ClockPort, kept for PR-F1 (cpu takes a clock through the port)",
     "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
     "cst_core/adapters/nocow.py:FS_IOC_SETFLAGS": "an ioctl request used inside nocow.py and by its tests",
@@ -277,7 +276,6 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/domain/install.py:manifest_by_dest": "read by the gate tests/test_unit_contract.py; no module looks a dest up",
     "cst_core/domain/install.py:python_entry_srcs": "read by the static gates in tests/",
     "cst_core/domain/text.py:Assignment": "the record parse_shell_assignments returns, used only inside text.py",
-    "cst_core/ports/__init__.py:ClockPort": "kept for PR-F1: cpu's use cases take the clock through it (its brief)",
 }
 
 
