@@ -285,7 +285,7 @@ class Episode:
         }
 
 
-class _DTaskSince(TypedDict):
+class DTaskSince(TypedDict):
     first: float
     busy: float
     comm: str

@@ -98,7 +98,7 @@ class _TargetProto(Protocol):
     ID: str
 
 
-class _ToolchainsModule(Protocol):
+class ToolchainsModule(Protocol):
     JOURNAL: bool
     TRASH_PREFIX: str
     SERVICE: str
@@ -157,7 +157,7 @@ class _ToolchainsModule(Protocol):
     restore: Callable[[], object]
 
 
-def load() -> _ToolchainsModule:
+def load() -> ToolchainsModule:
     """The toolchains package as one namespace (cli, adapters, domain): a
     name set on it reaches every module that uses it; restore() undoes that.
     The program is the checkout's cst-toolchains (what main() would be told)."""
@@ -165,7 +165,7 @@ def load() -> _ToolchainsModule:
     view = PackageView(tc_cli, tc_adapters, tc_domain)
     # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
     view.restore_default_signals = lambda: None
-    return cast("_ToolchainsModule", cast("object", view))
+    return cast("ToolchainsModule", cast("object", view))
 
 
 class Base(unittest.TestCase):

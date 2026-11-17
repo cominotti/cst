@@ -30,7 +30,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters.zipapp import build_python_zipapp  # noqa: E402
 from cst_core.domain.errors import Refused, Usage  # noqa: E402
 from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain  # noqa: E402
-from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, _ToolchainsModule, load  # noqa: E402
+from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load  # noqa: E402
 
 TOOLCHAINS = os.path.dirname(TOOL)
 REPO = os.path.dirname(TOOLCHAINS)
@@ -102,7 +102,7 @@ class Scratch(unittest.TestCase):
                     os.environ[k] = v
 
         self.addCleanup(restore)
-        self.m: _ToolchainsModule = load()
+        self.m: ToolchainsModule = load()
         self.addCleanup(self.m.restore)
         self.m.JOURNAL = False
         self.m.cargo_procs = lambda uid=None: []

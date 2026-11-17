@@ -52,7 +52,7 @@ from btrfs.snapshot.domain import (
     UNFINISHED_FILE,
     UUID_RE,
     WRITABLE_FILE,
-    _SubvolInfo,
+    SubvolInfo,
     epoch_to_wall,
     err_text,
     fmt_epoch,
@@ -334,7 +334,7 @@ class Run:
         self._last_run = (parse_state(line), None)
 
     # Per source ---------------------------------------------------------------
-    def source_info(self, src: Source) -> _SubvolInfo:
+    def source_info(self, src: Source) -> SubvolInfo:
         kind = self.host.kind(src.path)
         if kind != "subvol":
             raise ParseError(f"{src.path} is not a subvolume ({kind})")
@@ -603,7 +603,7 @@ def free_name(host: Host, snapdir: str, name: str, wall: dt.datetime) -> str:
     return base if not taken else f"{base}_{max(taken) + 1}"
 
 
-def create_snapshot(run: Run, src: Source, info: _SubvolInfo, dest: str, entry: str, reason: str) -> bool:
+def create_snapshot(run: Run, src: Source, info: SubvolInfo, dest: str, entry: str, reason: str) -> bool:
     if run.host.kind(run.snapdir) == "missing":
         try:
             run.host.mkdir(run.snapdir, 0o700)

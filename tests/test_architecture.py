@@ -21,6 +21,20 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   doctor and cst_core) it still does I/O directly. CLI_CEILINGS caps the
   size of each one so that layer only shrinks: new logic goes into domain
   (pure) or adapters (I/O), or into an application layer with ports.
+- Every package module has one role (`module_role`): domain, ports,
+  application, adapters, presenter, wiring, cli or entry. A module with
+  none is in UNLAYERED_ALLOWED with its reason; that table only shrinks.
+- The I/O a module does itself outside its adapters ("hard I/O": the lines
+  direct_io_problems reports, with print, sys.stdout/stderr/argv/exit and
+  argparse allowed, the bootstrap left out) has a budget per package and
+  layer, IO_BUDGETS, that only goes down (tests/budgets.py). Moving code to
+  an adapter lowers it; moving it from cli.py into another unlayered module
+  does not hide it.
+- A package in HEXAGONAL_PACKAGES has a cli.py and a presenter.py with no
+  hard I/O at all, and only its composition point (wiring.py) and its
+  adapters import an adapter.
+- No module imports a private name (`_x`) from another module of the
+  repository: a name another module needs is public.
 
 Standard library only.
 """
@@ -31,10 +45,13 @@ from typing import Final, Literal
 import unittest
 
 from cst_core.domain.imports import loads_code_by_path
-from tests.code_graph import entry_points, module_closure, module_of, production_python
+from tests.budgets import budget_problems, format_table, package_of
+from tests.code_graph import entry_points, is_python, module_closure, module_of, production_python
 from tests.repo_files import REPO, repo_files
+from tests.test_entrypoints import BOOTSTRAP
 
 type LayerRole = Literal["domain", "ports", "application"]
+type ModuleRole = Literal["domain", "ports", "application", "adapters", "presenter", "wiring", "cli", "entry"]
 
 FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
     {"subprocess", "shutil", "socket", "fcntl", "ctypes", "sqlite3", "urllib"}
@@ -94,6 +111,58 @@ CLI_CEILINGS: Final[dict[str, int]] = {
 }
 
 
+# Package modules that are programs of their own (`python3 -I -B cst_core/installer.py`).
+ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py"})
+
+# Package modules with no role yet, and why. Each holds use cases and their
+# I/O together; splitting one into its layers removes its line. Only shrinks.
+UNLAYERED_ALLOWED: Final[dict[str, str]] = {
+    "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
+    "btrfs/bulk/items.py": "the move and recovery of ~/Bulk items: the journal steps with their file I/O",
+    "btrfs/bulk/steam.py": "the Steam library move: pure VDF edits, the journal steps and the copies together",
+    "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
+    "btrfs/stall_report/analysis.py": "the report's analysis of the recorded episodes, with a few reads of its own",
+}
+
+# What a cli.py or presenter.py may use although direct_io_problems reports
+# it: the terminal, argv, the exit status and argparse.
+CLI_ALLOWED: Final[frozenset[str]] = frozenset(
+    {"print", "sys.stdout", "sys.stderr", "sys.argv", "sys.exit", "argparse"}
+)
+
+# The roles whose hard I/O has a budget. adapters do I/O by design; domain
+# and application have none (test_repository_layers_obey_hexagonal_boundaries).
+IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wiring", "cli", "entry", "unlayered"})
+
+# Hard I/O lines per "<package> <role>" (see the module docstring and
+# tests/budgets.py). Only goes down; a missing key is 0.
+IO_BUDGETS: Final[dict[str, int]] = {
+    "bluetooth unlayered": 29,
+    "btrfs/bulk cli": 15,
+    "btrfs/bulk unlayered": 111,
+    "btrfs/chrome_cache cli": 8,
+    "btrfs/docker_gc cli": 29,
+    "btrfs/docker_volumes_nocow cli": 40,
+    "btrfs/snapshot cli": 19,
+    "btrfs/stall_monitord cli": 3,
+    "btrfs/stall_monitord unlayered": 52,
+    "btrfs/stall_report cli": 1,
+    "btrfs/stall_report unlayered": 4,
+    "cpu cli": 36,
+    "cst_core cli": 7,
+    "cst_core entry": 3,
+    "doctor cli": 1,
+    "swap cli": 3,
+    "toolchains cli": 64,
+    "vm cli": 83,
+}
+
+# Packages whose cli.py and presenter.py do no I/O, and their composition
+# point: the one module, besides the adapters, that imports adapters and
+# builds them. A package joins once hexagonal_problems() finds nothing in it.
+HEXAGONAL_PACKAGES: Final[dict[str, str]] = {}
+
+
 def layer_role(rel: str) -> LayerRole | None:
     """Classify a repository-relative path into its Hexagonal layer, or None."""
     if not rel.endswith(".py"):
@@ -110,6 +179,21 @@ def layer_role(rel: str) -> LayerRole | None:
     if filename == "application.py" or "application" in dirs:
         return "application"
     return None
+
+
+def module_role(rel: str) -> ModuleRole | None:
+    """The role of a production module of a package (None: it has none, see UNLAYERED_ALLOWED)."""
+    inner = layer_role(rel)
+    if inner is not None:
+        return inner
+    parts = rel.split("/")
+    filename, dirs = parts[-1], parts[:-1]
+    if filename == "adapters.py" or "adapters" in dirs:
+        return "adapters"
+    if not filename.endswith(".py") or filename == "__init__.py" or rel in ENTRY_MODULES:
+        return "entry"
+    named: dict[str, ModuleRole] = {"presenter.py": "presenter", "wiring.py": "wiring", "cli.py": "cli"}
+    return named.get(filename)
 
 
 def _is_dataclass_func(func: ast.expr) -> bool:
@@ -150,6 +234,11 @@ def _allowed_module(module: str) -> bool:
     return module in PURE_MODULES or module in PURE_NAMES or module.split(".", 1)[0] in REPO_PACKAGES
 
 
+def _extra_allowed(dotted: str, allowed: frozenset[str]) -> bool:
+    """`dotted` is one of the `allowed` names, or inside one of them."""
+    return any(dotted == a or dotted.startswith(a + ".") for a in allowed)
+
+
 def _allowed_use(dotted: str) -> bool:
     """A fully qualified name (os.path.join, time.time) inside the allow-list."""
     if dotted.split(".", 1)[0] in REPO_PACKAGES:
@@ -169,15 +258,20 @@ def _allowed_use(dotted: str) -> bool:
     return False
 
 
-def direct_io_problems(source: str, rel: str) -> list[str]:
-    """Imports and uses outside the inner layers' allow-list, and I/O builtins, in one module."""
+def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozenset()) -> list[str]:
+    """Imports and uses outside the inner layers' allow-list, and I/O builtins, in one module.
+
+    `allowed` adds names (builtins such as "print", modules, "sys.argv") that
+    are not reported, with their attributes; importing their module is fine.
+    """
     tree = ast.parse(source, filename=rel)
+    allowed_modules = {a.split(".", 1)[0] for a in allowed}
     problems: list[str] = []
     bound: dict[str, str] = {}  # local name -> fully qualified name
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if not _allowed_module(alias.name):
+                if not _allowed_module(alias.name) and alias.name not in allowed_modules:
                     problems.append(f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)")
                 bound[alias.asname or alias.name.split(".", 1)[0]] = (
                     alias.name if alias.asname else alias.name.split(".", 1)[0]
@@ -185,12 +279,14 @@ def direct_io_problems(source: str, rel: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
-                if not (_allowed_module(node.module) and (_allowed_use(full) or _allowed_module(full))):
+                if _extra_allowed(full, allowed):
+                    pass
+                elif not (_allowed_module(node.module) and (_allowed_use(full) or _allowed_module(full))):
                     problems.append(f"{rel}:{node.lineno}: imports {full} (reach the machine through a port)")
                 bound[alias.asname or alias.name] = full
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in IO_BUILTINS:
-            if node.func.id not in bound:
+            if node.func.id not in bound and node.func.id not in allowed:
                 problems.append(f"{rel}:{node.lineno}: {node.func.id}() does I/O (use a port)")
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
             name = _dotted(node)
@@ -200,7 +296,7 @@ def direct_io_problems(source: str, rel: str) -> list[str]:
             if head not in bound:
                 continue
             full = f"{bound[head]}.{rest}"
-            if not _allowed_use(full):
+            if not _allowed_use(full) and not _extra_allowed(full, allowed):
                 problems.append(f"{rel}:{node.lineno}: {full} does I/O (use a port)")
         if (
             isinstance(node, ast.Call)
@@ -263,6 +359,82 @@ def cli_code_lines(source: str) -> int:
         for node in body
         if not isinstance(node, (ast.Import, ast.ImportFrom))
     )
+
+
+def hard_io_lines(source: str, rel: str) -> list[int]:
+    """The lines where a module does I/O itself (CLI_ALLOWED aside, the bootstrap left out)."""
+    blanked = source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)  # same line numbers
+    found = direct_io_problems(blanked, rel, CLI_ALLOWED)
+    return sorted({int(p.split(":")[1]) for p in found})
+
+
+def _read(rel: str) -> str:
+    with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def package_modules() -> list[str]:
+    """Production Python files of the packages: package modules and their extensionless entries."""
+    return [rel for rel in production_python() if "/" in rel and not rel.startswith(".")]
+
+
+def io_measure(sources: dict[str, str]) -> dict[str, int]:
+    """Hard I/O lines per "<package> <role>" for the budgeted roles."""
+    out: dict[str, int] = {}
+    for rel, source in sources.items():
+        role = module_role(rel) or "unlayered"
+        if role not in IO_BUDGETED_ROLES:
+            continue
+        key = f"{package_of(rel)} {role}"
+        out[key] = out.get(key, 0) + len(hard_io_lines(source, rel))
+    return out
+
+
+def adapter_import_lines(source: str, rel: str) -> list[int]:
+    """Lines that import an adapters module (any package's) or a name from one."""
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(source, filename=rel)):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = ("." * node.level) + (node.module or "")
+            names = [base, *(f"{base}.{a.name}" for a in node.names)]
+        else:
+            continue
+        if any("adapters" in name.replace(".", " ").split() for name in names):
+            lines.append(node.lineno)
+    return sorted(set(lines))
+
+
+def hexagonal_problems(package: str, composition: str, sources: dict[str, str]) -> list[str]:
+    """What keeps `package` (its modules' sources by path) from the hexagonal rules, as text lines."""
+    problems: list[str] = []
+    if composition not in sources:
+        problems.append(f"{composition}: the composition point of {package} does not exist")
+    for rel, source in sorted(sources.items()):
+        role = module_role(rel)
+        if role == "adapters" or rel == composition:
+            continue
+        problems += [
+            f"{rel}:{n}: imports an adapter; only {composition} and the adapters may"
+            for n in adapter_import_lines(source, rel)
+        ]
+        if role in ("cli", "presenter"):
+            problems += [f"{rel}:{n}: does I/O itself (move it into an adapter)" for n in hard_io_lines(source, rel)]
+    return problems
+
+
+def private_imports(source: str, rel: str) -> list[str]:
+    """`from <repository module> import _name`: a private name used outside its module."""
+    problems: list[str] = []
+    for node in ast.walk(ast.parse(source, filename=rel)):
+        if not isinstance(node, ast.ImportFrom) or node.module in ("__future__",):
+            continue
+        ours = node.level > 0 or (node.module or "").split(".", 1)[0] in {*REPO_PACKAGES, "tests"}
+        for alias in node.names:
+            if ours and alias.name.startswith("_") and not alias.name.startswith("__"):
+                problems.append(f"{rel}:{node.lineno}: imports the private name {alias.name} from {node.module}")
+    return problems
 
 
 def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
@@ -427,9 +599,130 @@ class ArchitectureGateTest(unittest.TestCase):
             for rel, n in sorted(sizes.items())
             if n > CLI_CEILINGS[rel]
         ]
-        self.assertEqual(over, [], "cli.py grew: put new logic in domain or adapters")
+        self.assertEqual(over, [], "cli.py grew: put new logic in domain, application (with ports) or adapters")
         self.assertEqual(
             cli_code_lines('"""Doc."""\nimport os\nfrom a import (\n    b,\n)\n\n\ndef f():\n    return 1\n'), 2
+        )
+
+    def test_module_roles(self) -> None:
+        for rel, role in (
+            ("swap/domain.py", "domain"),
+            ("cst_core/adapters/files.py", "adapters"),
+            ("swap/adapters.py", "adapters"),
+            ("swap/presenter.py", "presenter"),
+            ("vm/wiring.py", "wiring"),
+            ("vm/cli.py", "cli"),
+            ("vm/__init__.py", "entry"),
+            ("vm/cst-vm", "entry"),
+            ("cst_core/installer.py", "entry"),
+            ("btrfs/bulk/steam.py", None),
+        ):
+            with self.subTest(rel=rel):
+                self.assertEqual(module_role(rel), role)
+
+    def test_every_package_module_has_a_role(self) -> None:
+        files = package_modules()
+        unlayered = sorted(rel for rel in files if module_role(rel) is None)
+        problems = [rel for rel in unlayered if rel not in UNLAYERED_ALLOWED]
+        self.assertEqual(
+            problems,
+            [],
+            "modules with no role: name them domain.py, ports.py, application.py, adapters.py, presenter.py, "
+            "wiring.py or cli.py (or put them in such a folder):\n" + "\n".join(problems),
+        )
+        stale = sorted(set(UNLAYERED_ALLOWED) - set(unlayered))
+        self.assertEqual(stale, [], "these have a role now (or are gone): remove them from UNLAYERED_ALLOWED")
+
+    def test_cli_allowed_names_are_not_io(self) -> None:
+        src = (
+            "import argparse\nimport sys\nfrom sys import argv\n"
+            "def main():\n    p = argparse.ArgumentParser()\n    print('x', file=sys.stderr)\n"
+            "    sys.stdout.write(argv[0])\n    sys.exit(2)\n"
+        )
+        self.assertEqual(hard_io_lines(src, "pkg/cli.py"), [])
+        self.assertTrue(direct_io_problems(src, "pkg/application.py"), "the inner layers still refuse them")
+        bad = "import os\nimport sys\ndef main():\n    sys.stdin.read()\n    return os.environ['A']\n"
+        self.assertEqual(hard_io_lines(bad, "pkg/cli.py"), [4, 5])
+
+    def test_the_bootstrap_is_not_counted(self) -> None:
+        self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])
+
+    def test_io_budgets(self) -> None:
+        measured = io_measure({rel: _read(rel) for rel in package_modules()})
+        problems = budget_problems(measured, IO_BUDGETS, "hard I/O lines")
+        self.assertEqual(
+            problems,
+            [],
+            "move the I/O into an adapter; measured table for IO_BUDGETS:\n" + format_table(measured),
+        )
+
+    def test_io_budget_keys(self) -> None:
+        got = io_measure(
+            {
+                "vm/cli.py": "import os\nos.getcwd()\nos.listdir('.')\n",
+                "vm/adapters.py": "import os\nos.getcwd()\n",
+                "btrfs/bulk/steam.py": "import os\nos.getcwd()\n",
+                "cst_core/installer.py": "import os\nos.geteuid()\n",
+            }
+        )
+        self.assertEqual(got, {"vm cli": 2, "btrfs/bulk unlayered": 1, "cst_core entry": 1})
+
+    def test_hexagonal_problems(self) -> None:
+        good = {
+            "vm/cli.py": "import sys\nfrom vm.wiring import build\ndef main():\n    print(build().run(sys.argv))\n",
+            "vm/wiring.py": "from vm.adapters import Host\nfrom vm.application import App\ndef build():\n    return App(Host())\n",
+            "vm/adapters.py": "import os\nfrom cst_core.adapters import files\nclass Host:\n    pass\n",
+            "vm/application.py": "class App:\n    pass\n",
+            "vm/presenter.py": "def render(x):\n    print(x)\n",
+        }
+        self.assertEqual(hexagonal_problems("p", "vm/wiring.py", good), [])
+        bad = dict(good)
+        bad["vm/cli.py"] = "import os\nfrom vm.adapters import Host\ndef main():\n    return os.getcwd()\n"
+        bad["vm/presenter.py"] = "from cst_core.adapters.files import read_text\n"
+        self.assertEqual(
+            hexagonal_problems("p", "vm/wiring.py", bad),
+            [
+                "vm/cli.py:2: imports an adapter; only vm/wiring.py and the adapters may",
+                "vm/cli.py:4: does I/O itself (move it into an adapter)",
+                "vm/presenter.py:1: imports an adapter; only vm/wiring.py and the adapters may",
+            ],
+        )
+        self.assertEqual(
+            hexagonal_problems("p", "vm/wiring.py", {"vm/cli.py": "from . import adapters\n"}),
+            [
+                "vm/wiring.py: the composition point of p does not exist",
+                "vm/cli.py:1: imports an adapter; only vm/wiring.py and the adapters may",
+            ],
+        )
+
+    def test_hexagonal_packages_follow_the_rules(self) -> None:
+        by_package: dict[str, dict[str, str]] = {}
+        for rel in package_modules():
+            by_package.setdefault(package_of(rel), {})[rel] = _read(rel)
+        problems = [
+            p
+            for pkg, comp in sorted(HEXAGONAL_PACKAGES.items())
+            for p in hexagonal_problems(pkg, comp, by_package.get(pkg, {}))
+        ]
+        self.assertEqual(problems, [], "\n".join(problems))
+        ready = sorted(
+            pkg
+            for pkg, sources in by_package.items()
+            if pkg not in HEXAGONAL_PACKAGES
+            and f"{pkg}/cli.py" in sources
+            and not hexagonal_problems(pkg, f"{pkg}/wiring.py", sources)
+        )
+        self.assertEqual(ready, [], "these packages follow the rules now: add them to HEXAGONAL_PACKAGES")
+
+    def test_no_private_name_crosses_a_module(self) -> None:
+        problems = [p for rel in repo_files() if is_python(rel) for p in private_imports(_read(rel), rel)]
+        self.assertEqual(problems, [], "make the name public (drop the underscore):\n" + "\n".join(problems))
+        self.assertEqual(
+            private_imports("from swap.domain import _x, y\nfrom . import _z\nfrom os import _exit\n", "a.py"),
+            [
+                "a.py:1: imports the private name _x from swap.domain",
+                "a.py:2: imports the private name _z from None",
+            ],
         )
 
     def test_repository_layers_obey_hexagonal_boundaries(self) -> None:

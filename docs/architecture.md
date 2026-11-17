@@ -32,8 +32,10 @@ for a program's commands). Only swap, doctor and `cst_core` have an
 application layer with ports; in the other packages `cli.py` orchestrates
 the commands and still does some I/O itself. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
-each `cli.py` so it only shrinks: new logic goes into `domain` (pure) or
-`adapters` (I/O).
+each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
+`application` (with ports) or `adapters` (I/O). The I/O left outside the
+adapters has a budget per package and layer that only goes down
+(`IO_BUDGETS`, see "Static gates beyond lint and types" below).
 
 ## Most helpers are Python scripts with no `.py` extension
 
@@ -60,7 +62,12 @@ when it lacks an option: the rule [reuse-primitives](../.agents/rules/reuse-prim
 
 All of them run in the unit suite:
 
-- `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules).
+- `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
+  - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table that only shrinks;
+  - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so);
+  - no module imports a private name (`_x`) from another module of the repository.
+- Budgets (`tests/budgets.py`) are counts per package and layer that only go down: a count above its entry fails, and a count below it fails too until the lower number is written down, so that what was removed cannot come back. A key missing from a table is 0. A failing gate prints the measured table to paste in.
 - `tests/test_distribution.py`: the manifest and the repository agree; every python-entry zipapp holds what it imports (AST import closure) and loads no code by path; modes fit the runner; entries with a known help mode run it from `/` with `/usr/bin/python3 -I`; sourced shell files exist. Its tier 1 twin (`test_11_...` in `tests/e2e/suites/suite_tier1_systemd.py`) installs the whole manifest for real and runs every entry as root and as a user.
 - `tests/test_bytecode.py`: every `python3 -I` that starts a CST program from the checkout (setup scripts, Python argv lists) passes `-B`, so no `__pycache__` lands in the checkout (as root it would be root's and block `git clean`); `-I -c` and `-I -` (inline code) are exempt.
 - `tests/test_docs.py`: every relative link and anchor in the Markdown files resolves; every document is in the AGENTS.md index; every skill in `.agents/skills` has a SKILL.md with its name and a description, every rule a description; `.claude/rules` and `.claude/skills` link to `.agents`.

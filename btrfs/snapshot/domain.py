@@ -319,7 +319,7 @@ def err_text(e: BaseException) -> str:
 
 
 # ---- btrfs ---------------------------------------------------------------------------
-class _SubvolInfo(TypedDict):
+class SubvolInfo(TypedDict):
     uuid: str
     parent_uuid: str | None
     generation: int
@@ -329,7 +329,7 @@ class _SubvolInfo(TypedDict):
 SHOW_LABELS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Generation": "generation", "Gen at creation": "cgen"}
 
 
-def parse_subvolume_show(text: str) -> _SubvolInfo:
+def parse_subvolume_show(text: str) -> SubvolInfo:
     """The four fields we use from `btrfs subvolume show`; ParseError on anything odd.
 
     Label lines are indented; the list after "Snapshot(s):" holds paths that are
@@ -364,7 +364,7 @@ def parse_subvolume_show(text: str) -> _SubvolInfo:
     }
 
 
-def other_parent(info: _SubvolInfo, source_uuid: str) -> str | None:
+def other_parent(info: SubvolInfo, source_uuid: str) -> str | None:
     """Why a subvolume with show() INFO is no snapshot of SOURCE_UUID (None = it is)."""
     if info["parent_uuid"] == source_uuid:
         return None
