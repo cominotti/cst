@@ -248,6 +248,7 @@ snap_install_runtime() {
     install_pending_alerts
     cst_install --component btrfs:snapshots
     systemctl daemon-reload
+    cst_mark btrfs:snapshots
 }
 
 # State of one SNAP_EXCLUDE entry: done | todo | create | aside | absent | -.
@@ -478,6 +479,7 @@ snap_activate() {
     cst_install --set "UUID=${uuid}" --set "OPTIONS=${opts}" --component btrfs:top-mount
     systemctl daemon-reload
     systemctl enable --now "${unit}.automount"
+    cst_mark btrfs:top-mount
     install -d -m 0700 "${SNAP_TOP}/${SNAP_DIR_NAME}"
     # Start the health check's clock now (not reset by re-running setup).
     install -d -m 0755 "${SNAP_STATE}"
@@ -527,7 +529,8 @@ snap_disable() {
     unit="$(systemd-escape --path "${SNAP_TOP}")"
     systemctl disable --now "${unit}.automount" 2>/dev/null || true
     systemctl stop "${unit}.mount" 2>/dev/null || true
-    rm -fv "${UNIT_DIR:?}/${unit:?}.mount" "${UNIT_DIR:?}/${unit:?}.automount"
+    # btrfs:top-mount: the two units of SNAP_TOP.
+    cst_remove --component btrfs:top-mount
     systemctl daemon-reload
     echo "Snapshots purged and their configuration removed (the subvolume exclusions stay;"
     echo "the restic repository on the NAS and ${SNAP_RESTIC_PW} are kept)."

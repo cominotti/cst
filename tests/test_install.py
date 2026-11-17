@@ -69,7 +69,7 @@ def entry(
     )
 
 
-class _MemoryTarget:
+class MemoryTarget:
     """InstallTargetPort in memory, recording writes; owners[path] = (uid, gid), links = paths that are links."""
 
     def __init__(self, files: Mapping[str, tuple[bytes, int]] | None = None) -> None:
@@ -93,6 +93,12 @@ class _MemoryTarget:
         self.owners.pop(path, None)
         self.links.discard(path)
         self.writes.append(path)
+
+    def remove(self, path: str) -> bool:
+        if path == self.fail_on:
+            raise WriteFailed(path, "Permission denied")
+        self.links.discard(path)
+        return self.files.pop(path, None) is not None
 
 
 class DomainTest(unittest.TestCase):
@@ -194,7 +200,7 @@ class InstallServiceTest(unittest.TestCase):
         self.a = entry("m/a", "/etc/a")
         self.t = entry("m/t.in", "/etc/t")
         self.u = entry("m/u", "~/.config/u", owner="user")
-        self.target = _MemoryTarget()
+        self.target = MemoryTarget()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src])
 
     def test_plan_changes_nothing_then_install_then_second_run_is_a_no_op(self) -> None:
@@ -520,7 +526,13 @@ class InstallerCliTest(unittest.TestCase):
         self.assertEqual(self.files(), {}, "plan wrote something")
         first = self.cli("install", *sel)
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(sorted(self.files()), sorted(e.dest.lstrip("/") for e in want))
+        # The files, and the install record that lists them.
+        self.assertEqual(
+            sorted(self.files()),
+            sorted(
+                [*(e.dest.lstrip("/") for e in want), "var/lib/cst/installed.json", "var/lib/cst/installed.json.lock"]
+            ),
+        )
         self.assertEqual(self.cli("check", *sel).returncode, 0)
         dests = self.cli("dests", "--component", "btrfs:snapshots").stdout.decode().split()
         self.assertEqual(dests, [e.dest for e in want])

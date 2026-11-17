@@ -155,7 +155,9 @@ SRC="$(dirname "${SELF}")/btrfs"
 source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 SYSCTL_FILE="/etc/sysctl.d/90-btrfs-writeback.conf"
+SYSCTL_SRC=btrfs/sysctl/90-btrfs-writeback.conf
 RECLAIM_FILE="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+RECLAIM_SRC=btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in
 BELOW_DROPIN="${UNIT_DIR}/below.service.d/10-cst.conf"
 DATA_DIR="/var/log/btrfs-stall-monitor"
 DEGRADED="${SRC}/btrfs-degraded-boot-setup.sh"
@@ -442,6 +444,7 @@ install_pending_alerts() {
     if [[ -n "${target_user}" && "${target_user}" != root ]]; then
         systemctl --user -M "${target_user}@" daemon-reload 2>/dev/null || true
     fi
+    cst_mark btrfs:alerts
 }
 
 # remove_old_reader: the reader and user unit of versions named f44-tools.
@@ -495,12 +498,9 @@ migrate_old_alerts() {
 }
 
 remove_pending_alerts() {
-    local -a files
     systemctl --global disable "${PENDING_UNIT}" 2>/dev/null || true
     # btrfs:alerts: btrfs-notify, the reader and its user unit.
-    mapfile -t files < <(cst_installed_dests --component btrfs:alerts)
-    (( ${#files[@]} )) || { echo "cannot list the files of btrfs:alerts" >&2; exit 1; }
-    rm -fv "${files[@]}"
+    cst_remove --component btrfs:alerts
     remove_old_reader
     rm -rf "${ALERTS_DIR}" "${OLD_ALERTS_DIR}"
 }
@@ -751,6 +751,7 @@ docker_gc() {
             if systemctl -q is-active docker.service; then
                 systemctl restart docker-gc-recorder.service
             fi
+            cst_mark btrfs:docker-gc
             echo "docker-gc enabled: image use is recorded from now on; weekly runs (Monday ~11:00)."
             echo "Timed image removal starts 14 days from now. Preview: ${PROG} docker-gc status"
             echo "To clear the current backlog once (asks first): ${PROG} docker-gc cleanup-now"
@@ -769,12 +770,8 @@ docker_gc() {
                 echo "To also remove its program, units and recorded state: ${PROG} docker-gc disable --purge"
                 return 0
             fi
-            mapfile -t files < <(docker_gc_files)
-            (( ${#files[@]} && ${#units[@]} )) ||
-                { echo "docker-gc disable --purge: cannot list its installed files" >&2; exit 1; }
-            for f in "${files[@]}"; do
-                rm -fv "${f}"
-            done
+            (( ${#units[@]} )) || { echo "docker-gc disable --purge: cannot list its installed files" >&2; exit 1; }
+            cst_remove --component btrfs:docker-gc
             if [[ -e "${DOCKER_GC_STATE}" ]]; then
                 rm -rf "${DOCKER_GC_STATE}"
                 echo "removed '${DOCKER_GC_STATE}' (the recorded image use)"
@@ -832,11 +829,11 @@ stop_monitoring() {
 }
 
 uninstall() {
-    local dest
-    local -a dests units
-    mapfile -t dests < <(cst_installed_dests --component btrfs:core)
+    local -a srcs units
+    # btrfs:core, but the sysctl and tmpfiles files: removed below, each with its own care.
+    mapfile -t srcs < <(cst_installer srcs --component btrfs:core | grep -vxF -e "${SYSCTL_SRC}" -e "${RECLAIM_SRC}")
     mapfile -t units < <(cst_component_units btrfs:core)
-    (( ${#dests[@]} && ${#units[@]} )) || { echo "uninstall: cannot list the files of btrfs:core" >&2; exit 1; }
+    (( ${#srcs[@]} && ${#units[@]} )) || { echo "uninstall: cannot list the files of btrfs:core" >&2; exit 1; }
     stop_monitoring
     # New Docker volumes copy-on-write again; existing NOCOW files stay as they are.
     systemctl disable docker-volumes-nocow.service 2>/dev/null || true
@@ -846,10 +843,7 @@ uninstall() {
     # This script enabled below's recorder; the package itself stays layered.
     systemctl disable --now below.service 2>/dev/null || true
     remove_old_units
-    # btrfs:core, but the sysctl and tmpfiles files: removed below, each with its own care.
-    for dest in "${dests[@]}"; do
-        [[ "${dest}" == "${SYSCTL_FILE}" || "${dest}" == "${RECLAIM_FILE}" ]] || rm -fv "${dest}"
-    done
+    cst_remove "${srcs[@]}"
     install_scrub_limit ""
     # The snapshot component (left alone here) still alerts through btrfs-notify,
     # and its alerts at boot still need the login-time reader (brought to the
@@ -861,9 +855,10 @@ uninstall() {
     else
         remove_pending_alerts
     fi
-    rm -fv "${BELOW_DROPIN}" "${OLD_BELOW_DROPIN}"
+    cst_remove --component btrfs:below
+    rm -fv "${OLD_BELOW_DROPIN}"
     if grep -qs 'Managed by btrfs-setup.sh' "${RECLAIM_FILE}"; then
-        rm -fv "${RECLAIM_FILE}"
+        cst_remove "${RECLAIM_SRC}"
         echo "Automatic reclaim stays enabled in sysfs until the next reboot."
     elif [[ -e "${RECLAIM_FILE}" ]]; then
         echo "Kept ${RECLAIM_FILE}: not created by this script."
@@ -875,7 +870,7 @@ uninstall() {
     fi
     systemctl daemon-reload
     if [[ -e "${SYSCTL_FILE}" ]]; then
-        rm -fv "${SYSCTL_FILE}"
+        cst_remove "${SYSCTL_SRC}"
         # Restore the tuned profile values (dirty_ratio) at runtime.
         systemctl try-restart tuned.service || true
     fi
@@ -989,6 +984,9 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
         echo "below: staged for the next boot (cannot be applied live while another deployment is staged)."
         echo "       Reboot, then re-run this script to enable it."
     fi
+    # Every component of install is complete (the record says done; see cst doctor).
+    cst_mark btrfs:core
+    if (( with_below )); then cst_mark btrfs:below; fi
     echo
     echo "Overview:            ${PROG} status"
     echo "Stalls (as ${target_user:-your user}, also in toolbox): btrfs-stall-report --since '5 min ago'"

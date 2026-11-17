@@ -13,8 +13,15 @@ Usage:
   installer.py install [OPTIONS] SRC...   unchanged:/written: per file, as it goes
   installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file; changes nothing
   installer.py check [OPTIONS] SRC...     exit 0 when every file is current, else 1; prints nothing
-  installer.py text DEST MODE [--root DIR]
-                                          generated content (stdin) to DEST, same rules
+  installer.py text DEST MODE [--root DIR] [--component C]
+                                          generated content (stdin) to DEST, same rules; with
+                                          --component, listed in the install record under C
+  installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
+                                          removed: per file that was there
+  installer.py remove-text DEST... [--root DIR]
+                                          the same for generated files
+  installer.py mark --component C done    C's setup command finished (the record says done; a
+                                          component stays "pending" from a write until then)
   installer.py text-plan DEST MODE [--root DIR]
                                           unchanged:/would write: for that content; changes nothing
   installer.py payload SRC                the bytes install writes for SRC, to stdout
@@ -27,6 +34,9 @@ OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
          --component C (select entries instead of naming them; C as in
          COMPONENTS, e.g. btrfs:core: every file one command installs)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
+Every file install writes or finds current is listed in the install record
+(/var/lib/cst/installed.json for root's files, ~/.local/state/cst/installed.json
+for the user's, under --root when staged): see cst_core/domain/record.py.
 A @KEY@ of a template without a --set value, or a --set KEY no template of the
 call uses, is a usage error (exit 2) and nothing is written. A file that
 cannot be written ends the run with "cst installer: cannot write DEST: REASON"
@@ -44,13 +54,19 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
     _cst_sys.path.insert(0, _cst_root)
 
 import argparse
-from collections.abc import Sequence
-import os
+from collections.abc import Iterable, Sequence
 import sys
 from typing import NoReturn
 
 from cst_core import wiring
-from cst_core.application.install import InstallRefused, InstallRequest, InstallService, staged
+from cst_core.application.install import (
+    InstallRefused,
+    InstallRequest,
+    InstallService,
+    Placement,
+    record_file,
+    staged,
+)
 from cst_core.domain.install import (
     COMPONENTS,
     INSTALL_MANIFEST,
@@ -79,7 +95,21 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> _Parser:
     p = _Parser(prog=NAME, add_help=False)
     p.add_argument(
-        "command", choices=["install", "plan", "check", "text", "text-plan", "payload", "dests", "srcs", "help"]
+        "command",
+        choices=[
+            "install",
+            "plan",
+            "check",
+            "text",
+            "text-plan",
+            "payload",
+            "dests",
+            "srcs",
+            "remove",
+            "remove-text",
+            "mark",
+            "help",
+        ],
     )
     p.add_argument("args", nargs="*")
     p.add_argument("--home")
@@ -128,50 +158,110 @@ def _entries(
     return tuple(by_src[s] for s in srcs)
 
 
-def _text(service: InstallService, command: str, args: Sequence[str], root: str) -> str:
+def _own() -> tuple[Owner, str, bool]:
+    """Who this process writes as: root (root's record) or a user (their record, in their home)."""
+    as_root, home = wiring.installer_identity()
+    return ("root" if as_root else "user"), home, as_root
+
+
+def _text_place(dest: str, mode: int, component: str | None, a: argparse.Namespace, *, recorded: bool) -> Placement:
+    """Where generated text goes (staged under --root), and its record (when recorded)."""
+    owner, home, _ = _own()
+    return Placement(
+        path=staged(a.root, dest),
+        dest=dest,
+        record=record_file(owner, a.home or home, a.root) if recorded else "",
+        component=component or "",
+        src=None,
+        kind="text",
+        owner=owner,
+        mode=mode,
+    )
+
+
+def _text(service: InstallService, a: argparse.Namespace) -> str:
     """text (write) or text-plan (only judge) generated content from stdin; the report line."""
-    if len(args) != 2:
-        raise _UsageError(f"{command} DEST MODE")
-    mode = OctalMode.parse(args[1]).bits
-    as_root = os.geteuid() == 0
+    if len(a.args) != 2:
+        raise _UsageError(f"{a.command} DEST MODE")
+    if a.component is not None and a.component not in COMPONENTS:
+        raise _UsageError(f"--component {a.component!r}: no such component")
+    mode = OctalMode.parse(a.args[1]).bits
     # Generated text as root goes to a root destination; as a user (cst_install_text DEST MODE USER), to theirs.
-    owner: Owner = "root" if as_root else "user"
-    dest = staged(root, args[0])
+    place = _text_place(a.args[0], mode, a.component, a, recorded=a.component is not None)
+    as_root = place.owner == "root"
     data = sys.stdin.buffer.read()
-    if command == "text":
-        return service.write_if_changed(dest, data, mode, owner, as_root=as_root)
-    current = service.is_current(dest, data, mode, owner, as_root=as_root)
-    return f"unchanged: {dest}" if current else f"would write: {dest}"
+    if a.command == "text":
+        written = service.put(place, data, as_root=as_root)
+        return f"{'written:  ' if written else 'unchanged:'} {place.path}"
+    current = service.is_current(place.path, data, mode, place.owner, as_root=as_root)
+    return f"unchanged: {place.path}" if current else f"would write: {place.path}"
 
 
-def _command(service: InstallService, a: argparse.Namespace) -> int:
-    """One command of the parsed command line; its exit status."""
-    if a.command in ("text", "text-plan"):
-        print(_text(service, a.command, a.args, a.root))
-        return 0
-    entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
-    if a.command in ("dests", "srcs"):
-        for e in entries:
-            if a.command == "srcs":
-                print(e.src)
-            else:
-                print(expand_dest(e.dest, a.home) if e.dest.startswith("~") and a.home else e.dest)
-        return 0
-    if a.command == "payload":
-        if len(entries) != 1:
-            raise _UsageError("payload SRC (one file)")
-        sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
-        return 0
-    req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=os.geteuid() == 0)
+def _mark(service: InstallService, a: argparse.Namespace) -> int:
+    """mark --component C done: the record of C's owner says done."""
+    if a.args != ["done"] or a.component not in COMPONENTS:
+        raise _UsageError("mark --component C done")
+    owner = next(e.owner for e in INSTALL_MANIFEST if e.component == a.component)
+    _, home, as_root = _own()
+    if owner == "user" and as_root and not a.root:
+        raise InstallRefused(f"{a.component}: belongs to the user; mark it as the user, not as root")
+    service.mark(record_file(owner, a.home or home, a.root), a.component)
+    return 0
+
+
+def _listing(command: str, entries: Sequence[InstallEntry], home: str | None) -> int:
+    """dests or srcs: one line per entry."""
+    for e in entries:
+        if command == "srcs":
+            print(e.src)
+        else:
+            print(expand_dest(e.dest, home) if e.dest.startswith("~") and home else e.dest)
+    return 0
+
+
+def _stream(lines: Iterable[str]) -> int:
+    """Print each report line as it comes (a later failure still leaves the earlier ones on screen)."""
+    for line in lines:
+        print(line, flush=True)
+    return 0
+
+
+def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[InstallEntry]) -> int:
+    """install, remove, plan or check of manifest entries."""
+    req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=_own()[2])
+    if a.command == "remove":
+        if any(e.owner == "user" for e in entries) and req.as_root and not req.root:
+            raise InstallRefused("files of the user are removed as the user (cst_remove_as USER), not as root")
+        return _stream(service.remove([service.placement(e, req) for e in entries]))
     if a.command == "install":
-        for line in service.install(entries, req):
-            print(line, flush=True)
-        return 0
+        return _stream(service.install(entries, req))
     lines, todo = service.plan(entries, req)
     if a.command == "plan":
         print("\n".join(lines))
         return 0
     return 0 if todo == 0 else 1
+
+
+def _command(service: InstallService, a: argparse.Namespace) -> int:
+    """One command of the parsed command line; its exit status."""
+    if a.command in ("text", "text-plan"):
+        print(_text(service, a))
+        return 0
+    if a.command == "mark":
+        return _mark(service, a)
+    if a.command == "remove-text":
+        if not a.args:
+            raise _UsageError("remove-text DEST...")
+        return _stream(service.remove([_text_place(d, 0, None, a, recorded=True) for d in a.args]))
+    entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
+    if a.command in ("dests", "srcs"):
+        return _listing(a.command, entries, a.home)
+    if a.command == "payload":
+        if len(entries) != 1:
+            raise _UsageError("payload SRC (one file)")
+        sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
+        return 0
+    return _files(service, a, entries)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

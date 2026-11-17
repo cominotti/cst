@@ -20,7 +20,8 @@ _cst_installer_as() {
     local user="$1"
     shift
     local -a as=()
-    [[ -z "${user}" ]] || as=(runuser -u "${user}" --)
+    # The current user needs no runuser (which only root may call).
+    [[ -z "${user}" || "${user}" == "$(id -un)" ]] || as=(runuser -u "${user}" --)
     CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" "${as[@]}" /usr/bin/python3 -I -B "${CST_INSTALLER}" "$@"
 }
 
@@ -29,9 +30,31 @@ cst_installer() {
     _cst_installer_as "" "$@"
 }
 
-# cst_install [--set KEY=VALUE]... SRC...: root-owned manifest files.
+# cst_install [--set KEY=VALUE]... (--component C | SRC...): root-owned
+# manifest files. Each is listed in the install record (cst_core/domain/record.py);
+# a component is "pending" there until cst_mark says its setup finished.
 cst_install() {
     cst_installer install "$@"
+}
+
+# cst_mark COMPONENT: its setup command finished (the record says done; a
+# crash between the install and this leaves it pending: cst doctor says so).
+cst_mark() {
+    cst_installer mark --component "$1" "done"
+}
+
+# cst_remove (--component C | SRC...): root-owned manifest files removed
+# (a link itself), with their lines in the install record; `removed:   DEST`
+# for each that was there. The files are the manifest's, so it also works
+# for an install from before the record.
+cst_remove() {
+    cst_installer remove "$@"
+}
+
+# cst_remove_text DEST...: generated files (cst_install_text with a
+# component) removed, with their record lines.
+cst_remove_text() {
+    cst_installer remove-text "$@"
 }
 
 # cst_install_as USER [--set KEY=VALUE]... SRC...: files of USER's
@@ -45,16 +68,41 @@ cst_install_as() {
     _cst_installer_as "${user}" install --home "${home}" "$@"
 }
 
-# _cst_installer_text COMMAND DEST MODE [OWNER] < content: installer.py text
+# _cst_user_home USER: USER's home folder (an error when there is none).
+_cst_user_home() {
+    local home
+    home="$(getent passwd "$1" | cut -d: -f6)"
+    [[ -n "${home}" ]] || { echo "cst-install.bash: no home folder for user '$1'" >&2; return 1; }
+    printf '%s\n' "${home}"
+}
+
+# cst_mark_as USER COMPONENT / cst_remove_as USER (--component C | SRC...):
+# cst_mark and cst_remove for a component of USER's home, run as USER.
+cst_mark_as() {
+    local home
+    home="$(_cst_user_home "$1")" || return 1
+    _cst_installer_as "$1" mark --home "${home}" --component "$2" "done"
+}
+cst_remove_as() {
+    local user="$1" home
+    shift
+    home="$(_cst_user_home "${user}")" || return 1
+    _cst_installer_as "${user}" remove --home "${home}" "$@"
+}
+
+# _cst_installer_text COMMAND DEST MODE [OWNER [COMPONENT]] < content: installer.py text
 # or text-plan, as OWNER unless OWNER is root (the default).
 _cst_installer_text() {
     local command="$1" dest="$2" mode="$3" owner="${4:-root}" user=""
+    local -a comp=()
     [[ "${owner}" == root ]] || user="${owner}"
-    _cst_installer_as "${user}" "${command}" "${dest}" "${mode}"
+    [[ -z "${5:-}" ]] || comp=(--component "$5")
+    _cst_installer_as "${user}" "${command}" "${dest}" "${mode}" "${comp[@]}"
 }
 
-# cst_install_text DEST MODE [OWNER] < content: generated text (not a file of
+# cst_install_text DEST MODE [OWNER [COMPONENT]] < content: generated text (not a file of
 # CST), with the same rules. OWNER other than root: written as that user.
+# COMPONENT: listed in the install record under it (cst_remove_text removes it).
 cst_install_text() {
     _cst_installer_text text "$@"
 }

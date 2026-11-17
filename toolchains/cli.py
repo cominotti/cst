@@ -28,7 +28,9 @@ from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import masked_refusal
+from cst_core.ports import WriteFailed
 from toolchains.adapters import (
+    AUTO_COMPONENT,
     PROG,
     where_text,
     Program,
@@ -80,6 +82,11 @@ from toolchains.adapters import (
     wrapper_path,
     write_cfg,
     write_state,
+    forget_auto_files,
+    put_auto_copy,
+    put_auto_unit,
+    put_wrapper,
+    record_done,
 )
 from toolchains.domain import (
     ANY_HEADER,
@@ -1326,22 +1333,16 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
         raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
     changed = False
     for rel, text in copies().items():
-        if st[rel] != "ok":
-            write_atomic(os.path.join(home, rel), text, mode=0o755 if rel == PROG_REL else 0o644)
-            say(f"written:   ~/{rel}")
-        else:
-            say(f"unchanged: ~/{rel}")
+        say(f"{'written:  ' if put_auto_copy(home, rel, text) else 'unchanged:'} ~/{rel}")
     for name, render in UNITS.items():
-        if st[name] != "ok":
-            write_atomic(os.path.join(home, UNIT_DIR_REL, name), render(), mode=0o644)
-            say(f"written:   {label(name)}")
-            changed = True
-        else:
-            say(f"unchanged: {label(name)}")
+        put = put_auto_unit(home, name, render())
+        say(f"{'written:  ' if put else 'unchanged:'} {label(name)}")
+        changed = changed or put
     if changed:
         systemctl("daemon-reload", check=True)
     systemctl("enable", "--now", TIMER, check=True)
     say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
+    record_done(home, AUTO_COMPONENT)
     if turned_off(home):
         os.unlink(os.path.join(home, OFF_REL))
         say(f"removed:   ~/{OFF_REL} (snapshots setup keeps it enabled again)")
@@ -1395,6 +1396,7 @@ def cmd_auto_off(home: str, now: float) -> int:
             say(f"removed:   ~/{rel}")
         elif st[rel] == "conflict":
             say(f"left alone: ~/{rel} (not written by CST)", 4, err=True)
+    forget_auto_files(home)
     try:
         os.rmdir(os.path.join(home, LIB_REL))  # only when empty (bluetooth keeps its watcher there)
     except OSError:
@@ -1820,19 +1822,15 @@ def install_wrapper(home: str, values: WrapperValues) -> int:
             err=True,
         )
         return 1
-    st = wrapper_state(home, text)
-    if st == "conflict":
+    if wrapper_state(home, text) == "conflict":
         say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
         return 1
-    if st == "ok":
-        say(f"kept:      {path} (sccache wrapper)")
-        return 0
     try:
-        write_atomic(path, text, mode=0o755)
-    except OSError as e:
-        say(f"{NAME}: cannot write {path}: {e.strerror or e}", 3, err=True)
+        written = put_wrapper(home, path, text, values.record())
+    except WriteFailed as e:
+        say(f"{NAME}: {e}", 3, err=True)
         return 1
-    say(f"written:   {path} (sccache wrapper, {values})")
+    say(f"written:   {path} (sccache wrapper, {values})" if written else f"kept:      {path} (sccache wrapper)")
     return 0
 
 

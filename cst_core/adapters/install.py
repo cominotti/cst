@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: MPL-2.0
 """Local files for the install use case: atomic writes, modes, root ownership, SELinux labels."""
 
+from collections.abc import Callable
+import hashlib
 import os
 import stat
 
 from cst_core.adapters.files import write_bytes_atomic
+from cst_core.adapters.locks import take_lock
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
+from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
 from cst_core.ports import WriteFailed
 
 
@@ -46,3 +50,77 @@ class LocalInstallTarget:
             write_bytes_atomic(path, data, mode=mode)
         except OSError as e:
             raise WriteFailed(path, e.strerror or str(e)) from None
+
+    def remove(self, path: str) -> bool:
+        """unlink(2): a link is removed itself; False when nothing is there; WriteFailed on an error."""
+        path = checked_path(path)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            raise WriteFailed(path, e.strerror or str(e)) from None
+        return True
+
+
+class JsonInstallRecord:
+    """InstallRecordPort on JSON files: written atomically (0644, folders 0755) under a lock file
+    next to the record (RECORD.lock), so two installs never lose each other's lines."""
+
+    def read(self, path: str) -> InstallRecord | None:
+        """parse_record of the file; None when there is no file."""
+        try:
+            with open(checked_path(path), encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError as e:
+            raise RecordFormatError(f"not UTF-8 ({e.reason})") from None
+        return parse_record(text)
+
+    def update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> bool:
+        """Read, change, write back if different, under RECORD.lock."""
+        path = checked_path(path)
+        folder = os.path.dirname(path)
+        try:
+            _make_folders(folder)
+            fd = take_lock(path + ".lock", wait=True, mode=0o644)
+        except OSError as e:
+            raise WriteFailed(path, e.strerror or str(e)) from None
+        assert fd is not None  # wait=True never returns None
+        try:
+            try:
+                old = self.read(path)
+            except RecordFormatError as e:
+                if e.newer:
+                    raise
+                old = None  # not a record (cut short, edited by hand): started again, the next install fills it
+            before = old or EMPTY_RECORD
+            after = change(before)
+            if render_record(after) == render_record(before) and (old is not None or after == EMPTY_RECORD):
+                return False  # no change; and no empty record where there was none (a mark with nothing listed)
+            write_bytes_atomic(path, render_record(after).encode("utf-8"), mode=0o644)
+            return True
+        except OSError as e:
+            raise WriteFailed(path, e.strerror or str(e)) from None
+        finally:
+            os.close(fd)
+
+    def sha256(self, data: bytes) -> str:
+        """hashlib.sha256 in hex."""
+        return hashlib.sha256(data).hexdigest()
+
+
+def _make_folders(folder: str) -> None:
+    """folder and its missing parents, each 0755 whatever the umask (sudo's 077 would make them 0700,
+    and cst doctor reads the record as a user)."""
+    missing: list[str] = []
+    while folder and not os.path.isdir(folder):
+        missing.append(folder)
+        folder = os.path.dirname(folder)
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o755)
+        except FileExistsError:
+            continue
+        os.chmod(d, 0o755)

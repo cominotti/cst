@@ -32,10 +32,13 @@ from cst_core.adapters.files import (
     write_atomic,
 )
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runtime import install_payload, restore_default_signals
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.runtime import checkout_commit, checkout_root, install_payload, restore_default_signals
+from cst_core.application.install import InstallService, Placement
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
+from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
@@ -116,6 +119,10 @@ SNAPSHOT_SETTLE = int(os.environ.get("CST_VM_SNAPSHOT_SETTLE") or 600)
 UNIT_DIR = os.environ.get("CST_VM_UNIT_DIR") or "/etc/systemd/system"  # override: tests
 
 SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"].dest  # as `install` places it
+
+# The install record that lists what backup-timer on writes (override: tests).
+INSTALL_RECORD = os.environ.get("CST_VM_INSTALL_RECORD") or ROOT_RECORD
+TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
 
 # True during the merge back of a NAS backup: every child then runs in its own
 # session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
@@ -536,6 +543,50 @@ def timer_files(entry_file: str) -> dict[str, tuple[bytes, int]]:
         os.path.join(UNIT_DIR, SERVICE): (render_service(SBIN_COPY, stop_timeout()).encode(), 0o644),
         os.path.join(UNIT_DIR, TIMER): (render_timer().encode(), 0o644),
     }
+
+
+def timer_installer(entry_file: str) -> InstallService:
+    """The installer's use case for backup-timer's files: written only when they changed, and listed in
+    the install record (INSTALL_RECORD) under the component vm:backup-timer."""
+    return InstallService(
+        LocalInstallTarget(),
+        lambda e: install_payload(e.src, entry_file),
+        record=JsonInstallRecord(),
+        commit=checkout_commit(checkout_root(entry_file)),
+    )
+
+
+def install_timer_files(
+    files: Mapping[str, tuple[bytes, int]], states: Mapping[str, UnitFileState], entry_file: str
+) -> None:
+    """Write (through the installer) each of backup-timer's files that is not current, and say so.
+    Its own refusals (a foreign or masked file) come first, in cmd_timer."""
+    svc = timer_installer(entry_file)
+    as_root = os.geteuid() == 0
+    for p, (text, mode) in files.items():
+        program = p == SBIN_COPY
+        place = Placement(
+            path=p,
+            dest=p,
+            record=INSTALL_RECORD,
+            component=TIMER_COMPONENT,
+            src="vm/cst-vm" if program else None,
+            kind="python-entry" if program else "text",
+            owner="root",
+            mode=mode,
+        )
+        if svc.put(place, text, as_root=as_root):
+            print(f"  {'installed' if states[p] == 'missing' else 'updated'}: {p}")
+
+
+def timer_record_done(entry_file: str) -> None:
+    """backup-timer on finished: the record says vm:backup-timer is complete."""
+    timer_installer(entry_file).mark(INSTALL_RECORD, TIMER_COMPONENT)
+
+
+def forget_timer_files(entry_file: str, removed: Sequence[str]) -> None:
+    """backup-timer off removed these files: the record no longer lists them."""
+    timer_installer(entry_file).forget(INSTALL_RECORD, removed)
 
 
 def timer_file_states(files: Mapping[str, tuple[bytes, int]], instance_timer: str) -> dict[str, UnitFileState]:

@@ -6,7 +6,10 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Callable, Mapping, Sequence
+import dataclasses
+import hashlib
 import io
+import json
 import os
 import shutil
 import signal
@@ -22,6 +25,8 @@ sys.dont_write_bytecode = True
 
 from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.application.install import InstallService
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
@@ -92,6 +97,12 @@ OLD_DROPIN = """\
 [Slice]
 MemoryLow=48G
 """
+
+
+def _installer() -> InstallService:
+    """The installer's use case on real files (the tests' folders), with a record port: swap writes its
+    files through it, and lists them in env.install_record when a test sets one."""
+    return InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
 
 
 # 1023 KiB of RAM: 20 % of it, and 85 % of that, do not divide evenly.
@@ -320,6 +331,7 @@ class StatusMathTest(unittest.TestCase):
             LocalFileSystemAdapter(),
             _FakeSystemd(os.path.join(proc, "swaps"), "/dev/dm-0"),
             _FakeSwapSystem(proc, size_bytes=SwapHardwareSpec().expected_size_bytes),
+            _installer(),
         )
 
     def settings_output(self, wsf: str, exp_on: bool) -> tuple[list[list[str]], str]:
@@ -459,6 +471,7 @@ class MarkerTest(unittest.TestCase):
             self.fs,
             _FakeSystemd(swaps, "/dev/dm-0"),
             _FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
+            _installer(),
         )
 
     def tearDown(self) -> None:
@@ -859,6 +872,39 @@ class _SwapScratch(unittest.TestCase):
 class SwapApplicationTest(_SwapScratch):
     """End-to-end application service and CLI tests inside temporary directories."""
 
+    def test_apply_lists_its_files_in_the_install_record(self) -> None:
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        env = dataclasses.replace(self.env, install_record=record)
+        first = b""
+        for n in (1, 2):
+            fs = self._fs(mapper_present=n == 2)
+            systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+            system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+            service = SwapApplicationService(env, fs, systemd, system, _installer())
+            err = io.StringIO()
+            self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 0, err.getvalue())
+            with open(record, "rb") as f:
+                data = f.read()
+            if n == 1:
+                first = data
+            else:
+                self.assertEqual(data, first, "a second apply that changes nothing rewrote the record")
+        rec = json.loads(first)
+        # Listed under their real destinations (not the test's folder), as `cst doctor` reads them.
+        self.assertEqual(
+            sorted(rec["files"]),
+            [
+                "/etc/sysctl.d/99-swap-tuning.conf",
+                "/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+                "/etc/tmpfiles.d/zswap.conf",
+            ],
+        )
+        self.assertEqual(rec["components"], {"swap:core": "done"})
+        with open(env.sysctl_conf, "rb") as f:
+            self.assertEqual(
+                rec["files"]["/etc/sysctl.d/99-swap-tuning.conf"]["sha256"], hashlib.sha256(f.read()).hexdigest()
+            )
+
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
         os.makedirs(os.path.join(self.env.etc_dir, "sysctl.d"), exist_ok=True)
@@ -867,7 +913,7 @@ class SwapApplicationTest(_SwapScratch):
         fs = self._fs(mapper_present=False)
         systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
         system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system)
+        service = SwapApplicationService(self.env, fs, systemd, system, _installer())
 
         # 1. plan changes nothing.
         plan_out = io.StringIO()
@@ -899,7 +945,7 @@ class SwapApplicationTest(_SwapScratch):
         fs2 = self._fs(mapper_present=True)
         systemd2 = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs2)
         system2 = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service2 = SwapApplicationService(self.env, fs2, systemd2, system2)
+        service2 = SwapApplicationService(self.env, fs2, systemd2, system2, _installer())
 
         again_out, again_err = io.StringIO(), io.StringIO()
         self.assertEqual(render_apply(service2.apply_changes(), out=again_out, err=again_err), 0, again_err.getvalue())
@@ -926,7 +972,9 @@ class SwapApplicationTest(_SwapScratch):
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, bad_size_sys).apply_changes(), out=io.StringIO(), err=err
+                SwapApplicationService(self.env, fs, systemd, bad_size_sys, _installer()).apply_changes(),
+                out=io.StringIO(),
+                err=err,
             ),
             1,
         )
@@ -937,7 +985,9 @@ class SwapApplicationTest(_SwapScratch):
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, bad_fs_sys).apply_changes(), out=io.StringIO(), err=err
+                SwapApplicationService(self.env, fs, systemd, bad_fs_sys, _installer()).apply_changes(),
+                out=io.StringIO(),
+                err=err,
             ),
             1,
         )
@@ -950,7 +1000,9 @@ class SwapApplicationTest(_SwapScratch):
         err = io.StringIO()
         self.assertEqual(
             render_apply(
-                SwapApplicationService(self.env, fs, systemd, good_sys).apply_changes(), out=io.StringIO(), err=err
+                SwapApplicationService(self.env, fs, systemd, good_sys, _installer()).apply_changes(),
+                out=io.StringIO(),
+                err=err,
             ),
             1,
         )
@@ -968,7 +1020,7 @@ class SwapApplicationTest(_SwapScratch):
         fs = self._fs()
         systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
         system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(self.env, fs, systemd, system)
+        service = SwapApplicationService(self.env, fs, systemd, system, _installer())
 
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(render_apply(service.apply_changes(), out=out, err=err), 0, err.getvalue())
@@ -984,6 +1036,7 @@ class SwapApplicationTest(_SwapScratch):
             self._fs(),
             _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0"),
             _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            _installer(),
         )
         with self.assertRaises(MissingDesiredFileError):
             service.plan_report()
@@ -1120,7 +1173,7 @@ class SwapApplyOutputTest(_SwapScratch):
         fs = self._fs() if fs is None else fs
         sd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs) if systemd is None else systemd
         sw = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
-        return SwapApplicationService(self.env, fs, sd, sw), sd
+        return SwapApplicationService(self.env, fs, sd, sw, _installer()), sd
 
     def _apply(self, service: SwapApplicationService) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -1456,6 +1509,7 @@ class SwapWiringTest(unittest.TestCase):
                 etc_dir="/x/etc",
                 cpu_run_dir="/x/run/cpu-setup",
                 prog="cst swap",
+                install_record="/x/var/lib/cst/installed.json",
             ),
         )
 

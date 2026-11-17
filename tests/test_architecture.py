@@ -168,7 +168,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
     "cpu cli": 36,
-    "cst_core entry": 3,
+    "cst_core entry": 1,
     "toolchains cli": 57,
     "vm cli": 82,
 }

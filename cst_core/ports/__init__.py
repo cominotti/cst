@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 """Port interfaces (typing.Protocol) and shared boundary errors for CST adapters."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, NewType, Protocol
 
 from cst_core.domain.install import OnDisk
+from cst_core.domain.record import InstallRecord
 
 
 # Why a command did not run to its end: not found (exit status 127), found
@@ -301,4 +302,29 @@ class InstallTargetPort(Protocol):
 
         A failure raises WriteFailed (cst_core.ports), naming path.
         """
+        ...
+
+    def remove(self, path: str) -> bool:
+        """Remove path (a link itself, never what it points to); False when nothing was there.
+
+        A failure raises WriteFailed, naming path.
+        """
+        ...
+
+
+class InstallRecordPort(Protocol):
+    """The install record files (cst_core.domain.record): read, and changed under a lock."""
+
+    def read(self, path: str) -> InstallRecord | None:
+        """The record at path; None when there is none. RecordFormatError when it is not one."""
+        ...
+
+    def update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> bool:
+        """Change the record at path under its lock (no file, or one that is not JSON: an empty one);
+        True when the file changed. RecordFormatError (newer=True) for a record of a newer CST,
+        which is left as it is; WriteFailed when it cannot be written."""
+        ...
+
+    def sha256(self, data: bytes) -> str:
+        """The hex sha256 of data, as the record holds it."""
         ...

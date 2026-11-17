@@ -1,20 +1,47 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Install use case: write manifest files (and generated text) only when they changed.
+"""Install use case: write manifest files (and generated text) only when they changed, and record them.
 
 Output lines are the ones the setup scripts always printed:
 `unchanged: DEST` and `written:   DEST`; a plan prints
-`would write: DEST` instead and changes nothing. Every entry's bytes are
-built and checked (templates) before the first write, so a bad call writes
-nothing; then one line comes per file, as it is written.
+`would write: DEST` instead and changes nothing; a removal
+`removed:   DEST`. Every entry's bytes are built and checked (templates)
+before the first write, so a bad call writes nothing; then one line comes
+per file, as it is written.
+
+Every file written or found current is listed in the install record of its
+owner (cst_core.domain.record): what it came from, its sha256, mode and
+component, and which checkout installed it. A file found current that the
+record did not list yet (installed before the record existed) is adopted.
+A component is "pending" from a write until its setup command marks it
+done (mark).
 """
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 from cst_core.domain.files import checked_path
-from cst_core.domain.install import InstallEntry, Owner, expand_dest, is_current, render_template, template_keys
+from cst_core.domain.install import (
+    InstallEntry,
+    Owner,
+    expand_dest,
+    is_current,
+    render_template,
+    template_keys,
+)
+from cst_core.domain.record import (
+    ROOT_RECORD,
+    USER_RECORD_REL,
+    ComponentState,
+    InstallRecord,
+    RecordedFile,
+    RecordFormatError,
+    tree_lines,
+    with_files,
+    with_state,
+    without_files,
+)
 from cst_core.domain.values import DomainValidationError
-from cst_core.ports import InstallTargetPort
+from cst_core.ports import InstallRecordPort, InstallTargetPort
 
 # The bytes install writes for an entry (a zipapp for a python-entry, the
 # file for the rest), before template rendering.
@@ -22,7 +49,7 @@ type PayloadFn = Callable[[InstallEntry], bytes]
 
 
 class InstallRefused(Exception):
-    """An install that must not run as asked (wrong user, bad arguments)."""
+    """An install that must not run as asked (wrong user, bad arguments, a record of a newer CST)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +63,18 @@ class InstallRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class _Prepared:
-    entry: InstallEntry
-    path: str
-    data: bytes
+class Placement:
+    """Where one file is written, and how the install record lists it."""
+
+    path: str  # where it is written (under a staging root, or where a module's tests put it)
+    dest: str  # its destination as the record lists it (`~/` expanded, never staged)
+    record: str  # the record file that lists it ("": none)
+    component: str
+    src: str | None  # the manifest source; None for generated text
+    kind: str
+    owner: Owner
+    mode: int
+    values: Mapping[str, str] | None = None
 
 
 def staged(root: str, path: str) -> str:
@@ -50,32 +85,57 @@ def staged(root: str, path: str) -> str:
     return checked_path(root.rstrip("/") or "/").rstrip("/") + path
 
 
-class InstallService:
-    """Writes manifest entries and generated text through an InstallTargetPort."""
+def record_file(owner: Owner, home: str | None, root: str = "") -> str:
+    """The install record of root's files, or of the user's whose home this is (staged under root)."""
+    if owner == "root":
+        return staged(root, ROOT_RECORD)
+    if not home:
+        raise ValueError("a home folder is needed for the user's install record")
+    return staged(root, home.rstrip("/") + "/" + USER_RECORD_REL)
 
-    def __init__(self, target: InstallTargetPort, payload: PayloadFn) -> None:
+
+class InstallService:
+    """Writes manifest entries and generated text through an InstallTargetPort, and records them
+    through an InstallRecordPort (None: nothing is recorded; a module's tests)."""
+
+    def __init__(
+        self,
+        target: InstallTargetPort,
+        payload: PayloadFn,
+        *,
+        record: InstallRecordPort | None = None,
+        commit: str = "unknown",
+    ) -> None:
         self._target = target
         self._payload = payload
+        self._record = record
+        self._commit = commit
 
     def desired(self, entry: InstallEntry, values: Mapping[str, str] | None = None) -> bytes:
         """The bytes the entry's dest must hold (DomainValidationError: a template value missing or unused)."""
-        return self._render([entry], values)[0]
+        return self._render([entry], values)[0][0]
 
-    def _render(self, entries: Sequence[InstallEntry], values: Mapping[str, str] | None) -> list[bytes]:
-        """Every entry's bytes; a --set value no template of the call uses is an error (a misspelt KEY)."""
+    def _render(
+        self, entries: Sequence[InstallEntry], values: Mapping[str, str] | None
+    ) -> list[tuple[bytes, Mapping[str, str] | None]]:
+        """Every entry's bytes, and a template's values (the --set values it uses); a --set value no
+        template of the call uses is an error (a misspelt KEY)."""
         values = values or {}
         used: set[str] = set()
-        out: list[bytes] = []
+        out: list[tuple[bytes, Mapping[str, str] | None]] = []
         for e in entries:
             data = self._payload(e)
+            mine: Mapping[str, str] | None = None
             if e.is_template:
                 text = data.decode("utf-8")
-                used |= template_keys(text)
+                keys = template_keys(text)
+                used |= keys
                 try:
                     data = render_template(text, values).encode("utf-8")
                 except DomainValidationError as exc:
                     raise DomainValidationError(f"{e.src}: {exc}") from None
-            out.append(data)
+                mine = {k: values[k] for k in sorted(keys)}
+            out.append((data, mine))
         unused = sorted(values.keys() - used)
         if unused:
             raise DomainValidationError(
@@ -90,6 +150,21 @@ class InstallService:
         """Where the entry goes for this request (`~/` expanded, staged)."""
         return staged(req.root, expand_dest(entry.dest, req.home))
 
+    def placement(self, entry: InstallEntry, req: InstallRequest, values: Mapping[str, str] | None = None) -> Placement:
+        """Where the entry is written for this request, and its line in the record (values: a template's)."""
+        dest = expand_dest(entry.dest, req.home)
+        return Placement(
+            path=staged(req.root, dest),
+            dest=dest,
+            record=record_file(entry.owner, req.home, req.root) if self._record else "",
+            component=entry.component,
+            src=entry.src,
+            kind=entry.kind,
+            owner=entry.owner,
+            mode=entry.mode.bits,
+            values=values,
+        )
+
     def _check(self, entries: Sequence[InstallEntry], req: InstallRequest) -> None:
         for entry in entries:
             if entry.owner == "user" and req.as_root and not req.root:
@@ -97,10 +172,29 @@ class InstallService:
                     f"{entry.src}: belongs to the user; install it as the user (cst_install_as USER), not as root"
                 )
 
-    def _prepare(self, entries: Sequence[InstallEntry], req: InstallRequest) -> list[_Prepared]:
+    def _prepare(self, entries: Sequence[InstallEntry], req: InstallRequest) -> list[tuple[Placement, bytes]]:
         self._check(entries, req)
-        paths = [self.destination(e, req) for e in entries]
-        return [_Prepared(e, p, d) for e, p, d in zip(entries, paths, self._render(entries, req.values), strict=True)]
+        for e in entries:
+            self.destination(e, req)  # every destination checked before any payload is built
+        places = [
+            (self.placement(e, req, values), data)
+            for e, (data, values) in zip(entries, self._render(entries, req.values), strict=True)
+        ]
+        self._check_records({p.record for p, _ in places})
+        return places
+
+    def _check_records(self, records: set[str]) -> None:
+        """A record of a newer CST stops the call before any write (it is never rewritten by an older one)."""
+        if self._record is None:
+            return
+        for path in sorted(r for r in records if r):
+            try:
+                self._record.read(path)
+            except RecordFormatError as e:
+                if e.newer:
+                    raise InstallRefused(f"{path}: {e}: nothing was changed") from None
+            except OSError:
+                continue  # unreadable here: the update below says why, after the files
 
     def is_current(self, path: str, data: bytes, mode: int, owner: Owner = "root", *, as_root: bool = False) -> bool:
         """True when path already holds exactly data with mode (links and owner: domain.install.is_current)."""
@@ -119,22 +213,105 @@ class InstallService:
         """Bring every entry's dest up to date; one report line each, yielded as it is written.
 
         Everything is checked first (here, before the iterator is returned):
-        a refused entry or a bad template value raises before any write.
+        a refused entry, a bad template value or a record of a newer CST
+        raises before any write. Programs are written before units (a unit
+        is never there before what it runs). The record is updated after
+        the last file, and also when a write fails (with the files before it).
         """
-        return self._write_all(self._prepare(entries, req), req.as_root)
+        todo = self._prepare(entries, req)
+        todo.sort(key=lambda pd: pd[0].kind == "unit")
+        return self._write_all(todo, req.as_root)
 
-    def _write_all(self, todo: Sequence[_Prepared], as_root: bool) -> Iterator[str]:
-        for p in todo:
-            yield self.write_if_changed(p.path, p.data, p.entry.mode.bits, p.entry.owner, as_root=as_root)
+    def _write_all(self, todo: Sequence[tuple[Placement, bytes]], as_root: bool) -> Iterator[str]:
+        trees = self._trees(todo)
+        done: list[tuple[Placement, bytes, bool]] = []
+        try:
+            for p, data in todo:
+                line = self.write_if_changed(p.path, data, p.mode, p.owner, as_root=as_root)
+                done.append((p, data, line.startswith("written")))
+                yield line
+        finally:
+            self._save(done, trees)
+
+    def _trees(self, todo: Sequence[tuple[Placement, bytes]]) -> dict[str, str]:
+        if self._record is None:
+            return {}
+        by_component: dict[str, dict[str, str]] = {}
+        for p, data in todo:
+            by_component.setdefault(p.component, {})[p.src or p.dest] = self._record.sha256(data)
+        return {c: self._record.sha256(tree_lines(f).encode()) for c, f in by_component.items()}
+
+    def _save(self, done: Sequence[tuple[Placement, bytes, bool]], trees: Mapping[str, str]) -> None:
+        """Record what was written or found current, one update per record file."""
+        if self._record is None:
+            return
+        per_record: dict[str, dict[str, tuple[RecordedFile, bool]]] = {}
+        for p, data, written in done:
+            if not p.record:
+                continue
+            sha = self._record.sha256(data)
+            f = RecordedFile(
+                p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, self._commit, trees.get(p.component, sha)
+            )
+            per_record.setdefault(p.record, {})[p.dest] = (f, written)
+        for path, files in sorted(per_record.items()):
+            self._update(path, _adding(files))
+
+    def _update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> None:
+        if self._record is None:
+            return
+        try:
+            self._record.update(path, change)
+        except RecordFormatError as e:
+            raise InstallRefused(f"{path}: {e}: not changed") from None
+
+    def put(self, place: Placement, data: bytes, *, as_root: bool) -> bool:
+        """Write one file a module checked itself (its own refusals first), unless current; record it.
+        True when it was written."""
+        self._check_records({place.record})
+        written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
+            "written"
+        )
+        self._save([(place, data, written)], {})
+        return written
+
+    def mark(self, record: str, component: str, state: ComponentState = "done") -> None:
+        """The component's state in the record (done: its setup command finished)."""
+        if record:
+            self._update(record, lambda rec: with_state(rec, component, state))
+
+    def forget(self, record: str, dests: Sequence[str]) -> None:
+        """Drop these destinations from the record (their files were removed by their module)."""
+        if record and dests:
+            self._update(record, lambda rec: without_files(rec, list(dests)))
+
+    def remove(self, places: Sequence[Placement]) -> Iterator[str]:
+        """Remove each file (a link itself) and its line in the record; `removed:   PATH` for each that
+        was there. Works without a record (an install from before it): the files are the manifest's."""
+        gone: list[Placement] = []
+        try:
+            for p in places:
+                existed = self._target.remove(p.path)
+                gone.append(p)
+                if existed:
+                    yield f"removed:   {p.path}"
+        finally:
+            for record in sorted({p.record for p in gone if p.record}):
+                self.forget(record, [p.dest for p in gone if p.record == record])
 
     def plan(self, entries: Sequence[InstallEntry], req: InstallRequest) -> tuple[list[str], int]:
         """What install would do, changing nothing: (report lines, number of files to write)."""
         lines: list[str] = []
         todo = 0
-        for p in self._prepare(entries, req):
-            if self.is_current(p.path, p.data, p.entry.mode.bits, p.entry.owner, as_root=req.as_root):
+        for p, data in self._prepare(entries, req):
+            if self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
                 lines.append(f"unchanged: {p.path}")
             else:
                 lines.append(f"would write: {p.path}")
                 todo += 1
         return lines, todo
+
+
+def _adding(files: Mapping[str, tuple[RecordedFile, bool]]) -> Callable[[InstallRecord], InstallRecord]:
+    """The record change that lists these files (with_files)."""
+    return lambda rec: with_files(rec, files)

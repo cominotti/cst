@@ -171,6 +171,11 @@ the swap part shows everything there.
 
 No reboot is needed: `apply` also sets everything live.
 
+`apply` writes its three files (`zswap.conf`, `99-swap-tuning.conf`,
+`50-memory-low.conf`) through CST's installer and lists them in the install
+record `/var/lib/cst/installed.json` (component `swap:core`), where `cst doctor`
+checks them.
+
 ---
 
 ## 4. Commands

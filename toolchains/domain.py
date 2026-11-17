@@ -600,6 +600,10 @@ class WrapperValues:
     def __str__(self) -> str:
         return f"cache size {self.size}" + ("" if self.workspace else "; local crates straight to rustc")
 
+    def record(self) -> dict[str, str]:
+        """The settings as the install record lists them (the wrapper's values)."""
+        return {"cache_size": self.size, "workspace": "yes" if self.workspace else "no"}
+
 
 def plain(data: Mapping[str, object]) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(json.dumps(data)))

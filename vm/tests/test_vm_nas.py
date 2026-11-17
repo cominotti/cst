@@ -289,6 +289,7 @@ class Nas(unittest.TestCase):
             "CST_VM_UNIT_DIR": self.units,
             "UNIT_DIR": self.units,
             "CST_VM_SBIN_COPY": os.path.join(self.tmp, "sbin", "cst-vm"),
+            "CST_VM_INSTALL_RECORD": os.path.join(self.tmp, "var-lib-cst", "installed.json"),
         }
 
     def vm(self, **kw: object) -> None:
@@ -1063,6 +1064,19 @@ class TimerTest(Nas):
         with open(copy, "rb") as f:
             self.assertEqual(f.read(), build_python_zipapp(REPO, "vm/cst-vm"))
         self.assertEqual(stat.S_IMODE(os.stat(copy).st_mode), 0o755)
+        # The three files are in the install record, the component marked done; a second on changes neither.
+        record_path = self.env["CST_VM_INSTALL_RECORD"]
+        rec = json.loads(read(record_path))
+        service_path = os.path.join(self.units, "cst-vm-backup@.service")
+        timer_path = os.path.join(self.units, "cst-vm-backup@.timer")
+        self.assertEqual(sorted(rec["files"]), sorted([copy, service_path, timer_path]))
+        self.assertEqual(rec["files"][copy]["src"], "vm/cst-vm")
+        self.assertEqual(rec["files"][timer_path]["kind"], "text")
+        self.assertEqual(rec["components"], {"vm:backup-timer": "done"})
+        before = read(record_path)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertNotIn("installed:", r.stdout)
+        self.assertEqual(read(record_path), before)
         r = self.run_tool("backup-timer", "status", "win")
         self.assertIn("weekly NAS backup of win: on", r.stdout)
         self.assertIn("installed, up to date", r.stdout)
@@ -1104,6 +1118,8 @@ class TimerTest(Nas):
         )
         self.assertFalse(os.path.exists(copy))
         self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.service")))
+        # Off removed them from the install record too (cst doctor would call them missing).
+        self.assertEqual(json.loads(read(record_path)), {"format": 1, "files": {}, "components": {}})
 
     def test_off_goes_on_when_clean_fails(self) -> None:
         r = self.run_tool("backup-timer", "on", "win")

@@ -10,6 +10,7 @@ itself.
 
 import os
 from pathlib import Path
+import pwd
 import signal
 import zipfile
 
@@ -114,3 +115,54 @@ def restore_default_signals() -> None:
     """
     for sig in (signal.SIGPIPE, signal.SIGXFSZ):
         signal.signal(sig, signal.SIG_DFL)
+
+
+def checkout_commit(root: str | None) -> str:
+    """The commit the checkout at root has out (HEAD), read from .git by hand; "unknown" when it
+    cannot be read (no checkout, an installed program, an unusual layout).
+
+    No git command: as root in a user's checkout, git refuses to work
+    (safe.directory). A worktree's .git file names its own git folder; its
+    branches live in the common one (commondir); packed-refs holds the rest.
+    """
+    if not root:
+        return "unknown"
+    try:
+        git = os.path.join(root, ".git")
+        if os.path.isfile(git):
+            line = Path(git).read_text(encoding="utf-8").strip()
+            if not line.startswith("gitdir:"):
+                return "unknown"
+            git = os.path.normpath(os.path.join(root, line.split(":", 1)[1].strip()))
+        common = git
+        if os.path.isfile(os.path.join(git, "commondir")):
+            common = os.path.normpath(os.path.join(git, Path(git, "commondir").read_text(encoding="utf-8").strip()))
+        head = Path(git, "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head if _is_sha(head) else "unknown"
+        ref = head.split(":", 1)[1].strip()
+        for folder in (git, common):
+            p = os.path.join(folder, ref)
+            if os.path.isfile(p):
+                sha = Path(p).read_text(encoding="utf-8").strip()
+                return sha if _is_sha(sha) else "unknown"
+        packed = os.path.join(common, "packed-refs")
+        if os.path.isfile(packed):
+            for line in Path(packed).read_text(encoding="utf-8").splitlines():
+                sha, _, name = line.partition(" ")
+                if name == ref and _is_sha(sha):
+                    return sha
+    except OSError, UnicodeDecodeError:
+        return "unknown"
+    return "unknown"
+
+
+def _is_sha(text: str) -> bool:
+    return len(text) in (40, 64) and all(c in "0123456789abcdef" for c in text)
+
+
+def process_identity() -> tuple[bool, str]:
+    """(running as root, this account's home folder from the password database): whose files and
+    whose install record a process such as the installer writes. Not $HOME: runuser keeps root's."""
+    euid = os.geteuid()
+    return euid == 0, pwd.getpwuid(euid).pw_dir

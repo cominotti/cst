@@ -1224,6 +1224,47 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-INSTALLED", out)
+        # The install records list every destination with the sha256 of the file on disk (root's under
+        # the stage's /var/lib/cst, tester's in tester's home), keyed by the destination as installed.
+        check_records = f"""
+import hashlib, json, sys
+stage = {stage!r}
+for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/home/tester/.local/state/cst/installed.json", "/home/")):
+    rec = json.load(open(path))
+    assert rec["format"] == 1, rec["format"]
+    for dest, f in rec["files"].items():
+        data = open(stage + dest, "rb").read()
+        assert f["sha256"] == hashlib.sha256(data).hexdigest(), dest
+        assert dest.startswith(prefix), dest
+    print(len(rec["files"]), sorted(rec["files"])[0])
+"""
+        rec = exec_bash(self.SYSTEMD_CONTAINER, f"/usr/bin/python3 -I -c {shlex.quote(check_records)}").stdout.split()
+        counts = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"{installer} dests --owner root | wc -l; {installer} dests --owner user | wc -l",
+        ).stdout.split()
+        self.assertEqual(rec[0], counts[0], "the root record does not list every root destination")
+        self.assertEqual(rec[2], counts[1], "tester's record does not list every user destination")
+        # An edited file: check says not current; a second install puts it back; remove --component takes a
+        # component's files and record lines away.
+        cycle = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            f={stage}/usr/local/sbin/docker-gc
+            echo '# edited' >>"$f"
+            rc=0; {installer} check --root {stage} --owner root {sets} || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
+            {installer} install --root {stage} --owner root {sets} | grep -qxF "written:   $f" ||
+                {{ echo "a second install did not restore the edited file" >&2; exit 1; }}
+            {installer} check --root {stage} --owner root {sets}
+            {installer} remove --root {stage} --component btrfs:docker-gc
+            [[ ! -e "$f" ]] || {{ echo "remove --component left $f" >&2; exit 1; }}
+            grep -q docker-gc {stage}/var/lib/cst/installed.json && {{ echo "the record still lists docker-gc" >&2; exit 1; }}
+            {installer} install --root {stage} --component btrfs:docker-gc >/dev/null
+            echo E2E-RECORD-CYCLE
+            """,
+        ).stdout
+        self.assertIn("E2E-RECORD-CYCLE", cycle)
         # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
         entries = {
             "/usr/local/sbin/btrfs-bulk": ("--help", 2),

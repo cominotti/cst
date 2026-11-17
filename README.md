@@ -415,7 +415,11 @@ everything with `plan`, `status` or `doctor` before changing anything:
   writing. Each file belongs to a **component**, the part of a module that
   one command installs as a whole (`btrfs:core` by `cst btrfs install`,
   `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: `COMPONENTS` in
-  the same file). In a home folder, a link to a file
+  the same file). Every file installed is listed, with its sha256 and the
+  commit of this folder it came from, in the **install record**
+  (`/var/lib/cst/installed.json`, and `~/.local/state/cst/installed.json` for
+  your own files), which `cst doctor` compares with the files and with this
+  checkout. In a home folder, a link to a file
   that already holds the wanted content stays a link (a dotfiles manager's
   link). The Python helpers are installed as **zipapps**, one file that runs
   without this folder. The details:

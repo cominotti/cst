@@ -392,6 +392,11 @@ cst bluetooth status    # cst-bt-ldac48.service active; the headset's rate
 | `~/.local/lib/cst/bt-ldac-watch` | A **copy** of `bluetooth/bt-ldac-watch`, built as a zipapp with the packages it imports. |
 | `~/.config/systemd/user/cst-bt-ldac48.service` | The user unit, enabled for `default.target` (it starts with your session). |
 
+Both go through CST's installer (atomic writes, as your user) and are listed
+in your install record `~/.local/state/cst/installed.json` (component
+`bluetooth:ldac`), which `cst doctor` checks; removing the watcher takes them
+out of it.
+
 Why a copy, and not the file in this folder: the service then does not
 depend on this working copy. Moving or renaming the folder, editing the
 script, or restoring a snapshot of `~/Workspace` cannot break or silently

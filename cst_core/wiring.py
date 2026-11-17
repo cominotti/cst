@@ -64,6 +64,13 @@ def start_installer() -> None:
     undo_python_start()
 
 
+def installer_identity() -> tuple[bool, str]:
+    """(as root, the home of this account): whose record the installer writes generated text into."""
+    from cst_core.adapters.runtime import process_identity
+
+    return process_identity()
+
+
 def cst_dispatcher(*, fallback_root: str, stdout: TextIO, stderr: TextIO) -> CstDispatcher:
     """The `cst` use case over the host, with what the cst wrapper hands over.
 
@@ -87,11 +94,17 @@ def install_service() -> InstallService | None:
     """The installer's use case over this machine's files, building payloads from this
     checkout (None: it runs from no checkout). Its modules are imported here, so cst and the
     router do not load them."""
-    from cst_core.adapters.install import LocalInstallTarget
+    from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+    from cst_core.adapters.runtime import checkout_commit
     from cst_core.adapters.zipapp import entry_payload
     from cst_core.application.install import InstallService
 
     root = checkout_root(__file__)
     if root is None:
         return None
-    return InstallService(LocalInstallTarget(), lambda e: entry_payload(root, e))
+    return InstallService(
+        LocalInstallTarget(),
+        lambda e: entry_payload(root, e),
+        record=JsonInstallRecord(),
+        commit=checkout_commit(root),
+    )

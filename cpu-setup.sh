@@ -200,7 +200,7 @@ gamemode_ini() { echo "$(user_home)/.config/gamemode.ini"; }
 
 # ---- install ---------------------------------------------------------------------
 install_all() {
-    local f srcs ini group_line ecores
+    local f srcs ini group_line ecores gamemode=0
     [[ -n "${target_user}" && "${target_user}" != root ]] ||
         { echo "install: run through sudo from your user account (needs SUDO_USER)" >&2; exit 1; }
     srcs="$(cst_component_programs cpu:core)" || { echo "cannot list the programs of cpu:core" >&2; exit 1; }
@@ -249,6 +249,7 @@ install_all() {
     ini="$(gamemode_ini)"
     if [[ ! -e "${ini}" ]] || grep -q 'Managed by cpu-setup.sh' "${ini}"; then
         cst_install_as "${target_user}" --component cpu:gamemode
+        gamemode=1
     else
         echo "NOTE: ${ini} is your own: add [custom] start/end from ${SRC}/gamemode.ini by hand" >&2
     fi
@@ -269,6 +270,8 @@ install_all() {
     systemctl daemon-reload
     usys daemon-reload 2>/dev/null || true
     systemctl enable --now cpu-game-watchdog.timer
+    cst_mark cpu:core
+    if (( gamemode )); then cst_mark_as "${target_user}" cpu:gamemode; fi
     echo
     echo "Done. Still to do by you:"
     echo "  - log out and in once (gamemode group; cpuset delegation, which makes the"
@@ -279,16 +282,14 @@ install_all() {
 }
 
 uninstall() {
-    local f ini
+    local ini
     systemctl stop cpu-game.service 2>/dev/null || true
     systemctl disable --now cpu-game-watchdog.timer 2>/dev/null || true
     # Without the watchdog nothing would remove one left behind (the reload
     # below then drops its MemoryLow).
     remove_game_dropins
     # cpu:core: programs, units, drop-ins (MACHINE_DROPIN, DELEGATE_DROPIN) and the polkit rule.
-    mapfile -t f < <(cst_installed_dests --component cpu:core)
-    (( ${#f[@]} )) || { echo "uninstall: cannot list the files of cpu:core" >&2; exit 1; }
-    rm -fv "${f[@]}"
+    cst_remove --component cpu:core
     remove_old_dropins
     if [[ -f "${HWP_TMPFILES}" ]]; then
         rm -fv "${HWP_TMPFILES}"
@@ -299,7 +300,7 @@ uninstall() {
         rm -fv "$(toolbox_dropin)" "$(helper_dropin)"
         rmdir "$(dirname "$(toolbox_dropin)")" "$(dirname "$(helper_dropin)")" 2>/dev/null || true
         ini="$(gamemode_ini)"
-        grep -qs 'Managed by cpu-setup.sh' "${ini}" && rm -fv "${ini}"
+        if grep -qs 'Managed by cpu-setup.sh' "${ini}"; then cst_remove_as "${target_user}" --component cpu:gamemode; fi
         usys daemon-reload 2>/dev/null || true
     fi
     systemctl daemon-reload
@@ -321,6 +322,7 @@ docker_slice() {
             cst_install --set "ALLOWED=${ecores:+AllowedCPUs=${ecores}}" --component cpu:docker-slice
             systemctl daemon-reload
             systemctl start builds.slice
+            cst_mark cpu:docker-slice
             python3 -I - "${DAEMON_JSON}" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -358,7 +360,7 @@ if d.get("cgroup-parent") == "builds.slice":
         os.remove(path)
     print(f"removed cgroup-parent from {path}")
 PY
-            rm -fv "${UNIT_DIR}/builds.slice"
+            cst_remove --component cpu:docker-slice
             systemctl daemon-reload
             echo "Restart Docker when convenient for new containers to leave builds.slice."
             ;;
