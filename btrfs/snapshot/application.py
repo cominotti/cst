@@ -396,15 +396,13 @@ def process_source(run: Run, src: Source, *, create: bool) -> Result:
     """One source of a snapshot or prune run: the snapshot (CREATE), then the deletions."""
     res = Result(src.name)
     first = first_scan(run, src, res)
-    if first is None:
-        return res
-    info, scan = first
-    extra: list[Snap] = []
-    if create:
-        scan = create_step(run, src, info, scan, res, extra)
-        if scan is None:
-            return res
-    return prune_step(run, src, info, scan, extra, res)
+    if first is not None:
+        info, scan = first
+        extra: list[Snap] = []
+        decide_on = create_step(run, src, info, scan, res, extra) if create else scan
+        if decide_on is not None:
+            prune_step(run, src, info, decide_on, extra, res)
+    return res
 
 
 def first_scan(run: Run, src: Source, res: Result) -> tuple[SubvolInfo, Scan] | None:
@@ -514,28 +512,28 @@ def scan_after_creation(run: Run, src: Source, info: SubvolInfo, dest: str, entr
     return scan
 
 
-def prune_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, extra: Sequence[Snap], res: Result) -> Result:
-    """The deletions the policy and the safeguards allow (none when a guard refuses them)."""
+def prune_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, extra: Sequence[Snap], res: Result) -> None:
+    """The deletions the policy and the safeguards allow (none when a guard refuses them), counted in RES."""
     decisions, doomed, refusal = run.decide(src, scan, extra)
     res.kept = sum(1 for d in decisions if d.action == "keep" and not d.snap.virtual)
     if not doomed:
-        return res
+        return
     if refusal:
         run.log(4, f"{src.name}: {len(doomed)} deletion(s) blocked: {refusal}")
         for d in doomed:
             run.log(6, f"{src.name}: blocked: {d.snap.entry} ({d.reason})")
         res.worse(EXIT_REFUSED)
         res.kept += len(doomed)
-        return res
+        return
     if run.options.dry_run:
         for d in doomed:
             run.log(5, f"{src.name}: would delete {d.snap.path} ({d.reason})")
         res.deleted = len(doomed)
-        return res
-    return delete_doomed(run, src, info, doomed, res)
+        return
+    delete_doomed(run, src, info, doomed, res)
 
 
-def delete_doomed(run: Run, src: Source, info: SubvolInfo, doomed: Sequence[Decision], res: Result) -> Result:
+def delete_doomed(run: Run, src: Source, info: SubvolInfo, doomed: Sequence[Decision], res: Result) -> None:
     """Right before deleting: list again, decide again, and keep only what both
     passes agree on (same UUID); then re-check each one just before its delete."""
     run.forget_pins()
@@ -544,18 +542,17 @@ def delete_doomed(run: Run, src: Source, info: SubvolInfo, doomed: Sequence[Deci
     except ParseError as e:
         run.log(3, f"{src.name}: {e}; no deletions")
         res.worse(EXIT_ERROR)
-        return res
+        return
     _, fresh_doomed, refusal = run.decide(src, fresh)
     if refusal:
         run.log(4, f"{src.name}: deletions blocked on re-check: {refusal}")
         res.worse(EXIT_REFUSED)
         res.kept += len(doomed)
-        return res
+        return
     fresh_uuids = {d.snap.uuid for d in fresh_doomed}
     for d in doomed:
         if not delete_one(run, src, d, info["uuid"], fresh_uuids, res):
             break
-    return res
 
 
 def delete_one(run: Run, src: Source, d: Decision, source_uuid: str, fresh_uuids: Collection[str], res: Result) -> bool:
@@ -936,15 +933,19 @@ def snapshot_or_prune(args: RunOptions, machine: Machine, tz: dt.tzinfo, *, crea
         + "; ".join(summary_part(r, create=create) for r in results)
         + f"; result: {SUMMARY_WORD[status]}",
     )
-    if args.dry_run:
-        return status
-    run.record_writable()
-    if status == EXIT_OK:
-        try:
-            run.record_success()
-        except OSError as e:
-            log(4, f"cannot record the run in {args.state_dir}: {e.strerror}")
+    if not args.dry_run:
+        run.record_writable()
+        if status == EXIT_OK:
+            record_success(run)
     return status
+
+
+def record_success(run: Run) -> None:
+    """Record the run as the last successful one (a warning when the state directory cannot take it)."""
+    try:
+        run.record_success()
+    except OSError as e:
+        run.log(4, f"cannot record the run in {run.options.state_dir}: {e.strerror}")
 
 
 def cmd_list(args: RunOptions, machine: Machine, tz: dt.tzinfo) -> tuple[int, Listing]:

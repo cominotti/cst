@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from btrfs.snapshot.domain import Listing, SourceCaches, SourceListing
+from btrfs.snapshot.domain import CacheWalk, Listing, SourceCaches, SourceListing
 from cst_core.domain.values import format_bytes_human
 
 
@@ -18,30 +18,33 @@ def source_listing_json(s: SourceListing) -> dict[str, object]:
     entry: dict[str, object] = {"name": s.name, "source": s.source, "policy": s.policy}
     if s.error is not None:
         entry["error"] = s.error
-        return entry
-    entry.update(
-        {
-            "uuid": s.uuid,
-            "generation": s.generation,
-            "changed": s.changed,
-            "snapshots": [
-                {
-                    "path": d.snap.path,
-                    "entry": d.snap.entry,
-                    "time": d.snap.wall.strftime("%Y-%m-%dT%H:%M"),
-                    "uuid": d.snap.uuid,
-                    "gen_at_creation": d.snap.cgen,
-                    "action": d.action,
-                    "reason": d.reason,
-                }
-                for d in s.decisions
-            ],
-            "ignored": [{"path": p, "reason": r} for p, r in s.ignored],
-            "unverifiable": [{"path": p, "reason": r} for p, r in s.unverifiable],
-            "deletions_blocked": s.deletions_blocked,
-        }
-    )
+    else:
+        entry.update(listed_snapshots_json(s))
     return entry
+
+
+def listed_snapshots_json(s: SourceListing) -> dict[str, object]:
+    """The part of a readable source in `list --json`."""
+    return {
+        "uuid": s.uuid,
+        "generation": s.generation,
+        "changed": s.changed,
+        "snapshots": [
+            {
+                "path": d.snap.path,
+                "entry": d.snap.entry,
+                "time": d.snap.wall.strftime("%Y-%m-%dT%H:%M"),
+                "uuid": d.snap.uuid,
+                "gen_at_creation": d.snap.cgen,
+                "action": d.action,
+                "reason": d.reason,
+            }
+            for d in s.decisions
+        ],
+        "ignored": [{"path": p, "reason": r} for p, r in s.ignored],
+        "unverifiable": [{"path": p, "reason": r} for p, r in s.unverifiable],
+        "deletions_blocked": s.deletions_blocked,
+    }
 
 
 def render_listing(listing: Listing, *, as_json: bool) -> None:
@@ -77,20 +80,22 @@ def source_caches_json(s: SourceCaches) -> dict[str, object]:
     entry: dict[str, object] = {"name": s.name, "source": s.source, "skips": list(s.skips)}
     if s.walk is None:
         entry["error"] = s.error
-        return entry
-    walk = s.walk
-    entry.update(
-        {
-            "folders": [{"path": c.rel, "files": c.files, "bytes": c.size} for c in walk.folders],
-            "files": walk.files,
-            "bytes": walk.size,
-            "kept": walk.kept,
-            "skipped": walk.skipped,
-            "problems": [{"path": p, "reason": r} for p, r in walk.problems],
-            "seconds": round(walk.seconds, 2),
-        }
-    )
+    else:
+        entry.update(walk_json(s.walk))
     return entry
+
+
+def walk_json(walk: CacheWalk) -> dict[str, object]:
+    """The part of a readable source in `caches --json`."""
+    return {
+        "folders": [{"path": c.rel, "files": c.files, "bytes": c.size} for c in walk.folders],
+        "files": walk.files,
+        "bytes": walk.size,
+        "kept": walk.kept,
+        "skipped": walk.skipped,
+        "problems": [{"path": p, "reason": r} for p, r in walk.problems],
+        "seconds": round(walk.seconds, 2),
+    }
 
 
 def render_caches(sources: list[SourceCaches], *, as_json: bool) -> None:
