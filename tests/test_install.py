@@ -495,6 +495,32 @@ class InstallerCliTest(unittest.TestCase):
         self.assertEqual(r.stdout, f"unchanged: {self.stage}/etc/x.conf\n".encode())
         self.assertEqual(stat.S_IMODE(os.stat(f"{self.stage}/etc/x.conf").st_mode), 0o640)
 
+    def test_text_plan_judges_generated_content_and_writes_nothing(self) -> None:
+        dest = f"{self.stage}/etc/x.conf"
+        r = self.cli("text-plan", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+        self.assertEqual((r.returncode, r.stdout), (0, f"would write: {dest}\n".encode()))
+        self.assertEqual(self.files(), {})
+        self.cli("text", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+        before = self.files()
+        for label, data, mode, line in (
+            ("same", b"generated\n", "0640", "unchanged"),
+            ("other content", b"other\n", "0640", "would write"),
+            ("other mode", b"generated\n", "0644", "would write"),
+        ):
+            with self.subTest(label):
+                r = self.cli("text-plan", "/etc/x.conf", mode, "--root", self.stage, stdin=data)
+                self.assertEqual(r.stdout, f"{line}: {dest}\n".encode(), r.stderr)
+                self.assertEqual(self.files(), before)
+        os.remove(dest)
+        os.symlink(f"{self.stage}/etc/target", dest)
+        Path(self.stage, "etc/target").write_bytes(b"generated\n")
+        os.chmod(f"{self.stage}/etc/target", 0o640)
+        with self.subTest("a link (to the same bytes) is never current at a root destination"):
+            r = self.cli("text-plan", "/etc/x.conf", "0640", "--root", self.stage, stdin=b"generated\n")
+            want = "would write" if os.geteuid() == 0 else "unchanged"
+            self.assertEqual(r.stdout, f"{want}: {dest}\n".encode(), r.stderr)
+            self.assertTrue(os.path.islink(dest))
+
     def test_user_entries_need_a_home(self) -> None:
         r = self.cli("install", "--root", self.stage, "cpu/gamemode.ini")
         self.assertEqual(r.returncode, 2)
@@ -548,6 +574,8 @@ class InstallerCliTest(unittest.TestCase):
             ("text", "etc/x", "0644", "--root", self.stage),
             ("install", "--root", self.stage, "--set", "NOEQUALS", "cpu/vm-pin"),
             ("text", "/etc/x", "9999", "--root", self.stage),
+            ("text-plan", "etc/x", "0644", "--root", self.stage),
+            ("text-plan", "/etc/x", "--root", self.stage),
             ("bogus",),
         ):
             with self.subTest(args=args):
@@ -598,6 +626,18 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash(f'cst_install_text "{self.stage}/u" 0600 alice', stdin=b"y\n")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(Path(self.log).read_text().count("runuser -u alice"), 2)
+        r = self.bash(f'cst_install_text_plan "{self.stage}/u" 0600 alice', stdin=b"y\n")
+        self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/u\n", r.stderr)
+        self.assertEqual(Path(self.log).read_text().count("runuser -u alice"), 3)
+
+    def test_cst_install_text_plan_changes_nothing(self) -> None:
+        r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        self.assertEqual((r.returncode, r.stdout.decode()), (0, f"would write: {self.stage}/etc/gen\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.stage))
+        self.bash(f'cst_install_text "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        r = self.bash(f'cst_install_text_plan "{self.stage}/etc/gen" 0644', stdin=b"x\n")
+        self.assertEqual(r.stdout.decode(), f"unchanged: {self.stage}/etc/gen\n", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
         r = self.bash("cst_install_as nobody-here cpu/gamemode.ini")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"no home folder", r.stderr)
