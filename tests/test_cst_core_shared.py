@@ -21,7 +21,15 @@ from unittest import mock
 
 from cst_core import adapters as core_adapters
 from cst_core.adapters import files as core_files, nocow
-from cst_core.adapters.files import ensure_dir, owned_file_state_at, read_bytes, read_int, read_text
+from cst_core.adapters.files import (
+    ensure_dir,
+    is_masked_unit,
+    owned_file_state_at,
+    read_bytes,
+    read_int,
+    read_text,
+    unit_file_state_at,
+)
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import Refused, Usage
@@ -34,7 +42,7 @@ from cst_core.domain.text import (
     parse_shell_assignments,
     parse_snapshots_conf,
 )
-from cst_core.domain.units import render_timer, render_unit_file
+from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from toolchains import domain as tc_domain
 from vm import domain as vm_domain
@@ -97,6 +105,18 @@ class DomainTest(unittest.TestCase):
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
         self.assertEqual(text, "# head\n[Unit]\nDescription=x\n\n[Service]\n# why\nType=oneshot\n")
+
+    def test_masked_refusal_names_each_unit_and_how_to_unmask_it(self) -> None:
+        self.assertIsNone(masked_refusal([], user=False))
+        self.assertEqual(
+            masked_refusal(["/etc/systemd/system/a@.timer", "/etc/systemd/system/a@vm.timer"], user=False),
+            "a@.timer is masked (systemctl mask); unmask it first: sudo systemctl unmask a@.timer; "
+            "a@vm.timer is masked (systemctl mask); unmask it first: sudo systemctl unmask a@vm.timer",
+        )
+        self.assertEqual(
+            masked_refusal(["/home/u/.config/systemd/user/b.timer"], user=True),
+            "b.timer is masked (systemctl mask); unmask it first: systemctl --user unmask b.timer",
+        )
 
     def test_render_timer_matches_the_toolchains_timer(self) -> None:
         # The timer cst-toolchains wrote before it used render_timer, byte for byte.
@@ -226,6 +246,38 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner="user"), "change")
         self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="user"), "conflict")
         self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner="user"), "missing")
+
+    def test_unit_file_state_at_sees_a_mask(self) -> None:
+        # `systemctl mask` leaves a link to /dev/null; the link rule alone replaced it (root) or
+        # called it someone else's file (user).
+        def mark(data: bytes) -> bool:
+            return b"MARK" in data
+
+        masked = self.path("masked.timer")
+        os.symlink("/dev/null", masked)
+        os.symlink("/dev/null", self.path("hop"))
+        chained = self.path("chained.timer")
+        os.symlink(self.path("hop"), chained)
+        ours = self.path("ours.timer", b"MARK v1\n")
+        os.symlink(ours, self.path("linked.timer"))
+        os.symlink(self.path("missing"), self.path("dangling.timer"))
+        empty = self.path("empty.timer", b"")
+        for owner in ("root", "user"):
+            with self.subTest(owner=owner):
+                self.assertTrue(is_masked_unit(masked))
+                self.assertTrue(is_masked_unit(chained))
+                self.assertEqual(unit_file_state_at(masked, b"MARK v1\n", mark, owner=owner), "masked")
+                self.assertEqual(unit_file_state_at(chained, b"MARK v1\n", mark, owner=owner), "masked")
+                # Anything else: the link rule, exactly as owned_file_state_at.
+                for path in (ours, self.path("linked.timer"), self.path("dangling.timer"), empty):
+                    self.assertFalse(is_masked_unit(path), path)
+                    self.assertEqual(
+                        unit_file_state_at(path, b"MARK v1\n", mark, owner=owner),
+                        owned_file_state_at(path, b"MARK v1\n", mark, owner=owner),
+                        path,
+                    )
+        self.assertFalse(is_masked_unit(self.path("missing")))
+        self.assertEqual(unit_file_state_at(self.path("linked.timer"), b"MARK v1\n", mark, owner="root"), "change")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()

@@ -351,6 +351,7 @@ def timer_file_words(prog: str, vm: str) -> dict[str, str]:
         "missing": "not installed",
         "conflict": "not CST's file",
         "change": f"installed, OLDER than this copy of CST: {prog} backup-timer on {vm} updates it",
+        "masked": f"masked (systemctl mask): unmask it first, then {prog} backup-timer on {vm} (off leaves it)",
     }
 
 

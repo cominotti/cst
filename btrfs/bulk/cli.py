@@ -8,12 +8,12 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 import os
-import pwd
-import subprocess
 import sys
 import time
 from btrfs.bulk.adapters import (
-    bulk_user,
+    BadSettings,
+    alert,
+    user_ctx,
     Ctx,
     FLAG,
     KEEP,
@@ -40,7 +40,6 @@ from btrfs.bulk.domain import (
     DECIMAL,
     MAKE_DEFAULT,
     MARGIN,
-    NOTIFY,
     STEAM_APP,
     STEAM_MARGIN,
     STEAM_ROOT,
@@ -358,29 +357,6 @@ def steam_cmd(args: Sequence[str]) -> int:
     return steam_apply(ctx, ids, allow_copy)
 
 
-def user_ctx(args: Sequence[str]) -> Ctx:
-    """Ctx from --user NAME (root) or, not as root, the current user and
-    BTRFS_BULK_HOME (tests, dry runs)."""
-    name = None
-    if "--user" in args:
-        i = args.index("--user")
-        name = args[i + 1] if i + 1 < len(args) else None
-    if ROOT:
-        if not name:
-            name = bulk_user()
-        if not name or name == "root":
-            raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
-        pw = pwd.getpwnam(name)
-        return Ctx(pw.pw_dir, pw)
-    return Ctx(os.environ.get("BTRFS_BULK_HOME") or os.path.expanduser("~"))
-
-
-def alert(title: str, body: str) -> None:
-    log(f"<4>btrfs-bulk: {title}: {body}")
-    if os.access(NOTIFY, os.X_OK):
-        subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True)
-
-
 def boot(ctx: Ctx) -> int:
     """At boot, before any login: nothing of the session holds files open.
     Never blocks the login more than twice for the same leftovers."""
@@ -479,7 +455,15 @@ def main(argv: Sequence[str], entry_file: str) -> int:
             file=sys.stderr,
         )
         return 2
-    ctx = user_ctx(argv[2:])
+    try:
+        ctx = user_ctx(argv[2:])
+    except BadSettings as e:
+        if cmd == "boot":  # before any login: the alert waits for it (btrfs-notify keeps it)
+            alert(
+                "~/Bulk: nothing moved at boot",
+                f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
+            )
+        raise
     if cmd == "plan":
         report(ctx, "plan")
         return 0

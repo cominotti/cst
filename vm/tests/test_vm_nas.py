@@ -1168,6 +1168,73 @@ class TimerTest(Nas):
         self.assertIn("Persistent=true\n", read(timer))
         self.assertEqual(read(elsewhere), "[Timer]\n", "the link was written through")
 
+    def test_a_masked_unit_refuses_on_and_is_left_by_off(self) -> None:
+        # `systemctl mask` leaves a link to /dev/null where the unit file goes. The installer's link
+        # rule replaces a link at a root destination, so `on` unmasked the unit without a word.
+        timer = os.path.join(self.units, "cst-vm-backup@.timer")
+        os.symlink("/dev/null", timer)
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"  {timer}: masked (systemctl mask): unmask it first", r.stdout)
+        open(self.log, "w").close()
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(
+            "cst-vm-backup@.timer is masked (systemctl mask); unmask it first: "
+            "sudo systemctl unmask cst-vm-backup@.timer; nothing was changed",
+            r.stderr,
+        )
+        self.assertEqual(os.readlink(timer), "/dev/null")
+        self.assertFalse(os.path.lexists(os.path.join(self.units, "cst-vm-backup@.service")))
+        self.assertFalse(os.path.lexists(self.env["CST_VM_SBIN_COPY"]))
+        self.assertEqual(self.calls(), [], "systemctl was called")
+        # off turns the VM's timer off and removes CST's files, never the user's mask.
+        os.makedirs(os.path.dirname(self.env["CST_VM_SBIN_COPY"]))
+        with open(self.env["CST_VM_SBIN_COPY"], "wb") as f:
+            f.write(build_python_zipapp(REPO, "vm/cst-vm"))
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  left as it is: {timer} (masked with systemctl mask)", r.stdout)
+        self.assertIn(f"  removed: {self.env['CST_VM_SBIN_COPY']}", r.stdout)
+        self.assertEqual(os.readlink(timer), "/dev/null")
+
+    def test_a_masked_timer_of_the_vm_refuses_on(self) -> None:
+        # `systemctl mask cst-vm-backup@win.timer` masks that VM only: a link CST never writes.
+        # `on` wrote the template files and only then failed at `enable`.
+        mask = os.path.join(self.units, "cst-vm-backup@win.timer")
+        os.symlink("/dev/null", mask)
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn(f"  {mask}: masked (systemctl mask)", r.stdout)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cst-vm-backup@win.timer is masked (systemctl mask); unmask it first", r.stderr)
+        self.assertEqual(sorted(os.listdir(self.units)), ["cst-vm-backup@win.timer"], "files were written")
+        # A link to /dev/null through another link is a mask too (systemd follows the chain).
+        os.remove(mask)
+        hop = os.path.join(self.tmp, "hop")
+        os.symlink("/dev/null", hop)
+        os.symlink(hop, os.path.join(self.units, "cst-vm-backup@.service"))
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cst-vm-backup@.service is masked (systemctl mask)", r.stderr)
+
+    def test_a_problem_line_fails_the_weekly_run_and_alerts(self) -> None:
+        # The service runs `cst-vm backup VM --nas`: a settings line that is not a plain KEY=VALUE
+        # must end it non-zero (no SuccessExitStatus=: the unit is failed, which cst doctor lists)
+        # and send the alert, naming the file and the line.
+        self.assertNotIn("SuccessExitStatus", vm_domain.render_service("/usr/local/sbin/cst-vm", "40min"))
+        with open(self.conf, "a") as f:
+            f.write("NAS_PATH=`hostname`\n")
+        self.env["INVOCATION_ID"] = "x"
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{self.conf} line 4: NAS_PATH=`hostname`", r.stderr)
+        alerts = [c for c in self.calls() if c.startswith("notify ")]
+        self.assertEqual(len(alerts), 1, self.calls())
+        self.assertIn("Weekly VM backup of win to the NAS failed", alerts[0])
+        self.assertIn(f"{self.conf} line 4: NAS_PATH=`hostname`", alerts[0])
+        self.assertIn("journalctl -u cst-vm-backup@win.service", alerts[0])
+
     def test_settings_are_read_as_bash_reads_them_and_a_problem_line_refuses_the_backup(self) -> None:
         # Snapshots.conf is sourced by btrfs-snapshot (bash); "NAS_ENABLED=1 # on" is 1 there,
         # but cst-vm read "1 # on" and called the NAS backup "not set up".

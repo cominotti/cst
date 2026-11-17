@@ -106,7 +106,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # module docstring). A new cli.py is added here on purpose.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
-    "btrfs/bulk/cli.py": 415,
+    "btrfs/bulk/cli.py": 404,
     "btrfs/chrome_cache/cli.py": 125,
     "btrfs/docker_gc/cli.py": 322,
     "btrfs/docker_volumes_nocow/cli.py": 193,
@@ -117,8 +117,8 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 165,
     "doctor/cli.py": 35,
     "swap/cli.py": 112,
-    "toolchains/cli.py": 1915,
-    "vm/cli.py": 1297,
+    "toolchains/cli.py": 1910,
+    "vm/cli.py": 1288,
 }
 
 
@@ -149,7 +149,7 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Only goes down; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
-    "btrfs/bulk cli": 15,
+    "btrfs/bulk cli": 9,
     "btrfs/bulk unlayered": 110,
     "btrfs/chrome_cache cli": 7,
     "btrfs/docker_gc cli": 29,
@@ -164,7 +164,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 3,
     "doctor cli": 1,
     "swap cli": 3,
-    "toolchains cli": 63,
+    "toolchains cli": 62,
     "vm cli": 83,
 }
 

@@ -1247,7 +1247,9 @@ What you should know:
   choice)` instead of a problem. Wrong ids are refused, with the valid ones.
 - **Busy items** (a running IDE, emulator, LM Studio) are moved at the next
   boot, before the login screen (`btrfs-bulk-boot.service`), or by `bulk
-  apply` once you close the program; snapshots wait for that. If an item
+  apply` once you close the program; snapshots wait for that. A bad line in
+  `/etc/btrfs-setup/bulk.conf` stops that boot step with a desktop alert that
+  names the line (SNAPSHOTS.md, "Nothing moved into ~/Bulk at boot"). If an item
   needs a look, `snapshots setup` says so before starting the snapshots and
   asks first (not for kept items, and not for a problem inside `~/Bulk`
   only, whose data is not in /home).

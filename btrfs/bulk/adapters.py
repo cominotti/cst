@@ -33,6 +33,7 @@ from btrfs.bulk.domain import (
     Item,
     KEEP_HEADER,
     NOCOW_TOP,
+    NOTIFY,
     SUBVOL_CREATE,
     TAG_SIGNATURE,
     TAG_TEXT,
@@ -64,21 +65,35 @@ KEEP = os.path.join(ETC, "bulk-keep")
 CONVERT_PLAN = os.path.join(ETC, "convert-plan")
 
 
+class BadSettings(SystemExit):
+    """bulk.conf has a line that is not a plain KEY=VALUE. A SystemExit with the
+    message: the run stops with exit 1 and the message on stderr. At boot,
+    main() also sends it as an alert (nobody reads the boot console); lines
+    names each bad line (file and line number)."""
+
+    def __init__(self, lines: str) -> None:
+        super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
+        self.lines = lines
+
+
 def bulk_user() -> str | None:
     """BULK_USER of bulk.conf (setup-bulk.bash writes it), or None when unset or
     the file cannot be read. A line that is not a plain assignment stops the
     run, naming the line: root must never guess whose home it moves."""
     parsed = parse_shell_assignments(read_text(CONF) or "", bash_sourced=False)
     if parsed.problems:
-        raise SystemExit(
-            f"btrfs-bulk: {describe_problems(CONF, parsed.problems)}\n"
-            "Fix the line (cst btrfs install writes the file) or pass --user NAME."
-        )
+        raise BadSettings(describe_problems(CONF, parsed.problems))
     return parsed.values.get("BULK_USER") or None
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def alert(title: str, body: str) -> None:
+    log(f"<4>btrfs-bulk: {title}: {body}")
+    if os.access(NOTIFY, os.X_OK):
+        subprocess.run([NOTIFY, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True)
 
 
 class Program:
@@ -245,6 +260,23 @@ class Ctx:
 
     def short(self, path: str) -> str:
         return "~" + path[len(self.home) :] if path.startswith(self.home + "/") else path
+
+
+def user_ctx(args: Sequence[str]) -> Ctx:
+    """Ctx from --user NAME (root) or, not as root, the current user and
+    BTRFS_BULK_HOME (tests, dry runs)."""
+    name = None
+    if "--user" in args:
+        i = args.index("--user")
+        name = args[i + 1] if i + 1 < len(args) else None
+    if ROOT:
+        if not name:
+            name = bulk_user()
+        if not name or name == "root":
+            raise SystemExit("btrfs-bulk: needs --user NAME (not root)")
+        pw = pwd.getpwnam(name)
+        return Ctx(pw.pw_dir, pw)
+    return Ctx(os.environ.get("BTRFS_BULK_HOME") or os.path.expanduser("~"))
 
 
 def as_user[R](ctx: Ctx, fn: Callable[..., R], *args: object) -> R:

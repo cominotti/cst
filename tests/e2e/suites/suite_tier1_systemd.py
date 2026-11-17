@@ -1504,3 +1504,79 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_18_a_masked_unit_stays_masked(self) -> None:
+        """`systemctl mask` leaves a link to /dev/null where the unit file goes.
+        `cst vm backup-timer on` (root, the system manager) and `cst toolchains
+        auto on` (tester, the user manager) refuse, write nothing and leave the
+        unit masked for the real systemctl; status says masked. Once unmasked,
+        `backup-timer on` works and `off` removes everything again."""
+        w = "/var/tmp/e2e-vm-mask"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            "systemctl unmask cst-vm-backup@e2emask.timer; systemctl disable --now cst-vm-backup@e2emask.timer; "
+            f"rm -rf {w} /etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/sbin"
+            printf 'NAS_ENABLED=1\nNAS_PATH=/x\n' >"$w/nas.conf"
+            printf 'secret\n' >"$w/pw" && chmod 600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_SBIN_COPY="$w/sbin/cst-vm" CST_VM_INDEX="$w/index.json"
+            tool=/opt/cst-rw/vm/cst-vm
+            unit=cst-vm-backup@e2emask.timer
+            systemctl mask "$unit"
+            [ "$(readlink "/etc/systemd/system/$unit")" = /dev/null ] || {{ echo "mask made no link to /dev/null" >&2; exit 1; }}
+            rc=0
+            /usr/bin/python3 -I "$tool" backup-timer on e2emask >"$w/on.out" 2>&1 || rc=$?
+            [ "$rc" -ne 0 ] || {{ echo "on did not refuse a masked unit" >&2; cat "$w/on.out" >&2; exit 1; }}
+            grep -qF "$unit is masked (systemctl mask); unmask it first: sudo systemctl unmask $unit" "$w/on.out"
+            for f in /etc/systemd/system/cst-vm-backup@.service /etc/systemd/system/cst-vm-backup@.timer "$w/sbin/cst-vm"; do
+                if [ -e "$f" ]; then echo "on wrote $f" >&2; exit 1; fi
+            done
+            [ "$(systemctl is-enabled "$unit" || true)" = masked ]
+            # grep reads all of it: status gets SIGPIPE back at its default, and pipefail would see it.
+            /usr/bin/python3 -I "$tool" backup-timer status e2emask | grep -F "/etc/systemd/system/$unit: masked" >/dev/null
+            systemctl unmask "$unit"
+            /usr/bin/python3 -I "$tool" backup-timer on e2emask >/dev/null
+            systemctl is-enabled "$unit"
+            /usr/bin/python3 -I "$tool" backup-timer off e2emask >/dev/null
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ] && [ ! -e "$w/sbin/cst-vm" ]
+            echo E2E-OK-VM
+            """,
+        ).stdout
+        self.assertIn("E2E-OK-VM", out)
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "systemctl --user unmask cst-toolchains-prune.timer; rm -f /home/tester/.config/cst/toolchains-auto.off",
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            d=/home/tester/.config/systemd/user
+            /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true
+            systemctl --user mask cst-toolchains-prune.timer
+            [ "$(readlink "$d/cst-toolchains-prune.timer")" = /dev/null ]
+            rc=0
+            /opt/cst-rw/cst toolchains auto on >/tmp/e2e-tc-mask.out 2>&1 || rc=$?
+            [ "$rc" -ne 0 ] || { echo "auto on did not refuse a masked unit" >&2; cat /tmp/e2e-tc-mask.out >&2; exit 1; }
+            grep -qF "cst-toolchains-prune.timer is masked (systemctl mask); unmask it first: systemctl --user unmask cst-toolchains-prune.timer" /tmp/e2e-tc-mask.out
+            if [ -e "$d/cst-toolchains-prune.service" ]; then echo "auto on wrote the service" >&2; exit 1; fi
+            [ "$(systemctl --user is-enabled cst-toolchains-prune.timer || true)" = masked ]
+            /opt/cst-rw/cst toolchains status | grep -F "cst-toolchains-prune.timer masked" >/dev/null
+            /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1
+            [ "$(readlink "$d/cst-toolchains-prune.timer")" = /dev/null ] || { echo "auto off removed the mask" >&2; exit 1; }
+            systemctl --user unmask cst-toolchains-prune.timer
+            rm -f /tmp/e2e-tc-mask.out
+            echo E2E-OK-TOOLCHAINS
+            """,
+        ).stdout
+        self.assertIn("E2E-OK-TOOLCHAINS", out)

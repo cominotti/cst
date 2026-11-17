@@ -7,6 +7,10 @@ allowed), sections separated by one blank line, ending in a newline.
 """
 
 from collections.abc import Sequence
+import posixpath
+
+# `systemctl mask NAME` leaves a link to this file where the unit file goes.
+MASK_TARGET = "/dev/null"
 
 
 def render_unit_file(header: Sequence[str], sections: Sequence[tuple[str, Sequence[str]]]) -> str:
@@ -30,4 +34,18 @@ def render_timer(
     return render_unit_file(
         header,
         [("Unit", [f"Description={description}"]), ("Timer", timer), ("Install", ["WantedBy=timers.target"])],
+    )
+
+
+def masked_refusal(paths: Sequence[str], *, user: bool) -> str | None:
+    """Why a command that would write or enable these unit files refuses: each
+    one is masked (`systemctl mask`: a link to /dev/null). None when the list is
+    empty. CST never unmasks a unit by itself: the mask is the user's choice, and
+    writing the file would silently undo it. user: a unit of the user manager."""
+    if not paths:
+        return None
+    unmask = "systemctl --user unmask" if user else "sudo systemctl unmask"
+    return "; ".join(
+        f"{name} is masked (systemctl mask); unmask it first: {unmask} {name}"
+        for name in (posixpath.basename(p) for p in paths)
     )

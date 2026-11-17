@@ -24,14 +24,15 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters.files import owned_file_state_at, write_atomic
+from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.domain.errors import Refused
-from cst_core.domain.files import OwnedState
+from cst_core.domain.files import OwnedState, UnitFileState
 from toolchains.domain import (
     CACHE_TAG,
     CARGO_COMM,
     CARGO_ENV,
+    CONF_REL,
     CMD_TIMEOUT,
     CRATE_DEPTH,
     ENUM_BUDGET,
@@ -45,6 +46,7 @@ from toolchains.domain import (
     NAME,
     NOT_A_MEMBER,
     OFF_REL,
+    OLD_CONF_REL,
     PIN_NAMES,
     REPO_DEPTH,
     RUST_TOOLS,
@@ -1056,6 +1058,23 @@ def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> O
     replaces the link itself."""
     want = wanted.encode() if isinstance(wanted, str) else wanted
     return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
+
+
+def timer_unit_state(path: str, wanted: str) -> UnitFileState:
+    """file_state of a unit file `auto on` writes: also "masked" when
+    `systemctl --user mask` left a link to /dev/null there (see
+    cst_core.adapters.files.unit_file_state_at)."""
+    return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner="user")
+
+
+def old_conf_note(home: str) -> None:
+    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
+        say(
+            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
+            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
+            4,
+            err=True,
+        )
 
 
 def turned_off(home: str) -> bool:

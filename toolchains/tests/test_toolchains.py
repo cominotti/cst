@@ -933,6 +933,56 @@ class AutoTest(Scratch):
         with open(kept) as f:
             self.assertEqual(f.read(), old, "the link was written through")
 
+    def test_a_masked_unit_refuses_auto_on_and_is_left_by_auto_off(self) -> None:
+        # `systemctl --user mask` leaves a link to /dev/null where the unit file goes. Read
+        # through, it held no marker, so auto on called the mask "not written by CST".
+        self.csts_cargo_config()
+        timer = os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")
+        os.makedirs(os.path.dirname(timer))
+        os.symlink("/dev/null", timer)
+        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "masked")
+        rc, out, err = self.run_split("auto", "on")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(
+            "cst-toolchains-prune.timer is masked (systemctl mask); unmask it first: "
+            "systemctl --user unmask cst-toolchains-prune.timer; nothing was written",
+            err,
+        )
+        self.assertEqual(os.readlink(timer), "/dev/null")
+        self.assertFalse(self.exists(".config/systemd/user/cst-toolchains-prune.service"))
+        self.assertFalse(self.exists(".local/lib/cst/cst-toolchains"))
+        self.assertEqual(self.calls(), [], "systemctl was called")
+        rc, out = self.run_main("status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("~/.config/systemd/user/cst-toolchains-prune.timer masked", out)
+        rc, out, err = self.run_split("auto", "off")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(
+            "left alone: ~/.config/systemd/user/cst-toolchains-prune.timer (masked with systemctl --user mask)", err
+        )
+        self.assertEqual(os.readlink(timer), "/dev/null")
+
+    def test_a_unit_linked_to_anything_else_follows_the_link_rule(self) -> None:
+        # Only a link to /dev/null is a mask: a link to the unit CST would write is kept (a
+        # dotfiles manager's), a link to another file is someone else's.
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        timer = os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")
+        kept = os.path.join(self.home, "dotfiles-timer")
+        os.rename(timer, kept)
+        os.symlink(kept, timer)
+        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "ok")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.islink(timer))
+        with open(kept, "w") as f:
+            f.write("[Timer]\nOnCalendar=daily\n")
+        rc, out, err = self.run_split("auto", "on")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("not written by CST, left alone: ~/.config/systemd/user/cst-toolchains-prune.timer", err)
+        self.assertNotIn("masked", err)
+
     def test_auto_on_upgrades_a_plain_script_copy_to_the_zipapp(self) -> None:
         # Older CST versions installed cst-toolchains as a plain script (it
         # holds CST's marker): auto on replaces it with the zipapp, and a

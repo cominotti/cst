@@ -1566,6 +1566,13 @@ items stay at their old place (their data is in the `/home` snapshots).
 Find what uses them (`sudo fuser -vm ~/<path>` or `lsof +D ~/<path>`), stop it,
 and run `cst btrfs bulk apply`. Log: `journalctl -u btrfs-bulk-boot`.
 
+**Nothing moved into ~/Bulk at boot** (alert `~/Bulk: nothing moved at boot`).
+A line of `/etc/btrfs-setup/bulk.conf` is not a plain `KEY=VALUE` (the alert
+names the file and the line), so the boot step cannot tell whose home it
+handles and moves nothing; it exits with 1, like a run that needs a look. The
+items keep waiting for the boot. Fix the line (`cst btrfs install` writes the
+file again), then run `cst btrfs bulk apply` or reboot.
+
 **`bulk status` says `an interrupted move is recorded`.**
 A move was interrupted (power loss, kill). Nothing is lost. Normally the next
 boot already handled it, before the login screen (`btrfs-bulk-boot.service`

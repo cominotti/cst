@@ -562,6 +562,36 @@ class BulkTest(BulkBase):
         with self.assertRaisesRegex(SystemExit, "needs --user NAME"):
             self.m.user_ctx([])
 
+    def test_a_bad_bulk_conf_line_at_boot_exits_non_zero_and_alerts(self) -> None:
+        # The boot service runs `btrfs-bulk boot` before any login. The refusal to guess whose home
+        # it moves only reached the boot console and the journal, every boot, unseen.
+        with open(os.path.join(os.path.dirname(HERE), "units", "btrfs-bulk-boot.service")) as f:
+            self.assertIn("ExecStart=/usr/local/sbin/btrfs-bulk boot\n", f.read())
+        self.m.ROOT = True
+        with open(self.m.CONF, "w") as f:
+            f.write("# CST\nBULK_USER=$USER\n")
+        with open(self.m.FLAG, "w") as f:
+            f.write("apps\n")
+        sent: list[tuple[str, str]] = []
+        self.m.alert = lambda title, body: sent.append((title, body))
+        with self.assertRaises(SystemExit) as cm:
+            bulk_cli.main(["btrfs-bulk", "boot"], TOOL)
+        code = cm.exception.code
+        # A text: Python prints it on stderr and exits 1.
+        self.assertIsInstance(code, str)
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", str(code))
+        self.assertEqual(len(sent), 1, sent)
+        title, body = sent[0]
+        self.assertEqual(title, "~/Bulk: nothing moved at boot")
+        self.assertIn(f"{self.m.CONF} line 2: BULK_USER=$USER: $", body)
+        self.assertIn("journalctl -u btrfs-bulk-boot", body)
+        self.assertTrue(os.path.exists(self.m.FLAG), "the items wait for the next boot, once the line is fixed")
+        # Run by hand, the message is on the terminal: no alert.
+        sent.clear()
+        with self.assertRaises(SystemExit):
+            bulk_cli.main(["btrfs-bulk", "plan"], TOOL)
+        self.assertEqual(sent, [])
+
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
         # The counter was written with open("w") and no fsync before the moves; a hang
         # or hard reset before the next btrfs commit lost it, and the give-up never tripped.

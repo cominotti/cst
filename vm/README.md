@@ -714,6 +714,12 @@ cst vm backup-timer off [VM]      # (root) stops it; removes the files when no V
 - `/etc/systemd/system/cst-vm-backup@.timer`, and enables
   `cst-vm-backup@<VM>.timer`.
 
+A masked unit (`systemctl mask` leaves a link to `/dev/null` in
+`/etc/systemd/system`: the service, the timer, or the timer of one VM,
+`cst-vm-backup@<VM>.timer`) stays masked: `on` refuses, changes nothing and
+says how to unmask it; `status` shows it as `masked`; `off` leaves the link
+where it is.
+
 When: **Saturday 04:30**, up to 30 minutes later (`RandomizedDelaySec`).
 That keeps it away from the other jobs: the `/home` NAS backup starts every
 day between 00:00 and 01:00, and the btrfs scrub runs on Sunday at 02:00.
@@ -722,7 +728,9 @@ If the machine was off at that time, it runs at the next boot
 restic waits up to 30 minutes for its lock (`--retry-lock 30m`).
 
 A failed run makes the unit `failed` (`cst doctor` lists failed units) and
-sends a desktop alert; the next week tries again. Run one now:
+sends a desktop alert; the next week tries again. A settings line that is not a
+plain `KEY=VALUE` (section 10.7) is such a failure: the alert names the file and
+the line. Run one now:
 `sudo systemctl start cst-vm-backup@win11-devbox.service`; its log:
 `journalctl -u cst-vm-backup@win11-devbox.service`.
 

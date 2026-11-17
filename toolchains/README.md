@@ -717,7 +717,10 @@ runs. A manual `prune apply` has the same budget.
 - `~/.config/systemd/user/cst-toolchains-prune.service` and `.timer`.
 
 All of them start with (or contain) `# managed-by: toolchains-setup.sh (CST)`;
-files without that line are never overwritten or removed. Each run saves its
+files without that line are never overwritten or removed. A unit you masked
+(`systemctl --user mask`, which leaves a link to `/dev/null` there) stays
+masked: `auto on` refuses, writes nothing and says how to unmask it, `status`
+shows it as `masked`, and `auto off` leaves the link alone. Each run saves its
 summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`). A
 summary that is not a JSON object (edited by hand, say) counts as none
 recorded.

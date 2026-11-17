@@ -29,6 +29,7 @@ one place only.
 | Read a file | `cst_core.adapters.files`: `read_text`, `read_int`, `read_bytes` | `read_text` decodes leniently (bad bytes replaced): not for a file written back. For that, `LocalFileSystemAdapter.read_text` (byte-transparent). The two policies are on purpose. `FileSystemPort` is the port. |
 | Install a file of CST | a row of `INSTALL_MANIFEST` (`cst_core.domain.install`); from a setup script `cst-install.bash`: `cst_install`, `cst_install_as`, `cst_install_text`, `cst_installed_dests` | Never copy a file by hand ([docs/architecture.md](../../docs/architecture.md#each-module-has-two-parts)). |
 | A link at a destination | `cst_core.domain.install.link_read_through`, `cst_core.adapters.files.owned_file_state_at` | Replaced at a root destination, judged by its target in a home. |
+| A unit file CST writes (masked or not) | `cst_core.adapters.files.unit_file_state_at`, `is_masked_unit`; `cst_core.domain.units.masked_refusal` | A link to `/dev/null` is `masked` (`systemctl mask`): refuse, never unmask. |
 | Managed lines and files, safe paths | `cst_core.domain.files`: `MarkedLineSpec`, `owned_file_state`, `inspect_managed_file`, `effective_lines`, `checked_path` | |
 | One run at a time | `cst_core.adapters.locks.take_lock` | A lock file it creates gets exactly its mode; refuses a link. |
 | A journal line | `cst_core.adapters.journal.log` | `<prio>tag: msg`, flushed. |
