@@ -50,13 +50,15 @@ from tests.shell_files import shell_files
 FIXER = os.path.join(REPO, "tests", "license_headers.py")
 # The scripts whose help is their header comment (lines 2 up to the first
 # blank line): (script, arguments that print it, exit status).
-HELP_FROM_HEADER = (
+HELP_FROM_HEADER: tuple[tuple[str, tuple[str, ...], int | None], ...] = (
     ("bluetooth-setup.sh", ("help",), 0),
     ("btrfs-setup.sh", ("help",), 0),
     ("cpu-setup.sh", ("help",), 0),
     ("toolchains-setup.sh", ("help",), 0),
     ("vm-setup.sh", ("help",), 0),
-    ("btrfs/btrfs-degraded-boot-setup.sh", ("--bogus",), 2),  # its usage is the bad-argument answer
+    # Its usage is the bad-argument answer, printed only after the script has re-run itself
+    # through sudo; a unit test must never run sudo, so only its help pipeline runs (None).
+    ("btrfs/btrfs-degraded-boot-setup.sh", (), None),
     ("btrfs/btrfs-stall-watch", ("--help",), 0),
 )
 
@@ -103,8 +105,12 @@ class LicenseGateTest(unittest.TestCase):
                 path = os.path.join(REPO, script)
                 # Not vacuous: the script does carry the header the help must skip.
                 self.assertIsNone(header_problem(script, Path(path).read_text(encoding="utf-8")))
+                argv = ["bash", path, *args]
+                if status is None:
+                    line = next(x for x in Path(path).read_text(encoding="utf-8").splitlines() if "sed -n '2,/^$/" in x)
+                    argv = ["bash", "-c", line.strip().replace('"$0"', '"$1"'), "help", path]
                 r = subprocess.run(
-                    ["bash", path, *args],
+                    argv,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -112,7 +118,7 @@ class LicenseGateTest(unittest.TestCase):
                     stdin=subprocess.DEVNULL,
                     timeout=60,
                 )
-                self.assertEqual(r.returncode, status, r.stdout + r.stderr)
+                self.assertEqual(r.returncode, 0 if status is None else status, r.stdout + r.stderr)
                 self.assertNotIn("SPDX-License-Identifier", r.stdout + r.stderr)
                 first = next(line for line in r.stdout.splitlines() if line.strip())
                 self.assertIn(os.path.basename(script), first)
