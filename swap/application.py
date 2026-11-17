@@ -366,6 +366,9 @@ class SwapApplicationService:
             live = params.get(name)
             if live is not None:
                 rows.append(SettingCheckRow("ok" if same_param(live, want) else "DIFF", f"zswap {name}", live, want))
+            elif params:
+                # tmpfiles' w skips a file that is not there, without a word (renamed or removed by a kernel).
+                rows.append(SettingCheckRow("MISSING", f"zswap {name}", "this kernel has no such parameter", want))
         exp_name, exp_key = WSF_EXPERIMENT
         exp_on = self._fs.exists(posixpath.join(self._env.cpu_run_dir, "exp-" + exp_name))
         for key, want in parse_sysctl(self._desired_text(self._env.src_sysctl)):

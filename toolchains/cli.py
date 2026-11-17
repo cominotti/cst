@@ -31,8 +31,10 @@ from toolchains.adapters import (
     Program,
     append_text,
     ask_cargo,
+    before_removal,
     cargo_procs,
     cargo_query,
+    disable_timer,
     file_state,
     find_manifests,
     find_worktrees,
@@ -46,6 +48,7 @@ from toolchains.adapters import (
     proc_users,
     read_cfg,
     read_state,
+    reload_failed,
     release,
     remove_tree,
     resolve_root,
@@ -1248,38 +1251,6 @@ def stale_files(home: str) -> list[tuple[str, bool]]:
     return out
 
 
-def before_removal(name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
-    """systemctl --user ARGS NAME for a timer, checked, before auto on/off
-    removes any file. When the user manager refuses or cannot be reached,
-    nothing has been removed yet: Refused, and a second run (once the
-    manager answers) can finish the job. Removing the files anyway would
-    leave a timer that keeps running with no file left to show it."""
-    try:
-        return systemctl(*args, name, check=True, ok=ok)
-    except Refused as e:
-        raise Refused(
-            f"{e}; nothing was removed and {name} may still be running: run this again once your user "
-            "manager answers (`systemctl --user status` shows whether it does)"
-        ) from None
-
-
-def reload_failed() -> bool:
-    """daemon-reload after unit files were removed: True (and an error line)
-    when it failed. The removal is not undone: the timer is already stopped,
-    and the manager forgets the files at its next reload or restart."""
-    try:
-        systemctl("daemon-reload", check=True)
-    except Refused as e:
-        say(
-            f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
-            "manager answers, so that it forgets them",
-            3,
-            err=True,
-        )
-        return True
-    return False
-
-
 def remove_stale(home: str) -> bool:
     """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
     well; False when the daemon-reload after the removal failed (reported).
@@ -1289,7 +1260,7 @@ def remove_stale(home: str) -> bool:
         return True
     timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
     if (timer, True) in found:
-        before_removal(OLD_TIMER, "disable", "--now")
+        disable_timer(OLD_TIMER)
     reload = False
     for path, ours in found:
         if not ours:
@@ -1402,7 +1373,7 @@ def cmd_auto_off(home: str, now: float) -> int:
     # Both timers are stopped, checked, before anything is removed (see
     # before_removal); remove_stale stops the earlier one first.
     if st[TIMER] in ("ok", "change"):
-        before_removal(TIMER, "disable", "--now")
+        disable_timer(TIMER)
     elif st[TIMER] == "missing":
         stop_orphan_timer()
     rc = 0 if remove_stale(home) else 1

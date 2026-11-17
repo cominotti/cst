@@ -7,6 +7,8 @@ After=local-fs.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 -I /usr/local/sbin/btrfs-stall-monitord
+# Journal lines under its own name (journalctl -t btrfs-stall-monitord), not "python3".
+SyslogIdentifier=btrfs-stall-monitord
 Restart=on-failure
 RestartSec=10
 # Data holds kernel messages and process names: readable by wheel only.
@@ -15,6 +17,10 @@ LogsDirectory=btrfs-stall-monitor
 LogsDirectoryMode=0750
 RuntimeDirectory=btrfs-stall-monitor
 RuntimeDirectoryMode=0700
+# Alerts queued there (alert-*.txt, drained by btrfs-stall-alert.service and the
+# hourly health check) survive a restart, also an automatic one after a crash;
+# a stop still removes the folder.
+RuntimeDirectoryPreserve=restart
 UMask=0027
 # Must keep sampling while everything else is stalled.
 Nice=-5

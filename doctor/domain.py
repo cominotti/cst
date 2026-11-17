@@ -55,6 +55,10 @@ SNAP_WRITABLE = f"{SNAP_STATE}/{WRITABLE_FILE}"
 SNAP_CONF = "/etc/btrfs-setup/snapshots.conf"  # also read by the VM NAS check
 
 NOCOW_POSTPONED = "/var/lib/docker-volumes-nocow/postponed"
+
+# swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
+ZSWAP_CONF = "/etc/tmpfiles.d/zswap.conf"
+ZSWAP_PARAMS = "/sys/module/zswap/parameters"
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
 GAME_RUN = "/run/cpu-setup"

@@ -51,6 +51,8 @@ from doctor.domain import (
     VM_RUN_DIR,
     VM_TIMER_WANTS,
     WARN,
+    ZSWAP_CONF,
+    ZSWAP_PARAMS,
     Deployment,
     OstreeAnswer,
     Request,
@@ -74,6 +76,7 @@ from doctor.domain import (
     virt_versions,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from swap.domain import parse_tmpfiles_params
 from vm.domain import guest_kind, tune_domain
 
 # The checkout's copies the doctor reads (host.repo_path gives where they are).
@@ -1007,6 +1010,39 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
         )
     if not loose and not jobs:
         yield Result(OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")
+
+
+# ---- swap: zswap --------------------------------------------------------------------------------
+@check("swap")
+def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN for each zswap parameter that swap's zswap.conf sets and this
+    kernel does not have: systemd-tmpfiles skips it at boot without a word
+    (a new kernel can rename or drop one). Nothing when that file is not
+    installed."""
+    try:
+        with host.open_text(host.path(ZSWAP_CONF)) as f:
+            wanted = [name for name, _ in parse_tmpfiles_params(f.read(65536))]
+    except FileNotFoundError:
+        return
+    except OSError:
+        yield Result(INFO, f"zswap: cannot read {ZSWAP_CONF}")
+        return
+    if not wanted:
+        return
+    try:
+        have = set(host.listdir(host.path(ZSWAP_PARAMS)))
+    except OSError:
+        yield Result(WARN, f"zswap: not in this kernel (no {ZSWAP_PARAMS}): {ZSWAP_CONF} sets nothing")
+        return
+    missing = [name for name in wanted if name not in have]
+    for name in missing:
+        yield Result(
+            WARN,
+            f"zswap {name}: this kernel has no such parameter; {ZSWAP_CONF} sets it, and systemd-tmpfiles "
+            "skips it at boot without a word (cst swap status shows the zswap settings)",
+        )
+    if not missing:
+        yield Result(OK, f"zswap: every parameter {ZSWAP_CONF} sets is in this kernel")
 
 
 # ---- vm: libvirt guests --------------------------------------------------------------------------

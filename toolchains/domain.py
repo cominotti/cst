@@ -474,6 +474,7 @@ def render_service() -> str:
                 [
                     "Type=oneshot",
                     f"ExecStart=/usr/bin/python3 -I %h/{PROG_REL} prune apply",
+                    "SyslogIdentifier=cst-toolchains",
                     "Nice=19",
                     "IOSchedulingClass=idle",
                     "TimeoutStartSec=30min",

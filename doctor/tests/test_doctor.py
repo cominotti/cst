@@ -870,6 +870,69 @@ class SnapshotsWritableTest(Scratch):
         self.assertIn("info   snapshots: cannot read /var/lib/btrfs-snapshot/core-unfinished", r.stdout)
 
 
+class ZswapParamsTest(Scratch):
+    """check_zswap_params: a zswap parameter that swap's zswap.conf (as
+    installed) sets and this kernel does not have. systemd-tmpfiles skips
+    it at boot without a word."""
+
+    def install_conf(self) -> None:
+        d = os.path.join(self.root, "etc", "tmpfiles.d")
+        os.makedirs(d, exist_ok=True)
+        shutil.copy(os.path.join(REPO, "swap", "tmpfiles", "zswap.conf"), os.path.join(d, "zswap.conf"))
+
+    def params(self, *names: str) -> None:
+        d = os.path.join(self.root, "sys", "module", "zswap", "parameters")
+        os.makedirs(d, exist_ok=True)
+        for n in names:
+            with open(os.path.join(d, n), "w") as f:
+                f.write("Y\n")
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "zswap" in ln]
+
+    def test_nothing_without_the_installed_file(self) -> None:
+        self.params("enabled")
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_ok_when_every_parameter_is_there(self) -> None:
+        self.install_conf()
+        self.params("compressor", "max_pool_percent", "shrinker_enabled", "enabled", "accept_threshold_percent")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            ["  ok     zswap: every parameter /etc/tmpfiles.d/zswap.conf sets is in this kernel"],
+        )
+        self.assert_read_only()
+
+    def test_a_parameter_this_kernel_lacks_warns(self) -> None:
+        self.install_conf()
+        self.params("compressor", "max_pool_percent", "enabled")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   zswap shrinker_enabled: this kernel has no such parameter; /etc/tmpfiles.d/zswap.conf "
+                "sets it, and systemd-tmpfiles skips it at boot without a word (cst swap status shows the zswap "
+                "settings)"
+            ],
+        )
+        self.assert_read_only()
+
+    def test_no_zswap_in_the_kernel_warns_once(self) -> None:
+        self.install_conf()
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   zswap: not in this kernel (no /sys/module/zswap/parameters): "
+                "/etc/tmpfiles.d/zswap.conf sets nothing"
+            ],
+        )
+
+
 class DockerNocowPostponedTest(Scratch):
     """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
     keeps of the boots at which its migration had to wait."""
@@ -1912,7 +1975,7 @@ class CommandLineTest(Scratch):
         for a, _ in doc_app.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "vm"])
+        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm"])
 
 
 class ToolboxTest(Scratch):
@@ -1975,7 +2038,7 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("btrfs", "cst_core", "cpu", "vm"):  # doctor imports these packages
+        for pkg in ("btrfs", "cst_core", "cpu", "swap", "vm"):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )

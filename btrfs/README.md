@@ -268,7 +268,10 @@ accident, the fingerprint no longer matches.
 need that file, and by then the other copy may be bad too.
 
 **How:** `btrfs-scrub-weekly.timer` runs `btrfs scrub start -B /var` every
-Sunday at 02:00, with the lowest IO priority. If the PC was off, it runs at the
+Sunday at 02:00, in the idle IO class (`IOSchedulingClass=idle`). That class
+only works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`,
+so on this PC the scrub reads at the disks' full speed (see
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)). If the PC was off, it runs at the
 next boot. After the scrub, the health check runs at once. If the scrub fails,
 the health check also runs and alerts.
 
@@ -444,7 +447,10 @@ text is also written to the journal. When you start it from a terminal (as
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
-which sends it.
+which sends it. That folder survives a restart of the monitor, also an automatic
+one after a crash (`RuntimeDirectoryPreserve=restart`), so a queued alert is not
+lost; stopping the monitor removes it. The monitor's journal lines carry its
+own name: `journalctl -t btrfs-stall-monitord` (or `-u btrfs-stall-monitor`).
 
 **When nobody is logged in.** Some alerts happen when no desktop is there to
 show them: at boot, before the login screen, or at night when you are logged
@@ -714,7 +720,11 @@ cst btrfs uninstall
 
 It does not ask for confirmation; it starts at once. It stops and removes:
 
-- the health-check and scrub timers, the stall monitor and its alert service;
+- the health-check and scrub timers, the stall monitor and its alert service.
+  The last run that systemd keeps for a timer (`/var/lib/systemd/timers/stamp-*`)
+  goes too: `systemctl clean --what=state` while the timer is still loaded. So
+  does the stamp of `btrfs-scrub-monthly.timer`, a timer of older versions (that
+  one also at `install`);
 - the installed scripts in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher;
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
@@ -1381,7 +1391,8 @@ list). It needs a terminal.
   `/etc/systemd/system`;
 - its state in `/var/lib/docker-gc`.
 
-`disable` stops the timer and the recorder. **The files stay**, including the
+`disable` stops the timer and the recorder, and makes systemd forget the
+timer's last run (`systemctl clean --what=state docker-gc.timer`). **The files stay**, including the
 recorded state; `uninstall` (section 6) does not touch docker-gc either. There
 is no command that removes the files. If you want them gone, remove them by
 hand after `disable`:

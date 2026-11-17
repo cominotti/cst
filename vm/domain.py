@@ -314,6 +314,7 @@ def render_service(program: str, stop_timeout: str) -> str:
                     "Type=oneshot",
                     'Environment="CST_PROG=cst vm"',
                     f"ExecStart=/usr/bin/python3 -I {program} backup %i --nas",
+                    "SyslogIdentifier=cst-vm",
                     "Nice=19",
                     "IOSchedulingClass=idle",
                     "CPUWeight=20",
@@ -330,6 +331,17 @@ def render_service(program: str, stop_timeout: str) -> str:
             ),
         ],
     )
+
+
+def timer_file_words(prog: str, vm: str) -> dict[str, str]:
+    """What `backup-timer status` says about each file of the timer, by its
+    owned-file state."""
+    return {
+        "ok": "installed, up to date",
+        "missing": "not installed",
+        "conflict": "not CST's file",
+        "change": f"installed, OLDER than this copy of CST: {prog} backup-timer on {vm} updates it",
+    }
 
 
 def is_cst_vm_program(data: bytes) -> bool:

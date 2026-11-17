@@ -211,6 +211,8 @@ case "$1" in
   enable) mkdir -p "$UNIT_DIR/timers.target.wants" && touch "$UNIT_DIR/timers.target.wants/$3" ;;
   disable) rm -f "$UNIT_DIR/timers.target.wants/$3" ;;
   show) echo "Sat 2026-11-21 04:41:12 UTC" ;;
+  # clean needs the unit loaded: the log says whether the timer's file was still there.
+  clean) [ -e "$UNIT_DIR/cst-vm-backup@.timer" ] && echo "  (timer file present)" >>"$STUB_LOG" ;;
 esac
 exit 0
 """
@@ -1083,11 +1085,51 @@ class TimerTest(Nas):
         self.assertIn("OLDER than this copy of CST", r.stdout)
         r = self.run_tool("status", "win")
         self.assertIn("weekly NAS backup timer: on", r.stdout)
+        # Neither on nor status forgets the timer's last run.
+        self.assertNotIn("clean", " ".join(self.calls()))
         r = self.run_tool("backup-timer", "off", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("systemctl disable --now cst-vm-backup@win.timer", self.calls())
+        # disable --now, then clean --what=state (the Persistent= stamp) while the timer file is still
+        # there (clean needs the unit loaded), then the files go.
+        calls = self.calls()
+        at = calls.index("systemctl disable --now cst-vm-backup@win.timer")
+        self.assertEqual(
+            calls[at : at + 3],
+            [
+                "systemctl disable --now cst-vm-backup@win.timer",
+                "systemctl clean --what=state cst-vm-backup@win.timer",
+                "  (timer file present)",
+            ],
+        )
         self.assertFalse(os.path.exists(copy))
         self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.service")))
+
+    def test_off_goes_on_when_clean_fails(self) -> None:
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.bin, "systemctl"), "w") as f:
+            f.write(SYSTEMCTL.replace('case "$1" in', 'case "$1" in\n  clean) exit 1 ;;', 1))
+        r = self.run_tool("backup-timer", "off", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("systemctl clean --what=state cst-vm-backup@win.timer", self.calls())
+        self.assertFalse(os.path.exists(os.path.join(self.units, "cst-vm-backup@.timer")))
+
+    def test_status_calls_a_service_without_its_journal_name_older(self) -> None:
+        # The service as an older CST wrote it, before SyslogIdentifier=cst-vm (its journal lines read
+        # "python3"): status says it is older, and on rewrites it.
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        service = os.path.join(self.units, "cst-vm-backup@.service")
+        new = read(service)
+        self.assertIn("\nSyslogIdentifier=cst-vm\n", new)
+        with open(service, "w") as f:
+            f.write(new.replace("SyslogIdentifier=cst-vm\n", ""))
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertIn(f"  {service}: installed, OLDER than this copy of CST", r.stdout)
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"  updated: {service}", r.stdout)
+        self.assertEqual(read(service), new)
 
     def test_on_upgrades_a_plain_script_copy_and_refuses_a_foreign_program(self) -> None:
         copy = self.env["CST_VM_SBIN_COPY"]

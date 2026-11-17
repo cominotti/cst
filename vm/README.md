@@ -688,6 +688,10 @@ cst vm backup-timer status [VM]   # on or off, up to date, next run, last NAS ba
 cst vm backup-timer off [VM]      # (root) stops it; removes the files when no VM uses them
 ```
 
+`off` also makes systemd forget that VM's last run
+(`systemctl clean --what=state`, which removes
+`/var/lib/systemd/timers/stamp-cst-vm-backup@<VM>.timer`), before the files go.
+
 `on` installs:
 
 - `/usr/local/sbin/cst-vm`: this program, as `install` writes every CST
@@ -698,7 +702,13 @@ cst vm backup-timer off [VM]      # (root) stops it; removes the files when no V
   copy installed by an older CST: `on` replaces it);
 - `/etc/systemd/system/cst-vm-backup@.service`: runs
   `cst-vm backup <VM> --nas` with low priority (`Nice=19`,
-  `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`);
+  `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`; the IO class only
+  works with the BFQ or Kyber IO schedulers and the weight with BFQ or iocost;
+  these NVMe disks use `none`:
+  see [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
+  Its journal lines carry the name `cst-vm` (`SyslogIdentifier=`), so
+  `journalctl -t cst-vm` finds them; a service written by an older CST shows
+  as `OLDER` in `backup-timer status`;
 - `/etc/systemd/system/cst-vm-backup@.timer`, and enables
   `cst-vm-backup@<VM>.timer`.
 

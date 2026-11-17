@@ -29,6 +29,7 @@ import swap.domain as D
 from swap.domain import (
     DEBUG_HELP,
     PAGE,
+    SettingCheckRow,
     SwapHardwareSpec,
     cgroup_row,
     parse_kv,
@@ -341,6 +342,33 @@ class StatusMathTest(unittest.TestCase):
             if "watermark_scale" in line and not line.lstrip().startswith("exp:")
         ]
         return rows, out.getvalue()
+
+    def zswap_rows(self, params: dict[str, str]) -> tuple[list[SettingCheckRow], str]:
+        tmp = tempfile.mkdtemp(prefix="swap-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        service = self._service(os.path.join(tmp, "proc"), os.path.join(tmp, "cg"), os.path.join(tmp, "run"))
+        report = service.build_settings_report(params)
+        out = io.StringIO()
+        render_settings(report, out=out)
+        return [r for r in report.rows if r.label.startswith("zswap")], out.getvalue()
+
+    def test_a_zswap_parameter_the_kernel_lacks_is_a_missing_row(self) -> None:
+        # tmpfiles' w skips a parameter file that is not there without a word: status says it.
+        rows, text = self.zswap_rows({"compressor": "zstd", "max_pool_percent": "20", "enabled": "Y"})
+        self.assertEqual(
+            rows,
+            [
+                SettingCheckRow("ok", "zswap compressor", "zstd", "zstd"),
+                SettingCheckRow("ok", "zswap max_pool_percent", "20", "20"),
+                SettingCheckRow("MISSING", "zswap shrinker_enabled", "this kernel has no such parameter", "1"),
+                SettingCheckRow("ok", "zswap enabled", "Y", "1"),
+            ],
+        )
+        self.assertIn("MISSING zswap shrinker_enabled       this kernel has no such parameter   (desired 1)", text)
+
+    def test_no_zswap_at_all_is_one_bad_row(self) -> None:
+        rows, _ = self.zswap_rows({})
+        self.assertEqual(rows, [SettingCheckRow("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", "")])
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
         rows, text = self.settings_output("300", exp_on=True)

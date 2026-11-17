@@ -358,7 +358,8 @@ it dropped: `dropped N cache folder(s) from Workspace.<time>: F files, S
 **Cost:** on this PC, dropping 26 cache folders (45,200 files, 15 GiB) from a
 copy of `~/Workspace` took 4.9 seconds and one btrfs commit of 165 ms, with no
 stall. It happens only when a snapshot is taken, at the hourly run's lowest
-CPU and disk priority.
+CPU priority and in the idle IO class (which only works with the BFQ or Kyber IO
+schedulers, see below).
 
 **Settings** in `/etc/btrfs-setup/snapshots.conf`:
 
@@ -976,7 +977,10 @@ cst btrfs snapshots clean-targets --apply   # delete
 - `btrfs-snapshot.timer` starts `btrfs-snapshot.service` **every hour**
   (with a random delay up to 5 minutes). If the computer was off or asleep,
   the missed run happens soon after it is on again.
-- It runs at the lowest CPU and disk priority.
+- It runs at the lowest CPU priority and in the idle IO class. That class only
+  works with the BFQ or Kyber IO schedulers; these NVMe disks use `none`, so only
+  the CPU priority is lower here (see
+  [cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
 - A snapshot is taken **only if something changed** since the newest snapshot.
   btrfs counts changes with a number called the *generation*; the program
   compares the subvolume's generation with the one recorded in the newest
@@ -1383,7 +1387,7 @@ Run them as described in [section 2](#where-and-how-to-run-it):
 | `snapshots caches [--json]` | The cache folders (`CACHEDIR.TAG`) the next snapshot of each source drops, with files and sizes ([section 3](#cache-folders-cachedirtag-dropped-from-every-new-snapshot)). Read-only; shown also when `SNAPSHOT_EXCLUDE_CACHES=no`. |
 | `snapshots prune [--confirm]` | The normal retention by hand, including what the circuit breaker held back. Without `--confirm` it is a dry run. |
 | `snapshots clean-targets [--apply]` | Old cargo `target/` folders: list, or delete with `--apply`. |
-| `snapshots disable` | Stops the hourly snapshots and the NAS timer, and cancels a pending conversion at boot. Keeps the snapshots. |
+| `snapshots disable` | Stops the hourly snapshots and the NAS timer (and makes systemd forget their last runs: `systemctl clean --what=state`), and cancels a pending conversion at boot. Keeps the snapshots. |
 | `snapshots disable --purge` | The same, then deletes **all snapshots owned by btrfs-snapshot-core** and removes the top-level mount units. |
 | `snapshots nas setup ...` | See [section 7](#7-optional-backup-on-the-nas-restic). |
 | `snapshots nas status / run / disable / enable` | See [section 7](#other-nas-commands). |
@@ -2063,7 +2067,7 @@ The **old tree** is the original folder after the swap, renamed to
 8. **Last check after the swap.** If something wrote into the old tree in that
    short moment, everything is renamed back, and tried again later.
 9. **Old tree deleted.** The old tree is deleted with `rm` at the lowest CPU
-   and disk priority, at most 15 minutes per tree each time; what is left is
+   priority and in the idle IO class (no effect with the `none` IO scheduler), at most 15 minutes per tree each time; what is left is
    retried on the next hourly run. Because of the reflinks, this frees no
    space and costs no space: the data is still used by the new subvolume.
    - During `setup` and in the hourly run, this happens **right away**, after

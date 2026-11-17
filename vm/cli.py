@@ -118,6 +118,7 @@ from vm.domain import (
     render_timer,
     restore_lines,
     stored,
+    timer_file_words,
     tune_domain,
     version_changes,
 )
@@ -1012,12 +1013,7 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     if sub == "status":
         on = unit in wants_links()
         print(f"weekly NAS backup of {vm}: {'on' if on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
-        words = {
-            "ok": "installed, up to date",
-            "missing": "not installed",
-            "conflict": "not CST's file",
-            "change": f"installed, OLDER than this copy of CST: {PROG} backup-timer on {vm} updates it",
-        }
+        words = timer_file_words(PROG, vm)
         for p, st in states.items():
             print(f"  {p}: {words[st]}")
         if on:
@@ -1054,6 +1050,9 @@ def cmd_timer(sub: str, vm: str, entry_file: str) -> int:
     rc, _, err = systemctl("disable", "--now", unit)
     if rc != 0 and unit in wants_links():
         raise Refused(f"systemctl disable --now {unit}: {err or f'exit {rc}'}")
+    # Forget the timer's last run (Persistent=: /var/lib/systemd/timers/stamp-UNIT): needs the unit loaded
+    # and stopped, so before its files go. A failure only leaves that small file behind.
+    systemctl("clean", "--what=state", unit)
     print(f"Off: {unit}")
     if not wants_links():
         for p, st in states.items():

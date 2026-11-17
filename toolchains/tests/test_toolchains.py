@@ -53,6 +53,11 @@ OLD_UV = (
 
 FAKE_LOG = """#!/bin/sh
 echo "$*" >>"$SYSTEMCTL_LOG"
+# clean needs the unit loaded: the log says whether its file was still there.
+case " $* " in *" clean "*)
+    for a in "$@"; do last="$a"; done
+    [ -e "$UNIT_DIR/$last" ] && echo "  ($last file present)" >>"$SYSTEMCTL_LOG";;
+esac
 """
 # is-active answers like systemctl: "inactive" and exit 4 for a unit the
 # manager does not know (the default); SYSTEMCTL_ACTIVE=active: a timer
@@ -88,6 +93,7 @@ class Scratch(unittest.TestCase):
             "CST_TOOLCHAINS_NOW": str(NOW),
             "CST_TOOLCHAINS_SYSTEMCTL": self.stub,
             "SYSTEMCTL_LOG": self.log,
+            "UNIT_DIR": os.path.join(self.home, ".config/systemd/user"),
             # status must never reach a real sccache server (their sockets live here).
             "XDG_RUNTIME_DIR": os.path.join(self.tmp, "no-runtime-dir"),
         }
@@ -484,9 +490,10 @@ class AutoTest(Scratch):
             "IOSchedulingClass=idle",
             "NoNewPrivileges=yes",
             "ExecStart=/usr/bin/python3 -I %h/.local/lib/cst/cst-toolchains prune apply",
+            "SyslogIdentifier=cst-toolchains",
             "ConditionPathExists=%h/.local/lib/cst/toolchains.conf",
         ):
-            self.assertIn(line, service)
+            self.assertIn(line + "\n", service)
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
         with open(os.path.join(self.home, ".local/lib/cst/cst-toolchains"), "rb") as f:
@@ -539,6 +546,58 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), [])
         self.assertFalse(os.path.exists(self.unit("cst-toolchains-prune.timer")))
 
+    def test_journal_name_reaches_a_service_an_older_cst_installed(self) -> None:
+        # The service as CST wrote it before SyslogIdentifier=: its lines read "python3" in the journal.
+        self.csts_cargo_config()
+        self.assertEqual(self.run_main("auto", "on")[0], 0)
+        service = self.unit("cst-toolchains-prune.service")
+        new = self.read(".config/systemd/user/cst-toolchains-prune.service")
+        old = new.replace("SyslogIdentifier=cst-toolchains\n", "")
+        self.assertNotEqual(old, new)
+        with open(service, "w") as f:
+            f.write(old)
+        rc, out = self.run_main("status")
+        self.assertIn("~/.config/systemd/user/cst-toolchains-prune.service change", out)
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("written:   ~/.config/systemd/user/cst-toolchains-prune.service", out)
+        self.assertEqual(self.read(".config/systemd/user/cst-toolchains-prune.service"), new)
+
+    def test_auto_off_forgets_the_timer_state_before_it_removes_the_timer_file(self) -> None:
+        # systemd keeps a Persistent= timer's last run (~/.local/share/systemd/timers/stamp-NAME)
+        # after the timer is gone; clean removes it, and needs the unit loaded: disable --now first,
+        # then clean while the file is there, then the files go.
+        self.csts_cargo_config()
+        self.assertEqual(self.run_main("auto", "on")[0], 0)
+        open(self.log, "w").close()
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(
+            self.calls(),
+            [
+                "--user disable --now cst-toolchains-prune.timer",
+                "--user clean --what=state cst-toolchains-prune.timer",
+                "  (cst-toolchains-prune.timer file present)",
+                "--user daemon-reload",
+            ],
+        )
+        self.assertFalse(os.path.exists(self.unit("cst-toolchains-prune.timer")))
+
+    def test_auto_off_goes_on_when_clean_fails(self) -> None:
+        self.csts_cargo_config()
+        self.assertEqual(self.run_main("auto", "on")[0], 0)
+        with self.failing("clean"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        for rel in self.INSTALLED:
+            self.assertFalse(self.exists(rel), rel)
+
+    def test_read_only_commands_and_auto_on_never_clean(self) -> None:
+        self.csts_cargo_config()
+        for args in (("status",), ("status", "--brief"), ("prune", "plan"), ("config", "plan"), ("auto", "on")):
+            self.run_main(*args)
+        self.assertNotIn("clean", " ".join(self.raw_calls()))
+
     def stale(self, ours: bool = True) -> list[str]:
         mark = OLD_MARKER if ours else "# my own"
         paths = [
@@ -562,7 +621,16 @@ class AutoTest(Scratch):
         self.assertEqual(rc, 0, out)
         for p in paths:
             self.assertFalse(os.path.exists(p), p)
-        self.assertEqual(self.calls()[:2], ["--user disable --now cst-cargo-build-gc.timer", "--user daemon-reload"])
+        # The old timer's last run is forgotten while its file is still there (clean needs it loaded).
+        self.assertEqual(
+            self.calls()[:4],
+            [
+                "--user disable --now cst-cargo-build-gc.timer",
+                "--user clean --what=state cst-cargo-build-gc.timer",
+                "  (cst-cargo-build-gc.timer file present)",
+                "--user daemon-reload",
+            ],
+        )
         self.assertIn("left by the earlier `cst btrfs cargo-gc`", out)
         self.assertTrue(os.path.exists(os.path.join(self.home, ".config/cst/cargo-gc.conf")))  # the user's
 
@@ -630,7 +698,15 @@ class AutoTest(Scratch):
         self.assertIn("systemctl --user daemon-reload failed", out)
         self.assertIn("run `systemctl --user daemon-reload` once your user manager answers", out)
         # The timer was stopped first; the cleanup is not undone and goes on.
-        self.assertEqual(self.calls()[-2:], ["--user disable --now cst-toolchains-prune.timer", "--user daemon-reload"])
+        self.assertEqual(
+            self.calls()[-4:],
+            [
+                "--user disable --now cst-toolchains-prune.timer",
+                "--user clean --what=state cst-toolchains-prune.timer",
+                "  (cst-toolchains-prune.timer file present)",
+                "--user daemon-reload",
+            ],
+        )
         for rel in self.INSTALLED:
             self.assertFalse(self.exists(rel), rel)
         self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
@@ -811,7 +887,15 @@ class AutoTest(Scratch):
             self.assertNotIn(line, out)
         self.assertIn("removed:   ~/.config/systemd/user/cst-toolchains-prune.timer", out)
         self.assertIn("removed:   ~/.local/lib/cst/toolchains.conf", out)
-        self.assertEqual(self.calls(), ["--user disable --now cst-toolchains-prune.timer", "--user daemon-reload"])
+        self.assertEqual(
+            self.calls(),
+            [
+                "--user disable --now cst-toolchains-prune.timer",
+                "--user clean --what=state cst-toolchains-prune.timer",
+                "  (cst-toolchains-prune.timer file present)",
+                "--user daemon-reload",
+            ],
+        )
         # Run again: the foreign files are reported again, and only they (the
         # files that are gone are not "left alone"); nothing else is called.
         open(self.log, "w").close()
@@ -894,7 +978,15 @@ class AutoTest(Scratch):
         with self.failing("daemon-reload"):
             rc, out, err = self.run_split("auto", "off")
         self.assertEqual(rc, 1, out + err)
-        self.assertEqual(self.calls(), ["--user disable --now cst-cargo-build-gc.timer", "--user daemon-reload"])
+        self.assertEqual(
+            self.calls(),
+            [
+                "--user disable --now cst-cargo-build-gc.timer",
+                "--user clean --what=state cst-cargo-build-gc.timer",
+                "  (cst-cargo-build-gc.timer file present)",
+                "--user daemon-reload",
+            ],
+        )
         self.assertIn("systemctl --user daemon-reload failed", err)
         self.assertIn("run `systemctl --user daemon-reload` once your user manager answers", err)
         self.assertNotIn("daemon-reload", out)

@@ -552,7 +552,8 @@ inside a workspace that does not list it ("believes it's in a workspace when
 it's not", for example a `fuzz/` folder). Cargo cannot build such a crate
 where it is, so it has no build folder to claim.
 
-All of this runs at the lowest CPU and disk priority; on this PC it takes
+All of this runs at the lowest CPU priority and in the idle IO class (see
+section 10 for what that class does on this PC); on this PC it takes
 about 10 seconds for some 800 worktrees.
 
 **What is not seen.** A Rust project outside `~/Workspace`, inside a hidden
@@ -620,7 +621,7 @@ uv cache prune --cache-dir ~/.cache/uv --no-progress
 ```
 
 - **At most once a day** (`PYTHON_UV_INTERVAL`), as your user, at the lowest
-  CPU and disk priority. Never with `--force`.
+  CPU priority and in the idle IO class. Never with `--force`.
 - **uv must be on your PATH** (here it comes from Homebrew); otherwise the
   target refuses and says so, and the run counts as failed. The timer's PATH
   is the one of your user manager (`systemctl --user show-environment`),
@@ -681,13 +682,20 @@ search, uv's output, and a summary, to the journal:
 journalctl --user -u cst-toolchains-prune.service
 ```
 
+The lines carry the program's name (`SyslogIdentifier=cst-toolchains`), so
+`journalctl --user -t cst-toolchains` finds them too. A unit file written by an
+older CST shows as `change` in `status`; `auto on` rewrites it.
+
 The timer starts at a random moment in each hour (up to 10 minutes late) and
-the run has the lowest CPU and disk priority (`Nice=19`,
-`IOSchedulingClass=idle`), so it does not get in the way of builds or games.
+the run has the lowest CPU priority (`Nice=19`) and the idle IO class
+(`IOSchedulingClass=idle`), so it does not get in the way of builds or games.
+The IO class only works with the BFQ or Kyber IO schedulers; these NVMe disks
+use `none`, so here only the CPU priority is lower (see
+[cpu/README.md, section 6.3](../cpu/README.md#63-baseline-always-active-even-without-a-game)).
 
 **Each run has a time budget of 25 minutes**; systemd stops the service
-after 30 (`TimeoutStartSec=30min`). With the lowest disk priority on a busy
-disk, deleting tens of GiB can take long, so the run keeps to the budget
+after 30 (`TimeoutStartSec=30min`). On a busy disk, deleting tens of GiB
+can take long, so the run keeps to the budget
 itself: `python:uv` (at most 10 minutes) runs first, then `rust:build`;
 `rust:build` starts no new deletion with less than 2 minutes left (`stopped
 before ...: the run's time budget ...`) and stops an `rm` that is still
@@ -726,7 +734,11 @@ says so: put its lines into `~/.config/cst/toolchains.conf` with the
 cst toolchains auto off
 ```
 
-stops the timer and removes the program copies and the unit files. Your
+stops the timer and removes the program copies and the unit files. Before the
+timer file goes, it makes systemd forget the timer's last run
+(`systemctl --user clean --what=state`, which removes
+`~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer`); the same for
+the timer of the earlier `cst btrfs cargo-gc`. Your
 `~/.config/cst/toolchains.conf` stays. `auto off` also writes
 `~/.config/cst/toolchains-auto.off`, so that a later `snapshots setup` does
 not turn the timer back on (it says `left off` instead); `auto on` removes
