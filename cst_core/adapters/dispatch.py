@@ -80,10 +80,6 @@ class LocalCstDispatchAdapter:
         sys.stdout.flush()
         sys.stderr.flush()
         try:
-            if env is None:
-                os.execvp(argv[0], list(argv))
-            else:
-                os.execvpe(argv[0], list(argv), dict(env))
+            os.execvpe(argv[0], list(argv), os.environ if env is None else dict(env))
         except OSError as exc:
             return _start_failure(argv, exc)
-        return 126  # not reached: exec does not return

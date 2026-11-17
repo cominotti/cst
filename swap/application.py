@@ -607,15 +607,16 @@ class SwapApplicationService:
         """The result of an apply that stopped before the verification."""
         return SwapApplyResult(returncode, tuple(events), None, (), "", "", self._env.prog)
 
-    def _run_units(self, steps: tuple[tuple[str, str], ...], events: list[ApplyEvent]) -> int:
-        """`systemctl VERB UNIT` for each step, showing its output; the first failing exit status, else 0.
+    def _run_units(
+        self, steps: tuple[tuple[Callable[[str], CommandResult], str], ...], events: list[ApplyEvent]
+    ) -> int:
+        """`systemctl VERB UNIT` for each (systemd call, unit) step, showing its output; the first failing status, else 0.
 
         Under `set -e` swap-setup.sh stopped at a failing systemctl with its
         exit status, and its message was the error the user saw.
         """
-        calls = {"start": self._systemd.start, "stop": self._systemd.stop, "restart": self._systemd.restart}
-        for verb, unit in steps:
-            res = calls[verb](unit)
+        for call, unit in steps:
+            res = call(unit)
             _show_output(res, events)
             if res.returncode != 0:
                 return res.returncode
@@ -682,7 +683,10 @@ class SwapApplicationService:
                             "out", "line", f"{spec.mapper_path}: entry changed and the device is empty: re-activating"
                         )
                     )
-                    rc = self._run_units((("stop", swap_unit), ("restart", crypt_unit), ("start", swap_unit)), events)
+                    sd = self._systemd
+                    rc = self._run_units(
+                        ((sd.stop, swap_unit), (sd.restart, crypt_unit), (sd.start, swap_unit)), events
+                    )
                     if rc != 0:
                         return self._stopped(rc, events)
                 else:
@@ -700,7 +704,7 @@ class SwapApplicationService:
             events.append(
                 ApplyEvent("out", "line", f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)")
             )
-            rc = self._run_units((("start", crypt_unit), ("start", swap_unit)), events)
+            rc = self._run_units(((self._systemd.start, crypt_unit), (self._systemd.start, swap_unit)), events)
             if rc != 0:
                 return self._stopped(rc, events)
 

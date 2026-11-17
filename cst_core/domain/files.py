@@ -5,20 +5,12 @@ import posixpath
 import re
 from typing import Literal
 
+from cst_core.domain.text import file_lines
+
 type ManagedState = Literal["ok", "adopt", "duplicate", "change", "missing", "conflict", "unreadable"]
 type OwnedState = Literal["ok", "change", "conflict", "missing"]
 
 _UNMARKED_KEY_RE = re.compile(r"^\s*([^\s#]\S*)")
-
-
-def _file_lines(content: str) -> list[str]:
-    """The lines of a file as bash's `while read -r` sees them: only a newline ends one, and
-    a last line without a newline is still a line (str.splitlines() would also split at a
-    carriage return, a form feed and other separators, and so change lines that are not ours)."""
-    lines = content.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +50,7 @@ class MarkedLineSpec:
         first = ""
         all_same_payload = True
 
-        for line in _file_lines(content):
+        for line in file_lines(content):
             if self.is_marked(line):
                 count += 1
                 if count == 1:
@@ -84,7 +76,7 @@ class MarkedLineSpec:
         """Return updated file content with the first marked line replaced and duplicates dropped."""
         out_lines: list[str] = []
         placed = False
-        for line in _file_lines(existing_content):
+        for line in file_lines(existing_content):
             if self.is_marked(line):
                 if not placed:
                     out_lines.append(self.desired_line)

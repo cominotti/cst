@@ -260,10 +260,10 @@ def run_command(cmd: str, service: SwapApplicationService, *, hint: str, out: Te
         result = service.apply_changes(emit=lambda ev: print_event(ev, out, err))
         return shell_exit_status(render_apply(result, out=out, err=err, events_shown=True))
     except CommandFailed as exc:
-        if exc.stdout:
-            print_event(ApplyEvent("out", "raw", exc.stdout), out, err)
-        if exc.stderr:
-            print_event(ApplyEvent("err", "raw", exc.stderr), out, err)
+        for text, stream in ((exc.stdout, out), (exc.stderr, err)):
+            if text:
+                _write_raw(text, stream)
+                stream.flush()
         return shell_exit_status(exc.returncode)
     except (MissingDesiredFileError, OSError) as exc:
         print(f"{service.prog}: ERROR: {exc}", file=err)

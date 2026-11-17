@@ -91,7 +91,5 @@ def restore_default_signals() -> None:
     (`cst help | head -1`), as the bash cst did; and a module it execs starts
     with the signal at its default, which bash itself could not restore.
     """
-    for name in ("SIGPIPE", "SIGXFSZ"):
-        sig = getattr(signal, name, None)
-        if sig is not None:
-            signal.signal(sig, signal.SIG_DFL)
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+        signal.signal(sig, signal.SIG_DFL)

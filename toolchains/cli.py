@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
 from cst_core.adapters.files import read_bytes, read_text
-from cst_core.adapters.runtime import install_payload, program_path
+from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState
 from toolchains.adapters import (
@@ -2183,11 +2183,9 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     if in_container() and not os.environ.get("CST_TOOLCHAINS_HERE"):
         # From a toolbox, the processes of other containers cannot be
         # inspected: the same program runs on the host (same home path).
-        me = program_path(entry_file)
         try:
             os.execvp(
-                "flatpak-spawn",
-                ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", "/usr/bin/python3", "-I", "-B", me, *argv],
+                "flatpak-spawn", ["flatpak-spawn", "--host", f"--env=CST_PROG={PROG}", *program_argv(entry_file), *argv]
             )
         except OSError as e:
             print(f"{NAME}: cannot run on the host (flatpak-spawn: {e.strerror}); run it on the host", file=sys.stderr)
