@@ -31,7 +31,7 @@ from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core.cli import CstDispatcher
 from cst_core.domain.dispatch import MODULES, format_cst_usage
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
-from cst_core.domain.plan import Err, Ok, Outcome, PlanItem
+from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import (
     ByteSize,
     CpuSet,
@@ -207,16 +207,11 @@ class ManagedFilesTest(unittest.TestCase):
         )
 
 
-class PlanAndOutcomeTest(unittest.TestCase):
-    def test_plan_item_and_outcome(self) -> None:
+class PlanItemTest(unittest.TestCase):
+    def test_plan_item(self) -> None:
         row = PlanItem("ok", "crypttab: swap0 line", "up to date")
         self.assertEqual(row.format_line(), "  ok        crypttab: swap0 line                   up to date")
         self.assertEqual(PlanItem("ok", "zram0").format_line(), "  ok        zram0")
-
-        ok: Outcome[int, str] = Ok(42)
-        err: Outcome[int, str] = Err("boom")
-        self.assertEqual(ok.value, 42)
-        self.assertEqual(err.error, "boom")
 
 
 class AdaptersTest(unittest.TestCase):

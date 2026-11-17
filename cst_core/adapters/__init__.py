@@ -212,7 +212,7 @@ class SubprocessCommandRunner:
 
 
 class HostExecutionContext:
-    """ExecutionContextPort and HostPathPort detecting host vs toolbox/container environments."""
+    """ExecutionContextPort detecting host vs toolbox/container environments (and mapping a host path into this view)."""
 
     def __init__(
         self,

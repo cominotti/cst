@@ -10,7 +10,6 @@ class DomainValidationError(ValueError):
     """Raised when a domain value object invariant is violated."""
 
 
-KIB: Final = 1 << 10
 MIB: Final = 1 << 20
 GIB: Final = 1 << 30
 

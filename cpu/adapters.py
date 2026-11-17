@@ -18,6 +18,7 @@ from cst_core.adapters import SubprocessVirshAdapter
 from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.values import CpuSet
 from cst_core.ports import VirshPort
 
 CONF = "/etc/cpu-setup/cpu-setup.conf"
@@ -87,14 +88,8 @@ def virsh(*args: str, check: bool = True) -> str:
 
 def cpus_of(kind: str) -> list[int]:
     """CPU numbers of core type kind ('cpu_core' or 'cpu_atom')."""
-    out: list[int] = []
-    for part in read_text(f"/sys/devices/{kind}/cpus", "").strip().split(","):
-        if "-" in part:
-            a, b = part.split("-")
-            out += range(int(a), int(b) + 1)
-        elif part:
-            out.append(int(part))
-    return out
+    text = read_text(f"/sys/devices/{kind}/cpus", "").strip()
+    return list(CpuSet.parse(text).sorted_cpus()) if text else []  # no such core type: none
 
 
 def mean_mhz(cpus: Sequence[int]) -> int:

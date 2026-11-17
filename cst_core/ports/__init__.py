@@ -172,12 +172,6 @@ class ExecutionContextPort(Protocol):
     def host_run_dir(self, subpath: str) -> str: ...
 
 
-class HostPathPort(Protocol):
-    """Maps an absolute host path into this process's container or host view."""
-
-    def path(self, host_path: str) -> str: ...
-
-
 class ClockPort(Protocol):
     """Provides wall-clock, monotonic timestamps, and sleeping without direct `time` imports."""
 

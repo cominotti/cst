@@ -77,7 +77,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "free_bytes": "statvfs free space of a folder vs btrfs's estimated free space of the Docker volumes",
     "is_subvol": "bulk also checks the btrfs magic; chrome-cache only needs the subvolume inode",
     "gib": "each program's display threshold, both over cst_core format_bytes_gib_mib",
-    "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused)",
+    "parse_size": "swap takes systemd sizes (plain numbers are bytes); toolchains requires a unit (150 is refused); "
+    "both over cst_core ByteSize (parse, parse_iec)",
     "render_service": "the toolchains and vm units' own text, both through cst_core.domain.units",
     "render_timer": "the toolchains and vm timers, both over cst_core.domain.units.render_timer",
     "systemctl": "toolchains runs systemctl --user and raises Refused; vm runs system systemctl for a status",

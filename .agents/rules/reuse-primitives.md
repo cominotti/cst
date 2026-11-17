@@ -36,7 +36,7 @@ one place only.
 | A journal line | `cst_core.adapters.journal.log` | `<prio>tag: msg`, flushed. |
 | A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. `parse_snapshots_conf`: the same for `snapshots.conf` only, which also reads the `printf %q` lines an older CST wrote there. |
 | Lines, first line, yes/no | `cst_core.domain.text`: `file_lines` (as bash's `read -r` sees them), `first_line`, `is_yes` | |
-| Sizes, durations, CPU lists, modes | `cst_core.domain.values`: `ByteSize`, `Duration`, `CpuSet`, `OctalMode`, `KIB`, `MIB`, `GIB`, `format_bytes_human`, `format_bytes_gib_mib`, `format_bytes_decimal` | |
+| Sizes, durations, CPU lists, modes | `cst_core.domain.values`: `ByteSize`, `Duration`, `CpuSet`, `OctalMode`, `MIB`, `GIB`, `format_bytes_human`, `format_bytes_gib_mib`, `format_bytes_decimal` | toolchains' settings parse sizes and durations with `ByteSize.parse_iec` and `Duration.parse_float` (its own `ConfigError`, same words); cpu reads its core types' CPU lists with `CpuSet`. |
 | A systemd unit or timer text | `cst_core.domain.units`: `render_unit_file`, `render_timer` | |
 | Usage errors, refusals, exit status | `cst_core.domain.errors`: `Usage`, `Refused`, `shell_exit_status` | `shell_exit_status`: 128+N for a child killed by signal N. |
 | libvirt XML | `cst_core.domain.libvirt_xml.keep_prefixes` | |
