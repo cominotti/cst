@@ -146,6 +146,21 @@ class ProgramTest(unittest.TestCase):
             self.run_main(*argv)
         self.assertEqual(self.restored, ["x", "x", "x"], "run and cleanup-now must keep Python's handling")
 
+    def test_the_run_summary_replaces_a_link_and_leaves_its_target(self) -> None:
+        # It was rewritten in place: through a link, into the file it pointed to.
+        self.v.STATE_DIR = self.tmp
+        target = os.path.join(self.tmp, "elsewhere")
+        with open(target, "w") as f:
+            f.write("keep")
+        os.symlink(target, gc_adapters.LAST_RUN)
+        gc_adapters.save_summary({"at": 1, "failed": 0})
+        self.assertFalse(os.path.islink(gc_adapters.LAST_RUN))
+        with open(gc_adapters.LAST_RUN) as f:
+            self.assertEqual(json.load(f), {"at": 1, "failed": 0})
+        with open(target) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["elsewhere", "last-run.json"])
+
     def test_status_shows_the_last_run_in_decimal_units(self) -> None:
         self.v.docker_up = lambda: False
         with open(gc_cli.LAST_RUN, "w") as f:

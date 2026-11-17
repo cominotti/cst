@@ -153,7 +153,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk cli": 9,
     "btrfs/bulk unlayered": 109,
     "btrfs/chrome_cache cli": 7,
-    "btrfs/docker_gc cli": 29,
+    "btrfs/docker_gc cli": 27,
     "btrfs/docker_volumes_nocow cli": 39,
     "btrfs/snapshot cli": 10,
     "btrfs/stall_monitord cli": 3,
