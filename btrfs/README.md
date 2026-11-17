@@ -127,7 +127,7 @@ cst btrfs help
 | `status` | root | One overview of everything (section 5). Read-only. |
 | `uninstall` | root | Removes what `install` added (section 6). |
 | `test-alert` | root | Sends a test desktop alert. |
-| `degraded-boot [install\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
+| `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
@@ -978,6 +978,7 @@ installed `btrfs-stall-report` command.
 
 ```
 cst btrfs degraded-boot            # install or update
+cst btrfs degraded-boot plan       # what install would change; changes nothing
 cst btrfs degraded-boot status
 cst btrfs degraded-boot uninstall
 cst btrfs degraded-boot files-only # for development only, see below
@@ -1053,6 +1054,14 @@ own checks:
   The change takes effect at the **next boot**. Running install again with
   nothing changed does not create one.
 - `uninstall` refuses while the current boot is degraded.
+
+`plan` runs the same checks as install (the refusals above, `udevadm verify`
+on the rule, a syntax check of the helper) and prints `would write:` or
+`unchanged:` for each file and `would run: ...` for each command install
+would run (`rpm-ostree initramfs-etc`, `systemctl enable`). It writes no
+file, reloads nothing and creates no deployment. The self-test needs the new
+files in place, so only install runs it; `plan` says how many disks it would
+check.
 
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.

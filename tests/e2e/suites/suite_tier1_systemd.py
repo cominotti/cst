@@ -1200,14 +1200,15 @@ EOF
 
     def test_13_degraded_boot_install_cycle(self) -> None:
         """`cst btrfs degraded-boot` with the real systemd and the real udevadm
-        verify: install writes the rule, the units and the helper, enables the
+        verify: `plan` first says what install would write and run and changes
+        nothing; install writes the rule, the units and the helper, enables the
         record unit and tracks the four files in the initramfs; the generated
         rule passes `udevadm verify` and the units `systemd-analyze verify`;
-        a second install writes nothing and makes no rpm-ostree change;
-        `status` changes nothing and ends in "verdict: OK"; a typo in a unit
-        (an unknown key in a drop-in of the record unit) stops an install at
-        its `systemd-analyze verify`, before any rpm-ostree change; uninstall removes
-        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        a second install writes nothing and makes no rpm-ostree change, and
+        `plan` then has nothing left to do; `status` changes nothing and ends
+        in "verdict: OK"; a typo in a unit (an unknown key in a drop-in of the
+        record unit) stops an install at its `systemd-analyze verify`, before
+        any rpm-ostree change; uninstall removes everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -1246,6 +1247,22 @@ EOF
         def calls() -> list[str]:
             return exec_bash(c, f"cat {w}/calls").stdout.splitlines()
 
+        everything = f"{' '.join(files)} {record} {synced} /etc/btrfs-degraded-boot"
+        exists = f"for f in {everything}; do [[ ! -e $f ]] || echo $f; done"
+        plan = step("/opt/cst-rw/cst btrfs degraded-boot plan")
+        for dest in (*files, record, synced):
+            self.assertIn(f"would write: {dest}\n", plan)
+        self.assertIn("would run: rpm-ostree initramfs-etc " + " ".join(f"--track={f}" for f in files) + "\n", plan)
+        self.assertIn("would run: systemctl enable btrfs-degraded-boot-record.service\n", plan)
+        self.assertIn(f"self-test: runs at install; lsblk lists 2 member(s) of {uuid}, btrfs counts 2\n", plan)
+        self.assertTrue(plan.endswith("plan: nothing was changed\n"), plan)
+        self.assertEqual(step(exists), "")
+        self.assertEqual(step(f"cat {w}/tracked"), "")
+        self.assertEqual([x for x in calls() if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
+        self.assertNotEqual(
+            exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0
+        )
+
         first = step("/opt/cst-rw/cst btrfs degraded-boot")
         for dest in (*files, record, synced):
             self.assertIn(f"written:   {dest}\n", first)
@@ -1274,6 +1291,10 @@ EOF
         self.assertNotIn("written:", second)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
         self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        again = step("/opt/cst-rw/cst btrfs degraded-boot plan")
+        self.assertNotIn("would ", again)
+        self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", again)
+        self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", again)
 
         sums = f"sha256sum {' '.join(files)} {record} {synced}"
         before = step(sums)
@@ -1301,10 +1322,7 @@ EOF
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
         self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
-        left = step(
-            f"for f in {' '.join(files)} {record} {synced} /etc/btrfs-degraded-boot; do [[ ! -e $f ]] || echo $f; done"
-        )
-        self.assertEqual(left, "")
+        self.assertEqual(step(exists), "")
         self.assertEqual(step(f"cat {w}/tracked"), "")
         self.assertNotEqual(
             exec_bash(c, "systemctl is-enabled btrfs-degraded-boot-record.service", check=False).returncode, 0

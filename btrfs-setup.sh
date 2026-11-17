@@ -42,10 +42,10 @@
 #   uninstall              (root) remove what `install` installed (keeps the
 #                          recorded data and the layered below package)
 #   test-alert             (root) send a test desktop notification
-#   degraded-boot [install|status|files-only|uninstall]
+#   degraded-boot [install|plan|status|files-only|uninstall]
 #                          (root) unattended degraded boot when one NVMe is
 #                          gone: udev rule + units in the initramfs. Separate
-#                          on purpose: it changes the boot path.
+#                          on purpose: it changes the boot path. plan = dry run.
 #   crypt-perf [status|enable|disable]
 #                          (root, asks the LUKS passphrase of each member)
 #                          dm-crypt no_read_workqueue/no_write_workqueue on
@@ -849,7 +849,7 @@ case "${cmd}" in
     degraded-boot)
         case "${1:-install}" in
             install) shift $(( $# > 0 ? 1 : 0 )); exec "${DEGRADED}" "$@" ;;
-            status|uninstall|files-only) exec "${DEGRADED}" "--$1" ;;
+            plan|status|uninstall|files-only) exec "${DEGRADED}" "--$1" ;;
             *) exec "${DEGRADED}" "$@" ;;
         esac
         ;;
