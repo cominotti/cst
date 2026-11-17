@@ -355,6 +355,56 @@ echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after inst
 """
 
 
+# test_10a: runs a command on a new pseudo-terminal (crypt-perf needs a
+# terminal: it checks [[ -t 0 ]] and cryptsetup reads /dev/tty) and answers
+# each "Enter passphrase" prompt with argv[1]. cryptsetup prints the prompt,
+# then turns echo off with TCSAFLUSH, which drops input already waiting: the
+# answer goes only once echo is off (tcgetattr on the master side reads the
+# terminal's settings). Prints what the command printed; exits with its code.
+CRYPT_PTY_DRIVER = r"""
+import os
+import pty
+import select
+import sys
+import termios
+import time
+
+answer = sys.argv[1].encode() + b"\n"
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[2], sys.argv[2:])
+out = bytearray()
+searched = 0
+deadline = time.monotonic() + 300
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.5)
+    if not ready:
+        continue
+    try:
+        data = os.read(fd, 4096)
+    except OSError:  # EIO: the command ended and closed the terminal
+        break
+    if not data:
+        break
+    out += data
+    at = out.find(b"Enter passphrase", searched)
+    if at >= 0:
+        searched = at + 1
+        for _ in range(200):
+            if not termios.tcgetattr(fd)[3] & termios.ECHO:
+                break
+            time.sleep(0.05)
+        time.sleep(0.1)
+        os.write(fd, answer)
+else:
+    os.kill(pid, 9)
+    out += b"\nE2E-PTY: no end after 300 s\n"
+_, status = os.waitpid(pid, 0)
+sys.stdout.write(out.decode(errors="replace").replace("\r\n", "\n"))
+sys.exit(os.waitstatus_to_exitcode(status))
+"""
+
+
 def as_tester_bash(container: str, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     quoted = shlex.quote(script)
     cmd = (
@@ -1411,6 +1461,177 @@ EOF
             systemctl is-active docker-gc.timer
             recorder_runs
             echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_10_crypt_perf_refuses_without_dm_crypt_members(self) -> None:
+        """`cst btrfs crypt-perf`: a usage error exits 2; on this loop btrfs
+        (no dm-crypt member) status, enable and disable exit 1 and say so,
+        before any terminal or passphrase is asked for."""
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_10 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst() { /opt/cst-rw/cst "$@"; }
+            rc=0
+            out="$(cst btrfs crypt-perf bogus 2>&1)" || rc=$?
+            [[ "$rc" == 2 ]]
+            grep -qxF 'crypt-perf: status|enable|disable' <<<"$out"
+            rc=0
+            out="$(cst btrfs crypt-perf status extra 2>&1)" || rc=$?
+            [[ "$rc" == 2 ]]
+            grep -qxF "crypt-perf: unexpected argument 'extra'" <<<"$out"
+            for action in status enable disable; do
+                rc=0
+                out="$(cst btrfs crypt-perf "$action" </dev/null 2>&1)" || rc=$?
+                [[ "$rc" == 1 ]]
+                grep -qxF 'crypt-perf: no dm-crypt member under the root btrfs' <<<"$out"
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_10a_crypt_perf_enable_disable_on_a_loop_luks2_device(self) -> None:
+        """`cst btrfs crypt-perf` on a btrfs whose member is a real dm-crypt
+        mapping (LUKS2 on a loop device, opened with allow_discards), mounted
+        at /sysroot in a mount namespace of its own. status and a run without
+        a terminal (refused) change nothing; a wrong passphrase leaves the
+        device as it was and exits 1; enable sets no_read_workqueue and
+        no_write_workqueue in the live table and in the LUKS2 header and keeps
+        allow_discards; a second enable keeps that; a plain device added to
+        the btrfs makes enable refuse; disable clears both flags (still with
+        allow_discards), and a second disable keeps that."""
+        docker_exec(
+            self.PRIV_CONTAINER,
+            ["bash", "-c", "mkdir -p /var/tmp/e2e-crypt && cat >/var/tmp/e2e-crypt/pty-drive.py"],
+            input_text=CRYPT_PTY_DRIVER,
+        )
+        docker_exec(
+            self.PRIV_CONTAINER,
+            ["bash", "-c", "cat >/var/tmp/e2e-crypt/inner.sh"],
+            input_text=r"""
+set -E
+trap 'echo "test_10a FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+name="$E2E_NAME"
+loop="$E2E_LOOP"
+plain="$E2E_PLAIN"
+pass="$E2E_PASS"
+w=/var/tmp/e2e-crypt
+cst() { /opt/cst-rw/cst "$@"; }
+drive() { /usr/bin/python3 -I "$w/pty-drive.py" "$1" /opt/cst-rw/cst btrfs crypt-perf "${@:2}"; }
+show() { sed "s/^/test_10a $1: /" <<<"$2" >&2; }   # the CI log
+# The flags of the live table, and those stored in the LUKS2 header.
+active() { dmsetup table "$name" | tr ' ' '\n' | grep -E '^(allow_discards|no_read_workqueue|no_write_workqueue)$' | sort | xargs; }
+header() { cryptsetup luksDump "$loop" | awk -F: '/^Flags:/ {print $2}' | xargs; }
+flags() { printf '%s | %s\n' "$(active)" "$(header)"; }
+same() {   # same LABEL BEFORE
+    [[ "$(flags)" == "$2" ]] && return 0
+    echo "$1 changed the flags: $2 -> $(flags)" >&2
+    return 1
+}
+
+# This namespace's /sysroot is the encrypted btrfs (the outer one is the loop RAID1).
+mount "/dev/mapper/$name" /sysroot
+uuid="$(findmnt -rn -o UUID --target /sysroot)"
+[[ "$(ls "/sys/fs/btrfs/$uuid/devices")" == dm-* ]]
+[[ "$(active)" == allow_discards ]]
+
+# 1. Plans and refusals change nothing.
+before="$(flags)"
+out="$(cst btrfs crypt-perf status 2>&1)" || { show status "$out"; exit 1; }
+show status "$out"
+grep -qE "^$name \(dm-[0-9]+ on $loop\)$" <<<"$out"
+grep -qxF '  active:     allow_discards' <<<"$out"
+same "crypt-perf status" "$before"
+rc=0
+out="$(cst btrfs crypt-perf enable </dev/null 2>&1)" || rc=$?
+[[ "$rc" == 1 ]]
+grep -qxF 'crypt-perf: needs a terminal for the LUKS passphrases' <<<"$out"
+same "enable without a terminal" "$before"
+rc=0
+out="$(drive not-the-passphrase enable)" || rc=$?
+show "wrong passphrase" "$out"
+[[ "$rc" == 1 ]]
+grep -qF "FAILED on $name: unchanged" <<<"$out"
+grep -qxF 'Applied to 0 of 1 member(s).' <<<"$out"
+same "a wrong passphrase" "$before"
+
+# 2. enable, twice.
+for run in first second; do
+    out="$(drive "$pass" enable)" || { show "$run enable" "$out"; exit 1; }
+    show "$run enable" "$out"
+    grep -qxF 'Applied to 1 of 1 member(s).' <<<"$out"
+    [[ "$(active)" == "allow_discards no_read_workqueue no_write_workqueue" ]]
+    grep -qw no-read-workqueue <<<"$(header)"
+    grep -qw no-write-workqueue <<<"$(header)"
+done
+out="$(cst btrfs crypt-perf status 2>&1)"
+grep -qxF '  active:     allow_discards no_read_workqueue no_write_workqueue' <<<"$out"
+
+# 3. A member without dm-crypt: enable refuses before asking anything.
+btrfs device add -f "$plain" /sysroot >/dev/null
+enabled="$(flags)"
+rc=0
+out="$(drive "$pass" enable)" || rc=$?
+show "plain member" "$out"
+[[ "$rc" == 1 ]]
+grep -qF 'not every btrfs member is present and encrypted' <<<"$out"
+same "enable with a plain member" "$enabled"
+btrfs device remove "$plain" /sysroot
+
+# 4. disable, twice.
+for run in first second; do
+    out="$(drive "$pass" disable)" || { show "$run disable" "$out"; exit 1; }
+    show "$run disable" "$out"
+    grep -qxF 'Applied to 1 of 1 member(s).' <<<"$out"
+    [[ "$(active)" == allow_discards ]]
+    if grep -qwE 'no-read-workqueue|no-write-workqueue' <<<"$(header)"; then
+        echo "disable left a flag in the header: $(header)" >&2
+        exit 1
+    fi
+done
+echo E2E-OK
+""",
+        )
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_10a FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            # No udev in this container: device-mapper makes its device nodes itself.
+            export DM_DISABLE_UDEV=1
+            w=/var/tmp/e2e-crypt
+            name=e2e-crypt-perf
+            pass=e2e-crypt-passphrase
+            loop=""
+            plain=""
+            cleanup() {
+                # The namespace's mount goes when its last process ends; the mapping may stay busy a moment.
+                for _ in 1 2 3 4 5 6 7 8 9 10; do
+                    cryptsetup close "$name" 2>/dev/null && break
+                    [[ -e "/dev/mapper/$name" ]] || break
+                    sleep 1
+                done
+                dmsetup remove "$name" 2>/dev/null || true
+                if [[ -n "$loop" ]]; then losetup -d "$loop" 2>/dev/null || true; fi
+                if [[ -n "$plain" ]]; then losetup -d "$plain" 2>/dev/null || true; fi
+                rm -rf "$w"
+            }
+            trap cleanup EXIT
+            truncate -s 512M "$w/luks.img" "$w/plain.img"
+            loop="$(losetup --find --show "$w/luks.img")"
+            plain="$(losetup --find --show "$w/plain.img")"
+            # LUKS2 (refresh --persistent needs it); a cheap key derivation keeps each passphrase check short.
+            printf '%s' "$pass" | cryptsetup luksFormat --type luks2 --batch-mode --pbkdf pbkdf2 \
+                --pbkdf-force-iterations 1000 --key-file=- "$loop"
+            printf '%s' "$pass" | cryptsetup open --allow-discards --key-file=- "$loop" "$name"
+            mkfs.btrfs -f -L e2e-crypt "/dev/mapper/$name" >/dev/null
+            unshare -m --propagation private env E2E_NAME="$name" E2E_LOOP="$loop" E2E_PLAIN="$plain" \
+                E2E_PASS="$pass" bash -euo pipefail "$w/inner.sh"
             """,
         ).stdout
         self.assertIn("E2E-OK", out)

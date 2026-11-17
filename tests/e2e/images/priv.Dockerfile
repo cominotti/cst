@@ -3,6 +3,8 @@ FROM cst-e2e-systemd:local
 
 RUN dnf -y install \
     btrfs-progs \
+    cryptsetup \
+    device-mapper \
     e2fsprogs \
     attr \
     fio \
