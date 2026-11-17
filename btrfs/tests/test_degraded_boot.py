@@ -298,7 +298,7 @@ class DegradedBootTest(unittest.TestCase):
             os.chmod(self.put(f"bin/{name}", f'#!/bin/bash\necho "{name} $*" >>"${{FAKE}}/calls"\n{body}\n'), 0o755)
         self.put("calls", "")
         self.put("root/usr/lib/udev/rules.d/64-btrfs.rules", UPSTREAM_64)
-        self.status_json(fixture("unpinned.json", {"serial": 0}))
+        self.status_json(fixture("unpinned.json"))
 
     # ------------------------------------------------------------ helpers --
     def put(self, rel: str, text: str) -> str:
@@ -415,9 +415,7 @@ R="{self.root}"
     def tracked_json(self, booted: list[str], nxt: list[str] | None = None) -> None:
         """A staged deployment (index 0, next boot) and the booted one, with their initramfs-etc lists."""
         staged = {"serial": 1, "initramfs-etc": [self.at(p) for p in (booted if nxt is None else nxt)]}
-        self.status_json(
-            fixture("staged-clean.json", staged, {"serial": 0, "initramfs-etc": [self.at(p) for p in booted]})
-        )
+        self.status_json(fixture("staged-clean.json", staged, {"initramfs-etc": [self.at(p) for p in booted]}))
 
     # ---------------------------------------------------- harness checks --
     def test_every_path_setting_is_pointed_into_the_fake_root(self) -> None:
@@ -460,6 +458,10 @@ R="{self.root}"
                 self.status_json(fixture(name))
                 out = self.ok('ostree_query next-staged; ostree_query summary; echo "[$(ostree_query tracked)]"')
                 self.assertEqual(out, f"{staged}\n{summary}\n[]\n")
+                # The fixtures as rpm-ostree writes them: with each deployment's serial.
+                first = "5" if staged == "yes" else "b"
+                root = self.ok("ostree_query next-root")
+                self.assertEqual(root, f"/ostree/deploy/fedora/deploy/{first * 64}.0\n")
 
     def test_ostree_query_tracked_lists_are_per_deployment(self) -> None:
         self.status_json(

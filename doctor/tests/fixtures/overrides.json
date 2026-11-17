@@ -3,6 +3,7 @@
   {
    "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
    "id": "fedora-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.0",
+   "serial": 0,
    "version": "44.20261028.0",
    "osname": "fedora",
    "origin": "fedora:fedora/44/x86_64/silverblue",
