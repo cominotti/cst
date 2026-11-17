@@ -431,7 +431,8 @@ everything with `plan`, `status` or `doctor` before changing anything:
   *(Not verified: whether the current installation was made with it.
   `cst btrfs status` does not check `commit=10`.)*
 - `btrfs/tests/`, `cpu/tests/`, `swap/tests/`, `bluetooth/tests/`, `toolchains/tests/`, `vm/tests/`, `doctor/tests/`: tests for
-  `btrfs-snapshot-core`, `btrfs-bulk`, `chrome-cache`, `cst-link.bash`, the `cpu`
+  `btrfs-snapshot-core`, `btrfs-bulk`, `chrome-cache`, `cst-link.bash`, the
+  `degraded-boot` setup, the `cpu`
   module, the `swap` module, the `bluetooth` module, the `toolchains` module, the
   `vm` module and `cst doctor`. The unit tests need no root and no btrfs:
   `python3 -I -B tests/run_unit.py`, run from this folder, runs all of them with a
