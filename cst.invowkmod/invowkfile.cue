@@ -22,7 +22,7 @@ cmds: [
 	{
 		name:        "test lint"
 		category:    "test"
-		description: "Run bash -n and shellcheck across cst shell entrypoints"
+		description: "Run bash -n and shellcheck on every shell file of the checkout (the list tests/shell_files.py prints)"
 		depends_on: {
 			tools: [{alternatives: ["shellcheck", "toolbox"]}]
 		}
@@ -31,23 +31,13 @@ cmds: [
 			runtimes: [{name: "native"}]
 			script: {content: """
 				set -euo pipefail
-				shopt -s nullglob
-				scripts=(
-					cst
-					cst-link.bash
-					cst-install.bash
-					btrfs-setup.sh
-					cpu-setup.sh
-					swap-setup.sh
-					bluetooth-setup.sh
-					toolchains-setup.sh
-					vm-setup.sh
-					toolchains/rustc-wrapper
-					fix-anaconda-webui-btrfs-compress.sh
-					cpu/game-profile
-					tests/uv-dev
-					tests/e2e/scripts/*.sh
-				)
+				# Derived from the repository (tests/test_distribution.py checks each
+				# one is a known kind), so a new script is linted without a list edit.
+				mapfile -t scripts < <(python3 -I -B tests/shell_files.py)
+				if [[ "${#scripts[@]}" -eq 0 ]]; then
+					echo "test lint: tests/shell_files.py found no shell file" >&2
+					exit 1
+				fi
 				bash -n "${scripts[@]}"
 				if command -v shellcheck >/dev/null 2>&1; then
 					shellcheck -S warning -x "${scripts[@]}"

@@ -252,12 +252,16 @@ def shell_same_name_definitions(repo: str, files: Iterable[str], allowed: Iterab
     return {name: sorted(paths) for name, paths in sorted(where.items()) if len(paths) > 1}
 
 
+_SHELL_FIRST_LINES: Final = ("#!/usr/bin/env bash", "#!/bin/bash", "#!/usr/bin/bash", "#!/bin/sh", "#!/usr/bin/sh")
+
+
 def is_shell(rel: str, repo: str) -> bool:
-    """A .sh/.bash file or a file with a bash/sh shebang."""
+    """A .sh/.bash file, a file with a bash/sh shebang, or one whose first line is `# shellcheck shell=`."""
     if rel.endswith((".sh", ".bash")):
         return True
     try:
         with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
-            return fh.readline().startswith(("#!/usr/bin/env bash", "#!/bin/bash", "#!/bin/sh"))
+            first = fh.readline()
     except OSError:
         return False
+    return first.startswith(_SHELL_FIRST_LINES) or first.startswith("# shellcheck shell=")

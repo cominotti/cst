@@ -107,7 +107,7 @@ Run from the repository root.
 ```
 python3 -I -B tests/run_unit.py -v            # all unit tests, socket as stdin (what CI runs)
 python3 -B -m unittest vm.tests.test_vm -v    # one module; or vm.tests.test_vm.PartsTest.test_disks_nvram_tpm
-invowk cmd test lint                          # bash -n + shellcheck -S warning (falls back to the devbox toolbox)
+invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
 invowk validate cst.invowkmod && invowk audit cst.invowkmod
@@ -133,7 +133,6 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   `tests/test_python_files.py` fails on each
   ([docs/dev-tools.md, "What each gate checks"](docs/dev-tools.md#what-each-gate-checks)).
 - A single-module run doesn't go through `tests/run_unit.py`. It skips the socket-stdin gate (see "Test gotchas"), so the full suite still has to pass.
-- A new shell entry point has to be added to the `test lint` script list in `cst.invowkmod/invowkfile.cue`. Until then it isn't linted.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
 - CI runs the unit tests as a non-root user named `ci`. Tests must not depend on the developer's home or groups.
 
