@@ -17,17 +17,17 @@ from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import (
-    DETACH,
+    COMMANDS_OF_VM,
     blklist,
     booted_deployment,
     conf_number,
     domain_state,
     domain_state_or_none,
+    nas_settings,
     package_versions,
     restic,
-    virsh,
     restic_env,
-    nas_settings,
+    virsh,
 )
 from vm.adapters.backup import (
     STOP_SIGNALS,
@@ -457,24 +457,23 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
         failure = e
     # From here on no signal may cut the cleanup short, and no child may get one.
     old = {s: signal.signal(s, signal.SIG_IGN) for s in STOP_SIGNALS}
-    DETACH["on"] = True
     problems: list[str] = []
     how: dict[str, str] = {}
     try:
-        if live:
-            # What the VM really runs on, not only what take_snapshot saw.
-            try:
-                overlaid.update(find_overlays(vm, specs))
-            except Exception as e:  # noqa: BLE001 - the merge back still runs for what is known
-                problems.append(f"the disks could not be listed: {e!r}")
-        if overlaid:
-            try:
-                more, how = commit_back(cfg, vm, overlaid)
-                problems += more
-            except Exception as e:  # noqa: BLE001 - reported loudly below
-                problems.append(f"the merge back failed: {e!r}")
+        with COMMANDS_OF_VM.detached():
+            if live:
+                # What the VM really runs on, not only what take_snapshot saw.
+                try:
+                    overlaid.update(find_overlays(vm, specs))
+                except Exception as e:  # noqa: BLE001 - the merge back still runs for what is known
+                    problems.append(f"the disks could not be listed: {e!r}")
+            if overlaid:
+                try:
+                    more, how = commit_back(cfg, vm, overlaid)
+                    problems += more
+                except Exception as e:  # noqa: BLE001 - reported loudly below
+                    problems.append(f"the merge back failed: {e!r}")
     finally:
-        DETACH["on"] = False
         for s, h in old.items():
             if h is not None:
                 signal.signal(s, h)

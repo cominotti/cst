@@ -7,7 +7,8 @@ vm.adapters.images the VM image folders.
 Where they read and write comes from the settings (vm.wiring.vm_settings).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 import json
 import os
 import socket
@@ -53,18 +54,6 @@ INDEX_FORMAT = state_format("vm-index")
 # The component of the files backup-timer on installs (the install record lists them under it).
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
 
-# True during the merge back of a NAS backup: every child then runs in its own
-# session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
-# `blockcommit --wait` on SIGINT).
-DETACH = {"on": False}
-
-# The commands cst-vm runs (where it runs: not moved to the host from a
-# toolbox), and virsh over the same runner. Bytes of their output that are
-# not UTF-8 become U+FFFD.
-RUNNER: CommandRunnerPort = SubprocessCommandRunner()
-
-VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False)
-
 
 def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
     """(rc, stdout, stderr) of r with cst-vm's own words for a command that is
@@ -78,6 +67,59 @@ def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]
     return r.returncode, r.stdout, r.stderr
 
 
+class VmCommands:
+    """The commands cst-vm runs (where it runs: not moved to the host from a toolbox), and virsh
+    over the same runner, in the C locale (virsh translates its answers: "shut off" is
+    "desligado" in pt_BR). Bytes of their output that are not UTF-8 become U+FFFD.
+
+    detached(): while it lasts (the merge back of a NAS backup), every child runs in its own
+    session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
+    `blockcommit --wait` on SIGINT). A call's own detach= wins."""
+
+    def __init__(self, runner: CommandRunnerPort) -> None:
+        self.runner = runner
+        self.virsh_adapter: VirshPort = SubprocessVirshAdapter(URI, runner, on_host=False)
+        self._detached = False
+
+    @contextmanager
+    def detached(self) -> Generator[None]:
+        before, self._detached = self._detached, True
+        try:
+            yield
+        finally:
+            self._detached = before
+
+    def run(
+        self, cmd: Sequence[str], timeout: int, extra_env: Mapping[str, str] | None, *, detach: bool | None
+    ) -> tuple[int, str, str]:
+        r = self.runner.run(
+            cmd,
+            timeout=timeout,
+            env=extra_env,
+            locale_c=True,
+            new_session=self._detached if detach is None else detach,
+        )
+        return _triple(r, cmd[0], timeout)
+
+    def on_terminal(self, cmd: Sequence[str]) -> int:
+        r = self.runner.run(cmd, locale_c=True, stdin="inherit", output="inherit")
+        if r.cause is not None:
+            raise r.cause
+        return r.returncode
+
+    def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
+        r = self.virsh_adapter.call(
+            *args, timeout=timeout, start_new_session=self._detached if detach is None else detach
+        )
+        return _triple(r, "virsh", timeout)
+
+
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
+
+# The one VmCommands of this process: run, virsh and run_on_terminal below go through it.
+COMMANDS_OF_VM = VmCommands(RUNNER)
+
+
 def run(
     cmd: Sequence[str],
     timeout: int = 120,
@@ -87,30 +129,19 @@ def run(
     """(rc, stdout, stderr); rc 127 when the command does not exist. In the
     C locale (virsh translates its answers: "shut off" is "desligado" in
     pt_BR); extra_env on top. Bytes that are not UTF-8 become U+FFFD."""
-    r = RUNNER.run(
-        cmd,
-        timeout=timeout,
-        env=extra_env,
-        locale_c=True,
-        new_session=DETACH["on"] if detach is None else detach,
-    )
-    return _triple(r, cmd[0], timeout)
+    return COMMANDS_OF_VM.run(cmd, timeout, extra_env, detach=detach)
 
 
 def run_on_terminal(cmd: Sequence[str]) -> int:
     """Exit status of cmd in the C locale, on our terminal (stdin and output:
     sudo may ask for the password). A command that cannot start raises (as
     subprocess.run did)."""
-    r = RUNNER.run(cmd, locale_c=True, stdin="inherit", output="inherit")
-    if r.cause is not None:
-        raise r.cause
-    return r.returncode
+    return COMMANDS_OF_VM.on_terminal(cmd)
 
 
 def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
-    """virsh -c URI ARGS through VIRSH, with run()'s answers."""
-    r = VIRSH.call(*args, timeout=timeout, start_new_session=DETACH["on"] if detach is None else detach)
-    return _triple(r, "virsh", timeout)
+    """virsh -c URI ARGS through VmCommands' virsh adapter, with run()'s answers."""
+    return COMMANDS_OF_VM.virsh(args, timeout, detach=detach)
 
 
 def read_conf(path: str, *, nas_conf: str, bash_sourced: bool = False) -> dict[str, str]:

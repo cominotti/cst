@@ -36,6 +36,7 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
+from cst_core.ports import CommandResult, DecodeErrors, OutputMode, StdinMode
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
@@ -1736,6 +1737,51 @@ class PackageTest(unittest.TestCase):
         self.assertTrue(vm_domain.is_cst_vm_program(build_python_zipapp(REPO, "vm/cst-vm")))
         self.assertFalse(vm_domain.is_cst_vm_program(b"#!/usr/bin/python3 -I\nprint(1)\n"))
         self.assertFalse(vm_domain.is_cst_vm_program(b'#!/bin/sh\n"""cst-vm:'))
+
+
+class DetachedTest(unittest.TestCase):
+    """VmCommands.detached(): every child of the block runs in a session of its own, then not."""
+
+    def test_detached_block(self) -> None:
+        sessions: list[tuple[str, bool]] = []
+
+        class Recorder:
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                check: bool = False,
+                timeout: float | None = None,
+                input_text: str | None = None,
+                env: Mapping[str, str] | None = None,
+                unset: Sequence[str] = (),
+                base_env: Mapping[str, str] | None = None,
+                cwd: str | None = None,
+                locale_c: bool = False,
+                new_session: bool = False,
+                on_host: bool = False,
+                stdin: StdinMode = "devnull",
+                output: OutputMode = "capture",
+                decode_errors: DecodeErrors = "replace",
+                nice: int | None = None,
+            ) -> CommandResult:
+                sessions.append((argv[0], new_session))
+                return CommandResult(0, "", "")
+
+        commands = vm_adapters.VmCommands(Recorder())
+        commands.run(["rpm"], 5, None, detach=None)
+        with commands.detached():
+            commands.run(["rpm"], 5, None, detach=None)
+            commands.virsh(["domstate", "win"], 5, detach=None)
+            commands.virsh(["domstate", "win"], 5, detach=False)  # a call's own detach= wins
+        commands.virsh(["domstate", "win"], 5, detach=None)
+        with self.assertRaises(RuntimeError), commands.detached():
+            raise RuntimeError
+        commands.run(["rpm"], 5, None, detach=None)
+        self.assertEqual(
+            sessions,
+            [("rpm", False), ("rpm", True), ("virsh", True), ("virsh", False), ("virsh", False), ("rpm", False)],
+        )
 
 
 class VmLockTest(unittest.TestCase):
