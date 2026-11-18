@@ -284,7 +284,6 @@ CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/
 # own copy, make it private when only its file uses it, or delete it; then
 # remove its line (or let `invowk cmd fix budgets` do it). Never grows.
 CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
-    "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
     "cst_core/adapters/nocow.py:FS_IOC_SETFLAGS": "an ioctl request used inside nocow.py and by its tests",
     "cst_core/adapters/runtime.py:running_archive": "used inside runtime.py and by the tests",
@@ -300,6 +299,11 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/domain/install.py:manifest_by_dest": "read by the gate tests/test_unit_contract.py; no module looks a dest up",
     "cst_core/domain/install.py:python_entry_srcs": "read by the static gates in tests/",
     "cst_core/domain/text.py:Assignment": "the record parse_shell_assignments returns, used only inside text.py",
+    # The duration names (magic values, rule 3 of tests/test_magic_values.py): the packages adopt them
+    # where they write 60, 3600 or 604800 today; each line goes once a package uses the name.
+    "cst_core/domain/values.py:MINUTE": "a duration name; the packages' unit numbers move onto it",
+    "cst_core/domain/values.py:HOUR": "a duration name; the packages' unit numbers move onto it",
+    "cst_core/domain/values.py:WEEK": "a duration name; the packages' unit numbers move onto it",
 }
 
 

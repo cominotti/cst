@@ -47,6 +47,11 @@ replace them.
       ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile));
       no module over 800 lines (`tests/test_module_size.py`; a big `cli.py`
       becomes a `cli/` folder with one file per command group).
+- [ ] Its states, kinds, subcommands and modes are a StrEnum matched with
+      `match`, its durations and exit statuses use `cst_core`'s names, its
+      JSON formats are TypedDicts, and outside text is parsed once at the
+      border ([magic-values](../../rules/magic-values.md));
+      `tests/test_magic_values.py` counts what is left.
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of

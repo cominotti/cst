@@ -68,23 +68,32 @@ UNIT_HOMES: Final = frozenset({"cst_core/domain/values.py", "cst_core/domain/err
 CHAIN_ARMS: Final = 3
 LITERAL_WORDS: Final = 3
 _MAPPINGS: Final = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
+_MAPPING_ARGS: Final = 2  # Mapping[key, value]
 _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 
 # The highest count per "<package> <rule>" (tests/budgets.py; a missing key is 0).
 MAGIC_CEILINGS: Final[dict[str, int]] = {
+    "bluetooth leak": 3,
     "bluetooth/setup chain": 5,
+    "bluetooth/setup leak": 44,
     "bluetooth/setup literal-vocabulary": 1,
     "btrfs/bulk chain": 1,
+    "btrfs/bulk leak": 34,
     "btrfs/bulk loose-record": 3,
     "btrfs/bulk unit-number": 3,
+    "btrfs/chrome_cache leak": 3,
+    "btrfs/docker_gc leak": 2,
     "btrfs/docker_gc literal-vocabulary": 1,
     "btrfs/docker_gc loose-record": 5,
-    "btrfs/docker_gc unit-number": 1,
+    "btrfs/docker_volumes_nocow leak": 1,
     "btrfs/docker_volumes_nocow literal-vocabulary": 1,
     "btrfs/docker_volumes_nocow loose-record": 7,
+    "btrfs/health_check leak": 2,
     "btrfs/health_check literal-vocabulary": 1,
     "btrfs/health_check unit-number": 3,
+    "btrfs/pending_alerts leak": 4,
     "btrfs/pending_alerts unit-number": 1,
+    "btrfs/snapshot leak": 5,
     "btrfs/snapshot literal-vocabulary": 3,
     "btrfs/snapshot loose-record": 4,
     "btrfs/snapshot unit-number": 9,
@@ -93,27 +102,43 @@ MAGIC_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_report loose-record": 1,
     "btrfs/stall_report unit-number": 2,
     "cpu chain": 1,
+    "cpu leak": 2,
     "cpu unit-number": 1,
+    "cpu/setup leak": 9,
     "cpu/setup literal-vocabulary": 1,
     "cpu/setup loose-record": 3,
     "cst_core chain": 1,
-    "cst_core literal-vocabulary": 10,
-    "cst_core loose-record": 1,
-    "cst_core unit-number": 5,
+    "cst_core leak": 1,
+    "cst_core literal-vocabulary": 2,
+    "cst_core unit-number": 3,
     "doctor chain": 1,
+    "doctor leak": 9,
     "doctor loose-record": 1,
     "doctor unit-number": 5,
+    "swap leak": 21,
     "swap literal-vocabulary": 3,
     "toolchains chain": 3,
+    "toolchains leak": 42,
     "toolchains loose-record": 10,
     "toolchains unit-number": 9,
     "vm chain": 3,
+    "vm leak": 12,
     "vm literal-vocabulary": 3,
     "vm loose-record": 3,
     "vm unit-number": 14,
 }
 # "path:qualname" -> why the hits in that scope stay.
-MAGIC_EXEMPT: Final[dict[str, str]] = {}
+MAGIC_EXEMPT: Final[dict[str, str]] = {
+    "cst_core/application/dispatch.py:CstDispatcher.run_doctor": (
+        'compares SUDO_USER with the account name "root", not a FileOwner or Owner'
+    ),
+    "cst_core/application/dispatch.py:ModuleRouter._as_user": (
+        'compares SUDO_USER with the account name "root", not a FileOwner or Owner'
+    ),
+    "cst_core/domain/record.py:_string": (
+        "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -304,7 +329,7 @@ def _is_loose(annotation: ast.expr, aliases: frozenset[str]) -> bool:
             args = node.slice.elts if isinstance(node.slice, ast.Tuple) else []
             if (
                 [_name_of(a) for a in args[:1]] == ["str"]
-                and len(args) == len(("key", "value"))
+                and len(args) == _MAPPING_ARGS
                 and _name_of(args[-1]) in _LOOSE_VALUES
             ):
                 return True

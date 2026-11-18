@@ -16,6 +16,10 @@ the entry; a missing key is 0):
   code only (tests may reach into what they test);
 - FBT001, FBT002: a bool positional parameter (`f(x, True)` says nothing at
   the call site; make it keyword-only with `*,`);
+- PLR2004: a number compared with a literal (magic-value-comparison;
+  ruff's default allows 0, 1, -1 and every string), production code only
+  (tests compare with the numbers they pin). Name it: a constant, or a
+  unit of cst_core.domain.values (.agents/rules/magic-values.md);
 - C901: a function whose cyclomatic complexity is above
   [tool.ruff.lint.mccabe] max-complexity. It stands in for SonarCloud's
   cognitive complexity rule (S3776), which only a Sonar run measures: the
@@ -42,52 +46,70 @@ if REPO not in sys.path:
 
 from tests.budgets import budget_problems, format_table, is_test_file, package_of
 
-RULES: Final = ("BLE001", "SLF001", "FBT001", "FBT002", "C901")
-PRODUCTION_ONLY: Final = frozenset({"SLF001"})
+RULES: Final = ("BLE001", "SLF001", "FBT001", "FBT002", "C901", "PLR2004")
+PRODUCTION_ONLY: Final = frozenset({"SLF001", "PLR2004"})
 
 RUFF_BUDGETS: Final[dict[str, int]] = {
     ".github/scripts FBT001": 1,
+    ".github/scripts PLR2004": 3,
     "bluetooth C901": 1,
     "bluetooth FBT001": 3,
     "bluetooth FBT002": 2,
+    "bluetooth PLR2004": 1,
     "bluetooth tests FBT001": 5,
     "bluetooth tests FBT002": 5,
+    "bluetooth/setup PLR2004": 4,
     "btrfs tests C901": 1,
     "btrfs tests FBT001": 15,
     "btrfs tests FBT002": 10,
     "btrfs/bulk BLE001": 1,
     "btrfs/bulk FBT001": 12,
     "btrfs/bulk FBT002": 6,
+    "btrfs/bulk PLR2004": 7,
     "btrfs/chrome_cache FBT001": 2,
     "btrfs/chrome_cache FBT002": 1,
+    "btrfs/chrome_cache PLR2004": 1,
+    "btrfs/docker_gc PLR2004": 2,
     "btrfs/docker_volumes_nocow BLE001": 1,
+    "btrfs/docker_volumes_nocow PLR2004": 1,
+    "btrfs/pending_alerts PLR2004": 2,
     "btrfs/snapshot BLE001": 1,
+    "btrfs/snapshot PLR2004": 3,
+    "btrfs/stall_monitord PLR2004": 4,
     "btrfs/stall_report C901": 4,
     "btrfs/stall_report FBT001": 2,
+    "btrfs/stall_report PLR2004": 21,
     "cpu FBT001": 1,
     "cpu FBT002": 1,
+    "cpu PLR2004": 2,
     "cpu tests FBT001": 1,
     "cpu tests FBT002": 1,
+    "cpu/game PLR2004": 10,
     "cst_core FBT001": 2,
     "cst_core FBT002": 1,
+    "cst_core PLR2004": 7,
     "doctor BLE001": 2,
     "doctor C901": 3,
     "doctor FBT001": 4,
     "doctor FBT002": 1,
+    "doctor PLR2004": 13,
     "doctor tests FBT001": 5,
     "doctor tests FBT002": 5,
     "swap C901": 1,
+    "swap PLR2004": 3,
     "swap tests FBT001": 2,
     "tests tests C901": 3,
     "tests tests FBT001": 2,
     "toolchains C901": 7,
     "toolchains FBT001": 12,
+    "toolchains PLR2004": 5,
     "toolchains tests FBT001": 1,
     "toolchains tests FBT002": 1,
     "vm BLE001": 3,
     "vm C901": 4,
     "vm FBT001": 15,
     "vm FBT002": 4,
+    "vm PLR2004": 5,
     "vm tests FBT001": 9,
     "vm tests FBT002": 7,
 }

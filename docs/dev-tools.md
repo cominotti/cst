@@ -111,7 +111,9 @@ repository:
   compared with `RUFF_BUDGETS`, which they may not go above: `BLE001` (blind
   `except Exception`), `SLF001` (a private member used outside its class;
   production code only), `FBT001`/`FBT002` (a bool positional parameter:
-  make it keyword-only) and `C901` (a function over
+  make it keyword-only), `PLR2004` (a number compared with a literal;
+  production code only: name it, see
+  [.agents/rules/magic-values.md](../.agents/rules/magic-values.md)) and `C901` (a function over
   `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
   SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
   measures. A second ruff run fails on any `# noqa` that suppresses nothing
@@ -123,6 +125,16 @@ repository:
   apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which they may not go above. Type the
   value instead: a `TypedDict` for a record read from JSON, a frozen
   dataclass for one built in code, `isinstance` narrowing instead of a cast.
+- **The magic values gate** (`tests/test_magic_values.py`, in the unit
+  suite): in production code, a string compared with a word of a StrEnum
+  (of the package or of cst_core), an if/elif chain or match with 3 or more
+  string arms on one subject, a unit number (3600, 86400, 604800, the exit
+  statuses 124, 126, 127, 137), a signature with a loose
+  `dict[str, Any | object | Json]` and a `Literal` of 3 or more strings are
+  counted per package in `MAGIC_CEILINGS`, which they may not go above.
+  `MAGIC_EXEMPT` names the scopes that keep one, with the reason; a stale
+  entry fails. See
+  [.agents/rules/magic-values.md](../.agents/rules/magic-values.md).
 - **The format check** (`ruff format --check`, the second part of
   `test pylint`): every Python file must already look the way `ruff format`
   writes it. Lines are up to 120 characters (`line-length` in `[tool.ruff]`;

@@ -238,6 +238,23 @@ class DuplicationRatchetTest(unittest.TestCase):
         self.assertEqual(clones(computed, 8).cross_file, 20)
         self.assertEqual(declared_lines(records["dc"], records=False), set())
 
+    def test_type2_leaves_out_enum_members_and_type1_keeps_them(self) -> None:
+        def enum(cls: str, base: str, prefix: str) -> str:
+            members = "".join(f'    {prefix}{i} = "{prefix}{i}"\n' for i in range(9))
+            return f"import enum\nfrom enum import StrEnum\n\nclass {cls}({base}):\n{members}"
+
+        enums = {"a": enum("A", "StrEnum", "x"), "b": enum("B", "StrEnum", "y"), "c": enum("C", "enum.IntEnum", "z")}
+        self.assertEqual(declared_lines(enums["a"], records=True), set(range(5, 14)))
+        self.assertEqual(declared_lines(enums["a"], records=False), set())
+        self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in enums.items()}, 8).cross_file, 33)
+        self.assertEqual(clones({p: measured_lines(s, type2=True) for p, s in enums.items()}, 8).duplicated, 0)
+        # Type 1 still finds a member list copied word for word.
+        same = {p: measured_lines(enums["a"].replace("class A", f"class {p}"), type2=False) for p in ("X", "Y")}
+        self.assertEqual(clones(same, 8).cross_file, 18)
+        # A plain class's assignments are code.
+        plain = {p: measured_lines(enums[p].replace("(StrEnum)", ""), type2=True) for p in ("a", "b")}
+        self.assertEqual(clones(plain, 8).cross_file, 24)
+
     def test_a_generic_protocol_body_is_left_out(self) -> None:
         port = "from typing import Protocol\n\nclass P[T](Protocol):\n    def f(self) -> T: ...\n"
         old_style = (

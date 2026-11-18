@@ -100,11 +100,13 @@ before changing that module.
 
 ## Agent rules and skills
 
-Read the two rules in `.agents/rules/` before any change:
+Read the three rules in `.agents/rules/` before any change:
 [reuse-primitives](.agents/rules/reuse-primitives.md) (use what `cst_core`
-provides, never a copy) and
+provides, never a copy),
 [refactor-vs-behaviour](.agents/rules/refactor-vs-behaviour.md) (one kind of
-change per commit, with its proof). `.agents/skills/` holds checklists for
+change per commit, with its proof) and
+[magic-values](.agents/rules/magic-values.md) (a vocabulary is a StrEnum, a
+unit has a name, a record read by key is a TypedDict). `.agents/skills/` holds checklists for
 one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
 `cst-shell-to-python` and `cst-refactor-parity`; open the one whose
 description fits the task. `.claude/rules` and `.claude/skills` are links to
