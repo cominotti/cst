@@ -225,7 +225,7 @@ class Host:
             except OSError:
                 continue
             for key, name in names.items():
-                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.M)
+                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.MULTILINE)
                 if found:
                     vals[key] = int(found[-1][1])
         return {k: v * BIG for k, v in vals.items()}
