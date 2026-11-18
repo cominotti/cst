@@ -803,6 +803,62 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         rc, out = self.run_main("prune", "apply")
         self.assertFalse(self.present("aa/0123456789abcd"))
 
+    def fake_proc(self, name: str, environ: bytes | None, cmdline: bytes = b"cargo\0test\0") -> str:
+        """A /proc (self.tmp/NAME) of one cargo process (pid 4242) working in self.tmp; ENVIRON
+        None: its environ cannot be opened. Returns the fake /proc folder."""
+        proc = os.path.join(self.tmp, name)
+        base = os.path.join(proc, "4242")
+        os.makedirs(base)
+        # The cargo of the process builds where its CARGO_BUILD_BUILD_DIR says; without it, elsewhere.
+        exe = self.fake_cargo(
+            'test "$RUSTUP_AUTO_INSTALL" = 0 || exit 3\n'
+            'if [ -n "$CARGO_BUILD_BUILD_DIR" ]; then d="$CARGO_BUILD_BUILD_DIR/aa/0123456789abcd"; '
+            f'else d="{self.tmp}/elsewhere/aa/0123456789abcd"; fi\n'
+            'echo "{\\"packages\\": [], \\"build_directory\\": \\"$d\\"}"\n'
+        )
+        for name, data in (("comm", b"cargo\n"), ("cmdline", cmdline), ("environ", environ)):
+            if data is not None:
+                with open(os.path.join(base, name), "wb") as f:
+                    f.write(data)
+        os.symlink(self.tmp, os.path.join(base, "cwd"))
+        os.symlink(exe, os.path.join(base, "exe"))
+        return proc
+
+    def test_cargo_whose_environment_reads_empty_keeps_its_folder(self) -> None:
+        """A cargo whose /proc environ comes back empty (it is starting or ending) or cannot be
+        read: asked with this program's environment instead of its own, cargo would name another
+        folder (here: no CARGO_BUILD_BUILD_DIR, so elsewhere). Its folder is unknown: nothing is
+        deleted while it runs."""
+        own = f"CARGO_BUILD_BUILD_DIR={self.root}\0HOME={self.home}\0".encode()
+        for i, (case, environ, cmdline) in enumerate(
+            (
+                ("read", own, b"cargo\0test\0"),
+                ("empty", b"", b"cargo\0test\0"),
+                ("unreadable", None, b"cargo\0test\0"),
+                ("no command line", own, b""),
+            )
+        ):
+            with self.subTest(case=case):
+                if not self.present("aa/0123456789abcd"):
+                    self.folder("aa/0123456789abcd", 100)
+                proc = self.fake_proc(f"proc-{i}", environ, cmdline)
+                with mock.patch.object(tc_processes, "PROC", proc):
+                    self.cargo_running = tc_processes.cargo_procs()
+                    rc, plan = self.run_main("prune", "plan")
+                    rc, out = self.run_main("prune", "apply")
+                self.assertEqual(rc, 0, out)
+                if case != "read":  # plan says why nothing is deleted
+                    self.assertIn("cargo (pid 4242)", plan)
+                    self.assertIn("its build folder is unknown", plan)
+                    self.assertIn("came back empty or could not be read", plan)
+                self.assertTrue(self.present("aa/0123456789abcd"), out)
+                if case == "read":
+                    self.assertIn("in use: cargo (pid 4242)", out)
+                else:
+                    self.assertIn("cargo (pid 4242)", out)
+                    self.assertIn("its build folder is unknown", out)
+                    self.assertIn("could not be read", out)
+
     def test_users_are_checked_while_the_lock_is_held(self) -> None:
         path = self.folder("aa/0123456789abcd", 100)
         lock = os.path.join(path, "debug/.cargo-build-lock")
