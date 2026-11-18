@@ -23,11 +23,9 @@ from typing import Literal
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import state_format
-from cst_core.domain.install import manifest_by_src
+from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.ports import CommandRunnerPort
 
-NOTIFY_PROGRAM = manifest_by_src()["btrfs/btrfs-notify"].dest
 PENDING_ALERTS = state_format("alert-spool").folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 

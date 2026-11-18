@@ -81,7 +81,6 @@ from doctor.domain import (
     per_device_allocated,
     pick_mount,
     pkg_names,
-    newer_index_version,
     read_intended,
     scrub_dropin_limit,
     scrub_limit_setting,
@@ -1286,7 +1285,7 @@ def newest_vm_backup(host: DoctorHostPort) -> float | None:
     """Epoch of the newest backup in cst vm's index, 0 when none or unreadable, None when the index is of
     a newer cst vm (not read: check_vm_index says so)."""
     data = vm_index_data(host)
-    if newer_index_version(data) is not None:
+    if VM_INDEX_FORMAT.newer(data, "version") is not None:
         return None
     entries = data.get("backups") if isinstance(data, dict) else None
     return max(
@@ -1306,7 +1305,7 @@ def nas_configured(host: DoctorHostPort) -> bool:
 def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
     """WARN when cst vm's backup index is of a newer format: this checkout's cst vm refuses to back up
     or list with it (after going back to an older CST)."""
-    found = newer_index_version(vm_index_data(host))
+    found = VM_INDEX_FORMAT.newer(vm_index_data(host), "version")
     if found is not None:
         yield Result(
             WARN,

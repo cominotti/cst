@@ -97,10 +97,12 @@ class BulkBase(unittest.TestCase):
             state=os.path.join(self.tmp, "state"),
             lock=os.path.join(self.tmp, "lock"),
             notify=os.path.join(self.tmp, "no-notify"),
-            alerts=os.path.join(self.tmp, "alerts", "pending"),
         )
+        self.alerts = os.path.join(self.tmp, "alerts", "pending")
         self.machine = Primitives()
-        self.wiring = Wiring(TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine)
+        self.wiring = Wiring(
+            TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine, alerts=self.alerts
+        )
         self.host = self.wiring.host
         self.state = self.wiring.state()
         self.ctx = self.wiring.home_ctx(self.home)
@@ -553,8 +555,8 @@ class BulkTest(BulkBase):
         out = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
-        [name] = os.listdir(self.paths.alerts)
-        kept = os.path.join(self.paths.alerts, name)
+        [name] = os.listdir(self.alerts)
+        kept = os.path.join(self.alerts, name)
         with open(kept) as f:
             text = f.read()
         self.assertIn("\nurgency=critical\napp=btrfs-bulk\n", text)

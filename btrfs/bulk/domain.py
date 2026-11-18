@@ -18,28 +18,9 @@ from typing import TypedDict
 import os
 import re
 
-from cst_core.domain.contracts import StateFormat, state_format, version_of
-from cst_core.domain.install import manifest_by_src
+from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.values import format_bytes_gib_mib
 
-NOTIFY = manifest_by_src()["btrfs/btrfs-notify"].dest
-# The journals of moves not finished yet (read back by any later btrfs-bulk).
-JOURNAL: StateFormat = state_format("bulk-journal")
-
-
-def journal_version(data: object) -> int | None:
-    """The format of a journal as read (no "v": 0, an older btrfs-bulk wrote it), None when it is not one."""
-    return version_of(data, "v")
-
-
-def journal_readable(data: object) -> bool:
-    """A journal this btrfs-bulk can act on: an object of its format or an older one."""
-    found = journal_version(data)
-    return found is not None and found <= JOURNAL.version
-
-
-# Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
-ALERTS = state_format("alert-spool").folder
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
 TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
@@ -520,15 +501,13 @@ class BulkPaths:
     keep: str = "/etc/btrfs-setup/bulk-keep"
     convert_plan: str = "/etc/btrfs-setup/convert-plan"
     snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
-    notify: str = NOTIFY
-    # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
-    alerts: str = ALERTS
-    state: str = JOURNAL.folder  # the journals and the boot counter
-    attempts: str = f"{JOURNAL.folder}/boot-attempts"
+    notify: str = NOTIFY_PROGRAM
+    state: str = state_format("bulk-journal").folder
+    attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
     lock: str = "/run/btrfs-snapshot.lock"  # shared with btrfs-snapshot
 
     @classmethod
-    def under(cls, *, etc: str, state: str, lock: str, notify: str = NOTIFY, alerts: str = ALERTS) -> BulkPaths:
+    def under(cls, *, etc: str, state: str, lock: str, notify: str = NOTIFY_PROGRAM) -> BulkPaths:
         """The same files in the folders etc and state, the lock at lock."""
         return cls(
             etc=etc,
@@ -538,7 +517,6 @@ class BulkPaths:
             convert_plan=os.path.join(etc, "convert-plan"),
             snapshots_conf=os.path.join(etc, "snapshots.conf"),
             notify=notify,
-            alerts=alerts,
             state=state,
             attempts=os.path.join(state, "boot-attempts"),
             lock=lock,

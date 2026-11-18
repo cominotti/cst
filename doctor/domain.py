@@ -13,7 +13,7 @@ from typing import Any, NewType, Self
 import xml.etree.ElementTree as ET
 
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import state_format, version_of
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
@@ -128,12 +128,6 @@ CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format("vm-index")
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)
-
-
-def newer_index_version(data: object) -> int | None:
-    """The "version" of a VM backup index of a newer cst vm than this checkout's, else None."""
-    found = version_of(data, "version")
-    return found if found is not None and found > VM_INDEX_FORMAT.version else None
 
 
 VM_CONF = HostPath("/etc/cst/vm.conf")

@@ -18,7 +18,7 @@ import time
 
 from btrfs.bulk.adapters.machine import HomeTree, kind, log
 from cst_core.adapters import SubprocessCommandRunner
-from cst_core.adapters.notify import Notifier
+from cst_core.adapters.notify import PENDING_ALERTS, Notifier
 from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
 
 
@@ -51,7 +51,8 @@ class Output:
 
 
 class Host:
-    """HostPort. snapshot_program: btrfs-snapshot's path, asked when needed."""
+    """HostPort. snapshot_program: btrfs-snapshot's path, asked when needed; alerts: where an alert
+    btrfs-notify could not take is kept (for cst doctor and the next login)."""
 
     def __init__(
         self,
@@ -60,9 +61,10 @@ class Host:
         snapshot_program: Callable[[], str],
         proc: str = PROC,
         run_user: str = RUN_USER,
+        alerts: str = PENDING_ALERTS,
     ) -> None:
         self.paths, self.tree, self.snapshot_program = paths, tree, snapshot_program
-        self.proc, self.run_user = proc, run_user
+        self.proc, self.run_user, self.alerts = proc, run_user, alerts
 
     def busy_paths(self, paths: Sequence[str], home: str) -> set[str]:
         """The subset of PATHS some process uses (open file, cwd, root, binary,
@@ -219,7 +221,7 @@ class Host:
         notifier = Notifier(
             SubprocessCommandRunner(),
             self.paths.notify,
-            self.paths.alerts,
+            self.alerts,
             log=lambda p, m: log(f"<{p}>btrfs-bulk: {m}"),
         )
         notifier.send("critical", "btrfs-bulk", title, body)

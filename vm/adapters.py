@@ -33,10 +33,10 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import program_installer
-from cst_core.adapters.notify import NOTIFY_PROGRAM, PENDING_ALERTS, Notifier, Urgency
+from cst_core.adapters.notify import PENDING_ALERTS, Notifier, Urgency
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.application.install import InstallService, Placement
-from cst_core.domain.contracts import state_format, version_of
+from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
@@ -356,8 +356,7 @@ def read_index(path: str | None = None) -> list[dict[str, Any]]:
             data = json.load(f)
     except OSError, ValueError:
         return []
-    found = version_of(data, "version")
-    if found is not None and found > INDEX_FORMAT.version:
+    if (found := INDEX_FORMAT.newer(data, "version")) is not None:
         raise Refused(
             f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
             f"with it; use the cst vm of that CST (in that checkout: {CST} vm backup-timer on installs it)"

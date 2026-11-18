@@ -21,6 +21,8 @@ from dataclasses import dataclass
 import posixpath
 from typing import Final, Literal, get_args
 
+from cst_core.domain.install import manifest_by_src
+
 type _FormatKey = Literal[
     "alert-spool",
     "stall-records",
@@ -55,6 +57,17 @@ class StateFormat:
     def file_name(self) -> str:
         """The file's name (a glob for a folder of them)."""
         return posixpath.basename(self.path)
+
+    def newer(self, data: object, field: str) -> int | None:
+        """The version data (a JSON object of this format, read back) carries in field when it is newer
+        than this checkout reads, else None (also when the version is not a number: version_of)."""
+        found = version_of(data, field)
+        return found if found is not None and found > self.version else None
+
+    def readable(self, data: object, field: str) -> bool:
+        """data is an object of this format or an older one, with a version that is a number."""
+        found = version_of(data, field)
+        return found is not None and found <= self.version
 
     def newer_text(self, path: str, found: int) -> str:
         """What a reader says of a file of a newer version than it knows."""
@@ -127,6 +140,10 @@ def _parse(table: str) -> tuple[StateFormat, ...]:
 _FORMATS: Final[Mapping[str, StateFormat]] = {f.key: f for f in _parse(_TABLE)}
 if sorted(_FORMATS) != sorted(get_args(_FormatKey.__value__)):
     raise ValueError("the state table and its keys differ")
+
+
+# The program every CST alert goes through (its manifest destination); it also keeps the alert spool.
+NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
 
 
 def state_format(key: _FormatKey) -> StateFormat:

@@ -18,19 +18,20 @@ from typing import TypeGuard
 from btrfs.bulk.domain import (
     BY_ID,
     ITEMS,
-    JOURNAL,
     KEEP_HEADER,
     BadSettings,
     BulkPaths,
     ItemJournal,
     SteamJournal,
     dec,
-    journal_readable,
-    journal_version,
 )
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
+from cst_core.domain.contracts import state_format
 from cst_core.domain.text import describe_problems, parse_shell_assignments
+
+# The journals of moves not finished yet (read back by any later btrfs-bulk).
+JOURNAL = state_format("bulk-journal")
 
 
 def bulk_user(conf: str) -> str | None:
@@ -147,19 +148,19 @@ class StateFiles:
         """The item's journal; None when missing, not JSON, not the shape btrfs-bulk writes, or of a
         format this btrfs-bulk does not read ("v": newer_journal says when a newer one wrote it)."""
         j = self._jload(ident)
-        return j if is_item_journal(j) and journal_readable(j) else None
+        return j if is_item_journal(j) and JOURNAL.readable(j, "v") else None
 
     def jread_steam(self, ident: str) -> SteamJournal | None:
         """The Steam game's journal; None when missing, not JSON, not the shape btrfs-bulk writes,
         or of another game than its file's (recovery would act on that game and drop its journal)."""
         j = self._jload(ident)
-        return j if is_steam_journal(j) and journal_readable(j) and ident == "steam-" + j["appid"] else None
+        return j if is_steam_journal(j) and JOURNAL.readable(j, "v") and ident == "steam-" + j["appid"] else None
 
     def newer_journal(self, ident: str) -> str | None:
         """Why the journal of ident is not used when a newer btrfs-bulk wrote it; None otherwise."""
         path = self.jpath(ident)
-        found = journal_version(self._jload(ident))
-        if found is None or found <= JOURNAL.version:
+        found = JOURNAL.newer(self._jload(ident), "v")
+        if found is None:
             return None
         return (
             f"{JOURNAL.newer_text(path, found)}; left as it is: the btrfs-bulk of that CST finishes or "

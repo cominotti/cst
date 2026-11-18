@@ -22,6 +22,7 @@ from btrfs.bulk.application.context import Bulk
 from btrfs.bulk.domain import BadSettings, BulkPaths, Ctx, NoUser, split_user_args
 from btrfs.bulk.ports import HostPort, OutputPort
 from cst_core.adapters.files import CounterFile
+from cst_core.adapters.notify import PENDING_ALERTS
 from cst_core.adapters.runtime import sibling_program
 
 
@@ -34,7 +35,6 @@ def bulk_paths(environ: Mapping[str, str], *, root: bool) -> BulkPaths:
         etc=environ.get("BTRFS_BULK_ETC", base.etc),
         state=environ.get("BTRFS_BULK_STATE", base.state),
         lock=environ.get("BTRFS_BULK_LOCK", base.lock),
-        alerts=environ.get("BTRFS_BULK_ALERTS", base.alerts),
     )
 
 
@@ -42,7 +42,8 @@ class Wiring:
     """btrfs-bulk put together for one run. entry_file: the running entry
     point's __file__ (where btrfs-snapshot is found); snapshot: btrfs-snapshot's
     path when given (BTRFS_BULK_SNAPSHOT, never as root); home: the home of a
-    run that is not root (BTRFS_BULK_HOME, else the caller's)."""
+    run that is not root (BTRFS_BULK_HOME, else the caller's); alerts: where an alert btrfs-notify
+    could not take is kept (BTRFS_BULK_ALERTS, never as root)."""
 
     def __init__(
         self,
@@ -55,12 +56,13 @@ class Wiring:
         machine: Primitives | None = None,
         host: HostPort | None = None,
         out: OutputPort | None = None,
+        alerts: str = PENDING_ALERTS,
     ) -> None:
         self.entry_file, self.root, self.paths = entry_file, root, paths
         self.snapshot, self.home = snapshot, home
         self.machine = Primitives() if machine is None else machine
         self.tree = HomeTree(self.machine)
-        self.host: HostPort = Host(paths, self.tree, self.snapshot_program) if host is None else host
+        self.host: HostPort = Host(paths, self.tree, self.snapshot_program, alerts=alerts) if host is None else host
         self.out: OutputPort = Output() if out is None else out
 
     @classmethod
@@ -73,6 +75,7 @@ class Wiring:
             paths=bulk_paths(env, root=root),
             snapshot=None if root else env.get("BTRFS_BULK_SNAPSHOT"),
             home=None if root else env.get("BTRFS_BULK_HOME") or None,
+            alerts=PENDING_ALERTS if root else env.get("BTRFS_BULK_ALERTS") or PENDING_ALERTS,
         )
 
     def snapshot_program(self) -> str:
