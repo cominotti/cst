@@ -10,18 +10,17 @@ from vm.domain import instance, nocow_lines, version_changes, VmSettings
 from vm.domain.tune import cpu_status_line, tune_line
 
 
-def cmd_list(cfg: VmSettings, vm: str | None) -> int:
+def cmd_list(cfg: VmSettings, vm: str | None) -> None:
     store = wiring.backup_store(cfg)
     entries = [e for e in store.read_index() if vm is None or e["vm"] == vm]
     if not entries:
         print(f"no VM backups{f' of {vm}' if vm else ''} in {cfg.paths.index} (make one: {cfg.cst} vm backup)")
-        return 0
+        return
     for e in sorted(entries, key=lambda e: (e["vm"], e.get("epoch") or 0)):
         print(store.describe(e))
-    return 0
 
 
-def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> int:
+def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> None:
     commands, store, conf = wiring.vm_commands(), wiring.backup_store(cfg), wiring.settings_port(cfg)
     rc, so, err = commands.virsh(("domstate", vm), 60, detach=None)
     if rc == 127:
@@ -69,4 +68,3 @@ def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> int:
         for d in wiring.images(cfg).folders():
             for ln in nocow_lines(d, cfg.prog, verbose=False):
                 print(f"  {ln}")
-    return 0

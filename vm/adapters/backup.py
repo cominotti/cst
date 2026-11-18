@@ -22,7 +22,7 @@ from cst_core.domain.text import first_line
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
-from vm.domain.backup import Fingerprint, IndexEntry, Stop
+from vm.domain.backup import DOMAIN_XML, MANIFEST_JSON, Fingerprint, IndexEntry, Stop
 
 
 def qcow2_backing_file(path: str) -> bool:
@@ -196,7 +196,7 @@ class BackupFiles(LocalFileSystemAdapter):
         for x in (self.cfg.paths.nas_stage, d):
             os.makedirs(x, mode=0o700, exist_ok=True)
             os.chmod(x, 0o700)
-        for name, text in (("domain.xml", xml_text), ("manifest.json", manifest)):
+        for name, text in ((DOMAIN_XML, xml_text), (MANIFEST_JSON, manifest)):
             path = os.path.join(d, name)
             try:
                 os.unlink(path)
@@ -207,7 +207,7 @@ class BackupFiles(LocalFileSystemAdapter):
         return d
 
     def unstage(self, folder: str) -> None:
-        for name in ("domain.xml", "manifest.json"):
+        for name in (DOMAIN_XML, MANIFEST_JSON):
             try:
                 os.unlink(os.path.join(folder, name))
             except OSError:

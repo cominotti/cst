@@ -6,6 +6,5 @@ from vm.application.backup import backup_local
 from vm.domain import VmSettings
 
 
-def cmd_backup(cfg: VmSettings, vm: str, full: bool) -> int:
+def cmd_backup(cfg: VmSettings, vm: str, full: bool) -> None:
     backup_local(cfg, vm, wiring.local_backup(cfg), full=full)
-    return 0

@@ -1225,7 +1225,7 @@ class NocowTest(unittest.TestCase):
     def dirs(self) -> dict[str, vm_domain.ImageProbe]:
         return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs(self.cfg)}
 
-    def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
+    def out(self, fn: Callable[..., int | None], *args: object) -> tuple[int | None, str]:
         buf = io.StringIO()
         with mock.patch("sys.stdout", buf):
             rc = fn(self.cfg, *args)

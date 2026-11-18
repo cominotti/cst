@@ -20,6 +20,7 @@ from vm.domain import (
     LIVE_STATES,
     OVERLAY_MARK,
     RETRY_LOCK,
+    SHUT_OFF,
     TAG,
     DomainParts,
     NasRepo,
@@ -31,6 +32,7 @@ from vm.domain import (
     live_disks,
     overlay_kind,
     overlay_recovery,
+    quiesce_skipped,
 )
 from vm.domain.backup import Fingerprint, Manifest, ResticSummary, Uncertain, manifest_text
 from vm.ports import (
@@ -114,7 +116,7 @@ def commit_back(
     if state not in LIVE_STATES:
         problems.append(
             f"{vm} stopped during the backup: its disks still point to the overlay files"
-            if state in ("shut off", "crashed")
+            if state in (SHUT_OFF, "crashed")
             else f"the state of {vm} could not be read ({state or 'virsh domstate failed'}): nothing merged"
         )
         for t, (base, _overlay) in overlaid.items():
@@ -221,12 +223,12 @@ def backup_nas(cfg: VmSettings, vm: str, keep: str | None, p: NasBackup, *, quie
         raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
     nas = p.settings.nas_repo()
     state = domain_state(p.commands, vm)
-    if state not in ("running", "shut off"):
+    if state not in ("running", SHUT_OFF):
         raise Refused(
             f"{vm} is {state or 'in an unknown state'}: the NAS backup reads a running VM (through a "
             f"snapshot) or a shut-off one. Resume it or shut it down first"
         )
-    if state == "shut off":
+    if state == SHUT_OFF:
         check_shut_off(p.commands, vm)
     p.signals.catch_stops()
     with p.lock(vm):
@@ -387,7 +389,8 @@ def nas_run(
                     "changed during the backup (the VM was started?), the copy is not consistent "
                     f"(restic snapshot {snap[:8]} forgotten): {', '.join(changed)}"
                 )
-    except BaseException as e:  # noqa: BLE001 - the overlays are merged back first, then it is raised again
+    # Any failure, a stop included: the overlays are merged back first, then it is raised again.
+    except BaseException as e:  # noqa: BLE001
         failure = e
     # From here on no signal may cut the cleanup short, and no child may get one.
     problems: list[str] = []
@@ -397,7 +400,8 @@ def nas_run(
             # What the VM really runs on, not only what take_snapshot saw.
             try:
                 overlaid.update(find_overlays(p, vm, specs))
-            except Exception as e:  # noqa: BLE001 - the merge back still runs for what is known
+            # The merge back still runs for what is known.
+            except Exception as e:  # noqa: BLE001
                 problems.append(f"the disks could not be listed: {e!r}")
         if overlaid:
             try:
@@ -540,15 +544,7 @@ def take_snapshot(
             if t not in overlaid:
                 p.store.drop(overlay)
 
-    why = (
-        "--no-quiesce"
-        if not quiesce
-        else "no guest agent channel (org.qemu.guest_agent.0) in the definition"
-        if agent == "none"
-        else "the guest agent is not connected"
-        if agent != "connected"
-        else ""
-    )
+    why = quiesce_skipped(agent, quiesce=quiesce)
     if not why:
         rc, err, unsure = attempt(True)
         if overlaid:

@@ -16,7 +16,7 @@ from cst_core.domain.text import first_line
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import masked_refusal
 from cst_core.ports import CommandFailed, CommandResult, SystemdPort, UnitName
-from vm.domain import URI, TimerStatus, TimerStep, instance
+from vm.domain import SHUT_OFF, URI, TimerStatus, TimerStep, instance
 from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
 from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
@@ -150,7 +150,7 @@ def tune_blocked(commands: VmCommandsPort, plan: TunePlan) -> str:
     vm, state = plan.vm, plan.state
     if plan.kind == "linux" or not any(" bus " in c or "network card" in c for c in plan.changes):
         return ""
-    if state != "shut off":
+    if state != SHUT_OFF:
         return (
             f"{vm} is {state}: for a guest that is not known to be Linux, the bus and network card "
             f"changes are applied only with the VM shut off (shut Windows down first)"

@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 import ctypes
-from dataclasses import replace
 import os
 import pwd
 import shlex
@@ -80,12 +79,12 @@ def probe_dir(d: ImageDir, readable: Callable[[str], str] = lambda p: p) -> Imag
         return here
     btrfs = is_btrfs(rp)
     if btrfs is False:
-        return replace(here, btrfs=False)
+        return ImageProbe(d.scope, d.path, d.what, present=True, btrfs=False)
     nocow = flag_state(readable_inode_flags(rp))
     try:
         entries = sorted(os.scandir(rp), key=lambda e: e.name)
     except OSError:
-        return replace(here, btrfs=btrfs, nocow=nocow)
+        return ImageProbe(d.scope, d.path, d.what, present=True, btrfs=btrfs, nocow=nocow)
     images: list[ImageInfo] = []
     leftovers: list[str] = []
     for e in entries:
@@ -109,7 +108,9 @@ def probe_dir(d: ImageDir, readable: Callable[[str], str] = lambda p: p) -> Imag
                 nocow=flag_state(readable_inode_flags(os.path.join(rp, e.name))),
             )
         )
-    return replace(here, btrfs=btrfs, nocow=nocow, listed=True, images=images, leftovers=leftovers)
+    return ImageProbe(
+        d.scope, d.path, d.what, present=True, btrfs=btrfs, nocow=nocow, listed=True, images=images, leftovers=leftovers
+    )
 
 
 def needs_mark(d: ImageProbe) -> bool:

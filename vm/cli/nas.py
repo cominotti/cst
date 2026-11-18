@@ -6,6 +6,5 @@ from vm.application.nas import backup_nas
 from vm.domain import VmSettings
 
 
-def cmd_backup_nas(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool) -> int:
+def cmd_backup_nas(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool) -> None:
     backup_nas(cfg, vm, keep, wiring.nas_backup(cfg), quiesce=quiesce)
-    return 0

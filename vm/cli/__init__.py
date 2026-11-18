@@ -45,21 +45,26 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
             print(doc)
             return 0
         if cmd == "list":
-            return status.cmd_list(cfg, vm)
+            status.cmd_list(cfg, vm)
+            return 0
         if cmd == "nocow":
             return nocow.cmd_nocow_plan(cfg, a.root) if a.sub == "plan" else nocow.cmd_nocow_apply(cfg)
         vm = vm or wiring.settings_port(cfg).default_vm()
         if cmd == "status":
-            return status.cmd_status(cfg, vm, entry_file)
-        if cmd == "tune":
+            status.cmd_status(cfg, vm, entry_file)
+        elif cmd == "tune":
             return tune.cmd_tune(cfg, vm, a.sub == "apply", a.guest_virtio)
-        if cmd == "backup-timer":
+        elif cmd == "backup-timer":
             timer.cmd_timer(cfg, a.sub or "status", vm, entry_file)
-            return 0
-        if cmd != "backup":
+        elif cmd != "backup":
             assert_never(cmd)  # every command is handled above
-        wiring.safe_terminal()  # a closed terminal or pipe never cuts a backup or its cleanup short
-        return nas.cmd_backup_nas(cfg, vm, a.keep, not a.no_quiesce) if a.nas else backup.cmd_backup(cfg, vm, a.full)
+        else:
+            wiring.safe_terminal()  # a closed terminal or pipe never cuts a backup or its cleanup short
+            if a.nas:
+                nas.cmd_backup_nas(cfg, vm, a.keep, not a.no_quiesce)
+            else:
+                backup.cmd_backup(cfg, vm, a.full)
+        return 0
     except (Refused, Stop, WriteFailed) as e:
         print(f"{cfg.prog}: {e}", file=sys.stderr)
         if cmd == "backup" and a.nas and cfg.under_systemd and "DISK NOT MERGED" not in str(e):

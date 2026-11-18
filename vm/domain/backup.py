@@ -9,6 +9,10 @@ from typing import NotRequired, TypedDict
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import Json
 
+# The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
+DOMAIN_XML = "domain.xml"
+MANIFEST_JSON = "manifest.json"
+
 # What changes when something writes to a file or a folder tree (vm.adapters.backup.fingerprint):
 # only compared, before and after a copy.
 type Fingerprint = tuple[object, ...]
@@ -78,6 +82,13 @@ class ResticSummary(TypedDict, total=False):
     snapshot_id: str
     total_bytes_processed: int
     data_added: int
+
+
+def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:
+    """What a copied source is in the manifest: a disk (big), the TPM folder or the UEFI variables."""
+    if big:
+        return "disk"
+    return "tpm" if src == tpm_dir else "nvram"
 
 
 def index_entry(manifest: Manifest, path: str) -> IndexEntry:

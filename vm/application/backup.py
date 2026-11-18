@@ -12,8 +12,17 @@ from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state, has_managed_save
-from vm.domain import FULL_MARGIN, URI, VmSettings, domain_parts, restore_lines, stored
-from vm.domain.backup import Fingerprint, Manifest, index_entry, manifest_text, utc_stamp
+from vm.domain import FULL_MARGIN, SHUT_OFF, URI, VmSettings, domain_parts, restore_lines, stored
+from vm.domain.backup import (
+    DOMAIN_XML,
+    MANIFEST_JSON,
+    Fingerprint,
+    Manifest,
+    copied_kind,
+    index_entry,
+    manifest_text,
+    utc_stamp,
+)
 from vm.ports import BackupStorePort, ProgressPort, VmCommandsPort
 
 
@@ -48,7 +57,7 @@ def check_shut_off(commands: VmCommandsPort, vm: str) -> None:
     `virsh managedsave` (virt-manager's Save) domstate also says "shut off",
     but the guest's disks are only consistent with the saved RAM."""
     state = domain_state(commands, vm)
-    if state != "shut off":
+    if state != SHUT_OFF:
         raise Refused(
             f"{vm} is {state or 'in an unknown state'}: shut it down first (a copy of a running "
             f"VM is not consistent). From Windows, or: virsh -c {URI} shutdown {vm}"
@@ -164,7 +173,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
                 + ". Shut the VM off and run the backup again"
             )
         # The definition holds --security-info secrets (graphics passwords): 0600 from the start.
-        store.write_private(os.path.join(dest_dir, "domain.xml"), xml_text)
+        store.write_private(os.path.join(dest_dir, DOMAIN_XML), xml_text)
         manifest: Manifest = {
             "vm": vm,
             "uuid": parts.uuid,
@@ -175,7 +184,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
                 {
                     "source": src,
                     "stored": posixpath.relpath(stored(dest_dir, src), dest_dir),
-                    "kind": "disk" if big else ("tpm" if src == tpm_dir else "nvram"),
+                    "kind": copied_kind(src, tpm_dir, big=big),
                     "allocated": sizes[src][0],
                     "apparent": sizes[src][1],
                 }
@@ -185,7 +194,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
             "deployment": p.commands.booted_deployment(),
             "notes": notes,
         }
-        store.write_private(os.path.join(dest_dir, "manifest.json"), manifest_text(manifest))
+        store.write_private(os.path.join(dest_dir, MANIFEST_JSON), manifest_text(manifest))
     except BaseException:
         store.remove_tree(dest_dir)
         out.warn(f"  incomplete backup removed: {dest_dir}")

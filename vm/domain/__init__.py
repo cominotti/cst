@@ -53,6 +53,8 @@ RETRY_LOCK = "30m"  # the /home NAS job may hold the repository's lock
 
 NAS_DEFAULTS = {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3, "VM_NAS_TIMEOUT_HOURS": 6}
 
+SHUT_OFF = "shut off"  # virsh domstate of a VM that is not running (in the C locale)
+
 LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU is alive: a block job works
 
 SERVICE = "cst-vm-backup@.service"
@@ -364,7 +366,7 @@ def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
     unknown: the state could not be read."""
     if state in LIVE_STATES:
         return "definition" if live_src == base else "live"
-    if state in ("shut off", "crashed"):
+    if state in (SHUT_OFF, "crashed"):
         return "offline"
     return "unknown"
 
@@ -414,6 +416,18 @@ def overlay_recovery(vm: str, items: Iterable[tuple[str, tuple[str, str]]], how:
                 f"sudo ls -l --time-style=full-iso {q(base)} {q(overlay)}",
             ]
     return lines
+
+
+def quiesce_skipped(agent: str, *, quiesce: bool) -> str:
+    """Why the NAS backup's snapshot is not even tried with --quiesce ("" when it is): agent is
+    agent_state's answer."""
+    if not quiesce:
+        return "--no-quiesce"
+    if agent == "none":
+        return "no guest agent channel (org.qemu.guest_agent.0) in the definition"
+    if agent != "connected":
+        return "the guest agent is not connected"
+    return ""
 
 
 def valid_keep(name: str | None) -> bool:
@@ -645,7 +659,10 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
     while rest:
         x = rest.pop(0)
         if cmd == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
-            value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
+            if "=" in x:
+                value = x.split("=", 1)[1]
+            else:
+                value = rest.pop(0) if rest else ""
             if not valid_keep(value):
                 raise Usage(
                     f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
