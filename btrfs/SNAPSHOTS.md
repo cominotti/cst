@@ -2406,7 +2406,12 @@ installed next to it, before it and removed after it. The runtime reads
 `snapshots.conf` with the same reader as `cst doctor` and runs
 `btrfs-snapshot-core` for every snapshot decision. The hourly run's first
 step (the planned conversions and the old trees) is the engine's: the runtime
-runs `btrfs-snapshot convert-planned --lock-held FD` under its lock.
+runs `btrfs-snapshot convert-planned --lock-held FD` under its lock. The
+commands the runtime starts get the signals bash's children got: when the
+unit starts the front with SIGPIPE ignored (systemd does), the front says so
+and the engine, the core and restic get it ignored too, so a journal stream
+that goes away is a failed write for them, not a kill; the runtime's own
+lines that cannot be written are dropped and the run goes on.
 
 ### What it considers "its own" (ownership)
 

@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import struct
@@ -803,6 +804,25 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertNotEqual(runner.run(probe).returncode, 0)
         _, kw = self.recorded(runner, lambda r: r.run(["cmd"], pass_fds=[5]))
         self.assertEqual(kw["pass_fds"], (5,))
+
+    def test_keep_signals_hands_this_process_s_dispositions_on(self) -> None:
+        # Python ignores SIGPIPE (bit 13 of SigIgn): by default subprocess puts it back to its
+        # default in the command; with keep_signals the command gets it ignored, as a shell's child.
+        def pipe_ignored(
+            runner: core_runner.SubprocessCommandRunner, on_line: Callable[[str], None] | None = None
+        ) -> bool:
+            res = runner.run(["grep", "^SigIgn:", "/proc/self/status"], output="stdout", on_line=on_line)
+            mask = int(res.stdout.split()[1], 16)
+            return bool(mask & (1 << (signal.SIGPIPE - 1)))
+
+        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+        self.assertFalse(pipe_ignored(core_runner.SubprocessCommandRunner()))
+        self.assertTrue(pipe_ignored(core_runner.SubprocessCommandRunner(keep_signals=True)))
+        # The same through on_line (subprocess.Popen).
+        self.assertTrue(pipe_ignored(core_runner.SubprocessCommandRunner(keep_signals=True), on_line=lambda ln: None))
+        self.assertFalse(pipe_ignored(core_runner.SubprocessCommandRunner(), on_line=lambda ln: None))
+        _, kw = self.recorded(core_runner.SubprocessCommandRunner(keep_signals=True), lambda r: r.run(["cmd"]))
+        self.assertIs(kw["restore_signals"], False)
 
     def test_on_line_gets_each_line_while_the_command_runs(self) -> None:
         runner = core_runner.SubprocessCommandRunner()

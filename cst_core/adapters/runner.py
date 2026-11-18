@@ -50,6 +50,7 @@ class _RunKwargs(TypedDict, total=False):
     cwd: str
     start_new_session: bool
     pass_fds: tuple[int, ...]
+    restore_signals: bool
 
 
 def _renice(increment: int) -> None:
@@ -142,14 +143,19 @@ class SubprocessCommandRunner:
         *,
         base_env: Mapping[str, str] | None = None,
         words: _FaultWords | None = None,
+        keep_signals: bool = False,
     ) -> None:
         """ctx: asked at each on_host call (inside a container or not).
         base_env: the environment a call starts from when it names none (None:
         this process's). words: rewrites a fault's result in the caller's own
-        words (before check)."""
+        words (before check). keep_signals: every command starts with this
+        process's signal dispositions (subprocess's restore_signals=False), as
+        a shell's children do; by default subprocess puts SIGPIPE and SIGXFSZ,
+        which Python ignores, back to their default in the command."""
         self._ctx = HostExecutionContext() if ctx is None else ctx
         self._base_env = base_env
         self._words = words
+        self._keep_signals = keep_signals
 
     def _argv(
         self, argv: Sequence[str], env: Mapping[str, str] | None, unset: Sequence[str], *, locale_c: bool, on_host: bool
@@ -206,6 +212,8 @@ class SubprocessCommandRunner:
             kw["preexec_fn"] = functools.partial(_renice, nice)
         if pass_fds:
             kw["pass_fds"] = tuple(pass_fds)
+        if self._keep_signals:
+            kw["restore_signals"] = False
         if on_line is not None:
             if timeout is not None or input_text is not None or output in ("inherit", "capture"):
                 # capture: a command that fills the stderr pipe while stdout is read to its end would
@@ -255,6 +263,7 @@ class SubprocessCommandRunner:
                 start_new_session=kw.get("start_new_session", False),
                 preexec_fn=kw.get("preexec_fn"),
                 pass_fds=kw.get("pass_fds", ()),
+                restore_signals=kw.get("restore_signals", True),
             )
         except FileNotFoundError as exc:
             fault: CommandFault = (

@@ -83,9 +83,15 @@ set -Euo pipefail
 # next to this file; installed beside it): handed over at once, with the
 # command line, before anything here runs. CST_LC_CTYPE: the caller's
 # LC_CTYPE ("" when unset), which Python changes at start under a C locale.
+# CST_SIGPIPE_IGNORED=1: this program started with SIGPIPE ignored (systemd
+# runs its services so), which Python cannot tell, since it ignores SIGPIPE
+# whatever it got: the runtime's commands then get it ignored too, as they did
+# from this bash.
 case "${1:-}" in
     hourly|nas|list|caches|prune|purge|configure)
-        CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" exec /usr/bin/python3 -I -B \
+        pipe_ignored=""
+        [[ -n "$(trap -p PIPE)" ]] && pipe_ignored=1
+        CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" CST_SIGPIPE_IGNORED="${pipe_ignored}" exec /usr/bin/python3 -I -B \
             "$(dirname "${BASH_SOURCE[0]}")/btrfs-snapshot-runtime" "$@" ;;
 esac
 

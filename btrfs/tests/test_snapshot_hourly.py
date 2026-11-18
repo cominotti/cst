@@ -461,16 +461,15 @@ class ClosedStdoutTest(Base):
     line that cannot be written fails with EPIPE and is dropped without a word, and the run goes on
     (bash's echo and printf did so): the snapshot is still taken and last-ok written."""
 
-    def test_hourly_goes_on_without_its_stdout(self) -> None:
-        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n<6>btrfs-snapshot: summary\n"})
-        self.write(self.state_file("alerted-paused"), "")
+    def closed_run(self, *, stderr_too: bool = False) -> subprocess.CompletedProcess[str]:
+        """hourly with stdout (and stderr, with stderr_too) a pipe nobody reads, SIGPIPE ignored."""
         read_end, write_end = os.pipe()
         os.close(read_end)
         try:
-            r = subprocess.run(
+            return subprocess.run(
                 ["bash", SCRIPT, "hourly"],
                 stdout=write_end,
-                stderr=subprocess.PIPE,
+                stderr=write_end if stderr_too else subprocess.PIPE,
                 text=True,
                 env=self.env,
                 cwd=self.tmp,
@@ -481,10 +480,30 @@ class ClosedStdoutTest(Base):
             )
         finally:
             os.close(write_end)
+
+    def test_hourly_goes_on_without_its_stdout(self) -> None:
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n<6>btrfs-snapshot: summary\n"})
+        self.write(self.state_file("alerted-paused"), "")
+        r = self.closed_run()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
         self.assertTrue(self.read_state("last-ok").strip().isdigit())
         self.assertEqual(r.stderr, "")
+
+    def test_the_commands_it_runs_keep_sigpipe_ignored(self) -> None:
+        # The engine step (bash) logs a line: an entry of drop-pending that is no old tree is
+        # forgotten. Started with SIGPIPE at its default (what subprocess gives a child unless told
+        # otherwise), it died of SIGPIPE on that line, and hourly failed without a snapshot.
+        other = os.path.join(self.home, "not-an-old-tree")
+        os.makedirs(other)
+        self.write(self.state_file("drop-pending"), f"{other}\n")
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n"})
+        r = self.closed_run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertEqual(self.read_state("drop-pending"), "")
+        self.assertTrue(os.path.isdir(other))
 
 
 class LockLifetimeTest(Base):
