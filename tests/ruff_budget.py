@@ -62,7 +62,6 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/chrome_cache FBT002": 1,
     "btrfs/docker_volumes_nocow BLE001": 1,
     "btrfs/snapshot BLE001": 1,
-    "btrfs/stall_monitord C901": 1,
     "btrfs/stall_report C901": 4,
     "btrfs/stall_report FBT001": 2,
     "cpu FBT001": 1,

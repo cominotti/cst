@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-monitord's machine side: reading /proc, /sys and cgroupfs to the end of each file, the btrfs/disk/container topology, D-state tasks, the journal lines and the writer thread of the log files."""
+"""btrfs-stall-monitord's reads of the machine: /proc, /sys and cgroupfs read to the end of each file, the btrfs/disk/container topology, D-state tasks, the journal lines, the log folder and the writer thread of the log files."""
 
 from __future__ import annotations
 
 from collections.abc import Set as AbstractSet
-from typing import Any
 import glob
 import os
 import queue
 import threading
 import time
 
-from btrfs.stall_monitord.domain import CGROUP_RESCAN, KEEP_DAYS
+from btrfs.stall_monitord.domain import (
+    CGROUP_RESCAN,
+    KEEP_DAYS,
+    FsTopo,
+)
 from cst_core.adapters.journal import log as journal_log
 
 CGROUP_ROOT = "/sys/fs/cgroup"
@@ -132,7 +135,7 @@ class Topology:
     """btrfs filesystems, their devices, swap devices and container cgroups."""
 
     def __init__(self) -> None:
-        self.fs: dict[str, dict[str, Any]] = {}  # uuid -> {"label", "devs", "disks", "devids"}
+        self.fs: dict[str, FsTopo] = {}  # uuid -> {"label", "devs", "disks", "devids"}
         self.disks: dict[str, str] = {}  # disk or dm name -> role string
         self.top_devs: set[str] = set()  # "maj:min" of btrfs member devices and swap
         self.containers: dict[str, str] = {}  # short name -> cgroup dir
@@ -232,6 +235,11 @@ def scan_d_tasks() -> list[tuple[str, str, str]]:
             if comm is not None:
                 out.append((pid, tid, comm))
     return out
+
+
+def prepare_log_dir(log_dir: str) -> None:
+    """The folder of the daily log files, made (with its parents) when missing."""
+    os.makedirs(log_dir, exist_ok=True)
 
 
 class Writer(threading.Thread):

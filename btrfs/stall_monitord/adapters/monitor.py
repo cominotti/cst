@@ -1,24 +1,62 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-monitord's sampling loop: probes, samples, episodes, hung and busy tasks, kernel log, alerts."""
+"""btrfs-stall-monitord's daemon (Monitor): its state across samples and its sampling loop, the PSI trigger, /dev/kmsg, the records it hands to the writer and the alert hand-off."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from collections.abc import Sequence
-from typing import Any
 import errno
 import json
 import os
 import queue
-import re
 import select
 import signal
 import subprocess
 import time
 
-from cst_core.adapters.files import write_atomic
-from cst_core.domain.contracts import state_format
-from btrfs.stall_monitord.adapters import (
+from btrfs.stall_monitord.domain import (
+    ALERT_COMMIT_MS,
+    ALERT_MIN_GAP,
+    BASE_INTERVAL,
+    ENTER_COMMIT_MS,
+    EPISODE_INTERVAL,
+    FLUSH_EVERY,
+    HUNG_REPEAT,
+    HUNG_SECONDS,
+    HUNG_TASK,
+    PROBE_INTERVAL,
+    PSI_TRIGGER,
+    SLICES,
+    SPACE_KEYS,
+    VERSION,
+    VMSTAT_KEYS,
+    DTask,
+    DTaskSince,
+    Episode,
+    FsSampleOut,
+    MetaOut,
+    RecordOut,
+    SampleOut,
+    alert_text,
+    cmdline_text,
+    commit_alert,
+    commit_long_ms,
+    episode_reason,
+    hung_key,
+    hung_report,
+    hung_start,
+    io_busy_key,
+    io_busy_message,
+    io_some_pct,
+    kmsg_line,
+    parse_stack,
+    settle_kinds,
+    stuck_since,
+    task_where,
+    wait_at,
+    wait_counts,
+    wait_kind,
+)
+from btrfs.stall_monitord.adapters.proc import (
     CGROUP_ROOT,
     Topology,
     Writer,
@@ -33,45 +71,13 @@ from btrfs.stall_monitord.adapters import (
     scan_d_tasks,
     short_cgroup,
 )
-from btrfs.stall_monitord.domain import (
-    ALERT_COMMIT_MS,
-    ALERT_MIN_GAP,
-    BASE_INTERVAL,
-    BUSY_ALERT_SECONDS,
-    ENTER_COMMIT_MS,
-    ENTER_D_TASKS,
-    ENTER_IO_SOME_PCT,
-    EPISODE_INTERVAL,
-    Episode,
-    FLUSH_EVERY,
-    HUNG_REPEAT,
-    HUNG_SECONDS,
-    KMSG_DEVICE,
-    KMSG_INTEREST,
-    KMSG_SEVERE,
-    LOCAL_IO_FRAME,
-    MAINT_HUNG_SECONDS,
-    MAX_EXAMPLE_STACKS,
-    MAX_STACK_SNAPSHOTS,
-    PROBE_INTERVAL,
-    PSI_TRIGGER,
-    QUIET_D_TASKS,
-    QUIET_IO_SOME_PCT,
-    QUIET_SECONDS_TO_CLOSE,
-    SLICES,
-    SPACE_KEYS,
-    TIMED_WAIT_FRAME,
-    VERSION,
-    VMSTAT_KEYS,
-    DTaskSince,
-    mmap_lock_only,
-    parse_stack,
-    stack_signature,
-    wait_kind,
-)
+from cst_core.adapters.files import write_atomic
+from cst_core.domain.contracts import state_format
 
 
 class Monitor:
+    """The daemon: its state across samples, the probes, samples, episodes, hung and busy tasks, the kernel log and the alerts."""
+
     def __init__(self, log_dir: str, run_dir: str, duration: float | None = None) -> None:
         self.log_dir = log_dir
         self.run_dir = run_dir
@@ -80,7 +86,7 @@ class Monitor:
         self.writer = Writer(log_dir)
         self.buffer: list[tuple[float, str]] = []
         self.last_flush = time.monotonic()
-        self.prev: dict[str, Any] | None = None
+        self.prev: SampleOut | None = None
         self.episode: Episode | None = None
         self.cmax: dict[str, int] = {}  # uuid -> longest commit (ms) seen since the last sample
         self.prev_commit: dict[
@@ -134,10 +140,10 @@ class Monitor:
 
     # ---- storage -----------------------------------------------------------
 
-    def emit(self, rec: Mapping[str, Any]) -> None:
-        self.buffer.append((rec.get("ts", time.time()), json.dumps(rec, separators=(",", ":"))))
+    def emit(self, rec: RecordOut) -> None:
+        self.buffer.append((rec["ts"], json.dumps(rec, separators=(",", ":"))))
 
-    def meta_record(self) -> dict[str, Any]:
+    def meta_record(self) -> MetaOut:
         wbt = {
             n: read_int(f"/sys/block/{n}/queue/wbt_lat_usec")
             for n in self.topo.disks
@@ -183,20 +189,9 @@ class Monitor:
             cs = read_kv(f"/sys/fs/btrfs/{uuid}/commit_stats")
             if not cs:
                 continue
-            commits, total = cs.get("commits", 0), cs.get("total_commit_ms", 0)
-            cur, last, mx = cs.get("cur_commit_ms", 0), cs.get("last_commit_ms", 0), cs.get("max_commit_ms", 0)
-            long_ms = cur
-            prev = self.prev_commit.get(uuid)
-            if prev and commits > prev[0]:
-                # Only count last_commit_ms when a commit actually finished;
-                # otherwise it repeats an old value forever.
-                long_ms = max(long_ms, last)
-                if total - prev[1] >= ENTER_COMMIT_MS and commits - prev[0] > 1:
-                    # Several commits finished within one probe; their sum is a floor.
-                    long_ms = max(long_ms, (total - prev[1]) // (commits - prev[0]))
-                if prev[2] < mx:
-                    long_ms = max(long_ms, mx)
-            self.prev_commit[uuid] = (commits, total, mx)
+            commits = cs.get("commits", 0)
+            long_ms = commit_long_ms(cs, self.prev_commit.get(uuid))
+            self.prev_commit[uuid] = (commits, cs.get("total_commit_ms", 0), cs.get("max_commit_ms", 0))
             if long_ms > self.cmax.get(uuid, 0):
                 self.cmax[uuid] = long_ms
             if long_ms >= ENTER_COMMIT_MS and self.episode is None:
@@ -204,33 +199,18 @@ class Monitor:
             if long_ms >= ALERT_COMMIT_MS and self.commit_alerted.get(uuid) != commits:
                 self.commit_alerted[uuid] = commits
                 label = self.topo.fs[uuid]["label"] or uuid[:8]
-                state = "still running after" if cur >= ALERT_COMMIT_MS else "took"
-                self.alert(
-                    "commit",
-                    "warning",
-                    f"btrfs commit stall on {label}",
-                    f"A transaction commit {state} {long_ms / 1000:.1f} s. "
-                    f"Ask an agent or run: btrfs-stall-report --since '10 min ago'",
-                )
+                title, body = commit_alert(label, cs.get("cur_commit_ms", 0), long_ms)
+                self.alert("commit", "warning", title, body)
 
-    def sample(self, d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]]) -> dict[str, Any]:
-        rec: dict[str, Any] = {"t": "s", "ts": round(time.time(), 3), "mono": round(time.monotonic(), 3)}
-        rec["psi"] = {r: parse_psi(f"/proc/pressure/{r}") for r in ("io", "memory", "cpu")}
+    def sample(self, d_tasks: Sequence[DTask]) -> SampleOut:
+        ts, mono = round(time.time(), 3), round(time.monotonic(), 3)
+        psi = {r: parse_psi(f"/proc/pressure/{r}") for r in ("io", "memory", "cpu")}
         vm = read_kv("/proc/vmstat")
-        rec["vm"] = [vm.get(k, 0) for k in VMSTAT_KEYS]
         st = read_kv("/proc/stat")
-        # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
-        rec["procs"] = [st.get("procs_running", 0), st.get("procs_blocked", 0)]
-        # "d": tasks waiting on storage; "d_all" also counts FUSE, maintenance,
-        # memory and idle-ish waits.
-        rec["d"] = sum(1 for t in d_tasks if t[5] == "storage")
-        rec["d_all"] = len(d_tasks)
-        rec["d_fuse"] = sum(1 for t in d_tasks if t[5] == "fuse")
-        rec["d_maint"] = sum(1 for t in d_tasks if t[5] == "maintenance")
-        rec["d_mem"] = sum(1 for t in d_tasks if t[5] == "memory")
-        rec["load1"] = float((read_text("/proc/loadavg") or "0").split()[0])
+        counts = wait_counts(d_tasks)  # d, d_all, d_fuse, d_maint, d_mem
+        load1 = float((read_text("/proc/loadavg") or "0").split()[0])
 
-        fs = {}
+        fs: dict[str, FsSampleOut] = {}
         for uuid, info in self.topo.fs.items():
             base = f"/sys/fs/btrfs/{uuid}"
             cs = read_kv(f"{base}/commit_stats")
@@ -256,44 +236,53 @@ class Monitor:
                 "space": space,
                 "discard": disc,
             }
-        rec["fs"] = fs
 
         disks = {}
         for line in (read_text("/proc/diskstats") or "").splitlines():
             f = line.split()
             if len(f) >= 14 and f[2] in self.topo.disks:
                 disks[f[2]] = [int(x) for x in f[3:]]
-        rec["disk"] = disks
 
         cg: dict[str, list[float | int]] = {}
         for sl in SLICES:
-            d = f"{CGROUP_ROOT}/{sl}"
-            p = parse_psi(f"{d}/io.pressure")
+            path = f"{CGROUP_ROOT}/{sl}"
+            p = parse_psi(f"{path}/io.pressure")
             if p is None:
                 continue
-            m = parse_psi(f"{d}/memory.pressure")
+            m = parse_psi(f"{path}/memory.pressure")
             cg[sl] = [
                 p[1],
                 p[3],
                 m[1] if m else 0,
                 m[3] if m else 0,
-                *(parse_io_stat(f"{d}/io.stat", self.topo.top_devs) or [0, 0]),
+                *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0]),
             ]
         self.topo.scan_cgroups(time.monotonic())
-        for name, d in self.topo.containers.items():
-            p = parse_psi(f"{d}/io.pressure")
+        for name, path in self.topo.containers.items():
+            p = parse_psi(f"{path}/io.pressure")
             if p is not None:
-                cg[name] = [p[1], p[3], 0, 0, *(parse_io_stat(f"{d}/io.stat", self.topo.top_devs) or [0, 0])]
-        rec["cg"] = cg
-        return rec
+                cg[name] = [p[1], p[3], 0, 0, *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0])]
+        return {
+            "t": "s",
+            "ts": ts,
+            "mono": mono,
+            "psi": psi,
+            "vm": [vm.get(k, 0) for k in VMSTAT_KEYS],
+            # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
+            "procs": [st.get("procs_running", 0), st.get("procs_blocked", 0)],
+            "d": counts[0],
+            "d_all": counts[1],
+            "d_fuse": counts[2],
+            "d_maint": counts[3],
+            "d_mem": counts[4],
+            "load1": load1,
+            "fs": fs,
+            "disk": disks,
+            "cg": cg,
+        }
 
-    def interval_io_some_pct(self, rec: Mapping[str, Any]) -> float:
-        if not self.prev or not rec["psi"]["io"] or not self.prev["psi"]["io"]:
-            return 0.0
-        dt = rec["mono"] - self.prev["mono"]
-        if dt <= 0:
-            return 0.0
-        return (rec["psi"]["io"][1] - self.prev["psi"]["io"][1]) / 1e6 / dt * 100
+    def interval_io_some_pct(self, rec: SampleOut) -> float:
+        return io_some_pct(self.prev, rec)
 
     # ---- D-state tasks -----------------------------------------------------
 
@@ -323,84 +312,27 @@ class Monitor:
             wchan = None if wchan in ("", "0") else wchan
         return frames, wchan
 
-    def describe_all(
-        self, d_tasks: Sequence[tuple[str, str, str]]
-    ) -> list[tuple[str, str, str, list[str], str | None, str]]:
+    def describe_all(self, d_tasks: Sequence[tuple[str, str, str]]) -> list[DTask]:
         """[(pid, tid, comm, frames, wchan, kind)] of tasks still in D state
         after their stack was read (a task that woke up in between shows the
-        stack of whatever it sleeps in next, e.g. a futex)."""
-        out: list[tuple[str, str, str, list[str], str | None, str]] = []
+        stack of whatever it sleeps in next, e.g. a futex), their kinds
+        settled across the threads of each process (settle_kinds)."""
+        out: list[DTask] = []
         for pid, tid, comm in d_tasks:
             frames, wchan = self.describe(pid, tid)
             if not (frames or wchan) or d_comm(pid, tid) is None:
                 continue
             out.append((pid, tid, comm, frames, wchan, wait_kind(frames, wchan)))
-        # Threads of a process that also has a thread inside FUSE, blocked on a
-        # VFS lock that thread holds (d_alloc_parallel, inode rwsem), wait on
-        # FUSE too, unless their stack shows the local block layer or btrfs.
-        fuse_pids = {t[0] for t in out if t[5] == "fuse"}
-        for i, t in enumerate(out):
-            if t[5] == "storage" and t[0] in fuse_pids and not any(LOCAL_IO_FRAME.match(f) for f in t[3]):
-                out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
-        # A thread waiting for the memory map lock waits for whatever the
-        # holder (another thread of the process) waits on: memory if a thread
-        # of the process is in reclaim or swap itself (a JVM whose threads
-        # fault through zswap, even with one thread in fsync), else storage or
-        # FUSE if a thread of the process waits there, memory otherwise.
-        lock_only = [i for i, t in enumerate(out) if t[5] == "memory" and mmap_lock_only(t[3], t[4])]
-        lock_tids = {out[i][1] for i in lock_only}
-        mem_pids = {t[0] for t in out if t[5] == "memory" and t[1] not in lock_tids}
-        storage_pids = {t[0] for t in out if t[5] == "storage"}
-        fuse_pids = {t[0] for t in out if t[5] == "fuse"}
-        for i in lock_only:
-            t = out[i]
-            if t[0] in mem_pids:
-                continue
-            if t[0] in storage_pids:
-                out[i] = (t[0], t[1], t[2], t[3], t[4], "storage")
-            elif t[0] in fuse_pids:
-                out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
-        return out
+        return settle_kinds(out)
 
-    def snapshot_stacks(self, ep: Episode, d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]]) -> None:
-        ep.snapshots += 1
-        ep.max_d = max(ep.max_d, sum(1 for t in d_tasks if t[5] == "storage"))
-        ep.max_d_mem = max(ep.max_d_mem, sum(1 for t in d_tasks if t[5] == "memory"))
-        ep.max_d_all = max(ep.max_d_all, len(d_tasks))
-        if ep.snapshots > MAX_STACK_SNAPSHOTS:
-            return
-        cg_cache = {}
-        for pid, _tid, comm, frames, wchan, kind in d_tasks:
-            sig, ctx = stack_signature(frames, wchan)
-            key = f"{sig}|{ctx}"
-            if pid not in cg_cache:
-                cg_cache[pid] = short_cgroup(pid)
-            entry = ep.sigs.setdefault(key, {"n": 0, "kind": kind, "comms": {}, "cgroups": {}})
-            entry["n"] += 1
-            entry["comms"][comm] = entry["comms"].get(comm, 0) + 1
-            entry["cgroups"][cg_cache[pid]] = entry["cgroups"].get(cg_cache[pid], 0) + 1
-            ex = ep.examples.setdefault(key, [])
-            if frames and len(ex) < MAX_EXAMPLE_STACKS and frames[:16] not in ex:
-                ex.append(frames[:16])
-
-    def track_hung(self, d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]], now: float) -> None:
+    def track_hung(self, d_tasks: Sequence[DTask], now: float) -> None:
         """Per task seen in D: 'busy' = in D at every sample since then;
         'first' = in D since then *without running in between* (stuck)."""
         current: dict[str, DTaskSince] = {}
         info: dict[str, tuple[list[str], str | None, str]] = {}
         for pid, tid, comm, frames, wchan, kind in d_tasks:
-            prev = self.d_since.get(tid)
             slices = run_slices(pid, tid)
-            if prev and prev["pid"] == pid:
-                moved = (
-                    slices is not None
-                    and prev["slices"] is not None
-                    and slices != prev["slices"]
-                    and not any(TIMED_WAIT_FRAME.match(f) for f in frames or ())
-                )
-                first, busy = (now if moved else prev["first"]), prev["busy"]
-            else:
-                first = busy = now
+            first, busy = stuck_since(self.d_since.get(tid), pid, slices, frames, now)
             current[tid] = {"first": first, "busy": busy, "comm": comm, "pid": pid, "slices": slices}
             info[tid] = (frames, wchan, kind)
         self.d_since = current
@@ -409,122 +341,35 @@ class Monitor:
             comm, pid = t["comm"], t["pid"]
             if kind == "idle":
                 continue
-            # FUSE waits and the maintenance note keep the old meaning (time
-            # in D, progressing or not: a slow network walk does progress);
-            # the stuck alerts need time in D without progress.
-            first = t["busy"] if kind == "fuse" else t["first"]
-            if kind == "maintenance" and now - t["first"] < MAINT_HUNG_SECONDS:
-                first = t["busy"]
+            first = hung_start(kind, t, now)
             if now - first < HUNG_SECONDS:
                 if kind == "storage" and now - t["busy"] >= HUNG_SECONDS:
                     self.report_io_busy(t, tid, frames, wchan, now)
                 continue
-            # btrfs maintenance: one informational event at HUNG_SECONDS, an
-            # alert only after MAINT_HUNG_SECONDS (keyed separately so the
-            # HUNG_REPEAT dedupe of the event does not delay the alert).
-            # Workload tasks queued behind it are "storage" and alert as usual.
-            key = kind
-            if kind == "maintenance" and now - t["first"] >= MAINT_HUNG_SECONDS:
-                key = "maintenance-hung"  # 15 min without any progress
+            key = hung_key(kind, t, now)
             # One report per process and kind of wait (bfs/find run many
             # threads), so a FUSE wait never hides a disk hang in the same process.
             if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
                 continue
             self.hung_reported[(pid, key)] = now
-            sig, ctx = stack_signature(frames, wchan)
-            at = f"{sig} via {ctx}" if ctx else sig
-            cmd = (read_text(f"/proc/{pid}/cmdline") or "").replace("\0", " ").strip()[:160]
-            where = f"{comm}:{tid} ({cmd or 'no cmdline'}; cgroup {short_cgroup(pid)})"
-            if key == "maintenance":
-                msg = (
-                    f"{where} in btrfs maintenance (trim/discard/scrub/balance) for {now - first:.0f}s "
-                    f"at {at}: not a workload stall"
-                )
-                self.emit(
-                    {
-                        "t": "ev",
-                        "ts": round(time.time(), 3),
-                        "msg": msg,
-                        "severe": False,
-                        "ours": True,
-                        "kind": "maintenance-wait",
-                        "stack": frames[:16],
-                    }
-                )
-                continue
-            if key == "maintenance-hung":
-                msg = f"{where} in btrfs maintenance, D state for {now - first:.0f}s at {at}"
-                self.emit(
-                    {
-                        "t": "ev",
-                        "ts": round(time.time(), 3),
-                        "msg": msg,
-                        "severe": True,
-                        "ours": True,
-                        "kind": "maintenance-hung",
-                        "stack": frames[:16],
-                    }
-                )
-                self.alert("maintenance-hung", "warning", "btrfs maintenance (fstrim/scrub) stuck for 15 min", msg)
-                if self.episode is None:
-                    self.start_episode(time.time(), "hung task")
-                continue
-            if kind == "fuse":
-                msg = (
-                    f"{where} waited {now - first:.0f}s on a FUSE filesystem (gvfs share or document "
-                    f"portal): usually the network or the FUSE daemon, not the local disks (check the "
-                    f"report for a storage wait at the same time); at {at}"
-                )
-                self.emit(
-                    {
-                        "t": "ev",
-                        "ts": round(time.time(), 3),
-                        "msg": msg,
-                        "severe": False,
-                        "ours": False,
-                        "kind": "fuse-wait",
-                        "stack": frames[:16],
-                    }
-                )
-                self.alert("fuse", "normal", "Program waiting on a FUSE filesystem (network share / portal)", msg)
-                continue
-            if kind == "memory":
-                # Not a disk or filesystem problem, so not severe and no
-                # storage episode; the report shows it with the memory waits.
-                msg = (
-                    f"{where} waited {now - first:.0f}s without progress in memory reclaim / swap "
-                    f"(too little free memory, not the disks) at {at}"
-                )
-                self.emit(
-                    {
-                        "t": "ev",
-                        "ts": round(time.time(), 3),
-                        "msg": msg,
-                        "severe": False,
-                        "ours": True,
-                        "kind": "hung-memory",
-                        "stack": frames[:16],
-                    }
-                )
-                self.alert(
-                    "hung-memory", "warning", "Task stuck in an uninterruptible wait (memory reclaim / swap)", msg
-                )
-                continue
-            msg = f"{where} in D state for {now - first:.0f}s at {at}"
+            at = wait_at(frames, wchan)
+            cmd = cmdline_text(read_text(f"/proc/{pid}/cmdline"))
+            rep = hung_report(key, task_where(comm, tid, cmd, short_cgroup(pid)), now - first, at)
             self.emit(
                 {
                     "t": "ev",
                     "ts": round(time.time(), 3),
-                    "msg": msg,
-                    "severe": True,
-                    "ours": True,
-                    "kind": "hung",
+                    "msg": rep.msg,
+                    "severe": rep.severe,
+                    "ours": rep.ours,
+                    "kind": rep.kind,
                     "stack": frames[:16],
                 }
             )
-            self.alert("hung", "warning", "Task stuck in an uninterruptible wait (likely storage)", msg)
-            if self.episode is None:
-                self.start_episode(time.time(), "hung task")
+            if rep.alert is not None:
+                self.alert(*rep.alert, rep.msg)
+            if rep.opens_episode and self.episode is None:
+                self.start_episode(time.time(), HUNG_TASK)
         # Forget processes that are gone.
         live = {v["pid"] for v in current.values()}
         self.hung_reported = {k: t for k, t in self.hung_reported.items() if k[0] in live or now - t < HUNG_REPEAT}
@@ -536,18 +381,13 @@ class Monitor:
         some IO). Once per process and kind per HUNG_REPEAT."""
         pid = t["pid"]
         busy_s = now - t["busy"]
-        key = "io-busy-long" if busy_s >= BUSY_ALERT_SECONDS else "io-busy"
+        key = io_busy_key(busy_s)
         if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
             return
         self.hung_reported[(pid, key)] = now
-        sig, ctx = stack_signature(frames, wchan)
-        at = f"{sig} via {ctx}" if ctx else sig
-        cmd = (read_text(f"/proc/{pid}/cmdline") or "").replace("\0", " ").strip()[:160]
-        msg = (
-            f"{t['comm']}:{tid} ({cmd or 'no cmdline'}; cgroup {short_cgroup(pid)}) waited on storage at "
-            f"every sample for {busy_s:.0f}s while still being scheduled (progressing, e.g. an fsync loop; "
-            f"check the window's storage metrics) at {at}"
-        )
+        at = wait_at(frames, wchan)
+        cmd = cmdline_text(read_text(f"/proc/{pid}/cmdline"))
+        msg = io_busy_message(task_where(t["comm"], tid, cmd, short_cgroup(pid)), busy_s, at)
         self.emit(
             {
                 "t": "ev",
@@ -565,38 +405,22 @@ class Monitor:
 
     # ---- episodes ----------------------------------------------------------
 
-    def update_episode(
-        self, rec: Mapping[str, Any], d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]]
-    ) -> None:
+    def update_episode(self, rec: SampleOut, d_tasks: Sequence[DTask]) -> None:
         io_pct = self.interval_io_some_pct(rec)
         cmax = max((v["c"][5] for v in rec["fs"].values()), default=0)
         io = rec["psi"]["io"] or [0, 0, 0, 0]
         if self.episode is None:
-            reason = self.want_episode
-            if io_pct >= ENTER_IO_SOME_PCT:
-                reason = f"io_some {io_pct:.0f}%"
-            elif rec["d"] >= ENTER_D_TASKS:
-                reason = f"{rec['d']} tasks waiting on storage"
-            elif cmax >= ENTER_COMMIT_MS:
-                reason = f"commit {cmax} ms"
+            reason = episode_reason(self.want_episode, io_pct, rec["d"], cmax)
             if reason:
                 self.start_episode(rec["ts"], reason)
         self.want_episode = None
         ep = self.episode
         if ep is None:
             return
-        ep.end = rec["ts"]
-        ep.peak["io_some_avg10"] = max(ep.peak["io_some_avg10"], io[0])
-        ep.peak["io_full_avg10"] = max(ep.peak["io_full_avg10"], io[2])
-        ep.peak["iowait_tasks"] = max(ep.peak["iowait_tasks"], rec["procs"][1])
-        ep.peak["commit_ms"] = max(ep.peak["commit_ms"], cmax)
-        self.snapshot_stacks(ep, d_tasks)
+        ep.observe(rec["ts"], io, rec["procs"][1], cmax)
+        ep.add_snapshot(d_tasks, short_cgroup)
         cur_commit = max((v["c"][2] for v in rec["fs"].values()), default=0)
-        if io_pct < QUIET_IO_SOME_PCT and rec["d"] <= QUIET_D_TASKS and cur_commit < ENTER_COMMIT_MS // 2:
-            ep.quiet += 1
-        else:
-            ep.quiet = 0
-        if ep.quiet >= QUIET_SECONDS_TO_CLOSE:
+        if ep.quiet_step(io_pct, rec["d"], cur_commit):
             self.end_episode()
 
     def start_episode(self, ts: float, reason: str) -> None:
@@ -604,25 +428,11 @@ class Monitor:
 
     def end_episode(self) -> None:
         ep, self.episode = self.episode, None
-        if ep is None:
-            return
-        # PSI triggers also fire on harmless 200 ms blips; keep only episodes
-        # that show an actual stall (the 1 s samples are stored either way).
-        if (
-            ep.peak["io_some_avg10"] < QUIET_IO_SOME_PCT
-            and ep.max_d < ENTER_D_TASKS
-            and ep.peak["commit_ms"] < ENTER_COMMIT_MS
-            and ep.reason != "hung task"
-        ):
+        if ep is None or not ep.is_stall():
             return
         rec = ep.to_record()
         self.emit(rec)
-        top = rec["sigs"][:1]
-        top_s = f"{top[0]['sig']} x{top[0]['n']}" if top else "no D tasks"
-        log(
-            f"episode {ep.end - ep.start:.0f}s ({ep.reason}); peak io_full_avg10="
-            f"{ep.peak['io_full_avg10']:.0f}% commit={ep.peak['commit_ms']}ms max_D={ep.max_d}; top: {top_s}"
-        )
+        log(ep.summary(rec))
         self.flush()
 
     # ---- kernel log ----------------------------------------------------------
@@ -642,25 +452,21 @@ class Monitor:
                 return
             if not data:
                 return
-            msg = data.decode("utf-8", "replace").partition(";")[2].split("\n", 1)[0]
-            if not KMSG_INTEREST.search(msg):
+            line = kmsg_line(data, members)
+            if line is None:
                 continue
-            m = KMSG_DEVICE.search(msg)
-            dev = (m.group(1) or m.group(2)) if m else None
-            ours = dev is None or dev in members or re.sub(r"p\d+$", "", dev) in members
-            severe = bool(KMSG_SEVERE.search(msg)) and ours
             self.emit(
                 {
                     "t": "ev",
                     "ts": round(time.time(), 3),
-                    "msg": msg[:400],
-                    "severe": severe,
-                    "ours": ours,
+                    "msg": line.msg[:400],
+                    "severe": line.severe,
+                    "ours": line.ours,
                     "kind": "kmsg",
                 }
             )
-            if severe:
-                self.alert("fs-error", "crit", "Kernel: btrfs/device error", msg[:300])
+            if line.severe:
+                self.alert("fs-error", "crit", "Kernel: btrfs/device error", line.msg[:300])
 
     # ---- alerts --------------------------------------------------------------
 
@@ -674,11 +480,11 @@ class Monitor:
         if not self.run_dir:
             return
         try:
-            # Plain-text queue for /usr/local/sbin/btrfs-notify --queue (the stall-queue format):
-            # line 1 urgency, line 2 title, rest body.
+            # Plain-text queue for /usr/local/sbin/btrfs-notify --queue (the stall-queue format, alert_text).
             path = os.path.join(self.run_dir, state_format("stall-queue").file_name.replace("*", str(time.time_ns())))
-            text = f"{'critical' if level == 'crit' else 'normal'}\n{title.replace(chr(10), ' ')}\n{body}\n"
-            write_atomic(path, text.encode("utf-8"), mode="umask", durable=False, relabel=False)
+            write_atomic(
+                path, alert_text(level, title, body).encode("utf-8"), mode="umask", durable=False, relabel=False
+            )
             subprocess.Popen(
                 ["systemctl", "--no-block", "start", "btrfs-stall-alert.service"],
                 stdout=subprocess.DEVNULL,
