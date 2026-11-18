@@ -393,22 +393,23 @@ def nas_run(
     except BaseException as e:  # noqa: BLE001
         failure = e
     # From here on no signal may cut the cleanup short, and no child may get one.
-    problems: list[str] = []
-    how: dict[str, str] = {}
-    with p.signals.ignored(), p.commands.detached():
-        if live:
-            # What the VM really runs on, not only what take_snapshot saw.
-            try:
-                overlaid.update(find_overlays(p, vm, specs))
-            # The merge back still runs for what is known.
-            except Exception as e:  # noqa: BLE001
-                problems.append(f"the disks could not be listed: {e!r}")
-        if overlaid:
-            try:
-                more, how = commit_back(cfg, p, vm, overlaid)
-                problems += more
-            except Exception as e:  # noqa: BLE001 - reported loudly below
-                problems.append(f"the merge back failed: {e!r}")
+    with p.signals.ignored():
+        problems: list[str] = []
+        how: dict[str, str] = {}
+        with p.commands.detached():
+            if live:
+                # What the VM really runs on, not only what take_snapshot saw.
+                try:
+                    overlaid.update(find_overlays(p, vm, specs))
+                # The merge back still runs for what is known.
+                except Exception as e:  # noqa: BLE001
+                    problems.append(f"the disks could not be listed: {e!r}")
+            if overlaid:
+                try:
+                    more, how = commit_back(cfg, p, vm, overlaid)
+                    problems += more
+                except Exception as e:  # noqa: BLE001 - reported loudly below
+                    problems.append(f"the merge back failed: {e!r}")
     if isinstance(failure, Uncertain) and not problems:
         problems.append(str(failure))
         overlaid.update({t: spec for t, spec in specs.items() if store.lexists(spec[1])})
