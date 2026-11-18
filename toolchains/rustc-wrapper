@@ -161,29 +161,31 @@ if [ "$own_address" = yes ]; then
     manager="${manager%%/*}"
     uid="${manager#user@}"
     uid="${uid%.service}"
-    case "$manager:$uid" in
-        user@*.service:*[!0-9]* | *:) ;;
-        user@*.service:*)
-            slice=user.slice
-            [ "$env_id" = host ] && slice=app.slice
-            scope="cst-sccache-${env_id}.scope"
-            manager_dir="${CST_SCCACHE_CGROUP_FS:-/sys/fs/cgroup}${above}/${manager}"
-            scope_dir="${manager_dir}/${slice}/${scope}"
-            if [ -d "$manager_dir" ] && { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; } &&
-                [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/systemd/private" ] &&
-                command -v systemd-run >/dev/null 2>&1 && command -v flock >/dev/null 2>&1; then
-                # The lock is held until --start-server returns (the server
-                # listens); the server never gets its descriptor (9>&-).
-                {
-                    if flock -w 15 9 && { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; }; then
-                        rm -f "$SCCACHE_SERVER_UDS"
-                        systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
-                            --description="CST: the shared sccache server ($env_id)" \
-                            sccache --start-server 9>&-
-                    fi
-                } 9>>"${SCCACHE_SERVER_UDS}.lock" </dev/null >/dev/null 2>&1
-            fi
-            ;;
-    esac
+    case "$manager" in user@*.service) ;; *) manager= ;; esac
+    case "$uid" in '' | *[!0-9]*) manager= ;; esac
+    if [ -n "$manager" ]; then
+        slice=user.slice
+        [ "$env_id" = host ] && slice=app.slice
+        scope="cst-sccache-${env_id}.scope"
+        manager_dir="${CST_SCCACHE_CGROUP_FS:-/sys/fs/cgroup}${above}/${manager}"
+        scope_dir="${manager_dir}/${slice}/${scope}"
+        # The socket is removed before each start: with the scope's folder, it
+        # means a server has started there.
+        server_missing() { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; }
+        if [ -d "$manager_dir" ] && server_missing &&
+            [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/systemd/private" ] &&
+            command -v systemd-run >/dev/null 2>&1 && command -v flock >/dev/null 2>&1; then
+            # The lock is held until --start-server returns (the server
+            # listens); the server never gets its descriptor (9>&-).
+            {
+                if flock -w 15 9 && server_missing; then
+                    rm -f "$SCCACHE_SERVER_UDS"
+                    systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
+                        --description="CST: the shared sccache server ($env_id)" \
+                        sccache --start-server 9>&-
+                fi
+            } 9>>"${SCCACHE_SERVER_UDS}.lock" </dev/null >/dev/null 2>&1
+        fi
+    fi
 fi
 exec sccache "$@"

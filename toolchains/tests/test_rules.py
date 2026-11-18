@@ -1324,13 +1324,10 @@ class RustcWrapperTest(unittest.TestCase):
         self.fake(self.sccache, report.format(who="sccache", log=self.log) + 'exec "$@"\n')
         self.containerenv = os.path.join(self.tmp, "containerenv")
         # Only test-owned programs on PATH (a real sccache must never be found):
-        # the two the wrapper runs itself are linked in.
+        # the ones the wrapper and the fakes run are linked in.
         self.sys = os.path.join(self.tmp, "sys")
         os.makedirs(self.sys)
-        for tool in ("mkdir", "chmod"):
-            resolved = shutil.which(tool)
-            assert resolved is not None
-            os.symlink(resolved, os.path.join(self.sys, tool))
+        self.link_tools("mkdir", "chmod", "rm", "readlink", "sleep")
         self.sh = shutil.which("sh")
         self.script = WRAPPER
         # The cgroup the wrapper reads and the cgroup tree it checks: test files
@@ -1350,14 +1347,21 @@ class RustcWrapperTest(unittest.TestCase):
         with open(self.script, "w") as f:
             f.write(text)
 
+    def link_tools(self, *names: str) -> None:
+        """Link these programs of the machine into the test's own PATH folder."""
+        for tool in names:
+            resolved = shutil.which(tool)
+            assert resolved is not None, f"{tool} is needed for these tests"
+            os.symlink(resolved, os.path.join(self.sys, tool))
+
     @staticmethod
     def fake(path: str, body: str) -> None:
         with open(path, "w") as f:
             f.write("#!/bin/sh\n" + body)
         os.chmod(path, 0o755)
 
-    def run_wrapper(self, *args: str, **env: str | None) -> list[dict[str, str]]:
-        assert self.sh is not None
+    def wrapper_env(self, **env: str | None) -> dict[str, str]:
+        """The wrapper's clean environment; a None value leaves that variable out."""
         base: dict[str, str | None] = {
             "PATH": f"{self.bin}:{self.sys}",
             "HOME": self.home,
@@ -1367,22 +1371,29 @@ class RustcWrapperTest(unittest.TestCase):
             "CST_SCCACHE_CGROUP_FS": self.cgroup_fs,
         }
         base.update(env)
-        clean_env = {k: v for k, v in base.items() if v is not None}
-        open(self.log, "w").close()
-        r = subprocess.run(
-            [self.sh, self.script, *args],
-            check=False,
-            env=clean_env,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
+        return {k: v for k, v in base.items() if v is not None}
+
+    def calls(self) -> list[dict[str, str]]:
+        """The fakes' log lines (who|key=value|...), oldest first."""
         with open(self.log) as f:
             return [
                 dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
                 for ln in f.read().splitlines()
             ]
+
+    def run_wrapper(self, *args: str, **env: str | None) -> list[dict[str, str]]:
+        assert self.sh is not None
+        open(self.log, "w").close()
+        r = subprocess.run(
+            [self.sh, self.script, *args],
+            check=False,
+            env=self.wrapper_env(**env),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return self.calls()
 
     def rustc(self) -> str:
         return os.path.join(self.tools, "rustc")
@@ -1593,15 +1604,8 @@ class RustcWrapperTest(unittest.TestCase):
         if manager_socket:
             os.makedirs(os.path.join(self.run_dir, "systemd"), exist_ok=True)
             os.mknod(os.path.join(self.run_dir, "systemd", "private"), stat.S_IFSOCK | 0o600)
-        for tool in ("rm", "readlink", "sleep"):
-            if not os.path.exists(os.path.join(self.sys, tool)):
-                resolved = shutil.which(tool)
-                assert resolved is not None
-                os.symlink(resolved, os.path.join(self.sys, tool))
         if flock:
-            resolved = shutil.which("flock")
-            assert resolved is not None, "util-linux flock is needed for the lock tests"
-            os.symlink(resolved, os.path.join(self.sys, "flock"))
+            self.link_tools("flock")
         if systemd_run:
             self.fake(
                 os.path.join(self.bin, "systemd-run"),
@@ -1710,6 +1714,15 @@ class RustcWrapperTest(unittest.TestCase):
         # manager folder not in the cgroup tree, no manager socket, no systemd-run or
         # flock, or a server address of the caller's own.
         um = self.user_manager
+
+        def no_cgroup_file() -> None:
+            um()
+            os.unlink(self.proc_cgroup)
+
+        def no_manager_folder() -> None:
+            um()
+            shutil.rmtree(self.cgroup_fs)
+
         cases: list[tuple[str, Callable[[], None], dict[str, str | None]]] = [
             ("root cgroup", lambda: um("/"), {}),
             ("ssh session", lambda: um("/user.slice/user-1000.slice/session-3.scope"), {}),
@@ -1719,9 +1732,11 @@ class RustcWrapperTest(unittest.TestCase):
             ("no manager socket", lambda: um(manager_socket=False), {}),
             ("no systemd-run", lambda: um(systemd_run=False), {}),
             ("no flock", lambda: um(flock=False), {}),
-            ("own socket", um, {"SCCACHE_SERVER_UDS": os.path.join(self.tmp, "own.sock")}),
+            ("own socket", um, {"SCCACHE_SERVER_UDS": "/nonexistent/own.sock"}),
             ("own port", um, {"SCCACHE_SERVER_PORT": "4300"}),
             ("no runtime dir", um, {"XDG_RUNTIME_DIR": None}),
+            ("no cgroup file", no_cgroup_file, {}),
+            ("manager folder not in the cgroup tree", no_manager_folder, {}),
         ]
         for label, setup, env in cases:
             with self.subTest(label):
@@ -1729,15 +1744,6 @@ class RustcWrapperTest(unittest.TestCase):
                 setup()
                 calls = self.run_wrapper(self.rustc(), "x", **env)
                 self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], label)
-        # No cgroup file, and a manager folder missing from the cgroup tree.
-        self.setUp()
-        self.user_manager()
-        os.unlink(self.proc_cgroup)
-        self.assertEqual(self.who(self.rustc(), "x"), ["sccache", "rustc"])
-        self.setUp()
-        self.user_manager()
-        shutil.rmtree(self.cgroup_fs)
-        self.assertEqual(self.who(self.rustc(), "x"), ["sccache", "rustc"])
 
     def test_parallel_cold_compiles_start_one_server(self) -> None:
         # cargo starts many rustc at once. The start takes a while after the
@@ -1745,14 +1751,7 @@ class RustcWrapperTest(unittest.TestCase):
         # folder alone as the test, each would start its own server.
         self.user_manager(start_delay="0.5")
         assert self.sh is not None
-        env = {
-            "PATH": f"{self.bin}:{self.sys}",
-            "HOME": self.home,
-            "XDG_RUNTIME_DIR": self.run_dir,
-            "CST_SCCACHE_CONTAINERENV": self.containerenv,
-            "CST_SCCACHE_PROC_CGROUP": self.proc_cgroup,
-            "CST_SCCACHE_CGROUP_FS": self.cgroup_fs,
-        }
+        env = self.wrapper_env()
         open(self.log, "w").close()
         procs = [
             subprocess.Popen(
@@ -1768,13 +1767,12 @@ class RustcWrapperTest(unittest.TestCase):
         for p in procs:
             _, err = p.communicate(timeout=60)
             self.assertEqual(p.returncode, 0, err)
-        with open(self.log) as f:
-            lines = f.read().splitlines()
-        who = [ln.split("|")[0] for ln in lines]
+        calls = self.calls()
+        who = [c["who"] for c in calls]
         self.assertEqual((who.count("systemd-run"), who.count("start")), (1, 1), who)
         self.assertEqual((who.count("sccache"), who.count("rustc")), (8, 8), who)
         # And no compile found the server missing (it would start one in its own cgroup).
-        self.assertEqual([ln for ln in lines if "|auto=yes|" in ln], [])
+        self.assertEqual([c for c in calls if c["who"] == "sccache" and c["auto"] != "no"], [])
 
     def test_shell_lint(self) -> None:
         r = subprocess.run(["sh", "-n", WRAPPER], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL)
