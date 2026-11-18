@@ -77,6 +77,9 @@ def main(
         for where, path in host.other_fragments(args[0], args[1:]):
             print(f"{where}|{path}", file=out)
         return 0
+    if cmd == "restart-pending" and len(args) >= 4 and args[0] in ("show", "save"):  # MODE PATH BT_ID WP_ID UNIT...
+        out.write(host.restart_pending(args[1], (args[2], args[3]), args[4:], save=args[0] == "save"))
+        return 0
     if cmd == "settings":
         shown, warnings = settings_report([(a, t) for a in args if (t := host.read_or_none(a)) is not None])
         out.write(shown)

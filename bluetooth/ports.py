@@ -6,7 +6,8 @@ from typing import Any, Protocol
 
 
 class BluetoothHostPort(Protocol):
-    """Read-only view of files, WirePlumber fragments, libwireplumber config, and stdin."""
+    """Files, WirePlumber fragments, libwireplumber config, and stdin, read only; one file of its
+    own written: the restarts still owed (restart_pending)."""
 
     def read(self, path: str) -> str:
         """Read a UTF-8 file, raising FileNotFoundError/OSError on failure."""
@@ -26,6 +27,13 @@ class BluetoothHostPort(Protocol):
 
     def read_stdin(self) -> str:
         """Read all text from standard input."""
+        ...
+
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        """The units whose restart is still owed, one per line (domain.still_pending of the file at
+        path, the current invocation IDs of RESTART_UNITS, "" for one that does not run, and the
+        units just skipped); with save, the file is replaced atomically with them (removed when
+        none is owed)."""
         ...
 
 

@@ -76,7 +76,9 @@
 #   --yes                  (apply, revert, le-audio) do not ask before
 #                          restarting Bluetooth
 #   --no-restart           (apply, revert, le-audio) write the files, restart nothing,
-#                          print the commands instead
+#                          print the commands instead; the restarts stay owed
+#                          (plan lists them, the next apply makes them) until
+#                          the service restarts or stops
 #
 # Settings: bluetooth/bluetooth.conf in CST (the defaults), then
 # ~/.config/cst/bluetooth.conf (yours, wins); the options win over both.
@@ -286,6 +288,27 @@ check_ok() { item ok "$1" "${2:-}"; }
 check_bad() { item BAD "$1" "${2:-}"; FAILS=$((FAILS + 1)); }
 check_warn() { item warn "$1" "${2:-}"; WARNS=$((WARNS + 1)); }
 restart_hint() { echo "sudo systemctl restart bluetooth && systemctl --user restart wireplumber"; }
+
+# A restart that apply, revert or le-audio did not make (--no-restart, the
+# question answered no, a restart that failed) stays owed in PENDING_FILE,
+# with the unit's invocation ID at that moment, while the unit keeps running
+# with that ID: any restart (by apply, by hand, a reboot) or a stop ends it.
+# A unit that does not run reads the new files when it starts: nothing is
+# owed for it. bt-helper writes the file (atomically) and judges it.
+PENDING_FILE="${HOME}/.local/state/cst/bluetooth-restart-pending.json"
+# restart_state show|save [UNIT...]: the units whose restart is still owed,
+# one per line; save also records them, with UNIT... (just skipped), or
+# removes the record when none is owed.
+restart_state() {
+    helper restart-pending "$1" "${PENDING_FILE}" "$(unit_invocation bluetooth.service)" \
+        "$(unit_invocation --user wireplumber.service)" "${@:2}"
+}
+# unit_invocation [--user] UNIT: its InvocationID while it is active, else
+# nothing (a stopped unit keeps its last ID: it must not count as running).
+unit_invocation() {
+    hostcmd systemctl "${@:1:$#-1}" is-active --quiet "${!#}" 2>/dev/null || return 0
+    hostcmd systemctl "${@:1:$#-1}" show -P InvocationID "${!#}" 2>/dev/null || true
+}
 # le_off_active: the LE Audio drop-in of CST is in place.
 le_off_active() {
     [[ -f "${LE_CONF}" ]] && grep -qF -e "${WP_MARKER}" "${LE_CONF}"
@@ -367,7 +390,8 @@ file_state() {
 
 # compute_plan: sets MC_CHANGED (main.conf, new text in TMP), WP_STATE,
 # LEGACY (0/1), the LE_* of le_plan, BEARER_STATE (none|ok|set|unpaired|
-# unknown) and the restart needs BT_RESTART / WP_RESTART.
+# unknown) and the restart needs BT_RESTART / WP_RESTART (with BT_OWED /
+# WP_OWED: owed by an earlier run, see restart_state).
 compute_plan() {
     local rc=0 info
     [[ -f "${MAIN_CONF}" ]] || die "${MAIN_CONF} does not exist (is the bluez package installed?)"
@@ -400,10 +424,14 @@ compute_plan() {
     lw_plan
     BT_RESTART=0
     WP_RESTART=0
-    (( MC_CHANGED || FORCE )) && BT_RESTART=1
+    OWED="$(restart_state show || true)"
+    BT_OWED=0 WP_OWED=0
+    grep -qx bluetooth.service <<<"${OWED}" && BT_OWED=1
+    grep -qx wireplumber.service <<<"${OWED}" && WP_OWED=1
+    (( MC_CHANGED || FORCE || BT_OWED )) && BT_RESTART=1
     # A bluetoothd restart takes WirePlumber's endpoints with it: it is
     # restarted too. A comment-only renewal ("adopt") restarts nothing.
-    if (( BT_RESTART || LEGACY || LE_CHANGE )) || [[ "${WP_STATE}" == missing || "${WP_STATE}" == change ]]; then
+    if (( BT_RESTART || WP_OWED || LEGACY || LE_CHANGE )) || [[ "${WP_STATE}" == missing || "${WP_STATE}" == change ]]; then
         WP_RESTART=1
     fi
 }
@@ -640,12 +668,14 @@ plan() {
     section "restarts"
     if (( BT_RESTART )); then
         item restart "bluetooth.service" "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)"
+        (( BT_OWED )) && item "" "" "(still owed: an earlier run did not restart it)"
     else
         item ok "bluetooth.service" "no restart needed"
     fi
     if (( WP_RESTART )); then
         item restart "wireplumber (your session)" "audio stops for a moment; A2DP is restored afterwards"
         (( LE_CHANGE )) && item "" "" "(the LE Audio change takes effect only with this restart)"
+        (( WP_OWED )) && item "" "" "(still owed: an earlier run did not restart it)"
     else
         item ok "wireplumber (your session)" "no restart needed"
     fi
@@ -833,6 +863,10 @@ status() {
     files_report
     verify
     echo
+    # Before the checks' verdict: an owed restart is often why a check fails.
+    if [[ -n "${OWED}" ]]; then
+        echo "A restart an earlier run did not make is still owed ($(tr '\n' ' ' <<<"${OWED}" | sed 's/ $//')): ${PROG} apply makes it."
+    fi
     if (( FAILS )); then
         echo "${FAILS} check(s) failed, ${WARNS} warning(s)."
         return 1
@@ -971,8 +1005,12 @@ confirm_bt_restart() {
 # 0 = done (or nothing to do), 1 = cancelled at the question, 2 = a restart
 # failed (WirePlumber is not restarted after a failed bluetoothd restart).
 do_restarts() {
-    local bt="$1" wp="$2"
+    local bt="$1" wp="$2" owed=(wireplumber.service)
     (( bt || wp )) || return 0
+    # Owed until they are done (WirePlumber always follows; see restart_state).
+    (( bt )) && owed+=(bluetooth.service)
+    restart_state save "${owed[@]}" >/dev/null ||
+        echo "WARNING: could not record the restarts still owed in ${PENDING_FILE}" >&2
     if (( NO_RESTART )); then
         if (( bt )); then
             echo "Not restarted (--no-restart). To finish: $(restart_hint)"
@@ -986,6 +1024,8 @@ do_restarts() {
         restart_bluetooth || return 2
     fi
     restart_wireplumber || return 2
+    # Done: both run with new invocations, so nothing is owed any more.
+    restart_state save >/dev/null || true
 }
 
 apply() {

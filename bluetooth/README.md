@@ -224,8 +224,19 @@ reads, also works in a toolbox).
 | `--le-audio on\|off` | plan, apply, status | LE Audio in PipeWire for this run only (see [LE Audio: off by default](#le-audio-off-by-default)). To keep it, use `cst bluetooth le-audio on\|off`. |
 | `--force` | apply | Restart bluetoothd and WirePlumber even when nothing changed. |
 | `--yes` | apply, revert, le-audio | Do not ask before restarting Bluetooth (needed without a terminal). |
-| `--no-restart` | apply, revert, le-audio | Write the files, restart nothing; prints the commands to run later. |
+| `--no-restart` | apply, revert, le-audio | Write the files, restart nothing; prints the commands to run later. The restarts stay owed (see below). |
 | `--check` | revert | Only show what `revert` would do. |
+
+**Restarts still owed.** A restart that `apply`, `revert` or `le-audio` did
+not make (`--no-restart`, the question answered no, a restart that failed)
+is remembered in `~/.local/state/cst/bluetooth-restart-pending.json`, with
+the invocation ID the service had then (`systemctl show -P InvocationID`).
+While the service keeps running with that ID, `plan` lists the restart
+("still owed", exit 10), `status` says so, and the next `apply` makes it
+(asking first for Bluetooth). Any restart of the service (by `apply`, by
+hand with the printed commands, or a reboot) or a stop ends it, and `apply`
+then removes the file. A service that does not run owes nothing: it reads
+the new files when it starts.
 
 **Settings.** The defaults are in [`bluetooth.conf`](bluetooth.conf) in this
 folder (`DEVICE`, `LDAC_QUALITY`, `BEARER`, `LE_AUDIO`, `LDAC_RATE`). To change them for your user,
@@ -461,7 +472,9 @@ cst bluetooth revert
   (a later `apply` with `LDAC_RATE=48000` installs it again).
 - Restarts as for `apply`: Bluetooth only after you say yes.
 - Kept: the backups (also the rule's `.bak`), `~/.config/cst/bluetooth.conf`,
-  and the headset's preferred bearer.
+  and the headset's preferred bearer. A restart `revert` did not make stays
+  owed (section 4), until the service restarts; delete
+  `~/.local/state/cst/bluetooth-restart-pending.json` to forget it.
 
 ## 9. Not managed here
 
@@ -491,15 +504,15 @@ replaces it with a backup of the current rule.
 |---|---|
 | `../bluetooth-setup.sh` | The module: commands, sudo calls, restarts, checks. |
 | `domain.py` | Pure domain model: `main.conf` [General] rules, WirePlumber/systemd rendering and state classification, settings parsing/merging, journal failure parsing, and live state JSON parsing; for the watcher, what it sees in `pw-dump` (`snapshot`, `decide`), the `pactl` events and profiles that matter, and the one-attempt-per-connection rule (`Tracker`). No I/O or subprocesses. |
-| `ports.py` | Ports (`Protocol` interfaces): `BluetoothHostPort` for files, WirePlumber resolution, and stdin; `LiveAudioPort` for live PipeWire/PulseAudio state and profile switching. |
-| `adapters.py` | Local host adapter reading config files, scanning WirePlumber `.conf` directories, and resolving `bluez5.roles` through `libwireplumber`; `Live`, the watcher's `LiveAudioPort` over `pw-dump` and `pactl`. |
+| `ports.py` | Ports (`Protocol` interfaces): `BluetoothHostPort` for files, WirePlumber resolution, stdin, and the record of restarts still owed; `LiveAudioPort` for live PipeWire/PulseAudio state and profile switching. |
+| `adapters.py` | Local host adapter reading config files, writing the record of restarts still owed (atomically, `write_atomic`), scanning WirePlumber `.conf` directories, and resolving `bluez5.roles` through `libwireplumber`; `Live`, the watcher's `LiveAudioPort` over `pw-dump` and `pactl`. |
 | `ldac_watch.py` | The watcher's loop and command line: it listens to `pactl subscribe`, looks at the headset through `LiveAudioPort`, bounces the profile (LDAC, SBC, LDAC) when `Tracker` says so, and defers a stop signal until a bounce is done. |
 | `cli.py` | The `bt-helper` command line: argv to the `domain.py` rules through `BluetoothHostPort`, answers printed in the formats `bluetooth-setup.sh` parses. |
-| `bt-helper` | The Python entry point: only the bootstrap and a `main()` that runs `cli.py` with the local adapter. It never writes a file. |
+| `bt-helper` | The Python entry point: only the bootstrap and a `main()` that runs `cli.py` with the local adapter. The one file it writes is the record of restarts still owed (`restart-pending save`). |
 | `bt-ldac-watch` | Python, no root: the LDAC rate watcher (section 7), only the bootstrap and a `main()` that runs `ldac_watch.py`; its docstring is the help. `apply` installs it as a zipapp (the program plus every CST package it imports, see `cst_core/installer.py`) at `~/.local/lib/cst/bt-ldac-watch` for the user service `cst-bt-ldac48.service`. |
 | `bluetooth.conf` | The default settings. |
 | `tests/test_bluetooth.py` | Unit tests (`python3 -I -B tests/run_unit.py`, from the repository root, runs them with all others; see [AGENTS.md, "Commands"](../AGENTS.md#commands)), among them the LE Audio file: its text, off/on/off in a scratch home, `plan`, `revert`, `le-audio on\|off` (a fresh home without `~/.config/cst`, a settings file without a final newline, a symlinked one), the rule and the drop-in as links (same text, older text, not ours, `/dev/null`), the role check, other WirePlumber files, the bearer warning, and reading the watcher's last failure from its log. Three tests ask `libwireplumber` how it merges the CST file; inside a toolbox they are skipped (the library is on the host). |
-| `tests/e2e` (tier 1) | `test_05`: `plan`, `apply --no-restart`, the WirePlumber roles read by the real `libwireplumber`, the LDAC unit and `revert`. `test_80`: a second `apply` changes nothing (files, backups, no restart), and `le-audio on`, `on` again and `off` with real WirePlumber restarts. See [tests/e2e/README.md](../tests/e2e/README.md). |
+| `tests/e2e` (tier 1) | `test_05`: `plan`, `apply --no-restart`, the WirePlumber roles read by the real `libwireplumber`, the LDAC unit and `revert`. `test_80`: after `apply --no-restart`, `plan` still owes WirePlumber's restart and the next `apply` makes it; a second `apply` changes nothing (files, backups, no restart), and `le-audio on`, `on` again and `off` with real WirePlumber restarts. See [tests/e2e/README.md](../tests/e2e/README.md). |
 | `tests/test_ldac_watch.py` | Unit tests of the watcher: parsing, the act/skip decision, one attempt per connection (two at most, none after a fix that did not hold), the cooldown, a stop signal during a profile switch, a profile change by WirePlumber during it, the profile switch against a fake system, the install and removal steps with `systemctl` as a stub (also with the unit as a link), and `apply` when the Bluetooth restart is declined. |
 
 ## 11. Glossary

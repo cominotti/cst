@@ -2,14 +2,24 @@
 """Concrete host adapters for the `bluetooth` bounded context."""
 
 from collections.abc import Sequence
+import contextlib
 import ctypes
 import json
 import os
 import sys
 from typing import Any
 
-from bluetooth.domain import LE_SECTION, classify_other_fragments, snapshot
+from bluetooth.domain import (
+    LE_SECTION,
+    RESTART_UNITS,
+    classify_other_fragments,
+    parse_pending,
+    render_pending,
+    snapshot,
+    still_pending,
+)
 from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.ports import CommandRunnerPort
 
 
@@ -104,6 +114,17 @@ class LocalBluetoothHostAdapter:
     def read_stdin(self) -> str:
         """Read all text from sys.stdin."""
         return sys.stdin.read()
+
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        """The restarts still owed, one per line; with save, the file at path holds them (atomically), or is removed."""
+        owed = still_pending(parse_pending(read_or_none(path)), dict(zip(RESTART_UNITS, ids, strict=True)), skipped)
+        if save and owed:
+            ensure_dir(os.path.dirname(path), 0o755)
+            write_atomic(path, render_pending(owed), mode=0o644, relabel=False)
+        elif save:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+        return "".join(f"{u}\n" for u in sorted(owed))
 
 
 # ---- the LDAC rate watcher: pw-dump and pactl ------------------------------------------------

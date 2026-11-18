@@ -234,18 +234,40 @@ no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change (e
 }
 systemctl --user is-active wireplumber.service
 
-# 1. apply (no restart: bluetoothd does not run here), then plan has nothing left.
+owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+
+# 1. apply --no-restart: the files are written and WirePlumber's restart stays owed
+# (bluetoothd does not run here: it owes nothing, it reads main.conf when it starts).
+pid="$(wp_pid)"
 step apply apply --yes --no-restart
 for f in "$rule" "$le" "$unit" "$watch"; do [[ -f "$f" ]]; done
 grep -qxF "Experimental = true" /etc/bluetooth/main.conf
+[[ "$(wp_pid)" == "$pid" ]]
+[[ -f "$owed_file" ]]
 rc=0; out="$(bt plan 2>&1)" || rc=$?
-show "plan after apply" "$out"
-[[ "$rc" == 0 ]]
-grep -qxF "Nothing to do." <<<"$out"
+show "plan after apply --no-restart" "$out"
+[[ "$rc" == 10 ]]
+grep -qE '^  ok +bluetooth.service +no restart needed$' <<<"$out"
+grep -qE '^  restart +wireplumber \(your session\) ' <<<"$out"
+grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
 s1="$(files)"
 le_text="$(cat "$le")"
 
-# 2. a second apply changes nothing: no file written, no backup, no restart.
+# 2. apply: no file written, no backup; the owed WirePlumber restart is made, then forgotten.
+step "apply after --no-restart" apply --yes
+wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+grep -qxF "$wp_restart_line" <<<"$out"
+no_writes "apply after --no-restart" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+same "apply after --no-restart" "$s1"
+[[ "$(wp_pid)" != "$pid" ]]
+systemctl --user is-active wireplumber.service
+[[ ! -e "$owed_file" ]]
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan after the restart" "$out"
+[[ "$rc" == 0 ]]
+grep -qxF "Nothing to do." <<<"$out"
+
+# 3. a second apply changes nothing: no file written, no backup, no restart.
 pid="$(wp_pid)"
 step "second apply" apply --yes
 no_writes "second apply" "$out"
@@ -257,12 +279,12 @@ grep -qxF "none needed" <<<"$out"
 same "second apply" "$s1"
 [[ "$(wp_pid)" == "$pid" ]]
 
-# 3. le-audio without on/off only shows the setting.
+# 4. le-audio without on/off only shows the setting.
 out="$(bt le-audio)"
 grep -qxF "LE Audio in PipeWire: off (~/.config/cst/bluetooth.conf)" <<<"$out"
 same "le-audio (show)" "$s1"
 
-# 4. le-audio on: the setting written (other lines kept), the drop-in removed,
+# 5. le-audio on: the setting written (other lines kept), the drop-in removed,
 # WirePlumber restarted and reading the PipeWire default roles again.
 [[ "$(roles)" == classic ]]
 step "le-audio on" le-audio on --yes
@@ -280,7 +302,7 @@ bt plan >/dev/null 2>&1   # exit 0: nothing to do
 s2="$(files)"
 pid="$(wp_pid)"
 
-# 5. le-audio on again: nothing written, nothing restarted.
+# 6. le-audio on again: nothing written, nothing restarted.
 step "le-audio on again" le-audio on --yes
 grep -qxF "unchanged: ~/.config/cst/bluetooth.conf already has LE_AUDIO=on" <<<"$out"
 grep -qxF "unchanged: LE Audio on (no drop-in)" <<<"$out"
@@ -291,7 +313,7 @@ out="$(bt le-audio)"
 grep -qxF "LE Audio in PipeWire: on (~/.config/cst/bluetooth.conf)" <<<"$out"
 same "le-audio (show, on)" "$s2"
 
-# 6. le-audio off: the same drop-in back, the classic roles again.
+# 7. le-audio off: the same drop-in back, the classic roles again.
 step "le-audio off" le-audio off --yes
 grep -qxF "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=off" <<<"$out"
 grep -qxF "restart:   wireplumber (your session; audio stops for a moment)" <<<"$out"
@@ -2232,10 +2254,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
-        the LE Audio drop-in and the LDAC watcher; `plan` then has nothing to
-        do (exit 0). A second `apply` (restarts allowed) changes nothing: the
-        same inode, mtime and content of each file, no new main.conf backup,
-        no restart of WirePlumber. `le-audio` alone only shows the setting.
+        the LE Audio drop-in and the LDAC watcher and restarts nothing;
+        `plan` then still owes WirePlumber's restart (exit 10; bluetoothd
+        does not run here, so it owes none). `apply` makes that restart and
+        writes nothing; `plan` then has nothing to do (exit 0). A second
+        `apply` changes nothing: the same inode, mtime and content of each
+        file, no new main.conf backup, no restart of WirePlumber. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
         defaults; nothing else changes and `plan` exits 0. A second
