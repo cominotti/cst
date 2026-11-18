@@ -96,6 +96,11 @@ repository:
   group (`==0.17.5`): a different ruff that reads `pyproject.toml` (an
   editor's, one on `PATH`) refuses to run instead of linting or formatting
   by other rules. `tests/test_python_files.py` fails when the two differ.
+- **`[tool.ruff.lint] typing-extensions = false`**: no ruff rule suggests,
+  and no fix writes, an import from the third-party `typing_extensions`
+  (by default ruff falls back to it for names newer than the target
+  Python). CST uses the standard library only. No hit today;
+  `tests/test_python_files.py` fails when the setting is not `false`.
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
   (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its

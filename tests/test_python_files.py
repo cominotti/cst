@@ -23,6 +23,8 @@ never be linted. This test derives the Python files from the repository
   environment.python-platform (which must be "linux") and rules raised to
   "error" (rules.<name> = "error"; "warn" or "ignore"
   fails), and no ignore comment in a ty-gated file;
+- [tool.ruff.lint] typing-extensions is false, so no ruff fix or message
+  reaches for the third-party typing_extensions module;
 - [tool.ruff] required-version is "==" and the version of the ruff pin of
   the dev group, so a ruff other than the pinned one refuses to run on this
   repository (an editor's, or one on PATH);
@@ -161,6 +163,17 @@ def ruff_version_problems(conf: Mapping[str, object]) -> list[str]:
         return [
             f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
             "(change both together)"
+        ]
+    return []
+
+
+def typing_extensions_problems(conf: Mapping[str, object]) -> list[str]:
+    """Whether [tool.ruff.lint] typing-extensions is false, as text lines (empty: it is)."""
+    got = _sub(_sub(_sub(dict(conf), "tool"), "ruff"), "lint").get("typing-extensions")
+    if got is not False:
+        return [
+            f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library only: "
+            "no ruff fix may import typing_extensions)"
         ]
     return []
 
@@ -512,6 +525,22 @@ class PythonFilesTest(unittest.TestCase):
             ['[dependency-groups] dev: no exact "ruff==VERSION" pin'],
         )
 
+    def test_ruff_never_reaches_for_typing_extensions(self) -> None:
+        self.assertEqual(typing_extensions_problems({"tool": {"ruff": {"lint": {"typing-extensions": False}}}}), [])
+        for conf, got in (
+            ({"tool": {"ruff": {"lint": {"typing-extensions": True}}}}, True),
+            ({"tool": {"ruff": {"lint": {}}}}, None),
+            ({}, None),
+        ):
+            with self.subTest(got=got, conf=conf):
+                self.assertEqual(
+                    typing_extensions_problems(conf),
+                    [
+                        f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library "
+                        "only: no ruff fix may import typing_extensions)"
+                    ],
+                )
+
     def test_every_python_file_is_under_the_gates(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, "pyproject.toml"), "rb") as fh:
@@ -522,6 +551,7 @@ class PythonFilesTest(unittest.TestCase):
             problems(py_files, extend, ty_gate)
             + ann_ignore_problems(conf)
             + ruff_version_problems(conf)
+            + typing_extensions_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, ty_gated(py_files, ty_gate))
         )

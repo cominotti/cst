@@ -80,6 +80,10 @@ exclude = ["*.md"]
 # PLW1510: every subprocess.run says check=True or check=False. Whether a
 # failed command stops the program is a decision, not a default.
 select = ["F", "B", "UP", "E9", "PLW1510"]
+# CST uses the standard library only: no rule may suggest or write an import
+# from the third-party typing_extensions (tests/test_python_files.py checks
+# this is false).
+typing-extensions = false
 
 [tool.ruff.lint.mccabe]
 # For C901, which is not selected above: tests/ruff_budget.py counts the
