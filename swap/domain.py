@@ -9,6 +9,7 @@ from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec
 from cst_core.domain.plan import PlanItem
+from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
@@ -49,13 +50,24 @@ _STATE_WORDS: Final[dict[ManagedState, str]] = {
 _SAFE_PARTITION_TYPES: Final[frozenset[str]] = frozenset({"", "swap", "crypto_PLAIN"})
 
 
+# The swap settings, /etc/cst/swap.conf (KEY=VALUE, only Python reads it): which partition swap
+# manages. Nothing is configured by default; apply refuses until it is (swap/README.md, 2.3).
+SETTINGS_REL: Final[str] = "cst/swap.conf"
+DEFAULT_SWAP_NAME: Final[str] = "swap0"
+# GPT PARTUUIDs as /dev/disk/by-partuuid names them (lower case), or the MBR form (disk id-partition).
+_PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{2}")
+# A dm-crypt mapper name that is also safe in a crypttab line, an fstab line and a unit name.
+_MAPPER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_BY_PARTUUID: Final[str] = "/dev/disk/by-partuuid/"
+
+
 @dataclass(frozen=True, slots=True)
 class SwapHardwareSpec:
-    """Identity and exact expected size of the encrypted NVMe swap partition."""
+    """Identity and exact expected size of the encrypted swap partition (from /etc/cst/swap.conf)."""
 
-    partuuid: str = "612551b1-ca02-4514-86ad-7d8902e612dc"
-    name: str = "swap0"
-    expected_size_bytes: int = 137438953472
+    partuuid: str
+    name: str
+    expected_size_bytes: int
 
     @property
     def mapper_path(self) -> str:
@@ -97,6 +109,97 @@ class SwapHardwareSpec:
             current_marker=SWAP_MARKER,
             legacy_markers=SWAP_OLD_MARKERS,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SwapSettings:
+    """What /etc/cst/swap.conf says: the partition (None: not configured) and the problems that make
+    apply refuse (each "line N: TEXT: REASON" or "KEY: reason")."""
+
+    spec: SwapHardwareSpec | None
+    problems: tuple[str, ...] = ()
+
+
+def parse_swap_settings(text: str) -> SwapSettings:
+    """/etc/cst/swap.conf -> SwapSettings. No SWAP_PARTUUID is "not configured"; a bad line or value,
+    or a PARTUUID without its size, is a problem (and no partition)."""
+    parsed = parse_shell_assignments(text, bash_sourced=False)
+    problems = [str(p) for p in parsed.problems]
+    values = parsed.values
+    partuuid = values.get("SWAP_PARTUUID", "")
+    name = values.get("SWAP_NAME", DEFAULT_SWAP_NAME)
+    size = values.get("SWAP_SIZE_BYTES", "")
+    if not partuuid:
+        if size:
+            problems.append("SWAP_SIZE_BYTES is set, SWAP_PARTUUID is not")
+        return SwapSettings(None, tuple(problems))
+    if not _PARTUUID.fullmatch(partuuid):
+        problems.append(f"SWAP_PARTUUID={partuuid}: not a PARTUUID as /dev/disk/by-partuuid names it (lower case)")
+    if not _MAPPER_NAME.fullmatch(name):
+        problems.append(f"SWAP_NAME={name}: letters, digits, _ . - only (it names /dev/mapper/NAME and units)")
+    if not size.isdecimal() or not size.isascii() or int(size) == 0:
+        problems.append(
+            f"SWAP_SIZE_BYTES={size}: the partition's exact size in bytes (blockdev --getsize64 /dev/disk/by-partuuid/...)"
+        )
+    if problems:
+        return SwapSettings(None, tuple(problems))
+    return SwapSettings(SwapHardwareSpec(partuuid, name, int(size)))
+
+
+def render_swap_settings(spec: SwapHardwareSpec, origin: str) -> str:
+    """The text of /etc/cst/swap.conf for spec (origin: where the values came from)."""
+    return (
+        "# The swap partition `cst swap` manages (swap/README.md in CST, section 2.3).\n"
+        f"# Written by cst swap apply {origin}.\n"
+        "# apply checks the exact size before it touches the partition: change both if it changes.\n"
+        f"SWAP_NAME={spec.name}\n"
+        f"SWAP_PARTUUID={spec.partuuid}\n"
+        f"SWAP_SIZE_BYTES={spec.expected_size_bytes}\n"
+    )
+
+
+def _marked_lines(text: str) -> list[list[str]]:
+    """The fields of each line that ends with swap's marker (or an older script's)."""
+    markers = (SWAP_MARKER, *SWAP_OLD_MARKERS)
+    return [line.split() for line in text.splitlines() if line.rstrip().endswith(markers)]
+
+
+def marked_crypttab_entry(text: str) -> tuple[str, str] | None:
+    """(name, PARTUUID) of the swap line an older CST (or the script before it) marked in /etc/crypttab,
+    when there is one such entry (the same line twice counts once) and it names its partition by
+    PARTUUID; else None."""
+    found: set[tuple[str, str]] = set()
+    for fields in _marked_lines(text):
+        if len(fields) < 2 or not fields[1].startswith(_BY_PARTUUID):
+            return None
+        found.add((fields[0], fields[1][len(_BY_PARTUUID) :]))
+    if len(found) != 1:
+        return None
+    name, partuuid = found.pop()
+    return (name, partuuid) if _MAPPER_NAME.fullmatch(name) and _PARTUUID.fullmatch(partuuid) else None
+
+
+def marked_fstab_name(text: str) -> str | None:
+    """The mapper name of the swap line an older CST marked in /etc/fstab (readable by everyone, unlike
+    /etc/crypttab), or None."""
+    for fields in _marked_lines(text):
+        if fields and fields[0].startswith("/dev/mapper/"):
+            return fields[0][len("/dev/mapper/") :]
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class SpecResolution:
+    """Which partition plan, status and apply work with, and why.
+
+    state: "ok" (from the settings file), "write" (derived from what an older CST set up: apply
+    writes the settings file first), "unknown" (an older CST set swap up, but /etc/crypttab needs
+    root to read), "unset" (not configured), "bad" (the settings file has problems).
+    """
+
+    spec: SwapHardwareSpec | None
+    state: Literal["ok", "write", "unknown", "unset", "bad"]
+    note: str = ""
 
 
 @dataclass(frozen=True, slots=True)

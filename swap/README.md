@@ -107,10 +107,27 @@ compressor later creates a second pool that lives until the old one drains).
 - **Found by PARTUUID**, the partition's ID in the GPT partition table. The
   usual filesystem UUID cannot be used: the random key turns it into noise.
 - **Size check**: because the `swap` option destroys whatever is on the
-  partition at every boot, `apply` checks its exact size (137438953472
-  bytes) every time, and refuses to touch a partition that carries a
-  filesystem signature. If the PARTUUID ever pointed at another disk (after
-  a clone or a repartition), `apply` stops.
+  partition at every boot, `apply` checks its exact size every time, and
+  refuses to touch a partition that carries a filesystem signature. If the
+  PARTUUID ever pointed at another disk (after a clone or a repartition),
+  `apply` stops.
+- **Which partition: `/etc/cst/swap.conf`** (`KEY=VALUE` lines, root's, mode
+  0644). Nothing is configured by default: without it `plan` and `status`
+  show `REFUSE` for `cst/swap.conf` (and no crypttab, fstab or partition
+  rows), `cst doctor` warns, and `apply` stops before it changes anything.
+  On sophia it reads:
+
+  ```
+  SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc   # ls -l /dev/disk/by-partuuid
+  SWAP_SIZE_BYTES=137438953472                         # blockdev --getsize64 /dev/disk/by-partuuid/...
+  SWAP_NAME=swap0                                      # optional: /dev/mapper/NAME (default swap0)
+  ```
+
+  A PARTUUID in lower case, as `/dev/disk/by-partuuid` names it; the size
+  in bytes, exact. Any other line or value is a problem that `plan`, `status`
+  and `cst doctor` name, and `apply` refuses. Only Python reads the file.
+  Until 2026-11 these values were written in `swap/domain.py`; a machine
+  set up then gets the file from its first `apply` (section 5).
 - `/etc/fstab` has `nofail` (boot goes on if the disk is missing) and
   `discard`.
 
@@ -166,6 +183,9 @@ memory back to the host.
 
 ## 3. Quick start
 
+On a new machine, first name the partition in `/etc/cst/swap.conf`
+([section 2.3](#23-the-encrypted-swap-partition)); `apply` refuses without it.
+
 ```bash
 cst swap plan          # what apply would change; changes nothing
 cst swap apply         # asks for sudo
@@ -211,12 +231,14 @@ The words in the first column of `plan` and `status`:
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. It does not make `apply` fail; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
 | `?` | Could not be read without root. |
-| `REFUSE`, `CONFLICT` | `apply` would stop: wrong partition, or an entry for `swap0` that was written by hand. |
+| `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
 
-1. **Checks** that zswap exists, that the `zstd` compressor loads, and the
-   partition (exists, exact size, no filesystem signature).
+1. **Checks** that a partition is configured (`/etc/cst/swap.conf`,
+   section 2.3), that zswap exists, that the `zstd` compressor loads, and the
+   partition (exists, exact size, no filesystem signature). On a machine an
+   older CST set up, it then writes `/etc/cst/swap.conf` (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
    is removed; with none, the line is appended. The file is replaced
@@ -279,6 +301,18 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
 - On sophia, the first `cst swap plan` after the move showed `adopt` for
   the four other items (crypttab needs `--root` to show it) and `ok` for
   the rest.
+- **The partition settings (2026-11).** CST used to have the partition
+  in its code. A machine it set up then has CST's marked lines in
+  `/etc/crypttab` and `/etc/fstab` and no `/etc/cst/swap.conf`. There,
+  `plan --root` shows `write` for `cst/swap.conf` with the values `apply`
+  will write: the name and PARTUUID from the marked crypttab line, the size
+  that partition has now (trusted on this first use; from then on `apply`
+  checks it every time). `apply` writes the file (`== settings`, after its
+  checks and before anything else), and the next `plan` shows `ok`. As your
+  user (also in a toolbox) `/etc/crypttab` cannot be read: `plan` shows `?`
+  and says so, from the marked `/etc/fstab` line. `apply` never writes over a
+  `/etc/cst/swap.conf` that is already there, even one without a
+  partition.
 - The old script itself is not touched; do not run it again. It does not
   know the new marker, so it **appends a second `swap0` line** to
   `/etc/crypttab` and `/etc/fstab`, runs `daemon-reload`, and may restart
@@ -424,7 +458,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 2. Delete the line ending in `# managed-by: swap-setup.sh (CST)` from
    `/etc/crypttab` and from `/etc/fstab` (`<file>.pre-swap-config.bak` is the
    version before the first change).
-3. `rm /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf
+3. `rm /etc/cst/swap.conf /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf
    /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf`
 4. To get Fedora's zram back: `rm /etc/systemd/zram-generator.conf` (the
    `/dev/null` symlink).
@@ -440,14 +474,15 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `tmpfiles/zswap.conf` | `/etc/tmpfiles.d/zswap.conf` |
 | `sysctl/99-swap-tuning.conf` | `/etc/sysctl.d/99-swap-tuning.conf` |
 | `units/machine.slice.d-10-swap-memory-low.conf` | `/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf` |
-| `domain.py` | pure swap domain model, hardware identity (`SwapHardwareSpec`), parsing, and metrics |
+| `domain.py` | pure swap domain model, the partition (`SwapHardwareSpec`, read from `/etc/cst/swap.conf`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
 | `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens); the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 
-The swap partition's PARTUUID (`partuuid`), device name (`name`), and expected
-size (`expected_size_bytes`) are set on `SwapHardwareSpec` in `swap/domain.py`.
+The swap partition's PARTUUID, device name and expected size are in
+`/etc/cst/swap.conf` (section 2.3), read by `parse_swap_settings` in
+`swap/domain.py`.
 Shared file/marker helpers and system ports live in `../cst_core/`.
 
 ---

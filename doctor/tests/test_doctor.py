@@ -1057,6 +1057,72 @@ class ZswapParamsTest(Scratch):
         )
 
 
+class SwapSettingsDoctorTest(Scratch):
+    """check_swap_settings: the partition /etc/cst/swap.conf names (cst swap apply refuses without
+    one), or that an older CST set swap up and apply writes the file."""
+
+    def write(self, rel: str, text: str) -> None:
+        p = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "swap partition" in ln]
+
+    def test_nothing_where_swap_is_not_set_up(self) -> None:
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_ok_with_a_partition(self) -> None:
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout), ["  ok     swap partition: 0a1b2c3d-02 (4096 bytes, /etc/cst/swap.conf)"]
+        )
+        self.assert_read_only()
+
+    def test_a_problem_warns(self) -> None:
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4 GiB\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: /etc/cst/swap.conf SWAP_SIZE_BYTES=4 GiB: the partition's exact size in bytes"
+                " (blockdev --getsize64 /dev/disk/by-partuuid/...): cst swap apply refuses until it is fixed"
+            ],
+        )
+
+    def test_an_older_cst_set_it_up(self) -> None:
+        self.write(
+            "etc/fstab",
+            "UUID=x / btrfs defaults 0 0\n"
+            "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n",
+        )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
+                " `cst swap apply` writes it from /etc/crypttab"
+            ],
+        )
+        self.assertIn("swap apply", r.stdout.split("swap partition:", 1)[1])
+        self.assert_read_only()
+
+    def test_installed_but_not_configured(self) -> None:
+        self.write("etc/tmpfiles.d/zswap.conf", "")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+                " refuses (swap/README.md, section 2.3)"
+            ],
+        )
+
+
 class DockerNocowPostponedTest(Scratch):
     """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
     keeps of the boots at which its migration had to wait."""

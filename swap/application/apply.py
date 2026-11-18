@@ -20,6 +20,7 @@ from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
     SwapApplyResult,
+    SwapHardwareSpec,
     can_evict_zram,
     crypto_has_algorithm,
     find_swap_used_kib,
@@ -27,6 +28,7 @@ from swap.domain import (
     killed_text,
     parse_meminfo,
     parse_tmpfiles_params,
+    render_swap_settings,
     same_param,
 )
 
@@ -59,9 +61,8 @@ def _show_output(res: CommandResult, events: list[ApplyEvent], prog: str) -> Non
 class SwapApplicationService(SwapReports):
     """Coordinates plan, status, and apply use cases for swap, zswap, and MemoryLow."""
 
-    def _check_preconditions(self, events: list[ApplyEvent]) -> str | None:
+    def _check_preconditions(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> str | None:
         env = self._env
-        spec = env.spec
 
         def fail(msg: str) -> None:
             events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {msg}"))
@@ -102,9 +103,10 @@ class SwapApplicationService(SwapReports):
         line_spec: MarkedLineSpec,
         mode: int,
         events: list[ApplyEvent],
+        *,
+        name: str,
     ) -> tuple[bool, bool, bool]:
-        """Apply one marked line. Returns (ok, line_changed, line_written)."""
-        name = self._env.spec.name
+        """Apply one marked line (name: the swap device's). Returns (ok, line_changed, line_written)."""
         prog = self._env.prog
         st = self._inspect_marked(path, line_spec)
         if st == "ok":
@@ -168,6 +170,20 @@ class SwapApplicationService(SwapReports):
             events.append(ApplyEvent("out", "line", f"written:   {dest}"))
         return True
 
+    def _write_settings(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> None:
+        """/etc/cst/swap.conf from what an older CST set up (resolve_spec's "write")."""
+        origin = f"from the {spec.name} line an older CST wrote in /etc/crypttab and the partition's size then"
+        self._fs.write_atomic(self._env.settings_path, render_swap_settings(spec, origin), 0o644)
+        events.append(ApplyEvent("out", "section", "== settings"))
+        events.append(
+            ApplyEvent(
+                "out",
+                "line",
+                f"written:   {self._env.settings_path} (SWAP_PARTUUID={spec.partuuid},"
+                f" SWAP_SIZE_BYTES={spec.expected_size_bytes}: {origin})",
+            )
+        )
+
     def _remove_old_dropin(self, events: list[ApplyEvent]) -> bool:
         """Remove the drop-in under its old name (and its line in the install record) when CST wrote it.
         True when it was removed."""
@@ -215,11 +231,18 @@ class SwapApplicationService(SwapReports):
         the result holds them all too.
         """
         env = self._env
-        spec = env.spec
         events: list[ApplyEvent] = _EventLog(emit)
-        tmpfiles_text = self._check_preconditions(events)
+        res = self.resolve_spec()
+        spec = res.spec
+        if spec is None:
+            note = self._settings_item(res, "plan").note
+            events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {env.settings_path}: {note}."))
+            return self._stopped(1, events)
+        tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return self._stopped(1, events)
+        if res.state == "write":
+            self._write_settings(spec, events)
 
         events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
         c_spec = spec.crypttab_spec()
@@ -245,10 +268,10 @@ class SwapApplicationService(SwapReports):
             )
             return self._stopped(1, events)
 
-        ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events)
+        ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events, name=spec.name)
         if not ok_c:
             return self._stopped(1, events)
-        ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events)
+        ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events, name=spec.name)
         if not ok_f:
             return self._stopped(1, events)
         line_changed = changed_c or changed_f

@@ -267,7 +267,7 @@ CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: the fast-g
 
 ## Machine-specific state lives outside the repository
 
-- Knobs: `/etc/cst/vm.conf` (root) and `~/.config/cst/toolchains.conf` (user). The defaults are in the scripts and in `toolchains/toolchains.conf`.
+- Knobs: `/etc/cst/vm.conf` and `/etc/cst/swap.conf` (root; swap's partition, no default) and `~/.config/cst/toolchains.conf` (user). The defaults are in the scripts and in `toolchains/toolchains.conf`.
 - The VM backup index is `/var/lib/cst/vm-backups.json`.
 - User units go in `~/.config/systemd/user`.
 - "Adapting CST to another PC" in README.md lists what is specific to this machine.

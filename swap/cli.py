@@ -34,7 +34,7 @@ Commands:
   plan [--root]          what apply would change (dry run). Works as your
                          user, also in a toolbox; only /etc/crypttab needs
                          root to read (--root: through sudo, on the host)
-  apply                  (root) idempotent:
+  apply                  (root; partition in /etc/cst/swap.conf) idempotent:
       * swap0: a marked line in /etc/crypttab (plain dm-crypt, new random
         key every boot) and one in /etc/fstab; activated if not active
       * zswap at boot: /etc/tmpfiles.d/zswap.conf (zstd, pool up to 20 %

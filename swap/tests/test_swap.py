@@ -106,6 +106,10 @@ def _installer() -> InstallService:
     return InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
 
 
+# The partition of the tests (the values swap/domain.py had in code until 2026-11), and its settings file.
+TEST_SPEC = SwapHardwareSpec("612551b1-ca02-4514-86ad-7d8902e612dc", "swap0", 137438953472)
+TEST_SETTINGS = "SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_BYTES=137438953472\n"
+
 # The drop-in as CST installed it until 2026-11, as machine.slice.d/50-memory-low.conf.
 # Its first line, split: the license gate wants that line on line 1 of this file only.
 MAIN_DROPIN = (
@@ -348,7 +352,7 @@ class StatusMathTest(unittest.TestCase):
             env,
             LocalFileSystemAdapter(),
             _FakeSystemd(os.path.join(proc, "swaps"), "/dev/dm-0"),
-            _FakeSwapSystem(proc, size_bytes=SwapHardwareSpec().expected_size_bytes),
+            _FakeSwapSystem(proc, size_bytes=TEST_SPEC.expected_size_bytes),
             installer=_installer(),
         )
 
@@ -490,10 +494,10 @@ class MarkerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.fs = _FakeTempFileSystem({})
-        self.spec = SwapHardwareSpec()
+        self.spec = TEST_SPEC
         swaps = os.path.join(self.tmp, "swaps")
         self.svc = SwapApplicationService(
-            SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp, spec=self.spec),
+            SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp),
             self.fs,
             _FakeSystemd(swaps, "/dev/dm-0"),
             _FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
@@ -518,7 +522,7 @@ class MarkerTest(unittest.TestCase):
 
     def write_marked(self, p: str, which: str = "fstab") -> None:
         events: list[D.ApplyEvent] = []
-        ok, _changed, _written = self.svc._apply_marked_line(p, self.line_spec(which), 0o644, events)
+        ok, _changed, _written = self.svc._apply_marked_line(p, self.line_spec(which), 0o644, events, name="swap0")
         self.assertTrue(ok, events)
 
     def file_state(self, src: str, dest: str) -> str:
@@ -530,7 +534,7 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(self.state(p), "unreadable")
         self.assertEqual(self.file_state(TMPFILES, p), "unreadable")
         events: list[D.ApplyEvent] = []
-        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events)[0], False)
+        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events, name="swap0")[0], False)
         self.assertIn("unreadable", events[-1].text)
 
     def test_other_lines_come_back_byte_for_byte(self) -> None:
@@ -821,7 +825,7 @@ class _SwapScratch(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-app-test-")
-        self.spec = SwapHardwareSpec()
+        self.spec = TEST_SPEC
         etc = os.path.join(self.tmp, "etc")
         proc = os.path.join(self.tmp, "proc")
         sys_dir = os.path.join(self.tmp, "sys")
@@ -882,8 +886,10 @@ class _SwapScratch(unittest.TestCase):
             zswap_params_dir=zparams,
             zswap_debug_dir=zdebug,
             cpu_run_dir=run_dir,
-            spec=self.spec,
         )
+        os.makedirs(os.path.join(etc, "cst"))
+        with open(self.env.settings_path, "w", encoding="utf-8") as f:
+            f.write(TEST_SETTINGS)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
@@ -893,6 +899,28 @@ class _SwapScratch(unittest.TestCase):
         if mapper_present:
             links[self.spec.mapper_path] = "/dev/dm-0"
         return _FakeTempFileSystem(links, unreadable)
+
+    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, _FakeSystemd]:
+        fs = self._fs(mapper_present=mapper_present)
+        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_apply(service.apply_changes(), out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def _plan_text(self, env: SwapEnvironment, *, unreadable: set[str] | None = None) -> str:
+        fs = self._fs(unreadable=unreadable)
+        service = SwapApplicationService(
+            env,
+            fs,
+            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        return out.getvalue()
 
 
 class SwapApplicationTest(_SwapScratch):
@@ -964,28 +992,6 @@ class SwapApplicationTest(_SwapScratch):
         )
         _installer().put(place, text.encode(), as_root=False)
         return old
-
-    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, _FakeSystemd]:
-        fs = self._fs(mapper_present=mapper_present)
-        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
-        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
-        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
-        out, err = io.StringIO(), io.StringIO()
-        rc = render_apply(service.apply_changes(), out=out, err=err)
-        return rc, out.getvalue(), err.getvalue(), systemd
-
-    def _plan_text(self, env: SwapEnvironment) -> str:
-        fs = self._fs()
-        service = SwapApplicationService(
-            env,
-            fs,
-            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
-            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
-            installer=_installer(),
-        )
-        out = io.StringIO()
-        render_plan(service.plan_report(), out=out)
-        return out.getvalue()
 
     def test_apply_moves_the_drop_in_to_its_10_name_and_forgets_the_old_one(self) -> None:
         # Upgrade: the drop-in under the name an older CST used (it sorted after set-property's
@@ -1258,6 +1264,223 @@ class SwapApplicationTest(_SwapScratch):
         self.assertEqual(piped.returncode, -signal.SIGPIPE)
         # No container marker (faked: CI itself runs in Docker): the host /etc.
         self.assertEqual(HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000).etc_dir(), "/etc")
+
+
+def _tree(root: str) -> dict[str, bytes]:
+    """Every file under root (links: their target), to prove a run changed nothing."""
+    out: dict[str, bytes] = {}
+    for d, _dirs, files in os.walk(root):
+        for name in files:
+            p = os.path.join(d, name)
+            if os.path.islink(p):
+                out[p] = os.readlink(p).encode()
+            else:
+                with open(p, "rb") as f:
+                    out[p] = f.read()
+    return out
+
+
+class SwapSettingsFileTest(unittest.TestCase):
+    """parse_swap_settings, render_swap_settings and the marked lines an older CST wrote."""
+
+    def test_a_partition_is_read_with_the_default_name(self) -> None:
+        s = D.parse_swap_settings(
+            "# mine\nSWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_BYTES = 4096\n"
+        )
+        self.assertEqual(s, D.SwapSettings(SwapHardwareSpec("612551b1-ca02-4514-86ad-7d8902e612dc", "swap0", 4096)))
+        s = D.parse_swap_settings("SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=8192\nSWAP_NAME=cryptswap\n")
+        self.assertEqual(s.spec, SwapHardwareSpec("0a1b2c3d-02", "cryptswap", 8192))
+
+    def test_no_partuuid_is_not_configured(self) -> None:
+        self.assertEqual(D.parse_swap_settings(""), D.SwapSettings(None))
+        self.assertEqual(D.parse_swap_settings("# nothing yet\nSWAP_NAME=swap1\n"), D.SwapSettings(None))
+
+    def test_bad_values_are_problems_and_no_partition(self) -> None:
+        cases = {
+            "SWAP_PARTUUID=612551B1-CA02-4514-86AD-7D8902E612DC\nSWAP_SIZE_BYTES=1\n": "SWAP_PARTUUID=612551B1",
+            "SWAP_PARTUUID=0a1b2c3d-02\n": "SWAP_SIZE_BYTES=: the partition's exact size",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=128G\n": "SWAP_SIZE_BYTES=128G",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=0\n": "SWAP_SIZE_BYTES=0",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME='a b'\n": "SWAP_NAME=a b",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME=../x\n": "SWAP_NAME=../x",
+            "SWAP_SIZE_BYTES=4096\n": "SWAP_SIZE_BYTES is set, SWAP_PARTUUID is not",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME=$(id)\n": "line 3: SWAP_NAME=$(id)",
+        }
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                s = D.parse_swap_settings(text)
+                self.assertIsNone(s.spec)
+                self.assertEqual(len(s.problems), 1, s.problems)
+                self.assertIn(want, s.problems[0])
+
+    def test_render_reads_back(self) -> None:
+        text = D.render_swap_settings(TEST_SPEC, "from somewhere")
+        self.assertIn("# Written by cst swap apply from somewhere.", text)
+        self.assertEqual(D.parse_swap_settings(text), D.SwapSettings(TEST_SPEC))
+
+    def test_the_marked_crypttab_line_names_the_partition(self) -> None:
+        mine = "other /dev/sda2 none luks\n"
+        want = ("swap0", "612551b1-ca02-4514-86ad-7d8902e612dc")
+        self.assertEqual(D.marked_crypttab_entry(mine + OLD_CRYPTTAB + "\n"), want)
+        new = TEST_SPEC.crypttab_line + "\n"
+        self.assertEqual(D.marked_crypttab_entry(mine + new), want)
+        self.assertEqual(D.marked_crypttab_entry(new + new), want)  # the old script ran again
+        self.assertIsNone(D.marked_crypttab_entry(mine))
+        self.assertIsNone(D.marked_crypttab_entry(new + new.replace("612551b1", "712551b1")))
+        self.assertIsNone(D.marked_crypttab_entry(f"swap0 /dev/nvme0n1p5 /dev/urandom swap {NEW}\n"))
+        self.assertIsNone(D.marked_crypttab_entry(new.replace("swap0 ", "a#b ", 1)))
+
+    def test_the_marked_fstab_line_names_the_device(self) -> None:
+        self.assertEqual(D.marked_fstab_name("UUID=x / btrfs defaults 0 0\n" + OLD_FSTAB + "\n"), "swap0")
+        self.assertEqual(D.marked_fstab_name(TEST_SPEC.fstab_line + "\n"), "swap0")
+        self.assertIsNone(D.marked_fstab_name("/dev/mapper/swap0 none swap defaults 0 0\n"))
+
+
+class SwapSettingsTest(_SwapScratch):
+    """Which partition plan, status and apply use: /etc/cst/swap.conf, or what an older CST set up."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.remove(self.env.settings_path)
+
+    def _status_text(self) -> str:
+        fs = self._fs()
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_status(service.status_report(), out=out)
+        return out.getvalue()
+
+    def _write(self, path: str, text: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_not_configured_plan_says_so_and_apply_refuses_changing_nothing(self) -> None:
+        before = _tree(self.tmp)
+        plan = self._plan_text(self.env)
+        self.assertIn(
+            "  REFUSE    cst/swap.conf                          no swap partition configured: set SWAP_PARTUUID", plan
+        )
+        self.assertNotIn("crypttab", plan)
+        self.assertNotIn("partition 6", plan)
+        self.assertIn("tmpfiles.d/zswap.conf", plan)  # the rest is still shown
+        self.assertIn("no swap partition configured", self._status_text())
+        rc, out, err, systemd = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            err,
+            f"cst swap: ERROR: {self.env.settings_path}: no swap partition configured: set SWAP_PARTUUID and"
+            " SWAP_SIZE_BYTES (swap/README.md, 2.3); apply stops.\n",
+        )
+        self.assertEqual(systemd.calls, [])
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_with_a_problem_refuses_and_is_kept(self) -> None:
+        self._write(self.env.settings_path, "SWAP_PARTUUID=0a1b2c3d-02\n")
+        self._write(self.env.crypttab, TEST_SPEC.crypttab_line + "\n")  # no migration over a file of the user's
+        before = _tree(self.tmp)
+        self.assertIn("  REFUSE    cst/swap.conf                          SWAP_SIZE_BYTES=", self._plan_text(self.env))
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"cst swap: ERROR: {self.env.settings_path}: SWAP_SIZE_BYTES=: ", err)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_without_a_partition_is_not_overwritten(self) -> None:
+        self._write(self.env.settings_path, "# to do\n")
+        self._write(self.env.crypttab, TEST_SPEC.crypttab_line + "\n")
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("no swap partition configured", err)
+        with open(self.env.settings_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# to do\n")
+
+    def test_upgrade_apply_writes_the_settings_from_what_an_older_cst_set_up(self) -> None:
+        # What an older CST's apply left: its marked lines, no /etc/cst/swap.conf (the partition was in code).
+        self._write(self.env.crypttab, "other /dev/sda2 none luks\n" + OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+        before = _tree(self.tmp)
+        plan = self._plan_text(self.env)
+        self.assertIn(
+            "  write     cst/swap.conf                          from the swap0 line an older CST wrote in crypttab:"
+            " partition 612551b1-ca02-4514-86ad-7d8902e612dc, 137438953472 bytes (its size now)",
+            plan,
+        )
+        self.assertIn("  adopt     crypttab: swap0 line", plan)
+        self.assertIn("  ok        partition 612551b1...", plan)
+        self.assertEqual(_tree(self.tmp), before, "plan wrote something")
+
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(
+            f"== settings\nwritten:   {self.env.settings_path} (SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc,",
+            out,
+        )
+        self.assertLess(out.index("== settings"), out.index("== swap0: crypttab and fstab"))
+        with open(self.env.settings_path, encoding="utf-8") as f:
+            self.assertEqual(D.parse_swap_settings(f.read()), D.SwapSettings(TEST_SPEC))
+        self.assertEqual(stat.S_IMODE(os.stat(self.env.settings_path).st_mode), 0o644)
+
+        self.assertIn(
+            "  ok        cst/swap.conf                          partition 612551b1-ca02-4514-86ad-7d8902e612dc,"
+            " 137438953472 bytes",
+            self._plan_text(self.env),
+        )
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("== settings", out)
+
+    def test_the_size_comes_from_the_partition_and_apply_still_checks_it(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        size = os.path.join(self.env.sys_dir, "class", "block", "nvme0n1p5", "size")
+        self._write(size, "2048\n")
+        self.assertIn(
+            "partition 612551b1-ca02-4514-86ad-7d8902e612dc, 1048576 bytes (its size now)", self._plan_text(self.env)
+        )
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)  # blockdev says 137438953472
+        self.assertEqual(rc, 1)
+        self.assertIn("expected 1048576: the PARTUUID points at an unexpected device; refusing.", err)
+        self.assertFalse(os.path.exists(self.env.settings_path))
+
+    def test_upgrade_with_the_partition_gone_refuses(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        env = self.env
+        fs = _FakeTempFileSystem({})  # no /dev/disk/by-partuuid link
+        service = SwapApplicationService(
+            env,
+            fs,
+            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        self.assertIn(
+            "no swap partition configured (the swap0 line in crypttab names"
+            " /dev/disk/by-partuuid/612551b1-ca02-4514-86ad-7d8902e612dc, which is not here)",
+            out.getvalue(),
+        )
+        err = io.StringIO()
+        self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 1)
+        self.assertFalse(os.path.exists(env.settings_path))
+
+    def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+        plan = self._plan_text(self.env, unreadable={self.env.crypttab})
+        self.assertIn(
+            "  ?         cst/swap.conf                          not written yet; an older CST set up swap0 (fstab):"
+            " apply writes it from crypttab, which needs root to read: on the host, cst swap plan --root",
+            plan,
+        )
+        self.assertNotIn("  REFUSE", plan)
+        os.remove(self.env.fstab)
+        self.assertIn("REFUSE    cst/swap.conf", self._plan_text(self.env, unreadable={self.env.crypttab}))
 
 
 class _ScriptedRunner:

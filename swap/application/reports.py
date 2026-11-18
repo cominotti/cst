@@ -27,8 +27,14 @@ from swap.domain import (
     cgroup_row,
     describe_state,
     find_swap_used_kib,
+    DEFAULT_SWAP_NAME,
+    SETTINGS_REL,
+    SpecResolution,
     human,
     is_cst_dropin,
+    marked_crypttab_entry,
+    marked_fstab_name,
+    parse_swap_settings,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -77,11 +83,15 @@ class SwapEnvironment:
     zswap_debug_dir: str = "/sys/kernel/debug/zswap"
     cpu_run_dir: str = "/run/cpu-setup"
     prog: str = "cst swap"
-    spec: SwapHardwareSpec = SwapHardwareSpec()
     # The install record that lists swap's three files ("": not recorded) and whether apply runs as
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+
+    @property
+    def settings_path(self) -> str:
+        """/etc/cst/swap.conf: the partition swap manages."""
+        return posixpath.join(self.etc_dir, SETTINGS_REL)
 
     @property
     def crypttab(self) -> str:
@@ -198,8 +208,8 @@ class SwapReports:
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
-    def _partition_size_sysfs(self) -> tuple[str, int] | None:
-        dev = self._fs.readlink(self._env.spec.device_path, canonicalize=True)
+    def _partition_size_sysfs(self, spec: SwapHardwareSpec) -> tuple[str, int] | None:
+        dev = self._fs.readlink(spec.device_path, canonicalize=True)
         if dev is None or not self._fs.is_block_device(dev):
             return None
         sectors = self._fs.read_first_line(
@@ -208,6 +218,63 @@ class SwapReports:
         if sectors is None or not sectors.isdigit():
             return None
         return dev, int(sectors) * 512
+
+    def resolve_spec(self) -> SpecResolution:
+        """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
+        up (its marked crypttab line, the partition's size now: apply writes the file from them)."""
+        env = self._env
+        text = self._fs.read_text(env.settings_path)
+        if text is not None:
+            settings = parse_swap_settings(text)
+            if settings.problems:
+                return SpecResolution(None, "bad", "; ".join(settings.problems))
+            return (
+                SpecResolution(settings.spec, "unset") if settings.spec is None else SpecResolution(settings.spec, "ok")
+            )
+        if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
+            name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
+            return SpecResolution(None, "unset") if name is None else SpecResolution(None, "unknown", name)
+        entry = marked_crypttab_entry(self._fs.read_text(env.crypttab, "") or "")
+        if entry is None:
+            return SpecResolution(None, "unset")
+        name, partuuid = entry
+        part = self._partition_size_sysfs(SwapHardwareSpec(partuuid, name, 0))
+        if part is None:
+            return SpecResolution(
+                None, "unset", f"the {name} line in crypttab names /dev/disk/by-partuuid/{partuuid}, which is not here"
+            )
+        return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), "write", name)
+
+    def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
+        """The row of /etc/cst/swap.conf in plan and status."""
+        env = self._env
+        target = _short_etc_path(env.etc_dir, env.settings_path)
+        spec = res.spec
+        if res.state == "ok" and spec is not None:
+            return PlanItem("ok", target, f"partition {spec.partuuid}, {spec.expected_size_bytes} bytes")
+        if res.state == "write" and spec is not None:
+            return PlanItem(
+                "write",
+                target,
+                f"from the {spec.name} line an older CST wrote in crypttab: partition {spec.partuuid},"
+                f" {spec.expected_size_bytes} bytes (its size now)",
+            )
+        if res.state == "unknown":
+            return PlanItem(
+                "?",
+                target,
+                f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
+                f" which needs root to read: on the host, {env.prog} {verb} --root",
+            )
+        if res.state == "bad":
+            return PlanItem("REFUSE", target, f"{res.note}: apply stops")
+        why = f" ({res.note})" if res.note else ""
+        return PlanItem(
+            "REFUSE",
+            target,
+            f"no swap partition configured{why}: set SWAP_PARTUUID and SWAP_SIZE_BYTES (swap/README.md, 2.3);"
+            " apply stops",
+        )
 
     def zswap_params(self) -> dict[str, str]:
         """Read current /sys/module/zswap/parameters entries."""
@@ -244,7 +311,7 @@ class SwapReports:
     def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
         """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
         runtime_items: list[PlanItem] = []
-        part = self._partition_size_sysfs()
+        part = self._partition_size_sysfs(spec)
         if part is not None:
             dev, size = part
             if size == spec.expected_size_bytes:
@@ -291,7 +358,6 @@ class SwapReports:
     def build_config_report(self, verb: str) -> ConfigSectionReport:
         """Inspect managed config files and runtime swap/zram states."""
         env = self._env
-        spec = env.spec
         if not self._fs.is_dir(env.etc_dir):
             return ConfigSectionReport(
                 etc_visible=False,
@@ -302,7 +368,11 @@ class SwapReports:
                 runtime_items=(),
             )
 
-        file_items, tier_change = self._marked_line_items(spec, verb)
+        res = self.resolve_spec()
+        spec = res.spec
+        file_items, tier_change = self._marked_line_items(spec, verb) if spec is not None else ([], False)
+        file_items.insert(0, self._settings_item(res, verb))
+        name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
         for src, dest in (
             (env.src_tmpfiles, env.tmpfiles_conf),
@@ -311,9 +381,7 @@ class SwapReports:
         ):
             st = self._inspect_file(src, dest)
             file_items.append(
-                PlanItem(
-                    describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, spec.name, env.prog, verb)
-                )
+                PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, name, env.prog, verb))
             )
 
         if self._fs.exists(env.old_sysctl_conf):
@@ -347,7 +415,7 @@ class SwapReports:
             )
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        runtime_items = self._partition_items(spec, swaps_text, tier_change=tier_change)
+        runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
 
         zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
         if zram_used is None:

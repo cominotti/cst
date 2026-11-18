@@ -109,6 +109,9 @@ _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
+# The partition swap manages (swap/domain.py, SETTINGS_REL), and the file an older CST marked a line in.
+SWAP_CONF = HostPath("/etc/cst/swap.conf")
+FSTAB = HostPath("/etc/fstab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
 GAME_RUN = HostPath(state_format("game-state").folder)
