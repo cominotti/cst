@@ -34,7 +34,7 @@ import time
 import types
 import unittest
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol, cast, override
+from typing import Any, Protocol, Self, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_stall_monitord.py): the checkout root holds the tests package.
@@ -511,7 +511,7 @@ class FakeProc:
             mock.patch.object(m, "parse_psi", _parse_psi),
         ]
 
-    def __enter__(self) -> FakeProc:
+    def __enter__(self) -> Self:
         for p in self.patches:
             p.start()
         return self
