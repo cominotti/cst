@@ -292,8 +292,8 @@ STEAM_READ_MAX = 64 << 20  # larger "VDF" files are refused unread
 PROC = "/proc"
 RUN_USER = "/run/user"
 # Apps that are tools, not games: they stay in the main library unless named
-# with --app. Checked: the Steam Linux Runtime ids are in Valve's own list
-# (steam-runtime, doc/steamlinuxruntime-known-issues.md); 228980 is the
+# with --app. Checked: the Steam Linux Runtime ids are in Valve's own list,
+# doc/steamlinuxruntime-known-issues.md in steam-runtime. 228980 is the
 # Steamworks Common Redistributables (Valve's Steamworks docs, SteamDB).
 # Proton (one app per version, plus the anti-cheat runtimes) is recognised by
 # name and folder below instead of by id: those ids could not be checked.
