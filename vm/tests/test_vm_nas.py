@@ -998,7 +998,7 @@ class ConstantsTest(unittest.TestCase):
             text = f.read()
 
         def shell(name: str) -> str:
-            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.M)
+            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.MULTILINE)
             assert m_re is not None
             return m_re.group(1)
 
@@ -1067,7 +1067,7 @@ class TimerTest(Nas):
         ):
             self.assertIn(line + "\n", service)
         # systemd never kills a merge half done: the stop budget covers the merge's own limit.
-        stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.M)
+        stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.MULTILINE)
         self.assertTrue(stop, service)
         assert stop is not None
         cfg = vm_wiring.vm_settings(self.env)
