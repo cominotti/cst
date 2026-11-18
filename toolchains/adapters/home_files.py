@@ -6,6 +6,7 @@ it appends to or rewrites, the run summaries of the targets and the run lock.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -220,10 +221,8 @@ class RunSummaries:
         write_state(self.home, tid, record, self.out)
 
     def forget(self, tid: str) -> None:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(state_path(self.home, tid))
-        except OSError:
-            pass
 
 
 class ToolchainsLock:
@@ -434,10 +433,8 @@ class HomeFiles:
         return os.path.islink(path) and not os.path.exists(path)
 
     def remove_if_empty(self, path: str) -> None:
-        try:
+        with contextlib.suppress(OSError):
             os.rmdir(path)
-        except OSError:
-            pass
 
     def old_conf_present(self) -> bool:
         return os.path.lexists(os.path.join(self.home, OLD_CONF_REL))
