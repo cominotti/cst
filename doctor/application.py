@@ -22,6 +22,7 @@ from doctor.domain import (
     ALERT_NAME,
     ALERT_PENDING,
     ALERTING_UNITS,
+    KEEPING_UNITS,
     BTRFS_SYSFS,
     CET_ISSUE,
     CPU_CONF,
@@ -443,15 +444,15 @@ def runs(host: DoctorHostPort, program: HostPath) -> bool:
 
 @check("alerts")
 def check_alert_program(host: DoctorHostPort) -> Iterator[Result]:
-    """WARN when installed units alert through btrfs-notify but it is missing: their alerts then reach only
-    the journal and the pending alerts folder (cst_core keeps them there, check_pending_alerts shows them)."""
+    """WARN when installed units alert through btrfs-notify but it is missing (KEEPING_UNITS: kept for this doctor)."""
     units = [os.path.basename(u) for u in ALERTING_UNITS if host.exists(host.path(u))]
     if not units or runs(host, NOTIFY_HOST):
         return
+    kept = ", ".join(u for u in units if u in KEEPING_UNITS)
     yield Result(
         WARN,
-        f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, "
-        "only the journal (btrfs-bulk-boot's and docker-volumes-nocow's also the pending alerts above)",
+        f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, only the "
+        "journal" + (f"; {kept}: also the pending alerts above" if kept else ""),
         refresh(host, "btrfs:alerts"),
     )
 
@@ -1641,7 +1642,7 @@ def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
         return
     yield Result(
         WARN,
-        f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM alerts nobody",
+        f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM reaches no desktop, only the journal and the pending alerts above",
         refresh(host, "btrfs:alerts"),
     )
 

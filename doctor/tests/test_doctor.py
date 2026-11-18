@@ -2296,7 +2296,11 @@ class InstallAreaTest(Scratch):
         res = list(doc_app.check_vm_backup_alerts(self.host))
         self.assertEqual(len(res), 1)
         self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
-        self.assertIn("a failed NAS backup of the VM alerts nobody", res[0].message)
+        # cst vm sends through cst_core's notify adapter, which keeps the alert for the alerts area.
+        self.assertIn(
+            "a failed NAS backup of the VM reaches no desktop, only the journal and the pending alerts above",
+            res[0].message,
+        )
         self.install("btrfs:alerts")
         self.assertEqual(list(doc_app.check_vm_backup_alerts(self.host)), [])
 
@@ -2315,8 +2319,24 @@ class InstallAreaTest(Scratch):
             ),
             res[0].message,
         )
+        self.assertTrue(
+            res[0].message.endswith("; btrfs-bulk-boot.service: also the pending alerts above"), res[0].message
+        )
         self.install("btrfs:alerts")
         self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+
+    def test_units_whose_alerts_are_not_kept_are_not_said_to_be(self) -> None:
+        # The health check and the stall alert are bash: without btrfs-notify their alerts reach only the
+        # journal, and the line must not send the reader to the pending alerts for them.
+        units = os.path.join(self.root, "etc/systemd/system")
+        os.makedirs(units, exist_ok=True)
+        for name in ("btrfs-health-check.service", "btrfs-stall-alert.service"):  # btrfs:core's
+            open(os.path.join(units, name), "w").close()
+        [res] = list(doc_app.check_alert_program(self.host))
+        self.assertIn("btrfs-health-check.service", res.message)
+        self.assertNotIn("btrfs-bulk-boot", res.message)
+        self.assertNotIn("pending alerts", res.message)
+        self.assertTrue(res.message.endswith("their alerts reach no desktop, only the journal"), res.message)
 
     def test_unit_exec_paths(self) -> None:
         text = (
