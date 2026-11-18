@@ -1667,6 +1667,21 @@ class MemoryLowOverrideRuleTest(unittest.TestCase):
         dropins = [(self.CST, self.CST_TEXT), (self.RUN, None)]
         self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
 
+    def test_an_assignment_as_systemd_reads_it(self) -> None:
+        mine = "/etc/systemd/system/machine.slice.d/60-mine.conf"
+        for text, effective in (
+            ("[Slice]\nMemoryLow = 32G\n", str(32 * 2**30)),  # blanks around "="
+            ("[Slice]\n  MemoryLow=32G\n", str(32 * 2**30)),  # blanks before the key
+            ("[Slice]\nMemoryLow=\n", "0"),  # an empty value resets it
+        ):
+            with self.subTest(text=text):
+                dropins = [(self.CST, self.CST_TEXT), (mine, text)]
+                self.assertEqual(D.memory_low_override(effective, dropins, self.CST, self.WANT), mine)
+        for comment in ("[Slice]\n#MemoryLow=1G\n", "[Slice]\n; MemoryLow=1G\n", "[Slice]\nMemoryLowX=1G\n"):
+            with self.subTest(text=comment):
+                dropins = [(self.CST, self.CST_TEXT), (mine, comment)]
+                self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
+
 
 class _ScriptedRunner:
     """CommandRunnerPort answering by program name (argv[0]); records each argv."""

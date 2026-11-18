@@ -310,6 +310,11 @@ def parse_memory_low(text: str) -> int | None:
     return parse_size(m.group(1)) if m else None
 
 
+# A line that assigns MemoryLow as systemd reads it: blanks before the key and around "=" are dropped,
+# and an empty value is an assignment too (it resets MemoryLow). A "#" or ";" line is a comment.
+_SETS_MEMORY_LOW: Final = re.compile(r"^[ \t]*MemoryLow[ \t]*=", re.M)
+
+
 def memory_low_override(
     effective: str, dropins: Sequence[tuple[str, str | None]], cst_dropin: str, want: int | None
 ) -> str | None:
@@ -322,7 +327,7 @@ def memory_low_override(
         return None
     source: str | None = None
     for path, text in sorted(dropins, key=lambda d: posixpath.basename(d[0])):
-        if text is not None and re.search(r"^MemoryLow=\S", text, re.M):
+        if text is not None and _SETS_MEMORY_LOW.search(text):
             source = path
     return None if source == cst_dropin else source
 
