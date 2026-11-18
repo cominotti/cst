@@ -284,10 +284,12 @@ class Machine:
         return os.path.exists(os.path.join(self.state, name))
 
     def services(self) -> None:
-        """bluetoothd and the session's WirePlumber running (with their bus name)."""
+        """bluetoothd and the session's WirePlumber running (with their bus name), the adapter powered."""
         self.unit("system", "bluetooth", inv="bt-0")
         self.unit("user", "wireplumber", inv="wp-0", pid=4242)
         self.put("bus-names", ":1.7 4242 wireplumber danilo :1.7 user@1000.service - -\n")
+        # The adapter answers right after a restart (apply waits up to 15 s for it).
+        self.put("prop-org.bluez.Adapter1-Powered", "b true\n")
 
     def adapter(self, *, iso: bool = True, bap: bool = True) -> None:
         """One Bluetooth adapter in org.bluez: its ISO feature on and BAP's PACs (as wanted)."""

@@ -749,6 +749,7 @@ class LeAudioTest(SetupCase):
 
     def test_revert_removes_the_drop_in(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)  # LE Audio on again after it: apply waits for the endpoint
         m.run("apply", "--no-restart")
         r = m.run("revert", "--check")
         self.assertEqual(r.returncode, 10, r.text)
@@ -888,6 +889,7 @@ class LinkTest(SetupCase):
 
     def test_a_linked_rule(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)
         m.run("apply", "--no-restart")
         kept = os.path.join(m.home, "dotfiles-wp.conf")
         os.rename(m.wp_conf, kept)
@@ -914,6 +916,7 @@ class LinkTest(SetupCase):
 
     def test_a_linked_drop_in(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)
         m.run("apply", "--no-restart")
         kept = os.path.join(m.home, "dotfiles-le.conf")
         os.rename(m.le_conf, kept)
@@ -945,6 +948,7 @@ class LinkTest(SetupCase):
 
     def test_a_link_to_something_not_ours_stays_a_conflict(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)
         os.makedirs(m.wp_dir)
         foreign = m.put("foreign.conf", "monitor.bluez.properties = { }\n")
         folder = os.path.join(m.home, "a-folder")
@@ -979,6 +983,7 @@ class LeAudioCommandTest(SetupCase):
 
     def test_without_a_settings_folder(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)
         r = m.run("le-audio", "on", "--yes", "--no-restart", env={"CST_PROG": "cst-t"})
         self.assertEqual(r.returncode, 1, r.text)  # apply's checks: no adapter on this machine
         self.assertEqual(r.stderr, "cst-t: ERROR: verification found problems (see above).\n")
@@ -1056,6 +1061,7 @@ class MainConfTest(SetupCase):
 
     def test_revert_to_the_oldest_backup(self) -> None:
         m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)
         old = m.put(m.main_conf + ".bak-20240101-000000", VENDOR)
         newer = m.put(m.main_conf + ".bak-20250101-000000", DONE)
         os.utime(old, (1_000_000, 1_000_000))
@@ -1245,6 +1251,7 @@ class WatcherTest(SetupCase):
 
     def test_revert_removes_it_and_check_changes_nothing(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.put("bt-journal", BAP_REGISTERED)
         m.run("apply", "--no-restart")
         r = m.run("revert", "--check")
         self.assertEqual(r.returncode, 10)
