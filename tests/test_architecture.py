@@ -520,9 +520,13 @@ def env_write_lines(source: str, rel: str) -> list[int]:
 
     lines: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value):
-            lines.add(node.lineno)
-        elif isinstance(node, ast.AugAssign) and is_environ(node.target):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Store | ast.Del)
+            and is_environ(node.value)
+            or isinstance(node, ast.AugAssign)
+            and is_environ(node.target)
+        ):
             lines.add(node.lineno)
         elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node):
             lines.add(node.lineno)  # os.environ = ..., del os.environ

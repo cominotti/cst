@@ -37,12 +37,16 @@ def loads_code_by_path(source: str, filename: str = "<source>") -> list[int]:
     tree = ast.parse(source, filename=filename)
     lines: list[int] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr in {
-            "SourceFileLoader",
-            "spec_from_file_location",
-            "run_path",
-        }:
-            lines.append(node.lineno)
-        elif isinstance(node, ast.Name) and node.id in {"SourceFileLoader", "spec_from_file_location", "run_path"}:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr
+            in {
+                "SourceFileLoader",
+                "spec_from_file_location",
+                "run_path",
+            }
+            or isinstance(node, ast.Name)
+            and node.id in {"SourceFileLoader", "spec_from_file_location", "run_path"}
+        ):
             lines.append(node.lineno)
     return sorted(set(lines))

@@ -179,40 +179,40 @@ COMPONENTS: Final[Mapping[str, str]] = {
 
 
 SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
-    """
-bluetooth-setup.sh
-btrfs-setup.sh
-btrfs/btrfs-degraded-boot-setup.sh
-btrfs/setup-bulk.bash
-btrfs/setup-snapshots.bash
-cpu-setup.sh
-cst
-cst-install.bash
-cst-link.bash
-swap-setup.sh
-toolchains-setup.sh
-vm-setup.sh
-""".split()
+    [
+        "bluetooth-setup.sh",
+        "btrfs-setup.sh",
+        "btrfs/btrfs-degraded-boot-setup.sh",
+        "btrfs/setup-bulk.bash",
+        "btrfs/setup-snapshots.bash",
+        "cpu-setup.sh",
+        "cst",
+        "cst-install.bash",
+        "cst-link.bash",
+        "swap-setup.sh",
+        "toolchains-setup.sh",
+        "vm-setup.sh",
+    ]
 )
 
 CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
-    """
-.github/scripts/pin_invowk.py
-bluetooth/bt-helper
-bluetooth/bt-setup
-btrfs/btrfs-stall-watch
-btrfs/chrome-cache
-btrfs/tests/realbtrfs-snapshot-core.sh
-cst_core/cli.py
-cst_core/installer.py
-cst_core/route.py
-cpu/cpu-setup
-doctor/cst-doctor
-fix-anaconda-webui-btrfs-compress.sh
-swap/cli.py
-tests/mutation/cst-mutation
-tests/uv-dev
-""".split()
+    [
+        ".github/scripts/pin_invowk.py",
+        "bluetooth/bt-helper",
+        "bluetooth/bt-setup",
+        "btrfs/btrfs-stall-watch",
+        "btrfs/chrome-cache",
+        "btrfs/tests/realbtrfs-snapshot-core.sh",
+        "cst_core/cli.py",
+        "cst_core/installer.py",
+        "cst_core/route.py",
+        "cpu/cpu-setup",
+        "doctor/cst-doctor",
+        "fix-anaconda-webui-btrfs-compress.sh",
+        "swap/cli.py",
+        "tests/mutation/cst-mutation",
+        "tests/uv-dev",
+    ]
 )
 
 
