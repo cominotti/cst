@@ -101,8 +101,10 @@ class AlertStarter:
     Starting a program waits until the child has exec'd it, and exec reads the program from the disk: during
     the stalls the daemon records, that can take minutes. request() only marks a start as wanted and returns.
     The helper starts the program once for every request still pending when it gets to it (requests made
-    meanwhile are merged: the service sends every queued alert at each start), waits at most `wait` seconds
-    for it, then kills it. One thread, never more (the unit's TasksMax).
+    meanwhile are merged: the service sends every queued alert at each start). Once the program runs, the
+    helper waits at most `wait` seconds for it to end, then kills it and waits for the kill to take effect,
+    so the child is reaped (no zombie) and there is never more than one child at a time. A non-zero exit is
+    logged. One thread, never more (the unit's TasksMax).
     """
 
     def __init__(
@@ -140,10 +142,14 @@ class AlertStarter:
                 log(f"alert hand-off failed: {e}", 4)
                 continue
             try:
-                child.wait(timeout=self._wait)
+                rc = child.wait(timeout=self._wait)
             except subprocess.TimeoutExpired:
                 child.kill()
                 log(f"alert hand-off: {' '.join(self.argv)} did not end in {self._wait:g} s; killed", 4)
+                child.wait()  # reaped before the next start: one child at a time, no zombie under TasksMax
+                continue
+            if rc != 0:
+                log(f"alert hand-off: {' '.join(self.argv)} exited with status {rc}", 4)
 
 
 class Monitor:

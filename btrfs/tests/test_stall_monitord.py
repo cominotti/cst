@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1181,15 +1182,20 @@ class AlertHandOffTest(unittest.TestCase):
 
 
 class _Child:
-    """A started program whose wait() times out (it never ends)."""
+    """A started program that does not end before it is killed: wait() with a timeout times out until kill()."""
 
     def __init__(self) -> None:
         self.killed = False
+        self.calls: list[str] = []
 
     def wait(self, timeout: float | None = None) -> int:
-        raise subprocess.TimeoutExpired("systemctl", timeout or 0)
+        self.calls.append(f"wait {timeout}")
+        if not self.killed:
+            raise subprocess.TimeoutExpired("systemctl", timeout or 0)
+        return -9
 
     def kill(self) -> None:
+        self.calls.append("kill")
         self.killed = True
 
 
@@ -1223,6 +1229,41 @@ class AlertStarterTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(children[0].killed)
         self.assertEqual(self.lines[1], "alert hand-off: systemctl start x.service did not end in 0.05 s; killed")
+        self.assertTrue(_eventually(lambda: children[0].calls == ["wait 0.05", "kill", "wait None"]), children[0].calls)
+
+    def test_a_killed_program_is_reaped(self) -> None:
+        """A real program that does not end in time: killed, then waited for, so no zombie stays behind (a zombie
+        still counts against the unit's TasksMax=8) and no second one runs beside it."""
+        children: list[subprocess.Popen[bytes]] = []
+
+        def start(argv: Sequence[str]) -> subprocess.Popen[bytes]:
+            child = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL)
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            children.append(child)
+            return child
+
+        starter = md_monitor.AlertStarter(["sleep", "30"], start, wait=0.1)
+        starter.request()
+        self.assertTrue(_eventually(lambda: len(self.lines) == 1))
+        self.assertEqual(self.lines, ["alert hand-off: sleep 30 did not end in 0.1 s; killed"])
+        self.assertTrue(_eventually(lambda: children[0].returncode is not None), "the killed program was not reaped")
+        self.assertEqual(children[0].returncode, -signal.SIGKILL)
+        self.assertEqual(len(children), 1)
+
+    def test_a_program_that_exits_with_an_error_is_logged(self) -> None:
+        class _Failed:
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return 4
+
+            def kill(self) -> None:
+                raise AssertionError("a program that ended is not killed")
+
+        starter = md_monitor.AlertStarter(["systemctl", "start", "x.service"], lambda _argv: _Failed(), wait=5.0)
+        starter.request()
+        self.assertTrue(_eventually(lambda: len(self.lines) == 1))
+        self.assertEqual(self.lines, ["alert hand-off: systemctl start x.service exited with status 4"])
 
     def test_a_thread_that_cannot_start_leaves_the_alert_queued_and_the_next_request_works(self) -> None:
         calls: list[list[str]] = []
