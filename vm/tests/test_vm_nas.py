@@ -630,6 +630,15 @@ class LiveBackupTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
 
+    def test_an_index_of_a_newer_cst_vm_stops_the_nas_backup_before_restic(self) -> None:
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        with open(self.index, "w") as f:
+            json.dump({"version": 2, "backups": []}, f)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"{self.index} is format 2 of the vm-index (this CST reads format 1 and older)", r.stderr)
+        self.assertFalse([c for c in self.calls() if c.startswith("restic ") or "snapshot-create" in c])
+
     def test_list_shows_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         r = self.run_tool("list")

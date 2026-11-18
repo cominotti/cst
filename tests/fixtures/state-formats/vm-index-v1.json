@@ -1,0 +1,12 @@
+{
+  "backups": [
+    {
+      "epoch": 1794000000,
+      "mode": "reflink",
+      "path": "/var/lib/libvirt/cst-backups/win/x",
+      "timestamp": "20261116-030000",
+      "vm": "win"
+    }
+  ],
+  "version": 1
+}

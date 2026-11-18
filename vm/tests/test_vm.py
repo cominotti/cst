@@ -450,6 +450,40 @@ class BackupTest(Scratch):
         self.assertEqual((p.returncode, p.stderr), (0, b""))
         self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
 
+    def test_an_index_of_a_newer_cst_vm_stops_the_backup_before_it_copies(self) -> None:
+        # After going back to an older CST: the backup would end in write_index, which would drop
+        # what this cst vm does not know of the newer index. Refused before anything is copied.
+        os.makedirs(os.path.dirname(self.index))
+        text = json.dumps({"version": 2, "backups": [{"vm": "win", "path": "/x", "epoch": 1, "timestamp": "a"}]})
+        with open(self.index, "w") as f:
+            f.write(text)
+        for args in (("backup", "win"), ("list",)):
+            with self.subTest(args=args):
+                r = self.run_tool(*args)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"cst vm: {self.index} is format 2 of the vm-index (this CST reads format 1 and older): "
+                    "written by a newer CST: left as it is, and nothing is backed up or listed with it",
+                    r.stderr,
+                )
+        self.assertEqual([c for c in self.calls() if c.startswith("cp ")], [])
+        self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))
+        with open(self.index) as f:
+            self.assertEqual(f.read(), text)
+
+    def test_the_index_writer_produces_the_checked_in_file_exactly(self) -> None:
+        # The bytes main's cst vm and doctor read (the format did not change; REPORT has the proof).
+        fixtures = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
+        entries = [{"vm": "win", "path": "/var/lib/libvirt/cst-backups/win/x", "epoch": 1794000000, "mode": "reflink",
+                    "timestamp": "20261116-030000"}]  # fmt: skip
+        path = os.path.join(self.tmp, "index.json")
+        vm_adapters.write_index(entries, path)
+        with open(path) as f, open(os.path.join(fixtures, "vm-index-v1.json")) as g:
+            self.assertEqual(f.read(), g.read())
+        with open(path, "w") as f:
+            json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
+        self.assertEqual(vm_adapters.read_index(path), entries)
+
     def test_index_drops_removed_backups(self) -> None:
         os.makedirs(os.path.dirname(self.index))
         kept = os.path.join(self.tmp, "kept")

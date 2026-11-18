@@ -131,6 +131,12 @@ of the backups with the VM, time, path, mode, package versions and
 deployment, and **no secrets**. `cst vm list`, `cst vm status` and
 `cst doctor` read it as your user. It is replaced atomically and written to
 disk (fsync) at once, so a power loss right after a backup cannot hide it.
+Its `"version"` (format 1; an index without it is read as before) tells the
+readers which format they read: an index of a newer `cst vm` (after you went
+back to an older CST) is left as it is, and `backup`, `backup --nas`, `list` and
+`status` stop with exit 1 and a message that names the format, before anything
+is copied, instead of dropping what they do not know when they write it back.
+`cst doctor` warns about it too.
 
 The VM must be **shut off** (`virsh domstate` says `shut off`). Only then
 are the disk, the UEFI variables and the TPM state consistent with each

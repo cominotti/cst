@@ -36,7 +36,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.notify import NOTIFY_PROGRAM, PENDING_ALERTS, Notifier, Urgency
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.application.install import InstallService, Placement
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import state_format, version_of
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
@@ -77,7 +77,8 @@ CPU_CONF = os.environ.get("CST_VM_CPU_CONF") or "/etc/cpu-setup/cpu-setup.conf" 
 # Overridable for the tests only (scratch folders instead of the host's).
 BACKUP_DIR = os.environ.get("CST_VM_BACKUP_DIR") or "/var/lib/libvirt/cst-backups"
 
-INDEX = os.environ.get("CST_VM_INDEX") or state_format("vm-index").path
+INDEX_FORMAT = state_format("vm-index")
+INDEX = os.environ.get("CST_VM_INDEX") or INDEX_FORMAT.path
 
 SWTPM_DIR = os.environ.get("CST_VM_SWTPM_DIR") or "/var/lib/libvirt/swtpm"
 
@@ -346,18 +347,35 @@ def booted_deployment() -> dict[str, Any] | None:
 
 
 def read_index(path: str | None = None) -> list[dict[str, Any]]:
+    """The backups in the index ([] when there is none or it cannot be read). Refused for an index of a
+    newer cst vm ("version" above INDEX_FORMAT's): listing it could mislead, and writing it back would
+    lose what this one does not know."""
     path = path or INDEX
     try:
         with open(path) as f:
             data = json.load(f)
     except OSError, ValueError:
         return []
+    found = version_of(data, "version")
+    if found is not None and found > INDEX_FORMAT.version:
+        raise Refused(
+            f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
+            f"with it; use the cst vm of that CST (in that checkout: {CST} vm backup-timer on installs it)"
+        )
     entries = data.get("backups") if isinstance(data, dict) else None
     return [
         e
         for e in entries or []
         if isinstance(e, dict) and e.get("vm") and (e.get("path") or e.get("mode") == "nas" and e.get("snapshot"))
     ]
+
+
+def check_backup_start(what: str) -> None:
+    """Before a backup copies anything: root (or the tests' override), and an index this cst vm can
+    record it in (read_index refuses one of a newer cst vm)."""
+    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+        raise Refused(f"{what} needs root: run it as `cst vm {what}` (it calls sudo by itself)")
+    read_index()
 
 
 def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -> None:
@@ -367,7 +385,7 @@ def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
-    text = json.dumps({"version": 1, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
+    text = json.dumps({"version": INDEX_FORMAT.version, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
     write_atomic(path, text, mode=0o644, relabel=False)
 
 

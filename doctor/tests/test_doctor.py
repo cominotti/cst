@@ -1622,6 +1622,28 @@ class VmTest(Scratch):
         self.assertNotIn("ostree admin pin", r.stdout)
         self.assertIn("No VM backup since the booted deployment was built", r.stdout)
 
+    def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
+        # After going back to an older CST: a newer index is neither taken for "never backed up"
+        # nor read as if this checkout knew its format.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        with open(path) as f:
+            data = json.load(f)
+        data["version"] = 2
+        with open(path, "w") as f:
+            json.dump(data, f)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(
+            "WARN   /var/lib/cst/vm-backups.json is format 2 of the vm-index (this CST reads format 1 and older): "
+            "written by a newer CST: cst vm refuses to back up or list with it",
+            r.stdout,
+        )
+        self.assertIn("last backup: unknown (see the index line)", r.stdout)
+        self.assertNotIn("rollback pinned and VM backup present", r.stdout)
+        self.assert_read_only()
+
     def test_pin_index_follows_the_list(self) -> None:
         """A staged deployment first: booted is 1, rollback 2."""
         self.deployments()

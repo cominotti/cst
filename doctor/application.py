@@ -56,6 +56,7 @@ from doctor.domain import (
     VIRSH_URI,
     VM_CONF,
     VM_INDEX,
+    VM_INDEX_FORMAT,
     VM_LIVE_STATES,
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
@@ -80,6 +81,7 @@ from doctor.domain import (
     per_device_allocated,
     pick_mount,
     pkg_names,
+    newer_index_version,
     read_intended,
     scrub_dropin_limit,
     scrub_limit_setting,
@@ -1271,13 +1273,21 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
             )
 
 
-def newest_vm_backup(host: DoctorHostPort) -> float:
-    """Epoch of the newest backup in cst vm's index, 0 when none or unreadable."""
+def vm_index_data(host: DoctorHostPort) -> object:
+    """cst vm's backup index as read, None when it is missing or unreadable."""
     try:
         with host.open_text(host.path(VM_INDEX)) as f:
-            data = json.load(f)
+            return json.load(f)
     except OSError, ValueError:
-        return 0
+        return None
+
+
+def newest_vm_backup(host: DoctorHostPort) -> float | None:
+    """Epoch of the newest backup in cst vm's index, 0 when none or unreadable, None when the index is of
+    a newer cst vm (not read: check_vm_index says so)."""
+    data = vm_index_data(host)
+    if newer_index_version(data) is not None:
+        return None
     entries = data.get("backups") if isinstance(data, dict) else None
     return max(
         (e["epoch"] for e in entries or [] if isinstance(e, dict) and isinstance(e.get("epoch"), (int, float))),
@@ -1290,6 +1300,19 @@ def nas_configured(host: DoctorHostPort) -> bool:
     parsed = settings_of(host, SNAP_CONF)
     values = parsed.values if parsed else {}
     return values.get("NAS_ENABLED") == "1" and bool(values.get("NAS_PATH"))
+
+
+@check("vm")
+def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN when cst vm's backup index is of a newer format: this checkout's cst vm refuses to back up
+    or list with it (after going back to an older CST)."""
+    found = newer_index_version(vm_index_data(host))
+    if found is not None:
+        yield Result(
+            WARN,
+            f"{VM_INDEX_FORMAT.newer_text(VM_INDEX, found)}: {host.cst} vm refuses to back up or list "
+            "with it; use the cst vm of that CST (its checkout: cst vm backup-timer on)",
+        )
 
 
 @check("vm")
@@ -1328,7 +1351,7 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
     ts = booted.get("timestamp")
     built = ts if isinstance(ts, (int, float)) else 0
     backup = newest_vm_backup(host)
-    fresh = backup > built > 0
+    fresh = backup is not None and backup > built > 0
     if pinned and fresh:
         yield Result(INFO, f"{what}; rollback pinned and VM backup present")
         return
@@ -1342,7 +1365,13 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
         )
     if not fresh:
         when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
-        last = time.strftime("%Y-%m-%d", time.localtime(backup)) if backup else "never"
+        last = (
+            "unknown (see the index line)"
+            if backup is None
+            else time.strftime("%Y-%m-%d", time.localtime(backup))
+            if backup
+            else "never"
+        )
         if nas_configured(host):
             yield Result(
                 WARN,
