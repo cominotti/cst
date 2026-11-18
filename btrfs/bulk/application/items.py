@@ -12,7 +12,7 @@ import os
 import time
 
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.application.steam import DAMAGED, steam_conflict_text, steam_recover_all
+from btrfs.bulk.application.steam import damaged, steam_conflict_text, steam_recover_all
 from btrfs.bulk.domain import (
     BIG,
     BY_ID,
@@ -164,7 +164,7 @@ def recover(b: Bulk) -> list[str]:
         if not j:
             if state.jexists(item.id):
                 stuck.append(item.id)
-                log(f"NEEDS A LOOK: {item.id}: damaged journal {state.jpath(item.id)} ({DAMAGED})")
+                log(f"NEEDS A LOOK: {item.id}: {state.newer_journal(item.id) or damaged(state, item.id)}")
             continue
         try:
             recover_item(b, item, j)
@@ -667,7 +667,7 @@ def report_journals(b: Bulk) -> int:
                 + ("inside ~/Bulk only, snapshots do not wait" if j.get("bulk_only") else "snapshots wait until then")
             )
         else:
-            say(f"  {item.id}: NEEDS A LOOK: damaged journal {state.jpath(item.id)} ({DAMAGED})")
+            say(f"  {item.id}: NEEDS A LOOK: {state.newer_journal(item.id) or damaged(state, item.id)}")
     return left + report_steam_journals(b)
 
 
@@ -684,7 +684,7 @@ def report_steam_journals(b: Bulk) -> int:
             say(f"  {ident}: an interrupted Steam game move is recorded (phase {sj.get('phase')}): the next")
             say("      apply, 'bulk steam apply' or boot finishes or undoes it; snapshots wait until then")
         else:
-            say(f"  {ident}: NEEDS A LOOK: damaged journal {state.jpath(ident)} ({DAMAGED})")
+            say(f"  {ident}: NEEDS A LOOK: {state.newer_journal(ident) or damaged(state, ident)}")
     return left
 
 

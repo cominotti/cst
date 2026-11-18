@@ -33,7 +33,7 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
@@ -1293,6 +1293,18 @@ class StateContractsTest(unittest.TestCase):
                 self.assertTrue(f.writers and f.readers)
                 for rel in f.writers + f.readers:
                     self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, rel)), rel)
+
+    def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
+        self.assertEqual(
+            [version_of({}, "v"), version_of({"v": 3}, "v"), version_of({"version": 1}, "version")], [0, 3, 1]
+        )
+        for bad in ({"v": True}, {"v": "1"}, {"v": -1}, {"v": 1.0}, [], "text", None):
+            with self.subTest(bad=bad):
+                self.assertIsNone(version_of(bad, "v"))
+        self.assertEqual(
+            state_format("vm-index").newer_text("/x.json", 2),
+            "/x.json is format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST",
+        )
 
     def test_the_programs_use_the_registered_paths(self) -> None:
         from btrfs.bulk.domain import BulkPaths

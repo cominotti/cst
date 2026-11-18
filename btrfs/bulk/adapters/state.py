@@ -15,7 +15,19 @@ import os
 import re
 from typing import TypeGuard
 
-from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkPaths, ItemJournal, SteamJournal, dec
+from btrfs.bulk.domain import (
+    BY_ID,
+    ITEMS,
+    JOURNAL,
+    KEEP_HEADER,
+    BadSettings,
+    BulkPaths,
+    ItemJournal,
+    SteamJournal,
+    dec,
+    journal_readable,
+    journal_version,
+)
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import describe_problems, parse_shell_assignments
@@ -120,7 +132,8 @@ class StateFiles:
     def jwrite(self, ident: str, j: ItemJournal | SteamJournal) -> None:
         os.makedirs(self.paths.state, mode=0o755, exist_ok=True)
         # durable: the rename itself is on disk before anything it protects is done.
-        write_atomic(self.jpath(ident), json.dumps(j), mode="umask", relabel=False)
+        # "v": its format (JOURNAL), so that an older btrfs-bulk leaves it alone.
+        write_atomic(self.jpath(ident), json.dumps({**j, "v": JOURNAL.version}), mode="umask", relabel=False)
 
     def _jload(self, ident: str) -> object:
         """The journal's JSON; None when it is missing or not JSON."""
@@ -131,15 +144,27 @@ class StateFiles:
             return None
 
     def jread_item(self, ident: str) -> ItemJournal | None:
-        """The item's journal; None when missing, not JSON or not the shape btrfs-bulk writes."""
+        """The item's journal; None when missing, not JSON, not the shape btrfs-bulk writes, or of a
+        format this btrfs-bulk does not read ("v": newer_journal says when a newer one wrote it)."""
         j = self._jload(ident)
-        return j if is_item_journal(j) else None
+        return j if is_item_journal(j) and journal_readable(j) else None
 
     def jread_steam(self, ident: str) -> SteamJournal | None:
         """The Steam game's journal; None when missing, not JSON, not the shape btrfs-bulk writes,
         or of another game than its file's (recovery would act on that game and drop its journal)."""
         j = self._jload(ident)
-        return j if is_steam_journal(j) and ident == "steam-" + j["appid"] else None
+        return j if is_steam_journal(j) and journal_readable(j) and ident == "steam-" + j["appid"] else None
+
+    def newer_journal(self, ident: str) -> str | None:
+        """Why the journal of ident is not used when a newer btrfs-bulk wrote it; None otherwise."""
+        path = self.jpath(ident)
+        found = journal_version(self._jload(ident))
+        if found is None or found <= JOURNAL.version:
+            return None
+        return (
+            f"{JOURNAL.newer_text(path, found)}; left as it is: the btrfs-bulk of that CST finishes or "
+            "undoes the move (cst btrfs snapshots setup in that checkout installs it)"
+        )
 
     def jdrop(self, ident: str) -> None:
         try:

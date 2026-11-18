@@ -49,6 +49,15 @@ from tests.probes import assert_replaced_durably, recorded_fsyncs
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+# The exact bytes of state files the writers produce (tests/fixtures/state-formats).
+def kind_of(path: str) -> str:
+    """absent, link or there."""
+    return "link" if os.path.islink(path) else "there" if os.path.exists(path) else "absent"
+
+
+STATE_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 
 
@@ -1636,6 +1645,90 @@ class BulkTest(BulkBase):
         self.assertLink("go/pkg/mod", "toolchains/go/pkg/mod")
         self.assertTrue(self.machine.is_subvol(self.B("toolchains/go/pkg/mod")))
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
+
+    # ---- the journal's format version ("v", cst_core/domain/contracts.py): an older btrfs-bulk's
+    # journal (no "v") is still finished or undone; a newer one's is left alone, never read as broken.
+    def journal_crashed(self) -> bytes:
+        self.setup_programs()
+        self.crash_after_late_write()
+        with open(self.state.jpath("apps"), "rb") as f:
+            return f.read()
+
+    def files_now(self) -> list[tuple[str, list[str], list[str]]]:
+        """What is there of the move of apps (the journal's src, link, new and old, and its target)."""
+        j = self.journal("apps")
+        tops = sorted({p for k in ("src", "target", "new", "old", "link") if isinstance(p := j.get(k), str)})
+        found: list[tuple[str, list[str], list[str]]] = [(p, [kind_of(p)], []) for p in tops]
+        found += [(r, sorted(d), sorted(f)) for p in tops if not os.path.islink(p) for r, d, f in os.walk(p)]
+        return found
+
+    def test_a_journal_carries_its_format_version(self) -> None:
+        self.journal_crashed()
+        self.assertEqual(self.journal("apps")["v"], 1)
+
+    def test_a_journal_without_a_version_is_finished_or_undone_as_before(self) -> None:
+        self.journal_crashed()
+        j = self.journal("apps")
+        del j["v"]  # as btrfs-bulk wrote it before the field
+        self.write_journal("apps", j)
+        self.assertEqual(self.apply(), ([], []), self.out)
+        self.assertIn("the old folder was written to during the switch", self.out)
+        self.assertEqual(self.read("Programs/a"), "late")
+        self.assertEqual(self.journals(), [])
+
+    def test_a_journal_of_a_newer_btrfs_bulk_is_left_alone(self) -> None:
+        self.journal_crashed()
+        j = self.journal("apps")
+        j["v"] = 2
+        self.write_journal("apps", j)
+        with open(self.state.jpath("apps"), "rb") as f:
+            raw = f.read()
+        before = self.files_now()
+        deferred, problems = self.apply()
+        self.assertEqual(problems, ["apps"], self.out)
+        self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 1)
+        path = self.state.jpath("apps")
+        self.assertIn(
+            f"NEEDS A LOOK: apps: {path} is format 2 of the bulk-journal (this CST reads format 1 and older): "
+            "written by a newer CST; left as it is",
+            self.out,
+        )
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), raw)
+        self.assertEqual(self.files_now(), before)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertGreaterEqual(bulk_items.report_journals(self.bulk), 1)
+        self.assertIn(f"apps: NEEDS A LOOK: {path} is format 2 of the bulk-journal", out.getvalue())
+
+    def test_a_version_that_is_no_whole_number_makes_an_unreadable_journal(self) -> None:
+        self.journal_crashed()
+        path = self.state.jpath("apps")
+        for bad in (True, "1", -1, 1.0):
+            with self.subTest(bad=bad):
+                j = self.journal("apps")
+                j["v"] = bad
+                self.write_journal("apps", j)
+                self.out = ""
+                self.assertEqual(self.apply()[1], ["apps"], self.out)
+                self.assertIn(
+                    f"NEEDS A LOOK: apps: damaged journal {path} (unreadable, or not as btrfs-bulk writes it", self.out
+                )
+
+    def test_the_writer_produces_the_checked_in_journal_exactly(self) -> None:
+        # The bytes main's btrfs-bulk was shown to read (REPORT, the mixed-version proof): a change
+        # here changes the format, and needs that proof again.
+        with open(os.path.join(STATE_FIXTURES, "bulk-journal-v0.json"), "rb") as f:
+            v0 = f.read()
+        self.state.jwrite("apps", json.loads(v0))
+        with (
+            open(self.state.jpath("apps"), "rb") as f,
+            open(os.path.join(STATE_FIXTURES, "bulk-journal-v1.json"), "rb") as g,
+        ):
+            self.assertEqual(f.read(), g.read())
+        with open(self.state.jpath("apps"), "wb") as f:
+            f.write(v0)
+        self.assertEqual(self.state.jread_item("apps"), json.loads(v0))
 
 
 class StateFilesDurableTest(BulkBase):

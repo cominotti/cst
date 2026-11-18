@@ -56,6 +56,22 @@ class StateFormat:
         """The file's name (a glob for a folder of them)."""
         return posixpath.basename(self.path)
 
+    def newer_text(self, path: str, found: int) -> str:
+        """What a reader says of a file of a newer version than it knows."""
+        return (
+            f"{path} is format {found} of the {self.key} (this CST reads format {self.version} and older): "
+            "written by a newer CST"
+        )
+
+
+def version_of(data: object, field: str) -> int | None:
+    """The format version a JSON object carries in field: 0 when it has no such field; None when data is not
+    an object or the field is not a whole number >= 0 (true is not 1)."""
+    if not isinstance(data, dict):
+        return None
+    found = data.get(field, 0)
+    return found if type(found) is int and found >= 0 else None
+
 
 # key | path | version | writers | readers | where the version is kept.
 # Writers and readers: repository files, separated by blanks.
@@ -81,7 +97,7 @@ _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/cst-pending-alerts doctor/application.py     | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/monitor.py  | btrfs/stall_report/analysis.py                     | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/monitor.py  | btrfs/btrfs-notify                                 | none (plain text, one boot)
-bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 0 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | none yet
+bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 0 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | none yet
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 0 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | none yet
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters.py                   | vm/adapters.py doctor/application.py               | "version"

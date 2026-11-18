@@ -18,13 +18,26 @@ from typing import TypedDict
 import os
 import re
 
-from cst_core.domain.contracts import StateFormat, state_format
+from cst_core.domain.contracts import StateFormat, state_format, version_of
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.values import format_bytes_gib_mib
 
 NOTIFY = manifest_by_src()["btrfs/btrfs-notify"].dest
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
 JOURNAL: StateFormat = state_format("bulk-journal")
+
+
+def journal_version(data: object) -> int | None:
+    """The format of a journal as read (no "v": 0, an older btrfs-bulk wrote it), None when it is not one."""
+    return version_of(data, "v")
+
+
+def journal_readable(data: object) -> bool:
+    """A journal this btrfs-bulk can act on: an object of its format or an older one."""
+    found = journal_version(data)
+    return found is not None and found <= JOURNAL.version
+
+
 # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
 ALERTS = state_format("alert-spool").folder
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args

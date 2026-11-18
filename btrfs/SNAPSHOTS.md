@@ -1587,6 +1587,19 @@ become a symbolic link, the repair (which runs as root) does not follow it: it
 says `NEEDS A LOOK: ... is a symbolic link (not followed)` and keeps the
 record.
 
+**`bulk status` says `NEEDS A LOOK: ... is format N of the bulk-journal (this CST reads format M and older): written by a newer CST`.**
+The record of an interrupted move (`/var/lib/btrfs-bulk/journal-*.json`) was
+written by a newer `btrfs-bulk` than the one that runs now: you went back to
+an older CST (an older checkout, then `snapshots setup` or `bulk apply`) while
+a move was not finished. The older `btrfs-bulk` does not guess what the newer
+record means: it leaves the record and that item as they are (the other items
+still move), and the boot step does the same. Go back to the CST that wrote
+it (`git checkout` that version, then `cst btrfs snapshots setup`), let it
+finish or undo the move (`cst btrfs bulk apply` or a reboot), then change
+versions. Each record carries its format in `"v"`; a record without it is
+format 0, written before the field existed, and every later `btrfs-bulk`
+reads it.
+
 **`bulk status` says `NEEDS A LOOK: ... was created again while the data waited in ...`.**
 A move was interrupted halfway, and before it was undone a program (or you)
 created the usual folder again, empty or with a few new files. Your data is

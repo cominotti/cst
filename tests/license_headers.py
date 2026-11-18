@@ -43,6 +43,7 @@ IDENTIFIER: Final = "SPDX-License-Identifier: MPL-2.0"
 LICENSE_EXEMPT: Final[dict[str, str]] = {
     "LICENSE": "the license itself; its Exhibit A is the full notice",
     "uv.lock": "generated: `uv lock` writes the whole file",
+    "tests/fixtures/state-formats/*.json": "JSON has no comments (the exact bytes of state files CST's writers produce)",
     "doctor/tests/fixtures/*.json": "JSON has no comments (captured `rpm-ostree status --json` output)",
     "btrfs/tests/fixtures/steam/*.acf": "Steam's own app manifests, as Steam writes them, for the parser under test",
     "btrfs/tests/fixtures/steam/*.vdf": "Steam's own library files, as Steam writes them, for the parser under test",
