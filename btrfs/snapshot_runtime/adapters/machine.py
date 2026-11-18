@@ -5,8 +5,10 @@ journal lines, and btrfs-snapshot-core's command lines with the common arguments
 """
 
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 import os
 import sys
+import time
 from typing import TextIO
 
 from btrfs.snapshot_runtime.domain import (
@@ -23,6 +25,8 @@ from btrfs.snapshot_runtime.domain import (
 )
 from cst_core.adapters.files import read_text
 from cst_core.adapters.journal import log
+from cst_core.adapters.locks import take_lock
+from cst_core.adapters.runtime import sibling_program
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -31,7 +35,7 @@ from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 class SnapshotRun:
     """Paths, settings and commands of one run (see the module docstring)."""
 
-    def __init__(self, environ: Mapping[str, str], runner: CommandRunnerPort) -> None:
+    def __init__(self, environ: Mapping[str, str], runner: CommandRunnerPort, main_file: str = "") -> None:
         # The test seam never moves a run as root.
         r = "" if os.geteuid() == 0 else environ.get("CST_SNAPSHOT_ROOT", "")
         self.root = r
@@ -40,7 +44,7 @@ class SnapshotRun:
         self.state = f"{r}/var/lib/btrfs-snapshot"
         self.core = f"{r}/usr/local/sbin/btrfs-snapshot-core"
         self.notify = f"{r}/usr/local/sbin/btrfs-notify"
-        self.lock = f"{r}/run/btrfs-snapshot.lock"
+        self.lock_path = f"{r}/run/btrfs-snapshot.lock"
         self.run_dir = f"{r}/run/btrfs-snapshot"
         self.pin_file = f"{self.run_dir}/pinned"
         self.nas_mnt = f"{self.run_dir}/nas"
@@ -51,6 +55,10 @@ class SnapshotRun:
         self.bulk_flag = f"{r}/etc/btrfs-setup/bulk-at-boot"
         self.bulk_state = f"{r}/var/lib/btrfs-bulk"
         self.runner = runner
+        # The bash front and engine (btrfs/btrfs-snapshot), next to this program.
+        self.front = sibling_program("btrfs/btrfs-snapshot", main_file) if main_file else ""
+        # The descriptors every command gets (the run's locks: fd 9 and 8 of the bash).
+        self.fds: tuple[int, ...] = ()
         self.env_home = environ.get("HOME_DIR", "")
         self.settings: dict[str, str] = dict(DEFAULTS)
         self.snapdir = ""
@@ -103,7 +111,8 @@ class SnapshotRun:
     ) -> CommandResult:
         """argv with this process's environment and stdin from /dev/null; a command that cannot start
         says so on stderr as bash does (127 not found, 126 not runnable)."""
-        res = self.runner.run(argv, output=output, input_text=input_text, pass_fds=pass_fds, on_line=on_line, env=env)
+        fds = tuple(pass_fds) or self.fds
+        res = self.runner.run(argv, output=output, input_text=input_text, pass_fds=fds, on_line=on_line, env=env)
         if res.fault is not None:
             what = "command not found" if res.fault == "missing" else "cannot be run"
             print(f"{TAG}: {argv[0]}: {what}", file=sys.stderr, flush=True)
@@ -123,7 +132,7 @@ class SnapshotRun:
 
     def ok(self, argv: Sequence[str], *, input_text: str | None = None) -> bool:
         """argv >/dev/null 2>&1 succeeded."""
-        res = self.runner.run(argv, output="capture", input_text=input_text)
+        res = self.runner.run(argv, output="capture", input_text=input_text, pass_fds=self.fds)
         return res.fault is None and res.returncode == 0
 
     # ---- what the bash asked through commands ---------------------------------------------------
@@ -156,3 +165,95 @@ class SnapshotRun:
             self.state,
             *CORE_HINTS,
         ]
+
+    # ---- files, as the bash's commands treat them ----------------------------------------------
+    @staticmethod
+    def now() -> int:
+        """date +%s."""
+        return int(time.time())
+
+    @staticmethod
+    def mtime(path: str) -> int | None:
+        """stat -c %Y PATH (None when it cannot be read)."""
+        try:
+            return int(os.stat(path).st_mtime)
+        except OSError:
+            return None
+
+    @staticmethod
+    def rm_f(*paths: str) -> None:
+        """rm -f PATHS: a missing one is no error; any other failure is said on stderr."""
+        for p in paths:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"rm: cannot remove '{p}': {e.strerror}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def touch(*paths: str) -> None:
+        """touch PATHS: created (umask mode) or their times set to now."""
+        for p in paths:
+            try:
+                with open(p, "a", encoding="utf-8"):
+                    pass
+                os.utime(p, None)
+            except OSError as e:
+                print(f"touch: cannot touch '{p}': {e.strerror}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def write(path: str, text: str) -> None:
+        """echo/printf ... >PATH (umask mode); a failure said on stderr, as bash's redirection."""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            print(f"{TAG}: {path}: {e.strerror}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def read(path: str) -> str | None:
+        """$(cat PATH 2>/dev/null) without the trailing newlines: None when it cannot be read."""
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+                return f.read().rstrip("\n")
+        except OSError:
+            return None
+
+    @staticmethod
+    def read_raw(path: str) -> str:
+        """The whole text of PATH ("" when it cannot be read)."""
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    @staticmethod
+    def non_empty(path: str) -> bool:
+        """[[ -s PATH ]]."""
+        try:
+            return os.stat(path).st_size > 0
+        except OSError:
+            return False
+
+    # ---- the lock ------------------------------------------------------------------------------
+    def lock(self, path: str, *, wait: bool, timeout: float | None = None) -> int | None:
+        """exec N>PATH; flock: an fd holding the lock, handed on to every command from now on; None
+        when another run holds it (or it cannot be opened: said on stderr, as bash says it)."""
+        mask = os.umask(0)
+        os.umask(mask)
+        try:
+            fd = take_lock(path, wait=wait, mode=0o666 & ~mask, nofollow=False, timeout=timeout)
+        except OSError as e:
+            print(f"{TAG}: {path}: {e.strerror}", file=sys.stderr, flush=True)
+            return None
+        if fd is not None:
+            self.fds = (*self.fds, fd)
+        return fd
+
+    def unlock(self, fd: int) -> None:
+        """exec N>&-: the lock released (unless a command still holds it)."""
+        self.fds = tuple(f for f in self.fds if f != fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)

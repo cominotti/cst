@@ -23,6 +23,6 @@ def main(argv: Sequence[str]) -> int:
     if command is None:
         print(USAGE, file=sys.stderr)
         return EXIT_USAGE
-    m = SnapshotRun(os.environ, SubprocessCommandRunner())
+    m = SnapshotRun(os.environ, SubprocessCommandRunner(), argv[0])
     m.start()
     return command(m, argv[2:])

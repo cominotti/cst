@@ -74,12 +74,12 @@
 
 set -Euo pipefail
 
-# list, caches and configure are the Python runtime's (btrfs-snapshot-runtime,
+# hourly, list, caches, prune, purge and configure are the Python runtime's (btrfs-snapshot-runtime,
 # next to this file; installed beside it): handed over at once, with the
 # command line, before anything here runs. CST_LC_CTYPE: the caller's
 # LC_CTYPE ("" when unset), which Python changes at start under a C locale.
 case "${1:-}" in
-    list|caches|configure)
+    hourly|list|caches|prune|purge|configure)
         CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" exec /usr/bin/python3 -I -B \
             "$(dirname "${BASH_SOURCE[0]}")/btrfs-snapshot-runtime" "$@" ;;
 esac

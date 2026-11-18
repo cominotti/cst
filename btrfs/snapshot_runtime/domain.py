@@ -21,6 +21,49 @@ EXIT_USAGE: Final = 2
 SUBVOL_ROOT_INODE: Final = "256"
 
 
+DAY_S: Final = 86400
+CORE_LOCK_BUSY: Final = 3
+CORE_BLOCKED: Final = 4
+PURGE_BATCH: Final = 10
+# How many paths an alert names (head -n 3).
+SHOWN: Final = 3
+
+
+class Urgency(StrEnum):
+    """btrfs-notify's -u."""
+
+    NORMAL = "normal"
+    CRITICAL = "critical"
+
+
+class AlertKind(StrEnum):
+    """The kinds of alert, each at most once a day (STATE/alerted-KIND)."""
+
+    BLOCKED = "blocked"
+    PAUSED = "paused"
+    EMERGENCY = "emergency"
+    PRUNE_FAILED = "prune-failed"
+    PENDING = "pending"
+    BOOT_WAIT = "boot-wait"
+    BULK_JOURNAL = "bulk-journal"
+    BULK_WAIT = "bulk-wait"
+    NAS = "nas"
+    NAS_CREATED = "nas-created"
+    NAS_PASSWORD = "nas-password"
+    NAS_CHECK = "nas-check"
+
+
+class CoreCommand(StrEnum):
+    """btrfs-snapshot-core's commands that this program runs."""
+
+    SNAPSHOT = "snapshot"
+    PRUNE = "prune"
+    FINISH = "finish"
+    LIST = "list"
+    CACHES = "caches"
+    LATEST = "latest"
+
+
 class Stderr(StrEnum):
     """What a captured command's stderr does: shown on ours, or dropped (2>/dev/null)."""
 
@@ -155,7 +198,43 @@ def core_reason(lines: Sequence[str]) -> str:
     )
     if block is not None:
         return block
-    return found[0] if found else ""
+    # awk's first == "" {first = $0}: the first line that is not empty.
+    return next((ln for ln in found if ln), "")
+
+
+def plan_entries(text: str) -> list[tuple[str, str]]:
+    """(strategy, path) of each line of the convert plan, as `while read -r strategy path` reads it:
+    only lines ended by a newline, blanks (space, tab) around the words, the path the rest of the
+    line; empty paths and comments (# in the strategy) left out."""
+    out: list[tuple[str, str]] = []
+    for line in text.split("\n")[:-1]:
+        words = re.split(r"[ \t]+", line.strip(" \t"), maxsplit=1)
+        strategy, path = words[0], (words[1] if len(words) > 1 else "")
+        if not path or strategy.startswith("#"):
+            continue
+        out.append((strategy, path))
+    return out
+
+
+def read_lines(text: str) -> list[str]:
+    """The lines `while IFS= read -r line` gives: those ended by a newline."""
+    return text.split("\n")[:-1]
+
+
+def nonempty_count(text: str) -> int:
+    """grep -c . : the lines with at least one character (a last line without a newline too)."""
+    return sum(1 for ln in text.split("\n") if ln)
+
+
+def head_spaced(text: str, n: int) -> str:
+    """head -n N | tr '\\n' ' ': the first N lines, each newline a blank."""
+    lines = text.split("\n")
+    ends = len(lines) - 1  # the lines ended by a newline
+    shown = lines[: min(n, ends)]
+    out = "".join(f"{ln} " for ln in shown)
+    if ends < n and lines[-1]:
+        out += lines[-1]
+    return out
 
 
 def blocked_alert(reason: str, conf: str) -> tuple[str, str]:

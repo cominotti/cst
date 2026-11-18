@@ -184,6 +184,7 @@ include = [
     "btrfs/snapshot_runtime/__init__.py",
     "btrfs/snapshot_runtime/adapters/__init__.py",
     "btrfs/snapshot_runtime/adapters/commands.py",
+    "btrfs/snapshot_runtime/adapters/hourly.py",
     "btrfs/snapshot_runtime/adapters/machine.py",
     "btrfs/snapshot_runtime/cli.py",
     "btrfs/snapshot_runtime/domain.py",
