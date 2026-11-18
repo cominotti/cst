@@ -112,7 +112,17 @@ usage() {
     sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' "${SELF}" | sed 's/^# \{0,1\}//'
     echo "Usage: ${PROG} <command> [options]"
 }
-in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }
+# in_container: inside a toolbox or another container. Tests set CST_BT_CONTAINER
+# (1: inside, 0: on the host) and CST_BT_ROOT (where the host's / is seen from
+# here, for /etc and /usr/share), as doctor's tests set CST_DOCTOR_CONTAINER
+# and CST_DOCTOR_ROOT.
+in_container() {
+    case "${CST_BT_CONTAINER:-}" in
+        1) return 0 ;;
+        0) return 1 ;;
+    esac
+    [[ -e /run/.containerenv || -e /.dockerenv ]]
+}
 die() { echo "${PROG}: ERROR: $*" >&2; exit 1; }
 bad_usage() { echo "${PROG} ${cmd}: $*" >&2; exit 2; }
 helper() { python3 -I -B "${HELPER}" "$@"; }
@@ -199,9 +209,11 @@ fi
 
 # Inside a toolbox the host's /etc is at /run/host/etc and the host's tools
 # are reached through flatpak-spawn (read-only use: apply never runs there).
-ETC=/etc
-USR_SHARE=/usr/share
-if in_container; then ETC=/run/host/etc; USR_SHARE=/run/host/usr/share; fi
+HOST_ROOT=""
+if in_container; then HOST_ROOT=/run/host; fi
+HOST_ROOT="${CST_BT_ROOT:-${HOST_ROOT}}"
+ETC="${HOST_ROOT}/etc"
+USR_SHARE="${HOST_ROOT}/usr/share"
 MAIN_CONF="${ETC}/bluetooth/main.conf"
 hostcmd() {
     if in_container; then flatpak-spawn --host "$@"; else "$@"; fi
