@@ -1334,7 +1334,8 @@ What you should know:
   only, whose data is not in /home).
 - **A damaged journal** (`/var/lib/btrfs-bulk/journal-*.json` that is not
   JSON, or JSON btrfs-bulk never writes: a key missing or of another type,
-  an unknown kind or phase) is reported as `NEEDS A LOOK: ID: damaged
+  an unknown kind or phase, a Steam journal naming another game than its
+  file name) is reported as `NEEDS A LOOK: ID: damaged
   journal PATH`. It stays where it is, nothing it names is touched, and the
   run exits non-zero. Compare the paths by hand, then delete the journal.
 - **Steam**: close Steam, then `cst btrfs bulk steam plan` and `cst btrfs

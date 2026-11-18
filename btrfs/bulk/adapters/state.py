@@ -137,9 +137,10 @@ class StateFiles:
         return j if is_item_journal(j) else None
 
     def jread_steam(self, ident: str) -> SteamJournal | None:
-        """The Steam game's journal; None when missing, not JSON or not the shape btrfs-bulk writes."""
+        """The Steam game's journal; None when missing, not JSON, not the shape btrfs-bulk writes,
+        or of another game than its file's (recovery would act on that game and drop its journal)."""
         j = self.jload(ident)
-        return j if is_steam_journal(j) else None
+        return j if is_steam_journal(j) and ident == "steam-" + j["appid"] else None
 
     def jdrop(self, ident: str) -> None:
         try:

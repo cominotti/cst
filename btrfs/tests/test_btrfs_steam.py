@@ -1163,7 +1163,8 @@ class SteamTest(tb.BulkBase):
 
     def test_a_steam_journal_missing_a_key_is_damaged_and_kept(self) -> None:
         # kind "steam" but no dst_lib (or a part without its old path, or no stamp2 after the
-        # copies): recovery names it, keeps it and touches nothing; put back, it recovers.
+        # copies, or the appid of another game than its file's): recovery names it, keeps it and
+        # touches nothing; put back, it recovers.
         self.crash_os_in("write_vdf_pair", "rename", 0, nth=2)
         good = self.journal("steam-570")
         part = {k: v for k, v in good["parts"][0].items() if k != "old"}
@@ -1173,6 +1174,7 @@ class SteamTest(tb.BulkBase):
             {k: v for k, v in good.items() if k != "stamp2"},
             {**good, "phase": "unknown"},
             {**good, "appid": "../570"},
+            {**good, "appid": "571"},  # another game's: recovery would act on it and drop its journal
         ]
         for bad in damaged:
             with open(self.state.jpath("steam-570"), "w") as f:
