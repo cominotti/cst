@@ -10,9 +10,11 @@ Run from the repository root:
 """
 
 import os
+import pwd
 import unittest
 
 from bluetooth.tests.setup_fakes import ISO, SETUP, Machine
+from tests.test_module_routing import userns_root
 
 GENERAL = "[General]\n#Experimental = false\n"
 
@@ -111,6 +113,37 @@ class StoppedTest(unittest.TestCase):
             self.assertEqual(f.read(), GENERAL)
         with open(m.wp_conf, "rb") as f:
             self.assertEqual(f.read(), b"# \xff\n")
+
+
+class StepDownTest(unittest.TestCase):
+    """Run as root (through sudo), the program runs again as SUDO_USER without the tests' overrides."""
+
+    def test_the_test_overrides_do_not_reach_the_run_as_the_user(self) -> None:
+        # sudo -E or a root shell could pass on CST_BT_ROOT, CST_BT_CONTAINER (Machine sets
+        # both) and CST_BT_LIBWP (the libwireplumber that bt-helper wp-roles loads).
+        if not userns_root():
+            self.skipTest("needs an unprivileged user namespace (unshare -r); tier 1 test_96 runs it as root")
+        m = Machine(self)
+        me = pwd.getpwuid(os.getuid())
+        r = m.run(
+            "plan",
+            "--device",
+            "AA:BB:CC:DD:EE:FF",
+            root=True,
+            env={"SUDO_USER": me.pw_name, "CST_BT_LIBWP": "/nowhere/libwp.so"},
+        )
+        self.assertEqual(r.returncode, 0, r.text)
+        session = (
+            f"HOME={me.pw_dir} USER={me.pw_name} LOGNAME={me.pw_name} XDG_RUNTIME_DIR=/run/user/{me.pw_uid} "
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{me.pw_uid}/bus"
+        )
+        unset = "-u XDG_CONFIG_HOME -u CST_BT_ROOT -u CST_BT_CONTAINER -u CST_BT_LIBWP -u SUDO_USER"
+        self.assertEqual(
+            r.calls,
+            [
+                f"runuser -u {me.pw_name} -- env {unset} {session} {os.path.realpath(SETUP)} plan --device AA:BB:CC:DD:EE:FF"
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@
 Machine builds a scratch HOME, a scratch host root (CST_BT_ROOT, with its
 /etc/bluetooth/main.conf) and a folder of stub commands on PATH: systemctl,
 sudo, busctl, bluetoothctl, journalctl, pactl, pw-dump, flatpak-spawn,
-selinuxenabled, sleep and python3 (which answers only bt-helper's wp-roles
-and passes every other call to /usr/bin/python3). The stubs keep their state
+selinuxenabled, sleep, python3 (which answers only bt-helper's wp-roles
+and passes every other call to /usr/bin/python3) and runuser (only logged). The stubs keep their state
 in files and log every call, so a test sees what the program ran, in order.
 Nothing reaches the real machine: sudo runs its command as the caller (with
 the root-only options of cp and install left out) and only inside the
@@ -40,6 +40,7 @@ STUBS = (
     "selinuxenabled",
     "sleep",
     "python3",
+    "runuser",
 )
 
 FAKE = r"""#!/bin/bash
@@ -174,6 +175,7 @@ case "$me" in
     pw-dump) cat "$S/pw-dump.json" 2>/dev/null; exit ;;
     selinuxenabled) [[ -e "$S/selinux" ]]; exit ;;
     sleep) exit 0 ;;
+    runuser) exit 0 ;; # the run as SUDO_USER: its command line is in the log
     python3)
         if [[ "$*" == *wp-roles* ]]; then
             log "  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-}"
@@ -321,13 +323,15 @@ class Machine:
         env: Mapping[str, str] | None = None,
         stdin_text: str | None = None,
         timeout: float = 120,
+        root: bool = False,
     ) -> Run:
-        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox)."""
+        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; root: as root
+        in a user namespace, unshare -r, where this user is root with no privilege outside)."""
         log = os.path.join(self.state, "log")
         if os.path.exists(log):
             os.unlink(log)
         r = subprocess.run(
-            ["bash", SETUP, *args],
+            [*(["/usr/bin/unshare", "-r"] if root else []), "bash", SETUP, *args],
             check=False,
             capture_output=True,
             text=True,

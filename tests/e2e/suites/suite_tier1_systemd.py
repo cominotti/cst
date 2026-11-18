@@ -2734,10 +2734,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
 
     def test_96_bluetooth_as_root_drops_the_test_overrides(self) -> None:
         """Run as root with SUDO_USER, `cst bluetooth` runs again as that user without the
-        unit tests' overrides CST_BT_ROOT and CST_BT_CONTAINER (sudo -E or a root shell could
-        pass them on): plan reads the real /etc/bluetooth/main.conf, not the one under the
-        folder CST_BT_ROOT names, and does not take itself for a run inside a toolbox
-        (/run/host/etc). The EUID branch cannot run in the unit tests (no root there)."""
+        unit tests' overrides CST_BT_ROOT, CST_BT_CONTAINER and CST_BT_LIBWP (sudo -E or a root
+        shell could pass them on): plan reads the real /etc/bluetooth/main.conf, not the one
+        under the folder CST_BT_ROOT names, and does not take itself for a run inside a toolbox
+        (/run/host/etc); status reads WirePlumber's roles through the real libwireplumber, not
+        the missing library CST_BT_LIBWP names. The unit twin (StepDownTest in
+        bluetooth/tests/test_setup.py) runs under unshare -r with a fake runuser."""
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, "rm -rf /tmp/bt96", check=False)
         exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -2747,14 +2749,22 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             printf '[General]\\n# elsewhere\\n' >/tmp/bt96/etc/bluetooth/main.conf
             """,
         )
+        overrides = "SUDO_USER=tester CST_BT_ROOT=/tmp/bt96 CST_BT_CONTAINER=1 CST_BT_LIBWP=/tmp/bt96/no-such.so"
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
-            "rc=0; SUDO_USER=tester CST_BT_ROOT=/tmp/bt96 CST_BT_CONTAINER=1 "
-            "/opt/cst-rw/cst bluetooth plan --device 00:11:22:33:44:55 || rc=$?; echo rc=$rc",
+            f"rc=0; {overrides} /opt/cst-rw/cst bluetooth plan --device 00:11:22:33:44:55 || rc=$?; echo rc=$rc",
             check=False,
         )
         self.assertIn("; host /etc in /etc\n", r.stdout, r.stdout + r.stderr)
         self.assertIn("rc=10", r.stdout, r.stdout + r.stderr)
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"{overrides} /opt/cst-rw/cst bluetooth status --device 00:11:22:33:44:55 2>&1 || true",
+            check=False,
+        )
+        roles = [line for line in r.stdout.splitlines() if "WirePlumber bluez5.roles" in line]
+        self.assertEqual(len(roles), 1, r.stdout)
+        self.assertNotIn("could not be read", roles[0], r.stdout)
 
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
