@@ -607,8 +607,12 @@ grep -qxF "removed:   $rule" <<<"$out"
 [[ -z "$(rules)" ]]
 grep -qxF "DEVICE=$mac" "$conf"
 
-# 6. No headset at all: plan, apply and a second apply skip its parts and write nothing for one.
+# 6. No headset at all: plan, apply and a second apply skip its parts and write nothing for one;
+# the old script's first rule name, which only a headset's rule replaces, stays.
 rm -f "$conf"
+legacy="$wp/50-jbl-live-beam-4.conf"
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$legacy"
+l0="$(sum "$legacy")"
 rc=0; out="$(bt plan 2>&1)" || rc=$?
 show "plan, no headset" "$out"
 [[ "$rc" == 10 ]]   # main.conf and the LE Audio drop-in, which need no headset
@@ -624,13 +628,15 @@ grep -qxF "$wp_restart_line" <<<"$out"
 no_writes "apply after --no-restart, no headset" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
 step "second apply, no headset" apply --yes
 no_writes "second apply, no headset" "$out"
-[[ ! -e "$conf" && -z "$(rules)" ]]
+[[ ! -e "$conf" && -z "$(rules)" && "$(sum "$legacy")" == "$l0" ]]
 rc=0; out="$(bt plan 2>&1)" || rc=$?
 show "plan after apply, no headset" "$out"
 [[ "$rc" == 0 ]]
 out="$(bt revert --yes --no-restart 2>&1)"
 show "revert, no headset" "$out"
 grep -qF "unchanged: no headset set: " <<<"$out"
+[[ "$(sum "$legacy")" == "$l0" ]]
+rm -f "$legacy"
 echo E2E-OK
 """
 )
@@ -2901,13 +2907,15 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         does not run here, as in test_80); a second apply changes nothing and plan has nothing to do; revert removes
         the rule and keeps DEVICE. Then no headset at all: plan, apply and a second apply skip
         the headset's LDAC rule and checks, write main.conf and the LE Audio drop-in, and no
-        headset's rule or setting; revert says there is no rule to remove."""
+        headset's rule or setting, and the old script's first rule name (only a headset's rule
+        replaces it) stays; revert says there is no rule to remove."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
             "rm -f /home/tester/.config/cst/bluetooth.conf "
-            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf",
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf "
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-jbl-live-beam-4.conf",
             check=False,
         )
         exec_bash(

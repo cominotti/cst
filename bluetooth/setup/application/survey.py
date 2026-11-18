@@ -393,7 +393,8 @@ class Survey:
         self.wp_state = (
             self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality)) if self.headset else "none"
         )
-        self.legacy = f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
+        # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
+        self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
         self.le_plan()
         self.bearer_state = "none"
         if self.c.bearer and not self.headset:
@@ -463,6 +464,11 @@ class Survey:
             self.lw_change = not done
         else:
             self.lw_change = self.lw_ours_present()
+
+    def lw_off_why(self) -> str:
+        """Why apply keeps the watcher off: LDAC_RATE is empty, or no headset is set for it."""
+        rate = self.c.ldac_rate
+        return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
         return self.lw_unit_st in ("ok", "change") or self.lw_prog_st in ("ok", "change")
@@ -570,7 +576,7 @@ class Survey:
         svc = f"{LDAC_UNIT} (your session)"
         rate = self.c.ldac_rate
         if not self.lw_want:
-            why = f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
+            why = self.lw_off_why()
             if self.lw_ours_present():
                 self.item("remove", "LDAC rate watcher", f"{why}: apply stops and removes {LDAC_UNIT} and its program")
             elif rate:

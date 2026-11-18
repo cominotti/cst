@@ -331,6 +331,10 @@ class Change(Checks):
         c = self.c
         if self.warns:
             self.out(f"Done, with {self.warns} warning(s). Details: {c.prog} status\n")
+        elif not self.headset:
+            self.out(f"Done. The headset's parts were skipped: {self.no_headset()}\n")
+            if c.le_audio == "off":
+                self.out(f"Turn LE Audio on: {self.le_on_hint}\n")
         elif c.le_audio == "off":
             self.out(f"Done. LE Audio is off in PipeWire: the headset plays over a2dp-sink, with LDAC ({c.quality}).\n")
             self.out(f"Turn LE Audio on: {self.le_on_hint}\n")

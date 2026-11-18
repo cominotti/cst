@@ -90,7 +90,7 @@ class Checks(Survey):
                     f"{self.lw_active or 'not running'} (LDAC_RATE={rate}): {prog} apply; logs: journalctl --user -u {unit}",
                 )
         elif self.lw_active == "active":
-            self.check_warn(unit, f"running although LDAC_RATE is empty: {prog} apply stops and removes it")
+            self.check_warn(unit, f"running although {self.lw_off_why()}: {prog} apply stops and removes it")
         if self.lw_want or self.lw_ours_present():
             self.lw_failure_check()
 

@@ -313,14 +313,16 @@ def resolve(
     )
 
 
-# A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf.
-RULE_NAME: Final = re.compile(r"50-bluez-((?:[0-9A-Fa-f]{2}_){5}[0-9A-Fa-f]{2})\.conf")
+# A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf, in capitals
+# (as every version wrote it: Config.device is upper case).
+RULE_NAME: Final = re.compile(r"50-bluez-((?:[0-9A-F]{2}_){5}[0-9A-F]{2})\.conf")
 
 
 def rule_device(name: str) -> str | None:
-    """The headset a rule's file name is for (AA:BB:...), or None (another name, a .bak copy)."""
+    """The headset a rule's file name is for (AA:BB:...), or None (another name, a .bak copy, an
+    address in lower case, which is not CST's name for it)."""
     m = RULE_NAME.fullmatch(name)
-    return m.group(1).upper().replace("_", ":") if m else None
+    return m.group(1).replace("_", ":") if m else None
 
 
 def no_headset_note(rules: Sequence[str], settings: str) -> str:

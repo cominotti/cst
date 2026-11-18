@@ -261,8 +261,8 @@ class HeadsetTest(SetupCase):
         m.put(os.path.join(m.wp_dir, "50-bluez-11_22_33_44_55_66.conf"), "monitor.bluez.rules = []\n")
         self.old_rule(m, "50-bluez-jbl.conf")  # not an address
         self.assertIn(f"Headset {MAC} (from CST's LDAC rule; apply saves it as DEVICE in ", self.plan(m))
-        # A second rule (the old script's marker counts, a lower-case name too): no headset is taken.
-        m.put(os.path.join(m.wp_dir, "50-bluez-aa_bb_cc_dd_ee_ff.conf"), f"# {OLD_WP}\n")
+        # A second rule (the old script's marker counts): no headset is taken.
+        m.put(os.path.join(m.wp_dir, "50-bluez-AA_BB_CC_DD_EE_FF.conf"), f"# {OLD_WP}\n")
         out = self.plan(m)
         self.assertIn("Headset none (no DEVICE set)", out)
         self.assertIn(
@@ -387,6 +387,39 @@ class HeadsetTest(SetupCase):
             self.assertNotIn("Traceback", r.stderr, args)
         self.assertIn("Headset none (no DEVICE set)", self.plan(m))
         os.chmod(locked, 0o600)
+
+    def test_a_rule_name_cst_never_writes_names_no_headset(self) -> None:
+        # CST (every version) writes the address in capitals; a lower-case name is not its file, and
+        # apply would manage the capital name next to it (a second rule that revert leaves behind).
+        m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)
+        rule = self.old_rule(m, f"50-bluez-{DEV.lower()}.conf")
+        self.assertIn("Headset none (no DEVICE set)", self.plan(m))
+        m.run("apply", "--yes", "--no-restart")
+        self.assertEqual(sorted(n for n in os.listdir(m.wp_dir) if n.startswith("50-bluez-")), [os.path.basename(rule)])
+        self.assertEqual(self.text(m.settings), "LE_AUDIO=off\n")
+
+    def test_without_a_headset_the_oldest_rule_name_is_left_alone(self) -> None:
+        # apply-le-audio.sh's first name for the rule: with a headset apply renames it (the rule
+        # under the headset's name); with none there is no name to give it, so it stays.
+        m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)
+        legacy = m.put(os.path.join(m.wp_dir, "50-jbl-live-beam-4.conf"), OLD_WP)
+        self.assertNotIn("older name of the same rule", self.plan(m))
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertNotIn("removed:", r.stdout, r.text)
+        self.assertEqual(self.text(legacy), OLD_WP)
+
+    def test_status_says_a_running_watcher_has_no_headset(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.run("apply", "--no-restart")
+        m.user_settings("DEVICE=\nLDAC_RATE=48000\n")
+        self.assertIn(
+            row(
+                "warn",
+                LW,
+                "running although no headset is set (LDAC_RATE=48000 needs one): cst-t apply stops and removes it",
+            ),
+            m.run("status", env={"CST_PROG": "cst-t"}).stdout,
+        )
 
     def test_the_option_wins_and_is_not_saved(self) -> None:
         m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)

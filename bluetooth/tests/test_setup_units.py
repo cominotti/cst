@@ -130,6 +130,22 @@ class ApplyDoneTest(unittest.TestCase):
             console.stdout,
         )
 
+    def test_no_headset(self) -> None:
+        # No headset set: no LDAC rule and no headset checks, so no word of a headset playing.
+        m = self.machine()
+        m.put("wp-roles", "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n")
+        run, console, _ = change(m, "apply", "--yes", "--no-restart", settings={"DEVICE": ""})
+        self.assertEqual(run.apply(), 0, console.stdout + console.stderr)
+        self.assertEqual((run.fails, run.warns), (0, 0), console.stdout)
+        self.assertTrue(
+            console.stdout.endswith(
+                "\nDone. The headset's parts were skipped: no headset set: set DEVICE=AA:BB:CC:DD:EE:FF in "
+                "~/.config/cst/bluetooth.conf (bluetoothctl devices lists the paired ones), or use --device MAC\n"
+                "Turn LE Audio on: cst-t le-audio on\n"
+            ),
+            console.stdout,
+        )
+
     def test_a_warning_is_counted(self) -> None:
         m = self.machine()
         run, console, _ = change(m, "apply", "--yes", "--no-restart")  # no wp-roles answer: a warning

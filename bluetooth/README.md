@@ -261,8 +261,9 @@ with it has CST's LDAC rule for that headset
 file. So when your file has no `DEVICE` line at all, the headset of CST's one
 LDAC rule there is used (`plan` shows "from CST's LDAC rule" and a `set` line
 for it, exit 10), and `apply` saves it as `DEVICE` in your file, the other
-lines kept. A rule CST did not write (no CST marker), a `.bak` copy, and the
-case of several rules (then none is taken; the `skip` line lists them) name no
+lines kept. A rule CST did not write (no CST marker), a `.bak` copy, a name
+with the address in lower case (CST always writes capitals), and the case of
+several rules (then none is taken; the `skip` line lists them) name no
 headset. An empty `DEVICE=` in your file means "no headset" and is kept.
 
 **Settings.** The defaults are in [`bluetooth.conf`](bluetooth.conf) in this
@@ -325,7 +326,9 @@ and `plan` no longer shows it (restart it by hand:
   comments (with the marker `# managed-by: bluetooth-setup.sh (CST)`) and
   restarts nothing, because WirePlumber does not read comments.
 - The old script's very first rule name, `50-jbl-live-beam-4.conf`, is
-  removed when found (that does restart WirePlumber, as the old script did).
+  removed when found and a headset is set, whose rule replaces it (that does
+  restart WirePlumber, as the old script did). With no headset it is left
+  alone: nothing would take its place.
 - Backups: the old script's `main.conf.bak-YYYYmmdd-HHMMSS` files use the
   same names as this module's, and `revert` reads them (see below).
 - The old `--check` is now `plan`, `--revert` is `revert`; the other options
@@ -351,7 +354,7 @@ only because of the comment renewal).
 | `preferred bearer` (a warning only) | With LE Audio off: the headset prefers LE, so a connection the PC starts would carry no audio. Fix: `cst bluetooth apply --bearer bredr`. |
 | `headset` | A warning when it is on a `bap-*` profile although LE Audio is off (restart WirePlumber). Profile, the LDAC rule as WirePlumber loaded it, the codec, quality and sample rate of the output node. "not in PipeWire now" = the headset is not connected. A rule or quality that differs means: reconnect the headset. |
 | `LDAC sample rate` (a warning only) | LDAC runs above 48 kHz (96000 Hz): the headset set the stream up by itself. See [section 7](#7-ldac-sample-rate-the-optional-watcher). With the watcher active, it should be gone within seconds; if it stays, the watcher gave up (its log says why). |
-| `cst-bt-ldac48.service` | Only with `LDAC_RATE=48000`: the watcher should be active. A warning when it is not (run `apply`; its log: `journalctl --user -u cst-bt-ldac48.service`), or when it still runs although `LDAC_RATE` is empty. |
+| `cst-bt-ldac48.service` | Only with `LDAC_RATE=48000`: the watcher should be active. A warning when it is not (run `apply`; its log: `journalctl --user -u cst-bt-ldac48.service`), or when it still runs although `LDAC_RATE` is empty or no headset is set. |
 | `LDAC rate watcher` (a warning only) | Its last attempt, as its log shows it, was `failed: ...`: the time, the reason and the line before it, and how to turn the watcher off. `plan` shows the same line. |
 
 ## 7. LDAC sample rate: the optional watcher
