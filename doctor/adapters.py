@@ -7,6 +7,7 @@ import hashlib
 import os
 import pwd
 import time
+import zipfile
 from typing import BinaryIO, TextIO
 
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -74,6 +75,15 @@ class Host:
     def open_bytes(self, path: ViewPath) -> BinaryIO:
         """open(path, "rb")."""
         return open(path, "rb")
+
+    def zip_text(self, path: ViewPath, member: str, limit: int) -> str:
+        """zipfile's read of one member, its first limit bytes decoded (bad bytes replaced); a file that is
+        no zip archive, or lacks the member, raises OSError like a file that cannot be read."""
+        try:
+            with zipfile.ZipFile(path) as zf, zf.open(member) as f:
+                return f.read(limit).decode("utf-8", "replace")
+        except (zipfile.BadZipFile, KeyError) as e:
+            raise OSError(f"{path}: {member}: {e}") from e
 
     def listdir(self, path: ViewPath) -> list[str]:
         """os.listdir."""

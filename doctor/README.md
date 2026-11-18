@@ -272,10 +272,12 @@ recover: [btrfs/README.md, "When btrfs says 'No space left' but df shows free sp
   the average per disk is below 50 GiB, because then at least one disk is.
   The hourly `btrfs-health-check` (root) always reads the exact numbers.
 - The levels (50 GiB warning, 5 GiB critical) are the health check's own:
-  `UNALLOC_MIN_GIB` and `UNALLOC_CRIT_GIB` in `btrfs/health_check/domain.py`,
-  which doctor imports. While the installed `/usr/local/sbin/btrfs-health-check`
-  is still the bash version (before the next `cst btrfs install`), its levels
-  are read from its text instead, since that copy is the one that alerts.
+  `UNALLOC_MIN_GIB` and `UNALLOC_CRIT_GIB` in `btrfs/health_check/domain.py`.
+  Doctor reads them from the installed `/usr/local/sbin/btrfs-health-check`
+  first, since that copy is the one that alerts: from that module inside the
+  zipapp, or from the text of a bash version installed before the port. Then
+  from the checkout's `btrfs/health_check/domain.py`, and last from its own
+  copy of that module.
 - There is no `fix:` for low unallocated space: the way out is several steps
   (free space first, then a careful balance), not one command.
 

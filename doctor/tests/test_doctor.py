@@ -34,6 +34,7 @@ from typing import Protocol
 import types
 import unittest
 from unittest import mock
+import zipfile
 
 sys.dont_write_bytecode = True
 
@@ -66,6 +67,7 @@ from doctor.application import (
     shared as doc_shared,
     vm as doc_vm,
 )
+from btrfs.health_check import domain as hc_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
@@ -855,6 +857,40 @@ class BtrfsTest(Scratch):
         self.assertIn("warning below 600 GiB, critical below 7 GiB", res[-1].message)
         os.unlink(os.path.join(hc, "btrfs-health-check"))
         self.assertEqual(doc_btrfs.unalloc_thresholds(no_repo), doc_domain.UNALLOC_DEFAULTS)
+
+    def test_an_installed_zipapp_s_thresholds_win_over_the_checkout_s(self) -> None:
+        # Once the Python version is installed, the installed copy is a zipapp: the levels module
+        # inside it is the one that alerts, so its values count.
+        hc = os.path.join(self.root, "usr", "local", "sbin")
+        os.makedirs(hc)
+        buf = io.BytesIO(b"#!/usr/bin/python3 -I\n")
+        buf.seek(0, io.SEEK_END)
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("__main__.py", "")
+            zf.writestr(
+                "btrfs/health_check/domain.py",
+                "UNALLOC_MIN_GIB: Final = 70  # early warning\nUNALLOC_CRIT_GIB: Final = 9\n",
+            )
+        with open(os.path.join(hc, "btrfs-health-check"), "wb") as f:
+            f.write(buf.getvalue())
+        self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (70, 9))
+        # What install writes holds the checkout's levels where doctor looks for them (the defaults are
+        # set apart, so only a read can give them).
+        entry = next(e for e in INSTALL_MANIFEST if e.src == "btrfs/btrfs-health-check")
+        with open(os.path.join(hc, "btrfs-health-check"), "wb") as f:
+            f.write(entry_payload(REPO, entry))
+        no_repo = doc_adapters.Host(self.env, repo=os.path.join(self.tmp, "nope"))
+        with mock.patch.object(doc_btrfs, "UNALLOC_DEFAULTS", (1, 1)):
+            self.assertEqual(
+                doc_btrfs.unalloc_thresholds(no_repo), (hc_domain.UNALLOC_MIN_GIB, hc_domain.UNALLOC_CRIT_GIB)
+            )
+
+    def test_without_an_installed_copy_the_checkout_s_levels_count(self) -> None:
+        repo = os.path.join(self.tmp, "checkout")
+        os.makedirs(os.path.join(repo, "btrfs", "health_check"))
+        with open(os.path.join(repo, "btrfs", "health_check", "domain.py"), "w", encoding="utf-8") as f:
+            f.write("UNALLOC_MIN_GIB: Final = 61\nUNALLOC_CRIT_GIB: Final = 6\n")
+        self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=repo)), (61, 6))
 
     def test_reclaim_off_on_the_root_warns(self) -> None:
         self.fs(dyn=0, per=1)
