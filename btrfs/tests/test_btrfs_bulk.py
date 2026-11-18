@@ -26,7 +26,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_btrfs_bulk.py): the checkout root holds the tests package.
@@ -86,6 +86,7 @@ class BulkBase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    @override
     def setUp(self) -> None:
         self.out: str = ""
         self.tmp = tempfile.mkdtemp(prefix="bulk-test-")
@@ -165,7 +166,7 @@ class BulkBase(unittest.TestCase):
         self.fake(self.machine, "set_nocow", set_nocow)
         self.fake(self.machine, "copy_tree", copy_tree)
         self.fake(self.host, "busy_paths", busy_paths)
-        self.fake(self.machine, "mounts", lambda: [])
+        self.fake(self.machine, "mounts", list)
         self.fake(self.machine, "free_bytes", lambda path: 10**15)
         self.fake(self.machine, "flatpak_installed", lambda app: app in self.flatpaks)
         self.fake(self.machine, "flatpak_has_fs", lambda app, path: path in self.flatpaks.get(app, set()))
@@ -186,6 +187,7 @@ class BulkBase(unittest.TestCase):
         """The program as root (the user from bulk.conf or --user), over the same scratch paths and fakes."""
         return Wiring(TOOL, root=True, paths=self.paths, machine=self.machine, host=self.host)
 
+    @override
     def tearDown(self) -> None:
         for root, dirs, _ in os.walk(self.tmp):
             for d in dirs:
@@ -799,7 +801,7 @@ class BulkTest(BulkBase):
         self.purge_tree(self.B("emulators"))
         os.makedirs(self.H("elsewhere/android/avd"))
         os.symlink(self.H("elsewhere"), self.B("emulators"))
-        state, detail = bulk_items.classify(self.bulk, bulk_domain.BY_ID["avd"], {"apps"})
+        state, _detail = bulk_items.classify(self.bulk, bulk_domain.BY_ID["avd"], {"apps"})
         self.assertEqual(state, "unexpected")
         _, text = self.report()
         self.assertIn("~/Bulk/emulators is a symlink", text)
@@ -911,7 +913,7 @@ class BulkTest(BulkBase):
             return True
 
         self.fake(self.user, "u_late_write", late)
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertEqual(problems, ["apps"], self.out)
         self.assertIn("written to on both sides", self.out)
         old = [n for n in os.listdir(self.home) if n.startswith("Programs.bulk-old-")]
@@ -920,7 +922,7 @@ class BulkTest(BulkBase):
             self.assertEqual(f.read(), "late")
         self.assertEqual(self.read("Programs/through-link"), "new")
         self.assertEqual(self.journals(), ["journal-apps.json"])
-        left, text = self.report()
+        _left, text = self.report()
         self.assertIn("NEEDS A LOOK", text)
         # Still stuck on the next run; resolved once the old tree is deleted.
         self.fake(self.user, "u_late_write", lambda j: False)
@@ -935,7 +937,7 @@ class BulkTest(BulkBase):
         self.assertTrue(os.path.exists(self.paths.flag))  # the boot service will run
         os.makedirs(self.H("Programs"))  # an app recreates it
         self.write("Programs/fresh", "fresh")
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertIn("apps", problems, self.out)
         self.assertIn("was created again", self.out)
         old = [n for n in os.listdir(self.home) if n.startswith("Programs.bulk-old-")]
@@ -1015,7 +1017,7 @@ class BulkTest(BulkBase):
             raise PermissionError(13, "Permission denied", j["old"])
 
         self.fake(self.user, "u_finish", fail)
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertIn("apps", problems)
         self.assertEqual(self.journals(), ["journal-apps.json"])
         left, _ = self.report()
@@ -1026,7 +1028,7 @@ class BulkTest(BulkBase):
     def test_entries_not_owned_are_not_moved(self) -> None:
         self.write(".m2/repository/org/x.jar", "jar")
         with mock.patch.object(os, "getuid", return_value=0):  # "every file belongs to someone else"
-            deferred, problems = self.apply()
+            _deferred, problems = self.apply()
         self.assertIn("m2", problems)
         self.assertIn("sudo chown -R root:", self.out)
         self.assertFalse(os.path.islink(self.H(".m2/repository")))
@@ -1141,7 +1143,7 @@ class BulkTest(BulkBase):
         j = self.journal("apps")
         del j["stamp2"]
         self.write_journal("apps", j)
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertEqual(problems, ["apps"], self.out)
         self.assertIn("written to on both sides", self.out)
         self.assertTrue([n for n in os.listdir(self.home) if n.startswith("Programs.bulk-old-")])
@@ -1162,7 +1164,7 @@ class BulkTest(BulkBase):
         self.assertIn("snapshots do not wait for it", self.out)
         self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 4)
         self.assertEqual(bulk_items.exit_status(self.bulk, ["apps"], problems), 4)
-        self.assertEqual(bulk_items.exit_status(self.bulk, [], problems + ["iso"]), 1)
+        self.assertEqual(bulk_items.exit_status(self.bulk, [], [*problems, "iso"]), 1)
         _, text = self.report()
         self.assertIn("NEEDS A LOOK", text)
         self.assertIn("snapshots do not wait for it", text)
@@ -1228,7 +1230,7 @@ class BulkTest(BulkBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("still a link into ~/Bulk", r.stdout)
         self.assertFalse(os.path.exists(self.paths.flag))  # nothing waits for the boot any more
-        left, text = self.report()
+        _left, text = self.report()
         self.assertIn("but still a link into ~/Bulk", text)
         # JetBrains lives inside ~/Bulk/apps: it waits, with the reason.
         self.assertIn("~/Programs is kept in /home (by choice)", text)
@@ -1330,7 +1332,7 @@ class BulkTest(BulkBase):
         self.assertEqual(problems, ["bulk-keep"], self.out)
         self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 1)
         self.assertFalse(os.path.islink(self.H(".m2/repository")))
-        left, text = self.report()
+        _left, text = self.report()
         self.assertIn("cannot be read", text)
         r = self.keep_cli("keep", "iso")
         self.assertEqual(r.returncode, 1)
@@ -1384,7 +1386,7 @@ class BulkTest(BulkBase):
         self.assertIn("snapshots do not wait for it", self.out)
         self.assertEqual(self.journals(), [])
         self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 4)
-        self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems + ["iso"]), 1)
+        self.assertEqual(bulk_items.exit_status(self.bulk, deferred, [*problems, "iso"]), 1)
 
     # ---- crash and race points found by the adversarial review of recover() ----
 
@@ -1418,7 +1420,7 @@ class BulkTest(BulkBase):
         self.fake(self.user, "u_rollback", real_rb)
         self.assertTrue(self.journal("apps").get("undo"))
         self.write("Programs/user-work", "important")  # through the live link
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertIn("apps", problems)
         found = [os.path.join(r, f) for r, _, fs in os.walk(self.home) for f in fs if f == "user-work"]
         self.assertEqual(len(found), 1, found)
@@ -1444,7 +1446,7 @@ class BulkTest(BulkBase):
         self.fake(self.user, "u_late_write", real)
         self.write("Programs/new-work", "w")  # into the copy, through the link
         os.unlink(self.H("Programs"))  # a tool removes the link
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertIn("apps", problems)
         found = [os.path.join(r, f) for r, _, fs in os.walk(self.home) for f in fs if f == "new-work"]
         self.assertEqual(len(found), 1, found)
@@ -1468,7 +1470,7 @@ class BulkTest(BulkBase):
             bulk_items.apply(self.bulk)
         self.fake(self.user, "u_move_subvol", real)
         self.write("go/pkg/mod/b", "new")  # go recreates the folder
-        deferred, problems = self.apply()
+        _deferred, problems = self.apply()
         self.assertIn("go-mod", problems)
         self.assertTrue(os.path.exists(self.B("toolchains/go/pkg/mod/a")))
         self.assertTrue(os.path.exists(self.H("go/pkg/mod/b")))
@@ -1826,6 +1828,7 @@ def _u_refuse(path: str) -> bool:
 class AsUserTest(unittest.TestCase):
     """as_user runs fn in a child process as the user (the uid and group calls faked: the run is not root)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-bulk-as-user-")
         self.addCleanup(shutil.rmtree, self.tmp)

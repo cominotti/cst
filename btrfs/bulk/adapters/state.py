@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
+import contextlib
 import json
 import os
 import re
@@ -20,9 +21,11 @@ from btrfs.bulk.domain import (
     ITEMS,
     KEEP_HEADER,
     BadSettings,
+    BulkJournalKind,
     BulkPaths,
     ItemJournal,
     SteamJournal,
+    SteamPhase,
     dec,
 )
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
@@ -64,18 +67,18 @@ _ITEM_OPTIONAL: KeyTypes = {
     "undo": (bool,),
     "finishing": (bool,),
 }
-_PART_REQUIRED: KeyTypes = {k: (str,) for k in ("name", "kind", "src", "dst", "new", "old")}
+_PART_REQUIRED: KeyTypes = dict.fromkeys(("name", "kind", "src", "dst", "new", "old"), (str,))
 _PART_OPTIONAL: KeyTypes = {"mode": (str,), "bytes": (int,), "sample": (str,)}
 _STEAM_REQUIRED: KeyTypes = {
-    **{k: (str,) for k in ("kind", "appid", "src_lib", "dst_lib", "size", "contentid", "phase")},
+    **dict.fromkeys(("kind", "appid", "src_lib", "dst_lib", "size", "contentid", "phase"), (str,)),
     "stamp": (int,),
     "parts": (list,),
 }
 _STEAM_OPTIONAL: KeyTypes = {"stamp2": (int,), "conflict": (bool,), "undo": (bool,)}
-STEAM_PHASES = ("prepared", "switching", "switched", "finishing")
+STEAM_PHASES = tuple(SteamPhase)
 
 
-def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> TypeGuard[Mapping[str, object]]:
+def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
     """obj is a JSON object with every required key and each known key of its type (a bool is
     no int here, as JSON tells them apart)."""
     if not isinstance(obj, dict):
@@ -93,20 +96,24 @@ def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> TypeGuard[Mapp
 
 def is_item_journal(obj: object) -> TypeGuard[ItemJournal]:
     """A journal-<id>.json's JSON has the shape btrfs-bulk writes (kind copy or subvol)."""
-    return _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL) and obj["kind"] in ("copy", "subvol")
+    return (
+        isinstance(obj, dict)
+        and _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL)
+        and obj["kind"] in (BulkJournalKind.COPY, BulkJournalKind.SUBVOL)
+    )
 
 
 def is_steam_journal(obj: object) -> TypeGuard[SteamJournal]:
     """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
     phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
-    if not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
+    if not isinstance(obj, dict) or not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
         return False
     appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
     return (
-        obj["kind"] == "steam"
+        obj["kind"] == BulkJournalKind.STEAM
         and dec(appid)
         and phase in STEAM_PHASES
-        and (phase == "prepared" or "stamp2" in obj)
+        and (phase == SteamPhase.PREPARED or "stamp2" in obj)
         and isinstance(parts, list)
         and all(_fits(p, _PART_REQUIRED, _PART_OPTIONAL) for p in parts)
     )
@@ -169,10 +176,8 @@ class StateFiles:
         )
 
     def jdrop(self, ident: str) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.remove(self.jpath(ident))
-        except FileNotFoundError:
-            pass
 
     def journals(self) -> list[str]:
         """Ids with a journal (a move not finished or undone yet); a Steam game's
@@ -201,7 +206,7 @@ class StateFiles:
     def flag_add(self, ident: str) -> None:
         ids = self.read_flag()
         if ident not in ids:
-            self.write_flag(ids + [ident])
+            self.write_flag([*ids, ident])
 
     def write_flag(self, ids: Sequence[str]) -> None:
         if ids:
@@ -209,10 +214,8 @@ class StateFiles:
             # Durable (file and folder): the next boot acts on it.
             write_atomic(self.paths.flag, "".join(i + "\n" for i in ids), mode="umask", relabel=False)
         else:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.remove(self.paths.flag)
-            except FileNotFoundError:
-                pass
 
     # ---- the keep list ----
     def read_keep(self) -> tuple[set[str], list[str]]:

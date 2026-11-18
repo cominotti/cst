@@ -64,11 +64,11 @@ class UserFilesPort(Protocol):
     def set_nocow_dirs(self, top: str) -> bool: ...
 
     def flatpak(self, app: str, path: str) -> str:
-        """absent | ok | added: the app may use path (an override added when missing)."""
+        """FlatpakAccess absent | ok | added: the app may use path (an override added when missing)."""
         ...
 
     def flatpak_state(self, app: str, path: str) -> str:
-        """absent | ok | missing."""
+        """FlatpakAccess absent | ok | missing."""
         ...
 
     def read(self, path: str) -> FileRead | None:
@@ -116,11 +116,11 @@ class HomeTreePort(Protocol):
     """Looks at the home that never follow a link (safe as root)."""
 
     def kind(self, path: str) -> str:
-        """absent | link | dir | other (lstat)."""
+        """LstatKind absent | link | dir | other (lstat)."""
         ...
 
     def chain(self, base: str, rel: str) -> str:
-        """ok | absent | 'symlink:<path>' | 'file:<path>' for every component of base/rel."""
+        """PathChain ok | absent, or 'symlink:<path>' | 'file:<path>', for every component of base/rel."""
         ...
 
     def empty_dir(self, path: str) -> bool: ...
@@ -157,11 +157,17 @@ class HomeTreePort(Protocol):
         """The uid this program runs as."""
         ...
 
-    def target_state(self, ctx: Ctx, item: Item) -> str: ...
+    def target_state(self, ctx: Ctx, item: Item) -> str:
+        """BulkTargetState absent | empty | data, or 'bad:<reason>'."""
+        ...
 
-    def bulk_state(self, ctx: Ctx) -> str: ...
+    def bulk_state(self, ctx: Ctx) -> str:
+        """BulkDirState."""
+        ...
 
-    def tag_state(self, ctx: Ctx) -> str: ...
+    def tag_state(self, ctx: Ctx) -> str:
+        """CacheTagState."""
+        ...
 
     def nocow_parents(self, ctx: Ctx, item: Item) -> list[str]: ...
 

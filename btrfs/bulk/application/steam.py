@@ -13,15 +13,24 @@ from collections.abc import Sequence
 import os
 import posixpath
 import time
+from typing import Literal
 
 from btrfs.bulk.application.context import Bulk
 from btrfs.bulk.domain import (
     MARGIN,
     STEAM_ROOT,
+    BulkJournalKind,
     Ctx,
+    LstatKind,
+    PathChain,
     SteamApp,
+    SteamAppState,
     SteamJournal,
+    SteamMoveResult,
     SteamPart,
+    SteamPartKind,
+    SteamPartMode,
+    SteamPhase,
     SteamRunning,
     SteamSurvey,
     Unexpected,
@@ -64,9 +73,9 @@ def steam_read_pair(b: Bulk, settle: Callable[[Vdf], Vdf] | None = None) -> VdfP
     ctx = b.ctx
     src, _ = steam_roots(ctx)
     c = b.tree.chain(ctx.home, STEAM_ROOT)
-    if c == "absent":
+    if c == PathChain.ABSENT:
         return None
-    if c != "ok":
+    if c != PathChain.OK:
         raise Unexpected(f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder")
     files = lf_files(src)
     raw: list[bytes] = []
@@ -110,10 +119,10 @@ def steam_marker(b: Bulk, library: str) -> str | None:
     ctx = b.ctx
     mk = os.path.join(library, "libraryfolder.vdf")
     k = b.tree.kind(mk)
-    if k == "absent":
+    if k == LstatKind.ABSENT:
         return None
-    if k != "other":
-        raise Unexpected(f"{ctx.short(mk)} is a {'symlink' if k == 'link' else 'folder'}")
+    if k != LstatKind.OTHER:
+        raise Unexpected(f"{ctx.short(mk)} is a {'symlink' if k == LstatKind.LINK else 'folder'}")
     r = b.user.read(mk)
     if r is None:
         return None
@@ -137,7 +146,7 @@ def steam_target(b: Bulk, pair: VdfPair, cid: str | None) -> str | None:
     if c.startswith(("symlink:", "file:")):
         raise Unexpected(f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder")
     sa = os.path.join(T, "steamapps")
-    if b.tree.kind(sa) == "dir" and b.tree.owner(sa) != ctx_uid(b):
+    if b.tree.kind(sa) == LstatKind.DIR and b.tree.owner(sa) != ctx_uid(b):
         raise Unexpected(f"{ctx.short(sa)} is not yours")
     idx = lf_index(pair["tree"], T, b.tree.realpath)
     if idx is not None:
@@ -151,14 +160,14 @@ def steam_target(b: Bulk, pair: VdfPair, cid: str | None) -> str | None:
 
 def nonempty(b: Bulk, path: str) -> bool:
     k = b.tree.kind(path)
-    return k in ("other", "link") or (k == "dir" and not b.tree.empty_dir(path))
+    return k in (LstatKind.OTHER, LstatKind.LINK) or (k == LstatKind.DIR and not b.tree.empty_dir(path))
 
 
 def new_app(appid: str) -> SteamApp:
     return {
         "id": appid,
         "name": "",
-        "state": "look",
+        "state": SteamAppState.LOOK,
         "why": "",
         "parts": [],
         "bytes": 0,
@@ -182,7 +191,7 @@ def steam_app(b: Bulk, pair: VdfPair, appid: str, explicit: bool) -> SteamApp:
     if workshop_problem := steam_workshop_check(b, parts, appid):
         A["why"] = workshop_problem
         return A
-    A["state"], A["parts"] = "move", parts
+    A["state"], A["parts"] = SteamAppState.MOVE, parts
     return A
 
 
@@ -199,11 +208,11 @@ def app_in_main_library(b: Bulk, pair: VdfPair, appid: str, app: SteamApp) -> di
     m_src = os.path.join(src, "steamapps", f"appmanifest_{appid}.acf")
     m_dst = os.path.join(T, "steamapps", f"appmanifest_{appid}.acf")
     ks, kd = t.kind(m_src), t.kind(m_dst)
-    if ks != "absent" and kd != "absent":
+    if ks != LstatKind.ABSENT and kd != LstatKind.ABSENT:
         app["why"] = "a manifest in both libraries"
         return None
-    mpath = m_dst if kd != "absent" else m_src
-    if t.kind(mpath) == "absent":
+    mpath = m_dst if kd != LstatKind.ABSENT else m_src
+    if t.kind(mpath) == LstatKind.ABSENT:
         app["why"] = "not installed in the main library"
         return None
     try:
@@ -215,13 +224,13 @@ def app_in_main_library(b: Bulk, pair: VdfPair, appid: str, app: SteamApp) -> di
         app["why"] = f"{ctx.short(mpath)}: {e}"
         return None
     app["name"] = info["name"]
-    if kd != "absent":
+    if kd != LstatKind.ABSENT:
         if listed != [d_idx]:
             app["why"] = (
                 f"its manifest is in ~/Bulk/steam, but libraryfolders.vdf lists it under {listed or 'no library'}"
             )
             return None
-        app["state"] = "ok"
+        app["state"] = SteamAppState.OK
         return None
     if listed != [s_idx]:
         app["why"] = f"libraryfolders.vdf lists it under {listed or 'no library'}, its manifest is in library {s_idx}"
@@ -237,15 +246,17 @@ def app_held(b: Bulk, app: SteamApp, info: dict[str, str], *, explicit: bool) ->
     appid = app["id"]
     why = is_tool(appid, info["name"], info["installdir"])
     if why and not explicit:
-        app["state"], app["why"] = "skip", why
+        app["state"], app["why"] = SteamAppState.SKIP, why
         return True
     sa = os.path.join(steam_roots(b.ctx)[0], "steamapps")
     busy = [info["mid"]] if info["mid"] else []
-    for rel in (f"downloading/{appid}", f"temp/{appid}", f"workshop/downloads/{appid}", f"workshop/temp/{appid}"):
-        if nonempty(b, os.path.join(sa, rel)):
-            busy.append(f"steamapps/{rel} is not empty")
+    busy.extend(
+        f"steamapps/{rel} is not empty"
+        for rel in (f"downloading/{appid}", f"temp/{appid}", f"workshop/downloads/{appid}", f"workshop/temp/{appid}")
+        if nonempty(b, os.path.join(sa, rel))
+    )
     if busy:
-        app["state"], app["why"] = "update", "; ".join(busy)
+        app["state"], app["why"] = SteamAppState.UPDATE, "; ".join(busy)
         return True
     if nonempty(b, os.path.join(sa, "compatdata", appid)):
         app["why"] = (
@@ -267,18 +278,18 @@ def app_parts(b: Bulk, app: SteamApp, info: dict[str, str]) -> list[SteamPart] |
     ts = time.strftime("%Y%m%dT%H%M%S")
     parts: list[SteamPart] = []
     for name, rel, what, optional in (
-        ("game", f"common/{info['installdir']}", "dir", False),
-        ("workshop", f"workshop/content/{appid}", "dir", True),
-        ("workshop-acf", f"workshop/appworkshop_{appid}.acf", "file", True),
-        ("manifest", f"appmanifest_{appid}.acf", "file", False),
+        ("game", f"common/{info['installdir']}", SteamPartKind.DIR, False),
+        ("workshop", f"workshop/content/{appid}", SteamPartKind.DIR, True),
+        ("workshop-acf", f"workshop/appworkshop_{appid}.acf", SteamPartKind.FILE, True),
+        ("manifest", f"appmanifest_{appid}.acf", SteamPartKind.FILE, False),
     ):
         p_src = os.path.join(sa, rel)
         k = t.kind(p_src)
-        if k == "absent" and optional:
+        if k == LstatKind.ABSENT and optional:
             continue
-        want = "dir" if what == "dir" else "other"
-        if k != want or (what == "file" and not t.is_regular(p_src)):
-            app["why"] = f"{ctx.short(p_src)} is {'missing' if k == 'absent' else 'a ' + k + ', not a ' + what}"
+        want = LstatKind.DIR if what == SteamPartKind.DIR else LstatKind.OTHER
+        if k != want or (what == SteamPartKind.FILE and not t.is_regular(p_src)):
+            app["why"] = f"{ctx.short(p_src)} is {'missing' if k == LstatKind.ABSENT else 'a ' + k + ', not a ' + what}"
             return None
         dst = os.path.join(T, "steamapps", rel)
         parts.append(
@@ -309,7 +320,7 @@ def measure_parts(b: Bulk, app: SteamApp, parts: Sequence[SteamPart]) -> bool:
         # whole part is copied byte by byte instead (see steam_nocow_scan).
         # copy_bytes is the size of such parts, not the size of the +C files
         # (one empty +C file is enough): the messages give both.
-        p["mode"], p["bytes"] = ("copy" if nocow_files else "reflink"), size
+        p["mode"], p["bytes"] = (SteamPartMode.COPY if nocow_files else SteamPartMode.REFLINK), size
         p["sample"] = "" if nocow_files else sample
         app["bytes"] += size
         app["copy_bytes" if nocow_files else "reflink_bytes"] += size
@@ -322,14 +333,14 @@ def part_size(b: Bulk, p: SteamPart, uid: int, library: str) -> tuple[str, int]:
     """('', its size) for a part that may move into library, else (why not, 0)."""
     ctx, t = b.ctx, b.tree
     for x in (p["dst"], p["new"]):
-        if t.kind(x) != "absent":
+        if t.kind(x) != LstatKind.ABSENT:
             return f"{ctx.short(x)} exists already: remove it or move it back (nothing is merged)", 0
     c = t.chain(library, posixpath.relpath(os.path.dirname(p["dst"]), library))
     if c.startswith(("symlink:", "file:")):
         return f"{ctx.short(c.split(':', 1)[1])} is a symlink or a file, not a folder", 0
     if cow_problem := steam_target_cow(b, library, p["dst"]):
         return cow_problem, 0
-    if p["kind"] == "file":
+    if p["kind"] == SteamPartKind.FILE:
         if t.owner(p["src"]) != uid:
             return f"{ctx.short(p['src'])} is not yours", 0
         return "", t.size(p["src"])
@@ -351,7 +362,7 @@ def steam_target_cow(b: Bulk, library: str, dst: str) -> str:
     path = library
     for part in [""] + [x for x in posixpath.relpath(os.path.dirname(dst), library).split("/") if x]:
         path = os.path.join(path, part) if part else path
-        if b.tree.kind(path) != "dir":
+        if b.tree.kind(path) != LstatKind.DIR:
             break
         if b.tree.is_nocow(path):
             return (
@@ -404,7 +415,7 @@ def write_vdf_pair(b: Bulk, pair: VdfPair, tree: Vdf) -> bool:
 
 
 def steam_conflict_text(b: Bulk, j: SteamJournal) -> str:
-    olds = ", ".join(b.ctx.short(p["old"]) for p in j["parts"] if b.tree.kind(p["old"]) != "absent")
+    olds = ", ".join(b.ctx.short(p["old"]) for p in j["parts"] if b.tree.kind(p["old"]) != LstatKind.ABSENT)
     return (
         f"app {j['appid']} was written to on both sides during its move: compare {olds} (the old copy) "
         f"with the same names in ~/Bulk/steam (in use now), copy what you need there, delete the old copy, "
@@ -430,23 +441,23 @@ def steam_settle_vdf(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) -> N
         raise Unexpected(f"Steam is running ({e}): close it; the next run finishes this move") from None
 
 
-def steam_finish(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) -> str:
+def steam_finish(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) -> SteamMoveResult:
     """The switch passed its checks: the VDF files, then the old copies go."""
     ident = "steam-" + j["appid"]
-    if j["phase"] != "finishing":
-        j["phase"] = "switched"
+    if j["phase"] != SteamPhase.FINISHING:
+        j["phase"] = SteamPhase.SWITCHED
         b.state.jwrite(ident, j)
         steam_settle_vdf(b, j, pair)
-        j["phase"] = "finishing"  # a kill now: the next repair goes on deleting
+        j["phase"] = SteamPhase.FINISHING  # a kill now: the next repair goes on deleting
         b.state.jwrite(ident, j)
     else:
         steam_settle_vdf(b, j, pair)
     b.user.steam_finish(j)
     b.state.jdrop(ident)
-    return "ok"
+    return SteamMoveResult.OK
 
 
-def steam_after_switch(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) -> str:
+def steam_after_switch(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) -> SteamMoveResult:
     """The last check after a complete switch, as in migrate(): a write into
     an old copy undoes the move; a write on both sides keeps both."""
     ident = "steam-" + j["appid"]
@@ -459,17 +470,17 @@ def steam_after_switch(b: Bulk, j: SteamJournal, pair: VdfPair | None = None) ->
         b.state.jwrite(ident, j)
         b.user.steam_rollback(j)
         b.state.jdrop(ident)
-        return "changed"
+        return SteamMoveResult.CHANGED
     return steam_finish(b, j, pair)
 
 
 def steam_all_switched(b: Bulk, j: SteamJournal) -> bool:
     kind = b.tree.kind
     return all(
-        kind(p["dst"]) != "absent"
-        and kind(p["new"]) == "absent"
-        and kind(p["old"]) != "absent"
-        and kind(p["src"]) == "absent"
+        kind(p["dst"]) != LstatKind.ABSENT
+        and kind(p["new"]) == LstatKind.ABSENT
+        and kind(p["old"]) != LstatKind.ABSENT
+        and kind(p["src"]) == LstatKind.ABSENT
         for p in j["parts"]
     )
 
@@ -479,26 +490,30 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
     ident = "steam-" + j["appid"]
     phase = j.get("phase")
     if j.get("conflict"):
-        if any(b.tree.kind(p["old"]) != "absent" for p in j["parts"]):
+        if any(b.tree.kind(p["old"]) != LstatKind.ABSENT for p in j["parts"]):
             raise Unexpected(steam_conflict_text(b, j))
-        j["phase"] = "finishing"
+        j["phase"] = SteamPhase.FINISHING
         steam_finish(b, j)
         return "the old copy is gone: the move is complete"
-    if phase == "finishing":
+    if phase == SteamPhase.FINISHING:
         steam_finish(b, j)
         return "deleted the old copy left by an interrupted run"
-    if phase == "switched":
+    if phase == SteamPhase.SWITCHED:
         steam_finish(b, j)
         return "finished an interrupted move"
-    if j.get("undo") or phase == "prepared" or (phase == "switching" and not steam_all_switched(b, j)):
-        if phase != "prepared":
+    if (
+        j.get("undo")
+        or phase == SteamPhase.PREPARED
+        or (phase == SteamPhase.SWITCHING and not steam_all_switched(b, j))
+    ):
+        if phase != SteamPhase.PREPARED:
             b.user.steam_rollback(j)
         else:
             b.user.steam_drop_news(j)
         b.state.jdrop(ident)
         return "undid an interrupted move (the game is back in the main library)"
-    if phase == "switching":
-        if steam_after_switch(b, j) == "changed":
+    if phase == SteamPhase.SWITCHING:
+        if steam_after_switch(b, j) == SteamMoveResult.CHANGED:
             return "undid an interrupted move: an old copy was written to during the switch"
         return "finished an interrupted move"
     raise Unexpected(f"unknown phase {phase!r}")
@@ -548,32 +563,32 @@ def steam_copy_need(b: Bulk, a: SteamApp) -> int:
     return a["copy_bytes"] + steam_copy_floor(b) if a["copy_bytes"] else 0
 
 
-def steam_race_guard(b: Bulk, j: SteamJournal) -> str:
+def steam_race_guard(b: Bulk, j: SteamJournal) -> SteamMoveResult | Literal[""]:
     """Why the switch must not happen now (running | busy | changed), or ''."""
     if b.host.steam_running(b.ctx):
-        return "running"
+        return SteamMoveResult.RUNNING
     if b.host.busy_paths([p["src"] for p in j["parts"]], b.ctx.home):
-        return "busy"
+        return SteamMoveResult.BUSY
     if b.user.steam_changed(j):
-        return "changed"
+        return SteamMoveResult.CHANGED
     return ""
 
 
-def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
+def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> SteamMoveResult:
     """Move one app. Returns ok | running | busy | changed | space."""
     ctx, user, state, host = b.ctx, b.user, b.state, b.host
     pair, (_, T) = sv["S"], steam_roots(ctx)
     ident, parts = "steam-" + a["id"], a["parts"]
     if host.steam_running(ctx):
-        return "running"
+        return SteamMoveResult.RUNNING
     if host.busy_paths([p["src"] for p in parts], ctx.home):
-        return "busy"
+        return SteamMoveResult.BUSY
     # A real copy shares no blocks: its full size must be free (asked again
     # per game: an earlier game's old copy may still be held by snapshots).
     if steam_copy_need(b, a) and b.tree.free_bytes(T) < steam_copy_need(b, a):
-        return "space"
+        return SteamMoveResult.SPACE
     j: SteamJournal = {
-        "kind": "steam",
+        "kind": BulkJournalKind.STEAM,
         "appid": a["id"],
         "src_lib": steam_roots(ctx)[0],
         "dst_lib": T,
@@ -581,7 +596,7 @@ def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
         "contentid": present(sv["cid"], "the library's contentid"),  # ensure_library has set it
         "parts": parts,
         "stamp": 0,
-        "phase": "prepared",
+        "phase": SteamPhase.PREPARED,
         "conflict": False,
         "undo": False,
     }
@@ -601,7 +616,7 @@ def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
         user.steam_drop_news(j)
         state.jdrop(ident)
         return why
-    j["phase"] = "switching"
+    j["phase"] = SteamPhase.SWITCHING
     state.jwrite(ident, j)
     try:
         user.steam_switch(j)

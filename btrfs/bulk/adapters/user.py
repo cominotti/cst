@@ -11,6 +11,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 import base64
+import contextlib
 import errno
 import json
 import os
@@ -30,9 +31,13 @@ from btrfs.bulk.domain import (
     STEAM_READ_MAX,
     TAG_TEXT,
     FileRead,
+    FlatpakAccess,
     ItemJournal,
+    LstatKind,
     SteamJournal,
     SteamPart,
+    SteamPartKind,
+    SteamPartMode,
     Unexpected,
     vdf_dump,
 )
@@ -100,10 +105,8 @@ def as_user[**P, R: Json](pw: Account | None, home: str, fn: Callable[P, R], *ar
 def idle_priority() -> None:
     """This process, and what it starts, at the lowest CPU priority and the
     idle IO class (the IO class only counts with the BFQ IO scheduler)."""
-    try:
+    with contextlib.suppress(OSError):
         os.nice(19)
-    except OSError:
-        pass
     if shutil.which("ionice"):
         subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
 
@@ -123,8 +126,7 @@ def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
             out.append((rel, "f", st.st_size, st.st_mtime_ns, mode, ""))
         elif stat.S_ISDIR(m):
             out.append((rel, "d", 0, st.st_mtime_ns, mode, ""))
-            for n in os.listdir(path):
-                stack.append((os.path.join(path, n), f"{rel}/{n}" if rel else n))
+            stack.extend((os.path.join(path, n), f"{rel}/{n}" if rel else n) for n in os.listdir(path))
         else:
             out.append((rel, "o", 0, st.st_mtime_ns, mode, str(stat.S_IFMT(m))))
     return sorted(out)
@@ -237,7 +239,7 @@ def back_up_pair(files: Sequence[str], olds: Sequence[FileRead], ts: str) -> Non
     """u_write_vdf_pair's backups: FILE.cst-bak-TS of each (once per run), the newest STEAM_BACKUPS kept."""
     for f, r in zip(files, olds, strict=False):
         bak = f"{f}.cst-bak-{ts}"
-        if kind(bak) == "absent":
+        if kind(bak) == LstatKind.ABSENT:
             u_write_new(bak, base64.b64decode(r["b64"]), r["mode"])
             fsync_dir(os.path.dirname(f))
         d, base = os.path.split(f)
@@ -292,9 +294,9 @@ class UserFiles:
         for n, part in enumerate([p for p in rel.split("/") if p]):
             path = os.path.join(path, part)
             k = kind(path)
-            if k == "absent":
+            if k == LstatKind.ABSENT:
                 os.mkdir(path, 0o755)
-            elif k != "dir":
+            elif k != LstatKind.DIR:
                 raise Unexpected(f"{path} is not a folder")
             if nocow and (n > 0 or part == NOCOW_TOP):
                 self.machine.set_nocow(path)
@@ -319,9 +321,9 @@ class UserFiles:
             elif not isinstance(exc, FileNotFoundError):
                 raise exc
 
-        if kind(path) == "dir":
+        if kind(path) == LstatKind.DIR:
             shutil.rmtree(path, onexc=fix)
-        elif kind(path) != "absent":
+        elif kind(path) != LstatKind.ABSENT:
             os.unlink(path)
 
     def rmtree(self, path: str) -> None:
@@ -341,10 +343,8 @@ class UserFiles:
         """A new subvolume root has no SELinux label (unlabeled_t), and files
         created in it would inherit that: give it the policy's label (as the
         user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
-        try:
+        with contextlib.suppress(OSError):
             subprocess.run(["restorecon", path], check=False, capture_output=True)
-        except OSError:
-            pass
         return True
 
     def relabel(self, path: str) -> bool:
@@ -361,7 +361,7 @@ class UserFiles:
         return as_user(self.pw, self.home, self.u_write_tag, bulk)
 
     def u_symlink(self, link: str, target: str) -> bool:
-        if kind(link) != "absent":
+        if kind(link) != LstatKind.ABSENT:
             raise Unexpected(f"{link} appeared meanwhile")
         os.symlink(target, link)
         return True
@@ -372,7 +372,7 @@ class UserFiles:
     def u_prepare(self, src: str, new: str, nocow: bool) -> int:
         """Copy src into new (a fresh folder next to the target) and check it.
         Returns the ctime stamp (ns) taken before the copy."""
-        if kind(new) != "absent":
+        if kind(new) != LstatKind.ABSENT:
             self.u_rmtree(new)
         # Timestamps advance in clock ticks (a few ms): wait one out, so nothing
         # done before the stamp (by us, e.g. a recovery rename) shares its tick,
@@ -417,7 +417,7 @@ class UserFiles:
         after anything done before (see u_prepare)."""
         time.sleep(0.05)
         probe = near + ".bulk-stamp"
-        if kind(probe) != "absent":
+        if kind(probe) != LstatKind.ABSENT:
             os.unlink(probe)  # left by a kill
         fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
@@ -472,7 +472,7 @@ class UserFiles:
         link) written to? Entries below it, or its own list of entries (mtime;
         the rename onto the target changes only its ctime)."""
         target, stamp2 = j["target"], j["stamp2"]
-        if kind(target) != "dir":
+        if kind(target) != LstatKind.DIR:
             return False
         return os.lstat(target).st_mtime_ns >= stamp2 or self.tree.changed_since(target, stamp2, mindepth=1)
 
@@ -485,11 +485,11 @@ class UserFiles:
         was created again meanwhile (by an app, while the data waited in old),
         nothing is deleted: Unexpected, and the journal stays."""
         src, target, new, old, link = j["src"], j["target"], j["new"], j["old"], j["link"]
-        if link and kind(link) == "link" and self.tree.link_target(link) == target:
+        if link and kind(link) == LstatKind.LINK and self.tree.link_target(link) == target:
             os.unlink(link)
-        if kind(old) == "dir":
+        if kind(old) == LstatKind.DIR:
             self.put_old_back(src, target, new, old)
-        if kind(new) != "absent":
+        if kind(new) != LstatKind.ABSENT:
             self.drop_copy(j, src, new)
         return True
 
@@ -497,11 +497,11 @@ class UserFiles:
         """u_rollback while the data waits in old: the copy goes out of the way, old back to src."""
         if src == target:
             # In place: the target holds the copy (if the switch got that far).
-            if kind(target) == "dir" and kind(new) == "absent":
+            if kind(target) == LstatKind.DIR and kind(new) == LstatKind.ABSENT:
                 os.rename(target, new)  # the copy goes back out of the way
-        elif kind(src) == "absent" and kind(new) == "absent" and kind(target) == "dir":
+        elif kind(src) == LstatKind.ABSENT and kind(new) == LstatKind.ABSENT and kind(target) == LstatKind.DIR:
             os.rename(target, new)
-        if kind(src) != "absent":
+        if kind(src) != LstatKind.ABSENT:
             raise Unexpected(
                 f"{src} was created again while the data waited in {old}: move what you need from "
                 f"{src} into {old}, delete {src}, then run bulk apply again (it puts the data back)"
@@ -515,7 +515,7 @@ class UserFiles:
         # removed the link): then it is kept, not deleted.
         if (
             "stamp2" in j
-            and kind(new) == "dir"
+            and kind(new) == LstatKind.DIR
             and (os.lstat(new).st_mtime_ns >= j["stamp2"] or self.tree.changed_since(new, j["stamp2"], mindepth=1))
         ):
             raise Unexpected(
@@ -529,9 +529,9 @@ class UserFiles:
 
     def u_finish(self, j: ItemJournal) -> bool:
         """Delete the old tree of a completed switch."""
-        if kind(j["old"]) != "absent":
+        if kind(j["old"]) != LstatKind.ABSENT:
             self.u_rmtree(j["old"])
-        if kind(j["new"]) != "absent":
+        if kind(j["new"]) != LstatKind.ABSENT:
             self.u_rmtree(j["new"])
         return True
 
@@ -541,7 +541,7 @@ class UserFiles:
     def u_move_subvol(self, link: str, target: str) -> bool:
         """An old subvolume (from an earlier snapshots setup) is renamed into
         ~/Bulk: instant, same data; it stays a nested subvolume there."""
-        if kind(target) == "dir":
+        if kind(target) == LstatKind.DIR:
             os.rmdir(target)  # the empty placeholder
         os.rename(link, target)
         os.symlink(target, link)
@@ -550,21 +550,21 @@ class UserFiles:
     def move_subvol(self, link: str, target: str) -> bool:
         return as_user(self.pw, self.home, self.u_move_subvol, link, target)
 
-    def u_flatpak(self, app: str, path: str) -> str:
+    def u_flatpak(self, app: str, path: str) -> FlatpakAccess:
         if not self.machine.flatpak_installed(app):
-            return "absent"
+            return FlatpakAccess.ABSENT
         if self.machine.flatpak_has_fs(app, path):
-            return "ok"
+            return FlatpakAccess.OK
         self.machine.flatpak_add_fs(app, path)
-        return "added"
+        return FlatpakAccess.ADDED
 
     def flatpak(self, app: str, path: str) -> str:
         return as_user(self.pw, self.home, self.u_flatpak, app, path)
 
-    def u_flatpak_state(self, app: str, path: str) -> str:
+    def u_flatpak_state(self, app: str, path: str) -> FlatpakAccess:
         if not self.machine.flatpak_installed(app):
-            return "absent"
-        return "ok" if self.machine.flatpak_has_fs(app, path) else "missing"
+            return FlatpakAccess.ABSENT
+        return FlatpakAccess.OK if self.machine.flatpak_has_fs(app, path) else FlatpakAccess.MISSING
 
     def flatpak_state(self, app: str, path: str) -> str:
         return as_user(self.pw, self.home, self.u_flatpak_state, app, path)
@@ -590,7 +590,7 @@ class UserFiles:
         """Clone SRC_FILE (a copy-on-write file of a part that moves by reflink)
         into ~/Bulk/steam and delete the clone again."""
         probe = os.path.join(library, ".bulk-probe")
-        if kind(probe) != "absent":
+        if kind(probe) != LstatKind.ABSENT:
             self.u_rmtree(probe)
         try:
             self.machine.copy_reflink(src_file, probe)
@@ -599,7 +599,7 @@ class UserFiles:
                 f"reflink of a copy-on-write file into ~/Bulk/steam failed (is ~/Bulk on another filesystem?): {e}"
             ) from None
         finally:
-            if kind(probe) != "absent":
+            if kind(probe) != LstatKind.ABSENT:
                 self.u_rmtree(probe)
         return True
 
@@ -658,9 +658,9 @@ class UserFiles:
         priority for the copy and the comparison."""
         for p in parts:
             for x in (p["new"], p["dst"]):
-                if kind(x) != "absent":
+                if kind(x) != LstatKind.ABSENT:
                     raise Unexpected(f"{x} exists already: remove it or move it back")
-        if idle and any(p.get("mode") == "copy" for p in parts):
+        if idle and any(p.get("mode") == SteamPartMode.COPY for p in parts):
             idle_priority()
         stamp = self.u_clock(parts[-1]["new"])
         uid = os.getuid()
@@ -674,14 +674,14 @@ class UserFiles:
 
     def prepare_part(self, p: SteamPart, uid: int) -> None:
         """One part of u_steam_prepare: its copy, then the checks of the copy."""
-        if p["kind"] == "dir":
+        if p["kind"] == SteamPartKind.DIR:
             _, _, foreign, others = self.tree.tree_stats(p["src"], uid)
             if foreign:
                 raise Unexpected(f"{p['src']} contains another subvolume or a mount")
             if others:
                 raise Unexpected(f"{others} entries in {p['src']} are not yours")
         label = f"{p['name']} ({os.path.basename(p['src'])})"
-        if p.get("mode") == "copy":
+        if p.get("mode") == SteamPartMode.COPY:
             if self.machine.is_nocow(os.path.dirname(p["new"])):
                 raise Unexpected(f"{os.path.dirname(p['new'])} has +C: the copy would be NOCOW too")
             self.machine.copy_bytes(p["src"], p["new"], label, p.get("bytes", 0))
@@ -695,7 +695,7 @@ class UserFiles:
         if a != b:
             diff = next((x for x, y in zip(a, b, strict=False) if x != y), None) or f"{len(a)} vs {len(b)} entries"
             raise RuntimeError(f"copy check failed for {p['src']} (first difference: {diff})")
-        if p.get("mode") == "copy":
+        if p.get("mode") == SteamPartMode.COPY:
             if n := self.nocow_entries(p["new"]):
                 raise RuntimeError(f"the copy of {p['src']} has {n} NOCOW (+C) entries; it must be copy-on-write")
             if bad := self.u_verify_content(p["src"], p["new"], label, p.get("bytes", 0)):
@@ -707,7 +707,7 @@ class UserFiles:
 
     def u_steam_drop_news(self, j: SteamJournal | PartsOnly) -> bool:
         for p in j["parts"]:
-            if kind(p["new"]) != "absent":
+            if kind(p["new"]) != LstatKind.ABSENT:
                 self.u_rmtree(p["new"])
         return True
 
@@ -724,7 +724,7 @@ class UserFiles:
     def u_steam_switch(self, j: SteamJournal) -> bool:
         """Per part, in order (the manifest last): src -> old, new -> dst."""
         for p in j["parts"]:
-            if kind(p["dst"]) != "absent":
+            if kind(p["dst"]) != LstatKind.ABSENT:
                 raise Unexpected(f"{p['dst']} appeared meanwhile")
             os.rename(p["src"], p["old"])
             os.rename(p["new"], p["dst"])
@@ -734,11 +734,11 @@ class UserFiles:
         return as_user(self.pw, self.home, self.u_steam_switch, j)
 
     def written_since(self, path: str, stamp: int) -> bool:
-        if kind(path) == "absent":
+        if kind(path) == LstatKind.ABSENT:
             return False
         if os.lstat(path).st_mtime_ns >= stamp:
             return True
-        return kind(path) == "dir" and self.tree.changed_since(path, stamp, mindepth=1)
+        return kind(path) == LstatKind.DIR and self.tree.changed_since(path, stamp, mindepth=1)
 
     def u_steam_late(self, j: SteamJournal) -> bool:
         """After the switch: was an old copy written to (see u_late_write)?"""
@@ -760,18 +760,18 @@ class UserFiles:
         path was created again meanwhile, nothing is deleted (Unexpected)."""
         parts = j["parts"]
         for p in parts:
-            if kind(p["old"]) != "absent" and kind(p["src"]) != "absent":
+            if kind(p["old"]) != LstatKind.ABSENT and kind(p["src"]) != LstatKind.ABSENT:
                 raise Unexpected(
                     f"{p['src']} was created again while the data waited in {p['old']}: move what you "
                     f"need into {p['old']}, delete {p['src']}, then run 'bulk steam apply' again"
                 )
         for p in reversed(parts):
-            if kind(p["old"]) != "absent" and kind(p["dst"]) != "absent":
-                if kind(p["new"]) != "absent":
+            if kind(p["old"]) != LstatKind.ABSENT and kind(p["dst"]) != LstatKind.ABSENT:
+                if kind(p["new"]) != LstatKind.ABSENT:
                     raise Unexpected(f"both {p['dst']} and {p['new']} exist")
                 os.rename(p["dst"], p["new"])
         for p in parts:
-            if kind(p["old"]) != "absent":
+            if kind(p["old"]) != LstatKind.ABSENT:
                 os.rename(p["old"], p["src"])
         self.drop_steam_copies(j)
         return True
@@ -779,7 +779,7 @@ class UserFiles:
     def drop_steam_copies(self, j: SteamJournal) -> None:
         """u_steam_rollback's last step: the copies go, unless one was written to."""
         for p in j["parts"]:
-            if kind(p["new"]) != "absent":
+            if kind(p["new"]) != LstatKind.ABSENT:
                 if "stamp2" in j and self.written_since(p["new"], j["stamp2"]):
                     raise Unexpected(
                         f"the data is back at {p['src']}, but the copy {p['new']} was written to as well: "
@@ -793,7 +793,7 @@ class UserFiles:
     def u_steam_finish(self, j: SteamJournal) -> bool:
         for p in j["parts"]:
             for x in (p["old"], p["new"]):
-                if kind(x) != "absent":
+                if kind(x) != LstatKind.ABSENT:
                     self.u_rmtree(x)
         return True
 
@@ -833,7 +833,7 @@ class UserFiles:
         out: list[Json] = []  # mtimes (ints): they come back through as_user's JSON
         for f, r in zip(files, olds, strict=False):
             tmp = f + ".cst-tmp"
-            if kind(tmp) != "absent":
+            if kind(tmp) != LstatKind.ABSENT:
                 os.unlink(tmp)  # left by a kill
             u_write_new(tmp, data, r["mode"])
             os.rename(tmp, f)

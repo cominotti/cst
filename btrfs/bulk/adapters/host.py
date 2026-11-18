@@ -19,7 +19,7 @@ import time
 from btrfs.bulk.adapters.machine import HomeTree, kind, log
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import Notifier, PENDING_ALERTS, Urgency
-from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
+from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx, LstatKind, PathChain
 
 
 # btrfs-snapshot's test seam (every file below another folder): never handed on to the runs below.
@@ -184,8 +184,8 @@ class Host:
         why: list[str] = []
         for rel in (".steam/steam.pid", ".var/app/com.valvesoftware.Steam/.steam/steam.pid"):
             if (
-                self.tree.chain(ctx.home, os.path.dirname(rel)) != "ok"
-                or kind(os.path.join(ctx.home, rel)) != "other"
+                self.tree.chain(ctx.home, os.path.dirname(rel)) != PathChain.OK
+                or kind(os.path.join(ctx.home, rel)) != LstatKind.OTHER
                 or not stat.S_ISREG(os.lstat(os.path.join(ctx.home, rel)).st_mode)
             ):
                 continue
@@ -225,7 +225,7 @@ class Host:
             except OSError:
                 continue
             for key, name in names.items():
-                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.M)
+                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.MULTILINE)
                 if found:
                     vals[key] = int(found[-1][1])
         return {k: v * BIG for k, v in vals.items()}
