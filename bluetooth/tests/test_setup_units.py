@@ -17,7 +17,7 @@ from bluetooth.setup import wiring
 from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.setup.application.change import Change
 from bluetooth.setup.application.survey import SetupMachine
-from bluetooth.setup.domain import Exit, Options, Paths, parse_command_line, resolve
+from bluetooth.setup.domain import BapState, Exit, Options, Paths, bap_state, parse_command_line, resolve
 from bluetooth.tests.setup_fakes import ISO, MAC, REPO, Machine
 from bluetooth.tests.test_ldac_watch import pw_dump
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -87,6 +87,23 @@ def change(m: Machine, *args: str, settings: dict[str, str] | None = None) -> tu
         python="/usr/bin/python3",
     )
     return Change(opts, cfg, paths, machine), console, clock
+
+
+class BapStateTest(unittest.TestCase):
+    def test_bap_states_are_plain_strings(self) -> None:
+        line = "Endpoint registered: sender=:1.5 path=/MediaEndpointLE/BAPSink/lc3"
+        self.assertEqual(bap_state(line, [":1.5"]), "registered")
+        self.assertEqual(bap_state(line.replace("registered", "unregistered"), [":1.5"]), "unregistered")
+        self.assertEqual(bap_state(line, [":1.6"]), "no-record")
+        self.assertEqual(
+            {s.name: s.value for s in BapState},
+            {
+                "REGISTERED": "registered",
+                "UNREGISTERED": "unregistered",
+                "NO_RECORD": "no-record",
+                "UNKNOWN": "unknown",
+            },
+        )
 
 
 class ApplyDoneTest(unittest.TestCase):

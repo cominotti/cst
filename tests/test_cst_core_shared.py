@@ -636,6 +636,10 @@ class WriteAtomicTest(unittest.TestCase):
                 with open(self.dest) as fh:
                     self.assertEqual(fh.read(), "old")
 
+    def test_file_owner_words(self) -> None:
+        # The words write_atomic's owner is documented with (reuse-primitives.md): "caller" and "root".
+        self.assertEqual({o.name: o.value for o in FileOwner}, {"CALLER": "caller", "ROOT": "root"})
+
     def test_owner_root_chowns_only_as_root(self) -> None:
         for owner, euid, calls in ((FileOwner.ROOT, 0, 1), (FileOwner.CALLER, 0, 0), (FileOwner.ROOT, 1000, 0)):
             with (

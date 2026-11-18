@@ -1160,6 +1160,27 @@ class ModuleRouterTest(unittest.TestCase):
             )
         self.assertEqual(route_command(ROUTING["toolchains"], "list", [], "p").action, "unknown")
 
+    def test_route_words_are_plain_strings(self) -> None:
+        # Routed's action and privilege as the strings they are: a member whose value changes fails here.
+        vm = ROUTING["vm"]
+        self.assertEqual(route_command(vm, "tune", ["x"], "p").action, "usage")
+        for args, privilege in (
+            (["list"], "read"),
+            (["tune", "apply"], "root"),
+            (["nocow", "apply", "--root"], "user"),
+        ):
+            with self.subTest(args=args):
+                routed = route_command(vm, args[0], args[1:], "p")
+                self.assertEqual((routed.action, routed.privilege), ("run", privilege))
+        self.assertEqual(route_command(ROUTING["toolchains"], "status", ["x"], "p").privilege, "as-user")
+        self.assertEqual(
+            {p.name: p.value for p in Privilege}, {"READ": "read", "USER": "user", "ROOT": "root", "AS_USER": "as-user"}
+        )
+        self.assertEqual(
+            {a.name: a.value for a in RouteAction},
+            {"HELP": "help", "USAGE": "usage", "UNKNOWN": "unknown", "RUN": "run"},
+        )
+
     def test_script_help_is_what_the_header_sed_printed(self) -> None:
         text = "#!/x\n# SPDX-License-Identifier: MPL-2.0\n#\n# a  b\n#c\n#   d\nnot a comment\n\nlater\n"
         self.assertEqual(script_help(text, "p"), "\na  b\nc\n  d\nnot a comment\n\nUsage: p <command> [args]\n")

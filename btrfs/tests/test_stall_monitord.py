@@ -685,6 +685,14 @@ class HungKindTest(unittest.TestCase):
         )
         self.assertIsNone(self.mon.episode)  # no storage episode
 
+    def test_records_are_tagged_with_the_words_the_report_reads(self) -> None:
+        # The "t" of each record kind, as btrfs-stall-report reads it from the log (a shared format).
+        self.assertEqual(self.stuck("sync_log")[0]["t"], "ev")
+        self.assertEqual(
+            {t.name: t.value for t in md_domain.StallRecordTag},
+            {"META": "meta", "SAMPLE": "s", "EPISODE": "ep", "EVENT": "ev", "ALERT": "al"},
+        )
+
     def test_storage_hung_task_unchanged(self) -> None:
         events = self.stuck("sync_log")
         self.assertEqual(events[0]["kind"], "hung")
