@@ -67,6 +67,7 @@ HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
     "btrfs/docker-gc": (("--help",), 2),
     "btrfs/docker-volumes-nocow": (("--help",), 2),
     "cpu/cpu-watch": (("--help",), 2),
+    "cpu/game-profile": (("--help",), 2),
     "cpu/vm-pin": (("--help",), 2),
     "bluetooth/bt-ldac-watch": (("--help",), 0),
     "toolchains/cst-toolchains": (("help",), 0),

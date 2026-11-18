@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-# cst-link.bash: sourced (not run) by the `install` of btrfs-setup.sh and
-# cpu-setup.sh, as root.
+# cst-link.bash: sourced (not run) by the `install` of btrfs-setup.sh and of
+# `cst cpu` (cpu/setup/adapters.py sources it in bash), as root.
 #
 # Programs those installs put on the system (alerts, logs, timers) print
 # hints such as "run 'cst btrfs bulk status'". This makes `cst` a real command

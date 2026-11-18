@@ -52,8 +52,11 @@ from cst_core.domain.text import (
     is_yes,
     parse_shell_assignments,
     parse_snapshots_conf,
+    printf_q,
+    printf_q_words,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
+from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from toolchains.domain import auto as tcd_auto
@@ -982,6 +985,50 @@ class VirshAdapterTest(unittest.TestCase):
         )
 
 
+class PrintfQTest(unittest.TestCase):
+    """printf_q and printf_q_words, the two sides of the state files a bash program writes with
+    printf %q and reads back with eval (the game profile's game.state), against bash itself."""
+
+    CORPUS: list[str] = (
+        [chr(i) for i in range(1, 128)]
+        + [f"a{chr(i)}b" for i in range(1, 128)]
+        + ["", "a b", "~a", "a~", "a=~b", "a:~", "#a", "a#", "-", "new", "it's", "lush\\x2dbatch.slice"]
+        + ["é", "aé b", "a\x01é", "\x85x", "a\tb\nc"]
+        # Printable for glibc, not for Python: a space (NBSP, em space), format characters (soft
+        # hyphen, zero-width space), a private-use character.
+        + ["a\u00a0b", "a\u2003b", "a\u00adb", "a\u200bb", "\ue000", "a\u00a0\tb"]
+    )
+
+    def bash_q(self, values: Sequence[str]) -> list[str]:
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", 'for a in "$@"; do printf "%q\\0" "$a"; done', "_", *values],
+            check=True,
+            capture_output=True,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+            stdin=subprocess.DEVNULL,
+        )
+        return r.stdout.decode("utf-8", "surrogateescape").split("\0")[:-1]
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_printf_q_writes_what_bash_writes(self) -> None:
+        for value, want in zip(self.CORPUS, self.bash_q(self.CORPUS), strict=True):
+            with self.subTest(value=value):
+                self.assertEqual(printf_q(value), want)
+
+    def test_words_read_back_what_printf_q_wrote(self) -> None:
+        for value in self.CORPUS:
+            with self.subTest(value=value):
+                self.assertEqual(printf_q_words(f"x {printf_q(value)}  y"), ["x", value, "y"])
+
+    def test_words_of_other_quoting_and_lines_bash_would_not_read_as_words(self) -> None:
+        self.assertEqual(printf_q_words("cgw /a ''"), ["cgw", "/a", ""])
+        self.assertEqual(printf_q_words("a'b c'\"d\\\"\" $'\\101\\x42'"), ['ab cd"', "AB"])
+        self.assertEqual(printf_q_words(""), [])
+        for line in ("a 'b", "a $x", "a `b`", "a;b", "a\\", "a (b)", 'a "$x"'):
+            with self.subTest(line=line):
+                self.assertIsNone(printf_q_words(line))
+
+
 class ShellAssignmentsTest(unittest.TestCase):
     """parse_shell_assignments, the one KEY=VALUE reader (cpu, vm, doctor, toolchains, bluetooth, bulk), against bash."""
 
@@ -1135,12 +1182,10 @@ class ShellAssignmentsTest(unittest.TestCase):
     @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
     def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
         # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
-        with open(os.path.join(REPO, "cpu-setup.sh"), encoding="utf-8") as fh:
-            cpu = re.search(r"printf '%s\\n' (\"# Managed by cpu-setup\.sh.*?)\| cst_install_text", fh.read(), re.S)
         with open(os.path.join(REPO, "btrfs", "setup-snapshots.bash"), encoding="utf-8") as fh:
             snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
-        assert cpu is not None and snap is not None
-        generated = self.bash_text(f"target_user=alice; printf '%s\\n' {cpu.group(1)}")
+        assert snap is not None
+        generated = cpu_setup_conf_lines("alice")  # what cst cpu install writes
         # snapshots.conf as the real writer (snap_conf_set) leaves it, blanks and a ' included.
         conf = os.path.join(self.tmp, "snapshots.conf")
         quoted = self.bash_text(
