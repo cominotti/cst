@@ -18,7 +18,7 @@ from typing import TextIO
 from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.text import parse_shell_assignments, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort
 from cpu.game.domain import (
     DOCKER_SCOPES,
@@ -64,11 +64,20 @@ def collate_as_bash() -> None:
         locale.setlocale(locale.LC_COLLATE, "")
 
 
-def read_settings(conf: str) -> GameSettings:
-    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults).
-    The lines bash would not read as plain assignments set nothing."""
+def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]:
+    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults), and its
+    problem lines: lines bash would not read as plain assignments, which set nothing."""
     text = read_text(conf)
-    return game_settings({} if text is None else parse_shell_assignments(text).values)
+    if text is None:
+        return game_settings({}), ()
+    parsed = parse_shell_assignments(text)
+    return game_settings(parsed.values), parsed.problems
+
+
+def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
+    """The game profile over paths.conf's settings (and its problem lines)."""
+    settings, problems = read_settings(paths.conf)
+    return GameProfile(paths, settings, runner, problems=problems)
 
 
 def user_id(user: str) -> str:
@@ -112,10 +121,12 @@ class GameProfile:
         runner: CommandRunnerPort,
         *,
         uid_of: Callable[[str], str] = user_id,
+        problems: Sequence[SettingsProblem] = (),
         out: TextIO | None = None,
     ) -> None:
         self.paths = paths
         self.s = settings
+        self.problems = tuple(problems)
         self._runner = runner
         self._uid_of = uid_of
         self._out = out
@@ -366,6 +377,9 @@ class GameProfile:
         if os.path.exists(p.state):
             self.log(6, "already on")
             return 0
+        if self.problems:
+            self.refuse("not switched on")
+            return 1
         if not s.target_user:
             self.log(3, f"TARGET_USER not set in {p.conf}")
             return 1
@@ -503,11 +517,20 @@ class GameProfile:
             self.log(5, "no GameMode client left: switching off")
             self.ctl("sys", "stop", "--no-block", "cpu-game.service")
             return 0
+        if self.problems:
+            self.refuse("tick changed nothing")
+            return 1
         self.pin_docker()  # containers started meanwhile
         self.protect_steam()  # the game's own scope, started after 'on'
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
+
+    def refuse(self, what: str) -> None:
+        """The settings file's problem lines in the journal, and what the profile did not do."""
+        for line in describe_problems(self.paths.conf, self.problems).split("\n"):
+            self.log(3, line)
+        self.log(3, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works)")
 
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
@@ -516,6 +539,8 @@ class GameProfile:
         on = os.path.exists(p.state)
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
+        for line in describe_problems(p.conf, self.problems).split("\n") if self.problems else ():
+            self.say(f"  settings: {line} (sets nothing: 'on' and 'tick' refuse until it is fixed)")
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line("builds.slice")

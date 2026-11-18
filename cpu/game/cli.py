@@ -11,7 +11,7 @@ import sys
 from cst_core.adapters.dispatch import default_ctrl_c
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals
-from cpu.game.adapters import GameProfile, collate_as_bash, read_settings
+from cpu.game.adapters import collate_as_bash, load_profile
 from cpu.game.domain import USAGE, GamePaths
 
 
@@ -26,5 +26,5 @@ def main(argv: Sequence[str]) -> int:
     if action == "state":
         restore_default_signals()
     paths = GamePaths()
-    profile = GameProfile(paths, read_settings(paths.conf), SubprocessCommandRunner())
+    profile = load_profile(paths, SubprocessCommandRunner())
     return profile.state() if action == "state" else profile.locked(action)

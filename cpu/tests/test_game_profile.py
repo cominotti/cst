@@ -25,7 +25,7 @@ import unittest.mock
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import GameProfile, read_settings
+from cpu.game.adapters import GameProfile, load_profile, read_settings
 from cpu.game.domain import GamePaths, GameSettings, ctl_file, escapes_in_state, expand_cpus, records, game_settings
 from cst_core.domain.contracts import state_format
 from cst_core.ports import CommandResult
@@ -251,7 +251,7 @@ class PureRulesTest(unittest.TestCase):
     def test_settings_file_read_as_bash_reads_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "cpu-setup.conf")
-            self.assertEqual(read_settings(conf), GameSettings())  # no file: the defaults
+            self.assertEqual(read_settings(conf), (GameSettings(), ()))  # no file: the defaults
             with open(conf, "w") as f:
                 f.write(
                     "# Managed by cpu-setup.sh (CST); values may be edited.\n"
@@ -260,7 +260,7 @@ class PureRulesTest(unittest.TestCase):
                 )
             self.assertEqual(
                 read_settings(conf),
-                GameSettings("tester", "12-23", "0-7", "10", "16G", "no"),
+                (GameSettings("tester", "12-23", "0-7", "10", "16G", "no"), ()),
             )
 
 
@@ -594,6 +594,68 @@ class IntendedFormatTest(GameProfileCase):
         _, actions = self.run_profile("off")
         self.assertIn(f"{SYS} daemon-reload", actions)
         self.assertFalse(os.path.exists(self.intended))
+
+
+class SettingsProblemTest(GameProfileCase):
+    """A line of cpu-setup.conf that bash would run or expand sets nothing: the profile does not
+    switch on, and a tick changes nothing, until it is fixed; off still undoes everything."""
+
+    def problem_profile(self) -> tuple[GameProfile, io.StringIO]:
+        text = "TARGET_USER='testuser'\nBUILD_CPUS=$(nproc)\n"
+        self.write(self.paths.conf, text)
+        settings, problems = read_settings(self.paths.conf)
+        self.assertEqual([p.line for p in problems], [2])
+        out = io.StringIO()
+        return GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems, out=out), out
+
+    def test_on_refuses_before_it_changes_anything(self) -> None:
+        p, out = self.problem_profile()
+        self.assertEqual(p.on(), 1)
+        conf = self.paths.conf
+        self.assertEqual(
+            out.getvalue(),
+            f"<3>game-profile: {conf} line 2: BUILD_CPUS=$(nproc): $, ` or \\ outside single quotes: bash would expand it"
+            " (use single quotes)\n"
+            f"<3>game-profile: not switched on: a line of {conf} sets nothing (fix it; 'off' still works)\n",
+        )
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.systemd.actions, [])
+        self.assertEqual(p.locked("on"), 1)  # what the unit's ExecStart gets
+
+    def test_tick_changes_nothing_but_still_switches_off_and_off_works(self) -> None:
+        self.run_profile("on")  # switched on before the line was broken
+        self.write(self.manual, "")
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+        p, out = self.problem_profile()
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 1)
+        self.assertIn("<3>game-profile: tick changed nothing: a line of", out.getvalue())
+        self.assertEqual(self.sets(self.systemd.actions), [])
+        os.remove(self.manual)
+        self.no_game()
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)  # no game left: switched off as before
+        self.assertEqual(self.systemd.actions, [f"{SYS} stop --no-block cpu-game.service"])
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(
+            self.now("sys", "machine.slice", "CPUWeight"), "50"
+        )  # the override is gone; the store keeps the fake's last
+
+    def test_the_program_builds_the_profile_over_the_settings_file(self) -> None:
+        self.write(self.paths.conf, "TARGET_USER='testuser'\nBUILD_CPUS=$(nproc)\n")
+        p = load_profile(self.paths, self.systemd)
+        self.assertEqual((p.s.target_user, p.s.build_cpus, [x.line for x in p.problems]), ("testuser", "12-23", [2]))
+        self.assertEqual(p.on(), 1)
+        os.remove(self.paths.conf)
+        p = load_profile(self.paths, self.systemd)
+        self.assertEqual((p.s, p.problems), (GameSettings(), ()))
+
+    def test_state_names_the_line(self) -> None:
+        p, out = self.problem_profile()
+        self.assertEqual(p.state(), 0)
+        self.assertIn(f"\n  settings: {self.paths.conf} line 2: BUILD_CPUS=$(nproc): ", out.getvalue())
+        self.assertIn("(sets nothing: 'on' and 'tick' refuse until it is fixed)\n", out.getvalue())
 
 
 class GameProfileEscapesTest(GameProfileCase):

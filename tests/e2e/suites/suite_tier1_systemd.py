@@ -3189,6 +3189,42 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_86_cpu_game_profile_refuses_a_settings_line_bash_would_run(self) -> None:
+        """With a line in cpu-setup.conf that bash would expand (`BUILD_CPUS=$(nproc)`), the real
+        game profile does not switch on: exit 1, the line in its output, no game.state, machine.slice's
+        weight as it was; `off` still works; with the line fixed, `on` and `off` work again."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-86-conf.bak
+            install -d /etc/cpu-setup
+            printf '%s
+' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            base=$(systemctl show -P CPUWeight machine.slice)
+            rc=0; got=$(gp on) || rc=$?
+            [[ $rc == 1 ]] || { echo "on with a bad line: exit $rc" >&2; exit 1; }
+            grep -q 'cpu-setup.conf line 2: BUILD_CPUS=$(nproc): ' <<<"$got"
+            grep -q 'not switched on' <<<"$got"
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            grep -q 'settings: /etc/cpu-setup/cpu-setup.conf line 2' <<<"$(gp state)"
+            gp off
+            sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            gp off
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            [[ ! -e /tmp/e2e-86-conf.bak ]] || mv /tmp/e2e-86-conf.bak /etc/cpu-setup/cpu-setup.conf
+            rm -rf /run/cpu-setup
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
