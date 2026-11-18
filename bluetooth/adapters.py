@@ -116,8 +116,13 @@ class LocalBluetoothHostAdapter:
         return sys.stdin.read()
 
     def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
-        """The restarts still owed, one per line; with save, the file at path holds them (atomically), or is removed."""
-        owed = still_pending(parse_pending(read_or_none(path)), dict(zip(RESTART_UNITS, ids, strict=True)), skipped)
+        """The restarts still owed, one per line; with save, the file at path holds them (atomically), or is removed.
+        A record that cannot be read (not UTF-8, not a file) counts as none, as parse_pending treats one that is not JSON."""
+        try:
+            text = read_or_none(path)
+        except OSError, ValueError:
+            text = None
+        owed = still_pending(parse_pending(text), dict(zip(RESTART_UNITS, ids, strict=True)), skipped)
         if save and owed:
             ensure_dir(os.path.dirname(path), 0o755)
             write_atomic(path, render_pending(owed), mode=0o644, relabel=False)

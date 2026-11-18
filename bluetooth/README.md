@@ -234,9 +234,12 @@ the invocation ID the service had then (`systemctl show -P InvocationID`).
 While the service keeps running with that ID, `plan` lists the restart
 ("still owed", exit 10), `status` says so, and the next `apply` makes it
 (asking first for Bluetooth). Any restart of the service (by `apply`, by
-hand with the printed commands, or a reboot) or a stop ends it, and `apply`
-then removes the file. A service that does not run owes nothing: it reads
-the new files when it starts.
+hand with the printed commands, or a reboot) or a stop ends it. The file
+goes with the next restart that `apply`, `revert` or `le-audio` makes;
+until then a record whose restarts were made is only ignored. A file that
+cannot be read counts as no record, and the next one written replaces it.
+A service that does not run owes nothing: it reads the new files when it
+starts.
 
 **Settings.** The defaults are in [`bluetooth.conf`](bluetooth.conf) in this
 folder (`DEVICE`, `LDAC_QUALITY`, `BEARER`, `LE_AUDIO`, `LDAC_RATE`). To change them for your user,

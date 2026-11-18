@@ -1040,6 +1040,16 @@ needs() { compute_plan; echo "bt=$BT_RESTART wp=$WP_RESTART owed=$(echo $OWED)";
             )
             self.assertEqual(r.returncode, 2, args)
 
+    def test_an_unreadable_record_is_replaced(self) -> None:
+        # Not UTF-8 (a damaged file): judged as no record, and the next save writes a good one.
+        os.makedirs(os.path.dirname(self.pending))
+        with open(self.pending, "wb") as f:
+            f.write(b"\xff{")
+        self.assertEqual(self.sh("needs\n"), ["bt=0 wp=0 owed="])
+        self.assertEqual(self.sh("NO_RESTART=1; do_restarts 0 1\nneeds\n"), ["bt=0 wp=1 owed=wireplumber.service"])
+        with open(self.pending) as f:
+            self.assertEqual(json.load(f), {"wireplumber.service": "wp-0"})
+
     def test_a_cancelled_question_keeps_both_owed(self) -> None:
         out = self.sh("YES=0; rc=0; do_restarts 1 1 </dev/null || rc=$?; echo rc=$rc\nneeds\n")
         self.assertEqual(out, ["rc=1", "bt=1 wp=1 owed=bluetooth.service wireplumber.service"])
