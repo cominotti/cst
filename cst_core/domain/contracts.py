@@ -98,8 +98,8 @@ alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrf
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/monitor.py  | btrfs/stall_report/analysis.py                     | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/monitor.py  | btrfs/btrfs-notify                                 | none (plain text, one boot)
 bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
-docker-gc-state    | /var/lib/docker-gc/last-used.json          | 0 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | none yet
-docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 0 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | none yet
+docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
+docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters.py                   | vm/adapters.py doctor/application.py               | "version"
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game-profile                 | cpu/game-profile cpu/cli.py doctor/application.py  | none (its existence is the contract)

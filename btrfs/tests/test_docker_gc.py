@@ -35,6 +35,7 @@ if _CHECKOUT not in sys.path:
 from btrfs.docker_gc import adapters as gc_adapters, cli as gc_cli, domain as gc_domain, wiring as gc_wiring
 from btrfs.docker_gc.application import DockerGc, Recording
 from btrfs.docker_gc.domain import (
+    NewerState,
     DAY,
     Container,
     DockerEvent,
@@ -58,6 +59,8 @@ sys.dont_write_bytecode = True
 
 TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docker-gc")
 NOW = 1_700_000_000.0
+# The exact bytes of state files the writers produce (tests/fixtures/state-formats).
+STATE_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(TOOL)), "tests", "fixtures", "state-formats")
 REPLACEMENT = chr(0xFFFD)  # what a byte that is not UTF-8 becomes
 
 
@@ -662,7 +665,7 @@ class StateFilesTest(unittest.TestCase):
             self.assertEqual(
                 json.load(f),
                 {"at": 1, "containers": 0, "volumes": 0, "images": 0, "image_bytes": 0, "failed": 0}
-                | {"before": {}, "after": {}},
+                | {"before": {}, "after": {}, "v": 1},
             )
         with open(target) as f:
             self.assertEqual(f.read(), "keep")
@@ -679,7 +682,7 @@ class StateFilesTest(unittest.TestCase):
         self.assertGreaterEqual(self.files.load_state().since, before)  # none: recorded from now
         self.files.save_state(GcState(since=5, images={"sha256:a": 7.5}, heartbeat=9))
         with open(self.files.paths.last_used) as f:
-            self.assertEqual(f.read(), '{"since": 5, "images": {"sha256:a": 7.5}, "heartbeat": 9}')
+            self.assertEqual(f.read(), '{"since": 5, "images": {"sha256:a": 7.5}, "heartbeat": 9, "v": 1}')
         self.assertEqual(self.files.load_state(), GcState(since=5, images={"sha256:a": 7.5}, heartbeat=9))
         for text in (
             "not json",
@@ -695,6 +698,56 @@ class StateFilesTest(unittest.TestCase):
                 self.write("last-used.json", text)
                 self.assertEqual(self.files.load_state().images, {})
                 self.assertGreaterEqual(self.files.load_state().since, before)
+
+    def fixture(self, name: str) -> str:
+        with open(os.path.join(STATE_FIXTURES, name)) as f:
+            return f.read()
+
+    def test_the_writers_produce_the_checked_in_files_exactly(self) -> None:
+        # The bytes main's docker-gc was shown to read (REPORT, the mixed-version proof): a change
+        # here changes the format, and needs that proof again.
+        state = GcState(since=1794000000.5, images={"sha256:" + "a" * 64: 1794000100.25}, heartbeat=1794000200.0)
+        self.files.save_state(state)
+        summary = RunSummary(1794000300.0, 1, 2, 3, 4500000, 0, {"Images": "1 GB"}, {"Images": "0.5 GB"})
+        self.files.save_summary(summary)
+        for name, fixture in ((self.files.paths.last_used, "docker-gc-last-used-v1.json"),
+                              (self.files.paths.last_run, "docker-gc-last-run-v1.json")):  # fmt: skip
+            with self.subTest(fixture), open(name) as f:
+                self.assertEqual(f.read(), self.fixture(fixture))
+        # What an older docker-gc wrote (no "v"): read the same.
+        self.write("last-used.json", self.fixture("docker-gc-last-used-v0.json"))
+        self.write("last-run.json", self.fixture("docker-gc-last-run-v0.json"))
+        # (status shows only the counts: before and after are not read back)
+        self.assertEqual(
+            (self.files.load_state(), self.files.load_summary()), (state, RunSummary(1794000300.0, 1, 2, 3, 4500000, 0))
+        )
+
+    def test_a_state_of_a_newer_docker_gc_is_refused_and_left_as_it_is(self) -> None:
+        for name, load in (("last-used.json", self.files.load_state), ("last-run.json", self.files.load_summary)):
+            with self.subTest(name):
+                text = '{"since": 1, "images": {}, "heartbeat": 2, "at": 1, "v": 2}'
+                self.write(name, text)
+                with self.assertRaises(NewerState) as caught:
+                    load()
+                path = os.path.join(self.tmp, name)
+                self.assertTrue(
+                    str(caught.exception).startswith(f"{path} is format 2 of the docker-gc-"), caught.exception
+                )
+                self.assertIn("this CST reads format 1 and older", str(caught.exception))
+                with open(path) as f:
+                    self.assertEqual(f.read(), text)
+
+    def test_a_version_that_is_no_whole_number_is_not_a_state_docker_gc_wrote(self) -> None:
+        before = time.time()
+        for v in ('"1"', "true", "-1"):
+            with self.subTest(v=v):
+                self.write("last-used.json", f'{{"since": 1, "images": {{}}, "heartbeat": 2, "v": {v}}}')
+                self.assertGreaterEqual(self.files.load_state().since, before)
+                self.write(
+                    "last-run.json",
+                    f'{{"at": 1, "containers": 1, "volumes": 1, "images": 1, "image_bytes": 1, "failed": 0, "v": {v}}}',
+                )
+                self.assertIsNone(self.files.load_summary())
 
     def test_a_summary_that_is_not_one_reads_as_never(self) -> None:
         for text in ("not json", "[]", '{"at": 1}', '{"at": 1, "containers": 1, "volumes": 1, "images": 1}'):

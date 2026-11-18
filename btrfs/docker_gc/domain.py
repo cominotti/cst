@@ -10,12 +10,30 @@ from datetime import datetime
 import os
 import re
 
-from cst_core.domain.contracts import StateFormat, state_format
+from cst_core.domain.contracts import StateFormat, state_format, version_of
 from cst_core.domain.values import format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
 STATE_FORMAT: StateFormat = state_format("docker-gc-state")
 LAST_RUN_FORMAT: StateFormat = state_format("docker-gc-last-run")
+
+
+class NewerState(RuntimeError):
+    """A state file of a newer docker-gc: nothing is recorded or removed with it, and it is left as it is."""
+
+
+def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
+    """The format of a state file as read ("v"; none: 0, an older docker-gc wrote it), None when it is not one
+    docker-gc wrote. Raises NewerState for a newer format than fmt's."""
+    found = version_of(data, "v")
+    if found is not None and found > fmt.version:
+        raise NewerState(
+            f"{fmt.newer_text(path, found)}: nothing is recorded or removed with it, and it is left as it is; "
+            "install the docker-gc of that CST (cst btrfs docker-gc enable in that checkout)"
+        )
+    return found
+
+
 DAY = 86400
 HEARTBEAT_SECONDS = 300
 MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up

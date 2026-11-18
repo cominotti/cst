@@ -1,0 +1,1 @@
+{"at": 1794000300.0, "containers": 1, "volumes": 2, "images": 3, "image_bytes": 4500000, "failed": 0, "before": {"Images": "1 GB"}, "after": {"Images": "0.5 GB"}}

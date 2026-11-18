@@ -409,6 +409,24 @@ class StatusTest(unittest.TestCase):
         rc, out, err = self.p.run("run", "--dry-run")
         self.assertEqual((rc, out, err), (1, "<3>docker-gc: docker volume ls: Error response from daemon: boom\n", ""))
 
+    def test_a_state_of_a_newer_docker_gc_stops_every_command_and_stays(self) -> None:
+        # After going back to an older CST: the older docker-gc must not read a newer last-used.json
+        # as "no state" and write over it (or remove images by it).
+        path = os.path.join(self.p.state, "last-used.json")
+        text = json.dumps({"since": OLD, "images": {sha("8"): self.p.now}, "heartbeat": self.p.now, "v": 2})
+        with open(path, "w") as f:
+            f.write(text)
+        before = self.p.docker()
+        for args in (("status",), ("run",), ("run", "--dry-run"), ("record",)):
+            with self.subTest(args=args):
+                rc, out, err = self.p.run(*args)
+                self.assertEqual((rc, err), (1, ""))
+                self.assertIn(f"<3>docker-gc: {path} is format 2 of the docker-gc-state (this CST reads format 1", out)
+                with open(path) as f:
+                    self.assertEqual(f.read(), text)
+        self.assertEqual(self.p.docker(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.p.state, "last-run.json")))
+
     def test_cleanup_now_needs_a_terminal(self) -> None:
         rc, out, err = self.p.run("cleanup-now")
         self.assertEqual((rc, out), (1, ""))
@@ -434,7 +452,7 @@ class RecordTest(unittest.TestCase):
 
     def check_state(self, start: float, end: float) -> None:
         st = self.p.last_used()
-        self.assertEqual(list(st), ["since", "images", "heartbeat"])
+        self.assertEqual(list(st), ["since", "images", "heartbeat", "v"])
         images = st["images"]
         assert isinstance(images, dict)
         # Every container counts as a use at the start (stopped ones: when they stopped), then the events.
