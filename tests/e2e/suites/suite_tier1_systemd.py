@@ -3275,6 +3275,61 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_87_cpu_game_profile_off_skips_a_cut_record_and_acts_for_the_user_on_acted_for(self) -> None:
+        """'off' with the real system and user managers, after 'on' for tester: a last line of
+        game.state cut short (no newline, "existed 1") is named and not undone (machine.slice's
+        IOWeight goes back to its own value, not 1), and with TARGET_USER changed to a line that sets
+        nothing (`TARGET_USER="$(id -un tester)"`) the user manager's side is undone for tester, the
+        uid game.state names: user.slice's CPUWeight back, its override file gone."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-87-conf.bak ]]; then mv /tmp/e2e-87-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-87-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            uid=$(id -u tester)
+            io=$(systemctl show -P IOWeight machine.slice)
+            uw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            override=/run/user/$uid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            grep -q "^prop sys user@$uid.service MemoryLow " /run/cpu-setup/game.state
+            printf 'prop sys machine.slice IOWeight existed 1' >>/run/cpu-setup/game.state   # cut short
+            n=$(( $(wc -l </run/cpu-setup/game.state) + 1 ))
+            printf '%s\n' 'TARGET_USER="$(id -un tester)"' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            got=$(gp off)
+            grep -qF "game.state line $n: no record 'off' can read, skipped: prop sys machine.slice IOWeight existed 1" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf: undoing for tester (uid $uid)" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]] || { echo "IOWeight: not $io" >&2; exit 1; }
+            test ! -e "$override"
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$uw" ]] \
+                || { echo "user.slice CPUWeight: not $uw" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
