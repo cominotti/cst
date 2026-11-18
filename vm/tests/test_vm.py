@@ -29,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -180,6 +181,7 @@ exit 1
 
 
 class Scratch(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1054,6 +1056,7 @@ class TuneEdgeCaseTest(unittest.TestCase):
 class TuneCommandTest(unittest.TestCase):
     """cmd_tune with a fake virsh (in-process: apply asks on a terminal)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1201,6 +1204,7 @@ class TuneCommandTest(unittest.TestCase):
 class NocowTest(unittest.TestCase):
     """The probe with fake inode flags (scratch folders are rarely btrfs)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1493,6 +1497,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     a NOCOW image still gets a reflink backup, because the backup pre-creates
     a NOCOW destination; without it, the clone fails (the negative control)."""
 
+    @override
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
         if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):

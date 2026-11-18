@@ -30,7 +30,7 @@ import sys
 import tempfile
 import termios
 import time
-from typing import Any
+from typing import Any, override
 import unittest
 
 # Run directly (python3 -I -B vm/tests/test_vm_nas.py): the checkout root holds the tests package.
@@ -229,6 +229,7 @@ def read(path: str) -> str:
 
 
 class Nas(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-nas-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
