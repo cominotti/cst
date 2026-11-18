@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-report's machine side: the log folder, `date -d` for --since/--until, reading the daily log files, below and container names."""
+"""btrfs-stall-report's machine side: the log folder, `date -d` for --since/--until, reading the daily log files, the analysis with the clock and below, and container names."""
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 import glob
 import gzip
@@ -13,7 +14,8 @@ import sys
 import time
 import zlib
 
-from btrfs.stall_report.domain import BelowItem
+from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
+from btrfs.stall_report.domain.window import summarise
 from cst_core.domain.contracts import state_format
 
 LOG_DIR = state_format("stall-records").folder
@@ -45,9 +47,13 @@ def report_window(since: str | None, until: str | None) -> tuple[float, float]:
     return start, end
 
 
+def log_dir_exists(log_dir: str) -> bool:
+    return os.path.isdir(log_dir)
+
+
 def load(log_dir: str, since: float, until: float) -> list[Any]:
     # Whatever each line parses to; analyse() picks the records by their "t".
-    recs: list[Any] = []
+    recs = []
     first_day = time.strftime("%Y-%m-%d", time.localtime(since - 86400))
     # Records buffered across midnight can land in the next day's file.
     last_day = time.strftime("%Y-%m-%d", time.localtime(until + 86400))
@@ -72,6 +78,42 @@ def load(log_dir: str, since: float, until: float) -> list[Any]:
         except (OSError, EOFError, zlib.error) as e:
             print(f"warning: cannot fully read {path}: {e}", file=sys.stderr)
     return recs
+
+
+def analyse(
+    recs: list[Any], since: float, until: float, with_below: bool, verbose: bool
+) -> tuple[AnalyseResult, MetaRecord]:
+    """The analysis of the window (summarise(), with the clock) of the records
+    load() read, and below's per-process section when asked (a window with 2+
+    samples only, the last key of the result)."""
+    recorded = Recorded([], [], [], [], [])
+    for r in recs:
+        t = r.get("t")
+        if t == "meta":
+            recorded.metas.append(r)
+        elif t == "s":
+            recorded.samples.append(r)
+        elif t == "ep":
+            recorded.episodes.append(r)
+        elif t == "ev":
+            recorded.events.append(r)
+        elif t == "al":
+            recorded.alerts.append(r)
+    res, meta = summarise(recorded, since, until, verbose=verbose, now=time.time())
+    if with_below and res["samples"] >= 2:
+        res["below"] = below_section(since, until)
+    return res, meta
+
+
+def below_section(since: float, until: float) -> BelowSection:
+    """below's top writers and readers of the window, both at once, or why there are none."""
+    if not shutil.which("below"):
+        return {"error": "below not installed (no per-process attribution)"}
+    with ThreadPoolExecutor(2) as ex:
+        fw = ex.submit(below_top, since, until, "io.wbytes_per_sec")
+        fr = ex.submit(below_top, since, until, "io.rbytes_per_sec")
+        (w, ew), (r, er) = fw.result(), fr.result()
+    return {"top_writers": w, "top_readers": r, "error": ew or er}
 
 
 def container_names() -> dict[str, str]:

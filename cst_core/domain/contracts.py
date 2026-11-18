@@ -108,7 +108,7 @@ def version_of(data: object, field: str) -> int | None:
 #   change. Neither has a version yet.
 _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/cst-pending-alerts doctor/application.py     | first line "cst-alert 1"
-stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/monitor.py  | btrfs/stall_report/analysis.py                     | "v" of each record
+stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/monitor.py  | btrfs/stall_report/domain/window.py                | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/monitor.py  | btrfs/btrfs-notify                                 | none (plain text, one boot)
 bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)

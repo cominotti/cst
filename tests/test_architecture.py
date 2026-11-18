@@ -150,7 +150,6 @@ ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_
 UNLAYERED_ALLOWED: Final[dict[str, str]] = {
     "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
     "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
-    "btrfs/stall_report/analysis.py": "the report's analysis of the recorded episodes, with a few reads of its own",
 }
 
 # What a cli.py or presenter.py may use although direct_io_problems reports
@@ -186,8 +185,6 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
     "btrfs/stall_monitord cli": 1,
     "btrfs/stall_monitord unlayered": 50,
-    "btrfs/stall_report cli": 1,
-    "btrfs/stall_report unlayered": 4,
     "cst_core entry": 1,
     "toolchains cli": 54,
     "vm cli": 78,

@@ -45,8 +45,6 @@ ANY_BUDGETS: Final[dict[str, int]] = {
     "btrfs/stall_monitord domain": 2,
     "btrfs/stall_monitord unlayered": 7,
     "btrfs/stall_report adapters": 2,
-    "btrfs/stall_report domain": 2,
-    "btrfs/stall_report unlayered": 2,
     "doctor adapters": 2,
     "doctor domain": 1,
     "doctor ports": 2,
@@ -63,7 +61,6 @@ ANY_BUDGETS: Final[dict[str, int]] = {
 CAST_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests": 1,
     "btrfs tests": 16,
-    "btrfs/stall_report domain": 1,
     "tests tests": 4,
     "toolchains cli": 1,
     "toolchains domain": 1,

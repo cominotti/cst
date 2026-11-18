@@ -64,7 +64,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/snapshot BLE001": 1,
     "btrfs/stall_monitord C901": 1,
     "btrfs/stall_report C901": 4,
-    "btrfs/stall_report FBT001": 3,
+    "btrfs/stall_report FBT001": 2,
     "cpu FBT001": 1,
     "cpu FBT002": 1,
     "cpu tests FBT001": 1,

@@ -1,72 +1,75 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-report's analysis of one window: coverage, totals, categories, episodes and events (reads the clock, and below when asked)."""
+"""btrfs-stall-report's analysis of one window, no I/O: coverage, pressure and peaks, the btrfs, disk, memory and cgroup totals, the categories of the episodes' waits, the corrections for records of older daemons, and an episode still open."""
 
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 import math
-import shutil
-import time
 
 from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE
-from btrfs.stall_report.adapters import below_top
-from btrfs.stall_report.domain import (
-    AnalyseResult,
-    CAT_DESC,
-    CgroupTotals,
+from btrfs.stall_report.domain.categories import CAT_DESC, MAINT_TEXT, NON_STORAGE, V2_HUNG_SIG, classify
+from btrfs.stall_report.domain.records import (
     DI,
     DISK_SUM,
+    FRESH_MAX,
+    GAP_MAX,
+    PAGE,
+    ZSWAP_KEYS,
+    AnalyseResult,
+    CgroupTotals,
+    DiskTotals,
     Episode,
     EpisodeRecord,
-    FRESH_MAX,
     FsTotals,
-    GAP_MAX,
-    MAINT_TEXT,
     MetaRecord,
-    NON_STORAGE,
-    Notice,
-    PAGE,
+    OpenEpisode,
+    Recorded,
     SampleRecord,
     Sig,
     SigRecord,
-    V2_HUNG_SIG,
-    ZSWAP_KEYS,
-    classify,
-    open_episode,
 )
 
 
-def analyse(
-    recs: list[Any], since: float, until: float, with_below: bool, verbose: bool
+def open_episode(samples: list[SampleRecord], episodes: list[Episode]) -> OpenEpisode | None:
+    """An episode the daemon has not written yet: the newest samples are 1 s
+    apart (episode sampling) with 3+ storage waits (v5+ samples), and no
+    episode record covers them. None otherwise."""
+    if len(samples) < 2 or "d_maint" not in samples[-1]:
+        return None
+    run = [samples[-1]]
+    for a in reversed(samples[:-1]):
+        if run[-1]["ts"] - a["ts"] > 1.5:
+            break
+        run.append(a)
+    if len(run) < 2:
+        return None
+    last = samples[-1]["ts"]
+    if any(ep["start"] - 1 <= last <= ep["end"] + 1 for ep in episodes):
+        return None
+    peak = max(r.get("d", 0) for r in run)
+    if peak < 3:
+        return None
+    return {"since": run[-1]["ts"], "last": last, "d_tasks": peak}
+
+
+def summarise(
+    recorded: Recorded, since: float, until: float, *, verbose: bool, now: float
 ) -> tuple[AnalyseResult, MetaRecord]:
+    """One window [since, until] of the records: coverage, totals, categories,
+    episodes and events (now: the clock, for whether the newest data is in yet).
+    The events and alerts in the window are rewritten in place where an older
+    daemon named their kind wrongly."""
     meta: MetaRecord | None = None
     # Earliest record of a daemon at version >= N: v6 added progress checks,
     # v7 reads all of /proc/vmstat (zswap counters).
-    first_at = {}
-    samples: list[SampleRecord]
-    episodes: list[EpisodeRecord]
-    events: list[Notice]
-    alerts: list[Notice]
-    samples, episodes, events, alerts = [], [], [], []
-    for r in recs:
-        t = r.get("t")
-        if t == "meta":
-            if r.get("ts", 0) <= until:
-                meta = r
-            for n in (6, 7):
-                if r.get("v", 0) >= n:
-                    first_at[n] = min(first_at.get(n, r.get("ts", 0)), r.get("ts", 0))
-        elif t == "s":
-            if since - GAP_MAX <= r["ts"] <= until:
-                samples.append(r)
-        elif t == "ep":
-            if r["end"] >= since and r["start"] <= until:
-                episodes.append(r)
-        elif t == "ev":
-            if since <= r["ts"] <= until:
-                events.append(r)
-        elif t == "al":
-            if since <= r["ts"] <= until:
-                alerts.append(r)
+    first_at: dict[int, float] = {}
+    for r in recorded.metas:
+        if r.get("ts", 0) <= until:
+            meta = r
+        for n in (6, 7):
+            if r.get("v", 0) >= n:
+                first_at[n] = min(first_at.get(n, r.get("ts", 0)), r.get("ts", 0))
+    samples = [r for r in recorded.samples if since - GAP_MAX <= r["ts"] <= until]
+    episodes = [r for r in recorded.episodes if r["end"] >= since and r["start"] <= until]
+    events = [r for r in recorded.events if since <= r["ts"] <= until]
+    alerts = [r for r in recorded.alerts if since <= r["ts"] <= until]
     samples.sort(key=lambda r: r["ts"])
     while len(samples) > 1 and samples[1]["ts"] <= since:
         samples.pop(0)
@@ -118,7 +121,7 @@ def analyse(
         if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold", "nr_dirty_background_threshold")
     }
     fs: dict[str, FsTotals]
-    disks: dict[str, dict[str, Any]]
+    disks: dict[str, DiskTotals]
     cg: dict[str, CgroupTotals]
     fs, disks, cg = {}, {}, {}
     gaps = 0
@@ -208,7 +211,23 @@ def analyse(
             delta = {k: xb[DI[k]] - xa[DI[k]] for k in DISK_SUM}
             if any(v < 0 for v in delta.values()):
                 continue
-            d = disks.setdefault(name, {**{k: 0 for k in DISK_SUM}, "peak_util_pct": 0.0, "peak_at": None})
+            d = disks.setdefault(
+                name,
+                {
+                    "rd_ios": 0,
+                    "wr_ios": 0,
+                    "rd_ticks": 0,
+                    "wr_ticks": 0,
+                    "rd_sectors": 0,
+                    "wr_sectors": 0,
+                    "io_ticks": 0,
+                    "time_in_queue": 0,
+                    "fl_ios": 0,
+                    "fl_ticks": 0,
+                    "peak_util_pct": 0.0,
+                    "peak_at": None,
+                },
+            )
             for k, v in delta.items():
                 d[k] += v
             util = min(delta["io_ticks"] / (dt * 1000) * 100, 100.0)
@@ -235,7 +254,7 @@ def analyse(
             "gaps": gaps,
             # Samples are 5 s apart: tolerate up to two missing ones on short windows.
             "complete": covered >= min(0.8 * window_s, window_s - 2 * meta.get("base_interval", 5.0))
-            and last >= min(until, time.time()) - FRESH_MAX,
+            and last >= min(until, now) - FRESH_MAX,
         }
     )
     pct = {f"{k}_pct": v / 1e6 / covered * 100 if covered else 0.0 for k, v in psi.items()}
@@ -248,7 +267,7 @@ def analyse(
         return vmd.get(key, 0) * PAGE if zswap_ok else None
 
     # Set when the window starts before the v7 upgrade: zswap is counted from there on.
-    counted_from = v7_since if zswap_ok and v7_since > samples[0]["ts"] else None
+    counted_from = v7_since if zswap_ok and v7_since is not None and v7_since > samples[0]["ts"] else None
     res["vm"] = {
         "swap_in_bytes": vmd.get("pswpin", 0) * PAGE,
         "swap_out_bytes": vmd.get("pswpout", 0) * PAGE,
@@ -268,19 +287,15 @@ def analyse(
     roles = meta.get("disks") or {}
     for name, d in disks.items():
         ios = d["rd_ios"] + d["wr_ios"]
-        d.update(
-            {
-                "role": roles.get(name, ""),
-                "read_bytes": d["rd_sectors"] * 512,
-                "write_bytes": d["wr_sectors"] * 512,
-                "await_ms": (d["rd_ticks"] + d["wr_ticks"]) / ios if ios else 0,
-                "read_await_ms": d["rd_ticks"] / d["rd_ios"] if d["rd_ios"] else 0,
-                "write_await_ms": d["wr_ticks"] / d["wr_ios"] if d["wr_ios"] else 0,
-                "flush_await_ms": d["fl_ticks"] / d["fl_ios"] if d["fl_ios"] else 0,
-                "util_pct": d["io_ticks"] / (covered * 1000) * 100 if covered else 0,
-                "queue_depth": d["time_in_queue"] / (covered * 1000) if covered else 0,
-            }
-        )
+        d["role"] = roles.get(name, "")
+        d["read_bytes"] = d["rd_sectors"] * 512
+        d["write_bytes"] = d["wr_sectors"] * 512
+        d["await_ms"] = (d["rd_ticks"] + d["wr_ticks"]) / ios if ios else 0
+        d["read_await_ms"] = d["rd_ticks"] / d["rd_ios"] if d["rd_ios"] else 0
+        d["write_await_ms"] = d["wr_ticks"] / d["wr_ios"] if d["wr_ios"] else 0
+        d["flush_await_ms"] = d["fl_ticks"] / d["fl_ios"] if d["fl_ios"] else 0
+        d["util_pct"] = d["io_ticks"] / (covered * 1000) * 100 if covered else 0
+        d["queue_depth"] = d["time_in_queue"] / (covered * 1000) if covered else 0
     res["disks"] = disks
     for c in cg.values():
         c["io_some_pct"] = c["io_some"] / 1e6 / c["wall"] * 100 if c["wall"] else 0.0
@@ -385,12 +400,4 @@ def analyse(
                 "btrfs maintenance (fstrim/scrub) waiting (recorded as stuck on IO)",
             )
     res["v6_since"] = v6_since
-    if with_below and shutil.which("below"):
-        with ThreadPoolExecutor(2) as ex:
-            fw = ex.submit(below_top, since, until, "io.wbytes_per_sec")
-            fr = ex.submit(below_top, since, until, "io.rbytes_per_sec")
-            (w, ew), (r, er) = fw.result(), fr.result()
-        res["below"] = {"top_writers": w, "top_readers": r, "error": ew or er}
-    elif with_below:
-        res["below"] = {"error": "below not installed (no per-process attribution)"}
     return res, meta

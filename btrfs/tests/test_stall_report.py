@@ -36,9 +36,11 @@ if _CHECKOUT not in sys.path:
 
 from btrfs.stall_monitord import domain as md_domain
 from btrfs.stall_report import adapters as rp_adapters
-from btrfs.stall_report import analysis as rp_analysis
 from btrfs.stall_report import cli as rp_cli
-from btrfs.stall_report import domain as rp_domain
+from btrfs.stall_report.domain import categories as rp_categories
+from btrfs.stall_report.domain import records as rp_records
+from btrfs.stall_report.domain import verdict as rp_verdict
+from btrfs.stall_report.domain import window as rp_window
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -84,7 +86,7 @@ class _StallReportModule(Protocol):
 
 def load() -> _StallReportModule:
     """The report's package as one namespace (the program is a thin entry over it)."""
-    view = PackageView(rp_cli, rp_analysis, rp_adapters, rp_domain)
+    view = PackageView(rp_cli, rp_adapters, rp_window, rp_verdict, rp_categories, rp_records)
     return cast("_StallReportModule", cast("object", view))
 
 
@@ -124,9 +126,9 @@ class RecordTypesTest(unittest.TestCase):
     def test_fields_older_daemons_lack_stay_optional_at_run_time(self) -> None:
         # NotRequired holds at run time only without `from __future__ import
         # annotations` (a string annotation hides it from TypedDict).
-        self.assertLessEqual({"d_mem", "d_maint", "vm", "mono"}, rp_domain.SampleRecord.__optional_keys__)
-        self.assertLessEqual({"max_d_mem", "max_d_all"}, rp_domain.EpisodeRecord.__optional_keys__)
-        self.assertIn("psi", rp_domain.SampleRecord.__required_keys__)
+        self.assertLessEqual({"d_mem", "d_maint", "vm", "mono"}, rp_records.SampleRecord.__optional_keys__)
+        self.assertLessEqual({"max_d_mem", "max_d_all"}, rp_records.EpisodeRecord.__optional_keys__)
+        self.assertIn("psi", rp_records.SampleRecord.__required_keys__)
 
 
 class ZswapAcrossUpgradeTest(unittest.TestCase):
@@ -669,7 +671,7 @@ class ClassifyBranchesTest(unittest.TestCase):
     """Each way classify() decides, one case per branch (the mutation run left them unchecked)."""
 
     def test_cases(self) -> None:
-        c = rp_domain.classify
+        c = rp_categories.classify
         cases = [
             # (sig, examples, comms, kind) -> category
             (("x", [], (), "memory"), "reclaim"),
