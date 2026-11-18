@@ -10,8 +10,7 @@ from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
 from swap.application.reports import (
     DROPIN_ENTRY,
-    OLD_DROPIN_DEST,
-    OLD_DROPIN_SRC,
+    OLD_DROPIN_ENTRY,
     SYSCTL_ENTRY,
     TMPFILES_ENTRY,
     SwapReports,
@@ -147,12 +146,10 @@ class SwapApplicationService(SwapReports):
         events.append(ApplyEvent("out", "line", f"written:   {path} ({name} entry)"))
         return True, True, True
 
-    def _apply_managed_file(self, entry: InstallEntry, src: str, dest: str, events: list[ApplyEvent]) -> bool:
-        """Ensure dest matches src, through the installer (atomic; listed in the install record, also when
-        it was already current). Returns True if dest was written."""
-        st = self._inspect_file(src, dest)
-        place = Placement(
-            path=dest,
+    def _placement(self, entry: InstallEntry, path: str) -> Placement:
+        """entry's file at path (under this run's /etc), listed in this run's install record."""
+        return Placement(
+            path=path,
             dest=entry.dest,
             record=self._env.install_record,
             component=entry.component,
@@ -161,6 +158,12 @@ class SwapApplicationService(SwapReports):
             owner=entry.owner,
             mode=entry.mode.bits,
         )
+
+    def _apply_managed_file(self, entry: InstallEntry, src: str, dest: str, events: list[ApplyEvent]) -> bool:
+        """Ensure dest matches src, through the installer (atomic; listed in the install record, also when
+        it was already current). Returns True if dest was written."""
+        st = self._inspect_file(src, dest)
+        place = self._placement(entry, dest)
         if not self._installer.put(place, self._desired_text(src).encode("utf-8"), as_root=self._env.as_root):
             events.append(ApplyEvent("out", "line", f"unchanged: {dest}"))
             return False
@@ -190,19 +193,9 @@ class SwapApplicationService(SwapReports):
         if not self.old_dropin_is_ours():
             # Gone, or someone else's now: CST no longer installs that name, so its record line goes
             # (doctor would ask for an apply that never puts it back); the file is left alone.
-            self._installer.forget(self._env.install_record, [OLD_DROPIN_DEST])
+            self._installer.forget(self._env.install_record, [OLD_DROPIN_ENTRY.dest])
             return False
-        old = Placement(
-            path=self._env.old_slice_dropin,
-            dest=OLD_DROPIN_DEST,
-            record=self._env.install_record,
-            component=DROPIN_ENTRY.component,
-            src=OLD_DROPIN_SRC,
-            kind=DROPIN_ENTRY.kind,
-            owner=DROPIN_ENTRY.owner,
-            mode=DROPIN_ENTRY.mode.bits,
-        )
-        for line in self._installer.remove([old]):
+        for line in self._installer.remove([self._placement(OLD_DROPIN_ENTRY, self._env.old_slice_dropin)]):
             events.append(
                 ApplyEvent("out", "line", f"{line} (the old name of {posixpath.basename(DROPIN_ENTRY.dest)})")
             )

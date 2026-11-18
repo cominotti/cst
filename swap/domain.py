@@ -61,6 +61,12 @@ _PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 _MAPPER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _BY_PARTUUID: Final[str] = "/dev/disk/by-partuuid/"
 _SETTING_KEYS: Final[tuple[str, ...]] = ("SWAP_PARTUUID", "SWAP_SIZE_BYTES", "SWAP_NAME")
+_SWAP_MARKERS: Final[tuple[str, ...]] = (SWAP_MARKER, *SWAP_OLD_MARKERS)
+
+
+def partuuid_path(partuuid: str) -> str:
+    """The /dev/disk/by-partuuid link of a partition."""
+    return _BY_PARTUUID + partuuid
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,7 @@ class SwapHardwareSpec:
     @property
     def device_path(self) -> str:
         """GPT PARTUUID symlink path for the underlying swap partition."""
-        return f"/dev/disk/by-partuuid/{self.partuuid}"
+        return partuuid_path(self.partuuid)
 
     @property
     def crypttab_line(self) -> str:
@@ -165,8 +171,7 @@ def render_swap_settings(spec: SwapHardwareSpec, origin: str) -> str:
 
 def _marked_lines(text: str) -> list[list[str]]:
     """The fields of each line that ends with swap's marker (or an older script's)."""
-    markers = (SWAP_MARKER, *SWAP_OLD_MARKERS)
-    return [line.split() for line in text.splitlines() if line.rstrip().endswith(markers)]
+    return [line.split() for line in text.splitlines() if line.rstrip().endswith(_SWAP_MARKERS)]
 
 
 def marked_crypttab_entry(text: str) -> tuple[str, str] | None:
@@ -415,7 +420,6 @@ def is_cst_dropin(text: str) -> bool:
     return any(
         line.startswith(("# Managed by swap-setup.sh (CST)", "# Managed by apply-swap-config.sh"))
         for line in text.splitlines()
-        if line.startswith("#")
     )
 
 

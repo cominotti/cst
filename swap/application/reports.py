@@ -2,7 +2,7 @@
 """The read-only use cases of swap: what plan and status show (no direct OS I/O or terminal formatting)."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import posixpath
 import re
 
@@ -36,6 +36,7 @@ from swap.domain import (
     marked_fstab_name,
     memory_low_override,
     parse_swap_settings,
+    partuuid_path,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -59,8 +60,11 @@ SYSCTL_ENTRY: InstallEntry = _MANIFEST["swap/sysctl/99-swap-tuning.conf"]
 DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-10-swap-memory-low.conf"]
 # The drop-in's name until 2026-11: it sorted after the 50-MemoryLow.conf of `systemctl set-property`
 # ('M' < 'm'), so after a daemon-reload its 48G beat a runtime value. plan shows it, apply removes it.
-OLD_DROPIN_SRC: str = "swap/units/machine.slice.d-50-memory-low.conf"
-OLD_DROPIN_DEST: str = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
+OLD_DROPIN_ENTRY: InstallEntry = replace(
+    DROPIN_ENTRY,
+    src="swap/units/machine.slice.d-50-memory-low.conf",
+    dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+)
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -126,7 +130,7 @@ class SwapEnvironment:
 
     @property
     def old_slice_dropin(self) -> str:
-        return _under(self.etc_dir, OLD_DROPIN_DEST, "/etc/")
+        return _under(self.etc_dir, OLD_DROPIN_ENTRY.dest, "/etc/")
 
     @property
     def zram_conf(self) -> str:
@@ -215,8 +219,8 @@ class SwapReports:
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
-    def _partition_size_sysfs(self, spec: SwapHardwareSpec) -> tuple[str, int] | None:
-        dev = self._fs.readlink(spec.device_path, canonicalize=True)
+    def _partition_size_sysfs(self, device_path: str) -> tuple[str, int] | None:
+        dev = self._fs.readlink(device_path, canonicalize=True)
         if dev is None or not self._fs.is_block_device(dev):
             return None
         sectors = self._fs.read_first_line(
@@ -235,9 +239,7 @@ class SwapReports:
             settings = parse_swap_settings(text)
             if settings.problems:
                 return SpecResolution(None, "bad", "; ".join(settings.problems))
-            return (
-                SpecResolution(settings.spec, "unset") if settings.spec is None else SpecResolution(settings.spec, "ok")
-            )
+            return SpecResolution(settings.spec, "unset" if settings.spec is None else "ok")
         if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
             name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
             return SpecResolution(None, "unset") if name is None else SpecResolution(None, "unknown", name)
@@ -245,10 +247,10 @@ class SwapReports:
         if entry is None:
             return SpecResolution(None, "unset")
         name, partuuid = entry
-        part = self._partition_size_sysfs(SwapHardwareSpec(partuuid, name, 0))
+        part = self._partition_size_sysfs(partuuid_path(partuuid))
         if part is None:
             return SpecResolution(
-                None, "unset", f"the {name} line in crypttab names /dev/disk/by-partuuid/{partuuid}, which is not here"
+                None, "unset", f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here"
             )
         return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), "write", name)
 
@@ -318,7 +320,7 @@ class SwapReports:
     def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
         """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
         runtime_items: list[PlanItem] = []
-        part = self._partition_size_sysfs(spec)
+        part = self._partition_size_sysfs(spec.device_path)
         if part is not None:
             dev, size = part
             if size == spec.expected_size_bytes:
