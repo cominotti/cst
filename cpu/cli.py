@@ -130,7 +130,7 @@ def watch(argv: Sequence[str]) -> int:
     label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
     run_dir, rc = record_run(cpu_paths().runs, label=label, game=game, seconds=seconds, mangohud=mangohud, cmd=cmd)
     print(summarize(run_dir))
-    return rc if rc else 0
+    return rc or 0
 
 
 def report(argv: Sequence[str]) -> None:

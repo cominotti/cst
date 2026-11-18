@@ -153,7 +153,7 @@ def pressure_total(path: str, kind: Literal["some", "full"]) -> int | None:
 
 
 def usage_usec(cg: str) -> int:
-    m = re.search(r"^usage_usec (\d+)", read_text(os.path.join(CG, cg, "cpu.stat"), ""), re.M)
+    m = re.search(r"^usage_usec (\d+)", read_text(os.path.join(CG, cg, "cpu.stat"), ""), re.MULTILINE)
     return int(m.group(1)) if m else 0
 
 
@@ -184,7 +184,7 @@ def game_cgroup(pid: int) -> str:
 def invol(pid: int) -> int:
     total = 0
     for st in glob.glob(f"/proc/{pid}/task/*/status"):
-        m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read_text(st, ""), re.M)
+        m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read_text(st, ""), re.MULTILINE)
         total += int(m.group(1)) if m else 0
     return total
 

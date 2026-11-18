@@ -249,7 +249,7 @@ class RunMeta(TypedDict):
 def pressure_field(text: str, kind: Literal["some", "full"], key: str) -> str | None:
     """The KEY= value (as text) on the KIND line ('some' or 'full') of a
     pressure file's text, or None."""
-    m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.M)
+    m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.MULTILINE)
     return m.group(1) if m else None
 
 
@@ -350,7 +350,7 @@ def stat_cpu(text: str) -> tuple[int, int]:
 
 def vmstat_pgpgout(text: str) -> int:
     """KiB written to the disks since boot (/proc/vmstat pgpgout)."""
-    m = re.search(r"^pgpgout (\d+)$", text, re.M)
+    m = re.search(r"^pgpgout (\d+)$", text, re.MULTILINE)
     if not m:
         raise ValueError("no 'pgpgout' line")
     return int(m.group(1))
