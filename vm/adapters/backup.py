@@ -95,7 +95,7 @@ def read_index(cfg: VmSettings) -> list[IndexEntry]:
     return [
         e
         for e in entries or []
-        if isinstance(e, dict) and e.get("vm") and (e.get("path") or e.get("mode") == "nas" and e.get("snapshot"))
+        if isinstance(e, dict) and e.get("vm") and (e.get("path") or (e.get("mode") == "nas" and e.get("snapshot")))
     ]
 
 

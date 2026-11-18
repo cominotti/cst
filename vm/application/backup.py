@@ -200,7 +200,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         raise
     # Entries whose folder was removed by hand leave the index here.
     entries = [
-        e for e in store.read_index() if e.get("mode") == "nas" or store.is_dir(e["path"]) and e["path"] != dest_dir
+        e for e in store.read_index() if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
     ]
     entries.append(index_entry(manifest, dest_dir))
     entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))

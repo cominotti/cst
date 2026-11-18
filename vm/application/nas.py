@@ -173,7 +173,7 @@ def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -
     out: dict[str, tuple[str, str]] = {}
     for t, (base, overlay) in specs.items():
         named = [m.get(t) == overlay for m in (live, persistent) if m is not None]
-        if any(named) or not named and p.store.exists(overlay):
+        if any(named) or (not named and p.store.exists(overlay)):
             out[t] = (base, overlay)
     return out
 
