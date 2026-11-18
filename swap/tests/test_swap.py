@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import NoReturn
+from typing import NoReturn, override
 import unittest
 from unittest import mock
 
@@ -496,6 +496,7 @@ class MarkerTest(unittest.TestCase):
     spec: SwapHardwareSpec
     svc: SwapApplicationService
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.fs = _FakeTempFileSystem({})
@@ -509,6 +510,7 @@ class MarkerTest(unittest.TestCase):
             installer=_installer(),
         )
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
@@ -645,14 +647,17 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
     def add_block_link(self, link: str, target: str) -> None:
         self._block_links[link] = target
 
+    @override
     def is_block_device(self, path: str) -> bool:
         return path in self._block_links or path in set(self._block_links.values())
 
+    @override
     def readlink(self, path: str, *, canonicalize: bool = False) -> str | None:
         if path in self._block_links:
             return self._block_links[path]
         return super().readlink(path, canonicalize=canonicalize)
 
+    @override
     def is_readable(self, path: str) -> bool:
         if path in self._unreadable:
             return False
@@ -843,6 +848,7 @@ class _SwapScratch(unittest.TestCase):
     spec: SwapHardwareSpec
     env: SwapEnvironment
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-app-test-")
         self.spec = TEST_SPEC
@@ -911,6 +917,7 @@ class _SwapScratch(unittest.TestCase):
         with open(self.env.settings_path, "w", encoding="utf-8") as f:
             f.write(TEST_SETTINGS)
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
@@ -1402,6 +1409,7 @@ class SwapSettingsFileTest(unittest.TestCase):
 class SwapSettingsTest(_SwapScratch):
     """Which partition plan, status and apply use: /etc/cst/swap.conf, or what an older CST set up."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         os.remove(self.env.settings_path)
@@ -1574,6 +1582,7 @@ class MemoryLowOverrideTest(_SwapScratch):
     RUNTIME = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
     FOREIGN = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)  # CST's drop-in in place
@@ -1733,6 +1742,7 @@ class _ScriptedRunner:
 
 
 class _ZswapWriteFails(_FakeTempFileSystem):
+    @override
     def write_text_direct(self, path: str, content: str) -> None:
         raise PermissionError(13, "Permission denied", path)
 
@@ -1740,6 +1750,7 @@ class _ZswapWriteFails(_FakeTempFileSystem):
 class _SysfsNoCreate(_FakeTempFileSystem):
     """sysfs (kernfs) has no create: opening a name that is not there for writing fails, root or not."""
 
+    @override
     def write_text_direct(self, path: str, content: str) -> None:
         if not os.path.exists(path):
             raise PermissionError(13, "Permission denied", path)
@@ -1834,6 +1845,7 @@ class SwapApplyOutputTest(_SwapScratch):
 
     def test_a_failing_daemon_reload_shows_its_message_and_exit_status(self) -> None:
         class _ReloadFails(_FakeSystemd):
+            @override
             def daemon_reload(self) -> None:
                 raise CommandFailed(["systemctl", "daemon-reload"], 4, "", "Failed to reload daemon: Access denied\n")
 
@@ -1859,6 +1871,7 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertEqual(self._apply(self._service(systemd=systemd, fs=fs)[0])[0], 128 + signal.SIGTERM)
 
         class _ReloadKilled(_FakeSystemd):
+            @override
             def daemon_reload(self) -> None:
                 raise CommandFailed(["systemctl", "daemon-reload"], -signal.SIGKILL)
 
@@ -1878,6 +1891,7 @@ class SwapApplyOutputTest(_SwapScratch):
         real = SubprocessCommandRunner()
 
         class _Killer(_ScriptedRunner):
+            @override
             def run(
                 self,
                 argv: Sequence[str],
