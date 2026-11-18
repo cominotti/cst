@@ -366,7 +366,7 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
             if complete_n is None:
                 complete_n = now()
                 complete = str(complete_n)
-                _append(marker, f"complete_since={complete}\n")
+                _append_text(marker, f"complete_since={complete}\n")
             # date(1), as in bash: a value it cannot show leaves the time out (its error goes to the journal).
             at = m.out(["date", "-d", f"@{complete}", "+%F %T"], "pass")
             state = f"all devices present since {at}, waiting for a clean scrub started after that"
@@ -399,7 +399,7 @@ def _rewrite(p: str, text: str) -> None:
         sys.stderr.write(f"{TAG}: cannot rewrite {p}: {e.strerror}\n")
 
 
-def _append(p: str, text: str) -> None:
+def _append_text(p: str, text: str) -> None:
     try:
         with open(p, "a", encoding="utf-8", errors="surrogateescape") as f:
             f.write(text)
