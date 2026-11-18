@@ -559,6 +559,25 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
         self.assertEqual(len(self.notifications()), 1)
 
+    def test_ctrl_c_while_waiting_for_the_desktop_ends_it_quietly(self) -> None:
+        # Ctrl-C reaches the whole foreground group: the program ends by SIGINT, with no traceback and
+        # no record written.
+        self.alert(1)
+        p = subprocess.Popen(
+            RUN,
+            env={**self.env, "CST_ALERTS_WAIT": "60", "BUS_ANSWER": "false"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        time.sleep(1.5)
+        os.killpg(p.pid, signal.SIGINT)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual((p.returncode, out, err), (-signal.SIGINT, b"", b""))
+        self.assertFalse(os.path.exists(self.record))
+        self.assertEqual(self.notifications(), [])
+
     def test_nul_bytes_are_dropped(self) -> None:
         # bash's read dropped every NUL byte of a pending file: the fields and the text are shown
         # without them (a NUL cannot be passed to notify-send at all).
