@@ -52,7 +52,7 @@ def log_dir_exists(log_dir: str) -> bool:
 
 
 def load(log_dir: str, since: float, until: float) -> list[Any]:
-    # Whatever each line parses to; analyse() picks the records by their "t".
+    # Each line that parses to a JSON object; analyse() picks the records by their "t".
     recs = []
     first_day = time.strftime("%Y-%m-%d", time.localtime(since - 86400))
     # Records buffered across midnight can land in the next day's file.
@@ -72,9 +72,11 @@ def load(log_dir: str, since: float, until: float) -> list[Any]:
             with opener(path, "rt", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     try:
-                        recs.append(json.loads(line))
+                        rec = json.loads(line)
                     except ValueError:
-                        pass
+                        continue
+                    if isinstance(rec, dict):  # a list, number or string is no record either
+                        recs.append(rec)
         except (OSError, EOFError, zlib.error) as e:
             print(f"warning: cannot fully read {path}: {e}", file=sys.stderr)
     return recs

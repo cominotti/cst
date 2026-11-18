@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, cast
@@ -721,6 +722,34 @@ class ClosedPipeTest(unittest.TestCase):
                     finally:
                         os.close(w)
                     self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
+
+
+class MalformedLineTest(unittest.TestCase):
+    def test_lines_that_are_json_but_no_record_are_skipped(self) -> None:
+        # A line that parses to a list, number, string or null (a cut or foreign write) is
+        # skipped like a line that is not JSON. Before, analyse() called .get on it: a traceback.
+        tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")
+        now = time.time()
+        good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        outputs = []
+        for junk in ([], ["[1, 2]", "5", '"s"', "null", "true"]):
+            with self.subTest(junk=junk), tempfile.TemporaryDirectory() as logs:
+                path = os.path.join(logs, time.strftime("stall-%Y-%m-%d.jsonl", time.localtime(now)))
+                with open(path, "w", encoding="utf-8") as f:
+                    f.writelines(line + "\n" for line in [*junk, *(json.dumps(r) for r in good), *junk])
+                p = subprocess.run(
+                    ["/usr/bin/python3", "-I", tool, "--log-dir", logs, "--since", f"@{now - 60:.0f}"]
+                    + ["--until", f"@{now:.0f}", "--no-below"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    env={"PATH": "/usr/bin:/bin"},
+                    timeout=60,
+                )
+                self.assertEqual((p.returncode, p.stderr), (0, ""))
+                outputs.append(p.stdout)
+        self.assertEqual(outputs[1], outputs[0])
 
 
 # A stand-in for btrfs-stall-report, for btrfs-stall-watch: samples every 5 s around the
