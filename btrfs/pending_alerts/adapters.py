@@ -18,6 +18,7 @@ from btrfs.pending_alerts.domain import (
     NAME,
     TAG,
     Alert,
+    AlertUrgency,
     Seen,
     PendingPaths,
     find_mtime,
@@ -25,6 +26,7 @@ from btrfs.pending_alerts.domain import (
     parse_delivered,
 )
 from cst_core.adapters.files import read_bytes, write_atomic
+from cst_core.domain.values import DAY
 from cst_core.ports import CommandRunnerPort
 
 
@@ -71,7 +73,7 @@ def pending_files(s: PendingPaths) -> list[tuple[str, str]]:
         except OSError:
             continue
         if e.is_file(follow_symlinks=False) and st.st_size <= MAX_FILE:
-            if now - st.st_mtime_ns < KEEP_DAYS * 86400 * 10**9:
+            if now - st.st_mtime_ns < KEEP_DAYS * DAY * 10**9:
                 found.append((st.st_mtime_ns, e.name))
     return [(find_mtime(ns), name) for ns, name in sorted(found)[-MAX_FILES:]]
 
@@ -158,7 +160,7 @@ def wait_for_notification_server(runner: CommandRunnerPort, wait: int) -> bool:
     return True
 
 
-def show_notification(runner: CommandRunnerPort, urgency: str, app: str, title: str, body: str) -> bool:
+def show_notification(runner: CommandRunnerPort, urgency: AlertUrgency, app: str, title: str, body: str) -> bool:
     """One desktop notification (notify-send); True when it was shown."""
     argv: Sequence[str] = ["notify-send", "-u", urgency, "-a", app, "-i", ICON, "--", title, body]
     r = runner.run(argv, output="inherit")

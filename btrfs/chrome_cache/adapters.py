@@ -11,6 +11,7 @@ from btrfs.chrome_cache.domain import (
     OLD_CACHE_REL,
     SYSTEM_INSTALLS,
     USER_INSTALL_REL,
+    ChromeFlagsState,
     decide,
     inspect,
     off_message,
@@ -191,13 +192,13 @@ def plan_line(home: str) -> str:
     if not installed(home):
         return "not installed: nothing to do"
     state, _, msg = decide(flags_text(home))
-    return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
+    return msg if state in (ChromeFlagsState.ABSENT, ChromeFlagsState.CAP_MISSING) else f"nothing to do ({msg})"
 
 
-def apply(home: str) -> tuple[str, str, bool]:
+def apply(home: str) -> tuple[ChromeFlagsState, str, bool]:
     """(state, message, changed)."""
     if not installed(home):
-        return "no-app", "Chrome Flatpak not installed: nothing to do", False
+        return ChromeFlagsState.NO_APP, "Chrome Flatpak not installed: nothing to do", False
     dfd, text, st = current(home, create=False)
     try:
         state, new, msg = decide(text)
