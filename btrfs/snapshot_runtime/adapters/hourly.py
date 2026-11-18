@@ -181,8 +181,7 @@ def mounts_below(m: SnapshotRun, path: str) -> list[str]:
 
 def unfinished_bulk_move(m: SnapshotRun) -> bool:
     """A btrfs-bulk journal (a move into ~/Bulk not finished) that is not marked "bulk_only": true."""
-    found = glob.glob(glob.escape(m.bulk_state) + "/journal-*.json")
-    for f in found:
+    for f in glob.glob(m.bulk_journals):
         try:
             with open(f, "rb") as fh:
                 data = fh.read()

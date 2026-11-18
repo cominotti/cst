@@ -6,6 +6,7 @@ journal lines, and btrfs-snapshot-core's command lines with the common arguments
 
 from collections.abc import Buffer, Callable, Mapping, Sequence
 import contextlib
+import glob
 import io
 import os
 import signal
@@ -28,11 +29,13 @@ from btrfs.snapshot_runtime.domain import (
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 
 
+_BULK_JOURNAL = state_format("bulk-journal")
 # The byte-transparent reader (bash's $(cat ...) and read -r kept every byte).
 _FILES = LocalFileSystemAdapter()
 
@@ -62,7 +65,10 @@ class SnapshotRun:
         self.restic_cache = f"{r}/var/cache/btrfs-snapshot-restic"
         self.boot_flag = f"{r}/etc/btrfs-setup/convert-at-boot"
         self.bulk_flag = f"{r}/etc/btrfs-setup/bulk-at-boot"
-        self.bulk_state = f"{r}/var/lib/btrfs-bulk"
+        # btrfs-bulk's journals (the registered bulk-journal format; any version: one there is a move
+        # not finished).
+        self.bulk_state = f"{r}{_BULK_JOURNAL.folder}"
+        self.bulk_journals = f"{glob.escape(self.bulk_state)}/{_BULK_JOURNAL.file_name}"
         self.runner = runner
         # The bash front and engine (btrfs/btrfs-snapshot), in this program's folder (installed, in
         # a checkout or a copy alike), as the front finds this one.

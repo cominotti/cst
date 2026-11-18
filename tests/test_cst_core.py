@@ -1437,6 +1437,7 @@ class StateContractsTest(unittest.TestCase):
     def test_the_programs_use_the_registered_paths(self) -> None:
         from btrfs.bulk.domain import BulkPaths
         from btrfs.docker_gc.domain import GcPaths
+        from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
         from btrfs.stall_monitord.domain import VERSION
         from btrfs.stall_report.adapters import LOG_DIR
         from cpu.domain import GAME_STATE
@@ -1446,6 +1447,8 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(GcPaths().last_used, state_format("docker-gc-state").path)
         self.assertEqual(GcPaths().last_run, state_format("docker-gc-last-run").path)
         self.assertEqual(BulkPaths().state, state_format("bulk-journal").folder)
+        journal = state_format("bulk-journal")
+        self.assertEqual(SnapshotRun({}, SubprocessCommandRunner()).bulk_journals, journal.path)
         self.assertEqual(
             (VERSION, LOG_DIR), (state_format("stall-records").version, state_format("stall-records").folder)
         )
