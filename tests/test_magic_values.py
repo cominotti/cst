@@ -11,7 +11,8 @@ keep the raw words on purpose, they are what pins the values):
 
 1. leak: a comparison (`==`, `!=`, `in` a tuple, list or set) or a match
    `case` with a string literal equal to a member value of a StrEnum declared
-   in the same package or in cst_core. Compare with the member instead.
+   in the same package or, public, in cst_core's shared layers (domain, ports,
+   adapters). Compare with the member instead.
 2. chain: an if/elif chain with 3 or more arms that compare one subject with
    string literals (counted once, at its first `if`), or a match with 3 or
    more string-literal cases. Declare a StrEnum and match on it.
@@ -53,6 +54,8 @@ from tests.code_graph import production_python
 from tests.repo_files import REPO
 
 CORE_PACKAGE: Final = "cst_core"
+# The layers of cst_core other packages import; their public StrEnums are every package's vocabulary.
+CORE_SHARED_LAYERS: Final = frozenset({"domain", "ports", "adapters"})
 # The numbers rule 3 names, and the name to use instead.
 UNIT_NUMBERS: Final[dict[int, str]] = {
     3600: "HOUR (cst_core.domain.values)",
@@ -219,11 +222,11 @@ def _compared_strings(node: ast.Compare) -> list[tuple[ast.expr, str]]:
     return out
 
 
-def enum_values(tree: ast.Module) -> dict[str, str]:
-    """value -> "Class.MEMBER" for every StrEnum (or str, Enum) class of a module."""
+def enum_values(tree: ast.Module, *, public_only: bool = False) -> dict[str, str]:
+    """value -> "Class.MEMBER" for every StrEnum (or str, Enum) class of a module (public_only: not _Name)."""
     out: dict[str, str] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
+        if not isinstance(node, ast.ClassDef) or (public_only and node.name.startswith("_")):
             continue
         bases = {_name_of(b) for b in node.bases}
         if "StrEnum" not in bases and not {"str", "Enum"} <= bases:
@@ -385,6 +388,12 @@ def file_hits(tree: ast.Module, rel: str, vocabulary: Mapping[str, str]) -> list
     return sorted(Hit(rel, line, rule, scopes.get(id(n), "<module>"), text) for rule, n, line, text in found)
 
 
+def is_core_shared(rel: str) -> bool:
+    """A module of cst_core's shared layers (cst_core/domain/, ports/, adapters/)."""
+    parts = rel.split("/")
+    return len(parts) > 2 and parts[0] == CORE_PACKAGE and parts[1] in CORE_SHARED_LAYERS
+
+
 def scan(root: str, rels: Sequence[str]) -> list[Hit]:
     """Every hit in the files rels (relative to root), the exempt ones included."""
     trees: dict[str, ast.Module] = {}
@@ -392,10 +401,13 @@ def scan(root: str, rels: Sequence[str]) -> list[Hit]:
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
             trees[rel] = ast.parse(fh.read(), filename=rel)
     vocab: dict[str, dict[str, str]] = {}
+    core: dict[str, str] = {}
     for rel, tree in trees.items():
         for word, member in enum_values(tree).items():
             vocab.setdefault(package_of(rel), {}).setdefault(word, member)
-    core = vocab.get(CORE_PACKAGE, {})
+        if is_core_shared(rel):
+            for word, member in enum_values(tree, public_only=True).items():
+                core.setdefault(word, member)
     hits: list[Hit] = []
     for rel, tree in trees.items():
         hits += file_hits(tree, rel, {**core, **vocab.get(package_of(rel), {})})
@@ -499,6 +511,28 @@ class PlantedTest(unittest.TestCase):
         )
         self.assertIn("pkg/cli.py:2: 'ok' is OwnedState.OK: compare with the enum member", [str(h) for h in hits])
         self.assertEqual(counts(hits), {"pkg leak": 4})
+
+    def test_only_public_enums_of_cst_core_shared_layers_are_every_package_vocabulary(self) -> None:
+        hits = self.plant(
+            {
+                "cst_core/domain/files.py": self.CORE + "\n\nclass _Outcome(StrEnum):\n    HIDDEN = 'hidden'\n",
+                "cst_core/application/install.py": (
+                    "from enum import StrEnum\n\n\nclass InstallerCommand(StrEnum):\n    RUN = 'run'\n\n\n"
+                    "def f(s: str) -> bool:\n    return s in ('run', 'hidden', 'ok')\n"
+                ),
+                "pkg/cli.py": "def g(s: str) -> bool:\n    return s in ('run', 'hidden', 'ok')\n",
+            }
+        )
+        self.assertEqual(
+            [str(h) for h in hits],
+            [
+                "cst_core/application/install.py:9: 'hidden' is _Outcome.HIDDEN: compare with the enum member",
+                "cst_core/application/install.py:9: 'ok' is OwnedState.OK: compare with the enum member",
+                "cst_core/application/install.py:9: 'run' is InstallerCommand.RUN: compare with the enum member",
+                "pkg/cli.py:2: 'ok' is OwnedState.OK: compare with the enum member",
+            ],
+            "cst_core's application and private enums are only cst_core's own vocabulary",
+        )
 
     def test_chain_once_per_chain_and_match(self) -> None:
         src = (
