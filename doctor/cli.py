@@ -3,15 +3,16 @@
 
 It takes the Host (the machine, or the host seen from a toolbox), the VM
 tools and the install records from doctor/wiring.py, hands them to the
-checks that take them (application.wired_checks), runs them all and prints
-the report.
+checks that take them (wired_checks in doctor/application/registry.py),
+runs them all and prints the report.
 """
 
 from collections.abc import Mapping, Sequence
 import sys
 from typing import TextIO
 
-from doctor import application as app, wiring
+from doctor import wiring
+from doctor.application import registry as app
 from cst_core.domain.errors import Usage
 from doctor.domain import NAME, parse_args
 from doctor.presenter import render

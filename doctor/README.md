@@ -553,11 +553,17 @@ The code is split into four layers under `doctor/`:
   that is missing or does not answer; it also opens, lists and stats the
   host's files for the checks, and knows where the CST checkout is) and `VmTools` (the knobs and
   the image folder probe of `vm.adapters`).
-- `doctor/application.py`: host probes, check implementations, `CHECKS` registry
-  and `run_checks`, and `DoctorFacts`: what several checks ask (rpm-ostree with
-  every deployment, through cst_core's one query `cst_core.domain.ostree`, the libvirt domains, each VM's definition), asked once per
-  `Host` and kept here, not on the host port. No direct I/O: files and commands go through
-  `DoctorHostPort` (`tests/test_architecture.py` checks it).
+- `doctor/application/`: the checks, one module per check area
+  (`rpm_ostree.py`, `services.py`, `alerts.py`, `btrfs.py`, `cpu.py`,
+  `swap.py`, `vm.py`, `install.py`), each with its own probes.
+  `registry.py` holds `CHECKS` (the areas in their output order),
+  `wired_checks` and `run_checks`. `shared.py` holds what several areas use:
+  the `@check` decorator, the settings-file readers, and `DoctorFacts`: what
+  several checks ask (rpm-ostree with every deployment, through cst_core's
+  one query `cst_core.domain.ostree`, the libvirt domains, each VM's
+  definition), asked once per `Host` and kept here, not on the host port.
+  No direct I/O: files and commands go through `DoctorHostPort`
+  (`tests/test_architecture.py` checks it).
 - `doctor/presenter.py`: `render`, the report as text.
 - `doctor/cli.py`: the command line: arguments, the VM checks wired with the
   VM tools, the report.
@@ -566,10 +572,13 @@ The code is split into four layers under `doctor/`:
 - `doctor/cst-doctor`: the entry point: only the bootstrap and a `main()` that
   runs `cli.py`.
 
-Each check is a small function in `doctor/application.py`, registered with
-`@check("area")`. It gets a `DoctorHostPort` (how to run a query and where
-host files are) and yields `Result(status, message, fix)`. Areas are printed
-in the order their first check was registered. A host file is named by a
+Each check is a small function in its area's module under
+`doctor/application/`, registered with `@check(CHECKS, "area")` in that
+module's `CHECKS` list. It gets a `DoctorHostPort` (how to run a query and
+where host files are) and yields `Result(status, message, fix)`. Areas are
+printed in the order of `AREAS` in `doctor/application/registry.py`, and the
+checks of an area in the order its module registers them. A new area gets
+its own module and a place in `AREAS`. A host file is named by a
 `HostPath` (`/etc/cst/vm.conf`) and read through `host.path(...)`, which
 gives the `ViewPath` this process can open (`/run/host/...` in a toolbox);
 the host's file methods take a `ViewPath` only, so ty catches a path that
