@@ -126,7 +126,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # splitting a cli.py into it moves the entry and cannot raise the total.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 149,
-    "bluetooth/setup/cli.py": 69,
+    "bluetooth/setup/cli.py": 43,
     "btrfs/bulk/cli.py": 89,
     "btrfs/chrome_cache/cli.py": 80,
     "btrfs/docker_gc/cli.py": 23,

@@ -24,7 +24,7 @@ from bluetooth.domain import (
 from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed
 from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, matches_a_line
-from cst_core.domain.errors import shell_exit_status
+from cst_core.domain.errors import Refused, shell_exit_status
 
 SPACE = r"[ \t\n\r\f\v]"
 
@@ -38,6 +38,28 @@ class ReRun:
 
 class Change(Checks):
     """One run of apply, revert or le-audio."""
+
+    def run_command(self) -> int | ReRun:
+        """The command; a stop says why on stderr: its exit status, or the run again of le-audio."""
+        prog = self.c.prog
+        # apply and revert name the backup and the undo when a command stops them (the ERR trap of old).
+        changing = self.o.cmd == "apply" or (self.o.cmd == "revert" and not self.o.check)
+        commands = {"plan": self.plan, "status": self.status, "apply": self.apply, "revert": self.revert}
+        try:
+            return commands.get(self.o.cmd, self.le_audio)()
+        except Refused as e:
+            self.err(f"{prog}: ERROR: {e}\n")
+            return 1
+        except (StepFailed, OSError) as e:
+            status = e.status if isinstance(e, StepFailed) else 1
+            if isinstance(e, OSError):
+                self.err(f"{e}\n")
+            if changing:
+                self.err(f"{prog}: stopped: a command failed (exit {status}).{self.undo_hint()}\n")
+            return status
+
+    def undo_hint(self) -> str:
+        return f" Backup of main.conf: {self.backup or 'none taken'}. Undo: {self.c.prog} revert"
 
     def preconditions(self) -> None:
         for name in ("bluetoothctl", "busctl", "systemctl", "python3", "journalctl", "timeout", "sudo"):
