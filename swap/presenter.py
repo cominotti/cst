@@ -14,14 +14,18 @@ from swap.application.reports import MissingDesiredFileError
 from swap.domain import (
     PAGE,
     ApplyEvent,
+    ApplyEventKind,
     CgroupSwapRow,
     ConfigSectionReport,
     DebugSectionReport,
+    SettingState,
     SettingsReport,
     SwapApplyResult,
+    SwapCommand,
     SwapDeviceRow,
     SwapPlanReport,
     SwapStatusReport,
+    ZswapDebugStatus,
     ZswapSummary,
     killed_text,
     pct,
@@ -53,7 +57,7 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
     if header:
         _section("live settings vs desired (from swap/ in CST)", out)
     for row in report.rows:
-        extra = "" if row.state == "ok" or not row.want else f"   (desired {row.want})"
+        extra = "" if row.state == SettingState.OK or not row.want else f"   (desired {row.want})"
         print(f"  {row.state:<5} {row.label:<28} {row.live}{extra}", file=out)
     if report.override_source:
         print(
@@ -132,10 +136,10 @@ def render_traffic(s: ZswapSummary, out: TextIO = sys.stdout) -> None:
 def render_debug(report: DebugSectionReport, out: TextIO = sys.stdout) -> None:
     """Render zswap debugfs counters (or root hint when inaccessible)."""
     _section(f"zswap debug counters ({report.debug_dir})", out)
-    if report.status == "permission_denied":
+    if report.status == ZswapDebugStatus.PERMISSION_DENIED:
         print(f"  needs root{(': ' + report.hint) if report.hint else ''}", file=out)
         return
-    if report.status == "unavailable":
+    if report.status == ZswapDebugStatus.UNAVAILABLE:
         print("  not available (debugfs not mounted, or zswap without debug counters)", file=out)
         return
     for row in report.rows:
@@ -229,7 +233,7 @@ def _write_raw(text: str, out: TextIO) -> None:
 def print_event(ev: ApplyEvent, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> None:
     """Print one apply event at once (a command's own output as it came)."""
     stream = out if ev.stream == "out" else err
-    if ev.kind == "raw":
+    if ev.kind == ApplyEventKind.RAW:
         _write_raw(ev.text, stream)
         stream.flush()
     else:
@@ -260,13 +264,13 @@ def render_apply(
     return result.returncode
 
 
-def run_command(cmd: str, service: SwapApplicationService, *, hint: str, out: TextIO, err: TextIO) -> int:
+def run_command(cmd: SwapCommand, service: SwapApplicationService, *, hint: str, out: TextIO, err: TextIO) -> int:
     """plan, status or apply. apply prints each step as it runs; a failing command stops it with
     that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
     try:
-        if cmd == "plan":
+        if cmd == SwapCommand.PLAN:
             return render_plan(service.plan_report(), out=out)
-        if cmd == "status":
+        if cmd == SwapCommand.STATUS:
             return render_status(service.status_report(hint=hint, include_config=True), out=out)
         result = service.apply_changes(emit=lambda ev: print_event(ev, out, err))
         return shell_exit_status(render_apply(result, out=out, err=err, events_shown=True))

@@ -18,6 +18,7 @@ from typing import NoReturn, TextIO
 
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap import wiring
+from swap.domain import SwapCommand, parse_swap_command
 from swap.presenter import run_command
 
 _HELP_TEXT = """\
@@ -81,27 +82,26 @@ def execute_cli(
     cmd = args[0] if args and args[0] else "help"  # bash's ${1:-help}: an empty word is help too
     rest = args[1:] if args else []
     orig_args = [cmd, *rest]
-    want_root = False
 
-    if cmd in ("help", "-h", "--help"):
-        stdout.write(format_usage(prog))
-        return 0
-    if cmd in ("plan", "status"):
-        first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
-        if first == "--root":
+    match parse_swap_command(cmd):
+        case SwapCommand.HELP:
+            stdout.write(format_usage(prog))
+            return 0
+        case (SwapCommand.PLAN | SwapCommand.STATUS) as command:
+            first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
+            want_root = first == "--root"
+            if first and not want_root:
+                print(f"{cmd}: unknown argument '{first}' (only --root)", file=stderr)
+                return 2
+        case SwapCommand.APPLY as command:
+            if rest:
+                print("apply: no arguments", file=stderr)
+                return 2
             want_root = True
-        elif first:
-            print(f"{cmd}: unknown argument '{first}' (only --root)", file=stderr)
+        case None:
+            print(f"Unknown command: {cmd}", file=stderr)
+            stderr.write(format_usage(prog))
             return 2
-    elif cmd == "apply":
-        if rest:
-            print("apply: no arguments", file=stderr)
-            return 2
-        want_root = True
-    else:
-        print(f"Unknown command: {cmd}", file=stderr)
-        stderr.write(format_usage(prog))
-        return 2
 
     exec_ctx = wiring.execution_context() if ctx is None else ctx
     if want_root:
@@ -113,7 +113,7 @@ def execute_cli(
             reexec(wiring.sudo_rerun_argv(prog, orig_args))
 
     service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root, env=env_map)
-    return run_command(cmd, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
+    return run_command(command, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
 
 
 def main() -> int:
