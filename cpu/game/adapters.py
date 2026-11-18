@@ -446,8 +446,7 @@ class GameProfile:
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
-        if not self.s.target_user:
-            self._user_from_state(recs)
+        self._user_from_state(recs)
         # Newest first, so a property touched twice ends at its oldest value.
         for rec in reversed(recs):
             self._undo(rec, reload)
@@ -462,14 +461,17 @@ class GameProfile:
         return 0
 
     def _user_from_state(self, recs: Sequence[Record]) -> None:
-        """With no TARGET_USER (its line sets nothing, or is gone), 'off' undoes the user manager's side
-        for the user 'on' acted for, whose uid game.state names."""
+        """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
+        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now."""
         uid = state_uid(recs)
-        name = self._name_of(uid) if uid is not None else ""
+        target = self.s.target_user
+        if uid is None or (target and self._uid_of(target) == uid):
+            return
+        name = self._name_of(uid)
         if name:
-            self.log(
-                5, f"TARGET_USER not set in {self.paths.conf}: undoing for {name} (uid {uid}), the user 'on' acted for"
-            )
+            conf = self.paths.conf
+            why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
+            self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
             self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:

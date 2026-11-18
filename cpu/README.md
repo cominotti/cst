@@ -311,9 +311,9 @@ it while a game runs, and with the profile already on its `tick` changes
 nothing (it still switches the profile off when the game ends); it names
 the line in the journal once per boot (again when the lines change; its mark
 is `/run/cpu-setup/settings-warned`), and its unit does not fail. `off`
-still undoes everything (with no `TARGET_USER`, for the user `on` acted for:
-the uid of its `user@UID.service` record in `game.state`), and `cst cpu game
-state` shows the line.
+still undoes everything (for the user `on` acted for, the uid of its
+`user@UID.service` record in `game.state`, also when `TARGET_USER` sets
+nothing or names another user now), and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|

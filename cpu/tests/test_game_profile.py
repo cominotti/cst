@@ -705,6 +705,38 @@ class OffWithoutTargetUserTest(GameProfileCase):
             out,
         )
 
+    def test_off_acts_for_the_user_on_acted_for_when_target_user_names_another_one(self) -> None:
+        self.run_profile("on")
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.assertTrue(os.path.exists(user_override))
+        self.write(self.paths.conf, "TARGET_USER='other'\n")  # changed while the profile was on
+        settings, problems = read_settings(self.paths.conf)
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            settings,
+            self.systemd,
+            uid_of={USER: UID, "other": "424242"}.__getitem__,
+            name_of={UID: USER, "424242": "other"}.__getitem__,
+            problems=problems,
+            out=out,
+        )
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(user_override))
+        self.assertIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn(
+            f"<5>game-profile: TARGET_USER in {self.paths.conf} is other: undoing for {USER} (uid {UID}), the user"
+            " 'on' acted for\n",
+            out.getvalue(),
+        )
+        # The same user under TARGET_USER: nothing to say, as before.
+        self.run_profile("on")
+        out, actions = self.run_profile("off")
+        self.assertNotIn("undoing for", out)
+        self.assertIn(f"{USR} daemon-reload", actions)
+
     def test_the_user_name_of_a_uid(self) -> None:
         import pwd
 
