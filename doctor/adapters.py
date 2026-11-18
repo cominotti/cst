@@ -8,7 +8,8 @@ import pwd
 import time
 from typing import Any, BinaryIO, TextIO
 
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SubprocessVirshAdapter
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template

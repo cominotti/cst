@@ -222,7 +222,7 @@ All of them run in the unit suite:
 ## Toolbox vs host
 
 The scripts detect a container through `/run/.containerenv` or `/.dockerenv`. In Python
-one class does it, `HostExecutionContext` (`cst_core.adapters`); the `cst` dispatcher,
+one class does it, `HostExecutionContext` (`cst_core.adapters.runner`); the `cst` dispatcher,
 doctor's `Host` and toolchains ask it (`PRIMITIVE_LITERALS` keeps the markers out of
 every other module).
 

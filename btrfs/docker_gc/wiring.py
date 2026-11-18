@@ -11,7 +11,8 @@ import os
 from btrfs.docker_gc.adapters import DockerCli, GcHost, GcStateFiles, TerminalConsole
 from btrfs.docker_gc.application import DockerGc
 from btrfs.docker_gc.domain import GcPaths, GcSettings, protected_registries
-from cst_core.adapters import SubprocessCommandRunner, SystemClockAdapter
+from cst_core.adapters import SystemClockAdapter
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals as _restore_default_signals
 
 

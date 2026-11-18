@@ -22,7 +22,9 @@ from types import FrameType
 from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
-from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter, nocow as inode_attrs
+from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import (
     ensure_dir,
     is_masked_unit,

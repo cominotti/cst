@@ -17,7 +17,7 @@ import subprocess
 import time
 
 from btrfs.bulk.adapters.machine import HomeTree, kind, log
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import PENDING_ALERTS, Notifier
 from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
 

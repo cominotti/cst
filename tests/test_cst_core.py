@@ -20,15 +20,9 @@ from typing import Final, Literal
 import unittest
 from unittest import mock
 
-from cst_core.adapters import (
-    HostExecutionContext,
-    can_spawn_on_host,
-    on_host_argv,
-    SubprocessCommandRunner,
-    SubprocessVirshAdapter,
-    SystemClockAdapter,
-    SystemctlAdapter,
-)
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
+from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on_host_argv, SubprocessCommandRunner
+from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start

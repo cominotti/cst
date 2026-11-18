@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, on_host_argv
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner, on_host_argv
 from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import (

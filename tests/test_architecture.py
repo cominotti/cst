@@ -211,7 +211,9 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
 # A shared primitive -> the cst_core modules that own it. Anywhere else, a
 # call is a second implementation: use the owner's function or adapter.
 # "fcntl.ioctl" counts only with an FS_IOC_* request (the NOCOW flags).
-_RUNNER: Final = frozenset({"cst_core/adapters/__init__.py"})
+_RUNNER: Final = frozenset({"cst_core/adapters/runner.py"})
+_SYSTEMCTL: Final = frozenset({"cst_core/adapters/__init__.py"})
+_VIRSH: Final = frozenset({"cst_core/adapters/virsh.py"})
 _FILES: Final = frozenset({"cst_core/adapters/files.py"})
 PRIMITIVE_OWNERS: Final[dict[str, frozenset[str]]] = {
     "subprocess.run": _RUNNER,
@@ -232,10 +234,10 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
     "/run/.containerenv": _RUNNER,
     "/.dockerenv": _RUNNER,
     "flatpak-spawn": _RUNNER,
-    "qemu:///system": _RUNNER,
+    "qemu:///system": _VIRSH,
     "LC_ALL": _RUNNER,
     "restorecon": _FILES,
-    "systemd-escape": _RUNNER,
+    "systemd-escape": _SYSTEMCTL,
 }
 
 # Calls of a primitive outside its owners, per "<package> <primitive>"

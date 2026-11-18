@@ -10,7 +10,7 @@ import subprocess
 import sys
 from typing import Literal
 
-from cst_core.adapters import HostExecutionContext, can_spawn_on_host, on_host_argv
+from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on_host_argv
 from cst_core.domain.errors import shell_exit_status
 from cst_core.ports import ContainerProbePort
 
