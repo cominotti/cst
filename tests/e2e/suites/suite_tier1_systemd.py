@@ -787,6 +787,48 @@ EOF
             """,
         )
 
+    def test_89_swap_dropin_loses_to_a_runtime_memory_low_after_reload(self) -> None:
+        """systemd's real drop-in order for swap's machine.slice floor, next to cpu's
+        10-cpu-setup.conf (both shipped files, on a slice of their own): both
+        settings merge, and a `set-property --runtime MemoryLow` still wins after
+        a daemon-reload because 10-swap-memory-low.conf sorts before
+        50-MemoryLow.conf. Control: under the old name, 50-memory-low.conf, CST's
+        48G wins again at the reload (the bug the rename fixed)."""
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            swap_src=/opt/cst-rw/swap/units/machine.slice.d-10-swap-memory-low.conf
+            cpu_src="$(ls /opt/cst-rw/cpu/units/machine.slice.d-*-cpu-setup.conf)"
+            [[ "$(sed -n 's|^swap/units/machine.slice.d-10-swap-memory-low.conf *\(/etc/[^ ]*\) .*|\1|p' \
+                /opt/cst-rw/cst_core/domain/install.py)" == /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf ]]
+            d=/etc/systemd/system/e2e-swaporder.slice.d
+            ctl=/run/systemd/system.control/e2e-swaporder.slice.d
+            cleanup() {
+                systemctl stop e2e-swaporder.slice || true
+                rm -rf /etc/systemd/system/e2e-swaporder.slice "$d" "$ctl"
+                systemctl daemon-reload
+            }
+            trap cleanup EXIT
+            printf '[Unit]\nDescription=CST E2E swap drop-in order\n' >/etc/systemd/system/e2e-swaporder.slice
+            mkdir -p "$d"
+            cp "$swap_src" "$d/10-swap-memory-low.conf"
+            cp "$cpu_src" "$d/${cpu_src##*/machine.slice.d-}"
+            systemctl daemon-reload
+            systemctl start e2e-swaporder.slice
+            [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 51539607552 ]]
+            [[ "$(systemctl show -P CPUWeight e2e-swaporder.slice)" == 50 ]]
+            systemctl set-property --runtime e2e-swaporder.slice MemoryLow=1G
+            [[ -f "$ctl/50-MemoryLow.conf" ]]
+            systemctl daemon-reload
+            [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 1073741824 ]]
+            [[ "$(systemctl show -P CPUWeight e2e-swaporder.slice)" == 50 ]]
+            # The old name sorts after 50-MemoryLow.conf ('M' < 'm'): CST's 48G wins the reload.
+            mv "$d/10-swap-memory-low.conf" "$d/50-memory-low.conf"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 51539607552 ]]
+            """,
+        )
+
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
         system and user managers: a top-level user slice of its own and a

@@ -278,6 +278,17 @@ def crypto_has_algorithm(proc_crypto_text: str, name: str) -> bool:
     return any(pattern.fullmatch(line) for line in proc_crypto_text.splitlines())
 
 
+def is_cst_dropin(text: str) -> bool:
+    """A drop-in CST wrote: one of its comment lines starts with the "Managed by" of swap-setup.sh
+    or of apply-swap-config.sh, the script before it (a file someone else wrote under the same name
+    is left alone)."""
+    return any(
+        line.startswith(("# Managed by swap-setup.sh (CST)", "# Managed by apply-swap-config.sh"))
+        for line in text.splitlines()
+        if line.startswith("#")
+    )
+
+
 def describe_state(state: ManagedState) -> str:
     """Map a ManagedState into the column word shown by plan/status."""
     return _STATE_WORDS[state]

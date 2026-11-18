@@ -139,11 +139,21 @@ can be reclaimed, the kernel takes it from them first. When nothing else is
 left, the floor is ignored, so it cannot starve the host. The cgroup
 filesystem is mounted with `memory_recursiveprot`, so the protection reaches
 the VM's own scope without any libvirt setting. Raise the value in
-`units/machine.slice.d-50-memory-low.conf` if the VM grows.
+`units/machine.slice.d-10-swap-memory-low.conf` if the VM grows.
 
-The drop-in is `machine.slice.d/50-memory-low.conf`. The `cpu` module
+The drop-in is `machine.slice.d/10-swap-memory-low.conf`. The `cpu` module
 has its own drop-in in the same folder, `10-cpu-setup.conf`, with
-`CPUWeight=50`; the two set different things and do not clash. While a game
+`CPUWeight=50`; the two set different things and do not clash. Both
+names start with `10-` on purpose: systemd applies the drop-ins of a unit
+in file-name order and the last one wins, and `systemctl set-property`
+writes its values as `50-<Property>.conf` (`50-MemoryLow.conf`). A value
+set that way (also with `--runtime`) still wins after a `daemon-reload`.
+Until 2026-11 the file was `50-memory-low.conf`, which sorts after
+`50-MemoryLow.conf` (upper case first), so every reload put the 48G back
+over a value set at run time. `plan` shows that old file as `remove`, and
+`apply` deletes it and its line in the install record, but only when CST
+(or `apply-swap-config.sh`) wrote it: a file of that name with no
+"Managed by" comment of theirs is left alone. While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.
@@ -172,7 +182,7 @@ the swap part shows everything there.
 No reboot is needed: `apply` also sets everything live.
 
 `apply` writes its three files (`zswap.conf`, `99-swap-tuning.conf`,
-`50-memory-low.conf`) through CST's installer and lists them in the install
+`10-swap-memory-low.conf`) through CST's installer and lists them in the install
 record `/var/lib/cst/installed.json` (component `swap:core`), where `cst doctor`
 checks them.
 
@@ -230,8 +240,10 @@ What `apply` does, in order:
    `/etc/sysctl.d/99-swap-tuning.conf`, applies it (without
    `vm.watermark_scale_factor` while the `cpu` experiment `wsf-300` is on,
    section 2.4).
-6. **machine.slice**: writes the drop-in; `daemon-reload` when the file was
-   rewritten (also for a renewed comment, for the same reason as in step 2).
+6. **machine.slice**: writes the drop-in, removes the one under its old name
+   (`50-memory-low.conf`, section 2.5); `daemon-reload` when a file was
+   rewritten or removed (also for a renewed comment, for the same reason as
+   in step 2).
 7. **Verification**: the live settings against this folder, `swap0` active,
    `zram0` gone; `swapon --show`. Any `DIFF` makes `apply` end with an error.
 
@@ -260,10 +272,13 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
   a `daemon-reload` runs, so systemd stops calling the `swap0` units
   "changed on disk" (it restarts nothing).
 - A file whose settings are the same and only the comments differ is also
-  adopted: rewritten with the new header (plus a `daemon-reload` for the
-  `machine.slice` drop-in, for the same reason).
-- On sophia, the first `cst swap plan` after the move shows `adopt` for all
-  five items (crypttab needs `--root` to show it) and `ok` for the rest.
+  adopted: rewritten with the new header. The old script's
+  `machine.slice` drop-in, `50-memory-low.conf`, is removed instead, and
+  the drop-in is written under its new name (section 2.5), with a
+  `daemon-reload`.
+- On sophia, the first `cst swap plan` after the move showed `adopt` for
+  the four other items (crypttab needs `--root` to show it) and `ok` for
+  the rest.
 - The old script itself is not touched; do not run it again. It does not
   know the new marker, so it **appends a second `swap0` line** to
   `/etc/crypttab` and `/etc/fstab`, runs `daemon-reload`, and may restart
@@ -410,7 +425,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
    `/etc/crypttab` and from `/etc/fstab` (`<file>.pre-swap-config.bak` is the
    version before the first change).
 3. `rm /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf
-   /etc/systemd/system/machine.slice.d/50-memory-low.conf`
+   /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf`
 4. To get Fedora's zram back: `rm /etc/systemd/zram-generator.conf` (the
    `/dev/null` symlink).
 5. `systemctl daemon-reload`, then reboot (zswap and the sysctls return to
@@ -424,7 +439,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 |---|---|
 | `tmpfiles/zswap.conf` | `/etc/tmpfiles.d/zswap.conf` |
 | `sysctl/99-swap-tuning.conf` | `/etc/sysctl.d/99-swap-tuning.conf` |
-| `units/machine.slice.d-50-memory-low.conf` | `/etc/systemd/system/machine.slice.d/50-memory-low.conf` |
+| `units/machine.slice.d-10-swap-memory-low.conf` | `/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf` |
 | `domain.py` | pure swap domain model, hardware identity (`SwapHardwareSpec`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
 | `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens); the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |

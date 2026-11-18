@@ -43,8 +43,8 @@ Commands:
         only when free RAM can take its contents
       * /etc/sysctl.d/99-swap-tuning.conf (swappiness 100, page-cluster 0,
         watermarks), applied live
-      * machine.slice MemoryLow=48G (drop-in 50-memory-low.conf, next to
-        cpu-setup.sh's 10-cpu-setup.conf; different settings, no clash)
+      * machine.slice MemoryLow=48G (drop-in 10-swap-memory-low.conf, next to
+        cpu's 10-cpu-setup.conf; set-property still wins; old 50- name removed)
       * verification at the end
   status [--root]        read-only: config files, live settings, zswap pool
                          and traffic, swap devices, per-cgroup swap, memory

@@ -28,6 +28,7 @@ from swap.domain import (
     describe_state,
     find_swap_used_kib,
     human,
+    is_cst_dropin,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -47,7 +48,11 @@ from swap.ports import SwapSystemPort
 _MANIFEST = manifest_by_src()
 TMPFILES_ENTRY: InstallEntry = _MANIFEST["swap/tmpfiles/zswap.conf"]
 SYSCTL_ENTRY: InstallEntry = _MANIFEST["swap/sysctl/99-swap-tuning.conf"]
-DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-50-memory-low.conf"]
+DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-10-swap-memory-low.conf"]
+# The drop-in's name until 2026-11: it sorted after the 50-MemoryLow.conf of `systemctl set-property`
+# ('M' < 'm'), so after a daemon-reload its 48G beat a runtime value. plan shows it, apply removes it.
+OLD_DROPIN_SRC: str = "swap/units/machine.slice.d-50-memory-low.conf"
+OLD_DROPIN_DEST: str = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -101,6 +106,10 @@ class SwapEnvironment:
     @property
     def slice_dropin(self) -> str:
         return _under(self.etc_dir, DROPIN_ENTRY.dest, "/etc/")
+
+    @property
+    def old_slice_dropin(self) -> str:
+        return _under(self.etc_dir, OLD_DROPIN_DEST, "/etc/")
 
     @property
     def zram_conf(self) -> str:
@@ -180,6 +189,11 @@ class SwapReports:
             return inspect_managed_file(desired, None, exists=True, is_symlink=False, readable=False)
         actual = self._fs.read_text(dest)
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
+
+    def old_dropin_is_ours(self) -> bool:
+        """The drop-in under its old name is there and CST (or the script before it) wrote it."""
+        text = self._fs.read_text(self._env.old_slice_dropin)
+        return text is not None and is_cst_dropin(text)
 
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
@@ -305,6 +319,14 @@ class SwapReports:
         if self._fs.exists(env.old_sysctl_conf):
             file_items.append(
                 PlanItem("remove", _short_etc_path(env.etc_dir, env.old_sysctl_conf), "legacy file of the zram setup")
+            )
+        if self.old_dropin_is_ours():
+            file_items.append(
+                PlanItem(
+                    "remove",
+                    _short_etc_path(env.etc_dir, env.old_slice_dropin),
+                    "the old name: a runtime MemoryLow lost to it after a daemon-reload",
+                )
             )
 
         if self._zram_masked():

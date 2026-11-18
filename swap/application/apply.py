@@ -8,7 +8,14 @@ from cst_core.application.install import Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
-from swap.application.reports import DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY, SwapReports
+from swap.application.reports import (
+    DROPIN_ENTRY,
+    OLD_DROPIN_DEST,
+    OLD_DROPIN_SRC,
+    SYSCTL_ENTRY,
+    TMPFILES_ENTRY,
+    SwapReports,
+)
 from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
@@ -159,6 +166,27 @@ class SwapApplicationService(SwapReports):
             events.append(ApplyEvent("out", "line", f"adopted:   {dest} (comments renewed, settings unchanged)"))
         else:
             events.append(ApplyEvent("out", "line", f"written:   {dest}"))
+        return True
+
+    def _remove_old_dropin(self, events: list[ApplyEvent]) -> bool:
+        """Remove the drop-in under its old name (and its line in the install record) when CST wrote it.
+        True when it was removed."""
+        if not self.old_dropin_is_ours():
+            return False
+        old = Placement(
+            path=self._env.old_slice_dropin,
+            dest=OLD_DROPIN_DEST,
+            record=self._env.install_record,
+            component=DROPIN_ENTRY.component,
+            src=OLD_DROPIN_SRC,
+            kind=DROPIN_ENTRY.kind,
+            owner=DROPIN_ENTRY.owner,
+            mode=DROPIN_ENTRY.mode.bits,
+        )
+        for line in self._installer.remove([old]):
+            events.append(
+                ApplyEvent("out", "line", f"{line} (the old name of {posixpath.basename(DROPIN_ENTRY.dest)})")
+            )
         return True
 
     def _stopped(self, returncode: int, events: list[ApplyEvent]) -> SwapApplyResult:
@@ -341,7 +369,8 @@ class SwapApplicationService(SwapReports):
             return self._stopped(sysctl.returncode, events)
 
         events.append(ApplyEvent("out", "section", "== machine.slice"))
-        if self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events):
+        written = self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events)
+        if self._remove_old_dropin(events) or written:
             self._systemd.daemon_reload()
         # swap:core's files are all in place: the install record says the component is complete.
         self._installer.mark(env.install_record, DROPIN_ENTRY.component)

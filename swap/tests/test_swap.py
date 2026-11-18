@@ -26,7 +26,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
-from cst_core.application.install import InstallService
+from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application.apply import SwapApplicationService
@@ -68,7 +68,7 @@ REPO = os.path.dirname(SWAP)
 SETUP = os.path.join(REPO, "swap-setup.sh")
 TMPFILES = os.path.join(SWAP, "tmpfiles", "zswap.conf")
 SYSCTL = os.path.join(SWAP, "sysctl", "99-swap-tuning.conf")
-DROPIN = os.path.join(SWAP, "units", "machine.slice.d-50-memory-low.conf")
+DROPIN = os.path.join(SWAP, "units", "machine.slice.d-10-swap-memory-low.conf")
 
 OLD = "# managed-by: apply-swap-config.sh"
 OLDER = "# managed-by: apply-zram-config.sh"
@@ -104,6 +104,23 @@ def _installer() -> InstallService:
     """The installer's use case on real files (the tests' folders), with a record port: swap writes its
     files through it, and lists them in env.install_record when a test sets one."""
     return InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
+
+
+# The drop-in as CST installed it until 2026-11, as machine.slice.d/50-memory-low.conf.
+# Its first line, split: the license gate wants that line on line 1 of this file only.
+MAIN_DROPIN = (
+    "# SPDX-"
+    + "License-Identifier: MPL-2.0\n"
+    + """\
+# Managed by swap-setup.sh (CST): protect libvirt guests from reclaim.
+# Soft floor: reclaim prefers unprotected cgroups while they have anything
+# reclaimable; ignored when they don't. Propagates to the VM scope via the
+# memory_recursiveprot cgroup2 mount option. 48G matches the win11-devbox
+# allocation; raise it if the VM grows.
+[Slice]
+MemoryLow=48G
+"""
+)
 
 
 # 1023 KiB of RAM: 20 % of it, and 85 % of that, do not divide evenly.
@@ -435,6 +452,14 @@ class StatusMathTest(unittest.TestCase):
         self.assertTrue(lines["reject_reclaim_fail"].endswith(help_["reject_reclaim_fail"]))
         self.assertEqual(lines["new_kernel_counter"].split(), ["new_kernel_counter", "7"])
 
+    def test_is_cst_dropin(self) -> None:
+        self.assertTrue(D.is_cst_dropin(MAIN_DROPIN))
+        self.assertTrue(D.is_cst_dropin(OLD_DROPIN))
+        with open(DROPIN, encoding="utf-8") as f:
+            self.assertTrue(D.is_cst_dropin(f.read()))
+        self.assertFalse(D.is_cst_dropin("[Slice]\nMemoryLow=8G\n"))
+        self.assertFalse(D.is_cst_dropin("[Slice]\nMemoryLow=8G # Managed by swap-setup.sh (CST)\n"))
+
     def test_size_and_bool(self) -> None:
         self.assertEqual(parse_size("512M"), 512 * 2**20)
         self.assertEqual(parse_size("1024"), 1024)
@@ -576,7 +601,7 @@ class MarkerTest(unittest.TestCase):
 
     def test_file_state(self) -> None:
         src_tmp = os.path.join(SWAP, "tmpfiles", "zswap.conf")
-        src_drop = os.path.join(SWAP, "units", "machine.slice.d-50-memory-low.conf")
+        src_drop = DROPIN
         self.assertEqual(self.file_state(src_tmp, self.path("t", OLD_TMPFILES)), "adopt")
         self.assertEqual(self.file_state(src_drop, self.path("d", OLD_DROPIN)), "adopt")
         self.assertEqual(self.file_state(src_drop, self.path("d2", OLD_DROPIN.replace("48G", "32G"))), "change")
@@ -896,7 +921,7 @@ class SwapApplicationTest(_SwapScratch):
             sorted(rec["files"]),
             [
                 "/etc/sysctl.d/99-swap-tuning.conf",
-                "/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+                "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf",
                 "/etc/tmpfiles.d/zswap.conf",
             ],
         )
@@ -922,6 +947,94 @@ class SwapApplicationTest(_SwapScratch):
         self.assertIn("written by a newer CST", err.getvalue())
         with open(record) as f:
             self.assertEqual(f.read(), '{"format": 99, "files": {}}', "the newer record was changed")
+
+    def _old_dropin_install(self, record: str, text: str) -> str:
+        """machine.slice.d/50-memory-low.conf as an older CST's apply left it: the file, listed in the
+        install record by the same installer call (put) that apply made then."""
+        old = os.path.join(self.env.etc_dir, "systemd/system/machine.slice.d/50-memory-low.conf")
+        place = Placement(
+            path=old,
+            dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+            record=record,
+            component="swap:core",
+            src="swap/units/machine.slice.d-50-memory-low.conf",
+            kind="unit",
+            owner="root",
+            mode=0o644,
+        )
+        _installer().put(place, text.encode(), as_root=False)
+        return old
+
+    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, _FakeSystemd]:
+        fs = self._fs(mapper_present=mapper_present)
+        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_apply(service.apply_changes(), out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def _plan_text(self, env: SwapEnvironment) -> str:
+        fs = self._fs()
+        service = SwapApplicationService(
+            env,
+            fs,
+            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        return out.getvalue()
+
+    def test_apply_moves_the_drop_in_to_its_10_name_and_forgets_the_old_one(self) -> None:
+        # Upgrade: the drop-in under the name an older CST used (it sorted after set-property's
+        # 50-MemoryLow.conf and won over a runtime MemoryLow at every daemon-reload).
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        env = dataclasses.replace(self.env, install_record=record)
+        old = self._old_dropin_install(record, MAIN_DROPIN)
+        new = env.slice_dropin
+        self.assertEqual(os.path.basename(new), "10-swap-memory-low.conf")
+
+        plan = self._plan_text(env)
+        self.assertIn("  remove    machine.slice.d/50-memory-low.conf", plan)
+        self.assertIn("  write     machine.slice.d/10-swap-memory-low.conf", plan)
+        self.assertTrue(os.path.exists(old), "plan removed the old drop-in")
+
+        rc, out, err, systemd = self._apply_once(env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"removed:   {old} (the old name of 10-swap-memory-low.conf)", out)
+        self.assertFalse(os.path.lexists(old))
+        with open(new, encoding="utf-8") as f, open(DROPIN, encoding="utf-8") as want:
+            self.assertEqual(f.read(), want.read())
+        with open(record, encoding="utf-8") as f:
+            files = json.load(f)["files"]
+        self.assertNotIn("/etc/systemd/system/machine.slice.d/50-memory-low.conf", files)
+        self.assertIn("/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf", files)
+        self.assertGreaterEqual(systemd.daemon_reloads, 1)
+
+        self.assertNotIn("50-memory-low.conf", self._plan_text(env))
+        rc, out, err, systemd = self._apply_once(env, mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("removed:", out)
+        self.assertEqual(systemd.daemon_reloads, 0)
+
+    def test_an_old_drop_in_from_the_script_before_cst_is_removed_too(self) -> None:
+        old = self._old_dropin_install("", OLD_DROPIN)
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"removed:   {old}", out)
+        self.assertFalse(os.path.lexists(old))
+
+    def test_a_50_memory_low_conf_cst_did_not_write_is_left_alone(self) -> None:
+        foreign = "[Slice]\nMemoryLow=8G\n"
+        old = self._old_dropin_install("", foreign)
+        self.assertNotIn("50-memory-low.conf", self._plan_text(self.env))
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("removed:", out)
+        with open(old, encoding="utf-8") as f:
+            self.assertEqual(f.read(), foreign)
 
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
