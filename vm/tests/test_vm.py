@@ -38,7 +38,7 @@ from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
-from cst_core.ports import CommandResult, DecodeErrors, OutputMode, StdinMode
+from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
@@ -1808,10 +1808,10 @@ class PackageTest(unittest.TestCase):
 
 
 class FakeTimers:
-    """A TimerPort over a dict of file states and a list of timers on: what was asked, in order."""
+    """A TimerFilesPort over a dict of file states and a list of timers on: what was asked, in order."""
 
-    def __init__(self, states: dict[str, UnitFileState], on: list[str], fail: str = "") -> None:
-        self.states, self.on, self.fail = states, on, fail
+    def __init__(self, states: dict[str, UnitFileState], on: list[str]) -> None:
+        self.states, self.on = states, on
         self.done: list[str] = []
 
     def file_states(self, unit: str) -> dict[str, UnitFileState]:
@@ -1835,39 +1835,66 @@ class FakeTimers:
     def timers_on(self) -> list[str]:
         return list(self.on)
 
-    def turn_on(self, unit: str) -> None:
+
+class FakeSystemd:
+    """A SystemdPort for the timer use cases: what they ask goes to timers.done (one order for both),
+    enable and disable change timers.on; fail: "on", "off" or "reload" fails that step."""
+
+    def __init__(self, timers: FakeTimers, fail: str = "") -> None:
+        self.timers, self.fail = timers, fail
+
+    def daemon_reload(self) -> None:
+        if self.fail == "reload":
+            raise CommandFailed(["systemctl", "daemon-reload"], 1, "", "Access denied\n")
+        self.timers.done.append("reload")
+
+    def enable(self, unit: str, *, now: bool = False) -> CommandResult:
         if self.fail == "on":
-            raise Refused("systemctl enable --now: failed")
-        self.done.append(f"on {unit}")
-        self.on.append(unit)
+            return CommandResult(1, "", "failed\n")
+        self.timers.done.append(f"on {unit}")
+        self.timers.on.append(unit)
+        return CommandResult(0, "", "")
 
-    def turn_off(self, unit: str) -> str:
+    def disable(self, unit: str, *, now: bool = False) -> CommandResult:
         if self.fail == "off":
-            return "systemctl disable --now: denied"
-        self.done.append(f"off {unit}")
-        self.on.remove(unit) if unit in self.on else None
-        return ""
+            return CommandResult(1, "", "denied\n")
+        self.timers.done.append(f"off {unit}")
+        if unit in self.timers.on:
+            self.timers.on.remove(unit)
+        return CommandResult(0, "", "")
 
-    def forget_last_run(self, unit: str) -> None:
-        self.done.append(f"clean {unit}")
+    def clean(self, unit: str, *, what: str) -> CommandResult:
+        self.timers.done.append(f"clean {unit}")
+        return CommandResult(0, "", "")
 
-    def reload(self) -> None:
-        self.done.append("reload")
+    def show(self, unit: str, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+        if on_host:
+            raise AssertionError(f"the timer's status reads the local systemd: {unit}")
+        return {p: {"NextElapseUSecRealtime": "Sat", "Result": "success"}[p] for p in props}
 
-    def schedule(self, unit: str) -> tuple[str, str]:
-        return "Sat", "success"
+    def start(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def stop(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def restart(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def escape_path(self, path: str, *, suffix: str) -> UnitName:
+        raise AssertionError(path)
 
 
 class TimerUseCaseTest(unittest.TestCase):
-    """vm.application's backup-timer on, off and status over a fake TimerPort."""
+    """vm.application's backup-timer on, off and status over a fake TimerFilesPort and SystemdPort."""
 
     unit = "cst-vm-backup@win.timer"
 
     def test_on_installs_turns_on_then_records(self) -> None:
         timers = FakeTimers({"/p": "missing", "/u": "change", "/t": "ok"}, [])
         steps: list[vm_domain.TimerStep] = []
-        vm_application.timer_on(timers, "win", lambda: None, steps.append)
-        self.assertEqual(timers.done, ["write /p", "write /u", f"on {self.unit}", "complete"])
+        vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, steps.append)
+        self.assertEqual(timers.done, ["write /p", "write /u", "reload", f"on {self.unit}", "complete"])
         self.assertEqual([(s.kind, s.path) for s in steps], [("installed", "/p"), ("updated", "/u")])
 
     def test_on_refuses_before_any_change(self) -> None:
@@ -1882,46 +1909,56 @@ class TimerUseCaseTest(unittest.TestCase):
         for states, ready, words in cases:
             timers = FakeTimers(states, [])
             with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
-                vm_application.timer_on(timers, "win", ready, lambda s: None)
+                vm_application.timer_on(timers, FakeSystemd(timers), "win", ready, lambda s: None)
             self.assertEqual(timers.done, [])
 
     def test_a_failed_start_leaves_the_record_pending(self) -> None:
-        timers = FakeTimers({"/p": "missing"}, [], fail="on")
-        with self.assertRaises(Refused):
-            vm_application.timer_on(timers, "win", lambda: None, lambda s: None)
-        self.assertEqual(timers.done, ["write /p"])
+        for fail, words, done in (
+            ("on", f"^systemctl enable --now {self.unit}: failed$", ["write /p", "reload"]),
+            ("reload", "^systemctl daemon-reload: Access denied$", ["write /p"]),
+        ):
+            timers = FakeTimers({"/p": "missing"}, [])
+            with self.subTest(fail=fail), self.assertRaisesRegex(Refused, words):
+                vm_application.timer_on(timers, FakeSystemd(timers, fail), "win", lambda: None, lambda s: None)
+            self.assertEqual(timers.done, done)
 
     def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
         timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
         steps: list[vm_domain.TimerStep] = []
-        self.assertEqual(vm_application.timer_off(timers, "win", steps.append), [])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", steps.append), [])
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p", "reload"])
         self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
+        # The last daemon-reload is best effort: its failure leaves the files removed.
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers, "reload"), "win", lambda s: None), [])
 
     def test_off_keeps_the_files_for_another_vm(self) -> None:
         other = "cst-vm-backup@other.timer"
         timers = FakeTimers({"/p": "ok"}, [self.unit, other])
-        self.assertEqual(vm_application.timer_off(timers, "win", lambda s: None), [other])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", lambda s: None), [other])
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}"])
 
     def test_off_refuses_when_the_timer_stays_on(self) -> None:
-        timers = FakeTimers({"/p": "ok"}, [self.unit], fail="off")
-        with self.assertRaisesRegex(Refused, "denied"):
-            vm_application.timer_off(timers, "win", lambda s: None)
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        with self.assertRaisesRegex(Refused, f"^systemctl disable --now {self.unit}: denied$"):
+            vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
         self.assertEqual(timers.done, [])
-        timers = FakeTimers({"/p": "ok"}, [], fail="off")  # off already: the failure does not matter
-        vm_application.timer_off(timers, "win", lambda s: None)
+        timers = FakeTimers({"/p": "ok"}, [])  # off already: the failure does not matter
+        vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
         self.assertIn("remove /p", timers.done)
 
     def test_status(self) -> None:
-        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, [self.unit]), "win")
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual(
             (st.unit, st.on, st.files, st.next_run, st.last_result), (self.unit, True, {"/p": "ok"}, "Sat", "success")
         )
-        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, []), "win")
+        timers = FakeTimers({"/p": "ok"}, [])
+        st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
+        timers = FakeTimers({}, [])
         with self.assertRaises(Refused):
-            vm_application.timer_status(FakeTimers({}, []), "bad name")
+            vm_application.timer_status(timers, FakeSystemd(timers), "bad name")
 
 
 class PatchVmTest(unittest.TestCase):

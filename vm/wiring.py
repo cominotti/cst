@@ -13,12 +13,14 @@ from cst_core.adapters.notify import PENDING_ALERTS
 from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.adapters import terminal
-from vm.adapters import COMMANDS_OF_VM, NAME
+from cst_core.adapters import SystemctlAdapter, terminal
+from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.ports import SystemdPort
+from vm.adapters import COMMANDS_OF_VM, NAME, fault_words
 from vm.adapters.backup import DefinitionFiles
 from vm.adapters.timer import TimerFiles
 from vm.domain import VmPaths, VmSettings
-from vm.ports import DefinitionStorePort, TimerPort, VmCommandsPort
+from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
 
 def vm_env() -> Mapping[str, str]:
@@ -72,9 +74,15 @@ def vm_settings(env: Mapping[str, str] | None = None) -> VmSettings:
     )
 
 
-def timer_port(cfg: VmSettings, entry_file: str) -> TimerPort:
-    """The weekly timer's files and systemd on this machine (entry_file: the running cst-vm)."""
+def timer_port(cfg: VmSettings, entry_file: str) -> TimerFilesPort:
+    """The weekly timer's files on this machine (entry_file: the running cst-vm)."""
     return TimerFiles(cfg, entry_file)
+
+
+def systemd() -> SystemdPort:
+    """systemctl as cst-vm runs it: in the C locale, 120 s at most, with its own words for a
+    systemctl that is missing or does not answer (fault_words)."""
+    return SystemctlAdapter(SubprocessCommandRunner(words=fault_words), timeout=120, locale_c=True)
 
 
 def vm_commands() -> VmCommandsPort:

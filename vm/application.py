@@ -15,17 +15,40 @@ from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import masked_refusal
+from cst_core.ports import CommandFailed, CommandResult, SystemdPort, UnitName
 from vm.domain import URI, TimerStatus, TimerStep, instance
 from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
-from vm.ports import DefinitionStorePort, TimerPort, VmCommandsPort
+from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
 
-def timer_status(timers: TimerPort, vm: str) -> TimerStatus:
+def _why(r: CommandResult) -> str:
+    """systemctl's first line of stderr, else its exit status."""
+    return first_line(r.stderr) or f"exit {r.returncode}"
+
+
+def _reload(systemd: SystemdPort) -> str:
+    """systemctl daemon-reload; why it failed ("" when it did not)."""
+    try:
+        systemd.daemon_reload()
+    except CommandFailed as e:
+        return f"systemctl daemon-reload: {first_line(e.stderr) or f'exit {e.returncode}'}"
+    return ""
+
+
+def _shown(systemd: SystemdPort, unit: str, prop: str) -> str:
+    """One property of unit, from the systemd cst-vm runs under; "" when it cannot answer."""
+    return systemd.show(UnitName(unit), (prop,), on_host=False).get(prop, "").strip()
+
+
+def timer_status(timers: TimerFilesPort, systemd: SystemdPort, vm: str) -> TimerStatus:
     """backup-timer status of vm."""
     unit = instance(vm)
     files = timers.file_states(unit)
     on = unit in timers.timers_on()
-    next_run, last_result = timers.schedule(unit) if on else ("", "")
+    next_run, last_result = "", ""
+    if on:
+        next_run = _shown(systemd, unit, "NextElapseUSecRealtime")
+        last_result = _shown(systemd, unit.replace(".timer", ".service"), "Result")
     return TimerStatus(unit, on, files, next_run, last_result)
 
 
@@ -36,14 +59,15 @@ def _refuse_foreign(states: Mapping[str, UnitFileState]) -> None:
 
 
 def timer_on(
-    timers: TimerPort,
+    timers: TimerFilesPort,
+    systemd: SystemdPort,
     vm: str,
     nas_ready: Callable[[], object],
     report: Callable[[TimerStep], None],
 ) -> str:
-    """Install what is not current, turn vm's timer on, record the component complete; its unit.
-    Refused, before any change, for a file that is not CST's, a masked one, or a NAS backup that is
-    not set up (nas_ready raises)."""
+    """Install what is not current, turn vm's timer on (systemd reloads the units and starts it,
+    enabled), record the component complete; its unit. Refused, before any change, for a file that
+    is not CST's, a masked one, or a NAS backup that is not set up (nas_ready raises)."""
     unit = instance(vm)
     states = timers.file_states(unit)
     _refuse_foreign(states)
@@ -51,23 +75,28 @@ def timer_on(
         raise Refused(why + "; nothing was changed")
     nas_ready()
     timers.install(states, report)
-    timers.turn_on(unit)
+    if why := _reload(systemd):
+        raise Refused(why)
+    r = systemd.enable(UnitName(unit), now=True)
+    if r.returncode != 0:
+        raise Refused(f"systemctl enable --now {unit}: {_why(r)}")
     timers.mark_complete()
     return unit
 
 
-def timer_off(timers: TimerPort, vm: str, report: Callable[[TimerStep], None]) -> list[str]:
-    """Turn vm's timer off; when no VM's timer is on any more, remove the files (a masked one is
-    left) and forget them in the record. The timers still on (then nothing is removed)."""
+def timer_off(timers: TimerFilesPort, systemd: SystemdPort, vm: str, report: Callable[[TimerStep], None]) -> list[str]:
+    """Turn vm's timer off (stopped and disabled); when no VM's timer is on any more, remove the
+    files (a masked one is left) and forget them in the record. The timers still on (then nothing
+    is removed)."""
     unit = instance(vm)
     states = timers.file_states(unit)
     _refuse_foreign(states)
-    why = timers.turn_off(unit)
-    if why and unit in timers.timers_on():
-        raise Refused(why)
+    r = systemd.disable(UnitName(unit), now=True)
+    if r.returncode != 0 and unit in timers.timers_on():
+        raise Refused(f"systemctl disable --now {unit}: {_why(r)}")
     # Forget the timer's last run (Persistent=: /var/lib/systemd/timers/stamp-UNIT): needs the unit loaded
-    # and stopped, so before its files go. A failure only leaves that small file behind.
-    timers.forget_last_run(unit)
+    # and stopped, so before its files go. Best effort: a failure only leaves that small file behind.
+    systemd.clean(UnitName(unit), what="state")
     report(TimerStep("off", unit))
     still = timers.timers_on()
     if still:
@@ -79,7 +108,7 @@ def timer_off(timers: TimerPort, vm: str, report: Callable[[TimerStep], None]) -
             timers.remove(p)
             report(TimerStep("removed", p))
     timers.forget([p for p, st in states.items() if st not in ("missing", "masked")])
-    timers.reload()
+    _reload(systemd)  # best effort
     return []
 
 

@@ -8,10 +8,11 @@ from cst_core.domain.files import UnitFileState
 from vm.domain import TimerStep
 
 
-class TimerPort(Protocol):
-    """The weekly NAS backup timer on this machine: the files backup-timer on writes (the program
-    copy and the two template units, through the installer, listed in the install record) and
-    systemd's side of one VM's timer unit. Errors that stop a use case are Refused."""
+class TimerFilesPort(Protocol):
+    """The weekly NAS backup timer's files on this machine: what backup-timer on writes (the program
+    copy and the two template units, through the installer, listed in the install record) and the
+    links that say which VM's timer is on. systemd itself is cst_core's SystemdPort. Errors that stop
+    a use case are Refused."""
 
     def file_states(self, unit: str) -> dict[str, UnitFileState]:
         """{path: state} of each file backup-timer on writes; the VM's own timer unit (which
@@ -34,26 +35,6 @@ class TimerPort(Protocol):
 
     def timers_on(self) -> list[str]:
         """The VM timer units that are on (their timers.target.wants links)."""
-        ...
-
-    def turn_on(self, unit: str) -> None:
-        """systemd reloads the units and starts unit, enabled; Refused when it cannot."""
-        ...
-
-    def turn_off(self, unit: str) -> str:
-        """unit stopped and disabled; why not ("" when it was)."""
-        ...
-
-    def forget_last_run(self, unit: str) -> None:
-        """systemd drops unit's last run (its Persistent= stamp); best effort."""
-        ...
-
-    def reload(self) -> None:
-        """systemd reloads the units; best effort."""
-        ...
-
-    def schedule(self, unit: str) -> tuple[str, str]:
-        """(next run of unit, last result of its service), "" when unknown."""
         ...
 
 

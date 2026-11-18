@@ -1029,9 +1029,11 @@ The Python code inside `vm/` (standard library only at run time):
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
   `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
 - `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`,
-  `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
+  `restic` (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
-  files. `backup.py`: the
+  files, and `fault_words`, cst-vm's words for a command that is missing or does not
+  answer (systemctl runs through cst_core's `SystemctlAdapter` with them, in the C
+  locale, 120 s at most). `backup.py`: the
   backup index, fingerprints and sizes, the stop signals, the per-VM lock and
   the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
   and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
@@ -1043,8 +1045,9 @@ The Python code inside `vm/` (standard library only at run time):
   merge timeouts). `cst doctor` builds the same settings for its VM checks.
 - `vm/application.py`: the use cases that change the machine in several
   steps, typed against the ports of `vm/ports.py`: `backup-timer on` and
-  `off` (`TimerPort`: the timer's files through the installer, and systemd;
-  its adapter is `vm/adapters/timer.py`'s `TimerFiles`), and `tune` (plan,
+  `off` (`TimerFilesPort`: the timer's files through the installer and the
+  links that say which timer is on, its adapter `vm/adapters/timer.py`'s
+  `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,
   then apply: `VmCommandsPort`, virsh as `vm.adapters.VmCommands` runs it,
   and `DefinitionStorePort`, the definition kept before tune and `virsh
   define` from a text, `vm/adapters/backup.py`'s `DefinitionFiles`).

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The vm module's reach into the host: virsh, rpm, rpm-ostree, systemctl and
-restic, and the settings files. vm.adapters.backup has the backups' files
+"""The vm module's reach into the host: virsh, rpm, rpm-ostree and restic, and
+the settings files (systemctl: cst_core's SystemctlAdapter, with fault_words). vm.adapters.backup has the backups' files
 and the run of a backup, vm.adapters.timer the weekly timer's files,
 vm.adapters.images the VM image folders.
 
@@ -280,11 +280,6 @@ def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str
 def domain_state_or_none(vm: str) -> str | None:
     rc, so, _ = virsh("domstate", vm)
     return first_line(so) if rc == 0 else None
-
-
-def systemctl(*args: str) -> tuple[int, str, str]:
-    rc, so, err = run(["systemctl", *args], timeout=120)
-    return rc, so.strip(), first_line(err)
 
 
 def nas_settings(cfg: VmSettings) -> NasRepo:
