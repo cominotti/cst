@@ -18,9 +18,10 @@ type CommandFault = Literal["missing", "unstartable", "timeout"]
 type StdinMode = Literal["devnull", "inherit"]
 
 # Its stdout and stderr: both captured; stderr merged into the captured
-# stdout; stdout captured and stderr discarded; or both left on ours (the
-# result's stdout and stderr are then empty).
-type OutputMode = Literal["capture", "merge", "stdout", "inherit"]
+# stdout; stdout captured and stderr discarded; stdout captured and stderr
+# left on ours ("stdout-show-stderr": a shell's $(cmd)); or both left on ours
+# (the result's stdout and stderr are then empty).
+type OutputMode = Literal["capture", "merge", "stdout", "stdout-show-stderr", "inherit"]
 
 # Captured output that is not UTF-8: U+FFFD for the bad bytes (every CST
 # caller), or a UnicodeDecodeError out of run().
@@ -99,7 +100,7 @@ class CommandRunnerPort(Protocol):
     - pass_fds: open file descriptors the command gets as they are (the
       others are closed): a lock this process holds, handed on;
     - on_line: called with each line of the captured stdout (output
-      "capture", "merge" or "stdout"; without its newline) as soon as the
+      "capture", "merge", "stdout" or "stdout-show-stderr"; without its newline) as soon as the
       command writes it, for a caller that passes the lines on while the
       command runs; not with timeout (use timeout(1) then) or input_text.
     """

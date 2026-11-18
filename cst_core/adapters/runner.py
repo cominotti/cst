@@ -94,6 +94,8 @@ def _stream_kwargs(
         kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.STDOUT
     elif output == "stdout":
         kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.DEVNULL
+    elif output == "stdout-show-stderr":
+        kw["stdout"] = subprocess.PIPE
     if output != "inherit" or input_text is not None:
         kw["text"] = True
         if decode_errors == "replace":
@@ -242,7 +244,7 @@ class SubprocessCommandRunner:
                 cmd,
                 stdin=kw.get("stdin"),
                 stdout=subprocess.PIPE,
-                stderr=kw.get("stderr", subprocess.PIPE),
+                stderr=kw.get("stderr", subprocess.PIPE if "capture_output" in kw else None),
                 text=True,
                 errors=kw.get("errors"),
                 env=kw.get("env"),

@@ -828,6 +828,35 @@ class CommandRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.run(["true"], on_line=lambda ln: None, timeout=1)
 
+    def test_stdout_show_stderr_captures_stdout_and_leaves_stderr_on_ours(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        script = "import sys; print('out'); print('err', file=sys.stderr)"
+        probe = [self.py, "-I", "-c", script]
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Our stderr: a file, so the test can read what reached it.
+        with tempfile.TemporaryFile("w+") as err:
+            wrapper = [
+                self.py,
+                "-I",
+                "-c",
+                "import subprocess, sys\n"
+                f"sys.path.insert(0, {repo!r})\n"
+                "from cst_core.adapters.runner import SubprocessCommandRunner\n"
+                "r = SubprocessCommandRunner()\n"
+                "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
+                "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
+                "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n",
+                *probe,
+            ]
+            out = subprocess.run(
+                wrapper, stdout=subprocess.PIPE, stderr=err, text=True, stdin=subprocess.DEVNULL, check=True
+            )
+            err.seek(0)
+            self.assertEqual(err.read(), "err\nerr\n")
+        self.assertEqual(out.stdout, repr(("out\n", "", "out\n", "")) + "\n")
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], output="stdout-show-stderr"))
+        self.assertEqual((kw["stdout"], "stderr" in kw, "capture_output" in kw), (subprocess.PIPE, False, False))
+
     def test_strict_decoding_raises_as_text_true_did(self) -> None:
         runner = core_runner.SubprocessCommandRunner()
         with self.assertRaises(UnicodeDecodeError):
