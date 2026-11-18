@@ -253,6 +253,9 @@ class DockerGc:
             return
         if not self.take_lock():
             return
+        # The last run's summary is written at the end: one of a newer docker-gc stops the run here
+        # (NewerState), before anything is removed, instead of being written over.
+        self.state.load_summary()
         p = self.plan(self.clock.now())
         self.show(p)
         if dry:

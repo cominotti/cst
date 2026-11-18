@@ -429,6 +429,22 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.p.docker(), before)
         self.assertFalse(os.path.exists(os.path.join(self.p.state, "last-run.json")))
 
+    def test_a_last_run_of_a_newer_docker_gc_stops_the_run_before_it_removes(self) -> None:
+        # The run writes last-run.json at its end and never read it: a newer one was written over.
+        path = os.path.join(self.p.state, "last-run.json")
+        text = json.dumps(
+            {"at": OLD, "containers": 0, "volumes": 0, "images": 0, "image_bytes": 0, "failed": 0, "v": 2}
+        )
+        with open(path, "w") as f:
+            f.write(text)
+        before = self.p.docker()
+        rc, out, err = self.p.run("run")
+        self.assertEqual((rc, err), (NEWER_STATE_EXIT, ""))
+        self.assertIn(f"<3>docker-gc: {path} is format 2 of the docker-gc-last-run (this CST reads format 1", out)
+        with open(path) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(self.p.docker(), before)
+
     def test_the_recorder_unit_does_not_restart_on_a_newer_state(self) -> None:
         # Restart=on-failure with RestartSec=10 would start the recorder again every 10 s, forever, to
         # read the same file (systemd's start limit never trips at that pace), and the unit would never
