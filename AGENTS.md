@@ -207,3 +207,25 @@ checks the flag. Never clear it or work around it. The flag reaches only
 the runner's children: a command handed to a daemon (`flatpak-spawn --host`,
 docker, `systemd-run`) does not inherit it, so a unit test never starts one
 of those either.
+
+### A test that reaches systemctl changes the host from a toolbox
+
+From a toolbox, `systemctl`, `busctl`, `loginctl` and `systemd-run` talk
+D-Bus to the host's systemd, `flatpak-spawn` runs a command on the host and
+`virsh` talks to the host's libvirt. no_new_privs stops none of them. A unit
+test once started a unit on the host that way: a helper thread outlived the
+patch of `subprocess.Popen` that was meant to catch its call.
+
+**Rule:** a unit test runs only fakes of these commands. `tests/run_unit.py`
+enforces it at run time: before the tests start it writes a refusing stub
+for each of them (`HOST_COMMANDS`) into a temporary folder and puts that
+folder first on PATH, for the runner and every child that inherits its
+environment. The stub prints "unit test reached the real systemctl" and
+exits 97 and writes its command line down, and the run fails when one ran,
+even if the test ignored the answer (a helper thread whose result nobody
+reads). A test that sets a PATH of its own is neither affected nor
+protected: when that PATH goes on to `/usr/bin`, its folder of fakes comes
+first and holds a fake of each of these commands the code may run. `HostCommandGuardTest` in `tests/test_run_unit.py` checks the
+stubs. A command run by its absolute path (`/usr/bin/systemctl`) passes the
+stubs: production code names these commands bare, and a test never adds a
+path to them.

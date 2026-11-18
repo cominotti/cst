@@ -9,7 +9,16 @@ import tempfile
 import unittest
 
 from tests.repo_files import REPO, repo_files
-from tests.run_unit import EXPECTED_SKIPS, GATE_MODULES, expected_skip, load, skip_problems
+from tests.run_unit import (
+    EXPECTED_SKIPS,
+    GATE_MODULES,
+    HOST_COMMANDS,
+    HOST_GUARD_ENV,
+    HOST_GUARD_EXIT,
+    expected_skip,
+    load,
+    skip_problems,
+)
 
 
 def ids(suite: unittest.TestSuite) -> set[str]:
@@ -53,6 +62,76 @@ class NoPrivilegeGainTest(unittest.TestCase):
         self.assertEqual(lines[:1], ["1"], done.stdout + done.stderr)
         if shutil.which("sudo") and os.geteuid() != 0:
             self.assertNotEqual(lines[1:], ["0"], "sudo ran as root despite no_new_privs")
+
+
+# A child that puts the stubs in place the way the runner does, then runs
+# each command with the environment it inherited: "name rc refused" lines.
+_HOST_GUARD_CHILD = """
+import os, subprocess, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+from tests.run_unit import HOST_COMMANDS, guard_host_commands, guard_hits
+with tempfile.TemporaryDirectory() as folder:
+    guard_host_commands(folder)
+    for name in HOST_COMMANDS:
+        done = subprocess.run([name, "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+        print(name, done.returncode, f"unit test reached the real {name}" in done.stderr)
+    print("hits:", guard_hits(folder))
+"""
+
+
+class HostCommandGuardTest(unittest.TestCase):
+    def test_a_child_that_runs_a_host_command_is_refused(self) -> None:
+        # A helper thread that outlived a patch of subprocess.Popen ran the real systemctl,
+        # which from a toolbox starts a unit on the host.
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _HOST_GUARD_CHILD, REPO],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(
+            done.stdout.splitlines(),
+            [f"{name} {HOST_GUARD_EXIT} True" for name in HOST_COMMANDS]
+            + [f"hits: {[f'{name} --version' for name in HOST_COMMANDS]}"],
+            done.stderr,
+        )
+
+    def test_a_run_whose_test_ignored_the_refusal_fails(self) -> None:
+        # The helper thread's call: nobody read its exit status, the run must fail anyway.
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-guard-run-"))
+        probe = os.path.join(tmp, "probe_guard.py")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write(
+                "import subprocess, unittest\n"
+                "class T(unittest.TestCase):\n"
+                "    def test_ignores(self):\n"
+                "        subprocess.run(['systemctl', 'start', 'x.service'], capture_output=True,"
+                " stdin=subprocess.DEVNULL, check=False)\n"
+            )
+        env = {**os.environ, "PYTHONPATH": tmp}
+        done = subprocess.run(
+            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_guard"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env=env,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("error: a unit test reached the real systemctl start x.service", done.stderr)
+
+    def test_the_runner_puts_the_stubs_first_on_path(self) -> None:
+        main = sys.modules["__main__"]
+        if os.path.basename(getattr(main, "__file__", "") or "") != "run_unit.py":
+            return  # a bare python3 -m unittest: no runner, no stubs (AGENTS.md says to use the runner)
+        folder = os.environ.get(HOST_GUARD_ENV, "")
+        self.assertTrue(folder, f"tests/run_unit.py did not set {HOST_GUARD_ENV}")
+        for name in HOST_COMMANDS:
+            with self.subTest(name=name):
+                self.assertEqual(shutil.which(name), os.path.join(folder, name))
 
 
 class LoadTest(unittest.TestCase):

@@ -29,6 +29,21 @@ fails here every time, not only in some environments. The static side of
 the same rule is tests/test_subprocess_hygiene.py; the reason is written
 down in AGENTS.md.
 
+No test may reach the real machine's daemons either. From a toolbox,
+systemctl, busctl, loginctl and systemd-run talk D-Bus to the host's
+systemd, flatpak-spawn runs a command on the host and virsh talks to the
+host's libvirt; no_new_privs (below) stops none of them. A test once
+reached the host's systemd that way: a helper thread outlived the patch of
+subprocess.Popen that was meant to catch its call. Before the tests start
+this runner writes a refusing stub for each of HOST_COMMANDS into a
+temporary folder and puts that folder first on PATH, for the runner and
+every child that inherits its environment. Such a call then prints "unit
+test reached the real systemctl" and exits 97, and the test fails instead
+of changing the machine. Each stub also writes its command line down, and
+the run fails when one ran, even if the test ignored the answer (a helper
+thread whose result nobody reads). A test that sets a PATH of its own (a
+folder of fakes, or one without the command) is not affected.
+
 No test may reach sudo (or any setuid program that would make it root):
 where sudo needs no password (a toolbox) such a test would change the real
 machine and still pass. Before the tests start this runner sets the
@@ -41,8 +56,11 @@ test's sandbox) works under it; it sets the same flag itself.
 from collections.abc import Sequence
 import ctypes
 import os
+import shlex
+import shutil
 import socket
 import sys
+import tempfile
 from typing import Final
 import unittest
 
@@ -153,6 +171,38 @@ def forbid_privilege_gain() -> None:
         raise OSError(err, f"prctl(PR_SET_NO_NEW_PRIVS): {os.strerror(err)}")
 
 
+# The commands that reach a daemon of the real machine (systemd, logind,
+# the host through flatpak-spawn, libvirt): a unit test only ever runs a fake of them.
+HOST_COMMANDS: Final = ("busctl", "flatpak-spawn", "loginctl", "systemctl", "systemd-run", "virsh")
+# The exit status of a stub (no command uses it for an answer of its own).
+HOST_GUARD_EXIT: Final = 97
+# Names the stubs' folder in the environment of the run (tests/test_run_unit.py checks it).
+HOST_GUARD_ENV: Final = "CST_UNIT_HOST_GUARD"
+# The file each stub adds its command line to; the runner fails a run that left one.
+HOST_GUARD_HITS: Final = "hits"
+_STUB: Final = """#!/bin/sh
+echo "unit test reached the real {name} (refused by tests/run_unit.py): give the test a fake, or a PATH of its own" >&2
+printf '%s\\n' "{name} $*" >> {hits}
+exit {code}
+"""
+
+
+def guard_host_commands(folder: str) -> None:
+    """Write a refusing stub for each of HOST_COMMANDS into folder, then put
+    folder first on this process's PATH (so on every child's that inherits
+    it) and name it in HOST_GUARD_ENV. A stub that runs adds its command
+    line to folder/HOST_GUARD_HITS."""
+    for name in HOST_COMMANDS:
+        path = os.path.join(folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                _STUB.format(name=name, code=HOST_GUARD_EXIT, hits=shlex.quote(os.path.join(folder, HOST_GUARD_HITS)))
+            )
+        os.chmod(path, 0o755)
+    os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", os.defpath)
+    os.environ[HOST_GUARD_ENV] = folder
+
+
 def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
     """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
     names = [a for a in args if a != "-v"]
@@ -172,6 +222,28 @@ def main(argv: Sequence[str]) -> int:
     if repo not in sys.path:
         sys.path.insert(0, repo)
     forbid_privilege_gain()
+    guard = tempfile.mkdtemp(prefix="cst-unit-host-guard-")
+    try:
+        guard_host_commands(guard)
+        rc = _run(repo, argv, verbosity)
+        hits = guard_hits(guard)
+        for line in hits:
+            print(f"error: a unit test reached the real {line}", file=sys.stderr)
+        return 1 if hits else rc
+    finally:
+        shutil.rmtree(guard, ignore_errors=True)
+
+
+def guard_hits(folder: str) -> list[str]:
+    """The command lines the stubs in folder refused (a test that ignored the refusal still fails the run)."""
+    try:
+        with open(os.path.join(folder, HOST_GUARD_HITS), encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     ours, theirs = socket.socketpair()
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
