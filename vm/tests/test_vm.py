@@ -428,8 +428,10 @@ class BackupTest(Scratch):
         )
         xml = os.path.join(dest, "domain.xml")
         self.assertEqual(stat.S_IMODE(os.stat(xml).st_mode), 0o600)
-        self.assertIn("s3cret", open(xml).read())
-        man = json.load(open(os.path.join(dest, "manifest.json")))
+        with open(xml) as f:
+            self.assertIn("s3cret", f.read())
+        with open(os.path.join(dest, "manifest.json")) as f:
+            man = json.load(f)
         self.assertEqual((man["vm"], man["uuid"], man["mode"], man["epoch"]), ("win", UUID, "reflink", NOW))
         self.assertEqual([f["kind"] for f in man["files"]], ["disk", "nvram", "tpm"])
         self.assertEqual(man["versions"]["qemu-kvm"], "qemu-kvm-11.1.3-1.fc45.x86_64")
@@ -439,9 +441,11 @@ class BackupTest(Scratch):
         # The index: world-readable, without secrets.
         self.assertEqual(stat.S_IMODE(os.stat(self.index).st_mode), 0o644)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.index)).st_mode), 0o755)
-        text = open(self.index).read()
+        with open(self.index) as f:
+            text = f.read()
         self.assertNotIn("s3cret", text)
-        idx = json.load(open(self.index))["backups"]
+        with open(self.index) as f:
+            idx = json.load(f)["backups"]
         self.assertEqual(len(idx), 1)
         self.assertEqual((idx[0]["path"], idx[0]["epoch"], idx[0]["mode"]), (dest, NOW, "reflink"))
         cps = [c for c in self.calls() if c.startswith("cp ")]
@@ -546,7 +550,8 @@ class BackupTest(Scratch):
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
         self.assertEqual(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": path})), entries)
         self.assertEqual(self.run_tool("backup", "win").returncode, 0)
-        [real] = json.load(open(self.index))["backups"]
+        with open(self.index) as f:
+            [real] = json.load(f)["backups"]
         self.assertEqual(set(real), set(entries[0]))
         self.assertEqual(set(real["deployment"]), set(entries[0]["deployment"]))
 
@@ -566,7 +571,8 @@ class BackupTest(Scratch):
             )
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        paths = [e["path"] for e in json.load(open(self.index))["backups"]]
+        with open(self.index) as f:
+            paths = [e["path"] for e in json.load(f)["backups"]]
         self.assertEqual(paths, [kept, self.dest()])
 
     def test_full_backup_flags(self) -> None:
@@ -576,7 +582,8 @@ class BackupTest(Scratch):
         self.assertTrue(cps[0].startswith("cp --reflink=never --sparse=auto -a -- "), cps)
         self.assertTrue(cps[1].startswith(f"cp --reflink=never -a -- {self.nvram} "), cps)
         self.assertTrue(cps[2].startswith("cp --reflink=never -a -- "), cps)
-        self.assertEqual(json.load(open(os.path.join(self.dest(), "manifest.json")))["mode"], "full")
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            self.assertEqual(json.load(f)["mode"], "full")
 
     def test_refuses_a_running_vm(self) -> None:
         self.state("running")
@@ -625,7 +632,8 @@ class BackupTest(Scratch):
         self.env["LC_ALL"] = "pt_BR.UTF-8"
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(open(os.path.join(self.fix, "virsh-locale.txt")).read().strip(), "LC_ALL=C")
+        with open(os.path.join(self.fix, "virsh-locale.txt")) as f:
+            self.assertEqual(f.read().strip(), "LC_ALL=C")
 
     def test_vm_started_during_the_copy(self) -> None:
         for state, needle in (
@@ -656,7 +664,8 @@ class BackupTest(Scratch):
         self.assertFalse(os.path.lexists(os.path.join(self.dest(), "files", self.disk.lstrip("/"))))
         self.assertIn(f"disk {self.disk} is a symbolic link", r.stdout)
         self.assertIn(f"{kept} {real}", r.stdout)  # restored to the file it points to
-        man = json.load(open(os.path.join(self.dest(), "manifest.json")))
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
         self.assertEqual(man["files"][0]["source"], real)
 
     def test_missing_tpm_state_is_a_note(self) -> None:
@@ -680,9 +689,9 @@ class BackupTest(Scratch):
         with (
             mock.patch.dict(os.environ, self.env),
             mock.patch.object(os, "statvfs", return_value=fake),
+            self.assertRaises(Refused) as cm,
         ):
-            with self.assertRaises(Refused) as cm:
-                vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
+            vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
         self.assertIn("--full needs", str(cm.exception))
         self.assertIn("allocated size", str(cm.exception))
         self.assertFalse(os.path.exists(self.backups))
@@ -1456,9 +1465,8 @@ class NocowTest(unittest.TestCase):
         rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertIn("already has the NOCOW mark", out)
         self.flags[self.boxes] = 0
-        with mock.patch("sys.stdin", io.StringIO("")):
-            with self.assertRaises(Refused):
-                self.out(vm_cli_nocow.cmd_nocow_apply)
+        with mock.patch("sys.stdin", io.StringIO("")), self.assertRaises(Refused):
+            self.out(vm_cli_nocow.cmd_nocow_apply)
 
     def test_status_lists_the_folders(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
