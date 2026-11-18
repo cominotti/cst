@@ -2431,6 +2431,127 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77) ----------------------
+    # The unit as the manifest installs it (copied to /etc when the container has none), running this
+    # checkout's btrfs-bulk through a drop-in in /run; the settings, journals, boot flag, btrfs-notify
+    # and new pending alerts are put back by the cleanup (btrfs-notify is moved aside, never removed).
+    BULK_BOOT_SETUP = r"""
+s=/var/tmp/e2e-bulk-boot
+rm -rf "$s"; mkdir -p "$s/aside"
+if [ ! -e /etc/systemd/system/btrfs-bulk-boot.service ]; then
+    cp /opt/cst-rw/btrfs/units/btrfs-bulk-boot.service /etc/systemd/system/
+    touch "$s/made-unit"
+fi
+mkdir -p /run/systemd/system/btrfs-bulk-boot.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk boot\n' \
+    >/run/systemd/system/btrfs-bulk-boot.service.d/50-e2e.conf
+for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
+    if [ -e "$p" ] || [ -L "$p" ]; then mkdir -p "$s/aside$(dirname "$p")"; mv "$p" "$s/aside$p"; fi
+done
+[ -d /var/lib/cst-alerts ] || touch "$s/made-alerts"
+ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-before" || true
+id cste2ebulk >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /var/tmp/cst-e2e-bulk-home cste2ebulk
+install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
+mkdir -p /etc/btrfs-setup
+systemctl daemon-reload
+# boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
+boot_unit() {
+    systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
+    [ "$(systemctl show -P Result btrfs-bulk-boot.service)" = success ]
+    [ "$(systemctl show -P ExecMainStatus btrfs-bulk-boot.service)" = 1 ]
+}
+# unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
+unit_log_has() {
+    for _ in $(seq 1 60); do
+        journalctl --sync 2>/dev/null || true
+        if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF -- "$1"; then return 0; fi
+        sleep 0.5
+    done
+    echo "not in the unit's journal: $1" >&2
+    journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" >&2 || true
+    return 1
+}
+start="$(date +%s)"
+"""
+    BULK_BOOT_CLEANUP = r"""
+s=/var/tmp/e2e-bulk-boot
+systemctl reset-failed btrfs-bulk-boot.service 2>/dev/null || true
+rm -f /run/systemd/system/btrfs-bulk-boot.service.d/50-e2e.conf
+rmdir /run/systemd/system/btrfs-bulk-boot.service.d 2>/dev/null || true
+if [ -e "$s/made-unit" ]; then rm -f /etc/systemd/system/btrfs-bulk-boot.service; fi
+rm -rf /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk
+if [ -e "$s/made-alerts" ]; then
+    rm -rf /var/lib/cst-alerts
+elif [ -d /var/lib/cst-alerts/pending ]; then
+    ls -1 /var/lib/cst-alerts/pending | sort | comm -13 "$s/pending-before" - |
+        while read -r n; do rm -f "/var/lib/cst-alerts/pending/$n"; done
+fi
+for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
+    if [ -e "$s/aside$p" ] || [ -L "$s/aside$p" ]; then mv "$s/aside$p" "$p"; fi
+done
+userdel cste2ebulk 2>/dev/null || true
+rm -rf /var/tmp/cst-e2e-bulk-home "$s"
+systemctl daemon-reload
+"""
+
+    def bulk_boot(self, script: str) -> str:
+        """script after BULK_BOOT_SETUP, as root in the systemd container; its output."""
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, self.BULK_BOOT_CLEANUP, check=False)
+        return exec_bash(self.SYSTEMD_CONTAINER, self.BULK_BOOT_SETUP + script).stdout
+
+    def test_76_bulk_boot_leaves_a_journal_of_a_newer_btrfs_bulk_alone(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) finds a journal of an interrupted move written by a
+        newer btrfs-bulk ("v" above this checkout's bulk-journal format): the unit runs (the glob
+        condition), counts "needs a look" (exit 1) as success, names the format in its journal, and
+        leaves the journal byte for byte as it was, at that boot and the next one."""
+        out = self.bulk_boot(
+            r"""
+h=/var/tmp/cst-e2e-bulk-home
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+install -d -m 0755 /var/lib/btrfs-bulk
+j=/var/lib/btrfs-bulk/journal-apps.json
+printf '{"kind": "copy", "src": "%s/Programs", "target": "%s/Bulk/apps", "new": "%s/Bulk/apps.bulk-new-1", "old": "%s/Programs.bulk-old-1", "stamp": 1, "link": "%s/Programs", "v": 99}' \
+    "$h" "$h" "$h" "$h" "$h" >"$j"
+cp "$j" "$s/journal.before"
+boot_unit
+unit_log_has "NEEDS A LOOK: apps: $j is format 99 of the bulk-journal (this CST reads format 1 and older): written by a newer CST; left as it is"
+cmp "$s/journal.before" "$j"
+boot_unit
+cmp "$s/journal.before" "$j"
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+
+    def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
+        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the refusal's alert
+        is kept in /var/lib/cst-alerts/pending in btrfs-notify's format (the unit's journal says so),
+        and cst doctor, as the user, shows it and warns that the installed unit alerts through a
+        missing btrfs-notify; cst-pending-alerts lists it for the next login."""
+        out = self.bulk_boot(
+            r"""
+printf 'BULK_USER=$USER\n' >/etc/btrfs-setup/bulk.conf
+printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
+boot_unit
+unit_log_has "alert not delivered (/usr/local/sbin/btrfs-notify is not installed): ~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
+f="$(grep -lxF 'title=~/Bulk: nothing moved at boot' /var/lib/cst-alerts/pending/*.alert)"
+[ "$(head -n 1 "$f")" = "cst-alert 1" ]
+grep -qxF 'urgency=critical' "$f"
+grep -qxF 'app=btrfs-bulk' "$f"
+[ "$(stat -c '%a %U' "$f")" = "644 root" ]
+[ "$(stat -c '%a' /var/lib/cst-alerts/pending)" = 755 ]
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+        doctor = as_tester_bash(self.SYSTEMD_CONTAINER, "/opt/cst-rw/cst doctor", check=False).stdout
+        self.assertIn("~/Bulk: nothing moved at boot", doctor)
+        self.assertIn("btrfs-bulk-boot.service", doctor)
+        self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
+        listed = as_tester_bash(self.SYSTEMD_CONTAINER, "bash /opt/cst-rw/btrfs/cst-pending-alerts --list").stdout
+        self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
+
     def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
         """In a container with /.dockerenv (no override), cst vm's commands that change the
         host refuse before sudo, with the host command to type (cst is not on PATH there:
