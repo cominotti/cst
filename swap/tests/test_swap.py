@@ -1435,6 +1435,26 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual(rc, 0, err)
         self.assertNotIn("== settings", out)
 
+    def test_an_upgrade_apply_refused_by_a_hand_written_line_writes_no_settings(self) -> None:
+        # The refusals for a line written by hand come before the settings file is written.
+        for path, line in (
+            (self.env.fstab, "/dev/mapper/swap0 none swap defaults 0 0\n"),
+            (self.env.crypttab, "swap0 /dev/nvme0n1p5 none luks\n"),
+        ):
+            with self.subTest(path=path):
+                if os.path.exists(self.env.settings_path):
+                    os.remove(self.env.settings_path)  # an older apply's, from the subtest before
+                self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+                self._write(self.env.fstab, OLD_FSTAB + "\n")
+                self._write(path, (OLD_CRYPTTAB + "\n" if path == self.env.crypttab else "") + line)
+                before = _tree(self.tmp)
+                rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+                self.assertEqual(rc, 1)
+                self.assertIn(f"cst swap: ERROR: {path} has an unmarked entry for ", err)
+                self.assertEqual(out, "")
+                self.assertFalse(os.path.exists(self.env.settings_path))
+                self.assertEqual(_tree(self.tmp), before)
+
     def test_the_size_comes_from_the_partition_and_apply_still_checks_it(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
         size = os.path.join(self.env.sys_dir, "class", "block", "nvme0n1p5", "size")

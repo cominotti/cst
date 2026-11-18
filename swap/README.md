@@ -307,8 +307,9 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
   `plan --root` shows `write` for `cst/swap.conf` with the values `apply`
   will write: the name and PARTUUID from the marked crypttab line, the size
   that partition has now (trusted on this first use; from then on `apply`
-  checks it every time). `apply` writes the file (`== settings`, after its
-  checks and before anything else), and the next `plan` shows `ok`. As your
+  checks it every time). `apply` writes the file (`== settings`, after all its
+  checks, also those for a crypttab or fstab line written by hand, and before
+  anything else), and the next `plan` shows `ok`. As your
   user (also in a toolbox) `/etc/crypttab` cannot be read: `plan` shows `?`
   and says so, from the marked `/etc/fstab` line. `apply` never writes over a
   `/etc/cst/swap.conf` that is already there, even one without a

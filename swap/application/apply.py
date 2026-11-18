@@ -241,12 +241,9 @@ class SwapApplicationService(SwapReports):
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return self._stopped(1, events)
-        if res.state == "write":
-            self._write_settings(spec, events)
-
-        events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
         c_spec = spec.crypttab_spec()
         f_spec = spec.fstab_spec()
+        # Every refusal comes before the first write: the settings file too.
         if self._inspect_marked(env.crypttab, c_spec) == "conflict":
             events.append(
                 ApplyEvent(
@@ -267,7 +264,10 @@ class SwapApplicationService(SwapReports):
                 )
             )
             return self._stopped(1, events)
+        if res.state == "write":
+            self._write_settings(spec, events)
 
+        events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
         ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events, name=spec.name)
         if not ok_c:
             return self._stopped(1, events)
