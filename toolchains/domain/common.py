@@ -62,12 +62,12 @@ class ConfigError(Exception):
     pass
 
 
-def gib(n: int | float) -> str:
+def gib(n: float) -> str:
     """GiB from 1 GiB on, else rounded MiB."""
     return format_bytes_gib_mib(n, mib_floor=False)
 
 
-def ago(seconds: int | float) -> str:
+def ago(seconds: float) -> str:
     secs = max(0, int(seconds))
     if secs < HOUR:
         return f"{secs // MINUTE}m"
