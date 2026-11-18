@@ -26,7 +26,6 @@ from btrfs.snapshot_runtime.domain import (
 )
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runtime import program_path
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -61,7 +60,8 @@ class SnapshotRun:
         self.runner = runner
         # The bash front and engine (btrfs/btrfs-snapshot), in this program's folder (installed, in
         # a checkout or a copy alike), as the front finds this one.
-        self.front = os.path.join(os.path.dirname(program_path(main_file)), "btrfs-snapshot") if main_file else ""
+        # The path the front ran this program by (not resolved: as bash names itself in its errors).
+        self.front = os.path.join(os.path.dirname(os.path.abspath(main_file)), "btrfs-snapshot") if main_file else ""
         # The descriptors every command gets (the run's locks: fd 9 and 8 of the bash).
         self.fds: tuple[int, ...] = ()
         # A trapped signal (see trap_stop): asked for, and whether a command is running now.
