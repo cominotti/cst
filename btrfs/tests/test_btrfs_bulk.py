@@ -165,7 +165,7 @@ class BulkBase(unittest.TestCase):
         self.fake(self.machine, "set_nocow", set_nocow)
         self.fake(self.machine, "copy_tree", copy_tree)
         self.fake(self.host, "busy_paths", busy_paths)
-        self.fake(self.machine, "mounts", lambda: [])
+        self.fake(self.machine, "mounts", list)
         self.fake(self.machine, "free_bytes", lambda path: 10**15)
         self.fake(self.machine, "flatpak_installed", lambda app: app in self.flatpaks)
         self.fake(self.machine, "flatpak_has_fs", lambda app, path: path in self.flatpaks.get(app, set()))
