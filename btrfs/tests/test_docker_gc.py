@@ -27,6 +27,7 @@ import time
 import unittest
 import zipfile
 from collections.abc import Mapping
+from typing import override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_gc.py): the checkout root holds the tests package.
@@ -426,6 +427,7 @@ class DomainTest(unittest.TestCase):
 
 
 class ApplicationTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture()
 
@@ -545,6 +547,7 @@ class ApplicationTest(unittest.TestCase):
 
 
 class RecordTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture(GcSettings(flush_seconds=7))
 
@@ -625,6 +628,7 @@ class RecordTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture()
         self.f.docker.up = False
@@ -806,6 +810,7 @@ class SettingsUseCaseTest(unittest.TestCase):
 
 
 class SettingsFileTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="docker-gc-settings-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -928,6 +933,7 @@ class ContainerRefusalTest(unittest.TestCase):
 
 
 class StateFilesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="docker-gc-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1082,6 +1088,7 @@ class StateFilesTest(unittest.TestCase):
 class RecorderActiveTest(unittest.TestCase):
     """recorder_active: systemctl is-active with no stdin and a time limit."""
 
+    @override
     def setUp(self) -> None:
         self.host = gc_adapters.GcHost(SubprocessCommandRunner())
 
@@ -1173,6 +1180,7 @@ class EntryTest(unittest.TestCase):
 class DockerCommandTest(unittest.TestCase):
     """DockerCli.run: a docker that does not answer stops the run with one line; one that is missing raises."""
 
+    @override
     def setUp(self) -> None:
         self.docker = gc_adapters.DockerCli(SubprocessCommandRunner())
 

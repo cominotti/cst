@@ -24,6 +24,7 @@ import time
 import unittest
 import zipfile
 from datetime import UTC, datetime
+from typing import override
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_gc_program.py): the checkout root holds cst_core.
 CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -327,6 +328,7 @@ held back: 1 image(s) (protected registry: cleanup-now only)
 
 
 class StatusTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.since = OLD + 30 * DAY
@@ -495,6 +497,7 @@ class ContainerTest(unittest.TestCase):
     """Inside a toolbox or container the settings file and the installed program are the container's
     (missing), while docker is the host's engine: no command that talks to docker runs there."""
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
@@ -544,6 +547,7 @@ class SettingsUpgradeTest(unittest.TestCase):
     `settings --write` (what `cst btrfs docker-gc enable` runs before it installs) keeps them in the
     file. The program as a process, the installed docker-gc a zipapp as main installed it."""
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
@@ -637,6 +641,7 @@ class RecordTest(unittest.TestCase):
         "not json",
     )
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         st = self.p.docker()

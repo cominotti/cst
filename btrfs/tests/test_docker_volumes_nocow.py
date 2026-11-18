@@ -48,6 +48,7 @@ import unittest
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType, SimpleNamespace
+from typing import override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_volumes_nocow.py): the checkout root holds the tests package.
@@ -416,6 +417,7 @@ class Commands:
 
 
 class Base(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-nocow-test-")
         self.addCleanup(tmp.cleanup)
@@ -650,6 +652,7 @@ class NotVolumeDataTest(Base):
     """What the helper must neither count nor change: a _data that is a
     symlink, and a filesystem mounted below a volume."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -768,6 +771,7 @@ class MainTest(Base):
 class MissingProgramTest(Base):
     """A program the helper runs is missing: it stops as when subprocess.run raised."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -816,6 +820,7 @@ class MissingProgramTest(Base):
 
 
 class MigrateTest(Base):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)  # what install's mark left
@@ -1294,6 +1299,7 @@ class PostponeBase(Base):
     interrupted copy (recover() would remove it): what a postponed boot must
     leave as it is."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -1385,6 +1391,7 @@ class DockerdTest(PostponeBase):
     Docker's, which keeps our /); pointing at another folder, one in a
     container."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         # Another mount namespace (a container): its own /var/lib/docker.
@@ -1791,6 +1798,7 @@ class PostponedRecordTest(PostponeBase):
 class RecoverTest(Base):
     """A crash at each step of migrate_one(), then the next boot."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
