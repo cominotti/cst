@@ -33,7 +33,7 @@ import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
 
-from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters import SystemctlAdapter, nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
@@ -46,7 +46,13 @@ from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_imag
 from vm.domain import tune as vm_domain_tune
 from vm import application as vm_application, wiring as vm_wiring
 from vm.application import backup as vm_application_backup
-from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
+from vm.cli import (
+    backup as vm_cli_backup,
+    nocow as vm_cli_nocow,
+    status as vm_cli_status,
+    timer as vm_cli_timer,
+    tune as vm_cli_tune,
+)
 
 sys.dont_write_bytecode = True
 
@@ -102,10 +108,12 @@ class _NoCommands:
 
 
 def no_real_commands() -> AbstractContextManager[object]:
-    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) raises instead of running anything."""
+    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) and the timer's systemctl
+    (wiring.systemd, a runner of its own) raise instead of running anything."""
     stack = ExitStack()
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", _NoCommands()))
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", _NoCommands()))
+    stack.enter_context(mock.patch.object(vm_wiring, "systemd", lambda: SystemctlAdapter(_NoCommands())))
     return stack
 
 
@@ -1981,6 +1989,30 @@ class TimerUseCaseTest(unittest.TestCase):
         systemd = FakeSystemd(timers)
         with self.assertRaises(Refused):
             vm_application.timer_status(timers, systemd, "bad name")
+
+
+class NoRealCommandsTest(unittest.TestCase):
+    """no_real_commands() also stops systemctl: the timer's systemd (wiring.systemd) is built over a
+    runner of its own, not over COMMANDS_OF_VM."""
+
+    def test_backup_timer_status_reaches_no_systemctl(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-vm-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        marker = os.path.join(tmp, "systemctl-ran")
+        stub = os.path.join(tmp, "systemctl")
+        with open(stub, "w") as f:
+            f.write(f"#!/bin/sh\ntouch '{marker}'\n")
+        os.chmod(stub, 0o755)
+        timers = FakeTimers({"/p": "ok"}, ["cst-vm-backup@win.timer"])
+        cfg = vm_wiring.vm_settings({"CST_VM_INDEX": os.path.join(tmp, "vm-backups.json")})
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '/usr/bin')}"}),
+            mock.patch("sys.stdout", io.StringIO()),
+            no_real_commands(),
+            self.assertRaisesRegex(AssertionError, "a test ran a real command"),
+        ):
+            vm_cli_timer.cmd_timer(cfg, "status", "win", TOOL, timers=timers)
+        self.assertFalse(os.path.exists(marker), "the stub systemctl ran")
 
 
 class PatchVmTest(unittest.TestCase):
