@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -19,6 +19,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.install import INSTALL_MANIFEST, expand_dest, manifest_by_src
+from cst_core.domain.values import Json
 from toolchains.domain.common import (
     CONF_REL,
     MARKER,
@@ -28,8 +29,10 @@ from toolchains.domain.common import (
     STATE_DIR_REL,
     TIMER,
     UNIT_DIR_REL,
+    to_json,
 )
 from toolchains.domain.config import WRAPPER_REL
+from toolchains.domain.prune import RunRecord
 from toolchains.adapters.program import Program, say
 
 
@@ -119,7 +122,7 @@ def state_path(home: str, tid: str) -> str:
     return os.path.join(home, STATE_DIR_REL, f"toolchains-{tid.replace(':', '-')}.json")
 
 
-def write_state(home: str, tid: str, data: Mapping[str, Any]) -> None:
+def write_state(home: str, tid: str, data: RunRecord) -> None:
     path = state_path(home, tid)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -129,10 +132,10 @@ def write_state(home: str, tid: str, data: Mapping[str, Any]) -> None:
         say(f"{tid}: could not save the run summary: {e}", 4)
 
 
-def read_state(home: str, tid: str) -> dict[str, Any] | None:
+def read_state(home: str, tid: str) -> dict[str, Json] | None:
     try:
         with open(state_path(home, tid)) as f:
-            data = json.load(f)
+            data = to_json(json.load(f))
             return data if isinstance(data, dict) else None
     except OSError, ValueError:
         return None

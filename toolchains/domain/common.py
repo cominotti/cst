@@ -9,7 +9,7 @@ import json
 import os
 import time
 import tomllib
-from typing import Any, TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import parse_shell_assignments
-from cst_core.domain.values import ByteSize, DomainValidationError, Duration, format_bytes_gib_mib
+from cst_core.domain.values import ByteSize, DomainValidationError, Duration, Json, format_bytes_gib_mib
 
 
 MARKER = "# managed-by: toolchains-setup.sh (CST)"
@@ -161,8 +161,46 @@ def parse_off_or_duration(text: str) -> int:
     return parse_duration(text)
 
 
-def plain(data: Mapping[str, object]) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads(json.dumps(data)))
+def json_key(key: object) -> str:
+    """A key as json.dumps writes it; TypeError for one it refuses."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, bool):
+        return json.dumps(key)
+    if isinstance(key, int | float):
+        return json.dumps(key) if isinstance(key, int) else float.__repr__(key)
+    raise TypeError(f"keys must be str, int, float, bool or None, not {type(key).__name__}")
+
+
+def to_json(value: object) -> Json:
+    """VALUE as json.loads(json.dumps(VALUE)) gives it back (a tuple becomes a list, a key
+    a string); TypeError for a value JSON cannot hold (a TOML date, ...), as json.dumps
+    raises."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, dict):
+        return {json_key(k): to_json(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [to_json(v) for v in value]
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def json_items(value: Json) -> list[Json]:
+    """The items `for x in VALUE or []` visits that can be objects: a list's items; a
+    string or an object (its characters, its keys) gives none; a number that is not 0
+    is not iterable (TypeError, as the loop raised)."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str | dict):
+        return []
+    raise TypeError(f"'{type(value).__name__}' object is not iterable")
+
+
+def plain(data: Mapping[str, object]) -> dict[str, Json]:
+    """DATA as json.loads(json.dumps(DATA)) gives it back (see to_json)."""
+    return {json_key(k): to_json(v) for k, v in data.items()}
 
 
 def parses_as(text: str, expect: Mapping[str, object]) -> bool:

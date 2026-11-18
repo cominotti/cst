@@ -7,14 +7,22 @@ import os
 import shutil
 import stat
 import subprocess
-from typing import Any
 
 from collections.abc import Mapping, Sequence
 
 from cst_core.domain.errors import Refused
-from toolchains.domain.common import ago, gib, parse_off_or_duration, span, tilde, when
-from toolchains.domain.prune import RUN_BUDGET
-from toolchains.domain.uv import UV_CACHE_REL, UV_LOCK_TIMED_OUT, UV_LOCK_WAIT, UV_REMOVED, UV_TIMEOUT, UV_UNITS
+from cst_core.domain.values import Json
+from toolchains.domain.common import ago, gib, span, tilde
+from toolchains.domain.prune import PYTHON_UV, RUN_BUDGET, Settings, uv_last_run
+from toolchains.domain.uv import (
+    UV_CACHE_REL,
+    UV_LOCK_TIMED_OUT,
+    UV_LOCK_WAIT,
+    UV_REMOVED,
+    UV_TIMEOUT,
+    UV_UNITS,
+    UvPolicy,
+)
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.home_files import read_state, write_state
 from toolchains.adapters.program import run_idle, say
@@ -22,24 +30,12 @@ from toolchains.adapters.uv import uv_env, uv_lock_busy, uv_prune_preview
 from toolchains.cli.targets import Target
 
 
-class PythonUv(Target):
-    ID = "python:uv"
-    PREFIX = "PYTHON_UV"
-    WHAT = "uv's package cache (uv cache prune: only entries uv no longer uses)"
-    SETTINGS = ("INTERVAL",)
-    named = False
-    MAX_SECONDS = UV_TIMEOUT
-    USES_PATH = True
+class PythonUv(Target[UvPolicy]):
+    SPEC = PYTHON_UV
 
-    @staticmethod
-    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, int]:
-        _ = prefix
-        return {"interval": parse_off_or_duration(vals["INTERVAL"])}
-
-    @staticmethod
-    def policy_text(pol: Mapping[str, Any]) -> str:
-        every = span(pol["interval"]) if pol["interval"] else "every run"
-        return f"uv cache prune, at most once per INTERVAL ({every})"
+    @classmethod
+    def make(cls, home: str, now: float, settings: Settings | None) -> PythonUv:
+        return cls(home, now, settings.uv if settings else None)
 
     def location(self) -> str:
         return os.path.join(self.home, UV_CACHE_REL)
@@ -78,12 +74,13 @@ class PythonUv(Target):
 
     def due(self) -> str:
         """'' when an automatic run is due, else why not."""
-        last = read_state(self.home, self.ID)
-        iv = self.policy["interval"]
-        if self.named or not iv or not last or not isinstance(last.get("time"), (int, float)):
+        last = read_state(self.home, self.SPEC.id)
+        iv = self.required_policy().interval
+        t = last.get("time") if last else None
+        if self.named or not iv or not last or not isinstance(t, (int, float)):
             return ""
-        if self.now - last["time"] < iv:
-            return f"last run {ago(self.now - last['time'])} ago (INTERVAL {span(iv)})"
+        if self.now - t < iv:
+            return f"last run {ago(self.now - t)} ago (INTERVAL {span(iv)})"
         return ""
 
     def plan(self) -> int:
@@ -161,12 +158,12 @@ class PythonUv(Target):
         for line in text.splitlines():
             if line.strip():
                 self.tsay(f"uv: {line.strip()}")
-        write_state(self.home, self.ID, {"time": self.now, "removed": removed, "freed": freed})
+        write_state(self.home, self.SPEC.id, {"time": self.now, "removed": removed, "freed": freed})
         return 0
 
     @staticmethod
-    def last_run_text(s: Mapping[str, Any]) -> str:
-        return f"{when(s['time'])}, removed {s.get('removed', 0)} file(s) ({gib(s.get('freed', 0))})"
+    def last_run_text(s: Mapping[str, Json]) -> str:
+        return uv_last_run(s)
 
     def status_lines(self) -> list[str]:
         c = self.location()

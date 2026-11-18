@@ -23,6 +23,7 @@ from toolchains.domain.build import (
     HASH_TOP,
     HASH_VAR,
     INCREMENTAL,
+    IncrementalDir,
     LOCK_NAMES,
     TRASH_NAME,
     classify,
@@ -123,11 +124,11 @@ def measure(folder: Folder, dev: int, now: float) -> Folder:
                     seen.add(s.st_ino)
                 sub = inc
                 if sub < 0 and depth + 1 in (2, 3) and e.name == INCREMENTAL and stat.S_ISDIR(s.st_mode):
-                    folder.inc.append([e.path, 0])
+                    folder.inc.append(IncrementalDir(e.path))
                     sub = len(folder.inc) - 1
                 folder.size += s.st_blocks * 512
                 if sub >= 0:
-                    folder.inc[sub][1] += s.st_blocks * 512
+                    folder.inc[sub].size += s.st_blocks * 512
                 if stat.S_ISDIR(s.st_mode):
                     stack.append((e.path, depth + 1, sub))
     folder.activity = newest if newest else now

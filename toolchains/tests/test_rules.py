@@ -22,6 +22,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import io
@@ -42,7 +43,22 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
+from cst_core.domain.errors import Usage
+from toolchains.domain import build as tcd_build
+from toolchains.domain import common as tcd_common
+from toolchains.domain import config as tcd_config
+from toolchains.domain import uv as tcd_uv
 from toolchains.adapters import uv as tc_uv
+from toolchains.cli import prune as tc_prune
+from toolchains.adapters import build_tree as tc_build_tree
+from toolchains.cli import config as tc_config
+from toolchains.adapters import home_files as tc_home_files
+from toolchains.adapters import processes as tc_processes
+from toolchains.cli import python_uv as tc_python_uv
+from toolchains.cli import rust_build as tc_rust_build
+from toolchains.adapters import rustup as tc_rustup
+from toolchains.cli import status as tc_status
+from toolchains.adapters import units as tc_units
 from toolchains.tests.test_prune_rust_build import NOW, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
@@ -242,9 +258,9 @@ class OrphanTest(RulesBase):
         main = self.repo("proj")
         self.folder(key_of(main), 10)
         self.folder("ee/0123456789abcd", 10)
-        plan = self.m.decide(
-            self.m.scan(self.root, NOW)[0],
-            self.m.Settings(self.home).policy["rust:build"],
+        plan = tcd_build.decide(
+            tc_build_tree.scan(self.root, NOW)[0],
+            tc_prune.load_settings(self.home).rust,
             NOW,
             {"ee/0123456789abcd": [(7, "rustc")]},
             {key_of(main): [main]},
@@ -260,7 +276,7 @@ class OrphanTest(RulesBase):
         main = self.repo("real")
         os.makedirs(os.path.join(main, "src"))
         open(os.path.join(main, "src/lib.rs"), "w").close()
-        ws = self.m.claimed_folders(self.root, self.home)
+        ws = tc_rust_build.claimed_folders(self.root, self.home)
         if ws.incomplete and ("toolchain" in ws.incomplete or "rustup" in ws.incomplete):
             self.skipTest(ws.incomplete)
         self.assertEqual(ws.incomplete, "")
@@ -286,9 +302,9 @@ class IncrementalTest(RulesBase):
 
     def test_measure_finds_incremental(self) -> None:
         self.build_folder("aa/0123456789abcd", 10)
-        f = self.m.scan(self.root, NOW)[0][0]
+        f = tc_build_tree.scan(self.root, NOW)[0][0]
         self.assertEqual(
-            sorted(os.path.relpath(p, f.path) for p, _ in f.inc),
+            sorted(os.path.relpath(d.path, f.path) for d in f.inc),
             ["debug/incremental", "x86_64-unknown-linux-gnu/debug/incremental"],
         )
         self.assertGreaterEqual(f.inc_size, 64 * 1024)
@@ -297,7 +313,7 @@ class IncrementalTest(RulesBase):
     def test_idle_folder_loses_only_incremental(self) -> None:
         path = self.build_folder("aa/0123456789abcd", 10)
         self.build_folder("bb/0123456789abcd", 3)  # used 3h ago: untouched
-        before = self.m.scan(self.root, NOW)[0]
+        before = tc_build_tree.scan(self.root, NOW)[0]
         activity = {f.key: f.activity for f in before}
         rc, out = self.run_main("prune", "plan")
         self.assertRegex(out, r"trim .*aa/0123456789abcd incremental of an idle folder \(idle 10.0h; frees")
@@ -311,7 +327,7 @@ class IncrementalTest(RulesBase):
         self.assertTrue(os.path.isfile(os.path.join(path, "debug/deps/libfoo-0123.rlib")))
         self.assertTrue(os.path.isfile(os.path.join(path, "x86_64-unknown-linux-gnu/debug/deps/libbar.rlib")))
         self.assertTrue(os.path.isdir(os.path.join(self.root, "bb/0123456789abcd/debug/incremental")))
-        after = {f.key: f for f in self.m.scan(self.root, NOW)[0]}
+        after = {f.key: f for f in tc_build_tree.scan(self.root, NOW)[0]}
         # The folder's last activity did not move: MAX_IDLE still counts from the last build.
         self.assertEqual(after["aa/0123456789abcd"].activity, activity["aa/0123456789abcd"])
         self.assertEqual(after["aa/0123456789abcd"].inc, [])
@@ -337,23 +353,23 @@ class IncrementalTest(RulesBase):
 
     def test_leftover_of_a_trim_is_deleted(self) -> None:
         name = ".cst-toolchains-trash-aa0123456789abcd-inc0-123"
-        self.assertTrue(self.m.TRASH_NAME.match(name))
+        self.assertTrue(tcd_build.TRASH_NAME.match(name))
         os.makedirs(os.path.join(self.root, name, "s-x"))
         _rc, out = self.run_main("prune", "apply")
         self.assertIn(f"deleted leftover {name}", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, name)))
 
     def test_cap_counts_the_trim(self) -> None:
-        f = self.m.Folder(self.root, "aa", "00000000000001")
-        f.size, f.activity, f.inc = 100 << 30, NOW - 10 * H, [["x", 60 << 30]]
-        g = self.m.Folder(self.root, "aa", "00000000000002")
+        f = tcd_build.Folder(self.root, "aa", "00000000000001")
+        f.size, f.activity, f.inc = 100 << 30, NOW - 10 * H, [tcd_build.IncrementalDir("x", 60 << 30)]
+        g = tcd_build.Folder(self.root, "aa", "00000000000002")
         g.size, g.activity = 30 << 30, NOW - 20 * H
-        pol = {"max_idle": 48 * H, "max_total": 80 << 30, "min_keep": 2 * H, "incremental_idle": 6 * H}
+        pol = tcd_build.RustPolicy(max_idle=48 * H, max_total=80 << 30, min_keep=2 * H, incremental_idle=6 * H)
         # 130 GiB, trim frees 60: 70 <= 80, nothing else needed.
-        acts = {x.key: a for x, a, _ in self.m.decide([f, g], pol, NOW, {})}
+        acts = {x.key: a for x, a, _ in tcd_build.decide([f, g], pol, NOW, {})}
         self.assertEqual(acts, {"aa/00000000000001": "trim", "aa/00000000000002": "keep"})
-        pol["max_total"] = 20 << 30
-        acts = {x.key: a for x, a, _ in self.m.decide([f, g], pol, NOW, {})}
+        pol = dataclasses.replace(pol, max_total=20 << 30)
+        acts = {x.key: a for x, a, _ in tcd_build.decide([f, g], pol, NOW, {})}
         self.assertEqual(acts, {"aa/00000000000001": "delete", "aa/00000000000002": "delete"})
 
 
@@ -481,7 +497,7 @@ class UvTest(UvBase):
         rc, out = self.run_main("prune", "apply", "python:uv")
         self.assertEqual(rc, 0, out)
         self.assertIn("uv waited 60s for its cache lock", out)
-        self.assertIsNone(self.m.read_state(self.home, "python:uv"))
+        self.assertIsNone(tc_home_files.read_state(self.home, "python:uv"))
         self.fake_uv(prune="echo 'error: something else' >&2; exit 2")
         rc, out = self.run_main("prune", "apply", "python:uv")
         self.assertEqual(rc, 1, out)
@@ -532,12 +548,12 @@ class UvBudgetTest(UvBase):
         self.assertIn("stopped at the time budget", out)
         self.assertTrue(self.present("aa/0123456789abcd"))
         self.assertEqual(self.uv_calls(), [])
-        self.assertIsNone(self.m.read_state(self.home, "python:uv"))  # tried again next run
+        self.assertIsNone(tc_home_files.read_state(self.home, "python:uv"))  # tried again next run
 
     def test_uv_timeout_follows_the_budget(self) -> None:
         os.makedirs(self.cache)
         seen: list[float] = []
-        t = self.m.PythonUv(self.home, NOW, {"interval": 0})
+        t = tc_python_uv.PythonUv(self.home, NOW, tcd_uv.UvPolicy(interval=0))
         t.deadline = time.monotonic() + 200
         t.run_uv = lambda uv, args, timeout: seen.append(timeout) or subprocess.CompletedProcess(args, 0, "", "")
         self.assertEqual(t.apply(), 0)
@@ -548,8 +564,8 @@ class UvBudgetTest(UvBase):
     def test_rm_is_stopped_at_the_deadline(self) -> None:
         d = os.path.join(self.tmp, "big")
         os.makedirs(d)
-        with mock.patch.object(self.m.subprocess, "run", side_effect=subprocess.TimeoutExpired("rm", 1)):
-            ok, msg = self.m.remove_tree(d, 1)
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("rm", 1)):
+            ok, msg = tc_build_tree.remove_tree(d, 1)
         self.assertFalse(ok)
         self.assertIn("next run deletes the rest", msg)
 
@@ -595,9 +611,9 @@ class ManagerPathTest(UvBase):
 
     def test_quoted_value_is_not_parsed(self) -> None:
         self.manager_env = "PATH=$'/a\\nb'\n"
-        self.assertIsNone(self.m.manager_path())
+        self.assertIsNone(tc_units.manager_path())
         self.manager_env = "PATH=/x:/y\n"
-        self.assertEqual(self.m.manager_path(), "/x:/y")
+        self.assertEqual(tc_units.manager_path(), "/x:/y")
 
 
 class RecheckTest(RulesBase):
@@ -610,7 +626,7 @@ class RecheckTest(RulesBase):
     def touch_after_scan(self, rel: str, age_h: float) -> None:
         """Write REL (in the root) AGE_H hours before NOW, after apply has
         scanned and planned (at its first look at the processes)."""
-        real = self.m.proc_users
+        real = tc_processes.proc_users
         done: list[int] = []
 
         def hooked(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[Any, str]]], int]:
@@ -676,8 +692,8 @@ class RecheckTest(RulesBase):
 
     def test_delete_folder_honours_a_failed_recheck(self) -> None:
         self.folder("aa/0123456789abcd", 100)
-        f = self.m.scan(self.root, NOW)[0][0]
-        result, detail = self.m.delete_folder(self.root, f, NOW, self.home, {}, lambda: "measured again: x")
+        f = tc_build_tree.scan(self.root, NOW)[0][0]
+        result, detail = tc_rust_build.delete_folder(self.root, f, NOW, self.home, {}, lambda: "measured again: x")
         self.assertEqual((result, detail), ("changed", "measured again: x"))
         self.assertTrue(self.present("aa/0123456789abcd"))
 
@@ -703,7 +719,7 @@ class ToolchainReportTest(RulesBase):
         c = self.repo("c")
         with open(os.path.join(c, "rust-toolchain.toml"), "w") as f:
             f.write('[toolchain]\nchannel = "1.80.0"\n')
-        lines = "\n".join(self.m.toolchain_lines(self.home))
+        lines = "\n".join(tc_status.toolchain_lines(self.home))
         self.assertIn("default:  stable", lines)
         self.assertRegex(lines, r"1\.98\.1 +pinned by ~/Workspace/a/rust-toolchain.toml")
         self.assertRegex(lines, r"nightly-2026-06-01 +pinned by ~/Workspace/b/rust-toolchain")
@@ -731,7 +747,7 @@ class ToolchainReportTest(RulesBase):
         os.makedirs(os.path.join(a, "scripts"))
         with open(os.path.join(a, "scripts/bench.sh"), "w") as f:
             f.write("RUSTUP_TOOLCHAIN=1.99.1 cargo bench   # not 1.95.0.1, not 21.95.0\n")
-        lines = "\n".join(self.m.toolchain_lines(self.home))
+        lines = "\n".join(tc_status.toolchain_lines(self.home))
         self.assertRegex(lines, r"nightly-2026-06-01 +named in ~/Workspace/lush/Makefile")
         self.assertRegex(lines, r"nightly +named in ~/Workspace/lush/Makefile \(not offered for removal\)")
         self.assertRegex(lines, r"1\.98\.0 +named in ~/Workspace/lush/.github/workflows/ci.yml")
@@ -749,20 +765,20 @@ class ToolchainReportTest(RulesBase):
             files.append(os.path.join(d, f"{i}.sh"))
             with open(files[-1], "w") as f:
                 f.write("cargo +nightly build\n" if i == 2 else "true\n")
-        self.assertEqual(self.m.named_in(files, ["nightly"]), ({"nightly": files[2]}, True))
+        self.assertEqual(tc_rustup.named_in(files, ["nightly"]), ({"nightly": files[2]}, True))
         self.m.TOOL_FILES_MAX = 2
-        self.assertEqual(self.m.named_in(files, ["nightly"]), ({}, False))
+        self.assertEqual(tc_rustup.named_in(files, ["nightly"]), ({}, False))
 
     def test_incomplete_search_offers_no_command(self) -> None:
         rh = os.path.join(self.tmp, "rustup")
         os.environ["RUSTUP_HOME"] = rh
         os.makedirs(os.path.join(rh, "toolchains", "1.95.0-x86_64-unknown-linux-gnu"))
-        lines = "\n".join(self.m.toolchain_lines(self.home))  # no ~/Workspace: incomplete
+        lines = "\n".join(tc_status.toolchain_lines(self.home))  # no ~/Workspace: incomplete
         self.assertIn("no removal command, because the search was incomplete", lines)
         self.assertNotIn("rustup toolchain uninstall", lines)
 
     def test_toolchain_pattern(self) -> None:
-        p = self.m.toolchain_pattern
+        p = tcd_build.toolchain_pattern
         for name, text in (
             ("nightly", "cargo +nightly fuzz"),
             ("nightly", "toolchain: nightly\n"),
@@ -790,10 +806,10 @@ class ToolchainReportTest(RulesBase):
         for name, (text, want) in cases.items():
             with open(os.path.join(d, name), "w") as f:
                 f.write(text)
-            self.assertEqual(self.m.pinned_channel(os.path.join(d, name)), want)
+            self.assertEqual(tc_rustup.pinned_channel(os.path.join(d, name)), want)
         with open(os.path.join(d, "rust-toolchain.toml"), "w") as f:
             f.write("not = [toml\n")
-        self.assertEqual(self.m.pinned_channel(os.path.join(d, "rust-toolchain.toml")), "")
+        self.assertEqual(tc_rustup.pinned_channel(os.path.join(d, "rust-toolchain.toml")), "")
 
 
 class LeanDebugInfoTest(RulesBase):
@@ -826,7 +842,7 @@ class LeanDebugInfoTest(RulesBase):
         data = tomllib.loads(text)
         self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
         self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)
-        self.assertEqual(self.m.resolve_root(self.home), self.root)  # build-dir still read
+        self.assertEqual(tc_build_tree.resolve_root(self.home), self.root)  # build-dir still read
         _rc, out = self.run_main("config", "apply")
         self.assertIn("lean debug info already set", out)
         self.assertEqual(self.cfg(), text)
@@ -863,12 +879,12 @@ class LeanDebugInfoTest(RulesBase):
         self.assertEqual(self.cfg(), before)
 
     def test_parse_args(self) -> None:
-        p = self.m.parse_args
+        p = tcd_common.parse_args
         self.assertIs(p(["config", "apply", "--lean-debuginfo"])["lean"], True)
         self.assertIs(p(["config", "plan", "--no-lean-debuginfo"])["lean"], False)
         self.assertIsNone(p(["config", "plan"])["lean"])
         for bad in (["config", "apply", "--lean"], ["config", "apply", "--lean-debuginfo", "--no-lean-debuginfo"]):
-            with self.assertRaises(self.m.Usage, msg=bad):
+            with self.assertRaises(Usage, msg=bad):
                 p(bad)
 
     def test_snapshots_setup_never_turns_it_on(self) -> None:
@@ -955,7 +971,7 @@ class SccacheConfigTest(RulesBase):
         # Right after build-dir, inside [build].
         lines = text.splitlines()
         self.assertTrue(lines[lines.index("[build]") + 3].startswith("rustc-wrapper = "), text)
-        self.assertEqual(self.m.resolve_root(self.home), self.root)
+        self.assertEqual(tc_build_tree.resolve_root(self.home), self.root)
         st = os.stat(self.wrapper)
         self.assertEqual(stat_mode(st), 0o755)
         with open(self.wrapper) as f:
@@ -1053,11 +1069,11 @@ class SccacheConfigTest(RulesBase):
         # Only the sccache step (config apply would add build-dir's [build] first).
         self.write_cargo_config("[net]\noffline = true\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
         self.assertIn("\n\n# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes", self.cfg())
         self.assertEqual(self.data()["build"], {"rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
         self.assertEqual(self.cfg(), "[net]\noffline = true\n")
 
     def test_removal_of_csts_own_build_table_beside_a_subtable(self) -> None:
@@ -1066,19 +1082,19 @@ class SccacheConfigTest(RulesBase):
         original = "[build.foo]\nbar = 1\n"
         self.write_cargo_config(original)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
         self.assertEqual(self.data()["build"], {"foo": {"bar": 1}, "rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
         self.assertEqual(self.cfg(), original)
         self.assertNotIn("Added by", self.cfg())
 
     def test_removal_keeps_a_build_table_with_other_keys(self) -> None:
         self.write_cargo_config("[build]\njobs = 2\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.m.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
         self.assertEqual(self.cfg(), "[build]\njobs = 2\n")
 
     def test_removal_leaves_a_changed_line_alone(self) -> None:
@@ -1115,14 +1131,15 @@ class SccacheConfigTest(RulesBase):
     def test_wrapper_source_without_a_setting_line_is_not_installed(self) -> None:
         # Each setting must have its line in the source; a source without one
         # counts as missing, so no wrapper (and no rustc-wrapper line) is written.
-        real_read, source = self.m.read_text, self.m.read_text(WRAPPER)
+        real_read, source = tc_config.read_text, tc_config.read_text(WRAPPER)
+        assert source is not None
         for line in (r"cache_size=\S+ # cst: RUST_SCCACHE_CACHE_SIZE", r"workspace=\S+ # cst: RUST_SCCACHE_WORKSPACE"):
             broken, n = re.subn(rf"(?m)^{line}.*\n", "", source)
             self.assertEqual(n, 1, line)
             self.m.read_text = lambda path, text=broken: (
                 text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path)
             )
-            self.assertIsNone(self.m.wrapper_text(self.m.WrapperValues()), line)
+            self.assertIsNone(tc_config.wrapper_text(tcd_config.WrapperValues()), line)
             before = self.cfg()
             rc, _out = self.run_main("config", "apply", "--sccache")
             self.assertEqual(rc, 1, _out)
@@ -1205,26 +1222,26 @@ class SccacheConfigTest(RulesBase):
         self.assertIn("sccache wrapper up to date (cache size 25G)", out)
 
     def test_sizes(self) -> None:
-        p = self.m.parse_sccache_size
+        p = tcd_common.parse_sccache_size
         self.assertEqual(p("25G"), "25G")
         self.assertEqual(p("25GiB"), "25G")
         self.assertEqual(p("1.5G"), "1536M")
         self.assertEqual(p("2T"), "2T")
         self.assertEqual(p("100K"), "100K")
         for bad in ("0", "off", "25"):
-            with self.assertRaises(self.m.ConfigError, msg=bad):
+            with self.assertRaises(tcd_common.ConfigError, msg=bad):
                 p(bad)
         self.write_conf_raw("RUST_SCCACHE_CACHE_SIZE=0\n")
         _rc, _out = self.run_main("config", "plan", "--sccache")
         self.assertIn("BAD SETTINGS", self.run_main("status")[1])
 
     def test_parse_args(self) -> None:
-        p = self.m.parse_args
+        p = tcd_common.parse_args
         self.assertIs(p(["config", "apply", "--sccache"])["sccache"], True)
         self.assertIs(p(["config", "plan", "--no-sccache", "--lean-debuginfo"])["sccache"], False)
         self.assertIsNone(p(["config", "plan"])["sccache"])
         for bad in (["config", "apply", "--sccache", "--no-sccache"], ["config", "apply", "--sccache=yes"]):
-            with self.assertRaises(self.m.Usage, msg=bad):
+            with self.assertRaises(Usage, msg=bad):
                 p(bad)
 
     def test_status_lines(self) -> None:

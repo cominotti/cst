@@ -9,17 +9,18 @@ from __future__ import annotations
 import os
 import stat
 import time
-from typing import Any, cast
 
 from collections.abc import Callable, Mapping, Sequence
 
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import Json
 from toolchains.domain.build import (
+    CargoCache,
     ENUM_BUDGET,
     Folder,
     Incomplete,
-    MIN_KEEP_FLOOR,
     ROOT_REL,
+    RustPolicy,
     TRASH_PREFIX,
     WORKSPACE_REL,
     Workspaces,
@@ -30,19 +31,8 @@ from toolchains.domain.build import (
     unknown_text,
     users_text,
 )
-from toolchains.domain.common import (
-    ConfigError,
-    ago,
-    gib,
-    parse_bool,
-    parse_duration,
-    parse_off_or_duration,
-    parse_size,
-    span,
-    tilde,
-    when,
-)
-from toolchains.domain.prune import RM_MARGIN, RUN_BUDGET
+from toolchains.domain.common import ago, gib, json_items, span, tilde, when
+from toolchains.domain.prune import RM_MARGIN, RUN_BUDGET, RUST_BUILD, Settings, rust_last_run
 from toolchains.adapters.build_tree import measure, release, remove_tree, resolve_root, scan, take_locks
 from toolchains.adapters.cargo import (
     ask_cargo,
@@ -62,7 +52,7 @@ from toolchains.cli.targets import Target
 def cargo_users(
     root: str,
     home: str,
-    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    cache: CargoCache,
 ) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str | None, str]]]:
     """({folder key: [(pid, comm)]}, [(pid, comm, cwd, why)]): the folders
     running cargo processes build in, and the cargo processes whose folder
@@ -71,22 +61,22 @@ def cargo_users(
     found: dict[str, list[tuple[str, str]]] = {}
     unknown: list[tuple[str, str, str | None, str]] = []
     for p in cargo_procs():
-        key, q = cargo_query(p, home)
-        if key is None or isinstance(q, str):
-            unknown.append((p["pid"], p["comm"], p["cwd"], cast(str, q)))
+        q = cargo_query(p, home)
+        if isinstance(q, str):
+            unknown.append((p.pid, p.comm, p.cwd, q))
             continue
-        if key not in cache:
-            cache[key] = ask_cargo(*q)
-        bd, why = cache[key]
+        if q.key not in cache:
+            cache[q.key] = ask_cargo(q.cmd, q.env, q.cwd)
+        bd, why = cache[q.key]
         if why or bd is None:
-            unknown.append((p["pid"], p["comm"], p["cwd"], why or "unknown"))
+            unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
             continue
         for pr in pre:
             if bd.startswith(pr + "/"):
                 k = "/".join(bd[len(pr) + 1 :].split("/")[:2])
                 lst = found.setdefault(k, [])
-                if (p["pid"], p["comm"]) not in lst:
-                    lst.append((p["pid"], p["comm"]))
+                if (p.pid, p.comm) not in lst:
+                    lst.append((p.pid, p.comm))
                 break
     return found, unknown
 
@@ -122,7 +112,7 @@ def claimed_folders(root: str | None, home: str, with_cargo: bool = True) -> Wor
                     ws.failures.append((m, why or "unknown"))
                     continue
                 covered.add(m)
-                for p in data.get("packages") or []:
+                for p in json_items(data.get("packages")):
                     mp = p.get("manifest_path") if isinstance(p, dict) else None
                     if isinstance(mp, str):
                         covered.add(os.path.normpath(mp))
@@ -155,7 +145,7 @@ def guarded(
     root: str,
     folder: Folder,
     home: str,
-    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    cache: CargoCache,
     step: Callable[[], tuple[str, str]],
     recheck: Callable[[], str] | None = None,
 ) -> tuple[str, str]:
@@ -197,7 +187,7 @@ def delete_folder(
     folder: Folder,
     now: float,
     home: str,
-    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    cache: CargoCache,
     recheck: Callable[[], str] | None = None,
     rm_deadline: float | None = None,
 ) -> tuple[str, str]:
@@ -241,7 +231,7 @@ def trim_folder(
     folder: Folder,
     now: float,
     home: str,
-    cache: dict[tuple[Any, ...], tuple[str | None, str | None]],
+    cache: CargoCache,
     recheck: Callable[[], str] | None = None,
     rm_deadline: float | None = None,
 ) -> tuple[str, str]:
@@ -254,7 +244,8 @@ def trim_folder(
     base = folder.key.replace("/", "")
 
     def step() -> tuple[str, str]:
-        for i, (path, _size) in enumerate(folder.inc):
+        for i, d in enumerate(folder.inc):
+            path = d.path
             parent = os.path.dirname(path)
             try:
                 pst = os.lstat(parent)
@@ -290,43 +281,12 @@ def trim_folder(
     return "trimmed", ""
 
 
-class RustBuild(Target):
-    ID = "rust:build"
-    PREFIX = "RUST_BUILD"
-    WHAT = "cargo's intermediate build files (build-dir), one folder per workspace path"
-    SETTINGS = ("MAX_IDLE", "MAX_TOTAL", "MIN_KEEP", "ORPHANS", "INCREMENTAL_IDLE")
+class RustBuild(Target[RustPolicy]):
+    SPEC = RUST_BUILD
 
-    @staticmethod
-    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, Any]:
-        pol: dict[str, Any] = {
-            "max_idle": parse_duration(vals["MAX_IDLE"]),
-            "max_total": parse_size(vals["MAX_TOTAL"]),
-            "min_keep": parse_duration(vals["MIN_KEEP"]),
-            "orphans": parse_bool(vals["ORPHANS"]),
-            "incremental_idle": parse_off_or_duration(vals["INCREMENTAL_IDLE"]),
-        }
-        if pol["min_keep"] < MIN_KEEP_FLOOR:
-            raise ConfigError(f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} is below the floor of 15m")
-        if pol["max_idle"] < pol["min_keep"]:
-            raise ConfigError(
-                f"{prefix}_MAX_IDLE={vals['MAX_IDLE']} is shorter than {prefix}_MIN_KEEP={vals['MIN_KEEP']}"
-            )
-        if pol["incremental_idle"] and pol["incremental_idle"] < pol["min_keep"]:
-            raise ConfigError(
-                f"{prefix}_INCREMENTAL_IDLE={vals['INCREMENTAL_IDLE']} is shorter than "
-                f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} (0 or off turns it off)"
-            )
-        return pol
-
-    @staticmethod
-    def policy_text(pol: Mapping[str, Any]) -> str:
-        cap = gib(pol["max_total"]) if pol["max_total"] else "off"
-        inc = span(pol["incremental_idle"]) if pol.get("incremental_idle") else "off"
-        orph = "on" if pol.get("orphans", True) else "off"
-        return (
-            f"MAX_IDLE {span(pol['max_idle'])}, MAX_TOTAL {cap}, MIN_KEEP {span(pol['min_keep'])}, "
-            f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}"
-        )
+    @classmethod
+    def make(cls, home: str, now: float, settings: Settings | None) -> RustBuild:
+        return cls(home, now, settings.rust if settings else None)
 
     def location(self) -> str:
         return os.path.join(self.home, ROOT_REL)
@@ -345,7 +305,7 @@ class RustBuild(Target):
         """(claimed or None, Workspaces or None): the folders claimed by a
         workspace; None when the orphan rule is off or the search is
         incomplete (then nothing is an orphan)."""
-        if not self.policy.get("orphans", True):
+        if not self.required_policy().orphans:
             return None, None
         ws = claimed_folders(root, self.home)
         if ws.incomplete:
@@ -376,7 +336,7 @@ class RustBuild(Target):
         return out
 
     def plan(self) -> int:
-        home, now, pol = self.home, self.now, self.policy
+        home, now, pol = self.home, self.now, self.required_policy()
         root, folders, trash, others = self.gather()
         if root is None:
             say(f"  ~/{ROOT_REL} does not exist yet: nothing to do")
@@ -409,7 +369,7 @@ class RustBuild(Target):
             )
             + f"; left: {gib(after_total(plan))} in {len(plan) - len(gone)} folder(s)"
         )
-        if pol["max_total"] and after_total(plan) > pol["max_total"]:
+        if pol.max_total and after_total(plan) > pol.max_total:
             say("  still above MAX_TOTAL afterwards: the rest is active within MIN_KEEP, in use or left alone")
         if unreadable:
             say(
@@ -421,13 +381,13 @@ class RustBuild(Target):
         return 0
 
     def apply(self) -> int:
-        home, now, pol = self.home, self.now, self.policy
+        home, now, pol = self.home, self.now, self.required_policy()
         root, folders, trash, others = self.gather()
         if root is None:
             self.tsay(f"~/{ROOT_REL} does not exist yet: nothing to do")
             write_state(
                 home,
-                self.ID,
+                self.SPEC.id,
                 {
                     "time": now,
                     "deleted": 0,
@@ -442,14 +402,14 @@ class RustBuild(Target):
             )
             return 0
         before = sum(f.size for f in folders)
-        self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {self.policy_text(pol)}")
+        self.tsay(f"{len(folders)} folder(s), {gib(before)}; policy {pol.text()}")
         for name, why in others:
             self.tsay(f"left alone: {name} ({why})", 5)
         claimed, ws = self.workspaces(root)
         for line in self.workspace_lines(ws, claimed, folders):
             self.tsay(line, 5 if claimed is None and ws is not None else 6)
         rc = 0
-        cache: dict[tuple[Any, ...], tuple[str | None, str | None]] = {}
+        cache: CargoCache = {}
         users_map, unreadable = proc_users(root)
         users: dict[str, list[tuple[int | str, str]]] = merge_users(users_map, cargo_users(root, home, cache)[0])
         if unreadable:
@@ -574,15 +534,15 @@ class RustBuild(Target):
             + (f"; {nbusy} busy" if nbusy else "")
             + ("; stopped at the time budget" if stopped_by_budget else "")
         )
-        if pol["max_total"] and total > pol["max_total"] and not stopped_by_budget:
+        if pol.max_total and total > pol.max_total and not stopped_by_budget:
             self.tsay(
-                f"still above MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}): "
+                f"still above MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}): "
                 "the rest is active within MIN_KEEP, in use or left alone",
                 4,
             )
         write_state(
             home,
-            self.ID,
+            self.SPEC.id,
             {
                 "time": now,
                 "deleted": len(deleted),
@@ -598,14 +558,8 @@ class RustBuild(Target):
         return rc
 
     @staticmethod
-    def last_run_text(s: Mapping[str, Any]) -> str:
-        extra = f", {s['busy']} busy" if s.get("busy") else ""
-        extra += f", {s['failed']} failed" if s.get("failed") else ""
-        trim = f", incremental of {s['trimmed']} folder(s) ({gib(s.get('trim_freed', 0))})" if s.get("trimmed") else ""
-        return (
-            f"{when(s['time'])}, deleted {s['deleted']} folder(s) ({gib(s['freed'])}){trim}{extra}; "
-            f"left {gib(s['total'])} in {s['folders']} folder(s)"
-        )
+    def last_run_text(s: Mapping[str, Json]) -> str:
+        return rust_last_run(s)
 
     def status_lines(self) -> list[str]:
         """Size and age of the folders, or why they are not looked at."""

@@ -4,61 +4,52 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from collections.abc import Mapping
 
+from cst_core.domain.values import Json
 from toolchains.adapters.program import say, time_left
+from toolchains.domain.prune import TargetSpec
 
 
-class Target:
-    """One cache of one toolchain. A new target is a subclass with these
-    attributes and methods, added to TARGETS (and its keys to
-    toolchains/toolchains.conf):
-      ID        "lang:cache", as typed on the command line
-      PREFIX    the settings prefix, e.g. RUST_BUILD
-      WHAT      one line for status
-      SETTINGS  its own setting names (without PREFIX_; ENABLED is common)
-      make_policy(vals, prefix)  checked policy from {SETTING: raw value}
+class Target[P]:
+    """One cache of one toolchain, pruned by its policy P. A new target is a
+    subclass with these attributes and methods, added to TARGETS (its
+    TargetSpec to toolchains.domain.prune.SPECS, its policy to Settings, its
+    keys to toolchains/toolchains.conf):
+      SPEC      what it is: id ("lang:cache"), settings prefix, own setting
+                names, status line, max_seconds, uses_path
+      make(home, now, settings)  the target with its policy from the settings
+                                 (None: bad settings; only location, check
+                                 and status_lines work then)
       location()                 the folder it prunes (for status)
       check()                    raise Refused when it would refuse to run
       plan(), apply()            exit status; apply also calls write_state
       status_lines()             [line] for status (size, oldest, ...)
       last_run_text(state)       one line from the saved summary"""
 
-    ID: str = ""
-    PREFIX: str = ""
-    WHAT: str = ""
-    SETTINGS: tuple[str, ...] = ()
+    SPEC: TargetSpec
     # time.monotonic() by which an apply must be done (None: no limit);
     # cmd_prune sets it from RUN_BUDGET.
     deadline: float | None = None
     # PATH to look for programs in (None: this process's PATH).
     path: str | None = None
-    # The most seconds one apply can take (None: no fixed bound, only the
-    # run's budget). prune apply runs the bounded targets first.
-    MAX_SECONDS: int | None = None
-    # check() looks for a program on PATH (auto on then checks the user
-    # manager's PATH, which the timer runs with).
-    USES_PATH: bool = False
     named: bool = False
 
-    def __init__(self, home: str, now: float, policy: dict[str, Any] | None) -> None:
+    def __init__(self, home: str, now: float, policy: P | None) -> None:
         self.home: str = home
         self.now: float = now
-        self.policy: dict[str, Any] = {} if policy is None else policy
+        self.policy: P | None = policy
         self.started: float = time.monotonic()
 
-    @staticmethod
-    def make_policy(vals: Mapping[str, str], prefix: str) -> dict[str, Any]:
-        raise NotImplementedError
+    def required_policy(self) -> P:
+        """The policy plan and apply prune by (only status runs without one: bad settings)."""
+        if self.policy is None:
+            raise RuntimeError(f"{self.SPEC.id}: no policy (the settings could not be read)")
+        return self.policy
 
     @staticmethod
-    def policy_text(pol: Mapping[str, Any]) -> str:
-        raise NotImplementedError
-
-    @staticmethod
-    def last_run_text(s: Mapping[str, Any]) -> str:
+    def last_run_text(s: Mapping[str, Json]) -> str:
         raise NotImplementedError
 
     def location(self) -> str:
@@ -77,7 +68,7 @@ class Target:
         raise NotImplementedError
 
     def tsay(self, msg: str, prio: int = 6) -> None:
-        say(f"{self.ID}: {msg}", prio)
+        say(f"{self.SPEC.id}: {msg}", prio)
 
     def clock(self) -> float:
         """Now, on the run's clock: NOW plus the time since the start."""

@@ -34,6 +34,9 @@ from cst_core.domain.errors import Refused, Usage
 from toolchains.domain import auto as tcd_auto
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
+from toolchains.domain import prune as tcd_prune
+from toolchains import cli as tc_cli
+from toolchains.adapters import home_files as tc_home_files
 from toolchains.cli import prune as tc_prune
 from toolchains.cli import auto as tc_auto
 from toolchains.cli import config as tc_config
@@ -159,7 +162,7 @@ class Scratch(unittest.TestCase):
     def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
+            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue() + err.getvalue()
 
     def write(self, rel: str, text: str) -> str:
@@ -179,7 +182,7 @@ class Scratch(unittest.TestCase):
 
 class CliTest(Scratch):
     def test_parse(self) -> None:
-        p = self.m.parse_args
+        p = tcd_common.parse_args
         self.assertEqual(p([])["cmd"], "help")
         self.assertEqual(p(["--help"])["cmd"], "help")
         a = p(["prune", "plan", "rust", "rust:build", "--home", "/h"])
@@ -206,7 +209,7 @@ class CliTest(Scratch):
             ["prune", "apply", "--home="],
             ["auto", "on", "--home", ""],
         ):
-            with self.assertRaises(self.m.Usage, msg=bad):
+            with self.assertRaises(Usage, msg=bad):
                 p(bad)
 
     def test_empty_home_never_means_the_real_home(self) -> None:
@@ -214,7 +217,7 @@ class CliTest(Scratch):
         for args in (["prune", "apply", "--home="], ["auto", "off", "--home="], ["config", "apply", "--home", ""]):
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                rc = self.m.main(args, HELP, TOOL)
+                rc = tc_cli.main(args, HELP, TOOL)
             self.assertEqual(rc, 2, args)
             self.assertIn("--home needs a folder", err.getvalue())
         self.assertEqual(self.calls(), [])
@@ -231,7 +234,9 @@ class CliTest(Scratch):
 
 class SelectTest(Scratch):
     def sel(self, *names: str) -> list[tuple[str, bool]]:
-        return [(c.ID, named) for c, named in self.m.select_targets(list(names), self.m.Settings(self.home))]
+        return [
+            (c.SPEC.id, named) for c, named in tc_prune.select_targets(list(names), tc_prune.load_settings(self.home))
+        ]
 
     def test_selection(self) -> None:
         self.assertEqual(self.sel(), [("rust:build", False), ("python:uv", False)])
@@ -246,7 +251,7 @@ class SelectTest(Scratch):
             ("foo", "unknown target"),
             ("rust:foo", "unknown target"),
         ):
-            with self.assertRaisesRegex(self.m.Usage, msg, msg=name):
+            with self.assertRaisesRegex(Usage, msg, msg=name):
                 self.sel(name)
 
     def test_disabled_target(self) -> None:
@@ -267,9 +272,9 @@ class DefaultsTest(Scratch):
     def test_defaults_file_is_complete_and_marked(self) -> None:
         with open(DEFAULTS) as f:
             text = f.read()
-        self.assertIn(self.m.MARKER, text)
-        raw = self.m.parse_conf(text, self.m.known_keys())
-        self.assertEqual(set(raw), self.m.known_keys())
+        self.assertIn(tcd_common.MARKER, text)
+        raw = tcd_common.parse_conf(text, tcd_prune.known_keys())
+        self.assertEqual(set(raw), tcd_prune.known_keys())
         self.assertEqual(
             raw,
             {
@@ -291,13 +296,13 @@ class DefaultsTest(Scratch):
     def test_every_target_is_documented(self) -> None:
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:
             readme = f.read()
-        for tid in list(self.m.TARGETS) + list(self.m.PLANNED):
+        for tid in list(tc_prune.TARGETS) + list(tcd_prune.PLANNED):
             self.assertIn(f"`{tid}`", readme, tid)
 
     def test_missing_defaults_stop_the_run(self) -> None:
         self.m.defaults_path = lambda: os.path.join(self.tmp, "nope.conf")
-        with self.assertRaisesRegex(self.m.ConfigError, "missing"):
-            self.m.Settings(self.home)
+        with self.assertRaisesRegex(tcd_common.ConfigError, "missing"):
+            tc_prune.load_settings(self.home)
 
 
 class ConfigTest(Scratch):
@@ -316,7 +321,7 @@ class ConfigTest(Scratch):
         self.assertIn(f"kept:      {self.home}/.config/uv/uv.toml (link-mode already set)", out)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         # The line written is the one prune accepts.
-        self.assertEqual(self.m.resolve_root(self.home), None)
+        self.assertEqual(tc_build_tree.resolve_root(self.home), None)
         rc, out = self.run_main("status")
         self.assertIn("build-dir = CST's line", out)
 
@@ -512,7 +517,7 @@ class AutoTest(Scratch):
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
         with open(os.path.join(self.home, ".local/lib/cst/cst-toolchains"), "rb") as f:
-            self.assertIn(self.m.MARKER.encode(), f.read())
+            self.assertIn(tcd_common.MARKER.encode(), f.read())
         self.assertEqual(self.calls(), ["--user daemon-reload", "--user enable --now cst-toolchains-prune.timer"])
         # The installed copy runs with its own defaults file (as the timer does).
         r = subprocess.run(
@@ -865,7 +870,7 @@ class AutoTest(Scratch):
         """run_main, with stdout and stderr apart: warnings and errors go to stderr."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
+            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL)
         return rc, out.getvalue(), err.getvalue()
 
     def raw_calls(self) -> list[str]:
@@ -1132,7 +1137,7 @@ class AutoTest(Scratch):
             self.assertEqual(self.calls(), [], args)
 
     def test_auto_off_removes_the_state_file_of_every_target(self) -> None:
-        states = [self.m.state_path(self.home, tid) for tid in self.m.TARGETS]
+        states = [tc_home_files.state_path(self.home, tid) for tid in tc_prune.TARGETS]
         self.assertEqual(len(states), 2)
         for path in states:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1282,7 +1287,7 @@ class PackageLayersTest(Scratch):
         old.size, old.activity = 100, NOW - 1e6
         new = tcd_build.Folder("/tmp/build", "cc", "dddddddddddddd")
         new.size, new.activity = 100, NOW - 60
-        pol = {"max_idle": 3600 * 48, "max_total": 150 * (1 << 30), "min_keep": 7200}
+        pol = tcd_build.RustPolicy(max_idle=3600 * 48, max_total=150 * (1 << 30), min_keep=7200)
         self.assertEqual(
             [(f.key, action) for f, action, _ in tcd_build.decide([new, old], pol, NOW, {})],
             [("aa/bbbbbbbbbbbbbb", "delete"), ("cc/dddddddddddddd", "keep")],

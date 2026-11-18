@@ -12,16 +12,19 @@ import shutil
 import stat
 import subprocess
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+from cst_core.domain.values import Json
 from toolchains.domain.build import (
     CACHE_TAG,
     CARGO_ENV,
     CMD_TIMEOUT,
     CRATE_DEPTH,
+    CargoProc,
+    CargoQuery,
     ENUM_BUDGET,
     Incomplete,
     NOT_A_MEMBER,
@@ -35,16 +38,17 @@ from toolchains.domain.build import (
     is_tool_file,
     manifest_arg,
 )
+from toolchains.domain.common import to_json
 from toolchains.adapters.program import RUNNER, run_idle
 
 
-def cargo_binary(p: Mapping[str, Any], home: str) -> str:
+def cargo_binary(p: CargoProc, home: str) -> str:
     """The cargo to ask: the process's own program when it is a cargo (the
     same version computes the same folder name), else the user's."""
-    exe = str(p["exe"])
+    exe = str(p.exe)
     if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == "cargo" and os.access(exe, os.X_OK):
         return exe
-    ch = str(p["env"].get("CARGO_HOME") or os.environ.get("CARGO_HOME", ""))
+    ch = str(p.env.get("CARGO_HOME") or os.environ.get("CARGO_HOME", ""))
     for c in (
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
@@ -54,36 +58,28 @@ def cargo_binary(p: Mapping[str, Any], home: str) -> str:
     return ""
 
 
-def cargo_query(
-    p: Mapping[str, Any], home: str
-) -> (
-    tuple[None, str]
-    | tuple[
-        tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]],
-        tuple[list[str], dict[str, str], str],
-    ]
-):
-    """(cache key, command, env, cwd) of the `cargo metadata` that tells the
-    build folder of process P; or (None, why) when it cannot be asked."""
-    cwd = p["cwd"]
+def cargo_query(p: CargoProc, home: str) -> CargoQuery | str:
+    """The `cargo metadata` that tells the build folder of process P (with
+    its cache key, command, env and cwd); or why it cannot be asked."""
+    cwd = p.cwd
     if not isinstance(cwd, str) or not cwd or cwd.endswith(" (deleted)") or not os.path.isdir(cwd):
-        return None, f"its working folder {cwd or '(unreadable)'} is not reachable"
+        return f"its working folder {cwd or '(unreadable)'} is not reachable"
     cargo = cargo_binary(p, home)
     if not cargo:
-        return None, "no cargo program found to ask"
+        return "no cargo program found to ask"
     cmd = [cargo]
-    if len(p["args"]) > 1 and p["args"][1].startswith("+"):
-        cmd.append(p["args"][1])  # rustup's +toolchain (the process is rustup's proxy)
+    if len(p.args) > 1 and p.args[1].startswith("+"):
+        cmd.append(p.args[1])  # rustup's +toolchain (the process is rustup's proxy)
     cmd += ["metadata", "--no-deps", "--offline", "--format-version", "1"]
-    manifest = manifest_arg(p["args"], cwd)
+    manifest = manifest_arg(p.args, cwd)
     if manifest:
         cmd += ["--manifest-path", manifest]
     env = {k: v for k, v in os.environ.items() if k not in CARGO_ENV}
-    env.update(p["env"])
+    env.update(p.env)
     # Never download a toolchain or anything else; plain output.
     env.update(RUSTUP_AUTO_INSTALL="0", CARGO_NET_OFFLINE="true", CARGO_TERM_COLOR="never")
-    key = (tuple(cmd), cwd, tuple(sorted(p["env"].items())))
-    return key, (cmd, env, cwd)
+    key = (tuple(cmd), cwd, tuple(sorted(p.env.items())))
+    return CargoQuery(key, tuple(cmd), env, cwd)
 
 
 def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str | None, str | None]:
@@ -276,7 +272,7 @@ def user_cargo(home: str) -> str:
 
 def workspace_metadata(
     cargo: str, manifest: str, env: Mapping[str, str], deadline: float
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Json] | None, str | None]:
     """cargo metadata of one Cargo.toml: (data, None) or (None, why)."""
     left = deadline - time.monotonic()
     if left <= 0:
@@ -301,7 +297,7 @@ def workspace_metadata(
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
     try:
-        data = json.loads(r.stdout)
+        data = to_json(json.loads(r.stdout))
         if not isinstance(data, dict):
             raise ValueError
     except ValueError:

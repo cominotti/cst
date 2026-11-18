@@ -19,7 +19,8 @@ from toolchains.adapters.rustup import named_in, pinned_channel, rustup_default,
 from toolchains.adapters.sccache import sccache_status_lines
 from toolchains.cli.auto import stale_files, timer_text, unit_states
 from toolchains.cli.config import config_lines
-from toolchains.cli.prune import Settings, TARGETS
+from toolchains.domain.prune import Settings
+from toolchains.cli.prune import TARGETS, load_settings
 from toolchains.cli.rust_build import claimed_folders
 
 
@@ -112,7 +113,7 @@ def cmd_status(home: str, now: float, brief: bool) -> int:
     say(f"auto: {timer_text(home)}")
     settings: Settings | None
     try:
-        settings = Settings(home)
+        settings = load_settings(home)
     except ConfigError as e:
         settings = None
         say(f"BAD SETTINGS: {e} (prune and the timer do nothing until it is fixed)")
@@ -122,12 +123,12 @@ def cmd_status(home: str, now: float, brief: bool) -> int:
         if brief:
             say(f"{tid}: last prune: {last}")
             continue
-        say(f"== {tid}: {cls.WHAT}")
-        t = cls(home, now, settings.policy[tid] if settings else None)
+        say(f"== {tid}: {cls.SPEC.what}")
+        t = cls.make(home, now, settings)
         say(f"  where:    {where_text(t.location(), home)}")
         if settings:
             state = "enabled" if settings.enabled[tid] else "disabled (prune runs it only when named)"
-            say(f"  policy:   {state}; {cls.policy_text(settings.policy[tid])} ({settings.source_of(cls)})")
+            say(f"  policy:   {state}; {settings.policy_text(tid)} ({settings.source_of(cls.SPEC)})")
         else:
             say("  policy:   BAD SETTINGS (see above)")
         say(f"  last prune: {last}")

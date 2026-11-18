@@ -7,25 +7,15 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
 
 from collections.abc import Sequence
 
 from cst_core.domain.errors import Refused, Usage
-from toolchains.domain.common import CONF_REL, ConfigError, DEFAULTS_NAME, OPTIONS, parse_bool, parse_conf, tilde
-from toolchains.domain.prune import PLANNED, RUN_BUDGET
+from toolchains.domain.common import CONF_REL, DEFAULTS_NAME
+from toolchains.domain.prune import PLANNED, RUN_BUDGET, Settings, parse_defaults, checked_settings
 from toolchains.adapters.program import Program, say, where_text
 from toolchains.cli.python_uv import PythonUv
 from toolchains.cli.rust_build import RustBuild
-from toolchains.cli.targets import Target
-
-
-def known_keys() -> set[str]:
-    keys = set(OPTIONS)
-    for cls in TARGETS.values():
-        keys.add(f"{cls.PREFIX}_ENABLED")
-        keys.update(f"{cls.PREFIX}_{k}" for k in cls.SETTINGS)
-    return keys
 
 
 def defaults_path() -> str:
@@ -34,76 +24,36 @@ def defaults_path() -> str:
     return os.path.join(Program.folder(), DEFAULTS_NAME)
 
 
-class Settings:
+def load_settings(home: str) -> Settings:
     """The checked settings of every target: defaults, then the user's file.
     Raises ConfigError on any bad line or value (nothing runs then)."""
-
-    def __init__(self, home: str) -> None:
-        known = known_keys()
-        path = defaults_path()
-        try:
-            with open(path, encoding="utf-8") as f:
-                defaults = parse_conf(f.read(), known)
-        except FileNotFoundError:
-            raise ConfigError(f"the defaults file {path} is missing") from None
-        except ConfigError as e:
-            raise ConfigError(f"{path}: {e}") from None
-        lacking = sorted(known - set(defaults))
-        if lacking:
-            raise ConfigError(f"{path} lacks {', '.join(lacking)}")
-        self.user_path: str = os.path.join(home, CONF_REL)
-        self.source: str = tilde(self.user_path, home)
-        try:
-            with open(self.user_path, encoding="utf-8") as f:
-                text = f.read()
-        except FileNotFoundError:
-            text = ""
-        try:
-            user = parse_conf(text, known)
-        except ConfigError as e:
-            raise ConfigError(f"{self.source}: {e}") from None
-        self.user_keys: set[str] = set(user)
-        self.raw: dict[str, str] = {**defaults, **user}
-        self.enabled: dict[str, bool] = {}
-        self.policy: dict[str, dict[str, Any]] = {}
-        self.options: dict[str, Any] = {}
-        for key, parse in OPTIONS.items():
-            try:
-                self.options[key] = parse(self.raw[key])
-            except ConfigError as e:
-                raise ConfigError(f"{self.where(key)}: {key}: {e}") from None
-        for tid, cls in TARGETS.items():
-            key = f"{cls.PREFIX}_ENABLED"
-            try:
-                self.enabled[tid] = parse_bool(self.raw[key])
-            except ConfigError as e:
-                raise ConfigError(f"{self.where(key)}: {key}: {e}") from None
-            vals = {k: self.raw[f"{cls.PREFIX}_{k}"] for k in cls.SETTINGS}
-            try:
-                self.policy[tid] = cls.make_policy(vals, cls.PREFIX)
-            except ConfigError as e:
-                raise ConfigError(f"{self.where(*(f'{cls.PREFIX}_{k}' for k in cls.SETTINGS))}: {e}") from None
-
-    def where(self, *keys: str) -> str:
-        return self.source if any(k in self.user_keys for k in keys) else "defaults"
-
-    def source_of(self, cls: type[Target]) -> str:
-        keys = [f"{cls.PREFIX}_{k}" for k in ("ENABLED", *cls.SETTINGS)]
-        return self.where(*keys)
+    path = defaults_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            text: str | None = f.read()
+    except FileNotFoundError:
+        text = None
+    defaults = parse_defaults(path, text)
+    try:
+        with open(os.path.join(home, CONF_REL), encoding="utf-8") as f:
+            user_text = f.read()
+    except FileNotFoundError:
+        user_text = ""
+    return checked_settings(home, defaults, user_text)
 
 
-# The registry. Adding a target: a Target subclass here, its keys in
-# toolchains/toolchains.conf, a line in toolchains/README.md.
-TARGETS: dict[str, type[Target]] = {cls.ID: cls for cls in (RustBuild, PythonUv)}
+# The registry. Adding a target: a Target subclass here (see
+# toolchains/domain.py, SPECS, for the rest).
+TARGETS: dict[str, type[RustBuild] | type[PythonUv]] = {cls.SPEC.id: cls for cls in (RustBuild, PythonUv)}
 
 
-def select_targets(names: Sequence[str], settings: Settings) -> list[tuple[type[Target], bool]]:
+def select_targets(names: Sequence[str], settings: Settings) -> list[tuple[type[RustBuild] | type[PythonUv], bool]]:
     """[(Target class, named)]: the named targets (LANG:CACHE or LANG), or,
     without names, every enabled one. Raises Usage for an unknown or a
     planned target."""
     if not names:
         return [(cls, False) for tid, cls in TARGETS.items() if settings.enabled[tid]]
-    out: list[tuple[type[Target], bool]] = []
+    out: list[tuple[type[RustBuild] | type[PythonUv], bool]] = []
     for name in names:
         if ":" in name:
             if name in TARGETS:
@@ -126,7 +76,7 @@ def select_targets(names: Sequence[str], settings: Settings) -> list[tuple[type[
 
 
 def cmd_prune(home: str, now: float, action: str, names: Sequence[str]) -> int:
-    settings = Settings(home)
+    settings = load_settings(home)
     chosen = select_targets(names, settings)
     if not chosen:
         say(f"no target is enabled (settings: {settings.source}): nothing to do")
@@ -135,15 +85,15 @@ def cmd_prune(home: str, now: float, action: str, names: Sequence[str]) -> int:
     deadline = None
     if action == "apply":
         deadline = time.monotonic() + RUN_BUDGET
-        chosen = sorted(chosen, key=lambda c: c[0].MAX_SECONDS is None)  # stable: bounded ones first
+        chosen = sorted(chosen, key=lambda c: c[0].SPEC.max_seconds is None)  # stable: bounded ones first
     for cls, named in chosen:
-        t = cls(home, now, settings.policy[cls.ID])
+        t = cls.make(home, now, settings)
         t.named = named
         t.deadline = deadline
-        off = "" if settings.enabled[cls.ID] else " (disabled in the settings: runs only because it was named)"
+        off = "" if settings.enabled[cls.SPEC.id] else " (disabled in the settings: runs only because it was named)"
         if action == "plan":
-            say(f"== {cls.ID}: {where_text(t.location(), home)}{off}")
-            say(f"  policy: {cls.policy_text(t.policy)} ({settings.source_of(cls)})")
+            say(f"== {cls.SPEC.id}: {where_text(t.location(), home)}{off}")
+            say(f"  policy: {settings.policy_text(cls.SPEC.id)} ({settings.source_of(cls.SPEC)})")
         elif off:
             t.tsay(off.strip(" ()"), 5)
         try:

@@ -3,7 +3,31 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+from toolchains.domain.common import parse_off_or_duration, span
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class UvPolicy:
+    """python:uv's checked setting: at most one `uv cache prune` per INTERVAL seconds (0:
+    every run)."""
+
+    interval: int
+
+    @staticmethod
+    def parse(vals: Mapping[str, str], prefix: str) -> UvPolicy:
+        _ = prefix
+        return UvPolicy(interval=parse_off_or_duration(vals["INTERVAL"]))
+
+    def text(self) -> str:
+        every = span(self.interval) if self.interval else "every run"
+        return f"uv cache prune, at most once per INTERVAL ({every})"
 
 
 UV_CACHE_REL = ".cache/uv"

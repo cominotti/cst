@@ -45,7 +45,8 @@ from toolchains.domain.config import (
 )
 from toolchains.adapters.home_files import append_text, file_state, put_wrapper, read_cfg, wrapper_path, write_cfg
 from toolchains.adapters.program import PROG, Program, say
-from toolchains.cli.prune import Settings
+from toolchains.domain.prune import Settings
+from toolchains.cli.prune import load_settings
 
 
 def config_items(home: str) -> list[tuple[str, str, str, str]]:
@@ -265,7 +266,9 @@ def sccache_state(home: str) -> SccacheState:
     keyline = f"rustc-wrapper = {json.dumps(want)}"
     if value is None:
         expect = plain(data)
-        expect.setdefault("build", {})["rustc-wrapper"] = want
+        table = expect.setdefault("build", {})
+        if isinstance(table, dict):  # always: build is a table or absent here
+            table["rustc-wrapper"] = want
         headers = list(BUILD_HEADER.finditer(text))
         cands: list[str] = []
         if len(headers) == 1:
@@ -312,7 +315,9 @@ def sccache_state(home: str) -> SccacheState:
                     drop.add(i - 3)
             new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
             expect = plain(data)
-            del expect["build"]["rustc-wrapper"]
+            table = expect["build"]
+            if isinstance(table, dict):  # always: the line CST wrote is in [build]
+                del table["rustc-wrapper"]
             alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
             if parses_as(new, expect) or parses_as(new, alt):
                 st["remove"] = new
@@ -562,7 +567,7 @@ def config_lines(
 def cmd_config(home: str, action: str, lean: bool | None = None, sccache: bool | None = None) -> int:
     settings: Settings | None
     try:
-        settings = Settings(home)
+        settings = load_settings(home)
     except ConfigError as e:
         settings = None
         off = [w for w, flag in (("lean debug info", lean), ("sccache", sccache)) if flag is None]

@@ -120,9 +120,10 @@ The installed Rust toolchains are not a target: `status` only reports them
 
 The planned ones are **not implemented yet**: nothing is deleted there, and
 naming one (`cst toolchains prune plan go:mod`) says so. `status` lists them
-with where they are now. Adding one is a small step: a new class in
-`cli/` (`Target` in `cli/targets.py` says which methods), added to `TARGETS`
-in `cli/prune.py`, its keys in `toolchains.conf`, and a line in this table.
+with where they are now. Adding one is a small step: its `TargetSpec` and
+its policy in `domain/prune.py` (`SPECS`, `Settings`), a new class in `cli/`
+(`Target` in `cli/targets.py` says which methods) added to `TARGETS` in
+`cli/prune.py`, its keys in `toolchains.conf`, and a line in this table.
 
 ## 5. Settings
 
@@ -813,7 +814,7 @@ hand if you want them gone.
 | File | What it is |
 |---|---|
 | `cst-toolchains` | The program (`status`, `prune`, `auto`, `config`): only the bootstrap and a `main()` that runs `cli/`; its docstring is the `help`. `auto on` installs it at `~/.local/lib/cst/cst-toolchains` for the user timer, as a zipapp with the packages it imports (Python standard library only). |
-| `domain/` | The rules, no I/O, one module per area: `common.py` (names and paths, the settings syntax, the command line `parse_args`), `build.py` (rust:build: the build folders, the pruning decision `decide`), `uv.py` (python:uv), `prune.py` (the planned targets, the run's time budget), `auto.py` (the unit files, rendered through `cst_core`), `config.py` (the cargo, uv and sccache texts). |
+| `domain/` | The rules, no I/O, one module per area: `common.py` (names and paths, the settings syntax, the command line `parse_args`), `build.py` (rust:build: the build folders, the pruning decision `decide`), `uv.py` (python:uv), `prune.py` (the registry of targets `SPECS`, the checked settings `Settings`, the saved summary of a run, the planned targets, the run's time budget), `auto.py` (the unit files, rendered through `cst_core`), `config.py` (the cargo, uv and sccache texts). |
 | `adapters/` | The host, one module per tool or concern: `program.py` (output lines, journal-aware; `Program`, where the running program and the files next to it are; commands at idle priority), `home_files.py` (the files written in the home folder, the run summaries), `build_tree.py` (the build folders on disk, cargo's locks in them), `processes.py` (the processes that use them), `cargo.py` (cargo and git), `uv.py`, `rustup.py`, `sccache.py`, `units.py` (`systemctl --user`). |
 | `cli/` | The commands, one module per command group: `__init__.py` (`main()` and the run lock), `prune.py` (the settings, the registry `TARGETS`, `prune`), `targets.py`, `rust_build.py` and `python_uv.py` (the targets: `Target`, `RustBuild`, `PythonUv`), `status.py`, `auto.py` (`auto on/off`), `config.py`. |
 | `toolchains.conf` | The default settings. |

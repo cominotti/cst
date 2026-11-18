@@ -7,16 +7,26 @@ toolchains for the status report.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import stat
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 from cst_core.domain.values import MIB
-from toolchains.domain.common import ago, gib
+from toolchains.domain.common import (
+    ConfigError,
+    ago,
+    gib,
+    parse_bool,
+    parse_duration,
+    parse_off_or_duration,
+    parse_size,
+    span,
+)
 
 
 HASH_VAR = "{workspace-path-hash}"
@@ -38,6 +48,62 @@ def expected_template(home: str) -> str:
     return f"{home}/{ROOT_REL}/{HASH_VAR}"
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class RustPolicy:
+    """rust:build's checked settings, in seconds and bytes: MAX_IDLE, MAX_TOTAL (0: no
+    cap), MIN_KEEP, ORPHANS and INCREMENTAL_IDLE (0: off)."""
+
+    max_idle: int
+    max_total: int
+    min_keep: int
+    orphans: bool = True
+    incremental_idle: int = 0
+
+    @staticmethod
+    def parse(vals: Mapping[str, str], prefix: str) -> RustPolicy:
+        """The policy from {SETTING: raw value}; ConfigError for a bad value, or for a rule
+        that contradicts another."""
+        pol = RustPolicy(
+            max_idle=parse_duration(vals["MAX_IDLE"]),
+            max_total=parse_size(vals["MAX_TOTAL"]),
+            min_keep=parse_duration(vals["MIN_KEEP"]),
+            orphans=parse_bool(vals["ORPHANS"]),
+            incremental_idle=parse_off_or_duration(vals["INCREMENTAL_IDLE"]),
+        )
+        if pol.min_keep < MIN_KEEP_FLOOR:
+            raise ConfigError(f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} is below the floor of 15m")
+        if pol.max_idle < pol.min_keep:
+            raise ConfigError(
+                f"{prefix}_MAX_IDLE={vals['MAX_IDLE']} is shorter than {prefix}_MIN_KEEP={vals['MIN_KEEP']}"
+            )
+        if pol.incremental_idle and pol.incremental_idle < pol.min_keep:
+            raise ConfigError(
+                f"{prefix}_INCREMENTAL_IDLE={vals['INCREMENTAL_IDLE']} is shorter than "
+                f"{prefix}_MIN_KEEP={vals['MIN_KEEP']} (0 or off turns it off)"
+            )
+        return pol
+
+    def text(self) -> str:
+        cap = gib(self.max_total) if self.max_total else "off"
+        inc = span(self.incremental_idle) if self.incremental_idle else "off"
+        orph = "on" if self.orphans else "off"
+        return (
+            f"MAX_IDLE {span(self.max_idle)}, MAX_TOTAL {cap}, MIN_KEEP {span(self.min_keep)}, "
+            f"ORPHANS {orph}, INCREMENTAL_IDLE {inc}"
+        )
+
+
+class IncrementalDir:
+    """One of cargo's incremental folders in a build folder (<profile>/incremental or
+    <triple>/<profile>/incremental) and its size, summed while the folder is measured."""
+
+    __slots__ = ("path", "size")
+
+    def __init__(self, path: str, size: int = 0) -> None:
+        self.path: str = path
+        self.size: int = size
+
+
 class Folder:
     def __init__(self, root: str, top: str, leaf: str) -> None:
         self.key: str = f"{top}/{leaf}"
@@ -48,13 +114,13 @@ class Folder:
         self.problem: str = ""
         self.future: int = 0
         self.foreign: int = 0
-        # Cargo's incremental folders inside: [[path, size]], <profile>/incremental
-        # and <triple>/<profile>/incremental.
-        self.inc: list[Any] = []
+        # Cargo's incremental folders inside: <profile>/incremental and
+        # <triple>/<profile>/incremental.
+        self.inc: list[IncrementalDir] = []
 
     @property
     def inc_size(self) -> int:
-        return sum(int(n) for _, n in self.inc)
+        return sum(d.size for d in self.inc)
 
     def __repr__(self) -> str:
         return f"Folder({self.key}, {self.size}, {self.activity})"
@@ -92,6 +158,34 @@ def prefixes(root: str) -> tuple[str, ...]:
 # build folder it uses counts as in use while it runs.
 CARGO_COMM = re.compile(r"cargo(-.+)?")
 CARGO_ENV = ("CARGO_HOME", "CARGO_BUILD_BUILD_DIR", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CargoProc:
+    """A cargo (or cargo-*) process of the user, as /proc shows it: cwd None when it
+    cannot be read; env holds only the CARGO_ENV variables it was started with."""
+
+    pid: str
+    comm: str
+    cwd: str | None = None
+    exe: str = ""
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = dataclasses.field(default_factory=dict)
+
+
+# The answers of one run are kept under (command, folder, settings).
+type CargoKey = tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]
+type CargoCache = dict[CargoKey, tuple[str | None, str | None]]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CargoQuery:
+    """The read-only `cargo metadata` that tells which build folder a cargo process uses."""
+
+    key: CargoKey
+    cmd: tuple[str, ...]
+    env: Mapping[str, str]
+    cwd: str
 
 
 def manifest_arg(args: Sequence[str], cwd: str) -> str:
@@ -192,7 +286,7 @@ def is_tool_file(name: str) -> bool:
 
 def decide(
     folders: Sequence[Folder],
-    pol: Mapping[str, Any],
+    pol: RustPolicy,
     now: float,
     in_use: Mapping[str, Sequence[tuple[int | str, str]]],
     claimed: Mapping[str, Sequence[str]] | None = None,
@@ -204,32 +298,32 @@ def decide(
     order = sorted(folders, key=lambda f: (f.activity, f.key))
     act: dict[str, tuple[str, str]] = {}
     total = sum(f.size for f in folders)
-    inc_idle = pol.get("incremental_idle", 0)
+    inc_idle = pol.incremental_idle
     for f in order:
         idle = now - f.activity
         if f.problem:
             act[f.key] = ("keep", f"left alone: {f.problem}")
         elif f.key in in_use:
             act[f.key] = ("keep", "in use: " + users_text(in_use[f.key]))
-        elif idle < pol["min_keep"]:
+        elif idle < pol.min_keep:
             act[f.key] = ("keep", f"active {ago(idle)} ago (within MIN_KEEP)")
-        elif idle > pol["max_idle"]:
+        elif idle > pol.max_idle:
             act[f.key] = ("delete", f"idle {ago(idle)} > MAX_IDLE")
             total -= f.size
-        elif claimed is not None and pol.get("orphans", True) and f.key not in claimed:
+        elif claimed is not None and pol.orphans and f.key not in claimed:
             act[f.key] = ("delete", f"orphan: no workspace claims it (idle {ago(idle)})")
             total -= f.size
         elif inc_idle and idle > inc_idle and f.inc_size:
             act[f.key] = ("trim", f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})")
             total -= f.inc_size
-    if pol["max_total"] and total > pol["max_total"]:
+    if pol.max_total and total > pol.max_total:
         for f in order:
-            if total <= pol["max_total"]:
+            if total <= pol.max_total:
                 break
             a = act.get(f.key, ("", ""))[0]
             if a in ("keep", "delete"):
                 continue
-            act[f.key] = ("delete", f"over MAX_TOTAL ({gib(total)} > {gib(pol['max_total'])}), least recently active")
+            act[f.key] = ("delete", f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active")
             total -= f.size - (f.inc_size if a == "trim" else 0)
     out: list[tuple[Folder, str, str]] = []
     for f in order:

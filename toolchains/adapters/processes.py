@@ -6,12 +6,12 @@ processes (their folder, program, arguments and settings).
 from __future__ import annotations
 
 import os
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-from toolchains.domain.build import CARGO_COMM, CARGO_ENV, RUST_TOOLS, TRASH_PREFIX, prefixes
+from toolchains.domain.build import CARGO_COMM, CARGO_ENV, CargoProc, RUST_TOOLS, TRASH_PREFIX, prefixes
 
 
 PROC = "/proc"
@@ -97,35 +97,37 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     return found, unreadable
 
 
-def cargo_procs(uid: int | None = None) -> list[dict[str, Any]]:
+def cargo_procs(uid: int | None = None) -> list[CargoProc]:
     """The user's processes named cargo or cargo-* (cargo-nextest,
-    cargo-clippy, ...): [{pid, comm, cwd, exe, args, env}]. cwd is None when
-    it cannot be read."""
+    cargo-clippy, ...). cwd is None when it cannot be read."""
     target_uid = os.getuid() if uid is None else uid
-    out: list[dict[str, Any]] = []
+    out: list[CargoProc] = []
     for pid, comm, base in own_processes(target_uid):
         if not CARGO_COMM.fullmatch(comm):
             continue
-        p: dict[str, Any] = {"pid": pid, "comm": comm, "cwd": None, "exe": "", "args": [], "env": {}}
+        cwd: str | None = None
+        exe = ""
+        args: tuple[str, ...] = ()
+        env: dict[str, str] = {}
         try:
-            p["cwd"] = os.readlink(os.path.join(base, "cwd"))
+            cwd = os.readlink(os.path.join(base, "cwd"))
         except OSError:
             pass
         try:
-            p["exe"] = os.readlink(os.path.join(base, "exe"))
+            exe = os.readlink(os.path.join(base, "exe"))
         except OSError:
             pass
         try:
             with open(os.path.join(base, "cmdline"), "rb") as f:
-                p["args"] = [a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1]]
+                args = tuple(a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1])
             with open(os.path.join(base, "environ"), "rb") as f:
                 for item in f.read().split(b"\0"):
                     k, sep, v = item.decode("utf-8", "replace").partition("=")
                     if sep and k in CARGO_ENV:
-                        p["env"][k] = v
+                        env[k] = v
         except OSError:
             pass
         if not os.path.exists(base):
             continue  # ended meanwhile
-        out.append(p)
+        out.append(CargoProc(pid, comm, cwd, exe, args, env))
     return out

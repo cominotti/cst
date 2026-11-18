@@ -48,7 +48,7 @@ from toolchains.adapters.home_files import (
 )
 from toolchains.adapters.program import PROG, Program, say
 from toolchains.adapters.units import before_removal, disable_timer, manager_path, reload_failed, systemctl
-from toolchains.cli.prune import Settings, TARGETS, defaults_path
+from toolchains.cli.prune import TARGETS, defaults_path, load_settings
 
 
 UNITS: dict[str, Callable[[], str]] = {SERVICE: render_service, TIMER: render_timer}
@@ -115,7 +115,7 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
             f"'{PROG} auto on' turns it on again"
         )
         return rc
-    settings = Settings(home)
+    settings = load_settings(home)
     enabled = [cls for tid, cls in TARGETS.items() if settings.enabled[tid]]
     if not enabled:
         raise Refused(f"no target is enabled in the settings ({settings.source}): the timer would do nothing")
@@ -127,15 +127,15 @@ def cmd_auto_on(home: str, now: float, unless_off: bool = False) -> int:
     asked = False
     refused: list[str] = []
     for cls in enabled:
-        t = cls(home, now, settings.policy[cls.ID])
-        if cls.USES_PATH:
+        t = cls.make(home, now, settings)
+        if cls.SPEC.uses_path:
             if not asked:
                 mpath, asked = manager_path(), True
             t.path = mpath
         try:
             t.check()
         except Refused as e:
-            refused.append(f"{cls.ID}: {e}")
+            refused.append(f"{cls.SPEC.id}: {e}")
     if len(refused) == len(enabled):
         raise Refused("; ".join(refused))
     where = (
