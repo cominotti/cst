@@ -108,7 +108,8 @@ change per commit, with its proof). `.agents/skills/` holds checklists for
 one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
 `cst-shell-to-python` and `cst-refactor-parity`; open the one whose
 description fits the task. `.claude/rules` and `.claude/skills` are links to
-these two folders, for Claude Code.
+these two folders, for Claude Code. `.agents/workflows/cst-change.js` (linked as
+`.claude/workflows`) runs one change to a reviewed branch; its header says how.
 
 ## Commands
 
