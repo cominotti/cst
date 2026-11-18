@@ -334,6 +334,62 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   server that is already running keeps the `TMPDIR` it started with until it
   stops (after 10 minutes without work, or `sccache --stop-server` with that
   environment's `SCCACHE_SERVER_UDS`).
+- **The server runs in a scope of its own**, `cst-sccache-<toolbox name>.scope`
+  (`cst-sccache-host.scope` on the host), under your user manager. A server
+  that the sccache client starts stays in the cgroup of the compile that
+  started it, and runs every later compile of that environment there. When
+  that compile ran in a temporary scope with a memory cap (a test harness, a
+  `systemd-run --user --scope -p MemoryMax=4G` lane), the shared server and
+  every build that used it lived under that cap until the server stopped:
+  an OOM kill in the middle of other builds, reclaim, and memory counted
+  against the wrong build. So when the scope is missing, the wrapper starts
+  the server itself (`systemd-run --user --scope`, then
+  `sccache --start-server` with `TMPDIR=/tmp`) before it runs the
+  compile:
+  - inside a toolbox the scope goes into the inner `user.slice` of the user
+    manager, next to the toolboxes, so it gets their CPUs and weight (and
+    the game profile's idle class); on the host it goes into `app.slice`,
+    where host compiles from a terminal or a desktop IDE run (normal weight,
+    all CPUs; the game profile leaves it alone, as it leaves a host terminal,
+    see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    A host build that you start in a box of its own (`flatpak-spawn --host`
+    from a toolbox, `systemd-run --user --slice=user-NAME.slice`, a
+    `run-*` job) no longer keeps its compiles through sccache in that box:
+    they run in `cst-sccache-host.scope`, like every other host compile;
+  - a lock file next to the socket (`<socket>.lock`) makes the compiles
+    that cargo starts at once start one server, and the others wait until
+    it listens (up to 15 seconds, then they go on as below);
+  - each later compile only checks that the scope's folder in
+    `/sys/fs/cgroup` and the socket exist, with shell builtins (no program
+    is run, no bus call). The socket is removed before each start, so the
+    two together mean a server has started in the scope;
+  - a start that fails (systemd refuses the scope, or no server listens in
+    it afterwards) is written down in `<socket>.failed` (the seconds since
+    boot). For 10 minutes after it, compiles try no start, again with shell
+    builtins only, and use the server that the client started instead; then
+    one compile tries again (and removes that server's socket first, so the
+    client starts at most one more server in 10 minutes while the start
+    keeps failing). Without the pause, every compile would take the lock,
+    run `systemd-run`, and remove the socket of the server the compile
+    before it had started;
+  - `systemctl --user status cst-sccache-<toolbox name>.scope` shows the
+    server. The scope goes away when the server stops.
+
+  The client starts the server as before (in the compile's cgroup) when the
+  compile has no user manager above it (an ssh session, `docker exec`, a
+  system service), when the user manager's socket
+  (`$XDG_RUNTIME_DIR/systemd/private`, which `systemd-run --user`
+  connects to), `systemd-run` or `flock` is missing, when you set your own `SCCACHE_SERVER_UDS` or
+  `SCCACHE_SERVER_PORT`, or when the start fails; the build never fails
+  because of it. A server that an older wrapper started stays where it is
+  until it stops: the first compile after `config apply` starts the new
+  server in the scope, compiles already running on the old one finish
+  there, and the old one stops after 10 minutes without work (measured with
+  sccache 0.17.0). A memory cap on your own scope does not bound the
+  compiles that go through sccache: sccache runs rustc as a child of the
+  server, so they count against the server's scope (which has no cap).
+  Compiles that go straight to rustc (the cases above), build scripts and
+  tests stay in your scope.
 
 What is cached and what is not (sccache's own limits):
 

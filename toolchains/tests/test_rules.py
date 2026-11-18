@@ -37,7 +37,7 @@ import tempfile
 import time
 import tomllib
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 from unittest import mock
 
@@ -1361,15 +1361,18 @@ class RustcWrapperTest(unittest.TestCase):
         self.fake(self.sccache, report.format(who="sccache", log=self.log) + 'exec "$@"\n')
         self.containerenv = os.path.join(self.tmp, "containerenv")
         # Only test-owned programs on PATH (a real sccache must never be found):
-        # the two the wrapper runs itself are linked in.
+        # the ones the wrapper and the fakes run are linked in.
         self.sys = os.path.join(self.tmp, "sys")
         os.makedirs(self.sys)
-        for tool in ("mkdir", "chmod"):
-            resolved = shutil.which(tool)
-            assert resolved is not None
-            os.symlink(resolved, os.path.join(self.sys, tool))
+        self.link_tools("mkdir", "chmod", "rm", "readlink", "sleep")
         self.sh = shutil.which("sh")
         self.script = WRAPPER
+        # The cgroup the wrapper reads and the cgroup tree it checks: test files
+        # (missing here: no user manager, so no server start of its own).
+        self.proc_cgroup = os.path.join(self.tmp, "proc-self-cgroup")
+        self.cgroup_fs = os.path.join(self.tmp, "cgroup-fs")
+        # The seconds since boot the wrapper reads (missing here; user_manager writes it).
+        self.uptime = os.path.join(self.tmp, "proc-uptime")
 
     def written(self, workspace: str) -> None:
         """Run a copy of the wrapper with RUST_SCCACHE_WORKSPACE=WORKSPACE written
@@ -1383,37 +1386,54 @@ class RustcWrapperTest(unittest.TestCase):
         with open(self.script, "w") as f:
             f.write(text)
 
+    def link_tools(self, *names: str) -> None:
+        """Link these programs of the machine into the test's own PATH folder."""
+        for tool in names:
+            resolved = shutil.which(tool)
+            assert resolved is not None, f"{tool} is needed for these tests"
+            os.symlink(resolved, os.path.join(self.sys, tool))
+
     @staticmethod
     def fake(path: str, body: str) -> None:
         with open(path, "w") as f:
             f.write("#!/bin/sh\n" + body)
         os.chmod(path, 0o755)
 
-    def run_wrapper(self, *args: str, **env: str | None) -> list[dict[str, str]]:
-        assert self.sh is not None
+    def wrapper_env(self, **env: str | None) -> dict[str, str]:
+        """The wrapper's clean environment; a None value leaves that variable out."""
         base: dict[str, str | None] = {
             "PATH": f"{self.bin}:{self.sys}",
             "HOME": self.home,
             "XDG_RUNTIME_DIR": self.run_dir,
             "CST_SCCACHE_CONTAINERENV": self.containerenv,
+            "CST_SCCACHE_PROC_CGROUP": self.proc_cgroup,
+            "CST_SCCACHE_CGROUP_FS": self.cgroup_fs,
+            "CST_SCCACHE_PROC_UPTIME": self.uptime,
         }
         base.update(env)
-        clean_env = {k: v for k, v in base.items() if v is not None}
-        open(self.log, "w").close()
-        r = subprocess.run(
-            [self.sh, self.script, *args],
-            check=False,
-            env=clean_env,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
+        return {k: v for k, v in base.items() if v is not None}
+
+    def calls(self) -> list[dict[str, str]]:
+        """The fakes' log lines (who|key=value|...), oldest first."""
         with open(self.log) as f:
             return [
                 dict(kv.split("=", 1) for kv in ln.split("|")[1:]) | {"who": ln.split("|")[0]}
                 for ln in f.read().splitlines()
             ]
+
+    def run_wrapper(self, *args: str, **env: str | None) -> list[dict[str, str]]:
+        assert self.sh is not None
+        open(self.log, "w").close()
+        r = subprocess.run(
+            [self.sh, self.script, *args],
+            check=False,
+            env=self.wrapper_env(**env),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return self.calls()
 
     def rustc(self) -> str:
         return os.path.join(self.tools, "rustc")
@@ -1594,6 +1614,333 @@ class RustcWrapperTest(unittest.TestCase):
                     ["clippy-driver"],
                     (setting, env, extra),
                 )
+
+    # The server in a scope of its own: a compile inside a lushtext-style capped
+    # scope in a toolbox, under the user manager of uid 1000.
+    MANAGER = "/user.slice/user-1000.slice/user@1000.service"
+    CAPPED = MANAGER + "/user.slice/user-lushtext.slice/user-lushtext-heavy.slice/lushtext-cap-7.scope"
+
+    def user_manager(
+        self,
+        cgroup: str = CAPPED,
+        *,
+        systemd_run: bool = True,
+        flock: bool = True,
+        flock_log: bool = False,
+        manager_socket: bool = True,
+        start_fails: bool = False,
+        start_delay: str = "0",
+    ) -> None:
+        """A user manager above the compile: /proc/self/cgroup, the manager's
+        folder in the cgroup tree, the manager's socket (what systemd-run
+        --user connects to), a fake systemd-run that makes
+        the scope's folder and runs the command (as the real one: the folder
+        exists before the server listens), the real flock, and a fake sccache
+        whose --start-server logs how it was started, waits START_DELAY, then
+        leaves its socket."""
+        with open(self.proc_cgroup, "w") as f:
+            f.write(f"1:name=systemd:/x\n0::{cgroup}\n")
+        self.manager_dir = self.cgroup_fs + self.MANAGER
+        os.makedirs(self.manager_dir, exist_ok=True)
+        if manager_socket:
+            os.makedirs(os.path.join(self.run_dir, "systemd"), exist_ok=True)
+            os.mknod(os.path.join(self.run_dir, "systemd", "private"), stat.S_IFSOCK | 0o600)
+        if flock:
+            self.link_tools("flock")
+        if flock_log:
+            real = shutil.which("flock")
+            assert real is not None
+            self.fake(
+                os.path.join(self.bin, "flock"), f'printf "flock|args=%s\\n" "$*" >>"{self.log}"\nexec {real} "$@"\n'
+            )
+        self.set_uptime("1000.25")
+        if systemd_run:
+            self.fake(
+                os.path.join(self.bin, "systemd-run"),
+                f'printf "systemd-run|args=%s\\n" "$*" >>"{self.log}"\n'
+                + ("exit 1\n" if start_fails else "")
+                + "unit= slice=\n"
+                + "while [ $# -gt 0 ]; do\n"
+                + '    case "$1" in --unit=*) unit=${1#--unit=} ;; --slice=*) slice=${1#--slice=} ;; --*) ;; *) break ;; esac\n'
+                + "    shift\n"
+                + "done\n"
+                + f'mkdir -p "{self.manager_dir}/$slice/$unit"\n'
+                + 'exec "$@"\n',
+            )
+        # A compile with no socket: the real client would start a server here,
+        # in the compile's own cgroup (auto=yes).
+        compile_report = (
+            'auto=no; [ -z "${SCCACHE_SERVER_UDS:-}" ] || [ -e "$SCCACHE_SERVER_UDS" ] || auto=yes\n'
+            'printf "sccache|uds=%s|tmp=%s|auto=%s|args=%s\\n" "${SCCACHE_SERVER_UDS-}" "${TMPDIR-unset}" "$auto" "$*" '
+            f'>>"{self.log}"\n'
+        )
+        self.fake(
+            self.sccache,
+            'if [ "${1:-}" = --start-server ]; then\n'
+            "    fd9=no; [ -e /proc/$$/fd/9 ] && fd9=yes\n"
+            '    sock=absent; [ -e "$SCCACHE_SERVER_UDS" ] && sock=present\n'
+            '    printf "start|uds=%s|tmp=%s|fd9=%s|in=%s|out=%s|err=%s|sock=%s\\n" "$SCCACHE_SERVER_UDS" '
+            '"${TMPDIR-unset}" "$fd9" "$(readlink /proc/$$/fd/0)" "$(readlink /proc/$$/fd/1)" '
+            f'"$(readlink /proc/$$/fd/2)" "$sock" >>"{self.log}"\n'
+            f"    sleep {start_delay}\n"
+            f"    {sys.executable} -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "
+            '"$SCCACHE_SERVER_UDS"\n'
+            '    echo "sccache: Starting the server..."; echo "sccache: Listening" >&2\n'
+            "    exit 0\n"
+            "fi\n" + compile_report + 'exec "$@"\n',
+        )
+        with open(self.containerenv, "w") as f:
+            f.write('name="hypatia-f45"\n')
+
+    def set_uptime(self, seconds: str) -> None:
+        with open(self.uptime, "w") as f:
+            f.write(f"{seconds} 4000.50\n")
+
+    def sock(self) -> str:
+        return os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock")
+
+    def scope_dir(self, slice_name: str = "user.slice", env_id: str = "hypatia-f45") -> str:
+        return os.path.join(self.manager_dir, slice_name, f"cst-sccache-{env_id}.scope")
+
+    def test_cold_start_puts_the_server_in_its_own_scope(self) -> None:
+        # The first compile, in a capped scope: the wrapper starts the server in
+        # cst-sccache-<toolbox>.scope in the inner user.slice, silently, with
+        # TMPDIR=/tmp, without the lock's descriptor; then the compile goes on.
+        self.user_manager()
+        sock = os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock")
+        calls = self.run_wrapper(self.rustc(), "--crate-name", "dep", TMPDIR=os.path.join(self.tmp, "scope-tmp"))
+        self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
+        self.assertEqual(
+            calls[0]["args"],
+            "--user --scope --quiet --collect --unit=cst-sccache-hypatia-f45.scope --slice=user.slice "
+            "--description=CST: the shared sccache server (hypatia-f45) sccache --start-server",
+        )
+        start = calls[1]
+        self.assertEqual(
+            (start["uds"], start["tmp"], start["fd9"], start["sock"]), (sock, "/tmp", "no", "absent"), start
+        )
+        self.assertEqual((start["in"], start["out"], start["err"]), ("/dev/null",) * 3, start)
+        self.assertEqual((calls[2]["uds"], calls[2]["tmp"], calls[2]["auto"]), (sock, "/tmp", "no"))
+        self.assertTrue(os.path.isdir(self.scope_dir()))
+        self.assertTrue(stat.S_ISSOCK(os.stat(sock).st_mode))
+        self.assertTrue(os.path.exists(sock + ".lock"))
+
+    def test_warm_compile_starts_nothing(self) -> None:
+        self.user_manager()
+        self.run_wrapper(self.rustc(), "x")
+        for _ in range(2):
+            calls = self.run_wrapper(self.rustc(), "x")
+            self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
+
+    def test_host_server_goes_to_app_slice(self) -> None:
+        self.user_manager(self.MANAGER + "/app.slice/app-gnome-terminal-1.scope")
+        os.unlink(self.containerenv)
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
+        self.assertIn("--unit=cst-sccache-host.scope --slice=app.slice ", calls[0]["args"])
+        self.assertTrue(os.path.isdir(self.scope_dir("app.slice", "host")))
+
+    def test_a_scope_or_a_socket_alone_starts_a_server(self) -> None:
+        # A socket left by a server that stopped (or by a server an older
+        # wrapper started, in another cgroup), with no scope: start one, after
+        # removing that socket. A scope without its socket: a start is under
+        # way or failed; start again (the lock makes it one).
+        self.user_manager()
+        sock = os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock")
+        os.mknod(sock, stat.S_IFSOCK | 0o600)
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
+        self.assertEqual(calls[1]["sock"], "absent")
+        os.unlink(sock)
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
+
+    def test_a_failed_start_backs_off_for_ten_minutes(self) -> None:
+        # systemd-run refused (a unit of that name already there, the manager
+        # said no): the client is run as before and starts a server in the
+        # compile's cgroup. For 10 minutes no compile tries again: no flock, no
+        # systemd-run, and the socket of that server stays.
+        self.user_manager(start_fails=True, flock_log=True)
+        sock = self.sock()
+        self.assertEqual(self.who(self.rustc(), "x"), ["flock", "systemd-run", "sccache", "rustc"])
+        with open(sock + ".failed") as f:
+            self.assertEqual(f.read(), "1000\n")
+        os.mknod(sock, stat.S_IFSOCK | 0o600)  # the server the client started
+        self.set_uptime("1599.99")
+        self.assertEqual(self.who(self.rustc(), "x"), ["sccache", "rustc"])
+        self.assertTrue(stat.S_ISSOCK(os.stat(sock).st_mode))
+        self.set_uptime("1600.00")
+        self.assertEqual(self.who(self.rustc(), "x"), ["flock", "systemd-run", "sccache", "rustc"])
+        with open(sock + ".failed") as f:
+            self.assertEqual(f.read(), "1600\n")
+
+    def test_a_start_that_works_clears_the_marker(self) -> None:
+        self.user_manager()
+        with open(self.sock() + ".failed", "w") as f:
+            f.write("1000\n")
+        self.set_uptime("1700")
+        self.assertEqual(self.who(self.rustc(), "x"), ["systemd-run", "start", "sccache", "rustc"])
+        with open(self.sock() + ".failed") as f:
+            self.assertEqual(f.read(), "")
+
+    def test_a_marker_or_a_clock_it_cannot_read_holds_nothing_back(self) -> None:
+        # A marker from before a reboot (later than now), one that is not a
+        # number (never evaluated: no command in it runs) or has a leading zero
+        # (an error in $((...)) would end the wrapper), no clock to read, or
+        # one that is not a number: the start is tried.
+        pwned = os.path.join(self.tmp, "pwned")
+        cases: list[tuple[str, str | None, str | None]] = [
+            ("from before a reboot", "5000\n", "1000.25"),
+            ("not a number", "12x\n", "1000.25"),
+            ("a leading zero (not octal)", "0998\n", "1000.25"),
+            ("a clock with a leading zero", "1000\n", "01000.25"),
+            ("a command", f"a[$(touch {pwned})]\n", "1000.25"),
+            ("no clock", "1000\n", None),
+            ("a clock that is not a number", "1000\n", "up"),
+        ]
+        for label, marker, uptime in cases:
+            with self.subTest(label):
+                self.setUp()  # a fresh folder of its own (setUp removes it at the end)
+                self.user_manager(start_fails=True)
+                assert marker is not None
+                with open(self.sock() + ".failed", "w") as f:
+                    f.write(marker)
+                if uptime is None:
+                    os.unlink(self.uptime)
+                else:
+                    self.set_uptime(uptime)
+                self.assertEqual(self.who(self.rustc(), "x"), ["systemd-run", "sccache", "rustc"], label)
+        self.assertFalse(os.path.exists(pwned))
+
+    def run_parallel(self, n: int) -> None:
+        """Run N wrappers at once (cargo's parallel rustc), each to exit 0; the log starts empty."""
+        assert self.sh is not None
+        env = self.wrapper_env()
+        open(self.log, "w").close()
+        procs = [
+            subprocess.Popen(
+                [self.sh, self.script, self.rustc(), "--crate-name", f"c{i}"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for i in range(n)
+        ]
+        for p in procs:
+            _, err = p.communicate(timeout=60)
+            self.assertEqual(p.returncode, 0, err)
+
+    def test_parallel_compiles_try_a_failing_start_once(self) -> None:
+        # The compiles that waited for the lock of a failed start do not try
+        # again: one systemd-run for 8 parallel compiles.
+        self.user_manager(start_fails=True)
+        self.run_parallel(8)
+        who = [c["who"] for c in self.calls()]
+        self.assertEqual((who.count("systemd-run"), who.count("sccache"), who.count("rustc")), (1, 8, 8), who)
+
+    def test_a_lock_that_cannot_be_opened_is_silent(self) -> None:
+        # The shell's "cannot create" message would land among the compiler's
+        # messages in cargo's output.
+        self.user_manager()
+        os.mkdir(self.sock() + ".lock")
+        assert self.sh is not None
+        open(self.log, "w").close()
+        r = subprocess.run(
+            [self.sh, self.script, self.rustc(), "x"],
+            check=False,
+            env=self.wrapper_env(),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual([c["who"] for c in self.calls()], ["sccache", "rustc"])
+
+    def test_warm_and_backing_off_compiles_fork_nothing(self) -> None:
+        # With no process allowed to start (RLIMIT_NPROC 0), the wrapper must
+        # still get to the compile: a warm compile and one in the 10 minutes
+        # after a failed start run builtins only (an exec is not a fork).
+        prlimit = shutil.which("prlimit")
+        assert prlimit is not None, "util-linux prlimit is needed for this test"
+        assert self.sh is not None
+        control = subprocess.run(
+            [prlimit, "--nproc=0", sys.executable, "-I", "-c", "import os; os.fork()"],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertNotEqual(control.returncode, 0, "the limit does not stop a fork here (root?)")
+        self.user_manager()
+        self.run_wrapper(self.rustc(), "x")  # the cold start
+        for state in ("warm", "backing off"):
+            if state == "backing off":
+                shutil.rmtree(self.scope_dir())
+                with open(self.sock() + ".failed", "w") as f:
+                    f.write("990\n")
+            open(self.log, "w").close()
+            r = subprocess.run(
+                [prlimit, "--nproc=0", self.sh, self.script, self.rustc(), "x"],
+                check=False,
+                env=self.wrapper_env(),
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+            )
+            self.assertEqual((r.returncode, r.stderr), (0, ""), state)
+            self.assertEqual([c["who"] for c in self.calls()], ["sccache", "rustc"], state)
+
+    def test_without_what_a_scope_needs_the_client_starts_the_server(self) -> None:
+        # Today's path, with nothing run before sccache: no user manager above
+        # the compile (an ssh session, docker exec, a system service), a
+        # manager folder not in the cgroup tree, no manager socket, no systemd-run or
+        # flock, or a server address of the caller's own.
+        um = self.user_manager
+
+        def no_cgroup_file() -> None:
+            um()
+            os.unlink(self.proc_cgroup)
+
+        def no_manager_folder() -> None:
+            um()
+            shutil.rmtree(self.cgroup_fs)
+
+        cases: list[tuple[str, Callable[[], None], dict[str, str | None]]] = [
+            ("root cgroup", lambda: um("/"), {}),
+            ("ssh session", lambda: um("/user.slice/user-1000.slice/session-3.scope"), {}),
+            ("system service", lambda: um("/system.slice/sshd.service"), {}),
+            ("no uid", lambda: um("/user.slice/user@.service/app.slice/x.scope"), {}),
+            ("bad uid", lambda: um("/user.slice/user@10a.service/app.slice/x.scope"), {}),
+            ("no manager socket", lambda: um(manager_socket=False), {}),
+            ("no systemd-run", lambda: um(systemd_run=False), {}),
+            ("no flock", lambda: um(flock=False), {}),
+            ("own socket", um, {"SCCACHE_SERVER_UDS": "/nonexistent/own.sock"}),
+            ("own port", um, {"SCCACHE_SERVER_PORT": "4300"}),
+            ("no runtime dir", um, {"XDG_RUNTIME_DIR": None}),
+            ("no cgroup file", no_cgroup_file, {}),
+            ("manager folder not in the cgroup tree", no_manager_folder, {}),
+        ]
+        for label, setup, env in cases:
+            with self.subTest(label):
+                self.setUp()  # a fresh folder of its own (setUp removes it at the end)
+                setup()
+                calls = self.run_wrapper(self.rustc(), "x", **env)
+                self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], label)
+
+    def test_parallel_cold_compiles_start_one_server(self) -> None:
+        # cargo starts many rustc at once. The start takes a while after the
+        # scope's folder exists (start_delay): without the lock, or with the
+        # folder alone as the test, each would start its own server.
+        self.user_manager(start_delay="0.5")
+        self.run_parallel(8)
+        calls = self.calls()
+        who = [c["who"] for c in calls]
+        self.assertEqual((who.count("systemd-run"), who.count("start")), (1, 1), who)
+        self.assertEqual((who.count("sccache"), who.count("rustc")), (8, 8), who)
+        # And no compile found the server missing (it would start one in its own cgroup).
+        self.assertEqual([c for c in calls if c["who"] == "sccache" and c["auto"] != "no"], [])
 
     def test_shell_lint(self) -> None:
         r = subprocess.run(["sh", "-n", WRAPPER], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL)
