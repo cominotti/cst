@@ -50,11 +50,6 @@ jobs:
           checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
           enable-cache: 'false'
 
-      # Known vulnerabilities in the locked dev tools (uv.lock, every group). It
-      # needs the network, so it runs here and not in the fast gates.
-      - name: Audit the locked dev tools (uv audit)
-        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd ci uv-audit
-
       - name: Audit invowk module security (JSON report)
         # As root, like the summary step it replaces: the report goes into the
         # checkout and the summary into GITHUB_STEP_SUMMARY, which the ci user cannot write.
@@ -71,6 +66,36 @@ jobs:
 
       - name: Run the fast gates (invowk cmd check)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
+
+  # Known vulnerabilities in the locked dev tools (uv.lock, every group). It
+  # needs the network, so it runs here and not in the fast gates. A job of
+  # its own: a new advisory or a vulnerability database that does not answer
+  # fails this job only, and the static gates above still run.
+  # tests/test_workflow_audit.py keeps it the last step of a job with no
+  # `if:` or `continue-on-error:`.
+  uv-audit:
+    name: Audit the Locked Dev Tools (uv audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      # The same uv pin as ci.yml (version and archive SHA256); move both together.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.0'
+          checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
+          enable-cache: 'false'
+
+      - name: Audit the locked dev tools (uv audit)
+        run: invowk cmd ci uv-audit
 
   # The unit suite under coverage.py: a second unit run (about 6 minutes), so
   # nightly only. Same image, tools and user as the fast gates, so the same

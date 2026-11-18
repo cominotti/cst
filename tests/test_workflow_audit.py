@@ -18,8 +18,11 @@ what zizmor itself cannot:
   a finding at line 201 of a second composite action;
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
-- the nightly runs `invowk cmd ci uv-audit`, and that task runs exactly
-  UV_AUDIT_COMMAND: `uv audit --locked` on every dependency group;
+- the nightly runs `invowk cmd ci uv-audit` as the last step of a job with
+  no `if:` or `continue-on-error:` (a failed audit then skips no other
+  gate and cannot be let through), with no uv variable (`UV_...`) in the
+  workflow, and that task runs exactly UV_AUDIT_COMMAND: `uv audit
+  --locked` on every dependency group;
 - `invowk cmd check` runs `invowk cmd test workflows`, and that task runs
   exactly ZIZMOR_COMMAND: zizmor with --offline, the config file and
   --strict-collection (without it, a file zizmor cannot parse is skipped
@@ -217,11 +220,58 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
     return []
 
 
+UV_AUDIT_STEP = re.compile(r"^\s*(?:-\s+)?run:\s*invowk cmd ci uv-audit\s*$")
+_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+_LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error)\s*:")
+_STEP = re.compile(r"^(\s*)-\s")
+
+
 def uv_audit_problems(cue: str, nightly: str) -> list[str]:
-    """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes)."""
+    """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes).
+
+    The nightly must run the task in a step `run: invowk cmd ci uv-audit`
+    (on one line, nothing added), as the last step of its job (a failed
+    audit then skips no other gate), in a job with no `if:` or
+    `continue-on-error:` at any depth, and no uv variable (`UV_...`) may
+    appear anywhere in the workflow. Comment lines are left out.
+    """
     out: list[str] = []
-    if not any(line.strip().endswith("invowk cmd ci uv-audit") for line in nightly.splitlines()):
-        out.append(f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`")
+    lines = [(n, line) for n, line in enumerate(nightly.splitlines(), 1) if not line.lstrip().startswith("#")]
+    out += [
+        f"{NIGHTLY}:{n}: a uv variable (`UV_...`) in the nightly; it can leave packages or vulnerabilities out "
+        "of the audit"
+        for n, line in lines
+        if "UV_" in line
+    ]
+    jobs: dict[str, list[tuple[int, str]]] = {}
+    job: list[tuple[int, str]] | None = None
+    for n, line in lines:
+        found = _JOB.match(line)
+        if found is not None:
+            job = jobs.setdefault(found.group(1), [])
+        elif line and not line.startswith(" "):
+            job = None
+        elif job is not None:
+            job.append((n, line))
+    runs = [(name, n) for name, body in jobs.items() for n, line in body if UV_AUDIT_STEP.match(line)]
+    if not runs:
+        out.append(f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)")
+    for name, at in runs:
+        body = jobs[name]
+        for n, line in body:
+            lenient = _LENIENT.match(line)
+            if lenient is not None:
+                out.append(
+                    f"{NIGHTLY}:{n}: the job {name} has `{lenient.group(1)}:`; the job that runs uv audit may "
+                    "not, since it lets the nightly pass without the audit"
+                )
+        steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
+        depth = min((d for _, d in steps), default=0)
+        if any(n > at and d == depth for n, d in steps):
+            out.append(
+                f"{NIGHTLY}:{at}: the uv audit step must be the last step of the job {name}: when it fails, "
+                "the steps after it do not run (give the audit a job of its own)"
+            )
     return out + command_problems(cue, "ci uv-audit", UV_AUDIT_COMMAND, UV_AUDIT_WHY)
 
 
@@ -255,7 +305,26 @@ GOOD_CUE = '''cmds: [
 	},
 ]
 '''
-GOOD_NIGHTLY = "      - name: x\n        run: runuser -u ci -- invowk cmd ci uv-audit\n"
+GOOD_NIGHTLY = """name: Nightly
+permissions:
+  contents: read
+jobs:
+  static-gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fast gates
+        if: always()
+        run: invowk cmd check
+  # The audit, in a job of its own.
+  uv-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@abc # v7
+        with:
+          persist-credentials: false
+      - name: Audit
+        run: invowk cmd ci uv-audit
+"""
 
 
 class WorkflowAuditTest(unittest.TestCase):
@@ -413,7 +482,7 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(uv_audit_problems(GOOD_CUE, GOOD_NIGHTLY), [])
         self.assertEqual(
             uv_audit_problems(GOOD_CUE, "      - run: invowk cmd check\n"),
-            [f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`"],
+            [f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)"],
         )
         good = " ".join(UV_AUDIT_COMMAND)
         for bad in (
@@ -436,6 +505,44 @@ class WorkflowAuditTest(unittest.TestCase):
                         f"not `{bad}` (see {UV_AUDIT_WHY})"
                     ],
                 )
+
+    def test_the_nightly_job_cannot_skip_or_narrow_the_audit(self) -> None:
+        none = [f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)"]
+        last = (
+            f"{NIGHTLY}:19: the uv audit step must be the last step of the job uv-audit: when it fails, "
+            "the steps after it do not run (give the audit a job of its own)"
+        )
+        lenient = (
+            "{}: the job uv-audit has `{}:`; the job that runs uv audit may not, since it lets the "
+            "nightly pass without the audit"
+        )
+        uv_var = (
+            "{}: a uv variable (`UV_...`) in the nightly; it can leave packages or vulnerabilities out of the audit"
+        )
+        step = "        run: invowk cmd ci uv-audit\n"
+        for nightly, want in (
+            (GOOD_NIGHTLY.replace(step, "        # run: invowk cmd ci uv-audit\n"), none),
+            (GOOD_NIGHTLY.replace(step, "        run: invowk cmd ci uv-audit || true\n"), none),
+            (
+                GOOD_NIGHTLY.replace(step, "        run: UV_NO_DEV=1 invowk cmd ci uv-audit\n"),
+                [uv_var.format(f"{NIGHTLY}:19"), *none],
+            ),
+            (GOOD_NIGHTLY + "      - name: After\n        run: invowk cmd check\n", [last]),
+            (
+                GOOD_NIGHTLY.replace(step, step.replace("run:", "continue-on-error: true\n        run:")),
+                [lenient.format(f"{NIGHTLY}:19", "continue-on-error")],
+            ),
+            (
+                GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:\n    if: false\n"),
+                [lenient.format(f"{NIGHTLY}:13", "if")],
+            ),
+            (
+                GOOD_NIGHTLY.replace("permissions:", "env:\n  UV_NO_DEV: '1'\npermissions:"),
+                [uv_var.format(f"{NIGHTLY}:3")],
+            ),
+        ):
+            with self.subTest(nightly=nightly):
+                self.assertEqual(uv_audit_problems(GOOD_CUE, nightly), want)
 
     def test_the_repository_keeps_the_audit_on(self) -> None:
         files = repo_files()

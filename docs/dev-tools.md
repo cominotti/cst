@@ -470,10 +470,15 @@ audit-command`: every package of `uv.lock`, in every group (`dev`,
 and a known vulnerability fails it. `--locked` stops it when `uv.lock` does
 not match `pyproject.toml`; `--preview-features audit-command` only silences
 the notice that the command is new in uv 0.12. It needs the network, so the
-nightly workflow runs it (in its static gates job) and `check` does not.
+nightly workflow runs it, in a job of its own (`uv-audit`), so that a new
+advisory or a database that does not answer fails that job only and the
+nightly's static gates still run; `check` does not run it.
 When it fails, upgrade that pin (below), or the tool that pulls it in.
 `tests/test_workflow_audit.py` fails when the nightly stops running the task
-or the task runs anything but exactly that command: dropping `--locked`
+(the step must be `run: invowk cmd ci uv-audit` on one line, not a comment),
+when that step is not the last of its job or the job has an `if:` or a
+`continue-on-error:`, when a uv variable (`UV_...`) appears in the
+nightly, or when the task runs anything but exactly that command: dropping `--locked`
 fails, and so does any word added, such as an option that leaves packages
 or vulnerabilities out (`--no-group`, `--only-dev`, `--no-extra`,
 `--ignore`, `--ignore-until-fixed`, `--frozen`, `--service-url`), a
