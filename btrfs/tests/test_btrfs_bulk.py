@@ -51,12 +51,12 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-# The exact bytes of state files the writers produce (tests/fixtures/state-formats).
 def kind_of(path: str) -> str:
     """absent, link or there."""
     return "link" if os.path.islink(path) else "there" if os.path.exists(path) else "absent"
 
 
+# The exact bytes of state files the writers produce (tests/fixtures/state-formats).
 STATE_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 

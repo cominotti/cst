@@ -133,7 +133,8 @@ class StateFiles:
     def jwrite(self, ident: str, j: ItemJournal | SteamJournal) -> None:
         os.makedirs(self.paths.state, mode=0o755, exist_ok=True)
         # durable: the rename itself is on disk before anything it protects is done.
-        # "v": its format (JOURNAL), so that an older btrfs-bulk leaves it alone.
+        # "v": its format (JOURNAL). A btrfs-bulk from this format on leaves a journal of a newer one alone;
+        # one from before the field reads any journal as its own (format 0).
         write_atomic(self.jpath(ident), json.dumps({**j, "v": JOURNAL.version}), mode="umask", relabel=False)
 
     def _jload(self, ident: str) -> object:

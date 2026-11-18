@@ -278,7 +278,8 @@ class GcStateFiles:
 
     def save_state(self, state: GcState) -> None:
         os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
-        # "v": its format (STATE_FORMAT), so that an older docker-gc does not take it for its own.
+        # "v": its format (STATE_FORMAT). A docker-gc from this format on refuses a state of a newer one;
+        # one from before the field reads any state as its own (format 0).
         text = json.dumps({**asdict(state), "v": STATE_FORMAT.version})
         write_atomic(self.paths.last_used, text, mode="umask", durable="file", relabel=False)
 
