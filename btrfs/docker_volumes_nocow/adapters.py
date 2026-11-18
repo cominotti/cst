@@ -5,6 +5,7 @@ whether a dockerd uses them, the helper's state files, SELinux labels, the journ
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+import contextlib
 import errno
 import json
 import os
@@ -296,21 +297,17 @@ class NocowStateFiles:
         write_atomic(self.paths.postponed, json.dumps(dict(record)) + "\n", mode=0o644, relabel=False)
 
     def clear_postponed(self) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):  # nothing postponed
             os.remove(self.paths.postponed)
-        except FileNotFoundError:
-            pass  # nothing postponed
 
 
 def is_dockerd(proc: str) -> bool:
     """The process in /proc/PID is a dockerd (its name or its program file)."""
     with open(os.path.join(proc, "comm"), "rb") as f:
         names = {f.read().strip()}
-    try:
+    with contextlib.suppress(OSError):  # a kernel thread, or a process that just ended
         # As bytes: a program file name need not be valid UTF-8.
         names.add(os.path.basename(os.readlink(os.fsencode(os.path.join(proc, "exe"))).removesuffix(b" (deleted)")))
-    except OSError:
-        pass  # a kernel thread, or a process that just ended
     return b"dockerd" in names
 
 
