@@ -1677,7 +1677,14 @@ class MemoryLowOverrideRuleTest(unittest.TestCase):
             with self.subTest(text=text):
                 dropins = [(self.CST, self.CST_TEXT), (mine, text)]
                 self.assertEqual(D.memory_low_override(effective, dropins, self.CST, self.WANT), mine)
-        for comment in ("[Slice]\n#MemoryLow=1G\n", "[Slice]\n; MemoryLow=1G\n", "[Slice]\nMemoryLowX=1G\n"):
+        for comment in (
+            "[Slice]\n#MemoryLow=1G\n",  # comments, also after blanks
+            "[Slice]\n; MemoryLow=1G\n",
+            "[Slice]\n  # MemoryLow=1G\n",
+            "[Slice]\nMemoryLowX=1G\n",  # other keys
+            "[Slice]\nStartupMemoryLow=1G\n",
+            "[Slice]\nDefaultMemoryLow=1G\n",
+        ):
             with self.subTest(text=comment):
                 dropins = [(self.CST, self.CST_TEXT), (mine, comment)]
                 self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
