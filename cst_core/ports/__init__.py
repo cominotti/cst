@@ -100,7 +100,7 @@ class CommandRunnerPort(Protocol):
     - pass_fds: open file descriptors the command gets as they are (the
       others are closed): a lock this process holds, handed on;
     - on_line: called with each line of the captured stdout (output
-      "capture", "merge", "stdout" or "stdout-show-stderr"; without its newline) as soon as the
+      "merge", "stdout" or "stdout-show-stderr"; without its newline) as soon as the
       command writes it, for a caller that passes the lines on while the
       command runs; not with timeout (use timeout(1) then) or input_text.
     """

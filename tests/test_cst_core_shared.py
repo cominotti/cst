@@ -810,7 +810,9 @@ class CommandRunnerTest(unittest.TestCase):
         script = (
             "import sys, time\nprint('one', flush=True)\ntime.sleep(0.6)\nprint('two')\nsys.stdout.write('three')\n"
         )
-        res = runner.run([self.py, "-I", "-c", script], on_line=lambda ln: seen.append((ln, time.monotonic())))
+        res = runner.run(
+            [self.py, "-I", "-c", script], output="stdout", on_line=lambda ln: seen.append((ln, time.monotonic()))
+        )
         self.assertEqual((res.returncode, res.stdout), (0, "one\ntwo\nthree"))
         self.assertEqual([ln for ln, _ in seen], ["one", "two", "three"])
         # 'one' came before the command slept: it was not held until the end.
@@ -821,12 +823,24 @@ class CommandRunnerTest(unittest.TestCase):
             on_line=lambda ln: None,
         )
         self.assertEqual(sorted(merged.stdout.splitlines()), ["err", "out"])
-        failed = runner.run([self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"], on_line=lambda ln: None)
+        failed = runner.run(
+            [self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"], output="stdout", on_line=lambda ln: None
+        )
         self.assertEqual((failed.returncode, failed.stdout), (3, "x\n"))
-        missing = runner.run(["/nonexistent/cst-test-cmd"], on_line=lambda ln: None)
+        missing = runner.run(["/nonexistent/cst-test-cmd"], output="stdout", on_line=lambda ln: None)
         self.assertEqual((missing.returncode, missing.fault), (127, "missing"))
         with self.assertRaises(ValueError):
-            runner.run(["true"], on_line=lambda ln: None, timeout=1)
+            runner.run(["true"], output="stdout", on_line=lambda ln: None, timeout=1)
+
+    def test_on_line_refuses_capture_whose_stderr_could_fill_and_hang(self) -> None:
+        # With stderr captured, a command that writes more than the pipe holds to stderr while its
+        # stdout is read to the end would never end: refused, and merge does not hang on it.
+        runner = core_runner.SubprocessCommandRunner()
+        noisy = [self.py, "-I", "-c", "import sys; sys.stderr.write('e' * 300000); print('done')"]
+        with self.assertRaises(ValueError):
+            runner.run(noisy, on_line=lambda ln: None)
+        res = runner.run(noisy, output="merge", on_line=lambda ln: None)
+        self.assertEqual((res.returncode, res.stdout.endswith("done\n")), (0, True))
 
     def test_stdout_show_stderr_captures_stdout_and_leaves_stderr_on_ours(self) -> None:
         runner = core_runner.SubprocessCommandRunner()

@@ -207,8 +207,12 @@ class SubprocessCommandRunner:
         if pass_fds:
             kw["pass_fds"] = tuple(pass_fds)
         if on_line is not None:
-            if timeout is not None or input_text is not None or output == "inherit":
-                raise ValueError("on_line reads the captured stdout as it comes: no timeout, input_text or inherit")
+            if timeout is not None or input_text is not None or output in ("inherit", "capture"):
+                # capture: a command that fills the stderr pipe while stdout is read to its end would
+                # never end; merge or stdout-show-stderr instead.
+                raise ValueError(
+                    "on_line reads the captured stdout as it comes: no timeout, input_text, inherit or capture"
+                )
             res = self._stream(cmd, kw, on_line)
         else:
             res = self._spawn(cmd, kw, timeout)
@@ -244,7 +248,7 @@ class SubprocessCommandRunner:
                 cmd,
                 stdin=kw.get("stdin"),
                 stdout=subprocess.PIPE,
-                stderr=kw.get("stderr", subprocess.PIPE if "capture_output" in kw else None),
+                stderr=kw.get("stderr"),
                 text=True,
                 errors=kw.get("errors"),
                 env=kw.get("env"),
@@ -266,9 +270,8 @@ class SubprocessCommandRunner:
             for line in proc.stdout:
                 out.append(line)
                 on_line(line[:-1] if line.endswith("\n") else line)
-            err = proc.stderr.read() if proc.stderr is not None else ""
             rc = proc.wait()
-        return CommandResult(rc, "".join(out), _decode_stream(err), argv=tuple(cmd))
+        return CommandResult(rc, "".join(out), "", argv=tuple(cmd))
 
 
 class HostExecutionContext:
