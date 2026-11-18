@@ -702,16 +702,21 @@ busy() {
     return 0
 }
 
-# lock_held FD: true if fd FD of this process is the lock file and the lock is
-# held (a second open of the file cannot take it): the caller's lock, handed on.
+# lock_held FD: true if fd FD of this process is the lock file and holds the
+# lock (flock, exclusive) itself: the caller's lock, handed on. The kernel
+# lists in /proc/self/fdinfo/FD only the locks of that open of the file, so
+# another open (a read-only one, say) while some other run holds the lock is
+# refused.
 lock_held() {
-    local fd="$1" mine theirs
+    local fd="$1" mine theirs line
     [[ "${fd}" =~ ^[0-9]{1,4}$ && -e "/proc/self/fd/${fd}" ]] || return 1
     mine="$(stat -L -c '%d:%i' "/proc/self/fd/${fd}" 2>/dev/null)" || return 1
     theirs="$(stat -c '%d:%i' "${LOCK}" 2>/dev/null)" || return 1
     [[ "${mine}" == "${theirs}" ]] || return 1
-    # The lock itself: our own open of the file must not get it.
-    ! ( flock -n 7 ) 7>"${LOCK}" 2>/dev/null
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^lock:[[:space:]].*FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]] ]] && return 0
+    done 2>/dev/null <"/proc/self/fdinfo/${fd}"
+    return 1
 }
 
 # `convert-planned --lock-held FD`: the hourly run's first step (the planned

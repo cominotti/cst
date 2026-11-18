@@ -535,6 +535,29 @@ class EngineStepTest(Base):
                 self.assertEqual(self.calls("btrfs"), [])
                 self.assertTrue(os.path.exists(self.state_file("drop-pending")))
 
+    def test_refused_for_an_fd_that_does_not_hold_the_lock_another_run_holds(self) -> None:
+        # Another run (btrfs-bulk, convert-one) holds the lock; the caller hands on its own open of
+        # the file, read-only (the file is 0644: any user can open it), which holds no lock. Before,
+        # the check only asked whether someone held it, and the engine ran beside the real holder.
+        lock = self.path("run/btrfs-snapshot.lock")
+        with self.hold_lock(), open(lock, encoding="utf-8") as mine:
+            r = subprocess.run(
+                ["bash", SCRIPT, "convert-planned", "--lock-held", str(mine.fileno())],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self.env,
+                cwd=self.tmp,
+                pass_fds=(mine.fileno(),),
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+            )
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertTrue(r.stdout.endswith(" is not a held " + lock + "; nothing converted\n"), r.stdout)
+        self.assertFalse(self.is_subvol(self.ws))
+        self.assertEqual(self.calls("btrfs"), [])
+        self.assertTrue(os.path.exists(self.state_file("drop-pending")))
+
     def test_usage(self) -> None:
         for args in ((), ("--lock-held",), ("9",), ("--lock-held", "9", "x")):
             with self.subTest(args):
