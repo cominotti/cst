@@ -51,7 +51,9 @@ from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode
 
 
-def read_settings(host: BluetoothHostPort, paths: Paths) -> tuple[dict[str, str], tuple[str, ...], str] | Exit:
+def read_bluetooth_settings(
+    host: BluetoothHostPort, paths: Paths
+) -> tuple[dict[str, str], tuple[str, ...], str] | Exit:
     """(the merged settings, the keys the user's file sets, what to print on stderr). As
     bluetooth-setup.sh's two bt-helper calls (settings, then settings-keys), each names a file
     it cannot read: the first leaves the settings empty, the second (the user's file) ends the

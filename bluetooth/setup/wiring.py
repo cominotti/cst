@@ -32,7 +32,7 @@ from cst_core.adapters.files import read_text
 from cst_core.domain.dispatch import script_help, step_down_argv
 
 
-def start() -> Mapping[str, str]:
+def take_handover() -> Mapping[str, str]:
     """The process as bluetooth-setup.sh left it: SIGPIPE at its default, the caller's LC_CTYPE
     back, what the shim handed over taken out of the environment (the commands it runs do not
     get it), and output that writes any file name it reads. Returns the environment."""
@@ -50,7 +50,7 @@ def prog(env: Mapping[str, str]) -> str:
     return env.get("CST_PROG") or argv0 or "bluetooth-setup.sh"
 
 
-def checkout(entry: str) -> str:
+def cst_folder(entry: str) -> str:
     """The CST folder the program runs from."""
     root = checkout_root(entry)
     if root is None:
@@ -60,7 +60,9 @@ def checkout(entry: str) -> str:
 
 def usage(entry: str, prog_name: str) -> str:
     """The help: bluetooth-setup.sh's header comment, then the usage line."""
-    return script_help(read_text(os.path.join(checkout(entry), "bluetooth-setup.sh"), ""), prog_name, words="[options]")
+    return script_help(
+        read_text(os.path.join(cst_folder(entry), "bluetooth-setup.sh"), ""), prog_name, words="[options]"
+    )
 
 
 def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str) -> Exit | None:
@@ -78,7 +80,7 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
         return Exit(1, err=f"id: '{user}': no such user\n")
     uid, home = found
     handed = [f"CST_PROG={env['CST_PROG']}"] if env.get("CST_PROG") else []
-    self_script = os.path.join(checkout(entry), "bluetooth-setup.sh")
+    self_script = os.path.join(cst_folder(entry), "bluetooth-setup.sh")
     argv = step_down_argv(
         user,
         uid,
@@ -113,7 +115,7 @@ def paths(env: Mapping[str, str], entry: str, *, container: bool) -> Paths:
         config=env.get("XDG_CONFIG_HOME") or f"{home}/.config",
         etc=f"{root}/etc",
         usr_share=f"{root}/usr/share",
-        checkout=checkout(entry),
+        checkout=cst_folder(entry),
     )
 
 
