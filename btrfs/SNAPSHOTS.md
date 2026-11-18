@@ -1889,7 +1889,11 @@ that, remove the flag: `sudo rm /etc/btrfs-setup/bulk-at-boot`.
 `disable --purge` deletes only the snapshots btrfs-snapshot-core owns
 ([section 15](#15-safety-rules-of-btrfs-snapshot-core)), in groups of 10, and
 skips pinned ones. Anything else in the folder stays, and the script says how
-many entries were left.
+many entries were left. If btrfs-snapshot-core's list of the snapshots cannot
+be read (not its JSON), nothing is deleted: `disable --purge` says
+`WARNING: deleting the snapshots failed`, and
+`/var/lib/btrfs-snapshot/core-unfinished` and `core-writable` stay, since
+they still describe the snapshots.
 
 ### Undo one Bulk link
 

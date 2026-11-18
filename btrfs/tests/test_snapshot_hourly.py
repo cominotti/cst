@@ -835,26 +835,39 @@ class PurgeTest(Base):
         self.assertIn(log(3, "purge: a deletion failed"), self.lines(r.stdout))
         self.assertIn(f"1 entry left in {self.snapdir}", r.stdout)
 
-    def test_a_listing_that_is_not_json_deletes_nothing_but_says_it_did_well(self) -> None:
-        # Bug (phase 1 list): the listing's JSON is read in a process substitution, whose
-        # failure nobody sees: purge says it deletes 0 snapshots, exits 0 and forgets the
-        # state lists, as if the folder had been emptied.
+    def test_an_empty_listing_deletes_nothing_and_succeeds(self) -> None:
+        self.core(list={"out": '{"sources": [{"name": "home", "snapshots": []}]}\n'})
+        r = self.run_prog("purge")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr), (0, ["Deleting 0 snapshot(s) in batches of 10..."], "")
+        )
+        self.assertFalse(os.path.exists(self.snapdir))
+
+    def test_a_listing_that_cannot_be_read_deletes_nothing_and_fails(self) -> None:
+        # Not JSON, or not the core's JSON: nothing deleted, exit 1 (so disable --purge does not
+        # report success), and the state lists stay (they still describe the snapshots).
+        # Before, the listing was read in a process substitution whose failure nobody saw:
+        # "Deleting 0 snapshot(s)", exit 0, and both lists forgotten.
         self.make("home.20261101T0000")
         self.write(self.state_file("core-unfinished"), "")
         self.write(self.state_file("core-writable"), "home.x\n")
-        self.core(list={"out": "not json\n"})
-        r = self.run_prog("purge")
-        self.assertEqual(r.returncode, 0)
-        self.assertEqual(
-            self.lines(r.stdout),
-            [
-                "Deleting 0 snapshot(s) in batches of 10...",
-                f"1 entry left in {self.snapdir} (not owned by btrfs-snapshot-core, or pinned): not deleted.",
-            ],
-        )
-        self.assertIn("json", r.stderr.lower())
-        self.assertEqual(self.calls("btrfs"), [])
-        self.assertEqual(os.listdir(self.state), [])
+        for listing in ("not json\n", '{"other": 1}\n', '{"sources": [{"snapshots": [{"name": "x"}]}]}\n'):
+            with self.subTest(listing):
+                self.forget_calls()
+                self.core(list={"out": listing})
+                r = self.run_prog("purge")
+                self.assertEqual(
+                    (r.returncode, self.lines(r.stdout), r.stderr),
+                    (
+                        1,
+                        [log(3, "purge: btrfs-snapshot-core's list is not readable (not its JSON); nothing deleted")],
+                        "",
+                    ),
+                )
+                self.assertEqual(self.calls("btrfs"), [])
+                self.assertEqual(os.listdir(self.snapdir), ["home.20261101T0000"])
+                self.assertEqual(sorted(os.listdir(self.state)), ["core-unfinished", "core-writable"])
+                self.assertEqual(self.read_state("core-writable"), "home.x\n")
 
 
 if __name__ == "__main__":

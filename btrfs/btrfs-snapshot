@@ -825,7 +825,7 @@ list_caches() {
 # interrupted run left writable are finished first (made read-only, their
 # cache folders not dropped), so they are owned and deleted too.
 purge() {
-    local out p n_left
+    local out listed p n_left
     local -a paths=() batch=()
     [[ -n "${HOME_DIR}" && -d "${SNAPDIR}" ]] || { echo "No snapshot directory: nothing to delete."; return 0; }
     # The policy does not matter here: only the ownership check of `list` is used.
@@ -835,6 +835,13 @@ purge() {
     fi
     out="$("${CORE}" list --json --snapdir "${SNAPDIR}" --pin-file "${PIN_FILE}" --state-dir "${STATE}" \
         "${CORE_SOURCES[@]}")" || { log 3 "purge: cannot list the snapshots; nothing deleted"; return 1; }
+    # Read before anything is deleted: a listing that cannot be read deletes nothing,
+    # fails the run and keeps the state lists (they still describe the snapshots).
+    listed="$(python3 -I -c 'import json, sys
+for src in json.load(sys.stdin)["sources"]:
+    for snap in src.get("snapshots", []):
+        print(snap["path"])' <<<"${out}" 2>/dev/null)" ||
+        { log 3 "purge: btrfs-snapshot-core's list is not readable (not its JSON); nothing deleted"; return 1; }
     while IFS= read -r p; do
         [[ -n "${p}" ]] || continue
         if [[ -s "${PIN_FILE}" ]] && grep -qxF -- "${p}" "${PIN_FILE}"; then
@@ -842,10 +849,7 @@ purge() {
             continue
         fi
         paths+=("${p}")
-    done < <(python3 -I -c 'import json, sys
-for src in json.load(sys.stdin)["sources"]:
-    for snap in src.get("snapshots", []):
-        print(snap["path"])' <<<"${out}")
+    done <<<"${listed}"
     echo "Deleting ${#paths[@]} snapshot(s) in batches of 10..."
     # Batches + sync: a bulk delete is cleaner and discard work in the background.
     for p in "${paths[@]}"; do
