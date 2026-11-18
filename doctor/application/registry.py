@@ -44,8 +44,7 @@ def run_checks(host: DoctorHostPort, checks: Iterable[tuple[str, CheckFn]] | Non
     out: list[tuple[str, Result]] = []
     for area, fn in CHECKS if checks is None else checks:
         try:
-            for r in fn(host):
-                out.append((area, r))
+            out.extend((area, r) for r in fn(host))
         except Exception as e:  # noqa: BLE001 - one broken check must not hide the others
             out.append((area, Result(ERROR, f"{fn.__name__}: the check itself failed ({type(e).__name__}: {e})")))
     return out
