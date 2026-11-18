@@ -39,6 +39,13 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def unescape_mountinfo(field: str) -> str:
+    """A path field of /proc/self/mountinfo as the path it is: the kernel writes a space, a tab,
+    a line break and a backslash as \\ and three octal digits (\\040 \\011 \\012 \\134). One
+    pass, so an escaped backslash before "040" stays a backslash and the text 040."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
 class Progress:
     """A line every PROGRESS_EVERY seconds or PROGRESS_BYTES, so a long copy
     or comparison shows it is alive."""
@@ -141,7 +148,7 @@ class Primitives:
             with open("/proc/self/mountinfo") as f:
                 for line in f:
                     p = line.split()[4]
-                    out.append(p.replace("\\040", " "))
+                    out.append(unescape_mountinfo(p))
         except OSError:
             pass
         return out

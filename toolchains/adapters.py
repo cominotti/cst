@@ -82,6 +82,7 @@ from toolchains.domain import (
     expected_template,
     is_tool_file,
     manifest_arg,
+    own_session_env,
     prefixes,
     tilde,
     toolchain_pattern,
@@ -1048,12 +1049,10 @@ def systemctl_cmd(*args: str) -> list[str]:
 
 
 def systemctl_env() -> dict[str, str]:
-    env = dict(os.environ)
-    # Run by root through runuser (snapshots setup): no session variables.
-    rt = f"/run/user/{os.getuid()}"
-    if not env.get("XDG_RUNTIME_DIR") and os.path.isdir(rt):
-        env["XDG_RUNTIME_DIR"] = rt
-    return env
+    # Run by root through runuser or sudo: none, or root's (/run/user/0): this user's, as the domain says.
+    uid, xdg = os.getuid(), os.environ.get("XDG_RUNTIME_DIR", "")
+    owner = os.stat(xdg).st_uid if xdg and os.path.isdir(xdg) else None
+    return own_session_env(os.environ, uid, owner, own_exists=os.path.isdir(f"/run/user/{uid}"))
 
 
 def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:

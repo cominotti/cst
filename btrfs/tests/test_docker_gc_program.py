@@ -61,7 +61,8 @@ if key in st.get("fail", {}):
     fail(msg, rc)
 if a[0] == "info":
     if st.get("info_rc", 0):
-        fail("Cannot connect to the Docker daemon", st["info_rc"])
+        fail(st.get("info_err", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+             "Is the docker daemon running?"), st["info_rc"])
     print("FAKE-ID")
 elif a[:2] == ["ps", "-aq"]:
     print("\n".join(c["Id"] for c in st["containers"]))
@@ -379,6 +380,18 @@ class StatusTest(unittest.TestCase):
             "image use not recorded yet (recorder not started)\nlast run: never\ndocker is not running; nothing to do\n",
         )
         self.assertFalse(os.path.exists(self.p.state), "status writes no state")
+
+    def test_a_docker_that_refuses_is_an_error_not_a_stopped_docker(self) -> None:
+        # Permission denied (or SELinux): the weekly run and its dry run say so and exit 1.
+        st = self.p.docker()
+        st["info_rc"] = 1
+        st["info_err"] = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+        self.p.set_docker(st)
+        for args in (("run", "--dry-run"), ("run",), ("status",)):
+            rc, out, err = self.p.run(*args)
+            self.assertEqual(rc, 1, args)
+            self.assertNotIn("not running", out + err)
+            self.assertIn("docker info: permission denied while trying to connect", out + err)
 
     def test_a_dry_run_lists_and_removes_nothing(self) -> None:
         before = self.p.docker()

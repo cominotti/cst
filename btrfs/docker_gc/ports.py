@@ -42,7 +42,10 @@ class DockerPort(Protocol):
     """The docker commands docker-gc runs. A docker that does not answer in time, or
     a listing or inspect that fails, raises RuntimeError; one that cannot start raises OSError."""
 
-    def is_up(self) -> bool: ...
+    def is_up(self) -> bool:
+        """The daemon answers. False only when it is not running or docker is not installed; any
+        other failure of `docker info` (permission denied, SELinux) raises RuntimeError."""
+        ...
 
     def containers(self) -> list[Container]:
         """Every container, inspected (one that vanished meanwhile is left out)."""

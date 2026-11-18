@@ -1,9 +1,10 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: MPL-2.0
 """bt-helper: the text work of bluetooth-setup.sh (CST), kept apart so the
-tests can call it. It only reads files and standard input and prints to
-standard output; it never writes a file, never needs root and never talks to
-a service (the shell script runs busctl, pactl and pw-dump and pipes their
+tests can call it. It reads files and standard input and prints to standard
+output; the one file it writes is the record of restarts still owed
+(restart-pending save). It never needs root and never talks to a service
+(the shell script runs busctl, pactl, pw-dump and systemctl and hands their
 output in).
 
   general-apply PATH             main.conf with Experimental = true and
@@ -42,6 +43,14 @@ output in).
                                  rate watcher; when its last outcome was
                                  "failed:", prints TIME|REASON|DETAIL (exit
                                  0), else exit 1
+  restart-pending show|save PATH BT_ID WP_ID [UNIT...]
+                                 the restarts still owed (one unit per line):
+                                 those PATH records while bluetooth.service
+                                 and wireplumber.service run with the same
+                                 invocation ID (BT_ID, WP_ID; "" = not
+                                 running), and UNITs (just skipped) that run;
+                                 save writes PATH with them (atomically), or
+                                 removes it when none is owed
   adapter-path                   stdin: busctl -j GetManagedObjects; prints
                                  the first object with org.bluez.Adapter1
   card-state DEV                 stdin: JSON [cards, short sources,

@@ -15,6 +15,15 @@ from cst_core.domain.values import format_bytes_decimal
 DAY = 86400
 HEARTBEAT_SECONDS = 300
 MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up
+# What a failed `docker info` prints when nothing answers on the daemon's socket:
+# the socket is not there or nobody listens (the errno text of the dial, in every
+# version), or the question older CLIs print instead. Anything else (permission
+# denied, an SELinux denial, a broken daemon) is an error, never "not running".
+DAEMON_DOWN_SIGNS = (
+    "connect: no such file or directory",
+    "connect: connection refused",
+    "Is the docker daemon running?",
+)
 # Containers that belong to something the user manages as a unit.
 KEEP_LABEL_PREFIXES = (
     "com.docker.compose.",
@@ -405,3 +414,8 @@ def run_log_line(summary: RunSummary) -> str:
         f"{summary.images} image(s) planned ({format_bytes_decimal(summary.image_bytes)}), old build cache; "
         f"failures {summary.failed}; images {summary.before.get('Images', '?')} -> {summary.after.get('Images', '?')}"
     )
+
+
+def daemon_down(stderr: str) -> bool:
+    """A failed `docker info`'s stderr says the daemon is not running (DAEMON_DOWN_SIGNS)."""
+    return any(sign in stderr for sign in DAEMON_DOWN_SIGNS)

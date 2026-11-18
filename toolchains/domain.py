@@ -710,3 +710,21 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
     else:
         raise Usage(f"unknown command '{cmd}'")
     return out
+
+
+def own_session_env(env: Mapping[str, str], uid: int, owner: int | None, *, own_exists: bool) -> dict[str, str]:
+    """The environment systemctl --user gets: env with this user's XDG_RUNTIME_DIR (owner: the
+    owner of env's folder, None when it does not exist). None handed down (root through runuser):
+    /run/user/UID when it exists. Another uid's (owned by it, or /run/user/N with another N, as
+    sudo and runuser pass on root's /run/user/0): /run/user/UID, and a bus inside it, UID's bus."""
+    out, own, xdg = dict(env), f"/run/user/{uid}", env.get("XDG_RUNTIME_DIR", "")
+    if not xdg:
+        if own_exists:
+            out["XDG_RUNTIME_DIR"] = own
+        return out
+    named = re.fullmatch(r"/run/user/([0-9]+)/?", xdg, re.ASCII)
+    if (owner is not None and owner != uid) or (named is not None and int(named.group(1)) != uid):
+        out["XDG_RUNTIME_DIR"] = own
+        if f"={xdg.rstrip('/')}/" in env.get("DBUS_SESSION_BUS_ADDRESS", ""):
+            out["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={own}/bus"
+    return out

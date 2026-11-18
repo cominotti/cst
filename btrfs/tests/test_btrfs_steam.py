@@ -15,6 +15,7 @@ Run from the repository root:
 from __future__ import annotations
 
 import contextlib
+import json
 import io
 import os
 import shutil
@@ -1158,6 +1159,35 @@ class SteamTest(tb.BulkBase):
         self.assertEqual(self.state.journals(), ["steam-570"])
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(bulk_commands.boot(self.bulk), 0)
+        self.assertMoved()
+
+    def test_a_steam_journal_missing_a_key_is_damaged_and_kept(self) -> None:
+        # kind "steam" but no dst_lib (or a part without its old path, or no stamp2 after the
+        # copies, or the appid of another game than its file's): recovery names it, keeps it and
+        # touches nothing; put back, it recovers.
+        self.crash_os_in("write_vdf_pair", "rename", 0, nth=2)
+        good = self.journal("steam-570")
+        part = {k: v for k, v in good["parts"][0].items() if k != "old"}
+        damaged: list[object] = [
+            {k: v for k, v in good.items() if k != "dst_lib"},
+            {**good, "parts": [part, *good["parts"][1:]]},
+            {k: v for k, v in good.items() if k != "stamp2"},
+            {**good, "phase": "unknown"},
+            {**good, "appid": "../570"},
+            {**good, "appid": "571"},  # another game's: recovery would act on it and drop its journal
+        ]
+        for bad in damaged:
+            with open(self.state.jpath("steam-570"), "w") as f:
+                json.dump(bad, f)
+            before = self.tree()
+            stuck = self.run_out(bulk_items.recover, self.bulk)
+            self.assertEqual(stuck, ["steam-570"], bad)
+            self.assertIn(f"NEEDS A LOOK: steam-570: damaged journal {self.state.jpath('steam-570')}", self.out)
+            self.assertEqual(self.tree(), before, bad)
+            _, text = self.report()
+            self.assertIn("steam-570: NEEDS A LOOK: damaged journal", text)
+        self.write_journal("steam-570", good)
+        self.run_out(bulk_items.recover, self.bulk)
         self.assertMoved()
 
     def test_bulk_status_points_to_bulk_steam(self) -> None:

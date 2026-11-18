@@ -787,6 +787,34 @@ class DockerCommandTest(unittest.TestCase):
             self.docker.run("info")
         self.assertEqual(str(stop.exception), "docker info: daemon down")
 
+    def info_says(self, rc: int, stderr: str) -> bool:
+        done = subprocess.CompletedProcess(["docker"], rc, "", stderr)
+        with mock.patch.object(subprocess, "run", return_value=done):
+            return self.docker.is_up()
+
+    def test_is_up_only_says_not_running_when_the_daemon_is_not_running(self) -> None:
+        self.assertTrue(self.info_says(0, ""))
+        for down in (
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+            "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct "
+            "and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n",
+            "... dial unix /var/run/docker.sock: connect: connection refused\n",
+        ):
+            self.assertFalse(self.info_says(1, down), down)
+        missing = FileNotFoundError(2, "No such file or directory", "docker")
+        with mock.patch.object(subprocess, "run", side_effect=missing):
+            self.assertFalse(self.docker.is_up())
+
+    def test_is_up_reports_any_other_docker_error(self) -> None:
+        denied = (
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock: "
+            "dial unix /var/run/docker.sock: connect: permission denied\n"
+        )
+        for stderr, want in ((denied, "docker info: " + denied.strip()), ("", "docker info: exit 1")):
+            with self.assertRaises(RuntimeError) as stop:
+                self.info_says(1, stderr)
+            self.assertEqual(str(stop.exception), want)
+
     def test_not_utf8_output_is_replaced(self) -> None:
         # Bytes of docker's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError).
         tmp = tempfile.mkdtemp(prefix="cst-gc-bytes-")

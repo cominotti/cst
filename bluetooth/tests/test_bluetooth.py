@@ -9,10 +9,12 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Iterable, Mapping, Sequence
 import io
+import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,7 +37,7 @@ if REPO not in sys.path:
 
 from bluetooth import adapters as bt_adapters, cli as bt_app, domain as bt_domain
 from bluetooth.adapters import LocalBluetoothHostAdapter
-from bluetooth.domain import classify_other_fragments
+from bluetooth.domain import RESTART_UNITS, classify_other_fragments, parse_pending, render_pending, still_pending
 from tests.script_loader import load_script
 
 ISO = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
@@ -826,6 +828,7 @@ adapter_path() { echo /org/bluez/hci0; }
 restore_a2dp() { log restore_a2dp; }
 restart_hint() { echo hint; }
 le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
+restart_state() { log "owed $*"; }
 """
 
     def run_restarts(
@@ -860,17 +863,27 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
         self.assertIn("rc=0", r.stdout)
         self.assertEqual(
             calls,
-            ["sudo systemctl restart bluetooth", "systemctl --user restart wireplumber", "wait bap", "restore_a2dp"],
+            [
+                "owed save wireplumber.service bluetooth.service",
+                "sudo systemctl restart bluetooth",
+                "systemctl --user restart wireplumber",
+                "wait bap",
+                "restore_a2dp",
+                "owed save",
+            ],
         )
 
     def test_no_bap_wait_with_le_audio_off(self) -> None:
         r, calls = self.run_restarts(0, 0, bt=0, le_off=1)
         self.assertIn("rc=0", r.stdout)
-        self.assertEqual(calls, ["systemctl --user restart wireplumber", "restore_a2dp"])
+        self.assertEqual(
+            calls,
+            ["owed save wireplumber.service", "systemctl --user restart wireplumber", "restore_a2dp", "owed save"],
+        )
 
     def test_no_restart_hint_names_only_what_is_needed(self) -> None:
         r, calls = self.run_restarts(0, 0, bt=0, no_restart=1)
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, ["owed save wireplumber.service"])  # owed until done
         self.assertIn("To finish: systemctl --user restart wireplumber", r.stdout)
         self.assertNotIn("hint", r.stdout)
         r, _ = self.run_restarts(0, 0, bt=1, no_restart=1)
@@ -879,14 +892,168 @@ le_off_active() { [[ "${LE_OFF:-0}" == 1 ]]; }
     def test_failed_bluetooth_restart_stops_before_wireplumber(self) -> None:
         r, calls = self.run_restarts(1, 0)
         self.assertIn("rc=2", r.stdout)
-        self.assertEqual(calls, ["sudo systemctl restart bluetooth"])
+        self.assertEqual(calls, ["owed save wireplumber.service bluetooth.service", "sudo systemctl restart bluetooth"])
         self.assertIn("bluetooth.service was not restarted", r.stderr)
 
     def test_failed_wireplumber_restart(self) -> None:
         r, calls = self.run_restarts(0, 1, bt=0)
         self.assertIn("rc=2", r.stdout)
-        self.assertEqual(calls, ["systemctl --user restart wireplumber"])
+        self.assertEqual(calls, ["owed save wireplumber.service", "systemctl --user restart wireplumber"])
         self.assertIn("wireplumber was not restarted", r.stderr)
+
+
+class RestartOwedTest(unittest.TestCase):
+    """A restart that was not made stays owed (restart_state, compute_plan, do_restarts of
+    bluetooth-setup.sh with the real bt-helper): until the unit runs with another invocation
+    ID. systemctl and sudo are functions; each unit's invocation ID is a file of the test, and
+    a restart writes a new one."""
+
+    STUBS = r"""
+set -Eeuo pipefail
+PROG=test; NO_RESTART=0; YES=1; FORCE=0; BEARER=""; DEVICE_MAC=AA:BB:CC:DD:EE:FF; LDAC_QUALITY=auto
+MAIN_CONF="$T/main.conf"; TMP="$T/tmp"; WP_CONF="$T/wp.conf"; LEGACY_WP_CONF="$T/wp.conf"
+PENDING_FILE="$T/state/cst/bluetooth-restart-pending.json"
+log() { echo "$*" >>"$T/log"; }
+hostcmd() { "$@"; }
+helper() { python3 -I "$REPO/bluetooth/bt-helper" "$@"; }
+new_id() { n=$(( $(cat "$T/n" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$T/n"; echo "$1-$n" >"$T/$1-id"; }
+systemctl() {
+    case "$*" in
+        "is-active --quiet bluetooth.service") [[ -s "$T/bt-id" && "$(cat "$T/bt-id")" != stopped* ]] ;;
+        "--user is-active --quiet wireplumber.service") [[ -s "$T/wp-id" ]] ;;
+        "show -P InvocationID bluetooth.service") cat "$T/bt-id" ;;
+        "--user show -P InvocationID wireplumber.service") cat "$T/wp-id" ;;
+        "--user restart wireplumber") log "restart wp"; new_id wp ;;
+        *) return 1 ;;
+    esac
+}
+sudo() { [[ "$*" == "systemctl restart bluetooth" ]] && { log "restart bt"; new_id bt; }; }
+wait_for() { :; }; adapter_path() { :; }; restore_a2dp() { :; }; le_off_active() { return 0; }
+restart_hint() { echo hint; }; file_state() { echo ok; }; le_plan() { LE_CHANGE=0; LE_STATE=ok; }; lw_plan() { LW_CHANGE=0; }
+header() { :; }; files_report() { :; }; verify() { FAILS="${FAILS_WANT:-0}"; WARNS=0; }
+die() { echo "DIE $*"; exit 1; }
+needs() { compute_plan; echo "bt=$BT_RESTART wp=$WP_RESTART owed=$(echo $OWED)"; }
+"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="bt-owed-test-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        with open(os.path.join(self.tmp, "main.conf"), "w") as f:
+            f.write(f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n")
+        self.ids(bt="bt-0", wp="wp-0")
+        self.pending = os.path.join(self.tmp, "state", "cst", "bluetooth-restart-pending.json")
+
+    def ids(self, **ids: str) -> None:
+        for unit, value in ids.items():
+            with open(os.path.join(self.tmp, f"{unit}-id"), "w") as f:
+                f.write(value + "\n")
+
+    def sh(self, body: str, *, everything: bool = False) -> list[str]:
+        script = (
+            self.STUBS
+            + shell_functions(
+                "restart_state",
+                "unit_invocation",
+                "compute_plan",
+                "restart_bluetooth",
+                "restart_wireplumber",
+                "confirm_bt_restart",
+                "do_restarts",
+                "status",
+            )
+            + body
+        )
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp, "REPO": REPO, "HOME": self.tmp}
+        r = subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return [ln for ln in r.stdout.splitlines() if everything or ln.startswith(("bt=", "rc="))]
+
+    def restarts(self) -> list[str]:
+        path = os.path.join(self.tmp, "log")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return f.read().splitlines()
+
+    def test_no_restart_is_owed_until_apply_restarts(self) -> None:
+        self.assertEqual(self.sh("needs\n"), ["bt=0 wp=0 owed="])
+        # apply --no-restart after main.conf changed: both owed, the next plan says so.
+        self.assertEqual(
+            self.sh("NO_RESTART=1; do_restarts 1 1\nneeds\n"), ["bt=1 wp=1 owed=bluetooth.service wireplumber.service"]
+        )
+        self.assertEqual(self.restarts(), [])
+        with open(self.pending) as f:
+            self.assertEqual(json.load(f), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+        self.assertEqual(stat.S_IMODE(os.stat(self.pending).st_mode), 0o644)
+        # apply: restarts both, and nothing is owed afterwards.
+        self.assertEqual(self.sh("needs; do_restarts $BT_RESTART $WP_RESTART; needs\n")[1], "bt=0 wp=0 owed=")
+        self.assertEqual(self.restarts(), ["restart bt", "restart wp"])
+        self.assertFalse(os.path.exists(self.pending))
+
+    def test_a_restart_by_hand_or_a_reboot_ends_what_is_owed(self) -> None:
+        self.sh("NO_RESTART=1; do_restarts 1 1\n")
+        self.ids(wp="wp-by-hand")
+        self.assertEqual(self.sh("needs\n"), ["bt=1 wp=1 owed=bluetooth.service"])  # WirePlumber follows bluetoothd
+        self.ids(bt="stopped-keeps-bt-0")  # bluetoothd stopped (its last ID stays): it reads main.conf when it starts
+        self.assertEqual(self.sh("needs\n"), ["bt=0 wp=0 owed="])
+
+    def test_status_says_what_is_owed_also_when_checks_fail(self) -> None:
+        self.sh("NO_RESTART=1; do_restarts 1 1\n")
+        owed = "A restart an earlier run did not make is still owed (bluetooth.service wireplumber.service): test apply makes it."
+        for fails, verdict in (("1", "1 check(s) failed, 0 warning(s)."), ("0", "All checks passed.")):
+            out = self.sh(f"FAILS_WANT={fails}; status || echo rc=$?\n", everything=True)
+            self.assertIn(owed, out)
+            self.assertIn(verdict, out)
+        self.sh("do_restarts 1 1\n")
+        self.assertFalse([ln for ln in self.sh("status\n", everything=True) if "still owed" in ln])
+
+    def test_a_unit_that_does_not_run_owes_nothing(self) -> None:
+        self.ids(bt="")
+        self.assertEqual(self.sh("NO_RESTART=1; do_restarts 1 1\nneeds\n"), ["bt=0 wp=1 owed=wireplumber.service"])
+
+    def test_the_record_is_judged_strictly(self) -> None:
+        self.assertEqual(parse_pending(None), {})
+        self.assertEqual(parse_pending("not json"), {})
+        self.assertEqual(parse_pending("[1]"), {})
+        self.assertEqual(parse_pending('{"other.service": "x", "bluetooth.service": "", "wireplumber.service": 3}'), {})
+        recorded = {"bluetooth.service": "b1", "wireplumber.service": "w1"}
+        self.assertEqual(
+            still_pending(recorded, {"bluetooth.service": "b1", "wireplumber.service": "w2"}, ()),
+            {"bluetooth.service": "b1"},
+        )
+        self.assertEqual(
+            still_pending({}, {"bluetooth.service": "", "wireplumber.service": "w"}, RESTART_UNITS),
+            {"wireplumber.service": "w"},
+        )
+        self.assertEqual(render_pending({}), "")
+        self.assertEqual(parse_pending(render_pending(recorded)), recorded)
+        # bt-helper: a mode other than show or save, or too few arguments, is a usage error.
+        for args in (["restart-pending", "keep", "p", "a", "b"], ["restart-pending", "show", "p", "a"]):
+            r = subprocess.run(
+                [sys.executable, "-I", HELPER, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(r.returncode, 2, args)
+
+    def test_an_unreadable_record_is_replaced(self) -> None:
+        # Not UTF-8 (a damaged file): judged as no record, and the next save writes a good one.
+        os.makedirs(os.path.dirname(self.pending))
+        with open(self.pending, "wb") as f:
+            f.write(b"\xff{")
+        self.assertEqual(self.sh("needs\n"), ["bt=0 wp=0 owed="])
+        self.assertEqual(self.sh("NO_RESTART=1; do_restarts 0 1\nneeds\n"), ["bt=0 wp=1 owed=wireplumber.service"])
+        with open(self.pending) as f:
+            self.assertEqual(json.load(f), {"wireplumber.service": "wp-0"})
+
+    def test_a_cancelled_question_keeps_both_owed(self) -> None:
+        out = self.sh("YES=0; rc=0; do_restarts 1 1 </dev/null || rc=$?; echo rc=$rc\nneeds\n")
+        self.assertEqual(out, ["rc=1", "bt=1 wp=1 owed=bluetooth.service wireplumber.service"])
+        self.assertEqual(self.restarts(), [])
 
 
 class LeAudioShellTest(unittest.TestCase):
@@ -923,6 +1090,7 @@ compute_plan() {
     MC_CHANGED=0; WP_STATE=ok; LEGACY=0; BEARER_STATE=none; LW_CHANGE=0; LW_WANT=0
     le_plan
     BT_RESTART=0; WP_RESTART=0; (( LE_CHANGE )) && WP_RESTART=1
+    BT_OWED=0; WP_OWED=0; OWED=""
     return 0
 }
 # revert's other parts
@@ -1069,7 +1237,7 @@ YES="${YES:-0}"; NO_RESTART="${NO_RESTART:-0}"; le_set="${LE_SET:-}"; SELF="$HOM
         self.assertIn("left alone", r.stderr)
         self.assertTrue(os.path.exists(self.le_conf))
 
-    WP_PLAN = 'LEGACY_WP_CONF="$WP_CONF_DIR/50-jbl-live-beam-4.conf"\n'
+    WP_PLAN = 'LEGACY_WP_CONF="$WP_CONF_DIR/50-jbl-live-beam-4.conf"\nrestart_state() { :; }\n'
 
     def wp(self, body: str) -> subprocess.CompletedProcess[str]:
         """BODY after the real compute_plan and write_wp (the stub compute_plan is replaced)."""
@@ -1525,6 +1693,12 @@ class _FakeBluetoothHost:
 
     def read_stdin(self) -> str:
         return self.stdin_text
+
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        owed = still_pending(parse_pending(self.files.get(path)), dict(zip(RESTART_UNITS, ids, strict=True)), skipped)
+        if save:
+            self.files[path] = render_pending(owed)
+        return "".join(f"{u}\n" for u in sorted(owed))
 
 
 class HexagonalArchitectureTest(unittest.TestCase):

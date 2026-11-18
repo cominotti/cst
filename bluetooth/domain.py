@@ -2,6 +2,7 @@
 """Pure domain logic, value parsing, and rendering for the bluetooth module."""
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+import json
 import posixpath
 import re
 from typing import Any, Final
@@ -760,3 +761,35 @@ def profiles(dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, 
         alt = others[0] if others else None
     active = card.get("active_profile")
     return None if active is None else str(active), ldac, alt
+
+
+# ---- restarts skipped (--no-restart, a cancelled question, a failed restart) ----------------
+# The units whose restart apply may owe, as bt-helper restart-pending takes their invocation IDs.
+RESTART_UNITS: Final[tuple[str, str]] = ("bluetooth.service", "wireplumber.service")
+
+
+def parse_pending(text: str | None) -> dict[str, str]:
+    """unit -> invocation ID from the pending-restart file (JSON); {} when absent or unreadable,
+    and only the known units with a non-empty ID."""
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {u: i for u, i in data.items() if u in RESTART_UNITS and isinstance(i, str) and i}
+
+
+def still_pending(recorded: Mapping[str, str], current: Mapping[str, str], skipped: Iterable[str]) -> dict[str, str]:
+    """The restarts still owed: a recorded one while its unit runs with the invocation it had
+    when the restart was skipped (a restart, a stop or a reboot gives another one, or none),
+    and each skipped unit that runs now. A unit that does not run reads the new files when
+    it starts: nothing is owed for it."""
+    owed = {u: i for u, i in recorded.items() if current.get(u) == i}
+    owed.update({u: current[u] for u in skipped if u in RESTART_UNITS and current.get(u)})
+    return owed
+
+
+def render_pending(owed: Mapping[str, str]) -> str:
+    """The pending-restart file's text ('' when nothing is owed: the file goes)."""
+    return json.dumps(dict(sorted(owed.items())), indent=1) + "\n" if owed else ""

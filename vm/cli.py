@@ -1261,8 +1261,8 @@ def cmd_nocow_apply() -> int:
         )
         return 0
     for d in todo:
-        what = "create (root:root 0711) and mark" if not d["present"] else "mark"
-        unknown = " (its mark is not readable as your user: set again, harmless)" if d["nocow"] is None else ""
+        what = "mark" if (seen := d["present"]) else "create (root:root 0711) and mark"
+        unknown = " (its mark is not readable as your user: set again, harmless)" if seen and d["nocow"] is None else ""
         print(f"  {what} +C: {d['path']}{' (sudo)' if d['scope'] == 'system' and os.geteuid() else ''}{unknown}")
     print(
         "Only files created there later get the mark; existing images stay as they are "

@@ -730,10 +730,8 @@ same "apply answered no" "$before"
 # 4. answered yes: the system folder created as libvirt does it, through sudo, and every folder marked.
 out="$(drive y)"
 show apply "$out"
-# Today's wording, pinned: apply adds "(its mark is not readable as your user: set again,
-# harmless)" to a folder it is about to create, which has no mark to read yet (reported as
-# a wording bug; the fix drops that suffix here and changes this line).
-grep -qxF "  create (root:root 0711) and mark +C: $sys (sudo) (its mark is not readable as your user: set again, harmless)" <<<"$out"
+# A folder about to be created has no mark to read: no "not readable" note on its line.
+grep -qxF "  create (root:root 0711) and mark +C: $sys (sudo)" <<<"$out"
 grep -qxF "  mark +C: $sess" <<<"$out"
 grep -qxF "  mark +C: $boxes" <<<"$out"
 grep -qF "  sudo install -d -o root -g root -m 0711 $sys" <<<"$out"   # on the line of the question

@@ -751,9 +751,17 @@ the timer of the earlier `cst btrfs cargo-gc`. Your
 not turn the timer back on (it says `left off` instead); `auto on` removes
 that file again.
 
+**Your user manager.** `auto on` and `auto off` talk to your own user
+manager. When `XDG_RUNTIME_DIR` is not set (run by root through `runuser`),
+they use `/run/user/<uid>` if it exists. When it names another user's folder
+(owned by another user, or `/run/user/<N>` with another uid, such as the
+`/run/user/0` that sudo and `runuser` can pass on from root), they use
+`/run/user/<uid>` instead, and your bus in it in place of a
+`DBUS_SESSION_BUS_ADDRESS` inside that folder.
+
 **When your user manager cannot be reached** (for example when you are not
 logged in, so `/run/user/<uid>` does not exist, or `XDG_RUNTIME_DIR` points
-to another folder, or while `systemctl --user` itself fails), `auto off`
+to another folder of yours, or while `systemctl --user` itself fails), `auto off`
 stops first: it asks the manager to stop and disable the timer before it
 removes any file. If that fails, it prints systemctl's error, exits with 1
 and removes nothing, so the timer may still be running and nothing is lost.

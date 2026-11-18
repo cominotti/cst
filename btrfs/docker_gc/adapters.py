@@ -23,6 +23,7 @@ from btrfs.docker_gc.domain import (
     Image,
     RunSummary,
     Volume,
+    daemon_down,
     ts,
 )
 from btrfs.docker_gc.ports import EventSink
@@ -153,7 +154,15 @@ class DockerCli:
         return out
 
     def is_up(self) -> bool:
-        return self.run("info", "--format", "{{.ID}}", check=False, timeout=60).returncode == 0
+        try:
+            r = self.run("info", "--format", "{{.ID}}", check=False, timeout=60)
+        except FileNotFoundError:
+            return False  # docker is not installed
+        if r.returncode == 0:
+            return True
+        if daemon_down(r.stderr):
+            return False
+        raise RuntimeError(f"docker info: {r.stderr.strip()[:300] or f'exit {r.returncode}'}")
 
     def containers(self) -> list[Container]:
         return [container_of(o) for o in self.inspect_all("container", ("ps", "-aq", "--no-trunc"))]
