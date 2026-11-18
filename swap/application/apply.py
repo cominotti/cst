@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 import posixpath
+from typing import override
 
 from cst_core.application.install import Placement
 from cst_core.domain.files import MarkedLineSpec, OwnedState
@@ -42,6 +43,7 @@ class _EventLog(list[ApplyEvent]):
         super().__init__()
         self._emit = emit
 
+    @override
     def append(self, event: ApplyEvent, /) -> None:
         super().append(event)
         if self._emit is not None:
