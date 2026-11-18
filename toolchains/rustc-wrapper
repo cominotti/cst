@@ -65,7 +65,12 @@
 # (an ssh session, docker exec), without the user manager's socket
 # ($XDG_RUNTIME_DIR/systemd/private, what systemd-run --user connects to),
 # systemd-run or flock, with your own SCCACHE_SERVER_UDS or port, or when the
-# start fails, the client starts the server as before.
+# start fails, the client starts the server as before. A failed start (systemd
+# refused the scope, or no server listens in it afterwards) is written down in
+# <socket>.failed, as seconds since boot: for 10 minutes after it, compiles try
+# no start (builtins only) and use the server the client started, so a start
+# that keeps failing costs one try in 10 minutes, not a flock and a systemd-run
+# in every compile.
 
 cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
 workspace=yes # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
@@ -144,6 +149,7 @@ export TMPDIR=/tmp
 if [ "$own_address" = yes ]; then
     cgroup=
     proc_cgroup="${CST_SCCACHE_PROC_CGROUP:-/proc/self/cgroup}"
+    proc_uptime="${CST_SCCACHE_PROC_UPTIME:-/proc/uptime}"
     if [ -r "$proc_cgroup" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
@@ -172,19 +178,39 @@ if [ "$own_address" = yes ]; then
         # The socket is removed before each start: with the scope's folder, it
         # means a server has started there.
         server_missing() { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; }
-        if [ -d "$manager_dir" ] && server_missing &&
+        # A start failed less than 10 minutes ago (the marker holds the seconds
+        # since boot of that failure): try no start, leave the server that the
+        # client started then alone. Sets now, which a failed start writes.
+        failed="${SCCACHE_SERVER_UDS}.failed"
+        backing_off() {
+            now=
+            stamp=
+            { IFS=' .' read -r now _ <"$proc_uptime"; } 2>/dev/null
+            { read -r stamp <"$failed"; } 2>/dev/null
+            # Digits only, no leading zero: $((...)) reads 08 as a bad octal
+            # number, and that error would end the wrapper.
+            case "$now" in '' | *[!0-9]* | 0?*) return 1 ;; esac
+            case "$stamp" in '' | *[!0-9]* | 0?*) return 1 ;; esac
+            [ "$stamp" -le "$now" ] && [ "$((now - stamp))" -lt 600 ]
+        }
+        if [ -d "$manager_dir" ] && server_missing && ! backing_off &&
             [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/systemd/private" ] &&
             command -v systemd-run >/dev/null 2>&1 && command -v flock >/dev/null 2>&1; then
             # The lock is held until --start-server returns (the server
             # listens); the server never gets its descriptor (9>&-).
             {
-                if flock -w 15 9 && server_missing; then
+                if flock -w 15 9 && server_missing && ! backing_off; then
                     rm -f "$SCCACHE_SERVER_UDS"
                     systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
                         --description="CST: the shared sccache server ($env_id)" \
                         sccache --start-server 9>&-
+                    if server_missing; then
+                        printf '%s\n' "$now" >"$failed"
+                    elif [ -s "$failed" ]; then
+                        : >"$failed"
+                    fi
                 fi
-            } 9>>"${SCCACHE_SERVER_UDS}.lock" </dev/null >/dev/null 2>&1
+            } </dev/null >/dev/null 2>&1 9>>"${SCCACHE_SERVER_UDS}.lock"
         fi
     fi
 fi

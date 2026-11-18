@@ -1334,6 +1334,8 @@ class RustcWrapperTest(unittest.TestCase):
         # (missing here: no user manager, so no server start of its own).
         self.proc_cgroup = os.path.join(self.tmp, "proc-self-cgroup")
         self.cgroup_fs = os.path.join(self.tmp, "cgroup-fs")
+        # The seconds since boot the wrapper reads (missing here; user_manager writes it).
+        self.uptime = os.path.join(self.tmp, "proc-uptime")
 
     def written(self, workspace: str) -> None:
         """Run a copy of the wrapper with RUST_SCCACHE_WORKSPACE=WORKSPACE written
@@ -1369,6 +1371,7 @@ class RustcWrapperTest(unittest.TestCase):
             "CST_SCCACHE_CONTAINERENV": self.containerenv,
             "CST_SCCACHE_PROC_CGROUP": self.proc_cgroup,
             "CST_SCCACHE_CGROUP_FS": self.cgroup_fs,
+            "CST_SCCACHE_PROC_UPTIME": self.uptime,
         }
         base.update(env)
         return {k: v for k, v in base.items() if v is not None}
@@ -1586,6 +1589,7 @@ class RustcWrapperTest(unittest.TestCase):
         *,
         systemd_run: bool = True,
         flock: bool = True,
+        flock_log: bool = False,
         manager_socket: bool = True,
         start_fails: bool = False,
         start_delay: str = "0",
@@ -1606,6 +1610,13 @@ class RustcWrapperTest(unittest.TestCase):
             os.mknod(os.path.join(self.run_dir, "systemd", "private"), stat.S_IFSOCK | 0o600)
         if flock:
             self.link_tools("flock")
+        if flock_log:
+            real = shutil.which("flock")
+            assert real is not None
+            self.fake(
+                os.path.join(self.bin, "flock"), f'printf "flock|args=%s\\n" "$*" >>"{self.log}"\nexec {real} "$@"\n'
+            )
+        self.set_uptime("1000.25")
         if systemd_run:
             self.fake(
                 os.path.join(self.bin, "systemd-run"),
@@ -1643,6 +1654,13 @@ class RustcWrapperTest(unittest.TestCase):
         )
         with open(self.containerenv, "w") as f:
             f.write('name="hypatia-f45"\n')
+
+    def set_uptime(self, seconds: str) -> None:
+        with open(self.uptime, "w") as f:
+            f.write(f"{seconds} 4000.50\n")
+
+    def sock(self) -> str:
+        return os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock")
 
     def scope_dir(self, slice_name: str = "user.slice", env_id: str = "hypatia-f45") -> str:
         return os.path.join(self.manager_dir, slice_name, f"cst-sccache-{env_id}.scope")
@@ -1700,13 +1718,138 @@ class RustcWrapperTest(unittest.TestCase):
         calls = self.run_wrapper(self.rustc(), "x")
         self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
 
-    def test_a_failed_start_still_compiles(self) -> None:
-        # systemd-run refused (no manager, a unit of that name already there):
-        # the client is run as before, and the next compile tries again.
+    def test_a_failed_start_backs_off_for_ten_minutes(self) -> None:
+        # systemd-run refused (a unit of that name already there, the manager
+        # said no): the client is run as before and starts a server in the
+        # compile's cgroup. For 10 minutes no compile tries again: no flock, no
+        # systemd-run, and the socket of that server stays.
+        self.user_manager(start_fails=True, flock_log=True)
+        sock = self.sock()
+        self.assertEqual(self.who(self.rustc(), "x"), ["flock", "systemd-run", "sccache", "rustc"])
+        with open(sock + ".failed") as f:
+            self.assertEqual(f.read(), "1000\n")
+        os.mknod(sock, stat.S_IFSOCK | 0o600)  # the server the client started
+        self.set_uptime("1599.99")
+        self.assertEqual(self.who(self.rustc(), "x"), ["sccache", "rustc"])
+        self.assertTrue(stat.S_ISSOCK(os.stat(sock).st_mode))
+        self.set_uptime("1600.00")
+        self.assertEqual(self.who(self.rustc(), "x"), ["flock", "systemd-run", "sccache", "rustc"])
+        with open(sock + ".failed") as f:
+            self.assertEqual(f.read(), "1600\n")
+
+    def test_a_start_that_works_clears_the_marker(self) -> None:
+        self.user_manager()
+        with open(self.sock() + ".failed", "w") as f:
+            f.write("1000\n")
+        self.set_uptime("1700")
+        self.assertEqual(self.who(self.rustc(), "x"), ["systemd-run", "start", "sccache", "rustc"])
+        with open(self.sock() + ".failed") as f:
+            self.assertEqual(f.read(), "")
+
+    def test_a_marker_or_a_clock_it_cannot_read_holds_nothing_back(self) -> None:
+        # A marker from before a reboot (later than now), one that is not a
+        # number (never evaluated: no command in it runs) or has a leading zero
+        # (an error in $((...)) would end the wrapper), no clock to read, or
+        # one that is not a number: the start is tried.
+        pwned = os.path.join(self.tmp, "pwned")
+        cases: list[tuple[str, str | None, str | None]] = [
+            ("from before a reboot", "5000\n", "1000.25"),
+            ("not a number", "12x\n", "1000.25"),
+            ("a leading zero (not octal)", "0998\n", "1000.25"),
+            ("a clock with a leading zero", "1000\n", "01000.25"),
+            ("a command", f"a[$(touch {pwned})]\n", "1000.25"),
+            ("no clock", "1000\n", None),
+            ("a clock that is not a number", "1000\n", "up"),
+        ]
+        for label, marker, uptime in cases:
+            with self.subTest(label):
+                self.setUp()  # a fresh folder of its own (setUp removes it at the end)
+                self.user_manager(start_fails=True)
+                assert marker is not None
+                with open(self.sock() + ".failed", "w") as f:
+                    f.write(marker)
+                if uptime is None:
+                    os.unlink(self.uptime)
+                else:
+                    self.set_uptime(uptime)
+                self.assertEqual(self.who(self.rustc(), "x"), ["systemd-run", "sccache", "rustc"], label)
+        self.assertFalse(os.path.exists(pwned))
+
+    def test_parallel_compiles_try_a_failing_start_once(self) -> None:
+        # The compiles that waited for the lock of a failed start do not try
+        # again: one systemd-run for 8 parallel compiles.
         self.user_manager(start_fails=True)
-        for _ in range(2):
-            calls = self.run_wrapper(self.rustc(), "x")
-            self.assertEqual([c["who"] for c in calls], ["systemd-run", "sccache", "rustc"])
+        assert self.sh is not None
+        env = self.wrapper_env()
+        open(self.log, "w").close()
+        procs = [
+            subprocess.Popen(
+                [self.sh, self.script, self.rustc(), "--crate-name", f"c{i}"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for i in range(8)
+        ]
+        for p in procs:
+            _, err = p.communicate(timeout=60)
+            self.assertEqual(p.returncode, 0, err)
+        who = [c["who"] for c in self.calls()]
+        self.assertEqual((who.count("systemd-run"), who.count("sccache"), who.count("rustc")), (1, 8, 8), who)
+
+    def test_a_lock_that_cannot_be_opened_is_silent(self) -> None:
+        # The shell's "cannot create" message would land among the compiler's
+        # messages in cargo's output.
+        self.user_manager()
+        os.mkdir(self.sock() + ".lock")
+        assert self.sh is not None
+        open(self.log, "w").close()
+        r = subprocess.run(
+            [self.sh, self.script, self.rustc(), "x"],
+            check=False,
+            env=self.wrapper_env(),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual([c["who"] for c in self.calls()], ["sccache", "rustc"])
+
+    def test_warm_and_backing_off_compiles_fork_nothing(self) -> None:
+        # With no process allowed to start (RLIMIT_NPROC 0), the wrapper must
+        # still get to the compile: a warm compile and one in the 10 minutes
+        # after a failed start run builtins only (an exec is not a fork).
+        prlimit = shutil.which("prlimit")
+        assert prlimit is not None, "util-linux prlimit is needed for this test"
+        assert self.sh is not None
+        control = subprocess.run(
+            [prlimit, "--nproc=0", sys.executable, "-I", "-c", "import os; os.fork()"],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertNotEqual(control.returncode, 0, "the limit does not stop a fork here (root?)")
+        self.user_manager()
+        self.run_wrapper(self.rustc(), "x")  # the cold start
+        for state in ("warm", "backing off"):
+            if state == "backing off":
+                shutil.rmtree(self.scope_dir())
+                with open(self.sock() + ".failed", "w") as f:
+                    f.write("990\n")
+            open(self.log, "w").close()
+            r = subprocess.run(
+                [prlimit, "--nproc=0", self.sh, self.script, self.rustc(), "x"],
+                check=False,
+                env=self.wrapper_env(),
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+            )
+            self.assertEqual((r.returncode, r.stderr), (0, ""), state)
+            self.assertEqual([c["who"] for c in self.calls()], ["sccache", "rustc"], state)
 
     def test_without_what_a_scope_needs_the_client_starts_the_server(self) -> None:
         # Today's path, with nothing run before sccache: no user manager above

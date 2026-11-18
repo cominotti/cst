@@ -2374,28 +2374,34 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         """The real rustc wrapper (installed by `cst toolchains config apply
         --sccache`), real cargo and the real user manager, with a fake sccache
         that daemonises like the real one (its server stays in the cgroup it
-        starts in, and the socket comes 0.3 s after the start). The first build
+        starts in, and the socket comes 0.3 s after the start; unlike the real
+        one it runs rustc in the client's cgroup). The toolbox is a stand-in
+        (CST_SCCACHE_CONTAINERENV names "e2ebox"), so this is the toolbox
+        branch; the host one (app.slice) has unit tests only. The first build
         runs in a transient scope with MemoryMax, like a test harness's capped
         lane: the wrapper must start the one server in
-        cst-sccache-e2ebox.scope in the inner user.slice (no cap), not in the
-        capped scope, though cargo runs its rustc in parallel. What a fake
-        cannot prove: where systemd puts a --user --scope started from inside
-        another unit, that the scope's folder is where the wrapper looks, and
-        that the scope goes away when the server stops. Also: a second build
-        starts nothing; a server an older wrapper left in a capped scope is
-        replaced by one in the scope; --no-sccache undoes the cargo setting."""
+        cst-sccache-e2ebox.scope in the inner user.slice (MemoryMax infinity),
+        not in the capped scope. cargo's first rustc call (its version probe)
+        comes alone, so the start is not contended here; the unit tests cover
+        the lock. What a fake cannot prove: where systemd puts a --user --scope
+        started from inside another unit, that the scope's folder is where the
+        wrapper looks, and that the scope goes away when the server stops.
+        Also: a second build starts nothing; with a server an older wrapper
+        left in a capped scope, the next build starts one in the scope (the old
+        one runs on); a start that systemd refuses (a unit of that name in
+        another slice) is tried once, and the server the client then starts
+        is used without another try; --no-sccache undoes the cargo setting."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             """
-            for f in /home/tester/work/scc-scope/state/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
-            for u in e2e-scc-launch-1 e2e-scc-launch-2 e2e-scc-launch-3 e2e-scc-launch-4 e2e-scc-old.scope \
-                    cst-sccache-e2ebox.scope; do
-                systemctl --user stop "$u" 2>/dev/null || true
+            for f in /home/tester/work/scc-scope/state/*.pid; do
+                [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
             done
+            systemctl --user stop 'e2e-scc-*' cst-sccache-e2ebox.scope 2>/dev/null || true
             /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
             rm -rf /home/tester/work/scc-scope /run/user/1000/cst-sccache-e2ebox.sock \
-                /run/user/1000/cst-sccache-e2ebox.sock.lock
+                /run/user/1000/cst-sccache-e2ebox.sock.lock /run/user/1000/cst-sccache-e2ebox.sock.failed
             """,
             check=False,
         )
@@ -2466,13 +2472,13 @@ EOF
             # (MemoryMax=1G), started from a user service: a --user --scope
             # needs a caller that the user manager may move.
             build() {
-                local n=$1
+                local n=$1 jobs=${2:-8}
                 systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
                     -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
                     -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
                     -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
                     systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
-                    cargo build --offline -j8 </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
+                    cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
             }
             starts() { tr '\n' ' ' <"$st/starts"; }
 
@@ -2515,6 +2521,27 @@ EOF
             [ "$(cat "$st/server-$(cat "$st/live").cgroup")" = "$want" ]
             kill -0 "$old"   # the old one runs on until it stops by itself (killed here)
             kill "$old" "$(cat "$st/live")"
+            for _ in $(seq 50); do [ -d "$ucg/user.slice/$scope" ] || break; sleep 0.1; done
+
+            # A start that systemd refuses: a unit of the scope's name is already
+            # there, in another slice, so the scope's folder never appears. One
+            # try (cargo's first rustc call), then a marker; the server the
+            # client starts is used by every later compile (one at a time here:
+            # -j1), and no compile removes its socket to try again.
+            : >"$st/starts"
+            rm -f "$sock" "$sock.failed"
+            systemd-run --user --quiet --collect --unit=e2e-scc-block \
+                systemd-run --user --scope --quiet --unit="$scope" --slice=app.slice sleep 300
+            for _ in $(seq 50); do systemctl --user -q is-active "$scope" && break; sleep 0.1; done
+            systemctl --user -q is-active "$scope"
+            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            build 5 1
+            [ "$(starts)" = "auto " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+            [ -s "$sock.failed" ]
+            test -S "$sock"
+            grep -q e2e-scc-cap-5.scope "$st/server-$(cat "$st/live").cgroup"
+            kill "$(cat "$st/live")"
+            systemctl --user stop e2e-scc-block "$scope" 2>/dev/null || true
 
             # Undo: cargo no longer names the wrapper.
             "$cst" toolchains config apply --no-sccache >/dev/null

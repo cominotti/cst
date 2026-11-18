@@ -343,7 +343,13 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   - inside a toolbox the scope goes into the inner `user.slice` of the user
     manager, next to the toolboxes, so it gets their CPUs and weight (and
     the game profile's idle class); on the host it goes into `app.slice`,
-    where host compiles run;
+    where host compiles from a terminal or a desktop IDE run (normal weight,
+    all CPUs; the game profile leaves it alone, as it leaves a host terminal,
+    see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    A host build that you start in a box of its own (`flatpak-spawn --host`
+    from a toolbox, `systemd-run --user --slice=user-NAME.slice`, a
+    `run-*` job) no longer keeps its compiles through sccache in that box:
+    they run in `cst-sccache-host.scope`, like every other host compile;
   - a lock file next to the socket (`<socket>.lock`) makes the compiles
     that cargo starts at once start one server, and the others wait until
     it listens (up to 15 seconds, then they go on as below);
@@ -351,6 +357,15 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
     `/sys/fs/cgroup` and the socket exist, with shell builtins (no program
     is run, no bus call). The socket is removed before each start, so the
     two together mean a server has started in the scope;
+  - a start that fails (systemd refuses the scope, or no server listens in
+    it afterwards) is written down in `<socket>.failed` (the seconds since
+    boot). For 10 minutes after it, compiles try no start, again with shell
+    builtins only, and use the server that the client started instead; then
+    one compile tries again (and removes that server's socket first, so the
+    client starts at most one more server in 10 minutes while the start
+    keeps failing). Without the pause, every compile would take the lock,
+    run `systemd-run`, and remove the socket of the server the compile
+    before it had started;
   - `systemctl --user status cst-sccache-<toolbox name>.scope` shows the
     server. The scope goes away when the server stops.
 
