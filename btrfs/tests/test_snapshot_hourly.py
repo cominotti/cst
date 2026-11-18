@@ -882,6 +882,26 @@ class WaitingTest(Base):
         )
         self.assertTrue(os.path.isdir(old))
 
+    def test_the_mount_table_is_read_once_for_every_old_tree(self) -> None:
+        # The hourly run asked findmnt once per drop-pending entry; one reading serves them all (the
+        # engine step still asks once per tree it keeps, as before).
+        olds = [os.path.join(self.home, f".c{i}.pre-subvol-20261118T100000") for i in range(3)]
+        for old in olds:
+            os.makedirs(os.path.join(old, "m"))
+        self.machine(mounts=["/", *(f"{old}/m" for old in olds)])
+        self.write(self.state_file("drop-pending"), "".join(f"{old}\n" for old in olds))
+        self.wait_run("pending-since")
+        self.a_day_ago("pending-since")
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        held = " ".join(f"{old}/m" for old in olds)
+        self.assertEqual(
+            [str(a[5]) for a in self.notified()],
+            [f"For over a day: {' '.join(olds)} - mounted below them, so kept until unmounted: {held} "],
+        )
+        self.assertEqual(len(self.calls("findmnt")), len(olds) + 1, self.calls("findmnt"))
+
     def test_conversions_waiting_for_the_next_boot(self) -> None:
         ws = os.path.join(self.home, "Workspace")
         os.makedirs(ws)

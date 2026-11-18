@@ -171,11 +171,9 @@ def planned_left(m: SnapshotRun) -> str:
     return "".join(f"{p}\n" for p in out)
 
 
-def mounts_below(m: SnapshotRun, path: str) -> list[str]:
-    """findmnt's mount points below PATH."""
-    prefix = f"{path}/"
-    out = m.capture(["findmnt", "-rn", "-o", "TARGET"], stderr=Stderr.SHOW)
-    return [t for t in out.split("\n") if t.startswith(prefix)]
+def mount_points(m: SnapshotRun) -> list[str]:
+    """findmnt's mount points (read once per run: the same table for every path)."""
+    return m.capture(["findmnt", "-rn", "-o", "TARGET"], stderr=Stderr.SHOW).split("\n")
 
 
 def unfinished_bulk_move(m: SnapshotRun) -> bool:
@@ -292,7 +290,8 @@ def wait_for_data_leaving_home(m: SnapshotRun) -> bool:
     pending = f"{m.state}/drop-pending"
     if m.non_empty(pending):
         text = m.read_raw(pending)
-        held_list = [t for p in read_lines(text) for t in mounts_below(m, p)]
+        targets = mount_points(m)
+        held_list = [t for p in read_lines(text) for t in targets if t.startswith(f"{p}/")]
         held = head_spaced("".join(f"{t}\n" for t in held_list), SHOWN)
         waiting(
             m,
