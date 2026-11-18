@@ -44,7 +44,6 @@ from cst_core.domain.text import (
     ShellAssignments,
     describe_problems,
     first_line,
-    is_yes,
     parse_shell_assignments,
     parse_snapshots_conf,
 )
@@ -754,12 +753,6 @@ def needs_mark(d: Mapping[str, Any]) -> bool:
     if d["scope"] == "system" and not d["present"]:
         return os.path.isdir(os.path.dirname(d["path"]))
     return d["present"] and d["btrfs"] is not False and d["nocow"] is not True
-
-
-def confirm(question: str) -> bool:
-    if not sys.stdin.isatty():
-        raise Refused("apply asks for confirmation: run it in a terminal")
-    return is_yes(input(f"{question} [y/N] "))
 
 
 def domain_state(vm: str) -> str:

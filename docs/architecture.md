@@ -69,6 +69,12 @@ package has the light profile unless a layer of the full one pays for itself.
 - Tests fake cst_core's `CommandRunnerPort` or `FileSystemPort`, or the
   adapter functions, instead of a port of the package's own.
 
+`cpu` follows it too: its `cli.py` does no I/O of its own. The
+recording loop of `cpu-watch watch`, vm-pin's virsh calls and saved
+definition are in `cpu/adapters.py`; the rules and records in
+`cpu/domain.py`; the `quiet` loop stays in `cli.py` with its clock, pause
+and sampler passed in, and the apply prompt is cst_core's `confirm`.
+
 `btrfs/chrome_cache/cli.py` still has 7 lines of I/O of its own (closing
 folder descriptors, a folder test, resolving and `os.stat`-ing the home, the
 uid checks), counted in

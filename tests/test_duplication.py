@@ -82,7 +82,7 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
     "render_service": "the toolchains and vm units' own text, both through cst_core.domain.units",
     "render_timer": "the toolchains and vm timers, both over cst_core.domain.units.render_timer",
     "systemctl": "toolchains runs systemctl --user and raises Refused; vm runs system systemctl for a status",
-    "virsh": "bindings over cst_core's SubprocessVirshAdapter: cpu exits on a failure; doctor is read-only (-r); vm returns (rc, out, err)",
+    "virsh": "bindings over cst_core's SubprocessVirshAdapter: cpu raises Refused on a failure; doctor is read-only (-r); vm returns (rc, out, err)",
     "log": "each program's log binding (plain stdout for bulk, journal tags) over cst_core.adapters.journal.log",
     # Left for a follow-up (see the stage report): same idea, kept apart for now.
     "read_bytes": "btrfs-stall-monitord reads /proc with os.read until EOF and its tests fake os.read; "
