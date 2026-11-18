@@ -138,7 +138,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
     "toolchains/cli/": 934,
-    "vm/cli/": 1116,
+    "vm/cli/": 1070,
 }
 
 
@@ -181,7 +181,7 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 1,
     "toolchains cli": 16,
-    "vm cli": 65,
+    "vm cli": 61,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition

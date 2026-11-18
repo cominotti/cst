@@ -2,13 +2,12 @@
 """`cst vm nocow plan [--root]` and `cst vm nocow apply`: the NOCOW mark of the VM image folders."""
 
 import os
-import shlex
 
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
-from vm.adapters import knobs, run, run_on_terminal
-from vm.adapters.images import flag_state, image_dirs, readable_inode_flags, needs_mark, probe_dir, mark_folder_nocow
-from vm.domain import ImageProbe, nocow_lines, VmSettings
+from vm.adapters import knobs
+from vm.adapters.images import image_dirs, mark_dir, needs_mark, probe_dir
+from vm.domain import VmSettings, nocow_lines, todo_note
 
 
 def cmd_nocow_plan(cfg: VmSettings, as_root: bool = False) -> int:
@@ -28,53 +27,13 @@ def cmd_nocow_plan(cfg: VmSettings, as_root: bool = False) -> int:
     if todo:
         print(
             f"Set the mark with: {cfg.prog} nocow apply   (folders: "
-            + ", ".join(
-                d.path
-                + (
-                    " (not created yet)"
-                    if not d.present
-                    else " (mark not readable here: set again, harmless)"
-                    if d.nocow is None
-                    else ""
-                )
-                for d in todo
-            )
+            + ", ".join(d.path + todo_note(d) for d in todo)
             + ")"
         )
     else:
         print("No folder to mark.")
     print("Existing images are never converted by CST: the commands above are for you to run.")
     return 0
-
-
-def mark_system_dir(d: ImageProbe) -> str:
-    """Create (root:root 0711, as libvirt does) and mark the system folder:
-    directly as root, else with sudo. Returns an error text or ""."""
-    path, q = d.path, shlex.quote(d.path)
-    if os.path.islink(path) or not d.present and os.path.lexists(path):
-        return f"{path}: appeared or is a symbolic link: not touched"
-    if os.geteuid() == 0:
-        try:
-            if not d.present:
-                os.mkdir(path, 0o711)
-                os.chmod(path, 0o711)
-                run(["restorecon", path])
-            mark_folder_nocow(path)
-        except OSError as e:
-            return f"{path}: {e.strerror}"
-        return "" if flag_state(readable_inode_flags(path)) else f"{path}: the mark did not stick"
-    steps: list[list[str]] = []
-    if not d.present:
-        steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
-    steps.append(["chattr", "+C", path])
-    for cmd in steps:
-        print(f"  sudo {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
-        rc = run_on_terminal(["sudo", "--", *cmd])
-        if rc != 0:
-            return f"sudo {cmd[0]} {q}: exit {rc}"
-    rc, so, _ = run(["sudo", "--", "lsattr", "-d", path])
-    attrs = so.split()[0] if rc == 0 and so.split() else ""
-    return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"
 
 
 def cmd_nocow_apply(cfg: VmSettings) -> int:
@@ -102,15 +61,7 @@ def cmd_nocow_apply(cfg: VmSettings) -> int:
         return 0
     errors: list[str] = []
     for d in todo:
-        if d.scope == "system":
-            err = mark_system_dir(d)
-        else:
-            try:
-                mark_folder_nocow(d.path)
-                err = "" if flag_state(readable_inode_flags(d.path)) else f"{d.path}: the mark did not stick"
-            except OSError as e:
-                err = f"{d.path}: {e.strerror}"
-        if err:
+        if err := mark_dir(d, lambda line: print(line, flush=True)):
             errors.append(err)
         else:
             print(f"  done: {d.path}")

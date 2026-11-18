@@ -570,6 +570,15 @@ def convert_lines(img: ImageInfo, system: bool) -> list[str]:
     ]
 
 
+def todo_note(d: ImageProbe) -> str:
+    """What nocow plan says after a folder it would mark: not there yet, or its mark not readable."""
+    if not d.present:
+        return " (not created yet)"
+    if d.nocow is None:
+        return " (mark not readable here: set again, harmless)"
+    return ""
+
+
 def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
     """Lines describing one probed folder (nocow plan and status); prog names cst vm in the hints."""
     head = f"{d.path}  [{d.what}]"

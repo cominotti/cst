@@ -6,9 +6,11 @@ import ctypes
 from dataclasses import replace
 import os
 import pwd
+import shlex
 import struct
 
 from cst_core.adapters import nocow as inode_attrs
+from vm.adapters import run, run_on_terminal
 from vm.domain import BTRFS_MAGIC, USER_IMAGES, ImageDir, ImageInfo, ImageProbe, VmSettings
 
 
@@ -119,3 +121,46 @@ def needs_mark(d: ImageProbe) -> bool:
     if d.scope == "system" and not d.present:
         return os.path.isdir(os.path.dirname(d.path))
     return d.present and d.btrfs is not False and d.nocow is not True
+
+
+def mark_system_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
+    """Create (root:root 0711, as libvirt does) and mark the system folder:
+    directly as root, else with sudo (say shows each sudo command before it runs).
+    Returns an error text or ""."""
+    path, q = d.path, shlex.quote(d.path)
+    if os.path.islink(path) or not d.present and os.path.lexists(path):
+        return f"{path}: appeared or is a symbolic link: not touched"
+    if os.geteuid() == 0:
+        try:
+            if not d.present:
+                os.mkdir(path, 0o711)
+                os.chmod(path, 0o711)
+                run(["restorecon", path])
+            mark_folder_nocow(path)
+        except OSError as e:
+            return f"{path}: {e.strerror}"
+        return "" if flag_state(readable_inode_flags(path)) else f"{path}: the mark did not stick"
+    steps: list[list[str]] = []
+    if not d.present:
+        steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
+    steps.append(["chattr", "+C", path])
+    for cmd in steps:
+        say(f"  sudo {' '.join(shlex.quote(c) for c in cmd)}")
+        rc = run_on_terminal(["sudo", "--", *cmd])
+        if rc != 0:
+            return f"sudo {cmd[0]} {q}: exit {rc}"
+    rc, so, _ = run(["sudo", "--", "lsattr", "-d", path])
+    attrs = so.split()[0] if rc == 0 and so.split() else ""
+    return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"
+
+
+def mark_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
+    """Set the NOCOW mark on a folder nocow apply acts on (needs_mark): the system one through
+    mark_system_dir, a user's directly. Returns an error text or ""."""
+    if d.scope == "system":
+        return mark_system_dir(d, say)
+    try:
+        mark_folder_nocow(d.path)
+    except OSError as e:
+        return f"{d.path}: {e.strerror}"
+    return "" if flag_state(readable_inode_flags(d.path)) else f"{d.path}: the mark did not stick"

@@ -1034,7 +1034,9 @@ The Python code inside `vm/` (standard library only at run time):
   files. `backup.py`: the
   backup index, fingerprints and sizes, the stop signals, the per-VM lock and
   the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
-  and the image folders (`probe_dir`).
+  and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
+  system folder through `sudo` when not root). `nocow apply` has no
+  application layer: it marks folders one by one, nothing to roll back.
 - `vm/wiring.py`: the composition root: the environment of one run becomes a
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
   `CST_VM_*`, which move each path for the tests only, and the snapshot and

@@ -1385,7 +1385,7 @@ class NocowTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)  # target untouched
         # Even if the folder turns into a link between the probe and the action.
         probe = vm_domain.ImageProbe("system", self.system, "x", present=False, link=None, nocow=None)
-        self.assertIn("symbolic link: not touched", vm_cli_nocow.mark_system_dir(probe))
+        self.assertIn("symbolic link: not touched", vm_adapters_images.mark_system_dir(probe, print))
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
