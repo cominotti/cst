@@ -559,6 +559,24 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
         self.assertEqual(len(self.notifications()), 1)
 
+    def test_nul_bytes_are_dropped(self) -> None:
+        # bash's read dropped every NUL byte of a pending file: the fields and the text are shown
+        # without them (a NUL cannot be passed to notify-send at all).
+        name = self.alert(
+            1,
+            text=f"cst-alert 1\nurgency=critical\napp=btrfs-test\nfirst={FIRST}\nlast={FIRST}\n"
+            "count=1\ntitle=Disk: pro\0blem\n\nthe bo\0dy\nline 2\n",
+        )
+        listed = self.run_prog("--list")
+        self.assertEqual(
+            listed.stdout, f"{when(FIRST)}  critical btrfs-test: Disk: problem{NOT_SHOWN}\n", listed.stderr
+        )
+        r = self.run_prog()
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        at = f"Happened {when(FIRST)}, while no desktop session could show it."
+        self.assertEqual(self.notifications(), [self.shown("Disk: problem", at)])
+        self.assertEqual(self.read_record(), f"{name} {find_mtime(self.path(name))} shown 1 {FIRST}\n")
+
     def test_a_record_it_cannot_replace_still_ends_well(self) -> None:
         # The folder is there but the new record cannot take the old one's place (here a folder holds
         # its name): as bash's "mv ... || rm -f", the run still exits 0, and the old record stays, so

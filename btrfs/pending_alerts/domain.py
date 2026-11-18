@@ -111,7 +111,7 @@ class Alert:
 
 def parse_alert(text: str) -> Alert | None:
     """The alert in a pending file's text (its first MAX_FILE bytes), or None for anything unexpected."""
-    lines = file_lines(text)
+    lines = file_lines(text.replace("\0", ""))  # bash's read dropped every NUL byte
     if not lines or lines[0] not in _HEADERS:
         return None
     head: dict[str, str] = {}
@@ -151,7 +151,7 @@ class Seen:
 def parse_delivered(text: str) -> dict[str, Seen]:
     """The record: name -> what was seen, the newest entry of each name. Only whole lines count."""
     rec: dict[str, Seen] = {}
-    for line in text.split("\n")[:-1]:
+    for line in text.replace("\0", "").split("\n")[:-1]:  # bash's read dropped every NUL byte
         name, mtime, how, count, first = read_fields(line, 5)
         if not NAME.fullmatch(name) or not _MTIME.fullmatch(mtime):
             continue
