@@ -11,7 +11,6 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Sequence
-import contextlib
 import fnmatch
 import io
 import os
@@ -596,6 +595,58 @@ class IntendedFormatTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.intended))
 
 
+class UnreadableRecordTest(GameProfileCase):
+    """A line of game.state or game.intended that holds no record (cut short when 'on' died while it
+    wrote it, an unclosed quote): 'off' names it in the journal, skips it and undoes every other
+    record; 'state' names it. bash's eval stopped 'off' there (exit 1, game.state kept)."""
+
+    def test_off_skips_and_names_a_record_it_cannot_read_and_undoes_the_rest(self) -> None:
+        self.run_profile("on")
+        self.assertTrue(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
+        with open(self.state, "a") as f:
+            f.write("prop sys 'user.slice MemoryLow new -\nprop sys machine.slice IOWeight existed\n")
+        n = len(self.read(self.state).split("\n")) - 1
+        out, _ = self.run_profile("off")
+        self.assertEqual(
+            out.split("\n")[:2],
+            [
+                f"<4>game-profile: {self.state} line {n - 1}: no record 'off' can read, skipped:"
+                " prop sys 'user.slice MemoryLow new -",
+                f"<4>game-profile: {self.state} line {n}: no record 'off' can read, skipped:"
+                " prop sys machine.slice IOWeight existed",
+            ],
+        )
+        self.assertIn("<5>game-profile: off: previous CPU", out)
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))  # the rest undone
+
+    def test_state_names_such_lines_of_both_files(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        with open(self.state, "a") as f:
+            f.write("epp 3\n\n")
+        with open(self.intended, "a") as f:
+            f.write("prop sys machine.slice\ncgw $(x) 1 1\nfuture-kind a\n")
+        state_lines = len(self.read(self.state).split("\n")) - 2
+        intended_lines = len(self.read(self.intended).split("\n")) - 1
+        out, _ = self.run_profile("state")
+        self.assertIn(f"\n  unreadable: {self.state} line {state_lines} (skipped): epp 3\n", out)
+        self.assertIn(
+            f"\n  unreadable: {self.intended} line {intended_lines - 2} (skipped): prop sys machine.slice\n", out
+        )
+        self.assertIn(f"\n  unreadable: {self.intended} line {intended_lines - 1} (skipped): cgw $(x) 1 1\n", out)
+        self.assertEqual(out.count("unreadable:"), 3)  # a blank line and a kind it does not know are none
+        self.assertIn("  drift: none", out)  # the readable records are still compared
+
+    def test_tick_says_nothing_about_them(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        with open(self.intended, "a") as f:
+            f.write("prop sys machine.slice\n")
+        out, _ = self.run_profile("tick")
+        self.assertNotIn("unreadable", out)
+
+
 class SettingsProblemTest(GameProfileCase):
     """A line of cpu-setup.conf that bash would run or expand sets nothing: the profile does not
     switch on, and a tick changes nothing, until it is fixed; off still undoes everything."""
@@ -1009,59 +1060,6 @@ class GameProfileCliTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self.assertEqual((r.returncode, r.stdout, r.stderr), (2, "", "usage: game-profile on|off|tick|state\n"))
-
-
-class BashReadsTheRecordsTest(GameProfileCase):
-    """A line of game.state or game.intended that holds no record, read as bash's eval read it: 'off'
-    stops at a record cut short (exit 1, game.state kept, no reload), an unclosed quote repeats the
-    record before it; the drift check compares nothing; 'state' lists no idle boxes."""
-
-    def off_rc(self) -> tuple[int, str, str]:
-        self.systemd.actions = []
-        p, out = self.profile()
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            rc = p.off()
-        return rc, out.getvalue(), err.getvalue()
-
-    def test_off_stops_at_a_record_cut_short_and_keeps_game_state(self) -> None:
-        self.run_profile("on")
-        with open(self.state, "a") as f:
-            f.write("prop sys machine.slice IOWeight existed\n")
-        n = len(self.read(self.state).split("\n")) - 1
-        before = self.read(self.state)
-        rc, out, err = self.off_rc()
-        self.assertEqual((rc, out), (1, ""))
-        self.assertEqual(err, f"{self.state} line {n}: no record 'off' can read\n")
-        self.assertEqual(self.read(self.state), before)
-        self.assertNotIn(f"{SYS} daemon-reload", self.systemd.actions)
-        self.assertTrue(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))  # nothing older undone
-
-    def test_an_unclosed_quote_repeats_the_record_before_it(self) -> None:
-        self.write(self.state, "prop sys machine.slice CPUWeight existed 50\nprop sys 'user.slice MemoryLow new -\n\n")
-        # Newest first: the bad line (with no record before it) stops bash at once.
-        rc, _, _ = self.off_rc()
-        self.assertEqual(rc, 1)
-        self.write(self.state, "prop sys 'user.slice MemoryLow new -\nprop sys machine.slice CPUWeight existed 50\n")
-        rc, out, _ = self.off_rc()
-        self.assertEqual(rc, 0, out)
-        sets = [a for a in self.systemd.actions if "set-property" in a]
-        self.assertEqual(sets, [f"{SYS} set-property --runtime machine.slice CPUWeight=50"] * 2)
-        self.assertFalse(os.path.exists(self.state))
-
-    def test_the_drift_check_compares_nothing_and_state_lists_no_idle_boxes(self) -> None:
-        self.run_profile("on")
-        self.write(self.manual, "")
-        self.set_now("sys", "machine.slice", CPUWeight="50")  # drifted
-        with open(self.intended, "a") as f:
-            f.write("prop sys machine.slice\n")
-        out, actions = self.run_profile("state")
-        self.assertIn("  drift: none", out)
-        self.assertFalse([a for a in actions if " show -p " in a])
-        with open(self.state, "a") as f:
-            f.write("prop usr 'x CPUWeight new -\n")
-        out, _ = self.run_profile("state")
-        self.assertIn("\n  other boxes     idle: \n", out)
 
 
 if __name__ == "__main__":

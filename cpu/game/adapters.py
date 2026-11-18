@@ -35,22 +35,21 @@ from cpu.game.domain import (
     drifted,
     dropin_text,
     escaped_unit,
-    drift_readable,
+    escapes_in_state,
     expand_cpus,
     first_cpu,
     has_record_part,
     intended_header,
     intended_props,
     newer_intended,
-    off_records,
     on_text,
     record_line,
     records,
     repaired_text,
+    unreadable_lines,
     game_settings,
     show_values,
     shown,
-    state_escapes,
     transient_unit,
     vm_io_weight,
 )
@@ -430,13 +429,12 @@ class GameProfile:
             self.remove_leftover_dropins()
             return 0
         reload = {"sys": self.remove_game_dropins(), "usr": False}
+        text = self._state_text()
+        for number, line in unreadable_lines(text, intended=False):
+            self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         # Newest first, so a property touched twice ends at its oldest value.
-        recs, stopped = off_records(self._state_text())
-        for rec in recs:
+        for rec in reversed(records(text)):
             self._undo(rec, reload)
-        if stopped is not None:  # as bash's set -u ended it: no reload, game.state kept
-            print(f"{p.state} line {stopped}: no record 'off' can read", file=sys.stderr, flush=True)
-            return 1
         if reload["sys"]:
             self.ctl("sys", "daemon-reload")
         if reload["usr"]:
@@ -469,8 +467,6 @@ class GameProfile:
 
     def drift(self, text: str) -> list[Drift]:
         """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
-        if not drift_readable(text):
-            return []
         recs = records(text)
         now: dict[tuple[str, str], dict[str, str]] = {}
         for (mgr, unit), props in intended_props(recs).items():
@@ -570,7 +566,11 @@ class GameProfile:
             effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
             self.say(f"  toolboxes       cpus effective={effective}")
             if on:
-                self.say(f"  other boxes     idle: {state_escapes(self._state_text())}")
+                self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
+        if on:
+            for path, intended in ((p.state, False), (p.intended, True)):
+                for number, line in unreadable_lines(read_text(path) or "", intended=intended):
+                    self.say(f"  unreadable: {path} line {number} (skipped): {line}")
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:

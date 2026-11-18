@@ -205,48 +205,27 @@ def records(text: str) -> list[Record]:
     return out
 
 
-def off_records(text: str) -> tuple[list[Record], int | None]:
-    """The records of game.state 'off' undoes, newest first, as bash's `eval "rec=(${line})"` loop read
-    them, and the number of the line where it stopped (None: it read them all).
-
-    An empty line is skipped. A line eval cannot read as words (an unclosed quote) leaves the previous
-    record in place, which is undone again; with none before it, bash stopped. A line with fewer fields
-    than its kind needs (cgw and epp: 3, any other: 6; a record cut short) stopped bash too (`set -u`):
-    'off' then ends with exit 1 and leaves game.state as it is."""
-    lines = file_lines(text)
-    out: list[Record] = []
-    prev: Record | None = None
-    for number in range(len(lines), 0, -1):
-        line = lines[number - 1]
-        if line == "":
+def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
+    """The lines (number, text) of game.state, or of game.intended (intended), that hold no record the
+    profile can use: bash could not read them as plain words (an unclosed quote), or they have fewer
+    fields than their kind needs (a record cut short). Blank lines are none. records() leaves such a
+    line out; bash's eval stopped 'off' there instead (exit 1, game.state kept)."""
+    out: list[tuple[int, str]] = []
+    for number, line in enumerate(file_lines(text), 1):
+        if not line.strip():
             continue
         words = printf_q_words(line)
-        rec = prev if words is None else tuple(words)
-        if not rec or len(rec) < (3 if rec[0] in ("cgw", "epp") else 6):
-            return out, number
-        out.append(rec)
-        prev = rec
-    return out, None
-
-
-def drift_readable(text: str) -> bool:
-    """bash's drift check read game.intended whole: False when it stopped first (a line eval cannot read
-    as words, an empty record, a prop record with fewer than 4 fields), and so compared nothing."""
-    for line in file_lines(text):
-        if line == "":
+        if words is None:
+            out.append((number, line))
             continue
-        words = printf_q_words(line)
-        if not words or (words[0] == "prop" and len(words) < 4):
-            return False
-    return True
-
-
-def state_escapes(text: str) -> str:
-    """The 'other boxes idle' part of 'state' from game.state's text: escapes_in_state of its records, or
-    nothing when a line cannot be read as words (bash's eval then ended the command substitution)."""
-    if any(printf_q_words(line) is None for line in file_lines(text)):
-        return ""
-    return escapes_in_state(records(text))
+        kind = words[0] if words else ""
+        if intended:
+            need = {"prop": 6, "cgw": 4}.get(kind, 0)  # another kind (the format line) is no drift record
+        else:
+            need = 3 if kind in ("cgw", "epp") else 6  # 'off' undoes any other line as a prop record
+        if len(words) < need:
+            out.append((number, line))
+    return out
 
 
 def has_record_part(text: str, part: str) -> bool:

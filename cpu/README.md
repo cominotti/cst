@@ -703,6 +703,13 @@ so if `on` stops halfway, `off` can still undo what was done.
 
 A box that is gone by then (a `systemd-run` job that ended) is no problem:
 its override file is deleted if it is still there, and nothing else is done.
+A line of `game.state` that holds no record (cut short when `on` died while
+writing it, an unclosed quote) is named in the journal (`<4>... line N: no
+record 'off' can read, skipped: TEXT`) and skipped; `off` undoes every other
+record. `cst cpu game state` names such lines of `game.state` and
+`game.intended` (`unreadable: PATH line N (skipped)`); the drift check
+compares the records around them. (The bash version stopped `off` at such a
+line, with exit 1 and `game.state` left in place.)
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
