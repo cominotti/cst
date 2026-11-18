@@ -60,7 +60,8 @@ output in).
                                  PROFILES|RULE_QUALITY|NODE_CODEC|NODE_QUALITY|NODE_RATE
 
 DEV is the MAC with "_" instead of ":" (as PipeWire names the headset).
-Exit status: 0 fine, 10 see above, 1 the input could not be used, 2 usage,
+Exit status: 0 fine, 10 see above, 1 the input could not be used (a file it
+cannot read or decode: "bt-helper: " and the error on stderr), 2 usage,
 3 pw-dump output unreadable, 4 the headset is not in PipeWire.
 """
 

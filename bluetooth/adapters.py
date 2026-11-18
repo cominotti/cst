@@ -5,6 +5,7 @@ bt-helper reads, and the LDAC rate watcher's pw-dump and pactl calls and its loo
 from collections.abc import Callable, Sequence
 import contextlib
 import ctypes
+import io
 import json
 import os
 import select
@@ -31,6 +32,22 @@ from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.ports import CommandRunnerPort
+
+
+def one_line_errors[**P](main: Callable[P, int]) -> Callable[P, int]:
+    """bt-helper's main: a file it cannot read or decode (OSError, ValueError) ends it with one
+    line on its stderr (the stderr= argument, else sys.stderr), "bt-helper: " and the error,
+    and exit status 1, instead of a traceback."""
+
+    def run(*args: P.args, **kwargs: P.kwargs) -> int:
+        try:
+            return main(*args, **kwargs)
+        except (OSError, ValueError) as e:
+            given = kwargs.get("stderr")
+            print(f"bt-helper: {e}", file=given if isinstance(given, io.TextIOBase) else sys.stderr)
+            return 1
+
+    return run
 
 
 def read(path: str) -> str:

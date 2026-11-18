@@ -83,9 +83,34 @@ class StoppedTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.text)
         stops = [line for line in r.stderr.splitlines() if ": stopped: " in line]
         self.assertEqual(len(stops), 1, r.stderr)
-        self.assertRegex(stops[0], r"stopped: a command failed \(exit 1\)\. Backup of main\.conf: \S+/main\.conf\.bak-\d{8}-\d{6}\. Undo: ")
+        self.assertRegex(
+            stops[0],
+            r"stopped: a command failed \(exit 1\)\. Backup of main\.conf: \S+/main\.conf\.bak-\d{8}-\d{6}\. Undo: ",
+        )
         self.assertTrue(r.stderr.endswith(stops[0] + "\n"), r.stderr)
         self.assertFalse(os.path.exists(m.wp_conf))
+
+    def test_a_rule_file_it_cannot_read_stops_before_any_change(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, GENERAL)
+        m.services()
+        os.makedirs(m.wp_dir)
+        with open(m.wp_conf, "wb") as f:
+            f.write(b"# \xff\n")
+        bad = "bt-helper: 'utf-8' codec can't decode byte 0xff in position 2: invalid start byte\n"
+        for cmd in ("plan", "status"):
+            r = m.run(cmd)
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (1, "", bad), cmd)
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, 1, r.text)
+        self.assertEqual(
+            r.stderr,
+            f"{bad}{SETUP}: stopped: a command failed (exit 1). Backup of main.conf: none taken. Undo: {SETUP} revert\n",
+        )
+        with open(m.main_conf, encoding="utf-8") as f:
+            self.assertEqual(f.read(), GENERAL)
+        with open(m.wp_conf, "rb") as f:
+            self.assertEqual(f.read(), b"# \xff\n")
 
 
 if __name__ == "__main__":
