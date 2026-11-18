@@ -130,8 +130,7 @@ class HelperModule(Protocol):
 
 def load(path: str = HELPER, name: str = "bt_helper") -> types.ModuleType:
     """Load an extensionless helper script as a Python module."""
-    mod = load_script(path, name)
-    return mod
+    return load_script(path, name)
 
 
 def load_helper() -> HelperModule:
