@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""cst-pending-alerts' rules (pure): the alert files btrfs-show_notification keeps, the
+"""cst-pending-alerts' rules (pure): the alert files btrfs-notify keeps, the
 record of what this user has seen, and what one login shows.
 
 A pending alert ("alert-spool" in cst_core/domain/contracts.py) is a file
@@ -35,10 +35,10 @@ _SPOOL: Final = state_format("alert-spool")
 
 TAG: Final = "cst-pending-alerts"
 USAGE: Final = "usage: cst-pending-alerts [--list]"
-MAX_FILE: Final = 16384  # bytes; btrfs-show_notification writes far less
+MAX_FILE: Final = 16384  # bytes; btrfs-notify writes far less
 MAX_FILES: Final = 50
 MAX_SHOWN: Final = 8  # at one login; older normal ones are summed up in one notification
-KEEP_DAYS: Final = 7  # same as btrfs-show_notification
+KEEP_DAYS: Final = 7  # same as btrfs-notify
 MAX_RECORD: Final = 65536  # bytes of the record read
 ICON: Final = "drive-harddisk"
 NAME: Final = re.compile(r"[0-9a-f]{32}\.alert")
@@ -193,7 +193,7 @@ def happened_at(epoch: int, btime: int | None) -> str:
 
 
 def login_text(alert: Alert, seen: Seen | None, at: Callable[[int], str]) -> str:
-    """The text shown: happened_at it happened, then the original body. If this user saw an earlier version
+    """The text shown: when it happened, then the original body. If this user saw an earlier version
     of the same file (same first occurrence), only the occurrences since then are counted."""
     text = ""
     if seen is not None and seen.how == "shown" and seen.first == alert.first and 0 < seen.count < alert.count:

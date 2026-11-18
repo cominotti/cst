@@ -12,6 +12,7 @@ import re
 from typing import Final
 
 from cst_core.domain.text import file_lines, read_fields
+from cst_core.domain.values import GIB, MIB
 
 TAG: Final = "btrfs-health-check"
 ALERT_TITLE: Final = "Disk health: problems detected"
@@ -22,8 +23,6 @@ UNALLOC_CRIT_GIB: Final = 5  # near ENOSPC: btrfs' own dynamic reclaim only star
 NAS_MAX_AGE_DAYS: Final = 8
 SNAPSHOT_MAX_AGE: Final = 3 * 3600  # s since the last successful hourly snapshot
 SNAPSHOT_GRACE: Final = 20 * 60  # s after boot or resume: the timer catches up first
-MIB: Final = 1024**2
-GIB: Final = 1024**3
 KNOBS: Final = ("dynamic_reclaim", "periodic_reclaim")
 RECLAIM_KINDS: Final = ("data", "metadata")
 UPSTREAM_RULE_LINE: Final = 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"'

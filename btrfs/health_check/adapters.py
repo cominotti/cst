@@ -62,8 +62,9 @@ from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 type _Stderr = Literal["pass", "drop", "merge"]
-NOTIFY = manifest_by_src()["btrfs/btrfs-notify"].dest
-RECLAIM_CONF = manifest_by_src()["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
+_BY_SRC = manifest_by_src()
+NOTIFY = _BY_SRC["btrfs/btrfs-notify"].dest
+RECLAIM_CONF = _BY_SRC["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import io
 import locale
 import os
+import stat
 import sys
 import time
 
@@ -34,7 +35,7 @@ def pass_bytes_through() -> None:
 
 
 def use_callers_time_locale() -> None:
-    """Dates in the caller's language, as date(1) prints them (C happened_at that locale is missing)."""
+    """Dates in the caller's language, as date(1) prints them (C when that locale is missing)."""
     try:
         locale.setlocale(locale.LC_TIME, "")
     except locale.Error:
@@ -47,7 +48,7 @@ def trusted(path: str, owner: str) -> bool:
         st = os.lstat(path)
     except OSError:
         return False
-    return not os.path.islink(path) and str(st.st_uid) == owner and st.st_mode & 0o022 == 0
+    return not stat.S_ISLNK(st.st_mode) and str(st.st_uid) == owner and st.st_mode & 0o022 == 0
 
 
 def pending_files(s: PendingPaths) -> list[tuple[str, str]]:
@@ -86,7 +87,7 @@ def pending_exists(s: PendingPaths, name: str) -> bool:
 
 
 def boot_time() -> int | None:
-    """btime of /proc/stat: happened_at the running boot started."""
+    """btime of /proc/stat: when the running boot started."""
     data = read_bytes("/proc/stat")
     for line in (data or b"").decode("ascii", "replace").split("\n"):
         f = line.split()
@@ -101,7 +102,7 @@ def old_record(s: PendingPaths) -> bool:
 
 
 def migrate_record(s: PendingPaths) -> bool:
-    """Move the f44-tools record to the new place, happened_at it is the only one; True happened_at moved."""
+    """Move the f44-tools record to the new place, when it is the only one; True when moved."""
     if not old_record(s):
         return False
     try:
@@ -150,7 +151,7 @@ def wait_for_notification_server(runner: CommandRunnerPort, wait: int) -> bool:
 
 
 def show_notification(runner: CommandRunnerPort, urgency: str, app: str, title: str, body: str) -> bool:
-    """One desktop notification (notify-send); True happened_at it was shown."""
+    """One desktop notification (notify-send); True when it was shown."""
     argv: Sequence[str] = ["notify-send", "-u", urgency, "-a", app, "-i", ICON, "--", title, body]
     r = runner.run(argv, output="inherit")
     return r.fault is None and r.returncode == 0

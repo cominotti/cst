@@ -9,12 +9,12 @@ from btrfs.pending_alerts.adapters import (
     boot_time,
     load_record,
     migrate_record,
-    show_notification,
     pass_bytes_through,
     pending_exists,
     pending_files,
     read_pending,
     save_record,
+    show_notification,
     use_callers_time_locale,
     wait_for_notification_server,
 )
@@ -25,15 +25,15 @@ from btrfs.pending_alerts.domain import (
     TAG,
     USAGE,
     Alert,
-    Seen,
     PendingPaths,
-    login_text,
+    Seen,
+    alert_paths,
+    happened_at,
     list_line,
+    login_text,
     plan_login,
     record_text,
     seen_as,
-    alert_paths,
-    happened_at,
 )
 from cst_core.adapters.dispatch import default_ctrl_c
 from cst_core.adapters.journal import log as journal_log
