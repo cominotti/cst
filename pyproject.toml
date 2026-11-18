@@ -199,6 +199,7 @@ include = [
     "cst_core/adapters/locks.py",
     "cst_core/adapters/nocow.py",
     "cst_core/adapters/runtime.py",
+    "cst_core/adapters/terminal.py",
     "cst_core/adapters/zipapp.py",
     "cst_core/application/__init__.py",
     "cst_core/application/dispatch.py",

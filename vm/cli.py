@@ -24,6 +24,7 @@ from typing import Any
 import xml.etree.ElementTree as ET
 
 from cst_core.adapters import c_locale
+from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
@@ -53,7 +54,6 @@ from vm.adapters import (
     blklist,
     booted_deployment,
     conf_number,
-    confirm,
     cpu_disable_list,
     default_vm,
     describe_entry,

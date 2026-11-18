@@ -93,7 +93,7 @@ FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
 # are resolved through aliases and `from m import x`.
 PURE_MODULES: Final[frozenset[str]] = frozenset(
     {
-        "__future__", "ast", "collections", "collections.abc", "dataclasses", "enum", "fnmatch",
+        "__future__", "ast", "collections", "collections.abc", "dataclasses", "difflib", "enum", "fnmatch",
         "functools", "itertools", "json", "math", "operator", "posixpath", "re", "shlex", "stat",
         "string", "textwrap", "tomllib", "typing", "xml.etree.ElementTree",
     }
@@ -133,7 +133,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/snapshot/cli.py": 147,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 158,
-    "cpu/cli.py": 245,
+    "cpu/cli.py": 146,
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
@@ -189,10 +189,9 @@ IO_BUDGETS: Final[dict[str, int]] = {
     "btrfs/stall_monitord unlayered": 50,
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
-    "cpu cli": 35,
     "cst_core entry": 1,
     "toolchains cli": 54,
-    "vm cli": 80,
+    "vm cli": 78,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
