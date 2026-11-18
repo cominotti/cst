@@ -66,7 +66,8 @@ class FakeUnits(tc_units.UserUnits):
     """The user manager of a test: FAKE answers every systemctl call."""
 
     def __init__(self, out: RunOutputPort, fake: Callable[..., str]) -> None:
-        super().__init__(out)
+        # Never the real user manager, also if a call misses the fake.
+        super().__init__(out, "/nonexistent/systemctl")
         self.fake = fake
 
     def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:

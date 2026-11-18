@@ -228,7 +228,7 @@ class RunSummaries:
 
 
 class ToolchainsLock:
-    """ToolchainsLockPort: one run at a time (the timer and a manual apply, auto on/off), an
+    """One run at a time (the timer and a manual apply, auto on/off): an
     exclusive flock on ~/.local/state/cst/toolchains.lock (0600) in HOME; OUT says when
     another run holds it."""
 
@@ -461,5 +461,5 @@ class HomeFiles:
     def wrapper_state(self, text: str) -> str:
         return wrapper_state(self.home, text)
 
-    def put_wrapper(self, path: str, text: str, values: Mapping[str, str]) -> bool:
-        return put_wrapper(self.home, path, text, values, self.entry_file)
+    def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
+        return put_wrapper(self.home, wrapper_path(self.home), text, values, self.entry_file)

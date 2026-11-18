@@ -22,9 +22,10 @@ from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER, in_container
 
 
-def systemctl_cmd(*args: str, program: str | None = None) -> list[str]:
-    # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads): no test may reach the
-    # real user manager.
+def systemctl_cmd(*args: str, program: str | None) -> list[str]:
+    # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), None for the real
+    # systemctl. No default: every caller says which, so that no test reaches the real user
+    # manager by leaving it out.
     if program:
         return [program, "--user", *args]
     cmd = ["systemctl", "--user", *args]
@@ -38,7 +39,7 @@ def systemctl_env() -> dict[str, str]:
     return own_session_env(os.environ, uid, owner, own_exists=os.path.isdir(f"/run/user/{uid}"))
 
 
-def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,), program: str | None = None) -> str:
+def systemctl(*args: str, program: str | None, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
     r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=60, stdin="inherit")
@@ -56,7 +57,7 @@ class UserUnits:
     test's stub run instead of systemctl). Every call goes through systemctl(), which a
     test's subclass may replace."""
 
-    def __init__(self, out: RunOutputPort, program: str | None = None) -> None:
+    def __init__(self, out: RunOutputPort, program: str | None) -> None:
         self.out = out
         self.program = program
 
@@ -107,7 +108,7 @@ class UserUnits:
         when it failed. The removal is not undone: the timer is already stopped,
         and the manager forgets the files at its next reload or restart."""
         try:
-            self.systemctl("daemon-reload", check=True)
+            self.reload()
         except Refused as e:
             self.out.say(
                 f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "

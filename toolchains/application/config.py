@@ -296,7 +296,7 @@ class ToolConfig:
             self.out.say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
             return 1
         try:
-            written = self.files.put_wrapper(path, text, values.record())
+            written = self.files.put_wrapper(text, values.record())
         except WriteFailed as e:
             self.out.say(f"{NAME}: {e}", 3, err=True)
             return 1

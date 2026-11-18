@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """The boundaries the use cases (toolchains/application/) reach the machine
 through: cargo's build folders and who uses them, uv, the saved run summaries, the
-lines a run says, the user manager, the run lock, the files CST keeps in the home and
-the reports of what is installed besides the caches. cst_core's ClockPort gives the
+lines a run says, the user manager, the files CST keeps in the home and the
+reports of what is installed besides the caches. cst_core's ClockPort gives the
 monotonic time; the adapters in toolchains/adapters/ implement these.
 """
 
@@ -196,15 +196,6 @@ class UserUnitsPort(Protocol):
         ...
 
 
-class ToolchainsLockPort(Protocol):
-    """One run at a time: the hourly prune, a manual prune apply, auto on and auto off."""
-
-    def run(self, fn: Callable[[], int], *, busy_refused: bool = False) -> int:
-        """FN() while this run holds the lock. When another run holds it: nothing done, exit 0
-        (and a line), or Refused with BUSY_REFUSED (what was asked did not happen)."""
-        ...
-
-
 class HomeFilesPort(Protocol):
     """The files CST keeps in the user's home: what auto on installs (the program's copy,
     its defaults and the two user units, listed in the user's install record), the file
@@ -297,9 +288,9 @@ class HomeFilesPort(Protocol):
         """ok | change | missing | conflict of the installed wrapper against TEXT."""
         ...
 
-    def put_wrapper(self, path: str, text: str, values: Mapping[str, str]) -> bool:
-        """The wrapper through the installer, listed with VALUES, its component marked done;
-        True when written (WriteFailed when it cannot be written)."""
+    def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
+        """The wrapper TEXT, at its place in the home, through the installer, listed with VALUES,
+        its component marked done; True when written (WriteFailed when it cannot be written)."""
         ...
 
 

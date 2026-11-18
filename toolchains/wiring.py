@@ -52,7 +52,6 @@ if TYPE_CHECKING:
         BuildTreePort,
         HomeFilesPort,
         RunOutputPort,
-        ToolchainsLockPort,
         UserUnitsPort,
         UvPort,
     )
@@ -71,7 +70,7 @@ class Session:
     limits: Limits
     out: RunOutputPort
     units: UserUnitsPort
-    lock: ToolchainsLockPort
+    lock: ToolchainsLock
     files: HomeFilesPort
     machine: TargetPorts
 

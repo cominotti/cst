@@ -1344,6 +1344,18 @@ class PackageLayersTest(Scratch):
                 "is-active", "cst-toolchains-prune.timer", check=True, program=tc_wiring.systemctl_program()
             )
 
+    def test_no_systemctl_call_may_leave_its_program_out(self) -> None:
+        # Left out, the real systemctl would run: every caller must name the stub (or None).
+        none: dict[str, str | None] = {}  # no program= (a call the type checker cannot see as one)
+        with self.assertRaises(TypeError):
+            tc_units.systemctl_cmd("is-active", "cst-toolchains-prune.timer", **none)
+        with self.assertRaises(TypeError):
+            tc_units.UserUnits(tc_program.RunOutput(self.home, journal=False), **none)
+        self.assertEqual(
+            tc_units.systemctl_cmd("is-active", "x.timer", program="/nonexistent/systemctl"),
+            ["/nonexistent/systemctl", "--user", "is-active", "x.timer"],
+        )
+
 
 class ParseSizeTest(unittest.TestCase):
     """MAX_TOTAL and friends: a number with its unit, or 0/off for no cap."""
