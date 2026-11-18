@@ -283,7 +283,7 @@ show() {
     mkdir -p "${STATE_DIR}" && chmod 0700 "${STATE_DIR}" || exit 1
     tmp="$(mktemp "${STATE_DIR}/.delivered.XXXXXX")" || exit 1
     for name in "${!rec[@]}"; do
-        [[ -f "${PENDING}/${name}" ]] && echo "${name} ${rec["${name}"]}"
+        if [[ -f "${PENDING}/${name}" ]]; then echo "${name} ${rec["${name}"]}"; fi
     done | sort >"${tmp}" && mv -f "${tmp}" "${DELIVERED}" || rm -f "${tmp}"
 }
 

@@ -185,6 +185,7 @@ include = [
     "btrfs/tests/test_docker_gc_program.py",
     "btrfs/tests/test_docker_volumes_nocow.py",
     "btrfs/tests/test_health_check.py",
+    "btrfs/tests/test_pending_alerts.py",
     "btrfs/tests/test_snapshot_runtime.py",
     "btrfs/tests/test_stall_monitord.py",
     "btrfs/tests/test_stall_report.py",
