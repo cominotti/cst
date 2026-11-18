@@ -206,7 +206,7 @@ class StateFiles:
     def flag_add(self, ident: str) -> None:
         ids = self.read_flag()
         if ident not in ids:
-            self.write_flag(ids + [ident])
+            self.write_flag([*ids, ident])
 
     def write_flag(self, ids: Sequence[str]) -> None:
         if ids:
