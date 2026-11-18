@@ -7,71 +7,22 @@ from collections.abc import Sequence
 import os
 import sys
 from btrfs.chrome_cache.adapters import (
-    RUNTIME_DIR,
-    current,
+    allocated_bytes,
+    apply,
+    flags_text,
     installed,
     is_subvol,
+    off,
     old_cache,
-    allocated_bytes,
+    owned_by_caller,
     plan_line,
-    write_flags,
+    ram_cache,
+    real_home,
 )
-from btrfs.chrome_cache.domain import (
-    APP,
-    CACHE_SUBVOL_REL,
-    FLAGS_REL,
-    OLD_CACHE_REL,
-    decide,
-    inspect,
-    off_message,
-    size_text,
-    turn_off,
-)
+from btrfs.chrome_cache.domain import CACHE_SUBVOL_REL, FLAGS_REL, OLD_CACHE_REL, decide, size_text
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
-
-
-def apply(home: str) -> tuple[str, str, bool]:
-    """(state, message, changed)."""
-    if not installed(home):
-        return "no-app", "Chrome Flatpak not installed: nothing to do", False
-    dfd, text, st = current(home, create=False)
-    try:
-        state, new, msg = decide(text)
-        if new is None:
-            return state, msg, False
-        if dfd is None:
-            dfd, text, st = current(home, create=True)
-            assert dfd is not None
-            state, new, msg = decide(text)
-            if new is None:
-                return state, msg, False
-        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
-        return state, msg, True
-    finally:
-        if dfd is not None:
-            os.close(dfd)
-
-
-def off(home: str) -> tuple[str, bool, bool]:
-    """(message, changed, still_set): STILL_SET when cache flags remain."""
-    dfd, text, st = current(home, create=False)
-    try:
-        new = turn_off(text)
-        if new is None:
-            return "already off: nothing changed", False, False
-        if dfd is None:
-            dfd, text, st = current(home, create=True)
-            assert dfd is not None
-            new = turn_off(text)
-            if new is None:
-                return "already off: nothing changed", False, False
-        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
-        left = inspect(new)
-        return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
-    finally:
-        if dfd is not None:
-            os.close(dfd)
 
 
 def status(home: str) -> int:
@@ -80,10 +31,7 @@ def status(home: str) -> int:
     print(f"  Chrome Flatpak:        {('installed (' + inst + ')') if inst else 'not installed (nothing to do)'}")
     rc = 0
     try:
-        dfd, text, _ = current(home, create=False)
-        if dfd is not None:
-            os.close(dfd)
-        state, _, msg = decide(text)
+        state, _, msg = decide(flags_text(home))
         if state == "absent":
             msg = "absent" + ("; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" if inst else "")
         elif state == "cap-missing":
@@ -93,8 +41,8 @@ def status(home: str) -> int:
     except (Refused, OSError, ValueError) as e:
         print(f"  ~/{FLAGS_REL}: NEEDS A LOOK: {e}")
         state, rc = "?", 1
-    ram = os.path.join(RUNTIME_DIR, ".flatpak", APP, "tmp", "chrome-cache")
-    if os.path.isdir(ram):
+    ram = ram_cache()
+    if ram is not None:
         print(f"  in RAM now:            {size_text(allocated_bytes(ram))} ({ram})")
     http, code, profiles = old_cache(home)
     sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
@@ -125,12 +73,12 @@ def main(argv: Sequence[str]) -> int:
     if cmd not in ("status", "plan", "apply", "off", "undo") or (("--home" in args) and not home):
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
-    if os.geteuid() == 0:
+    if HostExecutionContext().is_root():
         print("chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)", file=sys.stderr)
         return 2
-    home = os.path.realpath(home or os.path.expanduser("~"))
+    home = real_home(home)
     try:
-        if os.stat(home).st_uid != os.getuid():
+        if not owned_by_caller(home):
             print(f"chrome-cache: {home} is not yours", file=sys.stderr)
             return 2
     except OSError as e:
@@ -146,11 +94,8 @@ def main(argv: Sequence[str]) -> int:
             return 0
         if cmd == "apply":
             state, msg, changed = apply(home)
-            print(
-                f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}"
-                if state != "no-app"
-                else f"{'kept:':<10} {msg}"
-            )
+            where = f"~/{FLAGS_REL}: " if state != "no-app" else ""
+            print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
             if changed:
                 print("           Takes effect when Chrome starts again (quit all its windows first).")
             return 0

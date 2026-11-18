@@ -36,10 +36,10 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from btrfs.stall_monitord import adapters as md_adapters
 from btrfs.stall_monitord import cli as md_cli
 from btrfs.stall_monitord import domain as md_domain
-from btrfs.stall_monitord import monitor as md_monitor
+from btrfs.stall_monitord.adapters import monitor as md_monitor
+from btrfs.stall_monitord.adapters import proc as md_proc
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -105,7 +105,7 @@ def load() -> _StallMonitordModule:
     """The daemon's package as one namespace (the program is a thin entry over
     it). A new view puts back what the previous test replaced; loading runs
     nothing: main() runs only from the program file."""
-    view = PackageView(md_cli, md_monitor, md_adapters, md_domain)
+    view = PackageView(md_cli, md_monitor, md_proc, md_domain)
     return cast("_StallMonitordModule", cast("object", view))
 
 

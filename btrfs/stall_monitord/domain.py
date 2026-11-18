@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-monitord's rules, no I/O: thresholds and intervals, the record version and keys, what a kernel stack waits for (the frame lists, wait_kind), and the episode being recorded."""
+"""btrfs-stall-monitord's rules, no I/O: thresholds and intervals, the record version and the records, what a kernel stack waits for (the frame lists, wait_kind), the episode being recorded, and the sampling loop's rules on the values it read (commits, episodes, hung and busy tasks, kernel log lines, alerts)."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
+from typing import NamedTuple, NotRequired
 from typing import TypedDict
 import re
 
@@ -244,7 +245,143 @@ TIMED_WAIT_FRAME = re.compile(
 )
 
 
+HUNG_TASK = "hung task"  # the reason of an episode a hung task opened
+
+# One D-state task as the sampling sees it: (pid, tid, comm, frames, wchan, wait kind).
+type DTask = tuple[str, str, str, list[str], str | None, str]
+
+
+class SigStats(TypedDict):
+    """What an episode counted for one wait signature ("sig|ctx")."""
+
+    n: int
+    kind: str
+    comms: dict[str, int]
+    cgroups: dict[str, int]
+
+
+class SigOut(TypedDict):
+    sig: str
+    ctx: str
+    n: int
+    kind: str
+    comms: dict[str, int]
+    cgroups: dict[str, int]
+    examples: list[list[str]]
+
+
+class EpisodeOut(TypedDict):
+    """The episode record ("t": "ep")."""
+
+    t: str
+    ts: float
+    start: float
+    end: float
+    reason: str
+    snapshots: int
+    max_d: int
+    max_d_mem: int
+    max_d_all: int
+    peak: dict[str, float]
+    sigs: list[SigOut]
+
+
+class FsTopo(TypedDict):
+    """One btrfs filesystem of the topology (the meta record's "fs", by UUID)."""
+
+    label: str
+    devs: list[str]
+    disks: list[str]
+    devids: list[str]
+
+
+class MetaOut(TypedDict):
+    """The meta record ("t": "meta"): at the start and at each new day."""
+
+    t: str
+    ts: float
+    v: int
+    kernel: str
+    boot_id: str
+    base_interval: float
+    fs: dict[str, FsTopo]
+    disks: dict[str, str]
+    vm_keys: tuple[str, ...]
+    space_keys: tuple[str, ...]
+    dirty_bytes: int
+    dirty_background_bytes: int
+    wbt_lat_usec: dict[str, int]
+    stacks: bool
+    kmsg: bool
+    hung_task_detector: bool
+    hung_seconds: int
+
+
+class FsSampleOut(TypedDict):
+    c: list[int]  # commits, total ms, current ms, last ms, max ms, longest since the last sample
+    err: dict[str, int]
+    space: dict[str, list[int]]
+    discard: list[int]
+
+
+class SampleOut(TypedDict):
+    """A sample ("t": "s")."""
+
+    t: str
+    ts: float
+    mono: float
+    psi: dict[str, list[float | int] | None]
+    vm: list[int]
+    procs: list[int]
+    d: int
+    d_all: int
+    d_fuse: int
+    d_maint: int
+    d_mem: int
+    load1: float
+    fs: dict[str, FsSampleOut]
+    disk: dict[str, list[int]]
+    cg: dict[str, list[float | int]]
+
+
+class EventOut(TypedDict):
+    """An event ("t": "ev"): a kernel message, a hung, busy or waiting task."""
+
+    t: str
+    ts: float
+    msg: str
+    severe: bool
+    comm: NotRequired[str]  # io-busy events
+    ours: bool
+    kind: str
+    stack: NotRequired[list[str]]  # task events
+
+
+class AlertOut(TypedDict):
+    """An alert ("t": "al"): what was handed to btrfs-notify."""
+
+    t: str
+    ts: float
+    kind: str
+    level: str
+    title: str
+    body: str
+
+
+type RecordOut = SampleOut | MetaOut | EventOut | AlertOut | EpisodeOut
+
+
+class DTaskSince(TypedDict):
+    first: float
+    busy: float
+    comm: str
+    pid: str
+    slices: int | None
+
+
 class Episode:
+    """The stall episode being recorded: its peaks and the wait signatures of its D-state tasks."""
+
     def __init__(self, ts: float, reason: str) -> None:
         self.start = ts
         self.end = ts
@@ -255,11 +392,60 @@ class Episode:
         self.max_d_mem = 0  # memory waits (reclaim, swap, zswap)
         self.max_d_all = 0
         self.peak: dict[str, float] = {"io_some_avg10": 0.0, "io_full_avg10": 0.0, "iowait_tasks": 0, "commit_ms": 0}
-        self.sigs: dict[str, dict[str, Any]] = {}  # "sig|ctx" -> {"n", "comms", "cgroups"}
+        self.sigs: dict[str, SigStats] = {}  # "sig|ctx" -> {"n", "kind", "comms", "cgroups"}
         self.examples: dict[str, list[list[str]]] = {}  # "sig|ctx" -> [stack frames lists]
 
-    def to_record(self) -> dict[str, Any]:
-        out = []
+    def observe(self, ts: float, io: Sequence[float], iowait_tasks: int, commit_ms: int) -> None:
+        """One sample in the episode: its end and the peaks."""
+        self.end = ts
+        self.peak["io_some_avg10"] = max(self.peak["io_some_avg10"], io[0])
+        self.peak["io_full_avg10"] = max(self.peak["io_full_avg10"], io[2])
+        self.peak["iowait_tasks"] = max(self.peak["iowait_tasks"], iowait_tasks)
+        self.peak["commit_ms"] = max(self.peak["commit_ms"], commit_ms)
+
+    def add_snapshot(self, d_tasks: Sequence[DTask], cgroup_of: Callable[[str], str]) -> None:
+        """The D-state tasks of one sample (cgroup_of: a task's short cgroup, asked once per process)."""
+        self.snapshots += 1
+        counts = wait_counts(d_tasks)
+        self.max_d = max(self.max_d, counts.d)
+        self.max_d_mem = max(self.max_d_mem, counts.d_mem)
+        self.max_d_all = max(self.max_d_all, counts.d_all)
+        if self.snapshots > MAX_STACK_SNAPSHOTS:
+            return
+        cg_cache: dict[str, str] = {}
+        for pid, _tid, comm, frames, wchan, kind in d_tasks:
+            sig, ctx = stack_signature(frames, wchan)
+            key = f"{sig}|{ctx}"
+            if pid not in cg_cache:
+                cg_cache[pid] = cgroup_of(pid)
+            entry = self.sigs.setdefault(key, {"n": 0, "kind": kind, "comms": {}, "cgroups": {}})
+            entry["n"] += 1
+            entry["comms"][comm] = entry["comms"].get(comm, 0) + 1
+            entry["cgroups"][cg_cache[pid]] = entry["cgroups"].get(cg_cache[pid], 0) + 1
+            ex = self.examples.setdefault(key, [])
+            if frames and len(ex) < MAX_EXAMPLE_STACKS and frames[:16] not in ex:
+                ex.append(frames[:16])
+
+    def quiet_step(self, io_pct: float, d: int, cur_commit: int) -> bool:
+        """Count one quiet sample (or start over); True once the episode is quiet long enough to close."""
+        if io_pct < QUIET_IO_SOME_PCT and d <= QUIET_D_TASKS and cur_commit < ENTER_COMMIT_MS // 2:
+            self.quiet += 1
+        else:
+            self.quiet = 0
+        return self.quiet >= QUIET_SECONDS_TO_CLOSE
+
+    def is_stall(self) -> bool:
+        """PSI triggers also fire on harmless 200 ms blips; only an episode that
+        shows an actual stall is recorded (the 1 s samples are stored either way)."""
+        return not (
+            self.peak["io_some_avg10"] < QUIET_IO_SOME_PCT
+            and self.max_d < ENTER_D_TASKS
+            and self.peak["commit_ms"] < ENTER_COMMIT_MS
+            and self.reason != HUNG_TASK
+        )
+
+    def to_record(self) -> EpisodeOut:
+        out: list[SigOut] = []
         for key, v in sorted(self.sigs.items(), key=lambda kv: -kv[1]["n"])[:25]:
             sig, ctx = key.split("|", 1)
             out.append(
@@ -287,10 +473,259 @@ class Episode:
             "sigs": out,
         }
 
+    def summary(self, rec: EpisodeOut) -> str:
+        """The journal line of the recorded episode."""
+        top = rec["sigs"][:1]
+        top_s = f"{top[0]['sig']} x{top[0]['n']}" if top else "no D tasks"
+        return (
+            f"episode {self.end - self.start:.0f}s ({self.reason}); peak io_full_avg10="
+            f"{self.peak['io_full_avg10']:.0f}% commit={self.peak['commit_ms']}ms max_D={self.max_d}; top: {top_s}"
+        )
 
-class DTaskSince(TypedDict):
-    first: float
-    busy: float
-    comm: str
-    pid: str
-    slices: int | None
+
+# ---- the rules of the sampling loop, on values already read ------------------
+
+
+def settle_kinds(tasks: list[DTask]) -> list[DTask]:
+    """The wait kinds of one sample's D-state tasks, settled across the threads of a process.
+
+    Threads of a process that also has a thread inside FUSE, blocked on a VFS
+    lock that thread holds (d_alloc_parallel, inode rwsem), wait on FUSE too,
+    unless their stack shows the local block layer or btrfs. A thread waiting
+    for the memory map lock waits for whatever the holder (another thread of
+    the process) waits on: memory if a thread of the process is in reclaim or
+    swap itself (a JVM whose threads fault through zswap, even with one
+    thread in fsync), else storage or FUSE if a thread of the process waits
+    there, memory otherwise.
+    """
+    out = list(tasks)
+    fuse_pids = {t[0] for t in out if t[5] == "fuse"}
+    for i, t in enumerate(out):
+        if t[5] == "storage" and t[0] in fuse_pids and not any(LOCAL_IO_FRAME.match(f) for f in t[3]):
+            out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
+    lock_only = [i for i, t in enumerate(out) if t[5] == "memory" and mmap_lock_only(t[3], t[4])]
+    lock_tids = {out[i][1] for i in lock_only}
+    mem_pids = {t[0] for t in out if t[5] == "memory" and t[1] not in lock_tids}
+    storage_pids = {t[0] for t in out if t[5] == "storage"}
+    fuse_pids = {t[0] for t in out if t[5] == "fuse"}
+    for i in lock_only:
+        t = out[i]
+        if t[0] in mem_pids:
+            continue
+        if t[0] in storage_pids:
+            out[i] = (t[0], t[1], t[2], t[3], t[4], "storage")
+        elif t[0] in fuse_pids:
+            out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
+    return out
+
+
+class WaitCounts(NamedTuple):
+    """The waits of one sample's D-state tasks: "d" counts the tasks waiting on
+    storage; "d_all" also FUSE, maintenance, memory and idle-ish waits."""
+
+    d: int
+    d_all: int
+    d_fuse: int
+    d_maint: int
+    d_mem: int
+
+
+def wait_counts(d_tasks: Sequence[DTask]) -> WaitCounts:
+    """The storage, all, FUSE, maintenance and memory waits of one sample."""
+    return WaitCounts(
+        d=sum(1 for t in d_tasks if t[5] == "storage"),
+        d_all=len(d_tasks),
+        d_fuse=sum(1 for t in d_tasks if t[5] == "fuse"),
+        d_maint=sum(1 for t in d_tasks if t[5] == "maintenance"),
+        d_mem=sum(1 for t in d_tasks if t[5] == "memory"),
+    )
+
+
+def io_some_pct(prev: SampleOut | None, rec: SampleOut) -> float:
+    """IO "some" pressure between two samples, in % of the time between them."""
+    if not prev:
+        return 0.0
+    io, prev_io = rec["psi"]["io"], prev["psi"]["io"]
+    if not io or not prev_io:
+        return 0.0
+    dt = rec["mono"] - prev["mono"]
+    if dt <= 0:
+        return 0.0
+    return (io[1] - prev_io[1]) / 1e6 / dt * 100
+
+
+def commit_long_ms(cs: Mapping[str, int], prev: tuple[int, int, int] | None) -> int:
+    """The longest commit one commit_stats probe shows (prev: (commits, total ms, max ms) of the last probe).
+
+    last_commit_ms counts only when a commit actually finished (otherwise it
+    repeats an old value forever); several commits that finished within one
+    probe give their mean as a floor; a new max_commit_ms counts too.
+    """
+    commits, total = cs.get("commits", 0), cs.get("total_commit_ms", 0)
+    cur, last, mx = cs.get("cur_commit_ms", 0), cs.get("last_commit_ms", 0), cs.get("max_commit_ms", 0)
+    long_ms = cur
+    if prev and commits > prev[0]:
+        long_ms = max(long_ms, last)
+        if total - prev[1] >= ENTER_COMMIT_MS and commits - prev[0] > 1:
+            long_ms = max(long_ms, (total - prev[1]) // (commits - prev[0]))
+        if prev[2] < mx:
+            long_ms = max(long_ms, mx)
+    return long_ms
+
+
+def commit_alert(label: str, cur_ms: int, long_ms: int) -> tuple[str, str]:
+    """(title, body) of the alert for a long commit."""
+    state = "still running after" if cur_ms >= ALERT_COMMIT_MS else "took"
+    return (
+        f"btrfs commit stall on {label}",
+        f"A transaction commit {state} {long_ms / 1000:.1f} s. "
+        f"Ask an agent or run: btrfs-stall-report --since '10 min ago'",
+    )
+
+
+def episode_reason(want: str | None, io_pct: float, d: int, commit_ms: int) -> str | None:
+    """What opens an episode at this sample (want: the probe's reason), or None."""
+    reason = want
+    if io_pct >= ENTER_IO_SOME_PCT:
+        reason = f"io_some {io_pct:.0f}%"
+    elif d >= ENTER_D_TASKS:
+        reason = f"{d} tasks waiting on storage"
+    elif commit_ms >= ENTER_COMMIT_MS:
+        reason = f"commit {commit_ms} ms"
+    return reason
+
+
+def stuck_since(
+    prev: DTaskSince | None, pid: str, slices: int | None, frames: Sequence[str], now: float
+) -> tuple[float, float]:
+    """(first, busy) of a task seen in D: 'busy' = in D at every sample since
+    then; 'first' = in D since then *without running in between* (stuck).
+    Timed sleeps wake up periodically (and so get scheduled) while still
+    waiting: a timeslice count change there is not progress."""
+    if prev and prev["pid"] == pid:
+        moved = (
+            slices is not None
+            and prev["slices"] is not None
+            and slices != prev["slices"]
+            and not any(TIMED_WAIT_FRAME.match(f) for f in frames or ())
+        )
+        return (now if moved else prev["first"]), prev["busy"]
+    return now, now
+
+
+def hung_start(kind: str, t: DTaskSince, now: float) -> float:
+    """Since when a task counts as waiting: FUSE waits and the maintenance note
+    keep the old meaning (time in D, progressing or not: a slow network walk
+    does progress); the stuck alerts need time in D without progress."""
+    first = t["busy"] if kind == "fuse" else t["first"]
+    if kind == "maintenance" and now - t["first"] < MAINT_HUNG_SECONDS:
+        first = t["busy"]
+    return first
+
+
+def hung_key(kind: str, t: DTaskSince, now: float) -> str:
+    """The kind of report: btrfs maintenance gives one informational event at
+    HUNG_SECONDS and an alert only after MAINT_HUNG_SECONDS without any
+    progress (keyed apart, so the HUNG_REPEAT dedupe of the event does not
+    delay the alert); workload tasks queued behind it are "storage"."""
+    if kind == "maintenance" and now - t["first"] >= MAINT_HUNG_SECONDS:
+        return "maintenance-hung"
+    return kind
+
+
+def wait_at(frames: Sequence[str], wchan: str | None) -> str:
+    """Where a task waits: its signature, and the syscall or context it came from."""
+    sig, ctx = stack_signature(frames, wchan)
+    return f"{sig} via {ctx}" if ctx else sig
+
+
+def cmdline_text(raw: str | None) -> str:
+    """A /proc/PID/cmdline as one line of at most 160 characters."""
+    return (raw or "").replace("\0", " ").strip()[:160]
+
+
+def task_where(comm: str, tid: str, cmd: str, cgroup: str) -> str:
+    return f"{comm}:{tid} ({cmd or 'no cmdline'}; cgroup {cgroup})"
+
+
+@dataclass(frozen=True, slots=True)
+class HungReport:
+    """What one long D-state wait makes: an event, maybe an alert (kind, level, title) and an episode."""
+
+    kind: str
+    msg: str
+    severe: bool
+    ours: bool
+    alert: tuple[str, str, str] | None
+    opens_episode: bool
+
+
+def hung_report(key: str, where: str, waited: float, at: str) -> HungReport:
+    """The report of a task in D for HUNG_SECONDS or more (key: hung_key())."""
+    if key == "maintenance":
+        msg = (
+            f"{where} in btrfs maintenance (trim/discard/scrub/balance) for {waited:.0f}s at {at}: not a workload stall"
+        )
+        return HungReport("maintenance-wait", msg, severe=False, ours=True, alert=None, opens_episode=False)
+    if key == "maintenance-hung":
+        msg = f"{where} in btrfs maintenance, D state for {waited:.0f}s at {at}"
+        alert = ("maintenance-hung", "warning", "btrfs maintenance (fstrim/scrub) stuck for 15 min")
+        return HungReport("maintenance-hung", msg, severe=True, ours=True, alert=alert, opens_episode=True)
+    if key == "fuse":
+        msg = (
+            f"{where} waited {waited:.0f}s on a FUSE filesystem (gvfs share or document "
+            f"portal): usually the network or the FUSE daemon, not the local disks (check the "
+            f"report for a storage wait at the same time); at {at}"
+        )
+        alert = ("fuse", "normal", "Program waiting on a FUSE filesystem (network share / portal)")
+        return HungReport("fuse-wait", msg, severe=False, ours=False, alert=alert, opens_episode=False)
+    if key == "memory":
+        # Not a disk or filesystem problem, so not severe and no storage
+        # episode; the report shows it with the memory waits.
+        msg = (
+            f"{where} waited {waited:.0f}s without progress in memory reclaim / swap "
+            f"(too little free memory, not the disks) at {at}"
+        )
+        alert = ("hung-memory", "warning", "Task stuck in an uninterruptible wait (memory reclaim / swap)")
+        return HungReport("hung-memory", msg, severe=False, ours=True, alert=alert, opens_episode=False)
+    msg = f"{where} in D state for {waited:.0f}s at {at}"
+    alert = ("hung", "warning", "Task stuck in an uninterruptible wait (likely storage)")
+    return HungReport("hung", msg, severe=True, ours=True, alert=alert, opens_episode=True)
+
+
+def io_busy_key(busy_s: float) -> str:
+    return "io-busy-long" if busy_s >= BUSY_ALERT_SECONDS else "io-busy"
+
+
+def io_busy_message(where: str, busy_s: float, at: str) -> str:
+    return (
+        f"{where} waited on storage at "
+        f"every sample for {busy_s:.0f}s while still being scheduled (progressing, e.g. an fsync loop; "
+        f"check the window's storage metrics) at {at}"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class KmsgLine:
+    """A kernel log line worth recording: severe (an alert) only on this host's disks."""
+
+    msg: str
+    severe: bool
+    ours: bool
+
+
+def kmsg_line(data: bytes, members: Collection[str]) -> KmsgLine | None:
+    """One /dev/kmsg record, if it is of interest (members: the disks and devices of the topology)."""
+    msg = data.decode("utf-8", "replace").partition(";")[2].split("\n", 1)[0]
+    if not KMSG_INTEREST.search(msg):
+        return None
+    m = KMSG_DEVICE.search(msg)
+    dev = (m.group(1) or m.group(2)) if m else None
+    ours = dev is None or dev in members or re.sub(r"p\d+$", "", dev) in members
+    return KmsgLine(msg, severe=bool(KMSG_SEVERE.search(msg)) and ours, ours=ours)
+
+
+def alert_text(level: str, title: str, body: str) -> str:
+    """The plain-text queue file for /usr/local/sbin/btrfs-notify --queue:
+    line 1 urgency, line 2 title, rest body."""
+    return f"{'critical' if level == 'crit' else 'normal'}\n{title.replace(chr(10), ' ')}\n{body}\n"

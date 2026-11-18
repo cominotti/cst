@@ -127,12 +127,12 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 89,
-    "btrfs/chrome_cache/cli.py": 125,
+    "btrfs/chrome_cache/cli.py": 80,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/stall_monitord/cli.py": 11,
-    "btrfs/stall_report/cli.py": 158,
+    "btrfs/stall_report/cli.py": 152,
     "cpu/cli.py": 146,
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
@@ -149,8 +149,6 @@ ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_
 # I/O together; splitting one into its layers removes its line. Never grows.
 UNLAYERED_ALLOWED: Final[dict[str, str]] = {
     "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
-    "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
-    "btrfs/stall_report/analysis.py": "the report's analysis of the recorded episodes, with a few reads of its own",
 }
 
 # What a cli.py or presenter.py may use although direct_io_problems reports
@@ -184,11 +182,6 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
-    "btrfs/chrome_cache cli": 7,
-    "btrfs/stall_monitord cli": 1,
-    "btrfs/stall_monitord unlayered": 50,
-    "btrfs/stall_report cli": 1,
-    "btrfs/stall_report unlayered": 4,
     "cst_core entry": 1,
     "toolchains cli": 54,
     "vm cli": 78,
@@ -211,7 +204,9 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
 # A shared primitive -> the cst_core modules that own it. Anywhere else, a
 # call is a second implementation: use the owner's function or adapter.
 # "fcntl.ioctl" counts only with an FS_IOC_* request (the NOCOW flags).
-_RUNNER: Final = frozenset({"cst_core/adapters/__init__.py"})
+_RUNNER: Final = frozenset({"cst_core/adapters/runner.py"})
+_SYSTEMCTL: Final = frozenset({"cst_core/adapters/__init__.py"})
+_VIRSH: Final = frozenset({"cst_core/adapters/virsh.py"})
 _FILES: Final = frozenset({"cst_core/adapters/files.py"})
 PRIMITIVE_OWNERS: Final[dict[str, frozenset[str]]] = {
     "subprocess.run": _RUNNER,
@@ -232,10 +227,10 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
     "/run/.containerenv": _RUNNER,
     "/.dockerenv": _RUNNER,
     "flatpak-spawn": _RUNNER,
-    "qemu:///system": _RUNNER,
+    "qemu:///system": _VIRSH,
     "LC_ALL": _RUNNER,
     "restorecon": _FILES,
-    "systemd-escape": _RUNNER,
+    "systemd-escape": _SYSTEMCTL,
 }
 
 # Calls of a primitive outside its owners, per "<package> <primitive>"

@@ -18,7 +18,7 @@ from bluetooth.domain import (
     snapshot,
     still_pending,
 )
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.ports import CommandRunnerPort
 

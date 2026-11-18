@@ -34,7 +34,7 @@ from cpu.domain import (
     run_folder,
     watch_row,
 )
-from cst_core.adapters import SubprocessVirshAdapter
+from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused

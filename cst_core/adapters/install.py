@@ -8,7 +8,7 @@ import shutil
 import stat
 import tempfile
 
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_bytes_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import checkout_commit, checkout_root, install_payload

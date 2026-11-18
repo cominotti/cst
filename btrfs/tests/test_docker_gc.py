@@ -55,7 +55,7 @@ from btrfs.docker_gc.domain import (
     Volume,
 )
 from btrfs.docker_gc.ports import EventSink
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandResult
 from tests.probes import bytes_program
 

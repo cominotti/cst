@@ -6,7 +6,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 
-from btrfs.stall_monitord.monitor import Monitor
+from btrfs.stall_monitord.adapters.monitor import Monitor
+from btrfs.stall_monitord.adapters.proc import prepare_log_dir
 
 
 def main(argv: Sequence[str]) -> int:
@@ -17,6 +18,6 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--run-dir", default=os.environ.get("RUNTIME_DIRECTORY", ""))
     ap.add_argument("--duration", type=float, help="stop after N seconds (testing)")
     args = ap.parse_args(argv)
-    os.makedirs(args.log_dir, exist_ok=True)
+    prepare_log_dir(args.log_dir)
     Monitor(args.log_dir, args.run_dir, args.duration).run()
     return 0

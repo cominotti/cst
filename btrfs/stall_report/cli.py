@@ -3,26 +3,16 @@
 
 import argparse
 import json
-import os
 import sys
 import time
 
-from btrfs.stall_report.adapters import LOG_DIR, container_names, load, report_window
-from btrfs.stall_report.analysis import analyse
+from btrfs.stall_report.adapters import LOG_DIR, analyse, container_names, load, log_dir_exists, report_window
+from btrfs.stall_report.domain.records import UNITS, AnalyseResult, MetaRecord
+from btrfs.stall_report.domain.verdict import fmt_bytes, fmt_counts, fmt_ts, verdict, zswap_text
 from cst_core.adapters.runtime import restore_default_signals
-from btrfs.stall_report.domain import (
-    AnalyseResult,
-    MetaRecord,
-    UNITS,
-    fmt_bytes,
-    fmt_counts,
-    fmt_ts,
-    verdict,
-    zswap_text,
-)
 
 
-def print_report(res: AnalyseResult, meta: MetaRecord, verbose: bool) -> None:
+def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None:
     w = res["window"]
     print(
         f"window   {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(w['since']))} -> {fmt_ts(w['until'])}"
@@ -116,14 +106,8 @@ def print_report(res: AnalyseResult, meta: MetaRecord, verbose: bool) -> None:
     eps = res["episodes"]
     limit = 50 if verbose else 6
     print()
-    print(
-        f"episodes {len(eps)}"
-        + (
-            " (worst first" + (f", showing {limit}" if len(eps) > limit else "") + ")"
-            if eps
-            else " (no stall episode recorded)"
-        )
-    )
+    showing = f", showing {limit}" if len(eps) > limit else ""
+    print(f"episodes {len(eps)}" + (f" (worst first{showing})" if eps else " (no stall episode recorded)"))
     for ep in eps[:limit]:
         pk = ep["peak"]
         print(
@@ -169,7 +153,7 @@ def main() -> None:
     ap.add_argument("--log-dir", default=LOG_DIR)
     args = ap.parse_args()
     since, until = report_window(args.since, args.until)
-    if not os.path.isdir(args.log_dir):
+    if not log_dir_exists(args.log_dir):
         sys.exit(
             f"{args.log_dir} not found: btrfs-stall-monitor is not installed on this host. "
             f"Installer: cst btrfs install (run on the host, not in toolbox)"
@@ -181,4 +165,4 @@ def main() -> None:
         json.dump(out, sys.stdout, indent=1, default=str)
         print()
     else:
-        print_report(res, meta, args.verbose)
+        print_report(res, meta, verbose=args.verbose)

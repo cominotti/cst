@@ -14,7 +14,8 @@ from btrfs.docker_volumes_nocow.adapters import (
 )
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import NocowPaths
-from cst_core.adapters import SubprocessCommandRunner, SystemClockAdapter
+from cst_core.adapters import SystemClockAdapter
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandRunnerPort
 
 

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-from cst_core.adapters import on_host_argv
+from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.files import read_bytes, read_text, write_atomic
 from cst_core.adapters.runtime import install_payload, program_argv
 from cst_core.domain.errors import Refused, Usage

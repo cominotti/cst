@@ -35,7 +35,7 @@ from btrfs.snapshot.domain import (
     parse_subvolume_show,
 )
 from btrfs.snapshot.ports import SnapshotHostPort
-from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import locale_bytes, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock

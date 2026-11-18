@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService

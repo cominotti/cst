@@ -76,11 +76,6 @@ definition are in `cpu/adapters.py`; the rules and records in
 `cpu/domain.py`; the `quiet` loop stays in `cli.py` with its clock, pause
 and sampler passed in, and the apply prompt is cst_core's `confirm`.
 
-`btrfs/chrome_cache/cli.py` still has 7 lines of I/O of its own (closing
-folder descriptors, a folder test, resolving and `os.stat`-ing the home, the
-uid checks), counted in
-`IO_BUDGETS`; they belong in its adapters, in a refactor of their own.
-
 **Full profile: add a layer only when it pays.** Reference package:
 `btrfs/docker_volumes_nocow` (a migration with rollback).
 
@@ -222,7 +217,7 @@ All of them run in the unit suite:
 ## Toolbox vs host
 
 The scripts detect a container through `/run/.containerenv` or `/.dockerenv`. In Python
-one class does it, `HostExecutionContext` (`cst_core.adapters`); the `cst` dispatcher,
+one class does it, `HostExecutionContext` (`cst_core.adapters.runner`); the `cst` dispatcher,
 doctor's `Host` and toolchains ask it (`PRIMITIVE_LITERALS` keeps the markers out of
 every other module).
 

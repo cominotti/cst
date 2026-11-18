@@ -12,7 +12,8 @@ import os
 import sys
 from typing import NoReturn
 
-from cst_core.adapters import HostExecutionContext, SubprocessCommandRunner, SystemctlAdapter
+from cst_core.adapters import SystemctlAdapter
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import (

@@ -5,7 +5,17 @@ from __future__ import annotations
 
 import os
 import stat
-from btrfs.chrome_cache.domain import APP, FLAGS_REL, OLD_CACHE_REL, SYSTEM_INSTALLS, USER_INSTALL_REL, decide
+from btrfs.chrome_cache.domain import (
+    APP,
+    FLAGS_REL,
+    OLD_CACHE_REL,
+    SYSTEM_INSTALLS,
+    USER_INSTALL_REL,
+    decide,
+    inspect,
+    off_message,
+    turn_off,
+)
 from cst_core.domain.errors import Refused
 
 RUNTIME_DIR = f"/run/user/{os.getuid()}"
@@ -169,11 +179,76 @@ def current(home: str, create: bool = False) -> tuple[int | None, str, os.stat_r
     return dfd, text, st
 
 
-def plan_line(home: str) -> str:
-    if not installed(home):
-        return "not installed: nothing to do"
+def flags_text(home: str) -> str:
+    """The text of the flags file ("" when it or its folder is missing); creates nothing."""
     dfd, text, _ = current(home, create=False)
     if dfd is not None:
         os.close(dfd)
-    state, _, msg = decide(text)
+    return text
+
+
+def plan_line(home: str) -> str:
+    if not installed(home):
+        return "not installed: nothing to do"
+    state, _, msg = decide(flags_text(home))
     return msg if state in ("absent", "cap-missing") else f"nothing to do ({msg})"
+
+
+def apply(home: str) -> tuple[str, str, bool]:
+    """(state, message, changed)."""
+    if not installed(home):
+        return "no-app", "Chrome Flatpak not installed: nothing to do", False
+    dfd, text, st = current(home, create=False)
+    try:
+        state, new, msg = decide(text)
+        if new is None:
+            return state, msg, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            assert dfd is not None
+            state, new, msg = decide(text)
+            if new is None:
+                return state, msg, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        return state, msg, True
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+def off(home: str) -> tuple[str, bool, bool]:
+    """(message, changed, still_set): STILL_SET when cache flags remain."""
+    dfd, text, st = current(home, create=False)
+    try:
+        new = turn_off(text)
+        if new is None:
+            return "already off: nothing changed", False, False
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            assert dfd is not None
+            new = turn_off(text)
+            if new is None:
+                return "already off: nothing changed", False, False
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        left = inspect(new)
+        return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
+# ---- the user and the home -----------------------------------------------------------------
+def real_home(home: str | None) -> str:
+    """HOME given (or the caller's ~), symlinks resolved."""
+    return os.path.realpath(home or os.path.expanduser("~"))
+
+
+def owned_by_caller(home: str) -> bool:
+    """HOME belongs to the calling user (OSError when it cannot be stat-ed)."""
+    return os.stat(home).st_uid == os.getuid()
+
+
+def ram_cache() -> str | None:
+    """The cache folder in the sandbox /tmp (RAM) when it exists now, else None."""
+    ram = os.path.join(RUNTIME_DIR, ".flatpak", APP, "tmp", "chrome-cache")
+    return ram if os.path.isdir(ram) else None
