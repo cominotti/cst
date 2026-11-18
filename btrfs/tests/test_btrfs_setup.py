@@ -255,6 +255,7 @@ disable_timers x.service
             STAGED_INSTALLER,
             DOCKER_GC_STAGED,
             shell_function(SETUP, "docker_gc_files"),
+            shell_function(SETUP, "docker_gc_keep_settings"),
             shell_function(SETUP, "docker_gc"),
         ]
 
@@ -536,6 +537,7 @@ class ComponentInstallTest(unittest.TestCase):
                         "forget_timer_state",
                         "disable_timers",
                         "docker_gc_files",
+                        "docker_gc_keep_settings",
                         "docker_gc",
                         "remove_tuning_files",
                     )

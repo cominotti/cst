@@ -12,7 +12,7 @@ import os
 import re
 
 from cst_core.domain.contracts import StateFormat, state_format, version_of
-from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
@@ -200,7 +200,7 @@ def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
     an assignment, an unknown key or a value that is not a list of registries raises UnknownProtection
     with every such line; nothing is guessed. No DOCKER_GC_PROTECT line: none protected."""
     parsed = parse_shell_assignments(text, bash_sourced=False)
-    problems = [f"{path} {p}" for p in parsed.problems]
+    problems = describe_problems(path, parsed.problems).splitlines()
     for a in parsed.entries:
         if a.key not in SETTINGS_KEYS:
             problems.append(f"{path} line {a.line}: {a.key}: unknown setting (known: {', '.join(SETTINGS_KEYS)})")
@@ -246,10 +246,14 @@ def builtin_protected(sources: Sequence[str]) -> tuple[str, ...] | None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == "GcSettings":
                 for item in node.body:
-                    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                        value = _literal(item.value) if item.target.id == "protected" else None
-                        if isinstance(value, tuple) and all(isinstance(v, str) for v in value):
-                            return registries_of(",".join(value))
+                    if (
+                        isinstance(item, ast.AnnAssign)
+                        and isinstance(item.target, ast.Name)
+                        and item.target.id == "protected"
+                        and isinstance(value := _literal(item.value), tuple)
+                        and all(isinstance(v, str) for v in value)
+                    ):
+                        return registries_of(",".join(value))
             elif (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
