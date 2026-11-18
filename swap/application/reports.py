@@ -154,10 +154,7 @@ class SwapEnvironment:
 
 def _short_etc_path(etc_dir: str, path: str) -> str:
     prefix = etc_dir.rstrip("/") + "/"
-    rel = path[len(prefix) :] if path.startswith(prefix) else path
-    if rel.startswith("systemd/system/"):
-        rel = rel[len("systemd/system/") :]
-    return rel
+    return path.removeprefix(prefix).removeprefix("systemd/system/")
 
 
 class SwapReports:

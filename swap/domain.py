@@ -341,13 +341,13 @@ def parse_size(spec: str | None) -> int | None:
 
 def parse_memory_low(text: str) -> int | None:
     """Extract MemoryLow= value in bytes from a systemd drop-in."""
-    m = re.search(r"^MemoryLow=(\S+)", text, re.M)
+    m = re.search(r"^MemoryLow=(\S+)", text, re.MULTILINE)
     return parse_size(m.group(1)) if m else None
 
 
 # A line that assigns MemoryLow as systemd reads it: blanks before the key and around "=" are dropped,
 # and an empty value is an assignment too (it resets MemoryLow). A "#" or ";" line is a comment.
-_SETS_MEMORY_LOW: Final = re.compile(r"^[ \t]*MemoryLow[ \t]*=", re.M)
+_SETS_MEMORY_LOW: Final = re.compile(r"^[ \t]*MemoryLow[ \t]*=", re.MULTILINE)
 
 
 def memory_low_override(
