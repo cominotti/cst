@@ -123,7 +123,7 @@ class Notifier:
         say = self.log or (lambda prio, msg: journal_log(prio, msg, tag=app))
         try:
             path = _keep_alert(self.pending, urgency, app, title, body)
-        except OSError as e:
+        except (OSError, ValueError) as e:  # ValueError: a folder that is no plain path, a title no file holds
             say(3, f"alert not delivered ({why}) and not kept ({e}): {title}; it is only in this journal")
             return "lost"
         say(3, f"alert not delivered ({why}): {title}; kept in {path} (cst doctor shows it)")

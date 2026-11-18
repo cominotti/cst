@@ -1352,6 +1352,26 @@ class NotifierTest(unittest.TestCase):
         self.assertTrue(msg.startswith("alert not delivered (/x/btrfs-notify is not installed) and not kept ("), msg)
         self.assertTrue(msg.endswith("): Disk: problem; it is only in this journal"), msg)
 
+    def test_a_folder_or_title_no_file_takes_leaves_the_alert_in_the_journal_only(self) -> None:
+        # A caller's error handler sends this alert: a ValueError (a folder from an override that is no
+        # plain path, a title with a lone surrogate) must end as "lost" with its line, not as a traceback.
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        result = core_ports.CommandResult(127, "", "", fault="missing", cause=missing)
+        for pending, title in (
+            (os.path.join(self.tmp, "x", "..", "alerts", "pending"), "Disk"),
+            (self.pending, "VM \udcff"),
+        ):
+            with self.subTest(pending=pending, title=title):
+                self.lines.clear()
+                notifier = Notifier(
+                    _NotifyRunner(result), "/x/btrfs-notify", pending, log=lambda p, m: self.lines.append((p, m))
+                )
+                self.assertEqual(notifier.send("normal", "cst-vm", title, "body"), "lost")
+                [(prio, msg)] = self.lines
+                self.assertEqual(prio, 3)
+                self.assertTrue(msg.endswith(f"): {title}; it is only in this journal"), msg)
+                self.assertEqual(self.kept(), [])
+
     def test_a_spool_lock_held_too_long_leaves_the_alert_in_the_journal_only(self) -> None:
         # btrfs-notify gives up on this lock after 30 s; at boot nothing may wait for it forever.
         os.makedirs(self.pending)
