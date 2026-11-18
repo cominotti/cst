@@ -208,7 +208,8 @@ class ToolchainsLockPort(Protocol):
 class HomeFilesPort(Protocol):
     """The files CST keeps in the user's home: what auto on installs (the program's copy,
     its defaults and the two user units, listed in the user's install record), the file
-    auto off leaves, and what the earlier `cst btrfs cargo-gc` left. PATH arguments are
+    auto off leaves, what the earlier `cst btrfs cargo-gc` left, and for config the tools'
+    settings files (cargo's config, uv.toml) and the sccache wrapper. PATH arguments are
     absolute paths in the home."""
 
     def auto_copies(self) -> dict[str, bytes]:
