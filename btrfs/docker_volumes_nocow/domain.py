@@ -6,11 +6,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import time
+from typing import TypedDict, TypeIs
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.values import GIB
 
-MARGIN = 20 * 1024**3  # free space kept besides the copy itself
+MARGIN = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
 GAVE_UP = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
 DAEMON_JSON = "/etc/docker/daemon.json"
@@ -18,6 +21,15 @@ DAEMON_JSON = "/etc/docker/daemon.json"
 # original between the two renames (followed by the time it was moved aside).
 NEW_SUFFIX = ".nocow-new"
 OLD_MARK = ".cow-old-"
+
+
+class NocowCommand(StrEnum):
+    """docker-volumes-nocow's commands (its first argument), in its usage's order."""
+
+    STATUS = "status"
+    MARK = "mark"
+    MIGRATE = "migrate"
+    UNMARK = "unmark"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +131,34 @@ def daemon_args(args: Sequence[str]) -> DaemonArgs:
     return DaemonArgs(root, config)
 
 
-def next_postponed(rec: Mapping[str, object] | None, *, why: str, boot: str, now: int) -> dict[str, object]:
+class PostponedRecord(TypedDict):
+    """The postponed file (JSON) as this helper writes it: the latest reason, the boots in a row
+    (counted once per boot id), the first and the last of them (epoch seconds), the last boot's id."""
+
+    reason: str
+    boots: int
+    first: int
+    last: int
+    boot_id: str
+
+
+class StoredPostponed(TypedDict, total=False):
+    """The postponed file as read back: PostponedRecord's keys, none of them checked (a file this
+    helper did not write may hold anything); next_postponed and postponed_line check what they use."""
+
+    reason: object
+    boots: object
+    first: object
+    last: object
+    boot_id: object
+
+
+def is_stored_postponed(value: object) -> TypeIs[StoredPostponed]:
+    """A JSON object is a StoredPostponed: none of its keys is required, any value is accepted."""
+    return isinstance(value, dict)
+
+
+def next_postponed(rec: StoredPostponed | None, *, why: str, boot: str, now: int) -> PostponedRecord:
     """The record after one more postponed run: boots counted once per boot (by the kernel's
     boot id), the latest reason kept. A record this helper did not write starts afresh."""
     old = rec or {}
@@ -131,7 +170,7 @@ def next_postponed(rec: Mapping[str, object] | None, *, why: str, boot: str, now
     return {"reason": why, "boots": boots, "first": first, "last": now, "boot_id": boot}
 
 
-def postponed_line(rec: Mapping[str, object] | None) -> str:
+def postponed_line(rec: StoredPostponed | None) -> str:
     """The status line of a postponed migration, or ""."""
     if not rec:
         return ""

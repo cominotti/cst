@@ -4,7 +4,7 @@ systemctl and /proc/uptime, the terminal and the journal."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 import json
 import os
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TypedDict, TypeIs
 import zipfile
 import zlib
 
@@ -46,9 +47,38 @@ EVENTS_ARGV = ("docker", "events", "--format", "{{json .}}", "--filter", "type=c
 
 
 # ---- docker's JSON, read without trusting its shape ---------------------------------
+class InspectedObject(TypedDict, total=False):
+    """One object of `docker container|volume|image inspect`: the keys docker-gc reads. Their
+    values are not trusted (object): each reader checks the one it uses."""
+
+    Id: object
+    Name: object
+    Image: object
+    Created: object
+    Config: object
+    State: object
+    HostConfig: object
+    Mounts: object
+    Labels: object
+    RepoTags: object
+    RepoDigests: object
+    Size: object
+    Metadata: object
+
+
 def _obj(value: object) -> dict[str, object]:
     """value when it is a JSON object, else an empty one (Docker's null)."""
     return value if isinstance(value, dict) else {}
+
+
+def _is_inspected(value: object) -> TypeIs[InspectedObject]:
+    """A JSON object is an InspectedObject: none of its keys is required, any value is accepted."""
+    return isinstance(value, dict)
+
+
+def _inspected(value: object) -> InspectedObject:
+    """value when it is a JSON object, else an empty one (as _obj)."""
+    return value if _is_inspected(value) else {}
 
 
 def _str(value: object) -> str:
@@ -67,7 +97,7 @@ def _time(value: object) -> float:
     return ts(value if isinstance(value, str) else None)
 
 
-def container_of(o: Mapping[str, object]) -> Container:
+def container_of(o: InspectedObject) -> Container:
     """A Container from one object of `docker container inspect`."""
     config, state = _obj(o.get("Config")), _obj(o.get("State"))
     policy = _obj(_obj(o.get("HostConfig")).get("RestartPolicy"))
@@ -89,11 +119,11 @@ def container_of(o: Mapping[str, object]) -> Container:
     )
 
 
-def volume_of(o: Mapping[str, object]) -> Volume:
+def volume_of(o: InspectedObject) -> Volume:
     return Volume(name=_str(o.get("Name")), anonymous="com.docker.volume.anonymous" in _obj(o.get("Labels")))
 
 
-def image_of(o: Mapping[str, object]) -> Image:
+def image_of(o: InspectedObject) -> Image:
     size = _num(o.get("Size")) or 0
     return Image(
         id=_str(o.get("Id")),
@@ -140,19 +170,19 @@ class DockerCli:
             raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
         return r
 
-    def inspect_all(self, kind: str, list_args: Sequence[str]) -> list[dict[str, object]]:
+    def inspect_all(self, kind: str, list_args: Sequence[str]) -> list[InspectedObject]:
         """Inspect every object listed. Objects that vanished in between are
         dropped; any other gap aborts (a container missing from the result would
         leave its image unprotected)."""
         ids = sorted(set(self.run(*list_args).stdout.split()))
-        out: list[dict[str, object]] = []
+        out: list[InspectedObject] = []
         for i in range(0, len(ids), 100):
             r = self.run(kind, "inspect", *ids[i : i + 100], check=False)
             try:
                 found = json.loads(r.stdout or "[]")
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"{kind} inspect: unreadable output ({e})") from e
-            out.extend(_obj(o) for o in (found if isinstance(found, list) else []))
+            out.extend(_inspected(o) for o in (found if isinstance(found, list) else []))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got
         if missing and missing & set(self.run(*list_args).stdout.split()):

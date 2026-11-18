@@ -8,16 +8,27 @@ import ast
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 import os
 import re
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
 from cst_core.domain.text import describe_problems, parse_shell_assignments
-from cst_core.domain.values import DAY, format_bytes_decimal
+from cst_core.domain.values import DAY, MINUTE, format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
 STATE_FORMAT: StateFormat = state_format(StateFormatKey.DOCKER_GC_STATE)
 LAST_RUN_FORMAT: StateFormat = state_format(StateFormatKey.DOCKER_GC_LAST_RUN)
+
+
+class GcCommand(StrEnum):
+    """docker-gc's commands (its first argument), in its usage's order."""
+
+    RECORD = "record"
+    RUN = "run"
+    CLEANUP_NOW = "cleanup-now"
+    STATUS = "status"
+    SETTINGS = "settings"
 
 
 class NewerState(RuntimeError):
@@ -43,8 +54,8 @@ def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
     return version_of(data, "v")
 
 
-HEARTBEAT_SECONDS = 300
-MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up
+HEARTBEAT_SECONDS = 5 * MINUTE
+MIN_UPTIME = 10 * MINUTE  # after boot, restart-policy containers are still coming up
 # What a failed `docker info` prints when nothing answers on the daemon's socket:
 # the socket is not there or nobody listens (the errno text of the dial, in every
 # version), or the question older CLIs print instead. Anything else (permission
@@ -156,7 +167,9 @@ def protected_registries(value: str) -> tuple[str, ...]:
 
 
 # ---- inside a toolbox or container ------------------------------------------------------
-def container_refusal(command: str, *, dry: bool, write: bool, settings_file: str, named_files: bool) -> str | None:
+def container_refusal(
+    command: GcCommand, *, dry: bool, write: bool, settings_file: str, named_files: bool
+) -> str | None:
     """Why docker-gc does not run this command inside a toolbox or container, or None.
 
     There /etc/cst/docker-gc.conf and the installed program are the container's (usually
@@ -166,11 +179,13 @@ def container_refusal(command: str, *, dry: bool, write: bool, settings_file: st
     removable). settings, which talks to no docker, runs only when the caller names both of
     its files (DOCKER_GC_CONF and DOCKER_GC_INSTALLED: the installer's staged step does).
     """
-    if command == "settings" and named_files:
+    if command == GcCommand.SETTINGS and named_files:
         return None
     words = " ".join([command, *(["--dry-run"] if dry else []), *(["--write"] if write else [])])
     on_host = (
-        f"sudo {GcPaths().installed} {words}" if command in ("record", "settings") else f"cst btrfs docker-gc {words}"
+        f"sudo {GcPaths().installed} {words}"
+        if command in (GcCommand.RECORD, GcCommand.SETTINGS)
+        else f"cst btrfs docker-gc {words}"
     )
     return (
         f"docker-gc {words}: refused inside a toolbox or container: {settings_file} there is the "
