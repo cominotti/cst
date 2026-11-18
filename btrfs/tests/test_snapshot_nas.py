@@ -21,7 +21,7 @@ import signal
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import RuntimeTest, log, read
+from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
 
 ALIAS = "btrfs-setup-nas"
 REPO_ID = "ab" * 32
@@ -687,6 +687,19 @@ class MaintenanceTest(Base):
         )
         self.assertEqual(self.read_state("nas-check-failures"), "1\n")
         self.assertTrue(any(ln.startswith(log(5, "NAS backup ok: ")) for ln in lines), lines)
+
+    def test_a_failure_count_that_names_a_word_stops_the_run_and_says_why(self) -> None:
+        # bash's $(( abc + 1 )) under set -u stopped the run; the runtime stops it too, and now
+        # says which file holds what (before, exit 1 without a line).
+        self.known_repository()
+        self.write(self.state_file("nas-check-failures"), "abc\n")
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, _, err = self.nas()
+        self.assertEqual(rc, 1)
+        failures = self.state_file("nas-check-failures")
+        self.assertIn(f"{SCRIPT}: {failures} holds 'abc': not a number", err.splitlines())
+        self.assertEqual(self.read_state("nas-check-failures"), "abc\n")
+        self.assertFalse(os.path.exists(self.path("run/btrfs-snapshot/pinned")))
 
     def test_a_check_that_keeps_failing_alerts_on_the_third_run(self) -> None:
         self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})

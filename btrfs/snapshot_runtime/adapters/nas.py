@@ -431,6 +431,8 @@ class Nas:
         before = m.read(path)
         n = guard_number(before) if before is not None else 0
         if n is GuardError.NOT_A_NUMBER:
+            # bash stopped here too ("abc: unbound variable"): say why, as the settings do.
+            print(f"{m.front}: {path} holds {before!r}: not a number", file=sys.stderr, flush=True)
             raise RunStopped
         fails = (0 if n is GuardError.BAD_NUMBER else n) + 1
         m.write(path, f"{fails}\n")
