@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from cst_core.domain.errors import Refused, Usage
 from cst_core.ports import WriteFailed
 from toolchains import wiring
-from toolchains.adapters.program import output_mode, real_user_is_root
 from toolchains.cli import auto, config, prune, status
 from toolchains.domain.common import NAME, USAGE, ConfigError, parse_args
 
@@ -28,11 +27,11 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
-    output_mode(a["cmd"], a["action"])
+    wiring.set_output_mode(a["cmd"], a["action"])
     if a["cmd"] == "help":
         print(doc)
         return 0
-    if real_user_is_root():
+    if wiring.run_by_root():
         print(f"{NAME}: run as your user, not as root", file=sys.stderr)
         return 1
     rc = wiring.reexec_on_host(argv, entry_file)
