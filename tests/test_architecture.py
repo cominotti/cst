@@ -142,7 +142,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
-    "swap/cli.py": 99,
+    "swap/cli.py": 98,
     "toolchains/cli/": 73,
     "vm/cli/": 282,
 }
@@ -301,9 +301,6 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/domain/text.py:Assignment": "the record parse_shell_assignments returns, used only inside text.py",
     # The duration names (magic values, rule 3 of tests/test_magic_values.py): the packages adopt them
     # where they write 60, 3600 or 604800 today; each line goes once a package uses the name.
-    "cst_core/domain/values.py:MINUTE": "a duration name; the packages' unit numbers move onto it",
-    "cst_core/domain/values.py:HOUR": "a duration name; the packages' unit numbers move onto it",
-    "cst_core/domain/values.py:WEEK": "a duration name; the packages' unit numbers move onto it",
 }
 
 
