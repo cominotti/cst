@@ -1178,9 +1178,8 @@ class DockerCommandTest(unittest.TestCase):
 
     def test_no_answer_and_missing(self) -> None:
         hang = subprocess.TimeoutExpired(["docker"], 30)
-        with mock.patch.object(subprocess, "run", side_effect=hang):
-            with self.assertRaises(RuntimeError) as stop:
-                self.docker.run("image", "ls", "-q", timeout=30)
+        with mock.patch.object(subprocess, "run", side_effect=hang), self.assertRaises(RuntimeError) as stop:
+            self.docker.run("image", "ls", "-q", timeout=30)
         self.assertEqual(str(stop.exception), "docker image ls: no answer in 30s")
         self.assertIsInstance(stop.exception.__cause__, subprocess.TimeoutExpired)
         missing = FileNotFoundError(2, "No such file or directory", "docker")
