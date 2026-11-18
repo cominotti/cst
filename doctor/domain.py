@@ -134,7 +134,7 @@ SCRUB_UNIT = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service")
 SCRUB_DROPIN = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf")
 _SCRUB_SIZE = re.compile(r"[0-9]+[KkMmGgTt]?")
 _SCRUB_LIMIT_LINE = re.compile(r"[ \t]*(?:export[ \t]+)?SCRUB_LIMIT(?![A-Za-z0-9_])")
-_SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.M)
+_SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.MULTILINE)
 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
@@ -450,8 +450,8 @@ def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
 def parse_unalloc_thresholds_text(text: str) -> tuple[int, int] | None:
     """Extract (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB) from btrfs-health-check's source: the bash version's
     `NAME=50` lines, or the Python version's `NAME: Final = 50` (btrfs/health_check/domain.py)."""
-    w = re.search(r"^UNALLOC_MIN_GIB(?:=|: Final = )(\d+)\b", text, re.M)
-    c = re.search(r"^UNALLOC_CRIT_GIB(?:=|: Final = )(\d+)\b", text, re.M)
+    w = re.search(r"^UNALLOC_MIN_GIB(?:=|: Final = )(\d+)\b", text, re.MULTILINE)
+    c = re.search(r"^UNALLOC_CRIT_GIB(?:=|: Final = )(\d+)\b", text, re.MULTILINE)
     if w and c:
         return int(w.group(1)), int(c.group(1))
     return None
