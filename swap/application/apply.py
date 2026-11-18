@@ -317,6 +317,10 @@ class SwapApplicationService(SwapReports):
         self._apply_managed_file(TMPFILES_ENTRY, env.src_tmpfiles, env.tmpfiles_conf, events)
         for name, val in parse_tmpfiles_params(tmpfiles_text):
             param_path = posixpath.join(env.zswap_params_dir, name)
+            if not self._fs.exists(param_path):
+                # MISSING in plan: tmpfiles skips it at boot, and sysfs cannot create it.
+                events.append(ApplyEvent("out", "line", f"skipped:   zswap {name} (this kernel has no such parameter)"))
+                continue
             live = self._read_first(param_path, "")
             if not same_param(live, val):
                 self._fs.write_text_direct(param_path, f"{val}\n")

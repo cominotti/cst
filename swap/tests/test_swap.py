@@ -1729,6 +1729,15 @@ class _ZswapWriteFails(_FakeTempFileSystem):
         raise PermissionError(13, "Permission denied", path)
 
 
+class _SysfsNoCreate(_FakeTempFileSystem):
+    """sysfs (kernfs) has no create: opening a name that is not there for writing fails, root or not."""
+
+    def write_text_direct(self, path: str, content: str) -> None:
+        if not os.path.exists(path):
+            raise PermissionError(13, "Permission denied", path)
+        super().write_text_direct(path, content)
+
+
 class SwapApplyOutputTest(_SwapScratch):
     """apply prints each step as it runs and stops at a failing command with its message and exit status,
     as swap-setup.sh did under `set -Eeuo pipefail`."""
@@ -1903,6 +1912,16 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertEqual(rc, 1)
         self.assertIn("cst swap: ERROR: [Errno 13] Permission denied", err)
         self.assertIn("== zswap", out)
+
+    def test_a_zswap_parameter_this_kernel_lacks_is_skipped_and_apply_goes_on(self) -> None:
+        # plan shows it MISSING and the README says it does not make apply fail.
+        os.remove(os.path.join(self.env.zswap_params_dir, "shrinker_enabled"))
+        fs = _SysfsNoCreate({self.spec.device_path: "/dev/nvme0n1p5"})
+        rc, out, err = self._apply(self._service(fs=fs)[0])
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("skipped:   zswap shrinker_enabled (this kernel has no such parameter)", out)
+        self.assertIn("== zram", out)
+        self.assertFalse(os.path.exists(os.path.join(self.env.zswap_params_dir, "shrinker_enabled")))
 
     def test_a_failing_blockdev_shows_its_message_and_exit_status(self) -> None:
         runner = _ScriptedRunner(

@@ -246,7 +246,7 @@ The words in the first column of `plan` and `status`:
 | `write`, `update`, `mask`, `remove` | `apply` would write, rewrite, mask or delete that file. |
 | `start`, `restart`, `swapoff` | `apply` would activate `swap0`, re-activate it, or swap off `zram0`. |
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
-| `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. It does not make `apply` fail; `cst doctor` warns about it too. |
+| `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
 | `?` | Could not be read without root. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
