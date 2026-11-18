@@ -92,6 +92,10 @@ repository:
 - **`[tool.ruff] extend-include`**: the extensionless helpers (`btrfs/btrfs-bulk`,
   `vm/cst-vm`, ...). ruff finds `*.py` files by itself, but not these. A new
   helper must be added here; the test fails until it is.
+- **`[tool.ruff] required-version`** is the exact ruff pin of the `dev`
+  group (`==0.17.5`): a different ruff that reads `pyproject.toml` (an
+  editor's, one on `PATH`) refuses to run instead of linting or formatting
+  by other rules. `tests/test_python_files.py` fails when the two differ.
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
   (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
@@ -455,7 +459,9 @@ or the task drops `--locked` or leaves packages out (`--no-group`,
 
 One tool per pull request, so that new findings are clearly the new version's:
 
-1. Change the version in `[dependency-groups]` of `pyproject.toml`.
+1. Change the version in `[dependency-groups]` of `pyproject.toml`. For
+   ruff, also `required-version` in `[tool.ruff]` (the same version, with
+   `==`; `tests/test_python_files.py` fails when the two differ).
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
    version finds, or explain in the pull request why it is noise. A new ruff

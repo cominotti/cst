@@ -22,6 +22,9 @@ never be linted. This test derives the Python files from the repository
   than src.include, terminal.error-on-warning (which must be true) and
   rules raised to "error" (rules.<name> = "error"; "warn" or "ignore"
   fails), and no ignore comment in a ty-gated file;
+- [tool.ruff] required-version is "==" and the version of the ruff pin of
+  the dev group, so a ruff other than the pinned one refuses to run on this
+  repository (an editor's, or one on PATH);
 - ruff's annotation rules (ANN, which `invowk cmd test types` runs on every
   Python file) are switched off for no file: no entry of
   [tool.ruff.lint.per-file-ignores] or extend-per-file-ignores, and no
@@ -140,6 +143,23 @@ def ty_entry_problems(py_files: set[str], ty_gate: Sequence[str]) -> list[str]:
         elif entry not in py_files and not _is_folder_entry(entry, py_files):
             out.append(f"{entry}: in [tool.ty.src] include but not a folder or a Python file of the repository")
     return out
+
+
+def ruff_version_problems(conf: Mapping[str, object]) -> list[str]:
+    """Whether [tool.ruff] required-version names exactly the ruff pin of the dev group, as text lines."""
+    groups = _sub(dict(conf), "dependency-groups")
+    dev = groups.get("dev") if isinstance(groups, dict) else None
+    pins = [d for d in dev if isinstance(d, str) and d.startswith("ruff==")] if isinstance(dev, list) else []
+    if len(pins) != 1:
+        return ['[dependency-groups] dev: no exact "ruff==VERSION" pin']
+    want = pins[0].removeprefix("ruff")
+    got = _sub(_sub(dict(conf), "tool"), "ruff").get("required-version")
+    if got != want:
+        return [
+            f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
+            "(change both together)"
+        ]
+    return []
 
 
 def problems(
@@ -446,6 +466,26 @@ class PythonFilesTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertEqual(len(ann_ignore_problems(tomllib.loads(bad))), 1)
 
+    def test_ruff_refuses_to_run_unless_it_is_the_pinned_one(self) -> None:
+        def conf(required: str | None, dev: Sequence[str] = ("ruff==1.2.3", "ty==0.0.1")) -> dict[str, object]:
+            ruff: dict[str, object] = {} if required is None else {"required-version": required}
+            return {"dependency-groups": {"dev": list(dev)}, "tool": {"ruff": ruff}}
+
+        self.assertEqual(ruff_version_problems(conf("==1.2.3")), [])
+        for bad in (None, ">=1.2.3", "==1.2.4", "1.2.3"):
+            with self.subTest(required=bad):
+                self.assertEqual(
+                    ruff_version_problems(conf(bad)),
+                    [
+                        f"[tool.ruff] required-version = {bad!r}: must be '==1.2.3', the ruff pin of the "
+                        "dev group (change both together)"
+                    ],
+                )
+        self.assertEqual(
+            ruff_version_problems(conf("==1.2.3", dev=["ruff>=1.2", "ty==0.0.1"])),
+            ['[dependency-groups] dev: no exact "ruff==VERSION" pin'],
+        )
+
     def test_every_python_file_is_under_the_gates(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, "pyproject.toml"), "rb") as fh:
@@ -455,6 +495,7 @@ class PythonFilesTest(unittest.TestCase):
         found = (
             problems(py_files, extend, ty_gate)
             + ann_ignore_problems(conf)
+            + ruff_version_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, ty_gated(py_files, ty_gate))
         )

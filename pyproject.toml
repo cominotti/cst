@@ -30,6 +30,11 @@ python-downloads = "never"
 # ---- ruff -------------------------------------------------------------------
 
 [tool.ruff]
+# The exact ruff of the dev group: any other ruff (an editor's, one on PATH)
+# that reads this file refuses to run instead of linting or formatting by
+# other rules. Change it together with the pin above (tests/test_python_files.py
+# fails when the two differ).
+required-version = "==0.17.5"
 # The line length `ruff format` aims for (its check runs in
 # `invowk cmd test pylint`). Long strings and comments can stay longer: the
 # linter's line-length rule (E501) is not selected.
