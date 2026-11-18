@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Literal
+from typing import Literal, override
 import unittest
 import unittest.mock
 
@@ -58,6 +58,7 @@ def help_text(script: str, prog: str) -> str:
 
 
 class CpuSetupCommandLineTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-setup-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -182,6 +183,7 @@ def handed(
 class RouteTest(unittest.TestCase):
     """Where each command goes: help, cpu-watch (here or on the host), the toolbox refusal, sudo, root."""
 
+    @override
     def setUp(self) -> None:
         self.ran: list[tuple[str, list[str]]] = []
 
@@ -290,6 +292,7 @@ class ShimExecTest(unittest.TestCase):
     """The shim execs Python, which execs cpu-watch (or flatpak-spawn): one process all the way, with
     the caller's environment (nothing the shim hands over, the caller's LC_CTYPE)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-shim-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -369,6 +372,7 @@ class FakeRunner:
 
 
 class CpuSetupCase(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-root-"))
         self.addCleanup(shutil.rmtree, self.tmp)

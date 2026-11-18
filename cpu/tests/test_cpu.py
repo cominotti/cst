@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import ClassVar
+from typing import ClassVar, override
 import unittest.mock
 import xml.etree.ElementTree as ET
 
@@ -80,6 +80,7 @@ class CpusOfTest(unittest.TestCase):
 
 
 class VmPinTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = cpu_domain
 
@@ -130,6 +131,7 @@ class VmPinTest(unittest.TestCase):
 class VmPinCpuFeaturesTest(unittest.TestCase):
     """The CET/MBEC features vm-pin keeps disabled on host-passthrough."""
 
+    @override
     def setUp(self) -> None:
         self.m = cpu_domain
         self.names = self.m.CPU_DISABLE_DEFAULT.split()
@@ -394,6 +396,7 @@ class QuietTest(unittest.TestCase):
     """`cpu-watch quiet`: fake /proc files, a fake clock and sleep (each sleep
     is one second: the fake files advance by that second)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
