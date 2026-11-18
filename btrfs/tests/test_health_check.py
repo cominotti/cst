@@ -1,39 +1,131 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Unit tests for the SMART part of btrfs/btrfs-health-check (no root needed).
+"""Behaviour tests for btrfs/btrfs-health-check (no root, no btrfs, no disks needed).
 
-The health check reads the NVMe health log (SMART) of the btrfs member disks
-and of the disks under every swap device in /proc/swaps. These tests source
-the script, which then defines its functions and stops before any check
-runs, and call the functions with a fake /proc/swaps
-and fake `lsblk` and `nvme` commands from a temporary folder. Nothing reads
-the real disks or writes outside the temporary folder.
+The hourly health check (root, btrfs-health-check.timer) reads the state of
+the btrfs filesystems, the NVMe disks and the markers of the degraded-boot
+part. It alerts through btrfs-notify when something is wrong. These tests run
+the whole program with CST_HEALTH_ROOT pointing at a temporary folder (every
+file it reads or writes: /proc, /sys, /etc, /run, /var, /usr) and with fake
+findmnt, btrfs, lsblk, nvme, journalctl, systemctl, rpm-ostree and
+btrfs-notify. The fakes answer from a description of the machine (JSON) and
+write down every call.
 
-Run from the repository root (-B: no __pycache__ in the repository):
-    python3 -B -m unittest btrfs.tests.test_health_check -v
+They pin what the journal, btrfs-notify and the next run see: the exit
+status, the journal lines (stdout: <6> OK, <5>, <4>; stderr: one <2> line per
+problem), the alert's title and body, the commands run, and the state files
+(the reclaim error counts, the journal cursor, the degraded-boot markers).
+
+Not covered here: the member disks of a filesystem. They are found only for
+devices that are block devices (lsblk below them, readlink -f for the
+device-mapper name), which a test folder cannot fake. Their SMART check and
+the kernel-line filter by device are covered on the swap disks and in the
+tier 1 run of the installed program.
+
+Run with: invowk cmd test module btrfs.tests.test_health_check
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from typing import Final
 import unittest
 
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "btrfs-health-check")
+# How the tests start the program.
+RUN: Final[list[str]] = ["bash", SCRIPT]
 
-# `lsblk -lnso NAME,TYPE DEV`: the device and everything below it.
-LSBLK = {
-    "dm-2": "dm-2 crypt\nnvme1n1p2 part\nnvme1n1 disk\n",
-    "dm-3": "dm-3 crypt\nnvme1n1p3 part\nnvme1n1 disk\n",  # a second swap on the same disk
-    "zram0": "zram0 disk\n",
-    "dm-0": "dm-0 crypt\nnvme0n1p3 part\nnvme0n1 disk\n",  # swap on a btrfs member disk
-}
-HEALTHY = """Smart Log for NVME device:nvme1 namespace-id:ffffffff
+UUID = "11111111-2222-3333-4444-555555555555"
+BOOT = "0f0f0f0f-aaaa-bbbb-cccc-000000000001"
+GIB = 1024**3
+TAG = "btrfs-health-check"
+TITLE = "Disk health: problems detected"
+FAKES = ("findmnt", "btrfs", "lsblk", "nvme", "journalctl", "systemctl", "rpm-ostree")
+
+# One program answers for every fake command, from the machine described in $FAKE_MACHINE.
+FAKE = r"""#!/usr/bin/python3 -I
+import json, os, sys
+name = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+with open(os.environ["FAKE_MACHINE"]) as f:
+    m = json.load(f)
+with open(os.environ["FAKE_CALLS"], "a") as f:
+    f.write(json.dumps([name] + args) + "\n")
+
+def out(text, rc=0):
+    sys.stdout.write(text)
+    sys.exit(rc)
+
+def fs(target):
+    for x in m.get("mounts", []):
+        if target == x["target"] or target in x.get("also", []):
+            return x
+    sys.stderr.write(name + ": " + target + ": not mounted\n")
+    sys.exit(1)
+
+if name == "findmnt":
+    o = args[args.index("-o") + 1]
+    if "-M" in args:
+        x = fs(args[args.index("-M") + 1])
+        out((x.get("options", "rw,noatime") if o == "OPTIONS" else x["uuid"]) + "\n")
+    if "--target" in args:
+        u = m.get("sysroot_uuid")
+        out(u + "\n" if u else "")
+    lines = []
+    for x in m.get("mounts", []):
+        for t in [x["target"]] + x.get("also", []):
+            lines.append(x["uuid"] + " " + t if o == "UUID,TARGET" else t + " " + x["uuid"])
+    out("".join(line + "\n" for line in lines))
+if name == "btrfs":
+    x = fs(args[-1])
+    sub = " ".join(args[:-1])
+    if sub == "device stats --check":
+        sys.exit(x.get("stats_check", 0))
+    key = {"filesystem show": "show", "filesystem usage -b": "usage", "device usage -b": "device_usage",
+           "device stats": "stats", "scrub status": "scrub"}[sub]
+    out(x.get(key, ""))
+if name == "lsblk":
+    v = m.get("lsblk", {}).get(os.path.basename(args[-1]))
+    out(v, 0) if v is not None else sys.exit(32)
+if name == "nvme":
+    v = m.get("nvme", {}).get(os.path.basename(args[1]))
+    out(v, 0) if v is not None else sys.exit(1)
+if name == "journalctl":
+    if "-k" in args:
+        cur = next((a.split("=", 1)[1] for a in args if a.startswith("--cursor-file=")), None)
+        if "-n" in args:
+            with open(cur, "w") as f:
+                f.write("s=cursor-new\n")
+            sys.exit(0)
+        if cur is not None and m.get("cursor_rc", 0):
+            sys.stderr.write("Failed to seek to cursor\n")
+            sys.exit(m["cursor_rc"])
+        if cur is not None:
+            with open(cur, "w") as f:
+                f.write("s=cursor-next\n")
+        if m.get("kernel_rc", 0):
+            sys.stderr.write(m.get("kernel_err", ""))
+        out(m.get("kernel", ""), m.get("kernel_rc", 0))
+    out(m.get("suspend", ""))
+if name == "systemctl":
+    sys.exit(0 if args[-1] in m.get("enabled", []) else 1)
+if name == "rpm-ostree":
+    v = m.get("ostree")
+    out(json.dumps(v), 0) if v is not None else sys.exit(1)
+if name == "btrfs-notify":
+    sys.exit(m.get("notify_rc", 0))
+sys.exit(127)
+"""
+
+HEALTHY_SMART = """Smart Log for NVME device:nvme1 namespace-id:ffffffff
 critical_warning                        : 0
 temperature                             : 38 C
 available_spare                         : 100%
@@ -41,129 +133,703 @@ available_spare_threshold               : 10%
 percentage_used                         : 3%
 media_errors                            : 0
 """
-FAILING = (
-    HEALTHY.replace("critical_warning                        : 0", "critical_warning                        : 0x1")
+FAILING_SMART = (
+    HEALTHY_SMART.replace(
+        "critical_warning                        : 0", "critical_warning                        : 0x1"
+    )
     .replace("media_errors                            : 0", "media_errors                            : 12")
     .replace("available_spare                         : 100%", "available_spare                         : 5%")
 )
 
 
-class HealthCheckSmartTest(unittest.TestCase):
+def ctime(epoch: float) -> str:
+    """A time as btrfs scrub status prints it (TZ=UTC)."""
+    return time.strftime("%a %b %e %H:%M:%S %Y", time.gmtime(epoch))
+
+
+def device_usage(*unalloc: int) -> str:
+    return "".join(
+        f"/dev/mapper/cst-test-{n}, ID: {n}\n   Device size:   2000398934016\n   Data,RAID1:    500000000000\n"
+        f"   Unallocated:   {u}\n\n"
+        for n, u in enumerate(unalloc, 1)
+    )
+
+
+class HealthCheckTest(unittest.TestCase):
     tmp: str
+    root: str
     bin: str
+    calls_log: str
+    machine_file: str
+    now: int
+    machine: dict[str, object]
+    fs: dict[str, object]
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="health-check-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = os.path.join(self.tmp, "root")
         self.bin = os.path.join(self.tmp, "bin")
-        os.makedirs(os.path.join(self.tmp, "lsblk"))
-        os.makedirs(os.path.join(self.tmp, "smart"))
         os.makedirs(self.bin)
-        for name, out in LSBLK.items():
-            self.write(f"lsblk/{name}", out)
-        self.stub("lsblk", 'cat "${FAKE}/lsblk/$(basename "${@: -1}")" 2>/dev/null || exit 32')
-        self.stub(
-            "nvme", '[[ "$1" == smart-log ]] || exit 2\ncat "${FAKE}/smart/$(basename "$2")" 2>/dev/null || exit 1'
+        fake = os.path.join(self.bin, "fake")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write(FAKE)
+        os.chmod(fake, 0o755)
+        for name in FAKES:
+            os.symlink(fake, os.path.join(self.bin, name))
+        os.makedirs(self.path("usr/local/sbin"))
+        os.symlink(fake, self.path("usr/local/sbin/btrfs-notify"))
+        self.calls_log = os.path.join(self.tmp, "calls")
+        self.machine_file = os.path.join(self.tmp, "machine.json")
+        self.now = int(time.time())
+        self.fs = {
+            "uuid": UUID,
+            "target": "/var",
+            "also": ["/etc"],
+            "options": "rw,noatime,compress=zstd:1",
+            "show": (
+                f"Label: none  uuid: {UUID}\n\tTotal devices 2 FS bytes used 1.00TiB\n"
+                "\tdevid    1 size 1.82TiB used 1.00TiB path /dev/mapper/cst-test-1\n"
+                "\tdevid    2 size 1.82TiB used 1.00TiB path /dev/mapper/cst-test-2\n\n"
+            ),
+            "usage": "Overall:\n    Device size:\t\t   4000797868032\n    Device missing:\t\t\t   0\n"
+            "    Multiple profiles:\t\t\t  no\n",
+            "device_usage": device_usage(800 * GIB, 800 * GIB),
+            "stats": "[/dev/mapper/cst-test-1].write_io_errs    0\n[/dev/mapper/cst-test-1].read_io_errs     0\n",
+            "scrub": self.scrub(self.now - 2 * 86400),
+        }
+        self.machine = {"mounts": [self.fs], "sysroot_uuid": UUID}
+        self.write("proc/sys/kernel/random/boot_id", BOOT + "\n")
+        self.write("proc/uptime", "100000.25 1000.00\n")
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        for rel, value in (
+            ("metadata/total_bytes", 20 * GIB),
+            ("metadata/bytes_used", 10 * GIB),
+            ("global_rsv_size", 512 * 1024**2),
+            ("data/dynamic_reclaim", 1),
+            ("data/periodic_reclaim", 1),
+            ("data/reclaim_errors", 0),
+            ("metadata/reclaim_errors", 0),
+        ):
+            self.write(f"{alloc}/{rel}", f"{value}\n")
+        self.write(
+            "etc/tmpfiles.d/btrfs-automatic-reclaim.conf",
+            f"w /sys/fs/btrfs/{UUID}/allocation/data/dynamic_reclaim - - - - 1\n"
+            f"w /sys/fs/btrfs/{UUID}/allocation/data/periodic_reclaim - - - - 1\n",
         )
 
-    def write(self, rel: str, text: str) -> None:
-        with open(os.path.join(self.tmp, rel), "w", encoding="utf-8") as f:
+    # ---- the machine ------------------------------------------------------------------------------------------
+
+    def path(self, rel: str) -> str:
+        return os.path.join(self.root, rel)
+
+    def write(self, rel: str, text: str) -> str:
+        p = self.path(rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             f.write(text)
+        return p
 
-    def stub(self, name: str, body: str) -> None:
-        path = os.path.join(self.bin, name)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"#!/bin/bash\n{body}\n")
-        os.chmod(path, 0o755)
+    def read(self, rel: str) -> str:
+        with open(self.path(rel), encoding="utf-8") as f:
+            return f.read()
 
-    def swaps(self, *lines: str) -> str:
-        self.write("swaps", "Filename\tType\tSize\tUsed\tPriority\n" + "".join(l + "\n" for l in lines))
-        return os.path.join(self.tmp, "swaps")
-
-    def run_lib(self, code: str) -> str:
-        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "FAKE": self.tmp}
-        r = subprocess.run(
-            ["bash", "-c", f'. "$1"; {code}', "health-check-test", SCRIPT],
-            check=False,
-            env=env,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            timeout=30,
+    def scrub(self, started: float | None, status: str = "finished", errors: str = "no errors found") -> str:
+        head = f"UUID:             {UUID}\n"
+        if started is None:
+            return head + "\tno stats available\n"
+        return (
+            head + f"Scrub started:    {ctime(started)}\nStatus:           {status}\nDuration:         1:02:03\n"
+            f"Total to scrub:   1.00TiB\nRate:             300.00MiB/s\nError summary:    {errors}\n"
         )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stderr, "")
-        return r.stdout
 
-    def test_disk_under_encrypted_swap(self) -> None:
-        swaps = self.swaps("/dev/dm-2                               partition\t134217724\t0\t-2")
-        self.assertEqual(self.run_lib(f'swap_disks "{swaps}" nvme0n1 nvme2n1'), "nvme1n1\n")
+    def run_check(self, *args: str) -> subprocess.CompletedProcess[str]:
+        with open(self.machine_file, "w", encoding="utf-8") as f:
+            json.dump(self.machine, f)
+        if os.path.exists(self.calls_log):
+            os.unlink(self.calls_log)
+        env = {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "CST_HEALTH_ROOT": self.root,
+            "FAKE_MACHINE": self.machine_file,
+            "FAKE_CALLS": self.calls_log,
+            "LC_ALL": "C.UTF-8",
+            "TZ": "UTC",
+        }
+        return subprocess.run(
+            [*RUN, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, timeout=120
+        )
 
-    def test_files_zram_and_repeats_are_skipped(self) -> None:
-        swaps = self.swaps(
-            "/dev/dm-2 partition 1 0 -2",
+    def calls(self, name: str | None = None) -> list[list[str]]:
+        """The fake commands run (each [name, args...]), in order; only those of name when given."""
+        with open(self.calls_log, encoding="utf-8") as f:
+            calls = [json.loads(line) for line in f]
+        return [c for c in calls if name is None or c[0] == name]
+
+    def alerts(self) -> list[list[str]]:
+        """btrfs-notify's calls that send an alert (not --prune or --queue)."""
+        return [c[1:] for c in self.calls("btrfs-notify") if c[1] == "-u"]
+
+    def ok_line(self, mounts: str = "/var", disks: str = "", swap: str = "") -> str:
+        return f"<6>{TAG}: OK ({mounts}; disks: {disks}{'; swap disks: ' + swap if swap else ''})\n"
+
+    def assert_healthy(self, r: subprocess.CompletedProcess[str], stdout: str | None = None) -> None:
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        self.assertEqual(r.stdout, self.ok_line() if stdout is None else stdout)
+        self.assertEqual(self.alerts(), [])
+
+    def assert_problems(self, r: subprocess.CompletedProcess[str], *problems: str, stdout: str = "") -> None:
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(r.stderr, "".join(f"<2>{TAG}: {p}\n" for p in problems))
+        self.assertEqual(r.stdout, stdout)
+        body = f"{len(problems)} problem(s):\n" + "\n".join(problems)
+        self.assertEqual(self.alerts(), [["-u", "critical", "-a", TAG, TITLE, body]])
+
+    # ---- a healthy machine ------------------------------------------------------------------------------------
+
+    def test_healthy(self) -> None:
+        r = self.run_check()
+        self.assert_healthy(r)
+        self.assertEqual(self.calls("btrfs-notify"), [["btrfs-notify", "--prune"]])
+        for kind in ("data", "metadata"):
+            self.assertEqual(self.read(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-{kind}"), f"{BOOT} 0\n")
+        self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-new\n")
+        journal = self.calls("journalctl")
+        self.assertEqual(journal[0][1:], ["-k", "-q", "--no-pager", "-o", "short-iso", "--since", "-65min"])
+        cursor = self.path("var/lib/btrfs-health-check/kernel.cursor")
+        self.assertEqual(journal[1][1:], ["-k", "-q", "-n", "1", "-o", "short-iso", f"--cursor-file={cursor}"])
+        self.assertEqual(
+            [c[1:] for c in self.calls("btrfs")],
+            [
+                ["filesystem", "show", "/var"],
+                ["filesystem", "usage", "-b", "/var"],
+                ["device", "usage", "-b", "/var"],
+                ["device", "stats", "--check", "/var"],
+                ["scrub", "status", "/var"],
+            ],
+        )
+        # The next run reads the kernel log from the cursor on.
+        self.assert_healthy(self.run_check())
+        self.assertEqual(
+            [c[1:] for c in self.calls("journalctl")],
+            [["-k", "-q", "--no-pager", "-o", "short-iso", f"--cursor-file={cursor}"]],
+        )
+        self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-next\n")
+
+    def test_arguments_are_ignored(self) -> None:
+        self.assert_healthy(self.run_check("--help"))
+        self.assert_healthy(self.run_check("", "x"))
+
+    def test_the_stall_queue_is_delivered_and_old_alerts_pruned(self) -> None:
+        os.makedirs(self.path("run/btrfs-stall-monitor"))
+        self.assert_healthy(self.run_check())
+        self.assertEqual(
+            self.calls("btrfs-notify"),
+            [["btrfs-notify", "--prune"], ["btrfs-notify", "--queue", self.path("run/btrfs-stall-monitor")]],
+        )
+
+    def test_a_failing_prune_changes_nothing(self) -> None:
+        self.machine["notify_rc"] = 1
+        os.makedirs(self.path("run/btrfs-stall-monitor"))
+        self.assert_healthy(self.run_check())
+        self.assertEqual(len(self.calls("btrfs-notify")), 2)
+
+    def test_no_btrfs_filesystem(self) -> None:
+        self.machine["mounts"] = []
+        r = self.run_check()
+        self.assert_healthy(r, f"<6>{TAG}: OK (; disks: )\n")
+
+    def test_a_read_only_sysroot_is_fine(self) -> None:
+        self.fs.update(target="/sysroot", also=[], options="ro,noatime")
+        self.assert_healthy(self.run_check(), self.ok_line("/sysroot"))
+
+    def test_slash_wins_over_bind_mounts(self) -> None:
+        self.fs.update(target="/etc", also=["/", "/home"])
+        self.assert_healthy(self.run_check(), self.ok_line("/"))
+
+    def test_a_running_scrub_is_fine(self) -> None:
+        self.fs["scrub"] = self.scrub(self.now - 40 * 86400, status="running")
+        self.assert_healthy(self.run_check())
+
+    # ---- one problem at a time --------------------------------------------------------------------------------
+
+    def test_filesystem_problems(self) -> None:
+        crit = (
+            "btrfs /var: CRITICAL: only 4096 MiB unallocated on /dev/mapper/cst-test-2: ENOSPC is close. First free "
+            "space (old snapshots, caches, images), then 'btrfs balance start -dusage=0 /var', then -dusage=5, 15, 30; "
+            "never a metadata or full balance. If a balance hangs the PC or the boot: boot once with ,skip_balance "
+            "added to the rootflags= of the kernel command line, then 'btrfs balance cancel /var' (cst btrfs README, "
+            "section 13)"
+        )
+        cases: list[tuple[str, dict[str, object], list[str]]] = [
+            (
+                "missing member",
+                {"show": "Label: none\n\t*** Some devices missing\n"},
+                ["btrfs /var: member device MISSING (running degraded)"],
+            ),
+            (
+                "read-only",
+                {"options": "ro,noatime"},
+                ["btrfs /var: mounted READ-ONLY (forced after an error?) - check 'journalctl -k -g BTRFS'"],
+            ),
+            (
+                "bytes on a missing device",
+                {"usage": "Overall:\n    Device missing:\t\t   1073741824\n"},
+                ["btrfs /var: 1073741824 bytes on missing device"],
+            ),
+            (
+                "mixed profiles",
+                {"usage": "Overall:\n    Device missing:\t\t   0\n    Multiple profiles:\t\t  yes\n"},
+                [
+                    "btrfs /var: mixed chunk profiles (degraded writes?) - run balance "
+                    "-dconvert=raid1,soft -mconvert=raid1,soft"
+                ],
+            ),
+            ("critical unallocated", {"device_usage": device_usage(800 * GIB, 4 * GIB)}, [crit]),
+            (
+                "low unallocated",
+                {"device_usage": device_usage(20 * GIB + 5, 800 * GIB)},
+                [
+                    "btrfs /var: only 20 GiB unallocated on /dev/mapper/cst-test-1 (warning below 50 GiB; metadata "
+                    "grows only from unallocated space). Free space, or compact half-empty data chunks: "
+                    "'btrfs balance start -dusage=20 /var'"
+                ],
+            ),
+            (
+                "a missing device's line is skipped",
+                {"device_usage": device_usage(800 * GIB).replace("/dev/mapper/cst-test-1", "missing")},
+                [],
+            ),
+            (
+                "device error counters",
+                {
+                    "stats_check": 64,
+                    "stats": "[/dev/mapper/cst-test-1].write_io_errs    0\n[/dev/mapper/cst-test-1].read_io_errs     3\n"
+                    "\n",
+                },
+                ["btrfs /var: non-zero device error counters: [/dev/mapper/cst-test-1].read_io_errs     3  "],
+            ),
+            (
+                "scrub errors",
+                {"scrub": self.scrub(self.now - 86400, errors="csum=3 verify=1\n  Corrected: 4")},
+                ["btrfs /var: last scrub reported errors: Error summary:    csum=3 verify=1"],
+            ),
+            ("never scrubbed", {"scrub": self.scrub(None)}, ["btrfs /var: no scrub has ever completed"]),
+            (
+                "scrub aborted",
+                {"scrub": self.scrub(self.now - 86400, status="aborted")},
+                [f"btrfs /var: last scrub (started {ctime(self.now - 86400)}) did not finish: status aborted"],
+            ),
+            (
+                "scrub with no status",
+                {"scrub": self.scrub(self.now - 86400).replace("Status:           finished\n", "")},
+                [f"btrfs /var: last scrub (started {ctime(self.now - 86400)}) did not finish: status unknown"],
+            ),
+            (
+                "old scrub",
+                {"scrub": self.scrub(self.now - 12 * 86400 - 60)},
+                ["btrfs /var: last scrub is 12 days old"],
+            ),
+            ("scrub of 10 days", {"scrub": self.scrub(self.now - 10 * 86400 - 60)}, []),
+            (
+                "unparsable scrub time",
+                {"scrub": self.scrub(self.now).replace(ctime(self.now), "sometime")},
+                [],
+            ),
+        ]
+        base = dict(self.fs)
+        for what, change, problems in cases:
+            with self.subTest(what):
+                self.fs.clear()
+                self.fs.update(base, **change)
+                r = self.run_check()
+                if problems:
+                    self.assert_problems(r, *problems)
+                else:
+                    self.assert_healthy(r)
+
+    def test_metadata_almost_full(self) -> None:
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        self.write(f"{alloc}/metadata/bytes_used", f"{20 * GIB - 600 * 1024**2}\n")
+        self.fs["device_usage"] = device_usage(GIB, 800 * GIB)
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            r.stderr.splitlines()[1],
+            f"<2>{TAG}: btrfs /var: CRITICAL: metadata almost full (600 MiB free in metadata chunks, 1024 MiB "
+            "unallocated): writes may fail with ENOSPC soon",
+        )
+
+    def test_reclaim(self) -> None:
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        conf = self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
+        self.write(f"{alloc}/data/periodic_reclaim", "0\n")
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs /var: automatic reclaim is configured but data/periodic_reclaim is off - run "
+            f"'systemd-tmpfiles --create {conf}'",
+        )
+        self.write(f"{alloc}/data/periodic_reclaim", "1\n")
+        # Errors since the last check, on this boot: only the new ones count.
+        self.write(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-data", f"{BOOT} 2\n")
+        self.write(f"{alloc}/data/reclaim_errors", "5\n")
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: automatic data reclaim failed 3 time(s) since the last check (reclaim_errors=5) - see "
+            "'journalctl -k -g BTRFS'",
+        )
+        self.assertEqual(self.read(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-data"), f"{BOOT} 5\n")
+        self.assert_healthy(self.run_check())
+        # Another boot (the count restarts at mount) or a damaged file: compared against 0.
+        for seen in ("another-boot 9\n", "garbage\n", ""):
+            with self.subTest(seen=seen):
+                self.write(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-metadata", seen)
+                self.write(f"{alloc}/metadata/reclaim_errors", "1\n")
+                self.assert_problems(
+                    self.run_check(),
+                    "btrfs /var: automatic metadata reclaim failed 1 time(s) since the last check (reclaim_errors=1) "
+                    "- see 'journalctl -k -g BTRFS'",
+                )
+        # Not a number in sysfs: skipped, the state file left as it was.
+        self.write(f"{alloc}/metadata/reclaim_errors", "n/a\n")
+        self.write(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-metadata", "keep 1\n")
+        self.assert_healthy(self.run_check())
+        self.assertEqual(self.read(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-metadata"), "keep 1\n")
+
+    def test_reclaim_not_configured_is_not_checked(self) -> None:
+        os.unlink(self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf"))
+        self.write(f"sys/fs/btrfs/{UUID}/allocation/data/dynamic_reclaim", "0\n")
+        self.assert_healthy(self.run_check())
+
+    def test_without_sysfs_no_metadata_or_reclaim_check(self) -> None:
+        shutil.rmtree(self.path("sys"))
+        self.assert_healthy(self.run_check())
+        self.assertFalse(os.path.exists(self.path(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-data")))
+
+    # ---- the degraded-boot part ---------------------------------------------------------------------------------
+
+    def last_resort(self, rule_uuid: str) -> str:
+        return self.write(
+            "etc/udev/rules.d/65-btrfs-last-resort.rules",
+            f'# managed\nENV{{ID_FS_UUID}}!="{rule_uuid}", GOTO="end"\n',
+        )
+
+    def upstream_rule(self, rel: str = "usr/lib/udev/rules.d/64-btrfs.rules") -> str:
+        return self.write(rel, 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"\n')
+
+    def test_last_resort_rule(self) -> None:
+        rule = self.last_resort("aaaaaaaa-0000")
+        self.upstream_rule()
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs-last-resort: {rule} is for aaaaaaaa-0000 but the root fs is {UUID}; re-run 'cst btrfs "
+            "degraded-boot'",
+        )
+        self.last_resort("")
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs-last-resort: {rule} is for ? but the root fs is {UUID}; re-run 'cst btrfs degraded-boot'",
+        )
+        self.last_resort("aaaaaaaa-0000")
+        self.machine["sysroot_uuid"] = ""
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs-last-resort: {rule} is for aaaaaaaa-0000 but the root fs is ?; re-run 'cst btrfs degraded-boot'",
+        )
+
+    def test_upstream_rule_of_this_and_the_next_boot(self) -> None:
+        self.last_resort(UUID)
+        self.upstream_rule()
+        self.assert_healthy(self.run_check())
+        self.machine["ostree"] = {
+            "deployments": [{"osname": "fedora", "checksum": "abc123", "serial": 1}, {"osname": "fedora"}]
+        }
+        nxt = self.path("ostree/deploy/fedora/deploy/abc123.1/usr/lib/udev/rules.d/64-btrfs.rules")
+        self.assert_problems(
+            self.run_check(), f"udev: {nxt} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+        )
+        self.upstream_rule("ostree/deploy/fedora/deploy/abc123.1/usr/lib/udev/rules.d/64-btrfs.rules")
+        self.assert_healthy(self.run_check())
+        os.unlink(self.path("usr/lib/udev/rules.d/64-btrfs.rules"))
+        here = self.path("usr/lib/udev/rules.d/64-btrfs.rules")
+        self.assert_problems(
+            self.run_check(), f"udev: {here} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+        )
+
+    def test_degraded_boot_flag(self) -> None:
+        self.write(f"run/btrfs-allow-degraded/{UUID}", "")
+        self.assert_problems(
+            self.run_check(),
+            f"btrfs {UUID}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)",
+        )
+
+    def marker_problem(self, uuid: str, since_h: str, state: str) -> str:
+        return (
+            f"btrfs {uuid}: booted DEGRADED on {since_h} ({state}); restore RAID1 (replace the disk if needed), then "
+            "'btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft /var' and 'btrfs scrub start /var'. "
+            "Clears after a clean scrub started once all devices are back."
+        )
+
+    def test_degraded_marker_of_a_filesystem_not_mounted(self) -> None:
+        self.write("var/lib/btrfs-degraded-boot/degraded-9999", "since=1700000000\nsince_human=2023-11-14 22:13\n")
+        self.assert_problems(self.run_check(), self.marker_problem("9999", "2023-11-14 22:13", "not mounted"))
+        self.write("var/lib/btrfs-degraded-boot/degraded-9999", "")
+        self.assert_problems(self.run_check(), self.marker_problem("9999", "?", "not mounted"))
+
+    def test_degraded_marker_while_a_device_is_still_missing(self) -> None:
+        marker = self.write(
+            f"var/lib/btrfs-degraded-boot/degraded-{UUID}",
+            "since=1700000000\nsince_human=2023-11-14 22:13\ncomplete_since=1700000100\n",
+        )
+        self.fs["show"] = "Label: none\n\t*** Some devices missing\n"
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: member device MISSING (running degraded)",
+            self.marker_problem(UUID, "2023-11-14 22:13", "still missing a device"),
+        )
+        with open(marker, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "since=1700000000\nsince_human=2023-11-14 22:13\n")
+
+    def test_degraded_marker_waits_for_a_clean_scrub_then_clears(self) -> None:
+        since = self.now - 5 * 86400
+        marker = self.write(
+            f"var/lib/btrfs-degraded-boot/degraded-{UUID}", f"since={since}\nsince_human=2026-01-01 10:00\n"
+        )
+        self.fs["scrub"] = self.scrub(since - 3600)
+        r = self.run_check()
+        with open(marker, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines[:2], [f"since={since}", "since_human=2026-01-01 10:00"])
+        self.assertRegex(lines[2], r"^complete_since=[0-9]+$")
+        complete = int(lines[2].split("=")[1])
+        self.assertLessEqual(abs(complete - self.now), 120)
+        at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(complete))
+        state = f"all devices present since {at}, waiting for a clean scrub started after that"
+        self.assert_problems(r, self.marker_problem(UUID, "2026-01-01 10:00", state))
+        # A scrub that started after the fs was complete again, finished clean: the marker goes.
+        self.fs["scrub"] = self.scrub(complete + 60)
+        r = self.run_check()
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(
+            r.stdout,
+            f"<5>{TAG}: btrfs {UUID}: RAID1 restored (clean scrub started {ctime(complete + 60)} after the "
+            f"degraded boot), cleared {marker}\n" + self.ok_line(),
+        )
+
+    def test_degraded_marker_keeps_waiting_on_mixed_profiles_or_scrub_errors(self) -> None:
+        since = self.now - 5 * 86400
+        marker = self.write(
+            f"var/lib/btrfs-degraded-boot/degraded-{UUID}",
+            f"since={since}\nsince_human=x\ncomplete_since={since + 10}\n",
+        )
+        at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(since + 10))
+        state = f"all devices present since {at}, waiting for a clean scrub started after that"
+        self.fs["scrub"] = self.scrub(since + 60, errors="csum=1")
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: last scrub reported errors: Error summary:    csum=1",
+            self.marker_problem(UUID, "x", state),
+        )
+        self.assertTrue(os.path.exists(marker))
+
+    # ---- the kernel log -----------------------------------------------------------------------------------------
+
+    def test_kernel_messages(self) -> None:
+        kernel = (
+            "2026-11-17T10:00:00+0000 host kernel: BTRFS error (device dm-9): csum failed root 5\n"
+            "2026-11-17T10:00:01+0000 host kernel: I/O error, dev sdz, sector 1 op 0x0\n"
+            "2026-11-17T10:00:02+0000 host kernel: BTRFS critical: corrupt leaf\n"
+            "2026-11-17T10:00:03+0000 host kernel: usb 1-1: new device\n"
+            "2026-11-17T10:00:04+0000 host kernel: INFO: task x:1 blocked for more than 120 seconds.\n"
+            "2026-11-17T10:00:05+0000 host kernel: btrfs: Transaction aborted (error -28)\n"
+            "2026-11-17T10:00:06+0000 host kernel: BTRFS: forced readonly\n"
+        )
+        self.machine["kernel"] = kernel
+        lines = kernel.splitlines()
+        self.assert_problems(
+            self.run_check(),
+            f"kernel: 4 btrfs/IO error message(s) since last check, e.g.: {lines[2]} | {lines[4]} | {lines[5]} | ",
+        )
+
+    def test_a_kernel_log_that_cannot_be_read(self) -> None:
+        self.machine.update(kernel_rc=1, kernel_err="No journal files were found.\n")
+        self.assert_problems(self.run_check(), "kernel log scan failed: No journal files were found.")
+
+    def test_a_bad_cursor_starts_over(self) -> None:
+        self.write("var/lib/btrfs-health-check/kernel.cursor", "s=old\n")
+        self.machine["cursor_rc"] = 1
+        self.assert_healthy(self.run_check())
+        self.assertEqual(
+            [c[1:] for c in self.calls("journalctl")][1:],
+            [
+                ["-k", "-q", "--no-pager", "-o", "short-iso", "--since", "-65min"],
+                ["-k", "-q", "-n", "1", "-o", "short-iso", "--cursor-file=" + self.path(
+                    "var/lib/btrfs-health-check/kernel.cursor")],
+            ],
+        )  # fmt: skip
+        self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-new\n")
+
+    # ---- snapshots and the NAS backup ---------------------------------------------------------------------------
+
+    def snapshots(self, last_ok: int) -> None:
+        self.machine["enabled"] = ["btrfs-snapshot.timer"]
+        self.write("var/lib/btrfs-snapshot/last-ok", f"{last_ok}\n")
+
+    def test_snapshots_that_stopped(self) -> None:
+        stale = "snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'"
+        self.snapshots(self.now - 4 * 3600)
+        self.assert_problems(self.run_check(), stale)
+        self.assertEqual(self.calls("systemctl")[0][1:], ["is-enabled", "-q", "btrfs-snapshot.timer"])
+        # Paused, trees still being dropped, a conversion or a move waiting for the next boot: said elsewhere.
+        for rel, text in (
+            ("var/lib/btrfs-snapshot/paused", ""),
+            ("var/lib/btrfs-snapshot/drop-pending", "x\n"),
+            ("etc/btrfs-setup/convert-at-boot", ""),
+            ("etc/btrfs-setup/bulk-at-boot", ""),
+        ):
+            with self.subTest(rel):
+                self.write(rel, text)
+                self.assert_healthy(self.run_check())
+                os.unlink(self.path(rel))
+        self.write("var/lib/btrfs-snapshot/drop-pending", "")
+        self.assert_problems(self.run_check(), stale)
+
+    def test_snapshots_get_time_after_boot_or_resume(self) -> None:
+        self.snapshots(self.now - 4 * 3600)
+        self.write("proc/uptime", "600.00 10.00\n")
+        self.assert_healthy(self.run_check())
+        self.write("proc/uptime", "100000.00 10.00\n")
+        self.machine["suspend"] = f"{self.now - 300}.123456 host systemd[1]: Finished System Suspend.\n"
+        self.assert_healthy(self.run_check())
+        self.assertEqual(
+            self.calls("journalctl")[-1][1:],
+            [
+                "-q", "-o", "short-unix", "--no-pager", "-u", "systemd-suspend.service", "-u",
+                "systemd-hibernate.service", "-u", "systemd-suspend-then-hibernate.service", "-n", "1",
+            ],
+        )  # fmt: skip
+        self.machine["suspend"] = f"{self.now - 3600}.5 host systemd[1]: Finished System Suspend.\n"
+        self.assertEqual(self.run_check().returncode, 1)
+
+    def test_snapshots_recent_or_unknown_are_fine(self) -> None:
+        self.snapshots(self.now - 3600)
+        self.assert_healthy(self.run_check())
+        self.write("var/lib/btrfs-snapshot/last-ok", "never\n")
+        self.assert_healthy(self.run_check())
+        self.machine["enabled"] = []
+        self.write("var/lib/btrfs-snapshot/last-ok", f"{self.now - 9 * 3600}\n")
+        self.assert_healthy(self.run_check())
+
+    def test_nas_backup_too_old_goes_to_the_journal_only(self) -> None:
+        self.snapshots(self.now - 600)
+        self.write("etc/btrfs-setup/snapshots.conf", "NAS_ENABLED=1\nNAS_PATH='/srv/x'\n")
+        self.write("var/lib/btrfs-snapshot/nas-last-ok", f"{self.now - 9 * 86400}\n")
+        nas = f"<4>{TAG}: no successful NAS backup (restic) for over 8 days (journalctl -u btrfs-snapshot-nas)\n"
+        self.assert_healthy(self.run_check(), nas + self.ok_line())
+        # Turned on later than the last success: counted from then.
+        self.write("var/lib/btrfs-snapshot/nas-enabled-at", f"{self.now - 86400}\n")
+        self.assert_healthy(self.run_check())
+        self.write("etc/btrfs-setup/snapshots.conf", "NAS_ENABLED=0\n")
+        self.write("var/lib/btrfs-snapshot/nas-enabled-at", "0\n")
+        self.assert_healthy(self.run_check())
+
+    # ---- md RAID and the NVMe health log ------------------------------------------------------------------------
+
+    def test_md_raid_degraded(self) -> None:
+        self.write(
+            "proc/mdstat",
+            "Personalities : [raid1]\nmd0 : active raid1 sda1[0]\n      1000 blocks super 1.2 [2/1] [U_]\n\n"
+            "md1 : active raid1 sdb1[0] sdc1[1]\n      1000 blocks [2/2] [UU]\n\n"
+            "md2 : active raid1 sdd1[0]\n      1000 blocks [2/1] [_U]\nunused devices: <none>\n",
+        )
+        self.assert_problems(
+            self.run_check(),
+            "md RAID degraded: md0 : active raid1 sda1[0] 1000 blocks super 1.2 [2/1] [U_] -- md2 : active raid1 "
+            "sdd1[0] 1000 blocks [2/1] [_U] ",
+        )
+
+    def swaps(self, *lines: str) -> None:
+        self.write("proc/swaps", "Filename\tType\tSize\tUsed\tPriority\n" + "".join(line + "\n" for line in lines))
+
+    def test_swap_disks_are_checked_and_named(self) -> None:
+        self.machine["lsblk"] = {
+            "dm-2": "dm-2 crypt\nnvme1n1p2 part\nnvme1n1 disk\n",
+            "dm-3": "dm-3 crypt\nnvme1n1p3 part\nnvme1n1 disk\n",
+            "zram0": "zram0 disk\n",
+        }
+        self.machine["nvme"] = {"nvme1": HEALTHY_SMART}
+        self.swaps(
+            "/dev/dm-2                               partition\t134217724\t0\t-2",
             "/dev/dm-3 partition 1 0 -3",
             "/var/swap/swapfile file 1 0 -4",
             "/dev/zram0 partition 1 0 100",
         )
-        self.assertEqual(self.run_lib(f'swap_disks "{swaps}"'), "nvme1n1\n")
-
-    def test_swap_on_a_member_disk_is_not_checked_twice(self) -> None:
-        swaps = self.swaps("/dev/dm-0 partition 1 0 -2")
-        self.assertEqual(self.run_lib(f'swap_disks "{swaps}" nvme0n1 nvme2n1'), "")
-
-    def test_no_swaps_file(self) -> None:
-        self.assertEqual(self.run_lib(f'swap_disks "{self.tmp}/missing"'), "")
-
-    def test_failing_swap_disk_is_a_problem(self) -> None:
-        self.write("smart/nvme1", FAILING)
-        out = self.run_lib('smart_check nvme1n1 swap; printf "%s\\n" "${problems[@]}"')
-        self.assertEqual(
-            out.splitlines(),
-            [
-                "NVMe nvme1n1 (swap): critical_warning=1",
-                "NVMe nvme1n1 (swap): media_errors=12",
-                "NVMe nvme1n1 (swap): available_spare 5% below threshold 10%",
-            ],
+        self.assert_healthy(self.run_check(), self.ok_line(swap="nvme1n1"))
+        self.assertEqual([c[1:] for c in self.calls("nvme")], [["smart-log", "/dev/nvme1"]])
+        self.machine["nvme"] = {"nvme1": FAILING_SMART}
+        self.assert_problems(
+            self.run_check(),
+            "NVMe nvme1n1 (swap): critical_warning=1",
+            "NVMe nvme1n1 (swap): media_errors=12",
+            "NVMe nvme1n1 (swap): available_spare 5% below threshold 10%",
         )
 
-    def test_healthy_disk_and_member_label(self) -> None:
-        self.write("smart/nvme1", HEALTHY)
-        self.write("smart/nvme0", FAILING.replace("12", "1"))
-        out = self.run_lib(
-            'smart_check nvme1n1 swap; smart_check nvme0n1; echo "n=${#problems[@]}"; printf "%s\\n" "${problems[@]}"'
-        )
-        lines = out.splitlines()
-        self.assertEqual(lines[0], "n=3")
-        self.assertIn("NVMe nvme0n1: media_errors=1", lines)  # member disks keep the old text
-
-    def test_hex_critical_warning(self) -> None:
-        # nvme-cli prints critical_warning in hex: 0x8 (read-only media) and
-        # 0xa must count, not become "08" (a bash error) or "0".
-        for raw, value in (("0x8", 8), ("0xa", 10), ("0", None), ("4", 4)):
+    def test_smart_values(self) -> None:
+        self.machine["lsblk"] = {"dm-2": "dm-2 crypt\nnvme1n1p2 part\nnvme1n1 disk\n"}
+        self.swaps("/dev/dm-2 partition 1 0 -2")
+        field = "critical_warning                        : 0"
+        for raw, problem in (
+            ("0x8", "critical_warning=8"),
+            ("0xa", "critical_warning=10"),
+            ("4", "critical_warning=4"),
+            ("08", "critical_warning=8"),
+            ("0", None),
+            ("bad", "cannot read critical_warning (bad)"),
+        ):
             with self.subTest(raw):
-                self.write(
-                    "smart/nvme1",
-                    HEALTHY.replace(
-                        "critical_warning                        : 0",
-                        f"critical_warning                        : {raw}",
-                    ),
-                )
-                out = self.run_lib('smart_check nvme1n1 swap; printf "%s\n" "${problems[@]}"')
-                want = [f"NVMe nvme1n1 (swap): critical_warning={value}"] if value is not None else [""]
-                self.assertEqual(out.splitlines(), want)
+                self.machine["nvme"] = {"nvme1": HEALTHY_SMART.replace(field, f"critical_warning : {raw}")}
+                r = self.run_check()
+                if problem is None:
+                    self.assert_healthy(r, self.ok_line(swap="nvme1n1"))
+                else:
+                    self.assert_problems(r, f"NVMe nvme1n1 (swap): {problem}")
+        wear = HEALTHY_SMART.replace("percentage_used                         : 3%", "percentage_used : 80%")
+        self.machine["nvme"] = {"nvme1": wear}
+        self.assert_problems(self.run_check(), "NVMe nvme1n1 (swap): wear percentage_used=80%")
+        self.machine["nvme"] = {}
+        self.assert_healthy(self.run_check(), self.ok_line(swap="nvme1n1"))
 
-    def test_unreadable_smart_log_is_skipped(self) -> None:
-        out = self.run_lib('smart_check nvme9n1 swap; echo "n=${#problems[@]}"')
-        self.assertEqual(out, "n=0\n")
+    # ---- several problems, and btrfs-notify ----------------------------------------------------------------------
 
-    def test_main_checks_swap_disks_and_names_them_in_the_ok_line(self) -> None:
-        with open(SCRIPT, encoding="utf-8") as f:
-            text = f.read()
-        main = text.split('if [[ "${BASH_SOURCE[0]}" != "$0" ]]', 1)[1]
-        self.assertIn('swap_disks /proc/swaps "${disks[@]}"', main)
-        self.assertIn('smart_check "${disk}" swap', main)
-        self.assertIn("swap disks: ${swap_only[*]}", main)
+    def test_several_problems_in_one_alert(self) -> None:
+        self.fs["scrub"] = self.scrub(None)
+        self.write(f"run/btrfs-allow-degraded/{UUID}", "")
+        self.write("proc/mdstat", "md0 : active raid1 sda1[0]\n      1 blocks [2/1] [U_]\n")
+        self.assert_problems(
+            self.run_check(),
+            "btrfs /var: no scrub has ever completed",
+            f"btrfs {UUID}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)",
+            "md RAID degraded: md0 : active raid1 sda1[0] 1 blocks [2/1] [U_] ",
+        )
+
+    def test_without_btrfs_notify_the_problems_reach_the_journal(self) -> None:
+        os.unlink(self.path("usr/local/sbin/btrfs-notify"))
+        self.write(f"run/btrfs-allow-degraded/{UUID}", "")
+        r = self.run_check()
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn(
+            f"<2>{TAG}: btrfs {UUID}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)\n",
+            r.stderr,
+        )
+        self.assertEqual(self.calls("btrfs-notify"), [])
+
+    def test_a_failing_btrfs_notify_keeps_exit_1(self) -> None:
+        self.machine["notify_rc"] = 3
+        self.write(f"run/btrfs-allow-degraded/{UUID}", "")
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.alerts()), 1)
 
 
 if __name__ == "__main__":

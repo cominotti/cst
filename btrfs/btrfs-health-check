@@ -14,6 +14,10 @@
 # The NVMe health log (SMART) is read for the btrfs member disks and for the
 # disks under every swap device in /proc/swaps (swap has no second copy).
 # Exit 0 = healthy, 1 = at least one problem was alerted.
+#
+# CST_HEALTH_ROOT (tests only): a folder every file path is read and written
+# under (/proc, /sys, /etc, /run, /var, /usr), instead of /. Commands still
+# come from PATH.
 
 set -Euo pipefail
 
@@ -21,8 +25,10 @@ SCRUB_MAX_AGE_DAYS=10
 WEAR_ALERT_PCT=80
 UNALLOC_MIN_GIB=50       # early warning, per device
 UNALLOC_CRIT_GIB=5       # near ENOSPC: btrfs' own dynamic reclaim only starts here
-RECLAIM_CONF=/etc/tmpfiles.d/btrfs-automatic-reclaim.conf
-state_dir=/var/lib/btrfs-health-check
+R="${CST_HEALTH_ROOT:-}"
+RECLAIM_CONF="${R}/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+state_dir="${R}/var/lib/btrfs-health-check"
+NOTIFY="${R}/usr/local/sbin/btrfs-notify"
 problems=()
 
 problem() { problems+=("$*"); }
@@ -88,9 +94,9 @@ mkdir -p "${state_dir}"
 # stall monitor's queue is normally empty: btrfs-stall-alert.service delivers
 # it at once. An alert written in the instant that service was finishing
 # would otherwise wait for the next stall alert; this picks it up.
-if [[ -x /usr/local/sbin/btrfs-notify ]]; then
-    /usr/local/sbin/btrfs-notify --prune || true
-    [[ -d /run/btrfs-stall-monitor ]] && { /usr/local/sbin/btrfs-notify --queue /run/btrfs-stall-monitor || true; }
+if [[ -x "${NOTIFY}" ]]; then
+    "${NOTIFY}" --prune || true
+    [[ -d "${R}/run/btrfs-stall-monitor" ]] && { "${NOTIFY}" --queue "${R}/run/btrfs-stall-monitor" || true; }
 fi
 
 # One entry per btrfs filesystem; prefer / or /var over bind mounts like /etc.
@@ -144,7 +150,7 @@ for mnt in "${btrfs_mounts[@]}"; do
         awk '/, ID:/ {dev = $1; sub(/,$/, "", dev)} /^[[:space:]]+Unallocated:/ {print dev, $2}')
 
     uuid="$(findmnt -rn -o UUID -M "${mnt}" | head -n1)"
-    alloc="/sys/fs/btrfs/${uuid}/allocation"
+    alloc="${R}/sys/fs/btrfs/${uuid}/allocation"
     if [[ -n "${uuid}" && -d "${alloc}" ]]; then
         # Metadata ENOSPC proper: little room left in metadata chunks (less
         # than twice the global reserve) and almost nothing to allocate more.
@@ -164,7 +170,7 @@ for mnt in "${btrfs_mounts[@]}"; do
         # reclaim_errors counts since mount (it resets on reboot). The state
         # file remembers boot id and count, so errors right after a reboot are
         # still compared against 0, and a damaged file just restarts at 0.
-        boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+        boot_id="$(cat "${R}/proc/sys/kernel/random/boot_id" 2>/dev/null)"
         for kind in data metadata; do
             errs="$(cat "${alloc}/${kind}/reclaim_errors" 2>/dev/null || echo 0)"
             [[ "${errs}" =~ ^[0-9]+$ ]] || continue
@@ -214,7 +220,7 @@ for mnt in "${btrfs_mounts[@]}"; do
 done
 
 # btrfs-degraded-boot-setup.sh integration (only if it is installed).
-lr_rule=/etc/udev/rules.d/65-btrfs-last-resort.rules
+lr_rule="${R}/etc/udev/rules.d/65-btrfs-last-resort.rules"
 if [[ -r "${lr_rule}" ]]; then
     rule_uuid="$(sed -n 's/^ENV{ID_FS_UUID}!="\([0-9a-f-]*\)".*/\1/p' "${lr_rule}")"
     root_uuid="$(findmnt -rn -o UUID --target /sysroot | head -n1)"
@@ -222,18 +228,18 @@ if [[ -r "${lr_rule}" ]]; then
         problem "btrfs-last-resort: ${lr_rule} is for ${rule_uuid:-?} but the root fs is ${root_uuid:-?}; re-run 'cst btrfs degraded-boot'"
     # Upstream rule semantics the last resort builds on: booted and next boot.
     next_root="$(rpm-ostree status --json 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin)["deployments"][0]; print("/ostree/deploy/%s/deploy/%s.%d" % (x["osname"], x["checksum"], x["serial"]))' 2>/dev/null)"
-    for up in /usr/lib/udev/rules.d/64-btrfs.rules ${next_root:+"${next_root}/usr/lib/udev/rules.d/64-btrfs.rules"}; do
+    for up in "${R}/usr/lib/udev/rules.d/64-btrfs.rules" ${next_root:+"${R}${next_root}/usr/lib/udev/rules.d/64-btrfs.rules"}; do
         grep -qF 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"' "${up}" 2>/dev/null ||
             problem "udev: ${up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
     done
 fi
-for flag in /run/btrfs-allow-degraded/*; do
+for flag in "${R}"/run/btrfs-allow-degraded/*; do
     [[ -e "${flag}" ]] && problem "btrfs ${flag##*/}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)"
 done
 # Persistent marker of a degraded boot (since=, complete_since=). Alert until a
 # scrub that STARTED after the fs was seen complete again finished clean, with
 # no missing device and no mixed profiles; then clear it.
-for marker in /var/lib/btrfs-degraded-boot/degraded-*; do
+for marker in "${R}"/var/lib/btrfs-degraded-boot/degraded-*; do
     [[ -e "${marker}" ]] || continue
     uuid="${marker##*/degraded-}"
     since="$(sed -n 's/^since=//p' "${marker}")"
@@ -301,7 +307,7 @@ fi
 # on their own; this catches a timer or a snapshot run that silently stopped
 # working.
 if systemctl is-enabled -q btrfs-snapshot.timer 2>/dev/null; then
-    snap_state=/var/lib/btrfs-snapshot
+    snap_state="${R}/var/lib/btrfs-snapshot"
     # (A pause by the space guard, old trees still being deleted after a
     # conversion, or busy directories whose conversion (or busy items whose
     # move into ~/Bulk) waits for the next boot - no snapshot until then - are
@@ -311,17 +317,17 @@ if systemctl is-enabled -q btrfs-snapshot.timer 2>/dev/null; then
     last="$(cat "${snap_state}/last-ok" 2>/dev/null)"
     awake_since="$(journalctl -q -o short-unix --no-pager -u systemd-suspend.service -u systemd-hibernate.service \
         -u systemd-suspend-then-hibernate.service -n 1 2>/dev/null | awk '{print int($1)}')"
-    boot_since=$(( $(date +%s) - $(awk '{print int($1)}' /proc/uptime) ))
+    boot_since=$(( $(date +%s) - $(awk '{print int($1)}' "${R}/proc/uptime") ))
     (( ${awake_since:-0} > boot_since )) || awake_since="${boot_since}"
-    if [[ ! -e "${snap_state}/paused" && ! -s "${snap_state}/drop-pending" && ! -e /etc/btrfs-setup/convert-at-boot &&
-          ! -e /etc/btrfs-setup/bulk-at-boot &&
+    if [[ ! -e "${snap_state}/paused" && ! -s "${snap_state}/drop-pending" && ! -e "${R}/etc/btrfs-setup/convert-at-boot" &&
+          ! -e "${R}/etc/btrfs-setup/bulk-at-boot" &&
           "${last}" =~ ^[0-9]+$ ]] && (( $(date +%s) - last > 3 * 3600 )) &&
         (( $(date +%s) - awake_since > 20 * 60 )); then
         problem "snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'"
     fi
     NAS_ENABLED=0
     # shellcheck source=/dev/null
-    [[ -r /etc/btrfs-setup/snapshots.conf ]] && . /etc/btrfs-setup/snapshots.conf
+    [[ -r "${R}/etc/btrfs-setup/snapshots.conf" ]] && . "${R}/etc/btrfs-setup/snapshots.conf"
     if [[ "${NAS_ENABLED}" == 1 ]]; then
         # Last success, or when the backup was turned on if later (as btrfs-snapshot).
         nas_last=0
@@ -336,8 +342,8 @@ if systemctl is-enabled -q btrfs-snapshot.timer 2>/dev/null; then
     fi
 fi
 
-if [[ -r /proc/mdstat ]] && grep -Eq '\[[U_]*_[U_]*\]' /proc/mdstat; then
-    problem "md RAID degraded: $(grep -B1 -E '\[[U_]*_[U_]*\]' /proc/mdstat | tr -s ' \n' ' ')"
+if [[ -r "${R}/proc/mdstat" ]] && grep -Eq '\[[U_]*_[U_]*\]' "${R}/proc/mdstat"; then
+    problem "md RAID degraded: $(grep -B1 -E '\[[U_]*_[U_]*\]' "${R}/proc/mdstat" | tr -s ' \n' ' ')"
 fi
 
 mapfile -t disks < <(printf '%s\n' "${member_disks[@]}" | sort -u | grep .)
@@ -346,7 +352,7 @@ for disk in "${disks[@]}"; do
 done
 # Swap has no second copy: a failing swap disk kills or hangs the programs
 # whose memory was swapped out, so its health log is read as well.
-mapfile -t swap_only < <(swap_disks /proc/swaps "${disks[@]}")
+mapfile -t swap_only < <(swap_disks "${R}/proc/swaps" "${disks[@]}")
 for disk in "${swap_only[@]}"; do
     smart_check "${disk}" swap
 done
@@ -362,6 +368,6 @@ done
 # A fixed title: an alert kept for the next login is replaced by its repeat
 # only when app and title match, so a count in the title would leave stale
 # copies ("1 problem" next to "2 problems"). The count opens the body.
-/usr/local/sbin/btrfs-notify -u critical -a btrfs-health-check "Disk health: problems detected" \
+"${NOTIFY}" -u critical -a btrfs-health-check "Disk health: problems detected" \
     "$(printf '%s problem(s):\n' "${#problems[@]}"; printf '%s\n' "${problems[@]}")" || true
 exit 1
