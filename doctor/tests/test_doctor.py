@@ -2956,7 +2956,10 @@ class DoctorFactsTest(unittest.TestCase):
                 calls.append(args)
                 return CommandResult(0, "win\n" if args[0] == "list" else "<domain/>", "")
 
-        mock.patch.object(host, "virsh", lambda *, read_only: Virsh()).start()
+        def virsh(*, read_only: bool) -> Virsh:
+            return Virsh()
+
+        mock.patch.object(host, "virsh", virsh).start()
         self.addCleanup(mock.patch.stopall)
         return host
 
