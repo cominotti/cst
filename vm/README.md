@@ -1020,8 +1020,10 @@ The Python code inside `vm/` (standard library only at run time):
   argv to `vm/cli/` (`main`). Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
   `backup-timer on`).
 - `vm/domain/`: the rules, no I/O. `tune.py`: the hardware `tune` recommends
-  (`tune_domain`, `guest_kind`). `__init__.py`: what a domain definition is
-  made of (`domain_parts`), the NAS backup's names and retention (`valid_keep`,
+  (`tune_domain`, `guest_kind`) and the lines that report it (`tune_line`,
+  `cpu_status_line`, `cpu_owner_line`). `__init__.py`: what a domain definition is
+  made of (`domain_parts`), the lines that describe an image folder
+  (`nocow_lines`), the NAS backup's names and retention (`valid_keep`,
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
   `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,

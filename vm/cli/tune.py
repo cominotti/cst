@@ -15,26 +15,7 @@ from cst_core.domain.text import first_line
 from vm.adapters import BACKUP_DIR, CST, PROG, VM_CONF, cpu_disable_list, domain_state, has_managed_save, knobs, virsh
 from vm.adapters.backup import utc_now
 from vm.domain import KNOBS, URI
-from vm.domain.tune import WINDOWS_STEPS, guest_kind, normalized, tune_domain
-
-
-def cpu_owner_line(root: ET.Element) -> str:
-    """How cst cpu vm-pin's part of the definition stands (reported, never changed here)."""
-    cpu = root.find("cpu")
-    mode = cpu.get("mode", "custom") if cpu is not None else "not set"
-    names = cpu_disable_list()
-    off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"} if cpu is not None else set()
-    missing = [n for n in names if n not in off]
-    pins = {c for p in root.findall("cputune/vcpupin") if (c := p.get("cpuset")) is not None}
-    pin = f"vCPUs pinned to {', '.join(sorted(pins))}" if pins else "vCPUs not pinned"
-    feat = (
-        f"NOT disabled: {' '.join(missing)}"
-        if mode == "host-passthrough" and missing
-        else "CET/MBEC disabled"
-        if mode == "host-passthrough" and names
-        else f"cpu mode {mode}"
-    )
-    return f"CPU (owned by {CST} cpu vm-pin, not by tune): {feat}; {pin}; check: {CST} cpu vm-pin plan"
+from vm.domain.tune import WINDOWS_STEPS, cpu_owner_line, guest_kind, normalized, tune_domain
 
 
 def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
@@ -64,7 +45,7 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
         print(f"  held back: {h}")
     for n in notes:
         print(f"  note: {n}")
-    print(f"  {cpu_owner_line(root)}")
+    print(f"  {cpu_owner_line(root, cpu_disable_list(), CST)}")
     if kind == "linux" and changes and any("bus" in c or "network card" in c for c in changes):
         print(
             "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
@@ -142,17 +123,3 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
         if left:
             print("Note: libvirt changed the definition again: still different: " + "; ".join(left))
     return 0
-
-
-def tune_line(xml_text: str) -> str:
-    """One status line: whether the hardware matches tune (all changes, as if
-    the drivers were there; Windows gets the hint to read the plan)."""
-    try:
-        _, changes, _, _ = tune_domain(xml_text, knobs(), True)
-        kind, _ = guest_kind(ET.fromstring(xml_text))
-    except ET.ParseError:
-        return "hardware: definition not readable"
-    if not changes:
-        return "hardware: disks and network card as tune recommends"
-    extra = " (Windows: virtio drivers first, the plan shows how)" if kind != "linux" else ""
-    return f"hardware: {len(changes)} difference(s) from tune{extra}: {CST} vm tune plan"

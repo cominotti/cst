@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
-from cst_core.domain.values import GIB
+from cst_core.domain.values import GIB, format_bytes_gib_mib
 
 URI = "qemu:///system"
 
@@ -491,6 +491,56 @@ def convert_lines(img: ImageInfo, system: bool) -> list[str]:
         f"{s}cmp {old} {f} && echo same",
         f"# start the VM; after a good boot: {s}rm {old}",
     ]
+
+
+def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
+    """Lines describing one probed folder (nocow plan and status); prog names cst vm in the hints."""
+    head = f"{d.path}  [{d.what}]"
+    if d.link is not None:
+        return [
+            f"{head}: a symbolic link to {d.link}: not managed by CST (set the mark on the real "
+            f"folder by hand if it is on btrfs: chattr +C <folder>)"
+        ]
+    if not d.present:
+        return [f"{head}: not present"]
+    if d.btrfs is False:
+        return [f"{head}: not on btrfs (NOCOW does not apply)"]
+    out = [head]
+    root_hint = f"{prog} nocow plan --root"
+    if d.nocow is None:
+        out.append(f"  NOCOW mark (+C): not readable as your user (root-only folder): {root_hint}")
+    else:
+        out.append(
+            "  NOCOW mark (+C): "
+            + ("yes" if d.nocow else f"no: {prog} nocow apply sets it (only files created later get it)")
+        )
+    if not d.listed:
+        if d.nocow is not None or d.scope != "system":
+            out.append("  images: folder not listable as your user")
+        return out
+    cow = [i for i in d.images if i.nocow is False]
+    unknown = [i for i in d.images if i.nocow is None]
+    ok = [i for i in d.images if i.nocow]
+    if not d.images:
+        out.append("  images: none")
+    if ok:
+        out.append(f"  NOCOW images: {', '.join(i.name for i in ok)}")
+    if unknown:
+        out.append(
+            f"  images whose mark is not readable as your user: {', '.join(i.name for i in unknown)} ({root_hint})"
+        )
+    for i in cow:
+        out.append(
+            f"  still copy-on-write: {i.name}  {format_bytes_gib_mib(i.alloc, mib_decimals=1)} allocated, {format_bytes_gib_mib(i.size, mib_decimals=1)} apparent"
+        )
+        if verbose:
+            out.append(
+                f"    to convert (every VM using it shut off; needs about {format_bytes_gib_mib(i.alloc, mib_decimals=1)} free):"
+            )
+            out += [f"      {ln}" for ln in convert_lines(i, d.scope == "system")]
+    for n in d.leftovers:
+        out.append(f"  leftover of a conversion: {n} (remove it once the VM booted well from the new file)")
+    return out
 
 
 def parse_args(argv: Sequence[str]) -> VmArgs:

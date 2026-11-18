@@ -5,13 +5,12 @@ import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
-from vm.adapters import CST, INDEX, cpu_disable_list, knobs, package_versions, virsh
+from vm.adapters import CST, INDEX, PROG, cpu_disable_list, knobs, package_versions, virsh
 from vm.adapters.backup import describe_entry, read_index
 from vm.adapters.images import image_dirs, probe_dir
 from vm.adapters.timer import wants_links
-from vm.cli.nocow import nocow_lines
-from vm.cli.tune import tune_line
-from vm.domain import instance, version_changes
+from vm.domain import instance, nocow_lines, version_changes
+from vm.domain.tune import cpu_status_line, tune_line
 
 
 def cmd_list(vm: str | None) -> int:
@@ -37,26 +36,9 @@ def cmd_status(vm: str) -> int:
             cpu = ET.fromstring(xml_text).find("cpu") if rc == 0 else None
         except ET.ParseError:
             cpu = None
-        names = cpu_disable_list()
-        if cpu is None:
-            print("  cpu: no <cpu> element (or not readable)")
-        else:
-            mode = cpu.get("mode", "custom")
-            off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
-            missing = [n for n in names if n not in off]
-            if mode != "host-passthrough":
-                print(f"  cpu mode {mode}: the CET/MBEC disables are only for host-passthrough")
-            elif not names:
-                print(f"  cpu mode {mode}: CPU features not managed (VM_CPU_DISABLE is empty)")
-            elif missing:
-                print(
-                    f"  cpu mode {mode}: NOT disabled: {' '.join(missing)} (Windows may bootloop under "
-                    f"QEMU 11; fix: {CST} cpu vm-pin plan)"
-                )
-            else:
-                print(f"  cpu mode {mode}: disabled {' '.join(names)}")
+        print(f"  {cpu_status_line(cpu, cpu_disable_list(), CST)}")
         if rc == 0:
-            print(f"  {tune_line(xml_text)}")
+            print(f"  {tune_line(xml_text, knobs(), CST)}")
     entries = sorted((e for e in read_index() if e["vm"] == vm), key=lambda e: e.get("epoch") or 0)
     if not entries:
         print(
@@ -86,6 +68,6 @@ def cmd_status(vm: str) -> int:
     if knobs()["VM_NOCOW"]:
         print("VM image folders (NOCOW):")
         for d in image_dirs():
-            for ln in nocow_lines(probe_dir(d), verbose=False):
+            for ln in nocow_lines(probe_dir(d), PROG, verbose=False):
                 print(f"  {ln}")
     return 0

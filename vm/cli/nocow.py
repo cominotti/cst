@@ -6,60 +6,9 @@ import shlex
 
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
-from cst_core.domain.values import format_bytes_gib_mib
 from vm.adapters import PROG, VM_CONF, knobs, run, run_on_terminal
 from vm.adapters.images import flag_state, image_dirs, readable_inode_flags, needs_mark, probe_dir, mark_folder_nocow
-from vm.domain import ImageProbe, convert_lines
-
-
-def nocow_lines(d: ImageProbe, verbose: bool = True) -> list[str]:
-    """Lines describing one probed folder (plan and status)."""
-    head = f"{d.path}  [{d.what}]"
-    if d.link is not None:
-        return [
-            f"{head}: a symbolic link to {d.link}: not managed by CST (set the mark on the real "
-            f"folder by hand if it is on btrfs: chattr +C <folder>)"
-        ]
-    if not d.present:
-        return [f"{head}: not present"]
-    if d.btrfs is False:
-        return [f"{head}: not on btrfs (NOCOW does not apply)"]
-    out = [head]
-    root_hint = f"{PROG} nocow plan --root"
-    if d.nocow is None:
-        out.append(f"  NOCOW mark (+C): not readable as your user (root-only folder): {root_hint}")
-    else:
-        out.append(
-            "  NOCOW mark (+C): "
-            + ("yes" if d.nocow else f"no: {PROG} nocow apply sets it (only files created later get it)")
-        )
-    if not d.listed:
-        if d.nocow is not None or d.scope != "system":
-            out.append("  images: folder not listable as your user")
-        return out
-    cow = [i for i in d.images if i.nocow is False]
-    unknown = [i for i in d.images if i.nocow is None]
-    ok = [i for i in d.images if i.nocow]
-    if not d.images:
-        out.append("  images: none")
-    if ok:
-        out.append(f"  NOCOW images: {', '.join(i.name for i in ok)}")
-    if unknown:
-        out.append(
-            f"  images whose mark is not readable as your user: {', '.join(i.name for i in unknown)} ({root_hint})"
-        )
-    for i in cow:
-        out.append(
-            f"  still copy-on-write: {i.name}  {format_bytes_gib_mib(i.alloc, mib_decimals=1)} allocated, {format_bytes_gib_mib(i.size, mib_decimals=1)} apparent"
-        )
-        if verbose:
-            out.append(
-                f"    to convert (every VM using it shut off; needs about {format_bytes_gib_mib(i.alloc, mib_decimals=1)} free):"
-            )
-            out += [f"      {ln}" for ln in convert_lines(i, d.scope == "system")]
-    for n in d.leftovers:
-        out.append(f"  leftover of a conversion: {n} (remove it once the VM booted well from the new file)")
-    return out
+from vm.domain import ImageProbe, nocow_lines
 
 
 def cmd_nocow_plan(as_root: bool = False) -> int:
@@ -72,7 +21,7 @@ def cmd_nocow_plan(as_root: bool = False) -> int:
         return 0
     dirs = [probe_dir(d) for d in image_dirs()]
     for d in dirs:
-        for ln in nocow_lines(d):
+        for ln in nocow_lines(d, PROG):
             print(ln)
     todo = [d for d in dirs if needs_mark(d)]
     print()

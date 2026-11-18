@@ -5,7 +5,7 @@ for a guest whose virtio drivers are not known to be installed. cst doctor's har
 the same rules.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import re
 import xml.etree.ElementTree as ET
 
@@ -238,3 +238,56 @@ WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves t
      resuming it on a changed boot controller can fail): in an admin prompt `shutdown /s /t 0`,
      or Shift + Shut down; then: {cst} vm tune apply {vm} --guest-has-virtio
 Details: vm/README.md in CST, section "Windows guests"."""
+
+
+def cpu_owner_line(root: ET.Element, names: Sequence[str], cst: str) -> str:
+    """How cst cpu vm-pin's part of the definition stands (reported, never changed here);
+    names: the features vm-pin keeps disabled (cpu_disable_list)."""
+    cpu = root.find("cpu")
+    mode = cpu.get("mode", "custom") if cpu is not None else "not set"
+    off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"} if cpu is not None else set()
+    missing = [n for n in names if n not in off]
+    pins = {c for p in root.findall("cputune/vcpupin") if (c := p.get("cpuset")) is not None}
+    pin = f"vCPUs pinned to {', '.join(sorted(pins))}" if pins else "vCPUs not pinned"
+    feat = (
+        f"NOT disabled: {' '.join(missing)}"
+        if mode == "host-passthrough" and missing
+        else "CET/MBEC disabled"
+        if mode == "host-passthrough" and names
+        else f"cpu mode {mode}"
+    )
+    return f"CPU (owned by {cst} cpu vm-pin, not by tune): {feat}; {pin}; check: {cst} cpu vm-pin plan"
+
+
+def tune_line(xml_text: str, kn: Mapping[str, bool], cst: str) -> str:
+    """One status line: whether the hardware matches tune (all changes, as if
+    the drivers were there; Windows gets the hint to read the plan); kn: the knobs."""
+    try:
+        _, changes, _, _ = tune_domain(xml_text, kn, True)
+        kind, _ = guest_kind(ET.fromstring(xml_text))
+    except ET.ParseError:
+        return "hardware: definition not readable"
+    if not changes:
+        return "hardware: disks and network card as tune recommends"
+    extra = " (Windows: virtio drivers first, the plan shows how)" if kind != "linux" else ""
+    return f"hardware: {len(changes)} difference(s) from tune{extra}: {cst} vm tune plan"
+
+
+def cpu_status_line(cpu: ET.Element | None, names: Sequence[str], cst: str) -> str:
+    """The status line of the definition's <cpu> element (None: none, or not readable): whether the
+    features vm-pin keeps disabled (names, cpu_disable_list) are."""
+    if cpu is None:
+        return "cpu: no <cpu> element (or not readable)"
+    mode = cpu.get("mode", "custom")
+    off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
+    missing = [n for n in names if n not in off]
+    if mode != "host-passthrough":
+        return f"cpu mode {mode}: the CET/MBEC disables are only for host-passthrough"
+    if not names:
+        return f"cpu mode {mode}: CPU features not managed (VM_CPU_DISABLE is empty)"
+    if missing:
+        return (
+            f"cpu mode {mode}: NOT disabled: {' '.join(missing)} (Windows may bootloop under "
+            f"QEMU 11; fix: {cst} cpu vm-pin plan)"
+        )
+    return f"cpu mode {mode}: disabled {' '.join(names)}"
