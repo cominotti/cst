@@ -9,7 +9,6 @@ Where they read and write comes from the settings (vm.wiring.vm_settings).
 
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-import json
 import os
 import socket
 import sys
@@ -25,6 +24,8 @@ from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
+from cst_core.domain.ostree import query_status
+from cst_core.domain.values import Json
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
@@ -234,16 +235,14 @@ def package_versions() -> dict[str, str]:
     return out
 
 
-def booted_deployment() -> dict[str, Any] | None:
-    """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None."""
-    rc, so, _ = run(["rpm-ostree", "status", "--json"], timeout=60)
-    if rc != 0:
+def booted_deployment() -> dict[str, Json] | None:
+    """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None: rpm-ostree
+    failed, its answer is not readable, or it names no booted deployment. The reason
+    query_status gives is not kept: the manifest and the index record null, as they always did."""
+    status = query_status(lambda argv: run(argv, timeout=60))
+    if isinstance(status, str) or status.booted is None:
         return None
-    try:
-        deps = json.loads(so).get("deployments") or []
-        d = next(x for x in deps if isinstance(x, dict) and x.get("booted"))
-    except ValueError, StopIteration, AttributeError:
-        return None
+    d = status.booted
     return {"version": d.get("version"), "checksum": d.get("checksum"), "timestamp": d.get("timestamp")}
 
 
