@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-stall-monitord's reads of the machine: /proc, /sys and cgroupfs read to the end of each file, the btrfs/disk/container topology, D-state tasks, the journal lines, the log folder and the writer thread of the log files."""
+"""btrfs-stall-monitord's reads of the machine: /proc, /sys and cgroupfs read to the end of each file, a read that may wait for another program done in a helper thread with a time limit (TimedReader), the btrfs/disk/container topology, D-state tasks, the journal lines, the log folder and the writer thread of the log files."""
 
 from __future__ import annotations
 
-from collections.abc import Set as AbstractSet
+from collections.abc import Callable, Set as AbstractSet
 import glob
 import os
 import queue
@@ -180,6 +180,41 @@ class Topology:
         for path in glob.glob(f"{CGROUP_ROOT}/machine.slice/machine-*.scope"):
             found[os.path.basename(path)[:40]] = path
         self.containers = found
+
+
+class TimedReader:
+    """Reads a file in a helper thread and waits at most `timeout` seconds for it.
+
+    Some /proc files make the reader wait inside the kernel for another program:
+    /proc/PID/cmdline takes that program's memory map lock (mmap_read_lock_killable
+    in access_remote_vm), which a thread stuck in reclaim, swap or a page fault on a
+    stalled disk can hold for minutes. Read in the sampling loop, such a file would
+    stop the loop for as long. read() raises TimeoutError when the answer does not
+    come in time, and at once while an earlier read is still waiting: one helper
+    thread at a time, never more (the unit's TasksMax). Each read has a thread and
+    an answer of its own, so a late answer never reaches the next read.
+    """
+
+    def __init__(self, timeout: float, read: Callable[[str], str | None] = read_text) -> None:
+        self.timeout = timeout
+        self._read = read
+        self._waiting: threading.Thread | None = None  # a read that did not answer in time
+
+    def read(self, path: str) -> str | None:
+        """The file's text (read_text: None when it cannot be read); TimeoutError when it takes too long."""
+        if self._waiting is not None and self._waiting.is_alive():
+            raise TimeoutError(f"an earlier read is still waiting; {path} not read")
+        answer: list[str | None] = []
+        thread = threading.Thread(target=lambda: answer.append(self._read(path)), name="timed-reader", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError as e:  # no thread (the unit's TasksMax reached): not read
+            raise TimeoutError(f"{path} not read: {e}") from None
+        thread.join(self.timeout)
+        if thread.is_alive():
+            self._waiting = thread
+            raise TimeoutError(f"{path} not read in {self.timeout:g} s")
+        return answer[0] if answer else None  # no answer: the read raised (its thread logged it)
 
 
 def short_cgroup(pid: str | int) -> str:

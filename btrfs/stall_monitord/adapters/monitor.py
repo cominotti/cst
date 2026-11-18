@@ -17,6 +17,8 @@ from btrfs.stall_monitord.domain import (
     ALERT_COMMIT_MS,
     ALERT_MIN_GAP,
     BASE_INTERVAL,
+    CMDLINE_SLOW,
+    CMDLINE_WAIT,
     ENTER_COMMIT_MS,
     EPISODE_INTERVAL,
     FLUSH_EVERY,
@@ -58,6 +60,7 @@ from btrfs.stall_monitord.domain import (
 )
 from btrfs.stall_monitord.adapters.proc import (
     CGROUP_ROOT,
+    TimedReader,
     Topology,
     Writer,
     d_comm,
@@ -99,6 +102,8 @@ class Monitor:
         self.stack_fail = 0
         self.d_since: dict[str, DTaskSince] = {}  # tid -> {first (stuck since), busy (in D since), comm, pid, slices}
         self.hung_reported: dict[tuple[str, str], float] = {}  # (pid, kind) -> time of the last report
+        # /proc/PID/cmdline of a reported task, read in a helper thread: it can wait minutes for that program.
+        self.cmdlines = TimedReader(CMDLINE_WAIT)
         self.kmsg_fd: int | None = None
         self.psi_fd: int | None = None
         self.running = True
@@ -374,8 +379,12 @@ class Monitor:
         self.hung_reported = {k: t for k, t in self.hung_reported.items() if k[0] in live or now - t < HUNG_REPEAT}
 
     def where(self, pid: str, tid: str, comm: str) -> str:
-        """The task as a report names it: comm:tid, its command line (read now) and its cgroup."""
-        return task_where(comm, tid, cmdline_text(read_text(f"/proc/{pid}/cmdline")), short_cgroup(pid))
+        """The task as a report names it: comm:tid, its command line (read now, waiting at most CMDLINE_WAIT) and its cgroup."""
+        try:
+            cmd = cmdline_text(self.cmdlines.read(f"/proc/{pid}/cmdline"))
+        except TimeoutError:
+            cmd = CMDLINE_SLOW
+        return task_where(comm, tid, cmd, short_cgroup(pid))
 
     def report_io_busy(self, t: DTaskSince, tid: str, frames: list[str], wchan: str | None, now: float) -> None:
         """In D at every sample for HUNG_SECONDS while still being scheduled
