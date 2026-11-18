@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
+from dataclasses import replace
 import io
 import json
 import os
@@ -27,7 +28,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import TypedDict, cast
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -36,8 +36,14 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.files import UnitFileState
+from cst_core.ports import CommandResult, DecodeErrors, OutputMode, StdinMode
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
+from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
+from vm.domain import tune as vm_domain_tune
+from vm import application as vm_application, wiring as vm_wiring
+from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
 
@@ -52,62 +58,55 @@ REPO = os.path.dirname(VM_DIR)
 SETUP = os.path.join(REPO, "vm-setup.sh")
 UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
+# The machine's paths (no CST_VM_* variable): a test moves the one it needs with replace().
+PATHS = vm_wiring.vm_paths({})
 
 
-class _DomainParts(TypedDict):
-    uuid: str
-    disks: list[str]
-    nvram: str
-    tpm: bool
-    problems: list[str]
-    skipped: list[str]
+class FakeCommands:
+    """A VmCommandsPort over a fake virsh function (args, timeout, detach) -> (rc, stdout, stderr)."""
+
+    def __init__(self, virsh: Callable[..., tuple[int, str, str]]) -> None:
+        self.fake = virsh
+
+    def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
+        return self.fake(*args, timeout=timeout, detach=detach)
 
 
-class _ParsedArgs(TypedDict):
-    cmd: str
-    sub: str | None
-    vm: str | None
-    full: bool
-    guest_virtio: bool
-    root: bool
-    nas: bool
-    keep: str | None
-    no_quiesce: bool
+class _NoCommands:
+    """A runner that refuses every command: a test that reaches the real virsh fails."""
+
+    def run(self, argv: Sequence[str], **_: object) -> CommandResult:
+        raise AssertionError(f"a test ran a real command: {list(argv)}")
+
+    def call(self, *args: str, **_: object) -> CommandResult:
+        raise AssertionError(f"a test ran the real virsh: {list(args)}")
 
 
-class _DirSpec(TypedDict):
-    scope: str
-    path: str
-    what: str
-
-
-class _ImageEntry(TypedDict):
-    path: str
-    name: str
-
-
-class _ProbeResult(TypedDict):
-    scope: str
-    path: str
-    what: str
-    present: bool
-    link: str | None
-    nocow: bool | None
-    listed: bool
-    images: list[_ImageEntry]
-    leftovers: list[str]
+def no_real_commands() -> AbstractContextManager[object]:
+    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) raises instead of running anything."""
+    stack = ExitStack()
+    stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", _NoCommands()))
+    stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", _NoCommands()))
+    return stack
 
 
 def patch_vm(name: str, new: object) -> AbstractContextManager[object]:
-    """Patch `name` in every vm module that has it (cli, adapters, domain), so
-    every caller sees the fake, wherever it lives (a fake virsh must reach
-    adapters.domain_state as well as cli.cmd_tune: the real one must never run)."""
+    """Patch `name` in every loaded vm module that has it (the cli groups, adapters,
+    domain), so every caller sees the fake, wherever it lives (a fake virsh must reach
+    vm.cli.status as well as the use cases over vm's VmCommandsPort, COMMANDS_OF_VM:
+    the real one must never run)."""
     stack = ExitStack()
     found = False
-    for mod in (vm_cli, vm_adapters, vm_domain):
+    for mod in [m for n, m in sorted(sys.modules.items()) if n == "vm" or n.startswith("vm.")]:
         if hasattr(mod, name):
             stack.enter_context(mock.patch.object(mod, name, new))
             found = True
+    if name == "virsh" and callable(new):
+
+        def port_virsh(args: Sequence[str], timeout: int, *, detach: bool | None) -> object:
+            return new(*args, timeout=timeout, detach=detach)
+
+        stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh", port_virsh))
     if not found:
         raise AttributeError(f"no vm module defines {name}")
     return stack
@@ -259,12 +258,12 @@ class PartsTest(unittest.TestCase):
           <disk type='file' device='cdrom'><target dev='sdc'/></disk>
           <tpm><backend type='emulator'/></tpm></devices></domain>"""
         p = vm_domain.domain_parts(xml)
-        self.assertEqual(p["uuid"], UUID)
-        self.assertEqual(p["disks"], ["/a.qcow2", "/b.raw"])
-        self.assertEqual(p["nvram"], "/n/VARS.fd")
-        self.assertTrue(p["tpm"])
-        self.assertEqual(p["problems"], [])
-        self.assertEqual(p["skipped"], ["sdc (cdrom, not copied)"])
+        self.assertEqual(p.uuid, UUID)
+        self.assertEqual(p.disks, ["/a.qcow2", "/b.raw"])
+        self.assertEqual(p.nvram, "/n/VARS.fd")
+        self.assertTrue(p.tpm)
+        self.assertEqual(p.problems, [])
+        self.assertEqual(p.skipped, ["sdc (cdrom, not copied)"])
 
     def test_a_disk_without_a_target_name_is_named_by_its_source(self) -> None:
         # libvirt requires <target dev>; a definition without one must not print "None".
@@ -276,17 +275,17 @@ class PartsTest(unittest.TestCase):
           <disk type='file' device='disk'><source file='/a.qcow2'/></disk></devices></domain>"""
         p = vm_domain.domain_parts(xml)
         self.assertEqual(
-            p["skipped"],
+            p.skipped,
             ["unnamed disk on /iso/win.iso (cdrom, not copied)", "unnamed disk (cdrom, not copied)",
              "unnamed disk (no source file)"],
         )  # fmt: skip
-        self.assertEqual(len(p["problems"]), 1)
-        self.assertTrue(p["problems"][0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p["problems"])
-        self.assertEqual(p["disks"], ["/a.qcow2"])
+        self.assertEqual(len(p.problems), 1)
+        self.assertTrue(p.problems[0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p.problems)
+        self.assertEqual(p.disks, ["/a.qcow2"])
         self.assertNotIn("None", repr(p))
         live = vm_domain.live_disks(xml)
-        self.assertEqual([d["target"] for d in live], ["", "", "", "", ""])
-        self.assertEqual(vm_domain.disk_label(live[4]["target"], word="disk "), "unnamed disk")
+        self.assertEqual([d.target for d in live], ["", "", "", "", ""])
+        self.assertEqual(vm_domain.disk_label(live[4].target, word="disk "), "unnamed disk")
         self.assertEqual(vm_domain.disk_label("sda", "/a.qcow2", word="disk "), "disk sda")
         self.assertEqual(vm_domain.disk_label(None, "/a.qcow2"), "unnamed disk on /a.qcow2")
 
@@ -296,16 +295,16 @@ class PartsTest(unittest.TestCase):
           <disk type='network' device='disk'><source protocol='rbd' name='pool/img'/><target dev='vdb'/></disk>
           <tpm><backend type='passthrough'/></tpm></devices></domain>"""
         p = vm_domain.domain_parts(xml)
-        self.assertEqual(len(p["problems"]), 2)
-        self.assertIn("vda: a block disk (/dev/vg/win)", p["problems"][0])
-        self.assertIn("vdb: a network disk (pool/img)", p["problems"][1])
-        self.assertFalse(p["tpm"])
-        self.assertEqual(p["nvram"], "")
+        self.assertEqual(len(p.problems), 2)
+        self.assertIn("vda: a block disk (/dev/vg/win)", p.problems[0])
+        self.assertIn("vdb: a network disk (pool/img)", p.problems[1])
+        self.assertFalse(p.tpm)
+        self.assertEqual(p.nvram, "")
 
     def test_parse_args(self) -> None:
         def short(argv: Sequence[str]) -> tuple[str, str | None, str | None, bool, bool, bool]:
             a = vm_domain.parse_args(argv)
-            return a["cmd"], a["sub"], a["vm"], a["full"], a["guest_virtio"], a["root"]
+            return a.cmd, a.sub, a.vm, a.full, a.guest_virtio, a.root
 
         self.assertEqual(short(["backup", "x", "--full"]), ("backup", None, "x", True, False, False))
         self.assertEqual(short(["list"]), ("list", None, None, False, False, False))
@@ -344,8 +343,8 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "w") as f:
                 f.write("VM_NOCOW = 0\n# VM_TUNE=x\nVM_TUNE_DISK_BUS='scsi'\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
-            self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent")), {})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
+            self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent"), nas_conf=""), {})
 
     def test_read_conf_last_line_wins_with_or_without_blanks(self) -> None:
         # main's cst-vm stripped the key line by line, so the last line in the file won.
@@ -359,7 +358,7 @@ class PartsTest(unittest.TestCase):
                 with self.subTest(text=text):
                     with open(p, "w", encoding="utf-8") as f:
                         f.write(text)
-                    self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": want})
+                    self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": want})
 
     def test_read_conf_lines_end_at_newlines_only(self) -> None:
         # main read the file line by line: a form feed or \u2028 inside a line does not end it.
@@ -367,7 +366,7 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "w", encoding="utf-8") as f:
                 f.write("A=1\x0cB=2\nC=3\u2028D=4\r\nE=5\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"A": "1\x0cB=2", "C": "3\u2028D=4", "E": "5"})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"A": "1\x0cB=2", "C": "3\u2028D=4", "E": "5"})
 
     def test_read_conf_replaces_undecodable_bytes(self) -> None:
         # Intended change from main (which stopped with a UnicodeDecodeError traceback): the
@@ -376,15 +375,15 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "wb") as f:
                 f.write(b"VM_NOCOW=no\n# caf\xe9\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "no"})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": "no"})
 
     def test_cpu_disable_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "c.conf")
-            self.assertEqual(vm_adapters.cpu_disable_list(conf)[0], "cet-ss")
+            self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf))[0], "cet-ss")
             with open(conf, "w") as f:
                 f.write("VM_CPU_DISABLE=''\n")
-            self.assertEqual(vm_adapters.cpu_disable_list(conf), [])
+            self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf)), [])
 
 
 class BackupTest(Scratch):
@@ -483,12 +482,12 @@ class BackupTest(Scratch):
             text = f.read()
         entries = json.loads(text)["backups"]
         path = os.path.join(self.tmp, "index.json")
-        vm_adapters.write_index(entries, path)
+        vm_adapters_backup.write_index(entries, path)
         with open(path) as f:
             self.assertEqual(f.read(), text)
         with open(path, "w") as f:
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
-        self.assertEqual(vm_adapters.read_index(path), entries)
+        self.assertEqual(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": path})), entries)
         self.assertEqual(self.run_tool("backup", "win").returncode, 0)
         [real] = json.load(open(self.index))["backups"]
         self.assertEqual(set(real), set(entries[0]))
@@ -622,14 +621,11 @@ class BackupTest(Scratch):
     def test_full_refuses_without_space(self) -> None:
         fake = os.statvfs_result((4096, 4096, 100, 10, 10, 0, 0, 0, 0, 255))
         with (
-            patch_vm("BACKUP_DIR", self.backups),
-            patch_vm("INDEX", self.index),
-            patch_vm("SWTPM_DIR", self.swtpm),
             mock.patch.dict(os.environ, self.env),
             mock.patch.object(os, "statvfs", return_value=fake),
         ):
             with self.assertRaises(Refused) as cm:
-                vm_cli.cmd_backup("win", True)
+                vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
         self.assertIn("--full needs", str(cm.exception))
         self.assertIn("allocated size", str(cm.exception))
         self.assertFalse(os.path.exists(self.backups))
@@ -744,7 +740,7 @@ class TuneTransformTest(unittest.TestCase):
     def tune(
         self, xml: str, allow: bool = True, kn: Mapping[str, bool] | None = None
     ) -> tuple[str | None, list[str], list[str], list[str]]:
-        return vm_domain.tune_domain(xml, kn or ALL_ON, allow)
+        return vm_domain_tune.tune_domain(xml, kn or ALL_ON, allow)
 
     def disks(self, xml: str) -> list[ET.Element]:
         return ET.fromstring(xml).findall("devices/disk")
@@ -754,7 +750,7 @@ class TuneTransformTest(unittest.TestCase):
         for allow in (True, False):
             after, changes, held, notes = self.tune(real_domain(), allow)
             self.assertEqual((changes, held, notes), ([], [], []))
-            self.assertEqual(after, vm_domain.normalized(real_domain()))
+            self.assertEqual(after, vm_domain_tune.normalized(real_domain()))
         assert after is not None
         self.assertIn("libosinfo:os id=", after)  # prefixes kept, no ns0
         self.assertNotIn("ns0", after)
@@ -921,7 +917,7 @@ class TuneTransformTest(unittest.TestCase):
         )
 
         def kind(extra: str) -> str:
-            return vm_domain.guest_kind(ET.fromstring(f"<domain>{extra}</domain>"))[0]
+            return vm_domain_tune.guest_kind(ET.fromstring(f"<domain>{extra}</domain>"))[0]
 
         self.assertEqual(kind(osinfo.format("http://microsoft.com/win/11")), "windows")
         self.assertEqual(kind(osinfo.format("http://fedoraproject.org/fedora/43")), "linux")
@@ -929,17 +925,17 @@ class TuneTransformTest(unittest.TestCase):
         self.assertEqual(kind("<features><hyperv mode='custom'/></features>"), "windows")
         self.assertEqual(kind(""), "unknown")
         for i, n in ((0, "sda"), (25, "sdz"), (26, "sdaa")):
-            self.assertEqual(vm_domain.disk_name(i), n)
-            self.assertEqual(vm_domain.disk_index(n), i)
-        self.assertEqual(vm_domain.disk_index("hdb"), 1)
-        self.assertIsNone(vm_domain.disk_index("xvda"))
+            self.assertEqual(vm_domain_tune.disk_name(i), n)
+            self.assertEqual(vm_domain_tune.disk_index(n), i)
+        self.assertEqual(vm_domain_tune.disk_index("hdb"), 1)
+        self.assertIsNone(vm_domain_tune.disk_index("xvda"))
 
 
 class TuneEdgeCaseTest(unittest.TestCase):
     """Cases found in review: default namespaces, SCSI host devices, socket NICs."""
 
     def tune(self, xml: str, allow: bool = True) -> tuple[str | None, list[str], list[str], list[str]]:
-        return vm_domain.tune_domain(xml, ALL_ON, allow)
+        return vm_domain_tune.tune_domain(xml, ALL_ON, allow)
 
     def test_default_namespace_in_metadata_stays_on_its_element(self) -> None:
         x = old_domain()
@@ -953,7 +949,7 @@ class TuneEdgeCaseTest(unittest.TestCase):
         self.assertIsNotNone(root.find("devices/disk"))
         self.assertIsNotNone(root.find("metadata/{http://example.com/app/1}app/{http://example.com/app/1}v"))
         self.assertIn("libosinfo:os id=", after)
-        self.assertEqual(ET.fromstring(vm_domain.normalized(x)).tag, "domain")
+        self.assertEqual(ET.fromstring(vm_domain_tune.normalized(x)).tag, "domain")
         again, changes2, _, _ = self.tune(after)
         self.assertEqual((changes2, again), ([], after))
 
@@ -1018,15 +1014,20 @@ class TuneCommandTest(unittest.TestCase):
                 return 0, "", ""
             return 1, "", "unsupported"
 
-        def _knobs(path: str | None = None) -> dict[str, bool]:
+        def _knobs(paths: object) -> dict[str, bool]:
             return dict(ALL_ON)
 
+        self.cfg = vm_wiring.vm_settings(
+            {
+                "CST_VM_BACKUP_DIR": self.tmp,
+                "CST_VM_CPU_CONF": os.path.join(self.tmp, "none.conf"),
+                "CST_VM_NONROOT_OK": "1",
+            }
+        )
+        self.commands = FakeCommands(virsh)
         patches: list[AbstractContextManager[object]] = [
-            patch_vm("virsh", virsh),
-            patch_vm("BACKUP_DIR", self.tmp),
             patch_vm("knobs", _knobs),
-            patch_vm("CPU_CONF", os.path.join(self.tmp, "none.conf")),
-            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": "1"}),
+            no_real_commands(),
         ]
         for p in patches:
             self.enterContext(p)
@@ -1037,8 +1038,8 @@ class TuneCommandTest(unittest.TestCase):
         def _confirm(q: str) -> bool:
             return answer
 
-        with patch_vm("confirm", _confirm), mock.patch("sys.stdout", out):
-            rc = vm_cli.cmd_tune("win11-devbox", apply, flag)
+        with mock.patch("sys.stdout", out):
+            rc = vm_cli_tune.cmd_tune(self.cfg, "win11-devbox", apply, flag, commands=self.commands, confirm=_confirm)
         return rc, out.getvalue()
 
     def test_plan_windows_without_flag(self) -> None:
@@ -1125,12 +1126,9 @@ class TuneCommandTest(unittest.TestCase):
         def _uid() -> int:
             return 1000
 
-        with (
-            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": ""}),
-            mock.patch.object(os, "geteuid", _uid),
-        ):
-            with self.assertRaises(Refused):
-                self.run_cmd(True, True)
+        self.cfg = replace(self.cfg, nonroot_ok=False)
+        with mock.patch.object(os, "geteuid", _uid), self.assertRaises(Refused):
+            self.run_cmd(True, True)
 
 
 # ---- NOCOW of the VM image folders ----------------------------------------------------------------
@@ -1153,14 +1151,14 @@ class NocowTest(unittest.TestCase):
         def _inode_flags(p: str) -> int | None:
             return self.flags.get(p, 0)
 
-        def _user_home() -> str:
+        def _user_home(sudo_user: str | None) -> str:
             return self.home
 
-        def _knobs(path: str | None = None) -> dict[str, bool]:
+        def _knobs(paths: object) -> dict[str, bool]:
             return dict(ALL_ON)
 
+        self.cfg = vm_wiring.vm_settings({"CST_VM_SYSTEM_IMAGES": self.system})
         patches: list[AbstractContextManager[object]] = [
-            patch_vm("SYSTEM_IMAGES", self.system),
             patch_vm("is_btrfs", _is_btrfs),
             patch_vm("readable_inode_flags", _inode_flags),
             patch_vm("user_home", _user_home),
@@ -1175,13 +1173,13 @@ class NocowTest(unittest.TestCase):
             f.write(b"x" * size)
         return p
 
-    def dirs(self) -> dict[str, _ProbeResult]:
-        return {d["path"]: cast("_ProbeResult", vm_adapters.probe_dir(d)) for d in vm_adapters.image_dirs()}
+    def dirs(self) -> dict[str, vm_domain.ImageProbe]:
+        return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs(self.cfg)}
 
     def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
         buf = io.StringIO()
         with mock.patch("sys.stdout", buf):
-            rc = fn(*args)
+            rc = fn(self.cfg, *args)
         return rc, buf.getvalue()
 
     def test_probe_and_plan(self) -> None:
@@ -1194,11 +1192,11 @@ class NocowTest(unittest.TestCase):
         self.flags[good] = inode_attrs.FS_NOCOW_FL
         d = self.dirs()
         s = d[self.system]
-        self.assertEqual((s["present"], s["nocow"], s["listed"]), (True, True, True))
-        self.assertEqual([i["name"] for i in s["images"]], ["win.qcow2"])
-        self.assertEqual(s["leftovers"], ["old.qcow2.cow-old"])
-        self.assertFalse(d[os.path.join(self.home, ".local/share/libvirt/images")]["present"])
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+        self.assertEqual((s.present, s.nocow, s.listed), (True, True, True))
+        self.assertEqual([i.name for i in s.images], ["win.qcow2"])
+        self.assertEqual(s.leftovers, ["old.qcow2.cow-old"])
+        self.assertFalse(d[os.path.join(self.home, ".local/share/libvirt/images")].present)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertEqual(rc, 0)
         self.assertIn("still copy-on-write: win.qcow2", out)
         self.assertIn(f"sudo mv {win} {win}.cow-old", out)
@@ -1211,7 +1209,7 @@ class NocowTest(unittest.TestCase):
         self.assertNotIn("virtio-win.iso", out)
 
     def test_convert_lines_order(self) -> None:
-        img = {"path": "/i/w b.qcow2"}
+        img = vm_domain.ImageInfo("w b.qcow2", "/i/w b.qcow2", 0, 0, False)
         lines = vm_domain.convert_lines(img, False)
         self.assertEqual([ln.split()[0] for ln in lines], ["mv", "install", "chattr", "cp", "cmp", "#"])
         self.assertIn("install -m 0600 /dev/null '/i/w b.qcow2'", lines[1])
@@ -1231,12 +1229,12 @@ class NocowTest(unittest.TestCase):
             return real_scandir(p)
 
         with mock.patch.object(os, "scandir", scandir):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("NOCOW mark (+C): not readable as your user (root-only folder): cst-vm nocow plan --root", out)
         self.assertNotIn("still copy-on-write", out)
         self.assertNotIn(": no:", out)
         # Readable listing but unreadable image flags (qemu's 0600 files): reported as unknown.
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("images whose mark is not readable as your user: win.qcow2", out)
         self.assertNotIn("still copy-on-write", out)
 
@@ -1245,23 +1243,23 @@ class NocowTest(unittest.TestCase):
             return False
 
         with patch_vm("is_btrfs", _not_btrfs):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("not on btrfs (NOCOW does not apply)", out)
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
         d = self.dirs()[self.system]
-        self.assertTrue(vm_adapters.needs_mark(d))  # /var/lib/libvirt is there: create it
+        self.assertTrue(vm_adapters_images.needs_mark(d))  # /var/lib/libvirt is there: create it
         os.rmdir(os.path.dirname(self.system))
-        self.assertFalse(vm_adapters.needs_mark(self.dirs()[self.system]))  # libvirt not installed
+        self.assertFalse(vm_adapters_images.needs_mark(self.dirs()[self.system]))  # libvirt not installed
 
     def test_knob_off(self) -> None:
-        def _knobs_off(path: str | None = None) -> dict[str, bool]:
+        def _knobs_off(paths: object) -> dict[str, bool]:
             return dict(ALL_ON, VM_NOCOW=False)
 
         with patch_vm("knobs", _knobs_off):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
             self.assertIn("VM_NOCOW=no", out)
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
             self.assertIn("nothing to do", out)
 
     def test_apply_marks_user_folders_and_uses_sudo_for_the_system_one(self) -> None:
@@ -1297,7 +1295,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("run", fake_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
         self.assertEqual(marked, [self.boxes])
         self.assertEqual(
@@ -1337,7 +1335,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("run", fake_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
         self.assertEqual(
             sudo,
@@ -1363,9 +1361,9 @@ class NocowTest(unittest.TestCase):
         self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
         d = self.dirs()
         for p in (self.system, libvirt_user):
-            self.assertEqual((d[p]["present"], d[p]["link"]), (False, real))
-            self.assertFalse(vm_adapters.needs_mark(d[p]))
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+            self.assertEqual((d[p].present, d[p].link), (False, real))
+            self.assertFalse(vm_adapters_images.needs_mark(d[p]))
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn(
             f"{self.system}  [libvirt qemu:///system: virt-manager, virsh]: a symbolic link to {real}: "
             "not managed by CST",
@@ -1388,29 +1386,22 @@ class NocowTest(unittest.TestCase):
             mock.patch.object(subprocess, "run", fake_sub_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual((rc, sudo), (0, []))
         self.assertIn("already has the NOCOW mark (+C) (symbolic links are not managed).", out)
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)  # target untouched
         # Even if the folder turns into a link between the probe and the action.
-        probe: dict[str, object] = {
-            "scope": "system",
-            "path": self.system,
-            "what": "x",
-            "present": False,
-            "link": None,
-            "nocow": None,
-        }
-        self.assertIn("symbolic link: not touched", vm_cli.mark_system_dir(probe))
+        probe = vm_domain.ImageProbe("system", self.system, "x", present=False, link=None, nocow=None)
+        self.assertIn("symbolic link: not touched", vm_adapters_images.mark_system_dir(probe, print))
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
-        rc, out = self.out(vm_cli.cmd_nocow_apply)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertIn("already has the NOCOW mark", out)
         self.flags[self.boxes] = 0
         with mock.patch("sys.stdin", io.StringIO("")):
             with self.assertRaises(Refused):
-                self.out(vm_cli.cmd_nocow_apply)
+                self.out(vm_cli_nocow.cmd_nocow_apply)
 
     def test_status_lists_the_folders(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
@@ -1418,14 +1409,14 @@ class NocowTest(unittest.TestCase):
         def _virsh(*a: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
             return (0, "shut off\n", "") if a[0] == "domstate" else (0, real_domain(), "")
 
-        def _read_index(path: str | None = None) -> list[dict[str, object]]:
+        def _read_index(cfg: object) -> list[dict[str, object]]:
             return []
 
         with (
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli.cmd_status, "win11-devbox")
+            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox")
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)
@@ -1439,12 +1430,12 @@ class BtrfsReflinkTest(unittest.TestCase):
 
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
-        if not os.path.isdir(cache) or not vm_adapters.is_btrfs(cache):
+        if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):
             self.skipTest("~/.cache is not on btrfs")
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-reflink-", dir=cache)
         self.addCleanup(shutil.rmtree, self.tmp)
         # The scratch folder itself copy-on-write, whatever ~/.cache has.
-        flags = vm_adapters.readable_inode_flags(self.tmp)
+        flags = vm_adapters_images.readable_inode_flags(self.tmp)
         assert flags is not None
         self.setflags(self.tmp, flags & ~inode_attrs.FS_NOCOW_FL, directory=True)
 
@@ -1460,19 +1451,19 @@ class BtrfsReflinkTest(unittest.TestCase):
     def test_reflink_of_a_nocow_image(self) -> None:
         src = os.path.join(self.tmp, "img.qcow2")
         open(src, "wb").close()
-        src_flags = vm_adapters.readable_inode_flags(src)
+        src_flags = vm_adapters_images.readable_inode_flags(src)
         assert src_flags is not None
         self.setflags(src, src_flags | inode_attrs.FS_NOCOW_FL)  # only while empty
         with open(src, "ab") as f:
             f.write(os.urandom(1 << 20))
-        if not vm_adapters.nocow(src):
+        if not vm_adapters_images.nocow(src):
             self.skipTest("NOCOW not settable here")
         plain = os.path.join(self.tmp, "plain.qcow2")
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
-        vm_cli.copy(src, dest, "reflink", True)
-        self.assertTrue(vm_adapters.nocow(dest))
+        vm_cli_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
+        self.assertTrue(vm_adapters_images.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
         # Restoring a copy-on-write backup onto the NOCOW image (the restore
@@ -1480,10 +1471,10 @@ class BtrfsReflinkTest(unittest.TestCase):
         cow = os.path.join(self.tmp, "cow-backup.qcow2")
         with open(cow, "wb") as f:
             f.write(os.urandom(1 << 20))
-        self.assertFalse(vm_adapters.nocow(cow))
+        self.assertFalse(vm_adapters_images.nocow(cow))
         r = subprocess.run(["cp", "--reflink=auto", "-a", cow, src], check=False, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(vm_adapters.nocow(src))
+        self.assertTrue(vm_adapters_images.nocow(src))
         with open(src, "rb") as a, open(cow, "rb") as b:
             self.assertEqual(a.read(), b.read())
 
@@ -1576,15 +1567,55 @@ class SetupScriptTest(unittest.TestCase):
 class PackageTest(unittest.TestCase):
     """The vm package's settings, parsing, dispatch and virsh wrapper (in-process)."""
 
+    def test_settings_from_the_environment(self) -> None:
+        variables = {
+            "backup_dir": "CST_VM_BACKUP_DIR",
+            "index": "CST_VM_INDEX",
+            "swtpm_dir": "CST_VM_SWTPM_DIR",
+            "vm_conf": "CST_VM_CONF",
+            "cpu_conf": "CST_VM_CPU_CONF",
+            "system_images": "CST_VM_SYSTEM_IMAGES",
+            "nas_conf": "CST_VM_NAS_CONF",
+            "restic_password": "CST_VM_RESTIC_PASSWORD",
+            "restic_cache": "CST_VM_RESTIC_CACHE",
+            "nas_stage": "CST_VM_NAS_STAGE",
+            "run_dir": "CST_VM_RUN_DIR",
+            "notify": "CST_VM_NOTIFY",
+            "alerts": "CST_VM_ALERTS",
+            "unit_dir": "CST_VM_UNIT_DIR",
+            "sbin_copy": "CST_VM_SBIN_COPY",
+            "install_record": "CST_VM_INSTALL_RECORD",
+        }
+        moved = vm_wiring.vm_paths({var: f"/t/{field}" for field, var in variables.items()})
+        self.assertEqual({f: getattr(moved, f) for f in variables}, {f: f"/t/{f}" for f in variables})
+        machine = vm_wiring.vm_paths({var: "" for var in variables.values()})  # empty: the machine's path
+        self.assertEqual(
+            (machine.backup_dir, machine.index, machine.vm_conf, machine.unit_dir, machine.sbin_copy),
+            (
+                "/var/lib/libvirt/cst-backups",
+                "/var/lib/cst/vm-backups.json",
+                "/etc/cst/vm.conf",
+                "/etc/systemd/system",
+                "/usr/local/sbin/cst-vm",
+            ),
+        )
+        cfg = vm_wiring.vm_settings({"CST_PROG": "./cst vm", "CST_VM_NONROOT_OK": "1", "CST_VM_COMMIT_TIMEOUT": "60"})
+        self.assertEqual((cfg.prog, cfg.cst, cfg.nonroot_ok, cfg.under_systemd), ("./cst vm", "./cst", True, False))
+        self.assertEqual((cfg.commit_timeout, cfg.snapshot_timeout, cfg.snapshot_settle), (60, 600, 600))
+        plain = vm_wiring.vm_settings({"INVOCATION_ID": "x", "CST_VM_NOW": "5"})
+        self.assertEqual((plain.prog, plain.cst, plain.under_systemd, plain.now), ("cst-vm", "cst", True, "5"))
+        with self.assertRaises(ValueError):
+            vm_wiring.vm_settings({"CST_VM_SNAPSHOT_TIMEOUT": "ten"})
+
     def test_knobs_and_nas_numbers_from_vm_conf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")
             self.assertEqual(
-                vm_adapters.knobs(conf),
+                vm_adapters.knobs(replace(PATHS, vm_conf=conf)),
                 {"VM_NOCOW": True, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": True, "VM_TUNE_NIC": True},
             )
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
-            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [4, 3, 6])
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
             with open(conf, "w") as f:
                 f.write(
                     "# comment\n"
@@ -1597,27 +1628,25 @@ class PackageTest(unittest.TestCase):
                     "VM_NAS_TIMEOUT_HOURS=12\n"
                 )
             self.assertEqual(
-                vm_adapters.knobs(conf),
+                vm_adapters.knobs(replace(PATHS, vm_conf=conf)),
                 {"VM_NOCOW": False, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": False, "VM_TUNE_NIC": False},
             )
-            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [8, 3, 12])
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
-        self.assertEqual(parts["uuid"], UUID)
-        self.assertIn("/var/lib/libvirt/images/win11-devbox.qcow2", parts["disks"])
-        self.assertTrue(parts["tpm"])
-        after, _, held, _ = vm_domain.tune_domain(old_domain(), ALL_ON, allow_bus=False)
+        self.assertEqual(parts.uuid, UUID)
+        self.assertIn("/var/lib/libvirt/images/win11-devbox.qcow2", parts.disks)
+        self.assertTrue(parts.tpm)
+        after, _, held, _ = vm_domain_tune.tune_domain(old_domain(), ALL_ON, allow_bus=False)
         self.assertIsNotNone(after)
         self.assertTrue(held)
-        _, changes, held, notes = vm_domain.tune_domain(real_domain(), ALL_ON, allow_bus=True)
+        _, changes, held, notes = vm_domain_tune.tune_domain(real_domain(), ALL_ON, allow_bus=True)
         self.assertEqual((changes, held, notes), ([], [], []))
 
     def test_parsing_and_backup_helpers(self) -> None:
         a = vm_domain.parse_args(["backup", "win", "--nas", "--keep-tag=pre-f46", "--no-quiesce"])
-        self.assertEqual(
-            (a["cmd"], a["vm"], a["nas"], a["keep"], a["no_quiesce"]), ("backup", "win", True, "pre-f46", True)
-        )
+        self.assertEqual((a.cmd, a.vm, a.nas, a.keep, a.no_quiesce), ("backup", "win", True, "pre-f46", True))
         for bad in (
             ["backup", "--full", "--nas"],
             ["backup", "--keep-tag", "pre-f46"],
@@ -1658,7 +1687,7 @@ class PackageTest(unittest.TestCase):
         out = io.StringIO()
         restored: list[bool] = []
         with (
-            patch_vm("read_index", lambda path=None: []),
+            patch_vm("read_index", lambda cfg: []),
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
             mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
@@ -1747,6 +1776,179 @@ class PackageTest(unittest.TestCase):
         self.assertFalse(vm_domain.is_cst_vm_program(b'#!/bin/sh\n"""cst-vm:'))
 
 
+class FakeTimers:
+    """A TimerPort over a dict of file states and a list of timers on: what was asked, in order."""
+
+    def __init__(self, states: dict[str, UnitFileState], on: list[str], fail: str = "") -> None:
+        self.states, self.on, self.fail = states, on, fail
+        self.done: list[str] = []
+
+    def file_states(self, unit: str) -> dict[str, UnitFileState]:
+        return dict(self.states)
+
+    def install(self, states: Mapping[str, UnitFileState], report: Callable[[vm_domain.TimerStep], None]) -> None:
+        for p, st in states.items():
+            if st != "ok":
+                self.done.append(f"write {p}")
+                report(vm_domain.TimerStep("installed" if st == "missing" else "updated", p))
+
+    def mark_complete(self) -> None:
+        self.done.append("complete")
+
+    def remove(self, path: str) -> None:
+        self.done.append(f"remove {path}")
+
+    def forget(self, removed: Sequence[str]) -> None:
+        self.done.append(f"forget {' '.join(removed)}")
+
+    def timers_on(self) -> list[str]:
+        return list(self.on)
+
+    def turn_on(self, unit: str) -> None:
+        if self.fail == "on":
+            raise Refused("systemctl enable --now: failed")
+        self.done.append(f"on {unit}")
+        self.on.append(unit)
+
+    def turn_off(self, unit: str) -> str:
+        if self.fail == "off":
+            return "systemctl disable --now: denied"
+        self.done.append(f"off {unit}")
+        self.on.remove(unit) if unit in self.on else None
+        return ""
+
+    def forget_last_run(self, unit: str) -> None:
+        self.done.append(f"clean {unit}")
+
+    def reload(self) -> None:
+        self.done.append("reload")
+
+    def schedule(self, unit: str) -> tuple[str, str]:
+        return "Sat", "success"
+
+
+class TimerUseCaseTest(unittest.TestCase):
+    """vm.application's backup-timer on, off and status over a fake TimerPort."""
+
+    unit = "cst-vm-backup@win.timer"
+
+    def test_on_installs_turns_on_then_records(self) -> None:
+        timers = FakeTimers({"/p": "missing", "/u": "change", "/t": "ok"}, [])
+        steps: list[vm_domain.TimerStep] = []
+        vm_application.timer_on(timers, "win", lambda: None, steps.append)
+        self.assertEqual(timers.done, ["write /p", "write /u", f"on {self.unit}", "complete"])
+        self.assertEqual([(s.kind, s.path) for s in steps], [("installed", "/p"), ("updated", "/u")])
+
+    def test_on_refuses_before_any_change(self) -> None:
+        def no_nas() -> None:
+            raise Refused("the NAS backup is not set up")
+
+        cases: list[tuple[dict[str, UnitFileState], Callable[[], None], str]] = [
+            ({"/p": "conflict"}, lambda: None, "not CST's files"),
+            ({"/p": "ok", "/own": "masked"}, lambda: None, "nothing was changed"),
+            ({"/p": "missing"}, no_nas, "not set up"),
+        ]
+        for states, ready, words in cases:
+            timers = FakeTimers(states, [])
+            with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
+                vm_application.timer_on(timers, "win", ready, lambda s: None)
+            self.assertEqual(timers.done, [])
+
+    def test_a_failed_start_leaves_the_record_pending(self) -> None:
+        timers = FakeTimers({"/p": "missing"}, [], fail="on")
+        with self.assertRaises(Refused):
+            vm_application.timer_on(timers, "win", lambda: None, lambda s: None)
+        self.assertEqual(timers.done, ["write /p"])
+
+    def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
+        timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
+        steps: list[vm_domain.TimerStep] = []
+        self.assertEqual(vm_application.timer_off(timers, "win", steps.append), [])
+        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p", "reload"])
+        self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
+
+    def test_off_keeps_the_files_for_another_vm(self) -> None:
+        other = "cst-vm-backup@other.timer"
+        timers = FakeTimers({"/p": "ok"}, [self.unit, other])
+        self.assertEqual(vm_application.timer_off(timers, "win", lambda s: None), [other])
+        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}"])
+
+    def test_off_refuses_when_the_timer_stays_on(self) -> None:
+        timers = FakeTimers({"/p": "ok"}, [self.unit], fail="off")
+        with self.assertRaisesRegex(Refused, "denied"):
+            vm_application.timer_off(timers, "win", lambda s: None)
+        self.assertEqual(timers.done, [])
+        timers = FakeTimers({"/p": "ok"}, [], fail="off")  # off already: the failure does not matter
+        vm_application.timer_off(timers, "win", lambda s: None)
+        self.assertIn("remove /p", timers.done)
+
+    def test_status(self) -> None:
+        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, [self.unit]), "win")
+        self.assertEqual(
+            (st.unit, st.on, st.files, st.next_run, st.last_result), (self.unit, True, {"/p": "ok"}, "Sat", "success")
+        )
+        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, []), "win")
+        self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
+        with self.assertRaises(Refused):
+            vm_application.timer_status(FakeTimers({}, []), "bad name")
+
+
+class PatchVmTest(unittest.TestCase):
+    """patch_vm("virsh", fake) reaches every virsh call, also those over the VmCommandsPort."""
+
+    def test_a_fake_virsh_reaches_the_backup_checks(self) -> None:
+        def _virsh(*a: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
+            return (0, "shut off\n", "") if a[0] == "domstate" else (0, "win\n", "")
+
+        with no_real_commands(), patch_vm("virsh", _virsh), self.assertRaisesRegex(Refused, "managed save"):
+            vm_cli_backup.check_shut_off("win")
+
+
+class DetachedTest(unittest.TestCase):
+    """VmCommands.detached(): every child of the block runs in a session of its own, then not."""
+
+    def test_detached_block(self) -> None:
+        sessions: list[tuple[str, bool]] = []
+
+        class Recorder:
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                check: bool = False,
+                timeout: float | None = None,
+                input_text: str | None = None,
+                env: Mapping[str, str] | None = None,
+                unset: Sequence[str] = (),
+                base_env: Mapping[str, str] | None = None,
+                cwd: str | None = None,
+                locale_c: bool = False,
+                new_session: bool = False,
+                on_host: bool = False,
+                stdin: StdinMode = "devnull",
+                output: OutputMode = "capture",
+                decode_errors: DecodeErrors = "replace",
+                nice: int | None = None,
+            ) -> CommandResult:
+                sessions.append((argv[0], new_session))
+                return CommandResult(0, "", "")
+
+        commands = vm_adapters.VmCommands(Recorder())
+        commands.run(["rpm"], 5, None, detach=None)
+        with commands.detached():
+            commands.run(["rpm"], 5, None, detach=None)
+            commands.virsh(["domstate", "win"], 5, detach=None)
+            commands.virsh(["domstate", "win"], 5, detach=False)  # a call's own detach= wins
+        commands.virsh(["domstate", "win"], 5, detach=None)
+        with self.assertRaises(RuntimeError), commands.detached():
+            raise RuntimeError
+        commands.run(["rpm"], 5, None, detach=None)
+        self.assertEqual(
+            sessions,
+            [("rpm", False), ("rpm", True), ("virsh", True), ("virsh", False), ("virsh", False), ("rpm", False)],
+        )
+
+
 class VmLockTest(unittest.TestCase):
     def test_lock_folder_and_pid_file_are_readable_under_a_077_umask(self) -> None:
         # `sudo cst vm backup --nas` keeps a user's 077 umask; /run/cst-vm came out 0700 and the
@@ -1757,13 +1959,13 @@ class VmLockTest(unittest.TestCase):
         run_dir = os.path.join(tmp, "run", "cst-vm")
         old = os.umask(0o077)
         try:
-            with mock.patch.object(vm_adapters, "RUN_DIR", run_dir), vm_adapters.VmLock("win") as lock:
+            with vm_adapters_backup.VmLock("win", run_dir) as lock:
                 self.assertEqual(os.stat(run_dir).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(os.path.dirname(run_dir)).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(lock.path).st_mode & 0o7777, 0o644)
                 with open(lock.path) as f:
                     self.assertEqual(f.read(), f"{os.getpid()}\n")  # the pid is in the flocked file itself
-                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters.VmLock("win"):
+                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters_backup.VmLock("win", run_dir):
                     pass
         finally:
             os.umask(old)
@@ -1792,9 +1994,12 @@ class IndexDurableTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         index = os.path.join(tmp, "lib-cst", "vm-backups.json")
         with recorded_fsyncs() as synced:
-            vm_adapters.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
+            vm_adapters_backup.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
         assert_replaced_durably(self, index, synced)
-        self.assertEqual(vm_adapters.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
+        self.assertEqual(
+            vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": index})),
+            [{"vm": "win", "path": "/b/win-1"}],
+        )
 
 
 if __name__ == "__main__":

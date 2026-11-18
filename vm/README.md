@@ -1017,20 +1017,42 @@ The Python code inside `vm/` (standard library only at run time):
   flatpak-spawn), on the host only for the rest, which first runs the
   script again through sudo (`nocow apply` stays the user's).
 - `vm/cst-vm`: the entry point (its docstring is the help); it only hands
-  argv to `vm/cli.py`. Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
+  argv to `vm/cli/` (`main`). Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
   `backup-timer on`).
-- `vm/domain.py`: the rules, no I/O: what a domain definition is made of
-  (`domain_parts`), the hardware `tune` recommends (`tune_domain`,
-  `guest_kind`), the NAS backup's names and retention (`valid_keep`,
+- `vm/domain/`: the rules, no I/O. `tune.py`: the hardware `tune` recommends
+  (`tune_domain`, `guest_kind`) and the lines that report it (`tune_line`,
+  `cpu_status_line`, `cpu_owner_line`). `__init__.py`: what a domain definition is
+  made of (`domain_parts`), the lines that describe an image folder
+  (`nocow_lines`), the NAS backup's names and retention (`valid_keep`,
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
-  `render_timer`), the command line (`parse_args`).
-- `vm/adapters.py`: what reaches the host: `virsh`, `rpm`, `rpm-ostree`,
+  `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
+  and the records the other modules pass around (`DomainParts`, `LiveDisk`,
+  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
+- `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`,
   `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
-  `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the backup index, the NOCOW flag
-  and the image folders (`probe_dir`), the per-VM lock, the paths
-  (`CST_VM_*` moves them, for the tests only).
-- `vm/cli.py`: the commands (`backup`, the NAS backup, `backup-timer`,
-  `list`, `status`, `tune`, `nocow`) and `main`.
+  `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
+  files. `backup.py`: the
+  backup index, fingerprints and sizes, the stop signals, the per-VM lock and
+  the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
+  and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
+  system folder through `sudo` when not root). `nocow apply` has no
+  application layer: it marks folders one by one, nothing to roll back.
+- `vm/wiring.py`: the composition root: the environment of one run becomes a
+  `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
+  `CST_VM_*`, which move each path for the tests only, and the snapshot and
+  merge timeouts). `cst doctor` builds the same settings for its VM checks.
+- `vm/application.py`: the use cases that change the machine in several
+  steps, typed against the ports of `vm/ports.py`: `backup-timer on` and
+  `off` (`TimerPort`: the timer's files through the installer, and systemd;
+  its adapter is `vm/adapters/timer.py`'s `TimerFiles`), and `tune` (plan,
+  then apply: `VmCommandsPort`, virsh as `vm.adapters.VmCommands` runs it,
+  and `DefinitionStorePort`, the definition kept before tune and `virsh
+  define` from a text, `vm/adapters/backup.py`'s `DefinitionFiles`).
+- `vm/cli/`: the commands, one module per command group: `backup.py` (the
+  local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
+  `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
+  `__init__.py`.
 
-`cst doctor` imports `vm.domain` (tune rules) and `vm.adapters` (knobs,
-image folder probe) from the same CST copy.
+`cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`,
+`vm.adapters` (knobs) and `vm.adapters.images` (the image folder probe) from
+the same CST copy.

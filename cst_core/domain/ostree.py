@@ -5,7 +5,7 @@ The deployments are rpm-ostree's JSON objects as they come (many keys of
 many types), read with .get where they are used. The bash copies of this
 query (btrfs-setup.sh, btrfs/setup-snapshots.bash, btrfs/btrfs-health-check,
 btrfs/btrfs-degraded-boot-setup.sh) stay until those scripts are Python;
-vm's booted_deployment (vm/adapters.py) keeps its own reading, which answers
+vm's booted_deployment (vm/adapters/__init__.py) keeps its own reading, which answers
 None on any failure, until the vm conversion.
 """
 

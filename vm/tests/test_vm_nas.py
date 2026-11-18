@@ -41,7 +41,9 @@ if _CHECKOUT not in sys.path:
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Usage
 from btrfs.tests.test_snapshot_runtime import shell_function
-from vm import adapters as vm_adapters, domain as vm_domain
+from vm import domain as vm_domain
+from vm.adapters import backup as vm_adapters_backup
+from vm import wiring as vm_wiring
 
 sys.dont_write_bytecode = True
 
@@ -645,7 +647,11 @@ class LiveBackupTest(Nas):
         with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
             nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        [real] = [e for e in vm_adapters.read_index(self.index) if e.get("mode") == "nas"]
+        [real] = [
+            e
+            for e in vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index}))
+            if e.get("mode") == "nas"
+        ]
         self.assertEqual(set(real), set(nas))
 
     def test_list_shows_nas_entries(self) -> None:
@@ -656,7 +662,7 @@ class LiveBackupTest(Nas):
 
     def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        entries = [e for e in vm_adapters.read_index(self.index)]
+        entries = [e for e in vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index}))]
         self.assertEqual(entries[0]["mode"], "nas")
 
 
@@ -917,8 +923,8 @@ class ShutOffAndRefusalTest(Nas):
             self.assertEqual(r.returncode, 1)
             self.assertIn("needs root", r.stderr)
         a = vm_domain.parse_args(["backup", "--keep-tag", "pre-f46", "--nas", "w"])
-        self.assertEqual((a["vm"], a["keep"], a["nas"]), ("w", "pre-f46", True))
-        self.assertEqual(vm_domain.parse_args(["backup", "--nas", "--keep-tag=x1"])["keep"], "x1")
+        self.assertEqual((a.vm, a.keep, a.nas), ("w", "pre-f46", True))
+        self.assertEqual(vm_domain.parse_args(["backup", "--nas", "--keep-tag=x1"]).keep, "x1")
         for bad in (
             ["backup", "--nas", "--full"],
             ["backup", "--keep-tag", "x"],
@@ -1079,9 +1085,9 @@ class TimerTest(Nas):
         stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.M)
         self.assertTrue(stop, service)
         assert stop is not None
+        cfg = vm_wiring.vm_settings(self.env)
         self.assertGreaterEqual(
-            int(stop.group(1)) * 60,
-            vm_adapters.SNAPSHOT_TIMEOUT + vm_adapters.SNAPSHOT_SETTLE + vm_adapters.COMMIT_TIMEOUT + 300 + 15 * 60,
+            int(stop.group(1)) * 60, cfg.snapshot_timeout + cfg.snapshot_settle + cfg.commit_timeout + 300 + 15 * 60
         )
         for line in (
             "OnCalendar=Sat *-*-* 04:30:00",

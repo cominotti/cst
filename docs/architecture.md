@@ -42,8 +42,10 @@ and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
 doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
-snapshot have the full profile; in the other packages `cli.py` orchestrates the
-commands and some still do I/O there. `tests/test_architecture.py`
+snapshot have the full profile (vm is on its way there: it has its `wiring.py`,
+`ports.py` and `application.py`, and the local and NAS backups still run in
+`vm/cli/`); in the other packages `cli.py` orchestrates the commands and some
+still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py`: new logic goes into `domain` (pure),
 `application` (with ports) or `adapters` (I/O). The I/O left outside the

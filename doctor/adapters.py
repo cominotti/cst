@@ -2,11 +2,12 @@
 """Adapters implementing the `doctor` ports against Linux/toolbox hosts."""
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 import hashlib
 import os
 import pwd
 import time
-from typing import Any, BinaryIO, TextIO
+from typing import BinaryIO, TextIO
 
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
@@ -18,6 +19,8 @@ from cst_core.domain.values import DomainValidationError
 from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
+from vm.adapters import images as vm_images
+from vm.domain import ImageDir, ImageProbe, VmSettings
 
 
 class Host:
@@ -195,22 +198,26 @@ def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> 
 
 
 class VmTools:
-    """VmToolsPort over the checkout's vm package (looked up at each call, so
-    a test that patches vm.adapters reaches it)."""
+    """VmToolsPort over the checkout's vm package, with the vm settings of this process
+    (vm.wiring.vm_settings); the functions are looked up at each call, so a test that
+    patches vm.adapters or vm.adapters.images reaches them."""
+
+    def __init__(self, settings: VmSettings) -> None:
+        self.settings = settings
 
     @property
     def system_images(self) -> str:
-        """vm.adapters.SYSTEM_IMAGES."""
-        return vm_adapters.SYSTEM_IMAGES
+        """The settings' system image folder (CST_VM_SYSTEM_IMAGES, else libvirt's)."""
+        return self.settings.paths.system_images
 
     def knobs(self, path: str) -> dict[str, bool]:
-        """vm.adapters.knobs."""
-        return vm_adapters.knobs(path)
+        """vm.adapters.knobs of the vm.conf at path."""
+        return vm_adapters.knobs(replace(self.settings.paths, vm_conf=path))
 
-    def image_dirs(self) -> list[dict[str, str]]:
-        """vm.adapters.image_dirs."""
-        return vm_adapters.image_dirs()
+    def image_dirs(self) -> list[ImageDir]:
+        """vm.adapters.images.image_dirs."""
+        return vm_images.image_dirs(self.settings)
 
-    def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
-        """vm.adapters.probe_dir."""
-        return vm_adapters.probe_dir(d, readable)
+    def probe_dir(self, d: ImageDir, readable: Callable[[str], str]) -> ImageProbe:
+        """vm.adapters.images.probe_dir."""
+        return vm_images.probe_dir(d, readable)

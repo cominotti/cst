@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: MPL-2.0
 """The vm module's rules: what a libvirt domain definition is made of, the
-hardware `cst vm tune` recommends, the NAS backup's names and retention,
-the weekly timer unit, the command line. Pure: text in, text or values out.
+NAS backup's names and retention, the weekly timer unit, the command line
+and the records the modules pass around. Pure: text in, text or values out.
+The hardware `cst vm tune` recommends is in vm.domain.tune.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 import os.path
 import re
 import shlex
-from typing import Any
+from typing import Final, Literal, TypedDict
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused, Usage
-from cst_core.domain.libvirt_xml import keep_prefixes
+from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
-from cst_core.domain.values import GIB
+from cst_core.domain.values import GIB, format_bytes_gib_mib
 
 URI = "qemu:///system"
 
@@ -61,6 +63,181 @@ UNIT_MARKER = "# Managed by cst vm (CST)"
 
 ON_CALENDAR = "Sat *-*-* 04:30:00"
 
+# The commands of cst vm, and the subcommands of those that take one.
+type VmCommand = Literal["help", "backup", "backup-timer", "list", "status", "tune", "nocow"]
+type VmSub = Literal["plan", "apply", "on", "off", "status"]
+
+COMMANDS: Final[dict[str, VmCommand]] = {
+    "backup": "backup",
+    "backup-timer": "backup-timer",
+    "list": "list",
+    "status": "status",
+    "tune": "tune",
+    "nocow": "nocow",
+}
+
+SUBS: Final[dict[VmCommand, dict[str, VmSub]]] = {
+    "tune": {"plan": "plan", "apply": "apply"},
+    "nocow": {"plan": "plan", "apply": "apply"},
+    "backup-timer": {"on": "on", "off": "off", "status": "status"},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class VmArgs:
+    """The command line of cst vm, as parse_args reads it."""
+
+    cmd: VmCommand = "help"
+    sub: VmSub | None = None
+    vm: str | None = None
+    full: bool = False
+    guest_virtio: bool = False
+    root: bool = False
+    nas: bool = False
+    keep: str | None = None
+    no_quiesce: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DomainParts:
+    """What a backup copies, from the inactive definition (domain_parts)."""
+
+    uuid: str
+    disks: list[str]
+    nvram: str
+    tpm: bool
+    skipped: list[str]
+    problems: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveDisk:
+    """One disk of a definition (live_disks); backing: the live definition shows a backing chain."""
+
+    target: str
+    device: str
+    kind: str
+    source: str
+    backing: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VmPaths:
+    """Where cst vm reads and writes on the machine. Each can be moved by its CST_VM_* variable
+    (vm.wiring.vm_settings), for the tests only: scratch folders instead of the host's."""
+
+    backup_dir: str  # the local copies: BACKUP_DIR/VM/STAMP
+    index: str  # the backups index (cst_core.domain.contracts "vm-index")
+    swtpm_dir: str  # the software TPM's state, per domain UUID
+    vm_conf: str  # this module's settings (optional; every knob defaults to yes)
+    cpu_conf: str  # cpu-setup.conf: VM_NAME, VM_CPU_DISABLE
+    system_images: str  # libvirt's default storage pool
+    nas_conf: str  # the /home NAS backup's snapshots.conf: its repository, shared
+    restic_password: str  # its password file (restic reads it through RESTIC_PASSWORD_FILE)
+    restic_cache: str
+    nas_stage: str  # the definition and the manifest, written here for restic to read
+    run_dir: str  # the per-VM lock of a NAS backup (holds the pid)
+    notify: str  # btrfs-notify
+    alerts: str  # where an alert btrfs-notify could not take is kept
+    unit_dir: str  # the weekly timer's units
+    sbin_copy: str  # the program copy the timer runs, as `install` places it
+    install_record: str  # what backup-timer on writes is listed there
+
+
+@dataclass(frozen=True, slots=True)
+class VmSettings:
+    """What the environment sets for one run of cst vm (vm.wiring.vm_settings)."""
+
+    paths: VmPaths
+    prog: str  # how the help and the hints name this program (CST_PROG, else cst-vm)
+    cst: str  # how they name cst itself
+    nonroot_ok: bool  # CST_VM_NONROOT_OK: the commands that need root run as the user (tests)
+    under_systemd: bool  # INVOCATION_ID: started by systemd (the weekly timer)
+    now: str | None  # CST_VM_NOW: the clock of the backups' names (tests)
+    sudo_user: str | None  # SUDO_USER: whose home has the user's image folders under sudo
+    # The merge back (every blockcommit of a run together; it copies the guest's writes of the
+    # backup's duration). The timer's TimeoutStopSec leaves room for it after a stop.
+    commit_timeout: int
+    # virsh snapshot-create-as; after a timeout the run waits up to snapshot_settle seconds for
+    # libvirt to finish (or not) on its own.
+    snapshot_timeout: int
+    snapshot_settle: int
+
+
+class NasRepo(TypedDict):
+    """The restic repository of the /home NAS backup, as a VM backup uses it (nas_settings): the
+    --host of its snapshots, the repository, and restic's variables (the password stays in its file)."""
+
+    host: str
+    repo: str
+    env: dict[str, str]
+
+
+type TimerStepKind = Literal["installed", "updated", "off", "left", "removed"]
+
+
+@dataclass(frozen=True, slots=True)
+class TimerStep:
+    """What backup-timer on or off did, as it happens: a file installed or updated, the timer turned
+    off (path: its unit), a masked file left as it is, a file removed."""
+
+    kind: TimerStepKind
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class TimerStatus:
+    """backup-timer status of one VM: its timer unit, whether it is on, the state of each file
+    backup-timer on writes, and, when on, systemd's next run and last result ("" when unknown)."""
+
+    unit: str
+    on: bool
+    files: dict[str, UnitFileState]
+    next_run: str
+    last_result: str
+
+
+type ImageScope = Literal["system", "user"]
+
+
+@dataclass(frozen=True, slots=True)
+class ImageDir:
+    """A known VM image folder: system (libvirt's pool, root's) or one in the user's home."""
+
+    scope: ImageScope
+    path: str
+    what: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageInfo:
+    """An image file in a probed folder; nocow None: its flags are not readable by this user."""
+
+    name: str
+    path: str
+    alloc: int
+    size: int
+    nocow: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageProbe:
+    """What a VM image folder looks like (probe_dir). present: a folder (a symbolic link is not:
+    link holds its target, and it is never created, marked or listed); btrfs None: unknown;
+    nocow None: not readable; listed False: not listable by this user; images: regular files,
+    not .iso, not the *.cow-old leftovers of a conversion (leftovers)."""
+
+    scope: ImageScope
+    path: str
+    what: str
+    present: bool = False
+    link: str | None = None
+    btrfs: bool | None = None
+    nocow: bool | None = None
+    listed: bool = False
+    images: list[ImageInfo] = field(default_factory=list)
+    leftovers: list[str] = field(default_factory=list)
+
 
 def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
     """A disk as a message names it: word + its target (sda). Without a
@@ -71,9 +248,9 @@ def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
     return f"unnamed disk on {source}" if source else "unnamed disk"
 
 
-def domain_parts(xml_text: str) -> dict[str, Any]:
-    """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
-    problems}. problems are disks a file copy cannot back up (block, network,
+def domain_parts(xml_text: str) -> DomainParts:
+    """From the inactive definition: uuid, disks [path], nvram, tpm, skipped,
+    problems. problems are disks a file copy cannot back up (block, network,
     pool volumes): the backup refuses then, rather than leaving one out."""
     root = ET.fromstring(xml_text)
     disks: list[str] = []
@@ -113,17 +290,17 @@ def domain_parts(xml_text: str) -> dict[str, Any]:
             path = s.get("file") or ""
         nvram = path
     tpm = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
-    return {
-        "uuid": (root.findtext("uuid") or "").strip(),
-        "disks": disks,
-        "nvram": nvram,
-        "tpm": tpm,
-        "skipped": skipped,
-        "problems": problems,
-    }
+    return DomainParts(
+        uuid=(root.findtext("uuid") or "").strip(),
+        disks=disks,
+        nvram=nvram,
+        tpm=tpm,
+        skipped=skipped,
+        problems=problems,
+    )
 
 
-def index_entry(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
+def index_entry(manifest: Mapping[str, object], path: str) -> dict[str, object]:
     return {
         "vm": manifest["vm"],
         "timestamp": manifest["timestamp"],
@@ -159,23 +336,22 @@ def restore_lines(vm: str, dest_dir: str, copied: Sequence[tuple[str, bool]], tp
     return lines
 
 
-def live_disks(xml_text: str) -> list[dict[str, Any]]:
-    """[{target, device, type, source, backing}] of a definition's disks;
-    backing: the live definition shows a backing chain (an overlay)."""
-    out: list[dict[str, Any]] = []
+def live_disks(xml_text: str) -> list[LiveDisk]:
+    """The disks of a definition; backing: the live definition shows a backing chain (an overlay)."""
+    out: list[LiveDisk] = []
     for disk in ET.fromstring(xml_text).findall("devices/disk"):
         t, s, bs = disk.find("target"), disk.find("source"), disk.find("backingStore")
         src = ""
         if s is not None:
             src = s.get("file") or s.get("dev") or s.get("name") or s.get("volume") or ""
         out.append(
-            {
-                "target": (t.get("dev") if t is not None else None) or "",
-                "device": disk.get("device", "disk"),
-                "type": disk.get("type", "file"),
-                "source": src,
-                "backing": bs is not None and bs.find("source") is not None,
-            }
+            LiveDisk(
+                target=(t.get("dev") if t is not None else None) or "",
+                device=disk.get("device", "disk"),
+                kind=disk.get("type", "file"),
+                source=src,
+                backing=bs is not None and bs.find("source") is not None,
+            )
         )
     return out
 
@@ -379,11 +555,11 @@ def version_changes(old: Mapping[str, str] | None, new: Mapping[str, str] | None
     return out
 
 
-def convert_lines(img: Mapping[str, Any], system: bool) -> list[str]:
+def convert_lines(img: ImageInfo, system: bool) -> list[str]:
     """The commands that make an existing image NOCOW (never run by CST)."""
     q = shlex.quote
     s = "sudo " if system else ""
-    f, old = q(img["path"]), q(img["path"] + ".cow-old")
+    f, old = q(img.path), q(img.path + ".cow-old")
     return [
         f"{s}mv {f} {old}",
         f"{s}install -m 0600 /dev/null {f}      # new empty file, private until cp -a sets the mode",
@@ -394,289 +570,127 @@ def convert_lines(img: Mapping[str, Any], system: bool) -> list[str]:
     ]
 
 
-DRIVER_WANTED = (("cache", "none"), ("io", "native"), ("discard", "unmap"), ("detect_zeroes", "unmap"))
-
-OLD_NICS = ("e1000", "e1000e", "rtl8139")
-
-# Interface types with an emulated card (a <model>); hostdev, vhostuser and vdpa are not.
-NIC_TYPES = ("network", "bridge", "direct", "user", "ethernet", "mcast", "server", "client", "udp", "null", "vds")
-
-LINUX_OS = (
-    "fedoraproject.org",
-    "redhat.com",
-    "centos.org",
-    "almalinux.org",
-    "rockylinux.org",
-    "debian.org",
-    "ubuntu.com",
-    "archlinux.org",
-    "opensuse.org",
-    "suse.com",
-    "alpinelinux.org",
-    "gentoo.org",
-    "nixos.org",
-    "linuxmint.com",
-    "manjaro.org",
-    "kali.org",
-    "endlessos.com",
-    "silverblue",
-    "popos",
-    "elementary.io",
-)
+def todo_note(d: ImageProbe) -> str:
+    """What nocow plan says after a folder it would mark: not there yet, or its mark not readable."""
+    if not d.present:
+        return " (not created yet)"
+    if d.nocow is None:
+        return " (mark not readable here: set again, harmless)"
+    return ""
 
 
-def guest_kind(root: ET.Element) -> tuple[str, str]:
-    """("windows" | "linux" | "unknown", why). From the libosinfo id that
-    virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
-    enlightenments (only Windows guests use them)."""
-    for el in root.iter():
-        if el.tag.endswith("}os") and el.get("id"):
-            osid = el.get("id") or ""
-            if "microsoft.com/win" in osid:
-                return "windows", f"libosinfo {osid}"
-            if any(k in osid for k in LINUX_OS):
-                return "linux", f"libosinfo {osid}"
-            return "unknown", f"libosinfo {osid}"
-    if root.find("features/hyperv") is not None:
-        return "windows", "Hyper-V enlightenments in <features>"
-    return "unknown", "no libosinfo id in the definition"
-
-
-def disk_index(name: str | None) -> int | None:
-    """sda -> 0, sdz -> 25, sdaa -> 26 (libvirt's numbering); None if not sdX/hdX/vdX."""
-    m = re.fullmatch(r"[shv]d([a-z]+)", name or "")
-    if not m:
-        return None
-    n = 0
-    for ch in m.group(1):
-        n = n * 26 + (ord(ch) - ord("a") + 1)
-    return n - 1
-
-
-def disk_name(idx: int) -> str:
-    s = ""
-    idx += 1
-    while idx:
-        idx, r = divmod(idx - 1, 26)
-        s = chr(ord("a") + r) + s
-    return "sd" + s
-
-
-def tune_domain(
-    xml_text: str, kn: Mapping[str, bool], allow_bus: bool = True
-) -> tuple[str | None, list[str], list[str], list[str]]:
-    """(after_xml, changes, held, notes) for a definition: changes are what
-    the new definition differs in, held the bus and network card changes
-    left out because allow_bus is False (a guest without virtio drivers),
-    notes things reported but not changed. Only elements that differ from
-    the desired state are touched."""
-    keep_prefixes(xml_text)
-    root = ET.fromstring(xml_text)
-    changes: list[str] = []
-    held: list[str] = []
-    notes: list[str] = []
-    devices = root.find("devices")
-    if devices is None:
-        return None, changes, held, ["no <devices> in the definition"]
-    disks = devices.findall("disk")
-    names: set[str | None] = {(t.get("dev") if (t := d.find("target")) is not None else None) for d in disks}
-    ctrl_idx: int | None = None
-
-    def virtio_scsi_index() -> int:
-        nonlocal ctrl_idx
-        if ctrl_idx is not None:
-            return ctrl_idx
-        scsi = [c for c in devices.findall("controller") if c.get("type") == "scsi"]
-        found = next((c for c in scsi if c.get("model") == "virtio-scsi"), None)
-        if found is not None:
-            ctrl_idx = int(found.get("index", "0"))
-            return ctrl_idx
-        idx = max((int(c.get("index", "0")) for c in scsi), default=-1) + 1
-        el = ET.Element("controller", {"type": "scsi", "index": str(idx), "model": "virtio-scsi"})
-        kids = list(devices)
-        last = max((i for i, c in enumerate(kids) if c.tag == "controller"), default=None)
-        if last is None:
-            last = max((i for i, c in enumerate(kids) if c.tag == "disk"), default=len(kids) - 1)
-        devices.insert(last + 1, el)
-        changes.append(f"add a virtio-scsi controller (index {idx})")
-        ctrl_idx = idx
-        return idx
-
-    def used_units(idx: int) -> set[int]:
-        """Units taken on controller idx (bus 0, target 0): SCSI disks and
-        CD-ROMs, and SCSI host devices (<hostdev type='scsi'>)."""
-        out: set[int] = set()
-        on_scsi = [d for d in disks if (t := d.find("target")) is not None and t.get("bus") == "scsi"]
-        on_scsi += [h for h in devices.findall("hostdev") if h.get("type") == "scsi"]
-        for d in on_scsi:
-            a = d.find("address")
-            if (
-                a is not None
-                and a.get("type") == "drive"
-                and a.get("controller", "0") == str(idx)
-                and a.get("bus", "0") == "0"
-                and a.get("target", "0") == "0"
-            ):
-                out.add(int(a.get("unit", "0")))
+def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
+    """Lines describing one probed folder (nocow plan and status); prog names cst vm in the hints."""
+    head = f"{d.path}  [{d.what}]"
+    if d.link is not None:
+        return [
+            f"{head}: a symbolic link to {d.link}: not managed by CST (set the mark on the real "
+            f"folder by hand if it is on btrfs: chattr +C <folder>)"
+        ]
+    if not d.present:
+        return [f"{head}: not present"]
+    if d.btrfs is False:
+        return [f"{head}: not on btrfs (NOCOW does not apply)"]
+    out = [head]
+    root_hint = f"{prog} nocow plan --root"
+    if d.nocow is None:
+        out.append(f"  NOCOW mark (+C): not readable as your user (root-only folder): {root_hint}")
+    else:
+        out.append(
+            "  NOCOW mark (+C): "
+            + ("yes" if d.nocow else f"no: {prog} nocow apply sets it (only files created later get it)")
+        )
+    if not d.listed:
+        if d.nocow is not None or d.scope != "system":
+            out.append("  images: folder not listable as your user")
         return out
-
-    for disk in disks:
-        if disk.get("device", "disk") != "disk":
-            continue  # cdrom, floppy, lun: left as they are
-        target = disk.find("target")
-        dev = (target.get("dev") or "?") if target is not None else "?"
-        kind = disk.get("type", "file")
-        if kind not in ("file", "block"):
-            notes.append(f"disk {dev}: a {kind} disk: left as it is (only file and block disks are tuned)")
-            continue
-        if kn["VM_TUNE_DISK_DRIVER"]:
-            drv = disk.find("driver")
-            if drv is None:
-                drv = ET.Element("driver", {"name": "qemu"})
-                disk.insert(0, drv)
-            if drv.get("name", "qemu") != "qemu":
-                notes.append(f"disk {dev}: driver {drv.get('name')}: left as it is")
-            else:
-                for k, v in DRIVER_WANTED:
-                    if drv.get(k) != v:
-                        changes.append(f"disk {dev}: {k} {drv.get(k) or '(default)'} -> {v}")
-                        drv.set(k, v)
-        bus = target.get("bus") if target is not None else None
-        if not kn["VM_TUNE_DISK_BUS"] or bus not in ("sata", "ide"):
-            continue
-        if not allow_bus:
-            held.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi)")
-            continue
-        assert target is not None
-        idx = virtio_scsi_index()
-        new = dev
-        if not dev.startswith("sd"):
-            n = 0
-            while disk_name(n) in names:
-                n += 1
-            new = disk_name(n)
-            names.add(new)
-            target.set("dev", new)
-        target.set("bus", "scsi")
-        addr = disk.find("address")
-        if addr is not None and addr.get("type") == "drive":
-            disk.remove(addr)
-        taken = used_units(idx)
-        want = disk_index(new)
-        unit = want if want is not None and want not in taken else min(set(range(len(taken) + 1)) - taken)
-        ET.SubElement(
-            disk, "address", {"type": "drive", "controller": str(idx), "bus": "0", "target": "0", "unit": str(unit)}
+    cow = [i for i in d.images if i.nocow is False]
+    unknown = [i for i in d.images if i.nocow is None]
+    ok = [i for i in d.images if i.nocow]
+    if not d.images:
+        out.append("  images: none")
+    if ok:
+        out.append(f"  NOCOW images: {', '.join(i.name for i in ok)}")
+    if unknown:
+        out.append(
+            f"  images whose mark is not readable as your user: {', '.join(i.name for i in unknown)} ({root_hint})"
         )
-        changes.append(
-            f"disk {dev}: bus {bus} -> scsi (virtio-scsi controller {idx}, unit {unit})"
-            + (f", renamed {dev} -> {new}" if new != dev else "")
+    for i in cow:
+        out.append(
+            f"  still copy-on-write: {i.name}  {format_bytes_gib_mib(i.alloc, mib_decimals=1)} allocated, {format_bytes_gib_mib(i.size, mib_decimals=1)} apparent"
         )
-    for nic in devices.findall("interface"):
-        mac = nic.find("mac")
-        label = f"network card {mac.get('address') if mac is not None else '(no MAC)'}"
-        if nic.get("type") not in NIC_TYPES:
-            continue  # hostdev, vhostuser, vdpa: not an emulated card
-        model = nic.find("model")
-        m = model.get("type") if model is not None else None
-        if m is None:
-            notes.append(f"{label}: no <model> (QEMU's default card): add <model type='virtio'/> by hand if wanted")
-            continue
-        if not kn["VM_TUNE_NIC"] or m not in OLD_NICS:
-            continue
-        if not allow_bus:
-            held.append(f"{label}: {m} -> virtio")
-            continue
-        assert model is not None
-        model.set("type", "virtio")
-        changes.append(f"{label}: {m} -> virtio (same MAC)")
-    bal = devices.find("memballoon")
-    if bal is None:
-        notes.append("no <memballoon>: not added (libvirt adds one by default; it was removed on purpose?)")
-    elif bal.get("model") == "none":
-        notes.append("memballoon model='none': left as it is")
-    ET.indent(root, space="  ")
-    return ET.tostring(root, encoding="unicode") + "\n", changes, held, notes
+        if verbose:
+            out.append(
+                f"    to convert (every VM using it shut off; needs about {format_bytes_gib_mib(i.alloc, mib_decimals=1)} free):"
+            )
+            out += [f"      {ln}" for ln in convert_lines(i, d.scope == "system")]
+    for n in d.leftovers:
+        out.append(f"  leftover of a conversion: {n} (remove it once the VM booted well from the new file)")
+    return out
 
 
-def normalized(xml_text: str) -> str:
-    keep_prefixes(xml_text)
-    root = ET.fromstring(xml_text)
-    ET.indent(root, space="  ")
-    return ET.tostring(root, encoding="unicode") + "\n"
-
-
-WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves to virtio-scsi
-(else: INACCESSIBLE_BOOT_DEVICE). With the guest running:
-  1. attach the virtio-win ISO (fedorapeople.org virtio-win, check its sha256) as a CD-ROM;
-  2. in an admin PowerShell (D: = the ISO; the .msi is unsigned, the .inf files are WHQL-signed):
-       Get-AuthenticodeSignature D:\\vioscsi\\w11\\amd64\\vioscsi.cat
-       pnputil /add-driver D:\\vioscsi\\w11\\amd64\\vioscsi.inf /install
-       pnputil /add-driver D:\\NetKVM\\w11\\amd64\\netkvm.inf /install
-       pnputil /add-driver D:\\Balloon\\w11\\amd64\\balloon.inf /install
-  3. hot-add a virtio-scsi controller so Windows binds vioscsi as a boot driver:
-       virsh -c qemu:///system attach-device {vm} ctrl.xml --live
-     (ctrl.xml: <controller type='scsi' model='virtio-scsi'/>; it needs a free PCIe root port); then in Windows
-       sc qc vioscsi        -> START_TYPE must be 0 (BOOT_START)
-  4. shut Windows down fully (Fast Startup makes the Start menu's Shut down a hibernation, and
-     resuming it on a changed boot controller can fail): in an admin prompt `shutdown /s /t 0`,
-     or Shift + Shut down; then: {cst} vm tune apply {vm} --guest-has-virtio
-Details: vm/README.md in CST, section "Windows guests"."""
-
-
-def parse_args(argv: Sequence[str]) -> dict[str, Any]:
-    """{cmd, sub, vm, full, guest_virtio, root, nas, keep, no_quiesce}."""
-    a: dict[str, Any] = {
-        "cmd": "help",
-        "sub": None,
-        "vm": None,
-        "full": False,
-        "guest_virtio": False,
-        "root": False,
-        "nas": False,
-        "keep": None,
-        "no_quiesce": False,
-    }
+def parse_args(argv: Sequence[str]) -> VmArgs:
+    """The command line of cst vm; Usage when it is not one."""
     if not argv or argv[0] in ("help", "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
-        return a
-    a["cmd"], rest = argv[0], list(argv[1:])
-    if a["cmd"] not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
-        raise Usage(f"unknown command '{a['cmd']}'")
-    subs: dict[str, tuple[str, ...]] = {
-        "tune": ("plan", "apply"),
-        "nocow": ("plan", "apply"),
-        "backup-timer": ("on", "off", "status"),
-    }
-    if a["cmd"] in subs:
-        if not rest or rest[0] not in subs[a["cmd"]]:
-            raise Usage(f"{a['cmd']}: {' or '.join(subs[a['cmd']])}")
-        a["sub"], rest = rest[0], rest[1:]
-    flags = {
-        "backup": {"--full": "full", "--nas": "nas", "--no-quiesce": "no_quiesce"},
-        "tune": {"--guest-has-virtio": "guest_virtio"},
-        "nocow": {"--root": "root"} if a["sub"] == "plan" else {},
-    }.get(a["cmd"], {})
-    takes_vm = a["cmd"] != "nocow"
-    where = " ".join(filter(None, (a["cmd"], a["sub"])))
+        return VmArgs()
+    word, rest = argv[0], list(argv[1:])
+    cmd = COMMANDS.get(word)
+    if cmd is None:
+        raise Usage(f"unknown command '{word}'")
+    sub: VmSub | None = None
+    if cmd in SUBS:
+        subs = SUBS[cmd]
+        sub = subs.get(rest[0]) if rest else None
+        if sub is None:
+            raise Usage(f"{cmd}: {' or '.join(subs)}")
+        rest = rest[1:]
+    flags = _FLAGS.get(cmd, ())
+    if cmd == "nocow" and sub != "plan":
+        flags = ()
+    takes_vm = cmd != "nocow"
+    where = " ".join(filter(None, (cmd, sub)))
+    seen: set[str] = set()
+    vm: str | None = None
+    keep: str | None = None
     while rest:
         x = rest.pop(0)
-        if a["cmd"] == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and a["keep"] is None:
+        if cmd == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
             value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
             if not valid_keep(value):
                 raise Usage(
                     f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
                     "starting with cst- or vm:), e.g. pre-f46"
                 )
-            a["keep"] = value
-        elif x in flags and not a[flags[x]]:
-            a[flags[x]] = True
-        elif takes_vm and not x.startswith("-") and a["vm"] is None:
-            a["vm"] = x
+            keep = value
+        elif x in flags and x not in seen:
+            seen.add(x)
+        elif takes_vm and not x.startswith("-") and vm is None:
+            vm = x
         else:
             raise Usage(f"{where}: unexpected argument '{x}'")
-    if a["full"] and a["nas"]:
+    a = VmArgs(
+        cmd=cmd,
+        sub=sub,
+        vm=vm,
+        full="--full" in seen,
+        guest_virtio="--guest-has-virtio" in seen,
+        root="--root" in seen,
+        nas="--nas" in seen,
+        keep=keep,
+        no_quiesce="--no-quiesce" in seen,
+    )
+    if a.full and a.nas:
         raise Usage("backup: --full is for the local copy, --nas for the NAS: one of them")
-    if (a["keep"] is not None or a["no_quiesce"]) and not a["nas"]:
+    if (a.keep is not None or a.no_quiesce) and not a.nas:
         raise Usage("backup: --keep-tag and --no-quiesce go with --nas")
     return a
+
+
+# The flags each command takes (nocow: --root with plan only).
+_FLAGS: Final[dict[VmCommand, tuple[str, ...]]] = {
+    "backup": ("--full", "--nas", "--no-quiesce"),
+    "tune": ("--guest-has-virtio",),
+    "nocow": ("--root",),
+}

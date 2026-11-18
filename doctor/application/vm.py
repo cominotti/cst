@@ -46,7 +46,7 @@ from doctor.domain import (
     host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
-from vm.domain import guest_kind, tune_domain
+from vm.domain.tune import guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
@@ -490,32 +490,32 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = 
         return
     system = vm_tools.system_images
     for d in vm_tools.image_dirs():
-        p = vm_tools.probe_dir(d, (lambda x: host.path(HostPath(x))) if d["path"] == system else (lambda x: x))
-        if not p["present"] or p["btrfs"] is False:
+        p = vm_tools.probe_dir(d, (lambda x: host.path(HostPath(x))) if d.path == system else (lambda x: x))
+        if not p.present or p.btrfs is False:
             continue
-        path = p["path"]
-        if p["nocow"] is None and not p["listed"]:
+        path = p.path
+        if p.nocow is None and not p.listed:
             yield Result(
                 INFO,
                 f"VM image folder {path}: NOCOW mark not readable as your user (root's "
                 f"folder); {host.cst} vm nocow plan --root shows it",
             )
             continue
-        cow = [i for i in p["images"] if i["nocow"] is False]
-        if p["nocow"] is False:
+        cow = [i for i in p.images if i.nocow is False]
+        if p.nocow is False:
             yield Result(
                 INFO,
                 f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
                 f"copy-on-write; {host.cst} vm nocow apply sets it",
             )
         if cow:
-            listed = ", ".join(f"{i['name']} ({format_bytes_gib_mib(i['alloc'], mib_decimals=1)})" for i in cow)
+            listed = ", ".join(f"{i.name} ({format_bytes_gib_mib(i.alloc, mib_decimals=1)})" for i in cow)
             yield Result(
                 INFO,
                 f"VM image folder {path}: still copy-on-write: {listed}; "
                 f"{host.cst} vm nocow plan prints how to convert (never done automatically)",
             )
-        if p["nocow"] and not cow:
+        if p.nocow and not cow:
             yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
 
 

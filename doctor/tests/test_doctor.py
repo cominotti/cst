@@ -77,7 +77,8 @@ from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
 from tests.probes import bytes_program
-from vm import adapters as vm_adapters
+from vm.adapters import images as vm_images
+from vm.wiring import vm_settings
 
 
 class _ScandirIter(Protocol):
@@ -1981,15 +1982,17 @@ class VmHardwareTest(VmTest):
                 raise PermissionError(13, "Permission denied")
             return real_scandir(p)
 
-        # The probe lives in vm.adapters (VmTools calls it there).
+        # The probe lives in vm.adapters.images (VmTools calls it there).
         with (
             mock.patch.dict(os.environ, {"HOME": self.tmp}),
-            mock.patch.object(vm_adapters, "is_btrfs", lambda p: btrfs),
-            mock.patch.object(vm_adapters, "readable_inode_flags", lambda p: flags.get(p, 0)),
+            mock.patch.object(vm_images, "is_btrfs", lambda p: btrfs),
+            mock.patch.object(vm_images, "readable_inode_flags", lambda p: flags.get(p, 0)),
             mock.patch.object(os, "scandir", scandir),
         ):
             return list(
-                doc_vm.check_vm_image_dirs(doc_adapters.Host(self.env, repo=REPO), vm_tools=doc_adapters.VmTools())
+                doc_vm.check_vm_image_dirs(
+                    doc_adapters.Host(self.env, repo=REPO), vm_tools=doc_adapters.VmTools(vm_settings())
+                )
             )
 
     def test_image_folders(self) -> None:
@@ -2120,7 +2123,7 @@ class CommandLineTest(Scratch):
                 calls.append(path)
                 return {"VM_NOCOW": False}
 
-        wired = doc_registry.wired_checks(Tools())
+        wired = doc_registry.wired_checks(Tools(vm_settings()))
         self.assertEqual([(a, fn.__name__) for a, fn in wired], [(a, fn.__name__) for a, fn in doc_registry.CHECKS])
         by_name = {fn.__name__: fn for _, fn in wired}
         host = doc_adapters.Host(self.env, repo=REPO)
@@ -2514,7 +2517,7 @@ class HermeticTest(Scratch):
         self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
         host = doc_adapters.Host(self.env, repo=REPO)
         with mock.patch.object(subprocess, "run", recording_run):
-            results = doc_registry.run_checks(host, doc_registry.wired_checks(doc_adapters.VmTools()))
+            results = doc_registry.run_checks(host, doc_registry.wired_checks(doc_adapters.VmTools(vm_settings())))
         crashed = [r.message for _, r in results if "the check itself failed" in r.message]
         self.assertEqual(crashed, [])
         return seen
