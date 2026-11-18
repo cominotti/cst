@@ -107,16 +107,16 @@ def version_of(data: object, field: str) -> int | None:
 #   that game.state exists (the profile is on): its name and place never
 #   change. Neither has a version yet.
 _TABLE: Final = r"""
-alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/cst-pending-alerts doctor/application.py     | first line "cst-alert 1"
+alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/cst-pending-alerts doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/adapters/monitor.py | btrfs/btrfs-notify                                 | none (plain text, one boot)
 bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
-vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters.py                   | vm/adapters.py doctor/application.py               | "version"
-install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application.py | "format"
-game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game-profile                 | cpu/game-profile cpu/cli.py doctor/application.py  | none (its existence is the contract)
-game-intended      | /run/cpu-setup/game.intended               | 0 | cpu/game-profile                 | cpu/game-profile doctor/application.py             | none yet
+vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters.py                   | vm/adapters.py doctor/application/vm.py            | "version"
+install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
+game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game-profile                 | cpu/game-profile cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
+game-intended      | /run/cpu-setup/game.intended               | 0 | cpu/game-profile                 | cpu/game-profile doctor/application/cpu.py         | none yet
 """
 
 

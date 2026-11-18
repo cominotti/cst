@@ -20,6 +20,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -50,11 +51,20 @@ if REPO not in sys.path:
 
 from doctor import (
     adapters as doc_adapters,
-    application as doc_app,
     cli as doc_cli,
     domain as doc_domain,
     presenter as doc_presenter,
     wiring as doc_wiring,
+)
+from doctor.application import (
+    alerts as doc_alerts,
+    btrfs as doc_btrfs,
+    cpu as doc_cpu,
+    install as doc_install,
+    registry as doc_registry,
+    services as doc_services,
+    shared as doc_shared,
+    vm as doc_vm,
 )
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
@@ -527,7 +537,7 @@ class ServicesTest(Scratch):
     def test_user_units_skipped_as_root(self) -> None:
         host = doc_adapters.Host(self.env, repo=REPO)
         host.uid = 0
-        res = list(doc_app.check_user_units(host))
+        res = list(doc_services.check_user_units(host))
         self.assertEqual(res[0].status, doc_domain.INFO)
         self.assertIn("running as root", res[0].message)
 
@@ -827,23 +837,23 @@ class BtrfsTest(Scratch):
         os.makedirs(hc)
         with open(os.path.join(hc, "btrfs-health-check"), "w") as f:
             f.write("UNALLOC_MIN_GIB=70\nUNALLOC_CRIT_GIB=9\n")
-        self.assertEqual(doc_app.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (70, 9))
+        self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (70, 9))
 
     def test_thresholds_come_from_the_health_check(self) -> None:
-        self.assertEqual(doc_app.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (50, 5))
+        self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (50, 5))
         # No checkout copy: the installed one decides.
         no_repo = doc_adapters.Host(self.env, repo=os.path.join(self.tmp, "nope"))
         hc = os.path.join(self.root, "usr", "local", "sbin")
         os.makedirs(hc)
         with open(os.path.join(hc, "btrfs-health-check"), "w") as f:
             f.write("UNALLOC_MIN_GIB=600       # x\nUNALLOC_CRIT_GIB=7\n")
-        self.assertEqual(doc_app.unalloc_thresholds(no_repo), (600, 7))
+        self.assertEqual(doc_btrfs.unalloc_thresholds(no_repo), (600, 7))
         self.fs()
-        res = [r for a, r in doc_app.run_checks(no_repo) if a == "btrfs"]
+        res = [r for a, r in doc_registry.run_checks(no_repo) if a == "btrfs"]
         self.assertEqual(res[-1].status, doc_domain.WARN, res)
         self.assertIn("warning below 600 GiB, critical below 7 GiB", res[-1].message)
         os.unlink(os.path.join(hc, "btrfs-health-check"))
-        self.assertEqual(doc_app.unalloc_thresholds(no_repo), doc_domain.UNALLOC_DEFAULTS)
+        self.assertEqual(doc_btrfs.unalloc_thresholds(no_repo), doc_domain.UNALLOC_DEFAULTS)
 
     def test_reclaim_off_on_the_root_warns(self) -> None:
         self.fs(dyn=0, per=1)
@@ -1197,7 +1207,7 @@ class GameProfileTest(Scratch):
         with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
             f.write("TARGET_USER='tester'\n")
         with mock.patch.dict(os.environ, self.env, clear=True):
-            res = list(doc_app.check_game_profile_drift(host))
+            res = list(doc_cpu.check_game_profile_drift(host))
         self.assert_read_only()
         return res
 
@@ -1210,10 +1220,10 @@ class GameProfileTest(Scratch):
 
     def test_off_is_ok_and_absent_module_is_silent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=True):
-            res = list(doc_app.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))
+            res = list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))
             self.assertEqual([(r.status, r.message) for r in res], [(doc_domain.OK, "game profile: off")])
             os.remove(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"))
-            self.assertEqual(list(doc_app.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO))), [])
+            self.assertEqual(list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO))), [])
         self.assertEqual(self.calls(), [])
 
     def test_all_settings_hold(self) -> None:
@@ -1279,7 +1289,7 @@ class GameProfileTest(Scratch):
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
         host = doc_adapters.Host(self.env, repo=REPO)
-        mgr, why = doc_app.user_manager(host)  # TARGET_USER='nobody-here' is not this user
+        mgr, why = doc_cpu.user_manager(host)  # TARGET_USER='nobody-here' is not this user
         self.assertIsNone(mgr)
         self.assertIn("the profile is for nobody-here", why)
 
@@ -1291,7 +1301,7 @@ class GameProfileTest(Scratch):
         os.makedirs(os.path.join(rt, "user-1000.slice.d"))
         open(os.path.join(rt, "user-1000.slice.d", "10-other.conf"), "w").close()
         with mock.patch.dict(os.environ, self.env, clear=True):
-            res = list(doc_app.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))
+            res = list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO)))
         self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
         self.assertIn(
             "/run/systemd/system/user.slice.d/zz-cst-game.conf, "
@@ -1344,7 +1354,7 @@ class UserManagerBoxesTest(Scratch):
         host = doc_adapters.Host(self.env, repo=REPO)
         host.uid = uid
         with mock.patch.dict(os.environ, self.env, clear=True):
-            res = list(doc_app.check_user_manager_boxes(host))
+            res = list(doc_cpu.check_user_manager_boxes(host))
         self.assertEqual(self.calls(), [])  # files only, no command
         return res
 
@@ -1583,14 +1593,14 @@ class VmTest(Scratch):
         os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
         with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
             f.write("VM_CPU_DISABLE='cet-ss cet-ibt'\n# VM_CPU_DISABLE='vmx-mbec'\nVM_CPU_DISABLE=''\n")
-        self.assertEqual(doc_app.cpu_disable_names(doc_adapters.Host(self.env, repo=REPO)), [])
+        self.assertEqual(doc_vm.cpu_disable_names(doc_adapters.Host(self.env, repo=REPO)), [])
         with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
             f.write("VM_CPU_DISABLE=''\nVM_CPU_DISABLE=\"cet-ss\"\n")
-        self.assertEqual(doc_app.cpu_disable_names(doc_adapters.Host(self.env, repo=REPO)), ["cet-ss"])
+        self.assertEqual(doc_vm.cpu_disable_names(doc_adapters.Host(self.env, repo=REPO)), ["cet-ss"])
 
     def test_knob_from_vm_pin(self) -> None:
         host = doc_adapters.Host(self.env, repo=REPO)
-        self.assertEqual(doc_app.cpu_disable_names(host), list(CPU_FEATURES))
+        self.assertEqual(doc_vm.cpu_disable_names(host), list(CPU_FEATURES))
 
     def test_no_libvirt_is_info_never_warn(self) -> None:
         for env in ({"FIX_VIRSH": ""}, {"PATH": f"{self.bin}:/usr/bin:/bin"}):
@@ -1979,7 +1989,7 @@ class VmHardwareTest(VmTest):
             mock.patch.object(os, "scandir", scandir),
         ):
             return list(
-                doc_app.check_vm_image_dirs(doc_adapters.Host(self.env, repo=REPO), vm_tools=doc_adapters.VmTools())
+                doc_vm.check_vm_image_dirs(doc_adapters.Host(self.env, repo=REPO), vm_tools=doc_adapters.VmTools())
             )
 
     def test_image_folders(self) -> None:
@@ -2022,10 +2032,10 @@ class VmHardwareTest(VmTest):
 
     def test_unwired_vm_tools_is_info(self) -> None:
         host = doc_adapters.Host(self.env, repo=REPO)
-        res = list(doc_app.check_vm_hardware(host, vm_tools=None, domains_fn=lambda host: (["win"], "")))
+        res = list(doc_vm.check_vm_hardware(host, vm_tools=None, domains_fn=lambda host: (["win"], "")))
         self.assertEqual(res[0].status, doc_domain.INFO)
         self.assertIn("VM hardware: not checked (the vm package is not wired in)", res[0].message)
-        self.assertEqual(list(doc_app.check_vm_image_dirs(host, vm_tools=None)), [])
+        self.assertEqual(list(doc_vm.check_vm_image_dirs(host, vm_tools=None)), [])
 
 
 class CommandLineTest(Scratch):
@@ -2077,7 +2087,7 @@ class CommandLineTest(Scratch):
             raise RuntimeError("bad")
             yield  # pragma: no cover
 
-        res = doc_app.run_checks(doc_adapters.Host(self.env, repo=REPO), [("x", boom)])
+        res = doc_registry.run_checks(doc_adapters.Host(self.env, repo=REPO), [("x", boom)])
         self.assertEqual(res[0][1].status, doc_domain.ERROR)
         out = io.StringIO()
         self.assertEqual(doc_presenter.render(res, False, out), 1)
@@ -2110,22 +2120,44 @@ class CommandLineTest(Scratch):
                 calls.append(path)
                 return {"VM_NOCOW": False}
 
-        wired = doc_app.wired_checks(Tools())
-        self.assertEqual([(a, fn.__name__) for a, fn in wired], [(a, fn.__name__) for a, fn in doc_app.CHECKS])
+        wired = doc_registry.wired_checks(Tools())
+        self.assertEqual([(a, fn.__name__) for a, fn in wired], [(a, fn.__name__) for a, fn in doc_registry.CHECKS])
         by_name = {fn.__name__: fn for _, fn in wired}
         host = doc_adapters.Host(self.env, repo=REPO)
         res = list(by_name["check_vm_image_dirs"](host))
         self.assertIn("NOCOW not managed", res[0].message)
         self.assertEqual(calls, [host.path("/etc/cst/vm.conf")])
-        unwired = {fn.__name__: fn for _, fn in doc_app.CHECKS}
+        unwired = {fn.__name__: fn for _, fn in doc_registry.CHECKS}
         self.assertIs(by_name["check_staged"], unwired["check_staged"])
 
     def test_registry_order(self) -> None:
         areas: list[str] = []
-        for a, _ in doc_app.CHECKS:
+        for a, _ in doc_registry.CHECKS:
             if a not in areas:
                 areas.append(a)
         self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "install"])
+
+    def test_every_module_that_registers_checks_is_an_area(self) -> None:
+        # registry.CHECKS holds only the checks of the modules in AREAS: a module of doctor/application/
+        # that registers checks (@check) and is missing there would drop them from the report unseen.
+        app_dir = os.path.join(DOCTOR_DIR, "application")
+        registering: list[str] = []
+        for fn in sorted(os.listdir(app_dir)):
+            if not fn.endswith(".py") or fn == "__init__.py":
+                continue
+            module = importlib.import_module(f"doctor.application.{fn.removesuffix('.py')}")
+            if module is not doc_registry and getattr(module, "CHECKS", None):
+                registering.append(module.__name__)
+        self.assertIn("doctor.application.vm", registering)  # the scan finds the area modules
+        areas = [m.__name__ for m in doc_registry.AREAS]
+        self.assertEqual(sorted(registering), sorted(areas))
+        self.assertEqual(len(set(areas)), len(areas), "an area listed twice would print its checks twice")
+        # One area name per module, and no two modules share one: the report starts a new "== area"
+        # header each time the area changes, so a check registered under another module's name would
+        # split that area in two.
+        names = [{area for area, _ in m.CHECKS} for m in doc_registry.AREAS]
+        self.assertEqual([len(n) for n in names], [1] * len(names), names)
+        self.assertEqual(len(set().union(*names)), len(names), names)
 
 
 class InstallAreaTest(Scratch):
@@ -2149,7 +2181,7 @@ class InstallAreaTest(Scratch):
         self.svc.mark(self.record, component)
 
     def results(self) -> list[Result]:
-        return list(doc_app.check_install(self.host, installed=self.files))
+        return list(doc_install.check_install(self.host, installed=self.files))
 
     def warns(self) -> list[Result]:
         return [r for r in self.results() if r.status == doc_domain.WARN]
@@ -2265,7 +2297,7 @@ class InstallAreaTest(Scratch):
         os.makedirs(os.path.dirname(gc))
         with open(gc, "w") as f:
             f.write("#!/usr/bin/python3\n# a plain-script copy of an older CST\n")
-        res = list(doc_app.check_install(self.host, installed=doc_adapters.InstalledFiles("")))
+        res = list(doc_install.check_install(self.host, installed=doc_adapters.InstalledFiles("")))
         self.assertEqual(res, [])
 
     def test_a_component_the_record_does_not_list_is_compared_as_before_the_record(self) -> None:
@@ -2290,10 +2322,10 @@ class InstallAreaTest(Scratch):
     def test_a_vm_backup_timer_without_btrfs_notify_warns(self) -> None:
         wants = os.path.join(self.root, "etc/systemd/system/timers.target.wants")
         os.makedirs(wants)
-        res = list(doc_app.check_vm_backup_alerts(self.host))
+        res = list(doc_vm.check_vm_backup_alerts(self.host))
         self.assertEqual(res, [])
         open(os.path.join(wants, "cst-vm-backup@win.timer"), "w").close()
-        res = list(doc_app.check_vm_backup_alerts(self.host))
+        res = list(doc_vm.check_vm_backup_alerts(self.host))
         self.assertEqual(len(res), 1)
         self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
         # cst vm sends through cst_core's notify adapter, which keeps the alert for the alerts area.
@@ -2302,14 +2334,14 @@ class InstallAreaTest(Scratch):
             res[0].message,
         )
         self.install("btrfs:alerts")
-        self.assertEqual(list(doc_app.check_vm_backup_alerts(self.host)), [])
+        self.assertEqual(list(doc_vm.check_vm_backup_alerts(self.host)), [])
 
     def test_units_that_alert_without_btrfs_notify_warn(self) -> None:
         # A refusal of btrfs-bulk-boot (a bad bulk.conf line) alerts through btrfs-notify; without it the
         # alert reached nobody. Now it is kept for this doctor, which also says why no desktop shows it.
-        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+        self.assertEqual(list(doc_alerts.check_alert_program(self.host)), [])
         self.install("btrfs:snapshots")
-        res = list(doc_app.check_alert_program(self.host))
+        res = list(doc_alerts.check_alert_program(self.host))
         self.assertEqual(len(res), 1, res)
         self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
         self.assertTrue(
@@ -2323,7 +2355,7 @@ class InstallAreaTest(Scratch):
             res[0].message.endswith("; btrfs-bulk-boot.service: also the pending alerts above"), res[0].message
         )
         self.install("btrfs:alerts")
-        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+        self.assertEqual(list(doc_alerts.check_alert_program(self.host)), [])
 
     def test_units_whose_alerts_are_not_kept_are_not_said_to_be(self) -> None:
         # The health check and the stall alert are bash: without btrfs-notify their alerts reach only the
@@ -2332,7 +2364,7 @@ class InstallAreaTest(Scratch):
         os.makedirs(units, exist_ok=True)
         for name in ("btrfs-health-check.service", "btrfs-stall-alert.service"):  # btrfs:core's
             open(os.path.join(units, name), "w").close()
-        [res] = list(doc_app.check_alert_program(self.host))
+        [res] = list(doc_alerts.check_alert_program(self.host))
         self.assertIn("btrfs-health-check.service", res.message)
         self.assertNotIn("btrfs-bulk-boot", res.message)
         self.assertNotIn("pending alerts", res.message)
@@ -2402,9 +2434,9 @@ class ToolboxTest(Scratch):
             f.write('#!/bin/sh\necho "LC_ALL=${LC_ALL-unset} $*"\n')
         env = dict(self.env, LANG="pt_BR.UTF-8", LC_ALL="pt_BR.UTF-8")
         want = (0, "LC_ALL=C -r -c qemu:///system domstate vm1\n", "")
-        self.assertEqual(doc_app.virsh(doc_adapters.Host(env), "domstate", "vm1"), want)
+        self.assertEqual(doc_vm.virsh(doc_adapters.Host(env), "domstate", "vm1"), want)
         # In a toolbox the host command does not get flatpak-spawn's environment: the setting goes in --env.
-        self.assertEqual(doc_app.virsh(doc_adapters.Host(dict(env, CST_DOCTOR_CONTAINER="1")), "domstate", "vm1"), want)
+        self.assertEqual(doc_vm.virsh(doc_adapters.Host(dict(env, CST_DOCTOR_CONTAINER="1")), "domstate", "vm1"), want)
         self.assertEqual(self.calls(), ["flatpak-spawn --host --env=LC_ALL=C virsh -r -c qemu:///system domstate vm1"])
 
     def test_missing_flatpak_spawn(self) -> None:
@@ -2429,7 +2461,7 @@ class ToolboxTest(Scratch):
             f.write("#!/bin/sh\nexec sleep 5\n")
         os.chmod(os.path.join(self.bin, "slow"), 0o755)
         self.assertEqual(host.run(["slow", "x"], timeout=0.3), (124, "", "slow x: no answer within 0.3 s"))
-        self.assertEqual(doc_app.virsh_problem(*host.run(["slow"], timeout=0.3)[::2]), "slow: no answer within 0.3 s")
+        self.assertEqual(doc_vm.virsh_problem(*host.run(["slow"], timeout=0.3)[::2]), "slow: no answer within 0.3 s")
 
 
 class HermeticTest(Scratch):
@@ -2482,7 +2514,7 @@ class HermeticTest(Scratch):
         self.env.update(CST_DOCTOR_CONTAINER=container, FIX_VIRSH=self.virsh_dir)
         host = doc_adapters.Host(self.env, repo=REPO)
         with mock.patch.object(subprocess, "run", recording_run):
-            results = doc_app.run_checks(host, doc_app.wired_checks(doc_adapters.VmTools()))
+            results = doc_registry.run_checks(host, doc_registry.wired_checks(doc_adapters.VmTools()))
         crashed = [r.message for _, r in results if "the check itself failed" in r.message]
         self.assertEqual(crashed, [])
         return seen
@@ -2519,6 +2551,11 @@ class CstIntegrationTest(Scratch):
         for fn in os.listdir(DOCTOR_DIR):
             if fn.endswith(".py"):
                 shutil.copy(os.path.join(DOCTOR_DIR, fn), os.path.join(self.repo, "doctor"))
+        shutil.copytree(
+            os.path.join(DOCTOR_DIR, "application"),
+            os.path.join(self.repo, "doctor", "application"),
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         self.cst = os.path.join(self.repo, "cst")
         self.env["CST_NAME"] = "cst"
 
@@ -2659,17 +2696,17 @@ class DoctorFactsTest(unittest.TestCase):
     def test_each_host_is_asked_once(self) -> None:
         a, b = self.host(), self.host()
         for _ in range(2):
-            self.assertEqual(doc_app.libvirt_domains(a), (["win"], ""))
-            self.assertEqual(doc_app.domain_xml(a, "win"), (0, "<domain/>", ""))
+            self.assertEqual(doc_vm.libvirt_domains(a), (["win"], ""))
+            self.assertEqual(doc_vm.domain_xml(a, "win"), (0, "<domain/>", ""))
         self.assertEqual(self.calls, [("list", "--all", "--name"), ("dumpxml", "--inactive", "win")])
-        doc_app.libvirt_domains(b)
+        doc_vm.libvirt_domains(b)
         self.assertEqual(len(self.calls), 3, "a new Host starts with no answers")
 
     def test_the_answers_are_not_kept_on_the_host(self) -> None:
         host = self.host()
-        doc_app.libvirt_domains(host)
-        doc_app.domain_xml(host, "win")
-        doc_app.deployments(host)
+        doc_vm.libvirt_domains(host)
+        doc_vm.domain_xml(host, "win")
+        doc_shared.deployments(host)
         self.assertEqual([n for n in vars(host) if n in ("_domains", "_dumpxml", "_ostree", "_ostree_list")], [])
 
 

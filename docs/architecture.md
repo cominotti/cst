@@ -40,7 +40,7 @@ two profiles (next section): `domain.py` / `domain/` for pure rules and
 frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
-`application.py` for use cases, `wiring.py` and `presenter.py`. Only swap,
+`application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
 doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
 snapshot have the full profile; in the other packages `cli.py` orchestrates the
 commands and some still do I/O there. `tests/test_architecture.py`
@@ -132,7 +132,16 @@ none does I/O), and `CLI_CEILINGS` caps the folder as a whole
 key by hand, at most its old value, and then moving code between the files
 changes nothing. Import the group modules by their full name
 (`from vm.cli import net`): the import graph of the gates (`tests/code_graph.py`)
-follows only absolute imports, like the rest of CST.
+follows only absolute imports, like the rest of CST. A big `application.py`
+becomes an `application/` folder: one module per use case or check area,
+each with the application role and its rules. There is no folder ceiling
+as for `cli/`: each module stays under the 800-line cap, and the split
+deletes the `OVER_CAP` entry (`doctor/application/`: one
+module per check area, and `registry.py` with the areas in their output
+order, and `shared.py` with what several areas use). Its `__init__.py`
+imports none of the folder's modules: the re-export gate of
+`tests/test_entrypoints.py` forbids that, so callers import each module by
+its full name.
 
 **Gates and metrics.** Budgets, ceilings and allow-lists fail only when the
 code is above them (the sets that must stay empty, such as `NOT_YET_CLEAN`,
