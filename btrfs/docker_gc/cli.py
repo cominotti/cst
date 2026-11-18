@@ -25,12 +25,12 @@ def run_cli(
     if (cmd in ("status", "settings") and not write) or (cmd == "run" and dry):
         # status, settings and a dry run only read: `| head` ends them quietly
         (wiring.quiet_sigpipe if restore_signals is None else restore_signals)()
+    known = next((c for c in COMMANDS if c == cmd), None)
+    if known is None:  # before the settings are read: a bad KEEP_* value never hides the usage line
+        print(USAGE, file=sys.stderr)
+        return 2
     gc = wiring.build_docker_gc() if service is None else service
-    for known in COMMANDS:
-        if cmd == known:
-            return gc.execute(known, dry=dry, write=write)
-    print(USAGE, file=sys.stderr)
-    return 2
+    return gc.execute(known, dry=dry, write=write)
 
 
 def main() -> int:

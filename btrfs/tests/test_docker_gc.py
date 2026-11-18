@@ -1067,6 +1067,23 @@ class EntryTest(unittest.TestCase):
             (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]\n"),
         )
 
+    def test_an_unknown_command_is_a_usage_error_before_the_settings_are_read(self) -> None:
+        # Before, the KEEP_* values were parsed first: a bad one gave a ValueError traceback
+        # (exit 1) instead of the usage line.
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", TOOL, "bogus"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin", "KEEP_IMAGE_DAYS": "x"},
+        )
+        self.assertEqual(
+            (r.returncode, r.stderr),
+            (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]\n"),
+        )
+
     def test_status_and_a_dry_run_into_a_closed_pipe_stop_quietly(self) -> None:
         # "cst btrfs docker-gc status | head -1" ended in "Exception ignored ...
         # BrokenPipeError" (exit 120). Docker is a stub that is not running.
