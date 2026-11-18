@@ -17,11 +17,11 @@ from cst_core.domain.install import manifest_by_src
 from toolchains.domain.build import HASH_VAR, ROOT_REL
 
 
-# Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
-# comments, same rules): a setting already there is never changed.
 # The words of the plan and status lines that name what CST could not do.
 CANNOT_READ = "cannot be read"
 BY_HAND = "BY HAND"
+# Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
+# comments, same rules): a setting already there is never changed.
 CARGO_CFG_REL = ".cargo/config.toml"
 UV_CFG_REL = ".config/uv/uv.toml"
 WS = r"[^\S\n]"  # a blank that is not a line break (grep's [[:space:]] within a line)

@@ -41,7 +41,7 @@ from toolchains.domain.build import (
     manifest_arg,
     prefixes,
 )
-from toolchains.domain.common import json_items, tilde, to_json
+from toolchains.domain.common import json_items, tilde
 from toolchains.adapters.program import RUNNER, run_idle
 
 
@@ -301,7 +301,7 @@ def workspace_metadata(
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
     try:
-        data = to_json(json.loads(r.stdout))
+        data: Json = json.loads(r.stdout)
         if not isinstance(data, dict):
             raise ValueError
     except ValueError:

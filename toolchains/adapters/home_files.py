@@ -35,7 +35,6 @@ from toolchains.domain.common import (
     STATE_DIR_REL,
     TIMER,
     UNIT_DIR_REL,
-    to_json,
 )
 from toolchains.domain.config import WRAPPER_REL
 from toolchains.domain.prune import RunRecord, Settings, checked_settings, parse_defaults
@@ -183,7 +182,7 @@ def write_state(home: str, tid: str, data: RunRecord, out: RunOutputPort) -> Non
 def read_state(home: str, tid: str) -> dict[str, Json] | None:
     try:
         with open(state_path(home, tid)) as f:
-            data = to_json(json.load(f))
+            data: Json = json.load(f)
             return data if isinstance(data, dict) else None
     except OSError, ValueError:
         return None

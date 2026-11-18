@@ -26,6 +26,6 @@ def cmd_prune(s: Session, action: str, names: Sequence[str]) -> int:
         settings,
         action,
         out=s.out,
-        clock=s.clock,
+        clock=s.machine.clock,
         limits=s.limits,
     )

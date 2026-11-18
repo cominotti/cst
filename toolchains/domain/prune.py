@@ -12,7 +12,7 @@ import os
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.values import Json
@@ -74,17 +74,13 @@ class Settings:
 
     source: str
     user_keys: frozenset[str]
-    raw: Mapping[str, str]
     enabled: Mapping[str, bool]
     options: Mapping[str, bool | str]
     rust: RustPolicy
     uv: UvPolicy
 
-    def where(self, *keys: str) -> str:
-        return self.source if any(k in self.user_keys for k in keys) else "defaults"
-
     def source_of(self, spec: TargetSpec) -> str:
-        return self.where(*(f"{spec.prefix}_{k}" for k in ("ENABLED", *spec.settings)))
+        return key_source(self.source, self.user_keys, *(f"{spec.prefix}_{k}" for k in ("ENABLED", *spec.settings)))
 
     def policy_text(self, tid: str) -> str:
         """Target TID's policy as plan and status show it; KeyError for an id of no target here."""
@@ -93,6 +89,11 @@ class Settings:
         if tid == PYTHON_UV.id:
             return self.uv.text()
         raise KeyError(tid)
+
+
+def key_source(source: str, user_keys: AbstractSet[str], *keys: str) -> str:
+    """Where KEYS are set: SOURCE (the user's file, as shown) when it sets any of them, else "defaults"."""
+    return source if any(k in user_keys for k in keys) else "defaults"
 
 
 def parse_defaults(path: str, text: str | None) -> dict[str, str]:
@@ -124,7 +125,7 @@ def checked_settings(home: str, defaults: Mapping[str, str], user_text: str) -> 
     raw = {**defaults, **user}
 
     def where(*keys: str) -> str:
-        return source if any(k in user_keys for k in keys) else "defaults"
+        return key_source(source, user_keys, *keys)
 
     options: dict[str, bool | str] = {}
     for key, parse in OPTIONS.items():
@@ -148,7 +149,7 @@ def checked_settings(home: str, defaults: Mapping[str, str], user_text: str) -> 
 
     rust = checked(RUST_BUILD, RustPolicy.parse)
     uv = checked(PYTHON_UV, UvPolicy.parse)
-    return Settings(source, user_keys, raw, enabled, options, rust, uv)
+    return Settings(source, user_keys, enabled, options, rust, uv)
 
 
 class RustRun(TypedDict):

@@ -182,7 +182,7 @@ class Base(unittest.TestCase):
             limits=self.limits,
             units=lambda out: FakeUnits(out, self.fake_systemctl),
             procs=lambda: list(self.cargo_running),
-            tree=None if tree is None else (lambda home, prog, limits, clock: tree),
+            tree=tree,
             journal=False,
         )
 

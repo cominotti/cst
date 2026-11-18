@@ -32,7 +32,6 @@ from toolchains.domain.prune import PYTHON_UV, RUST_BUILD, Limits
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from cst_core.ports import ClockPort
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
     from toolchains.domain.prune import Settings
@@ -50,9 +49,8 @@ class Session:
     prog: str
     entry_file: str
     limits: Limits
-    out: RunOutput
+    out: RunOutputPort
     units: UserUnits
-    clock: ClockPort
     machine: TargetPorts
 
 
@@ -63,7 +61,7 @@ class Parts:
     limits: Limits | None = None
     units: Callable[[RunOutputPort], UserUnits] | None = None
     procs: Callable[[], list[CargoProc]] | None = None
-    tree: Callable[[str, str, Limits, ClockPort], BuildTreePort] | None = None
+    tree: BuildTreePort | None = None
     uv: UvPort | None = None
     journal: bool | None = None
 
@@ -98,13 +96,11 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     journal = journal_stdout(os.environ.get("JOURNAL_STREAM", "")) if p.journal is None else p.journal
     out = RunOutput(home, journal=journal)
     limits = Limits() if p.limits is None else p.limits
-    if p.tree is not None:
-        tree = p.tree(home, prog, limits, clock)
-    else:
-        tree = CargoBuildTree(home, prog, limits, clock, procs=cargo_procs if p.procs is None else p.procs)
+    procs = cargo_procs if p.procs is None else p.procs
+    tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
     units = (UserUnits if p.units is None else p.units)(out)
-    return Session(home, now, prog, entry_file, limits, out, units, clock, machine)
+    return Session(home, now, prog, entry_file, limits, out, units, machine)
 
 
 def settings(s: Session) -> Settings:
