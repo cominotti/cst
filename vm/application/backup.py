@@ -95,10 +95,10 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         return r
 
     sources: list[tuple[str, bool]] = []
-    for path in parts.disks:
-        if not store.is_file(path):
-            raise Refused(f"{vm}: disk {path} not found")
-        path = real(path, "disk")
+    for disk in parts.disks:
+        if not store.is_file(disk):
+            raise Refused(f"{vm}: disk {disk} not found")
+        path = real(disk, "disk")
         if store.has_backing_file(path):
             raise Refused(
                 f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
