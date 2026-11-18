@@ -2443,7 +2443,10 @@ if [ ! -e /etc/systemd/system/btrfs-bulk-boot.service ]; then
     touch "$s/made-unit"
 fi
 mkdir -p /run/systemd/system/btrfs-bulk-boot.service.d
-printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk boot\n' \
+# ExecStopPost: the exit status and result, read after the oneshot is gone (an unreferenced
+# inactive unit may be unloaded, and systemctl show would then answer for a fresh one).
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk boot\nExecStopPost=/bin/sh -c %s\n' \
+    "'echo \"\$\$EXIT_STATUS \$\$SERVICE_RESULT\" >/var/tmp/e2e-bulk-boot/exit'" \
     >/run/systemd/system/btrfs-bulk-boot.service.d/50-e2e.conf
 for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
     if [ -e "$p" ] || [ -L "$p" ]; then mkdir -p "$s/aside$(dirname "$p")"; mv "$p" "$s/aside$p"; fi
@@ -2456,9 +2459,9 @@ mkdir -p /etc/btrfs-setup
 systemctl daemon-reload
 # boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
 boot_unit() {
+    rm -f "$s/exit"
     systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
-    [ "$(systemctl show -P Result btrfs-bulk-boot.service)" = success ]
-    [ "$(systemctl show -P ExecMainStatus btrfs-bulk-boot.service)" = 1 ]
+    [ "$(cat "$s/exit")" = "1 success" ] || { echo "exit status and result: $(cat "$s/exit")" >&2; return 1; }
 }
 # unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
 unit_log_has() {
