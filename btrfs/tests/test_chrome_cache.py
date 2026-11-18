@@ -20,7 +20,7 @@ import signal
 import unittest
 from collections.abc import Callable, Sequence
 from unittest import mock
-from typing import Protocol, cast
+from typing import Protocol, cast, override
 
 # Run directly (python3 -I -B btrfs/tests/test_chrome_cache.py): the checkout root holds the tests package.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -80,6 +80,7 @@ class ChromeCacheTest(unittest.TestCase):
     cfg: str
     path: str
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.addCleanup(cast("PackageView", self.m).restore)
@@ -92,6 +93,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.cfg = os.path.join(self.home, ".var/app/com.google.Chrome/config")
         self.path = os.path.join(self.cfg, "chrome-flags.conf")
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
