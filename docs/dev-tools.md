@@ -155,16 +155,26 @@ repository:
   passed". A new file needs no list edit for ANN. (Until 2026-11 a one-line
   `"!{...}" = ["ANN"]` entry named every typed file; every file had joined it,
   and each parallel change conflicted on that one line.)
-- **The ty gate, `[tool.ty.src] include`**: every Python file ty reports
-  nothing on. `error-on-warning` is on, so a warning fails it too. Every
-  Python file joins it; never remove one, or add an ignore comment, to
-  get a green run.
+- **The ty gate, `[tool.ty.src] include`**: every Python file, and ty
+  reports nothing on any. `error-on-warning` is on, so a warning fails it
+  too. It lists the ten folders with Python code (`.github/scripts`, the
+  eight modules, `tests`) and the extensionless helpers by name: ty finds
+  the `*.py` files below a folder by itself (leaving out git-ignored ones,
+  such as `tests/e2e/.artifacts/`), but not a file without the extension.
+  A new `*.py` file in one of these folders is in the gate with no list
+  edit; a new helper, or a new top-level folder, needs its entry, and
+  `tests/test_python_files.py` fails until it has one. An entry is a plain
+  path to a folder with Python files or to a Python file (no pattern, no
+  `.`). Never remove one, or add an ignore comment, to get a green run.
+  (Until 2026-11 the list named every file, 330 entries: ty's compiled
+  pattern for it passed its 1 MB limit, and it printed a warning on every
+  run.)
 - **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the historical exclusion set,
   now empty (`frozenset()`). Every Python file in the repository is in the ty
-  gate (`[tool.ty.src] include`), so every new file has to join both the ty
-  gate directly. The set sits in the test, not in
-  `pyproject.toml`, so that adding a file to it would be a visible edit of the
-  test. Never add one.
+  gate (`[tool.ty.src] include`). A file below a listed folder could not
+  leave it anyway (ty checks it; the test fails on a file in both). The
+  set sits in the test, not in `pyproject.toml`, so that adding a file to it
+  would be a visible edit of the test. Never add one.
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`
   exists at the top of the repository (ty would read it instead of
   `pyproject.toml`), when `[tool.ty]` sets anything but `src.include`,

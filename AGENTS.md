@@ -155,8 +155,8 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean and strictly annotated: it is
-  listed in `[tool.ty.src] include` of `pyproject.toml`, and an
-  extensionless helper also in `extend-include`. ruff's annotation rules
+  in `[tool.ty.src] include` of `pyproject.toml` (a `*.py` file through its
+  folder; an extensionless helper by name, there and in `extend-include`). ruff's annotation rules
   (ANN) apply to every file: no per-file-ignores entry ignores them.
   No ignore comments, nothing added to `NOT_YET_CLEAN`, no `[tool.ty]`
   setting that switches a file or a rule off: fix the code.

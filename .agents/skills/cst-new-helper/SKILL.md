@@ -51,8 +51,10 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       checkout reads goes to `CHECKOUT_ONLY_FILES` (with the reason) or
       `CHECKOUT_ONLY_EXECUTABLES` instead; `tests/test_distribution.py`
       fails on a file in neither.
-- [ ] `pyproject.toml`: the entry in `[tool.ruff] extend-include`; every new
-      Python file (tests too) in `[tool.ty.src] include`, fully annotated
+- [ ] `pyproject.toml`: the helper's entry in `[tool.ruff] extend-include`
+      and in `[tool.ty.src] include` (a `*.py` file is in the ty gate
+      through its folder; a new top-level folder needs its entry); every
+      new Python file (tests too) fully annotated
       (ruff's ANN rules apply to every file; no per-file-ignores entry may
       switch them off). `tests/test_python_files.py` checks it;
       `NOT_YET_CLEAN` stays empty; no ignore comments.

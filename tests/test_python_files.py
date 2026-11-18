@@ -9,9 +9,14 @@ never be linted. This test derives the Python files from the repository
 
 - the extensionless ones are exactly ruff's extend-include list;
 - every Python file is either in the ty gate ([tool.ty.src] include) or in
-  NOT_YET_CLEAN below, never both, and both name only Python files. A new
-  file therefore has to join the ty gate, unless someone adds it to
-  NOT_YET_CLEAN, which is an edit of this file that review can see;
+  NOT_YET_CLEAN below, never both. The ty gate lists folders and the
+  extensionless helpers: a *.py file is in it when it is below a listed
+  folder (ty finds those by itself) or named, an extensionless helper only
+  when it is named (ty, like ruff, does not find those). Each entry is a
+  plain path, no pattern, to a folder with Python files or to a Python file
+  of the repository. A new file therefore joins the ty gate by itself (or,
+  for a helper, by its entry), unless someone adds it to NOT_YET_CLEAN,
+  which is an edit of this file that review can see;
 - nothing else takes a file or a diagnostic out of ty's check: no ty.toml
   (ty would read it instead of pyproject.toml), no [tool.ty] setting other
   than src.include, terminal.error-on-warning (which must be true) and
@@ -109,6 +114,34 @@ def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:
     return out
 
 
+def _is_folder_entry(entry: str, py_files: set[str]) -> bool:
+    return any(p.startswith(entry + "/") for p in py_files)
+
+
+def ty_gated(py_files: set[str], ty_gate: Sequence[str]) -> set[str]:
+    """The Python files ty checks: each one named, and each *.py file below a listed folder."""
+    folders = [e for e in ty_gate if _is_folder_entry(e, py_files)]
+    return {p for p in py_files if p in ty_gate or (p.endswith(".py") and any(p.startswith(f + "/") for f in folders))}
+
+
+PLAIN_ENTRY = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]*")
+
+
+def ty_entry_problems(py_files: set[str], ty_gate: Sequence[str]) -> list[str]:
+    """Every [tool.ty.src] include entry that is not a plain path to a folder with Python files or to a Python file."""
+    out: list[str] = []
+    for entry in ty_gate:
+        plain = PLAIN_ENTRY.fullmatch(entry) is not None and entry != "." and not entry.endswith("/")
+        if not plain or ".." in entry.split("/") or "." in entry.split("/"):
+            out.append(
+                f"{entry}: in [tool.ty.src] include but not a plain path (no pattern, no '.', '..' or "
+                "trailing '/'); name a folder or a Python file of the repository"
+            )
+        elif entry not in py_files and not _is_folder_entry(entry, py_files):
+            out.append(f"{entry}: in [tool.ty.src] include but not a folder or a Python file of the repository")
+    return out
+
+
 def problems(
     py_files: set[str],
     extend: Sequence[str],
@@ -117,6 +150,7 @@ def problems(
 ) -> list[str]:
     """What is wrong with the lists, as text lines (empty: all fine)."""
     out: list[str] = []
+    gated = ty_gated(py_files, ty_gate)
     extensionless = {p for p in py_files if not p.endswith(".py")}
     for p in sorted(extensionless - set(extend)):
         out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
@@ -125,21 +159,24 @@ def problems(
     for name, items in (("extend-include", extend), ("[tool.ty.src] include", ty_gate)):
         dups = sorted({p for p in items if items.count(p) > 1})
         out += [f"{p}: listed twice in {name}" for p in dups]
-    for p in sorted(set(ty_gate) - py_files):
-        out.append(f"{p}: in [tool.ty.src] include but not a Python file of the repository")
+    out += ty_entry_problems(py_files, ty_gate)
     for p in sorted(not_clean - py_files):
         out.append(
             f"{p}: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
             "repository; delete it there, or rename it there if the file was renamed"
         )
-    for p in sorted(not_clean & set(ty_gate)):
+    for p in sorted(not_clean & gated):
         out.append(
             f"{p}: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from NOT_YET_CLEAN "
             "in tests/test_python_files.py"
         )
-    for p in sorted(py_files - set(ty_gate) - not_clean):
+    for p in sorted(py_files - gated - not_clean):
+        if not p.endswith(".py"):
+            where = "its path (ty finds no extensionless file by itself)"
+        else:
+            where = "its folder" if "/" in p else "its path"
         out.append(
-            f"{p}: a Python file outside the ty gate; make ty clean on it and add it to "
+            f"{p}: a Python file outside the ty gate; make ty clean on it and add {where} to "
             "[tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
         )
     return out
@@ -228,7 +265,7 @@ class PythonFilesTest(unittest.TestCase):
             check(extend=["other", "tool", "a.py"]),
         )
         self.assertIn(
-            "x.py: in [tool.ty.src] include but not a Python file of the repository",
+            "x.py: in [tool.ty.src] include but not a folder or a Python file of the repository",
             check(ty_gate=["a.py", "tool", "x.py"]),
         )
         self.assertIn("tool: listed twice in extend-include", check(extend=["other", "tool", "tool"]))
@@ -238,7 +275,7 @@ class PythonFilesTest(unittest.TestCase):
             return problems(set(py), ["tool"], list(ty_gate), frozenset(not_clean))
 
         outside = (
-            "{}: a Python file outside the ty gate; make ty clean on it and add it to "
+            "{}: a Python file outside the ty gate; make ty clean on it and add its path to "
             "[tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
         )
         self.assertEqual(check(["a.py", "tool", "old.py"], ["a.py", "tool"], ["old.py"]), [])
@@ -263,6 +300,58 @@ class PythonFilesTest(unittest.TestCase):
                 "old.py: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
                 "repository; delete it there, or rename it there if the file was renamed",
                 outside.format("new.py"),
+            ],
+        )
+
+    def test_the_ty_gate_by_folder(self) -> None:
+        py = {"pkg/a.py", "pkg/sub/b.py", "pkg/helper", "top.py", ".github/scripts/c.py", "other/d.py"}
+
+        def check(ty_gate: Sequence[str], not_clean: Sequence[str] = ()) -> list[str]:
+            return problems(py, ["pkg/helper"], list(ty_gate), frozenset(not_clean))
+
+        gate = ["pkg", "pkg/helper", "top.py", ".github/scripts", "other"]
+        self.assertEqual(check(gate), [])
+        self.assertEqual(ty_gated(py, gate), py)
+        # A folder covers the *.py files below it, at any depth, but not an extensionless helper.
+        self.assertEqual(
+            check(["pkg", "top.py", ".github/scripts", "other"]),
+            [
+                "pkg/helper: a Python file outside the ty gate; make ty clean on it and add its path "
+                "(ty finds no extensionless file by itself) to [tool.ty.src] include (a new file never "
+                "goes to NOT_YET_CLEAN)"
+            ],
+        )
+        # A file below no listed folder is outside, a dot folder included.
+        self.assertEqual(
+            check(["pkg", "pkg/helper", "top.py", "other"]),
+            [
+                ".github/scripts/c.py: a Python file outside the ty gate; make ty clean on it and add its "
+                "folder to [tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
+            ],
+        )
+        # "pkg/s" is no folder of pkg/sub/b.py: a prefix of a name covers nothing.
+        self.assertEqual(ty_gated(py, ["pkg/s"]), set())
+        # NOT_YET_CLEAN cannot hold a file a folder entry covers: ty checks it anyway.
+        self.assertEqual(
+            check(gate, ["pkg/sub/b.py"]),
+            [
+                "pkg/sub/b.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
+                "NOT_YET_CLEAN in tests/test_python_files.py"
+            ],
+        )
+        # Entries are plain paths to a folder with Python files or to a Python file.
+        plain = (
+            "{}: in [tool.ty.src] include but not a plain path (no pattern, no '.', '..' or trailing '/'); "
+            "name a folder or a Python file of the repository"
+        )
+        for bad in (".", "**", "pkg/*.py", "!pkg", "pkg/", "/pkg", "pkg/../other", "./pkg", "{pkg,other}"):
+            with self.subTest(entry=bad):
+                self.assertEqual(ty_entry_problems(py, [bad]), [plain.format(bad)])
+        self.assertEqual(
+            ty_entry_problems(py, ["docs", "pkg/missing.py"]),
+            [
+                "docs: in [tool.ty.src] include but not a folder or a Python file of the repository",
+                "pkg/missing.py: in [tool.ty.src] include but not a folder or a Python file of the repository",
             ],
         )
 
@@ -367,7 +456,7 @@ class PythonFilesTest(unittest.TestCase):
             problems(py_files, extend, ty_gate)
             + ann_ignore_problems(conf)
             + ty_setting_problems(conf, files)
-            + ignore_comments(REPO, set(ty_gate) & py_files)
+            + ignore_comments(REPO, ty_gated(py_files, ty_gate))
         )
         self.assertEqual(found, [], "the Python gates miss something (see docs/dev-tools.md):\n" + "\n".join(found))
 
