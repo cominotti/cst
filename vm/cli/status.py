@@ -5,19 +5,10 @@ import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
-from vm.adapters import (
-    CST,
-    INDEX,
-    cpu_disable_list,
-    describe_entry,
-    image_dirs,
-    knobs,
-    package_versions,
-    probe_dir,
-    read_index,
-    virsh,
-    wants_links,
-)
+from vm.adapters import CST, INDEX, cpu_disable_list, knobs, package_versions, virsh
+from vm.adapters.backup import describe_entry, read_index
+from vm.adapters.images import image_dirs, probe_dir
+from vm.adapters.timer import wants_links
 from vm.cli.nocow import nocow_lines
 from vm.cli.tune import tune_line
 from vm.domain import instance, version_changes

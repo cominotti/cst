@@ -7,19 +7,8 @@ import shlex
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import format_bytes_gib_mib
-from vm.adapters import (
-    PROG,
-    VM_CONF,
-    flag_state,
-    image_dirs,
-    readable_inode_flags,
-    knobs,
-    needs_mark,
-    probe_dir,
-    run,
-    run_on_terminal,
-    mark_folder_nocow,
-)
+from vm.adapters import PROG, VM_CONF, knobs, run, run_on_terminal
+from vm.adapters.images import flag_state, image_dirs, readable_inode_flags, needs_mark, probe_dir, mark_folder_nocow
 from vm.domain import ImageProbe, convert_lines
 
 

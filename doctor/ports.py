@@ -104,7 +104,7 @@ class CheckFn(Protocol):
 
 
 class VmToolsPort(Protocol):
-    """The host side of the vm package the VM checks reuse (vm.adapters):
+    """The host side of the vm package the VM checks reuse (vm.adapters, vm.adapters.images):
     the knobs of /etc/cst/vm.conf and the probe of the VM image folders."""
 
     @property

@@ -77,7 +77,7 @@ from cst_core.ports import CommandResult
 from doctor.domain import Result
 from doctor.ports import DoctorHostPort
 from tests.probes import bytes_program
-from vm import adapters as vm_adapters
+from vm.adapters import images as vm_images
 
 
 class _ScandirIter(Protocol):
@@ -1981,11 +1981,11 @@ class VmHardwareTest(VmTest):
                 raise PermissionError(13, "Permission denied")
             return real_scandir(p)
 
-        # The probe lives in vm.adapters (VmTools calls it there).
+        # The probe lives in vm.adapters.images (VmTools calls it there).
         with (
             mock.patch.dict(os.environ, {"HOME": self.tmp}),
-            mock.patch.object(vm_adapters, "is_btrfs", lambda p: btrfs),
-            mock.patch.object(vm_adapters, "readable_inode_flags", lambda p: flags.get(p, 0)),
+            mock.patch.object(vm_images, "is_btrfs", lambda p: btrfs),
+            mock.patch.object(vm_images, "readable_inode_flags", lambda p: flags.get(p, 0)),
             mock.patch.object(os, "scandir", scandir),
         ):
             return list(

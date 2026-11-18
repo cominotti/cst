@@ -17,20 +17,22 @@ from vm.adapters import (
     PROG,
     SWTPM_DIR,
     booted_deployment,
-    fingerprint,
     has_managed_save,
-    nocow,
     package_versions,
+    run,
+    virsh,
+)
+from vm.adapters.backup import (
+    fingerprint,
     precreate_nocow,
     qcow2_backing_file,
     check_backup_start,
     read_index,
-    run,
     tree_sizes,
     utc_now,
-    virsh,
     write_index,
 )
+from vm.adapters.images import nocow
 from vm.domain import FULL_MARGIN, URI, domain_parts, index_entry, restore_lines, stored
 
 

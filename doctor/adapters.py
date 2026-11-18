@@ -18,6 +18,7 @@ from cst_core.domain.values import DomainValidationError
 from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
+from vm.adapters import images as vm_images
 from vm.domain import ImageDir, ImageProbe
 
 
@@ -209,9 +210,9 @@ class VmTools:
         return vm_adapters.knobs(path)
 
     def image_dirs(self) -> list[ImageDir]:
-        """vm.adapters.image_dirs."""
-        return vm_adapters.image_dirs()
+        """vm.adapters.images.image_dirs."""
+        return vm_images.image_dirs()
 
     def probe_dir(self, d: ImageDir, readable: Callable[[str], str]) -> ImageProbe:
-        """vm.adapters.probe_dir."""
-        return vm_adapters.probe_dir(d, readable)
+        """vm.adapters.images.probe_dir."""
+        return vm_images.probe_dir(d, readable)

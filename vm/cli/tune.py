@@ -12,18 +12,8 @@ from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
-from vm.adapters import (
-    BACKUP_DIR,
-    CST,
-    PROG,
-    VM_CONF,
-    cpu_disable_list,
-    domain_state,
-    has_managed_save,
-    knobs,
-    utc_now,
-    virsh,
-)
+from vm.adapters import BACKUP_DIR, CST, PROG, VM_CONF, cpu_disable_list, domain_state, has_managed_save, knobs, virsh
+from vm.adapters.backup import utc_now
 from vm.domain import KNOBS, URI
 from vm.domain.tune import WINDOWS_STEPS, guest_kind, normalized, tune_domain
 

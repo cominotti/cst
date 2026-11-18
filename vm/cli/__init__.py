@@ -15,7 +15,8 @@ from typing import assert_never
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.text import first_line
 from cst_core.ports import WriteFailed
-from vm.adapters import PROG, Stop, default_vm, notify, prepare_command, safe_output
+from vm.adapters import PROG, default_vm, prepare_command
+from vm.adapters.backup import Stop, notify, safe_output
 from vm.cli import backup, nas, nocow, status, timer, tune
 from vm.domain import parse_args
 

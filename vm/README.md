@@ -1026,16 +1026,18 @@ The Python code inside `vm/` (standard library only at run time):
   `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
   `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
-- `vm/adapters.py`: what reaches the host: `virsh`, `rpm`, `rpm-ostree`,
+- `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`,
   `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
-  `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the backup index, the NOCOW flag
-  and the image folders (`probe_dir`), the per-VM lock, the paths
-  (`CST_VM_*` moves them, for the tests only).
+  `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
+  files, the paths (`CST_VM_*` moves them, for the tests only). `backup.py`: the
+  backup index, fingerprints and sizes, the stop signals, the per-VM lock and
+  the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
+  and the image folders (`probe_dir`).
 - `vm/cli/`: the commands, one module per command group: `backup.py` (the
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
   `__init__.py`.
 
-`cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`
-and `vm.adapters` (knobs,
-image folder probe) from the same CST copy.
+`cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`,
+`vm.adapters` (knobs) and `vm.adapters.images` (the image folder probe) from
+the same CST copy.

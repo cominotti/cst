@@ -5,18 +5,11 @@ import os
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.units import masked_refusal
-from vm.adapters import (
-    CST,
-    NAS_CONF,
-    PROG,
-    SBIN_COPY,
-    UNIT_DIR,
-    describe_entry,
+from vm.adapters import CST, NAS_CONF, PROG, SBIN_COPY, UNIT_DIR, read_conf, systemctl
+from vm.adapters.backup import describe_entry, read_index
+from vm.adapters.timer import (
     forget_timer_files,
     install_timer_files,
-    read_conf,
-    read_index,
-    systemctl,
     timer_file_states,
     timer_files,
     timer_record_done,

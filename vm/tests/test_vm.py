@@ -37,6 +37,7 @@ from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
+from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
 from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
@@ -440,12 +441,12 @@ class BackupTest(Scratch):
             text = f.read()
         entries = json.loads(text)["backups"]
         path = os.path.join(self.tmp, "index.json")
-        vm_adapters.write_index(entries, path)
+        vm_adapters_backup.write_index(entries, path)
         with open(path) as f:
             self.assertEqual(f.read(), text)
         with open(path, "w") as f:
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
-        self.assertEqual(vm_adapters.read_index(path), entries)
+        self.assertEqual(vm_adapters_backup.read_index(path), entries)
         self.assertEqual(self.run_tool("backup", "win").returncode, 0)
         [real] = json.load(open(self.index))["backups"]
         self.assertEqual(set(real), set(entries[0]))
@@ -1133,7 +1134,7 @@ class NocowTest(unittest.TestCase):
         return p
 
     def dirs(self) -> dict[str, vm_domain.ImageProbe]:
-        return {d.path: vm_adapters.probe_dir(d) for d in vm_adapters.image_dirs()}
+        return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs()}
 
     def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
         buf = io.StringIO()
@@ -1207,9 +1208,9 @@ class NocowTest(unittest.TestCase):
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
         d = self.dirs()[self.system]
-        self.assertTrue(vm_adapters.needs_mark(d))  # /var/lib/libvirt is there: create it
+        self.assertTrue(vm_adapters_images.needs_mark(d))  # /var/lib/libvirt is there: create it
         os.rmdir(os.path.dirname(self.system))
-        self.assertFalse(vm_adapters.needs_mark(self.dirs()[self.system]))  # libvirt not installed
+        self.assertFalse(vm_adapters_images.needs_mark(self.dirs()[self.system]))  # libvirt not installed
 
     def test_knob_off(self) -> None:
         def _knobs_off(path: str | None = None) -> dict[str, bool]:
@@ -1321,7 +1322,7 @@ class NocowTest(unittest.TestCase):
         d = self.dirs()
         for p in (self.system, libvirt_user):
             self.assertEqual((d[p].present, d[p].link), (False, real))
-            self.assertFalse(vm_adapters.needs_mark(d[p]))
+            self.assertFalse(vm_adapters_images.needs_mark(d[p]))
         rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn(
             f"{self.system}  [libvirt qemu:///system: virt-manager, virsh]: a symbolic link to {real}: "
@@ -1389,12 +1390,12 @@ class BtrfsReflinkTest(unittest.TestCase):
 
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
-        if not os.path.isdir(cache) or not vm_adapters.is_btrfs(cache):
+        if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):
             self.skipTest("~/.cache is not on btrfs")
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-reflink-", dir=cache)
         self.addCleanup(shutil.rmtree, self.tmp)
         # The scratch folder itself copy-on-write, whatever ~/.cache has.
-        flags = vm_adapters.readable_inode_flags(self.tmp)
+        flags = vm_adapters_images.readable_inode_flags(self.tmp)
         assert flags is not None
         self.setflags(self.tmp, flags & ~inode_attrs.FS_NOCOW_FL, directory=True)
 
@@ -1410,19 +1411,19 @@ class BtrfsReflinkTest(unittest.TestCase):
     def test_reflink_of_a_nocow_image(self) -> None:
         src = os.path.join(self.tmp, "img.qcow2")
         open(src, "wb").close()
-        src_flags = vm_adapters.readable_inode_flags(src)
+        src_flags = vm_adapters_images.readable_inode_flags(src)
         assert src_flags is not None
         self.setflags(src, src_flags | inode_attrs.FS_NOCOW_FL)  # only while empty
         with open(src, "ab") as f:
             f.write(os.urandom(1 << 20))
-        if not vm_adapters.nocow(src):
+        if not vm_adapters_images.nocow(src):
             self.skipTest("NOCOW not settable here")
         plain = os.path.join(self.tmp, "plain.qcow2")
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
         vm_cli_backup.copy(src, dest, "reflink", True)
-        self.assertTrue(vm_adapters.nocow(dest))
+        self.assertTrue(vm_adapters_images.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
         # Restoring a copy-on-write backup onto the NOCOW image (the restore
@@ -1430,10 +1431,10 @@ class BtrfsReflinkTest(unittest.TestCase):
         cow = os.path.join(self.tmp, "cow-backup.qcow2")
         with open(cow, "wb") as f:
             f.write(os.urandom(1 << 20))
-        self.assertFalse(vm_adapters.nocow(cow))
+        self.assertFalse(vm_adapters_images.nocow(cow))
         r = subprocess.run(["cp", "--reflink=auto", "-a", cow, src], check=False, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(vm_adapters.nocow(src))
+        self.assertTrue(vm_adapters_images.nocow(src))
         with open(src, "rb") as a, open(cow, "rb") as b:
             self.assertEqual(a.read(), b.read())
 
@@ -1705,13 +1706,13 @@ class VmLockTest(unittest.TestCase):
         run_dir = os.path.join(tmp, "run", "cst-vm")
         old = os.umask(0o077)
         try:
-            with mock.patch.object(vm_adapters, "RUN_DIR", run_dir), vm_adapters.VmLock("win") as lock:
+            with mock.patch.object(vm_adapters_backup, "RUN_DIR", run_dir), vm_adapters_backup.VmLock("win") as lock:
                 self.assertEqual(os.stat(run_dir).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(os.path.dirname(run_dir)).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(lock.path).st_mode & 0o7777, 0o644)
                 with open(lock.path) as f:
                     self.assertEqual(f.read(), f"{os.getpid()}\n")  # the pid is in the flocked file itself
-                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters.VmLock("win"):
+                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters_backup.VmLock("win"):
                     pass
         finally:
             os.umask(old)
@@ -1740,9 +1741,9 @@ class IndexDurableTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         index = os.path.join(tmp, "lib-cst", "vm-backups.json")
         with recorded_fsyncs() as synced:
-            vm_adapters.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
+            vm_adapters_backup.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
         assert_replaced_durably(self, index, synced)
-        self.assertEqual(vm_adapters.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
+        self.assertEqual(vm_adapters_backup.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
 
 
 if __name__ == "__main__":

@@ -113,7 +113,7 @@ stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stal
 bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
-vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters.py                   | vm/adapters.py doctor/application/vm.py            | "version"
+vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters/backup.py            | vm/adapters/backup.py doctor/application/vm.py     | "version"
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game-profile                 | cpu/game-profile cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 0 | cpu/game-profile                 | cpu/game-profile doctor/application/cpu.py         | none yet

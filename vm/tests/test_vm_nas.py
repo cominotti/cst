@@ -42,6 +42,7 @@ from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Usage
 from btrfs.tests.test_snapshot_runtime import shell_function
 from vm import adapters as vm_adapters, domain as vm_domain
+from vm.adapters import backup as vm_adapters_backup
 
 sys.dont_write_bytecode = True
 
@@ -645,7 +646,7 @@ class LiveBackupTest(Nas):
         with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
             nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        [real] = [e for e in vm_adapters.read_index(self.index) if e.get("mode") == "nas"]
+        [real] = [e for e in vm_adapters_backup.read_index(self.index) if e.get("mode") == "nas"]
         self.assertEqual(set(real), set(nas))
 
     def test_list_shows_nas_entries(self) -> None:
@@ -656,7 +657,7 @@ class LiveBackupTest(Nas):
 
     def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        entries = [e for e in vm_adapters.read_index(self.index)]
+        entries = [e for e in vm_adapters_backup.read_index(self.index)]
         self.assertEqual(entries[0]["mode"], "nas")
 
 

@@ -552,7 +552,7 @@ The code is split into four layers under `doctor/`:
   the same runner (`Host.virsh`), in the doctor's own words for a command
   that is missing or does not answer; it also opens, lists and stats the
   host's files for the checks, and knows where the CST checkout is) and `VmTools` (the knobs and
-  the image folder probe of `vm.adapters`).
+  the image folder probe of `vm.adapters.images`).
 - `doctor/application/`: the checks, one module per check area
   (`rpm_ostree.py`, `services.py`, `alerts.py`, `btrfs.py`, `cpu.py`,
   `swap.py`, `vm.py`, `install.py`), each with its own probes.
