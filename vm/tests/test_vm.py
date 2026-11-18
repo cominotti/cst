@@ -42,6 +42,10 @@ from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# A VM backup index as cst vm writes it (tests/fixtures/state-formats).
+INDEX_FIXTURE = os.path.join(
+    os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats", "vm-index-v1.json"
+)
 VM_DIR = os.path.dirname(HERE)
 TOOL = os.path.join(VM_DIR, "cst-vm")
 REPO = os.path.dirname(VM_DIR)
@@ -472,17 +476,23 @@ class BackupTest(Scratch):
             self.assertEqual(f.read(), text)
 
     def test_the_index_writer_produces_the_checked_in_file_exactly(self) -> None:
-        # The bytes main's cst vm and doctor read (the format did not change; REPORT has the proof).
-        fixtures = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
-        entries = [{"vm": "win", "path": "/var/lib/libvirt/cst-backups/win/x", "epoch": 1794000000, "mode": "reflink",
-                    "timestamp": "20261116-030000"}]  # fmt: skip
+        # The bytes main's cst vm and doctor read (the format did not change; REPORT has the proof):
+        # a local and a NAS entry with every field. The real entries' fields are checked against them
+        # (here, and in test_vm_nas for a NAS backup), so a new field fails and needs the proof again.
+        with open(INDEX_FIXTURE) as f:
+            text = f.read()
+        entries = json.loads(text)["backups"]
         path = os.path.join(self.tmp, "index.json")
         vm_adapters.write_index(entries, path)
-        with open(path) as f, open(os.path.join(fixtures, "vm-index-v1.json")) as g:
-            self.assertEqual(f.read(), g.read())
+        with open(path) as f:
+            self.assertEqual(f.read(), text)
         with open(path, "w") as f:
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
         self.assertEqual(vm_adapters.read_index(path), entries)
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        [real] = json.load(open(self.index))["backups"]
+        self.assertEqual(set(real), set(entries[0]))
+        self.assertEqual(set(real["deployment"]), set(entries[0]["deployment"]))
 
     def test_index_drops_removed_backups(self) -> None:
         os.makedirs(os.path.dirname(self.index))

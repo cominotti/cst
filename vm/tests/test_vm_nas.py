@@ -639,6 +639,15 @@ class LiveBackupTest(Nas):
         self.assertIn(f"{self.index} is format 2 of the vm-index (this CST reads format 1 and older)", r.stderr)
         self.assertFalse([c for c in self.calls() if c.startswith("restic ") or "snapshot-create" in c])
 
+    def test_a_nas_entry_has_the_fields_of_the_checked_in_index(self) -> None:
+        # The fixture main's readers were shown to read (tests/fixtures/state-formats/vm-index-v1.json).
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
+            nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
+        self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
+        [real] = [e for e in vm_adapters.read_index(self.index) if e.get("mode") == "nas"]
+        self.assertEqual(set(real), set(nas))
+
     def test_list_shows_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         r = self.run_tool("list")

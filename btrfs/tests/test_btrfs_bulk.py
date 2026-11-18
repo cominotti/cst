@@ -40,7 +40,7 @@ from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser
+from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser, SteamJournal, SteamPart
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.values import Json
@@ -1717,20 +1717,37 @@ class BulkTest(BulkBase):
                     f"NEEDS A LOOK: apps: damaged journal {path} (unreadable, or not as btrfs-bulk writes it", self.out
                 )
 
-    def test_the_writer_produces_the_checked_in_journal_exactly(self) -> None:
-        # The bytes main's btrfs-bulk was shown to read (REPORT, the mixed-version proof): a change
-        # here changes the format, and needs that proof again.
-        with open(os.path.join(STATE_FIXTURES, "bulk-journal-v0.json"), "rb") as f:
-            v0 = f.read()
-        self.state.jwrite("apps", json.loads(v0))
-        with (
-            open(self.state.jpath("apps"), "rb") as f,
-            open(os.path.join(STATE_FIXTURES, "bulk-journal-v1.json"), "rb") as g,
+    def test_the_writer_produces_the_checked_in_journals_exactly(self) -> None:
+        # The bytes main's btrfs-bulk was shown to read (REPORT, the mixed-version proof). Each fixture
+        # holds every field of its record: a field added to ItemJournal, SteamJournal or SteamPart
+        # fails here, and needs that proof again.
+        for ident, name, keys in (
+            ("apps", "bulk-journal", ItemJournal.__required_keys__ | ItemJournal.__optional_keys__),
+            ("steam-570", "bulk-journal-steam", SteamJournal.__required_keys__ | SteamJournal.__optional_keys__),
         ):
-            self.assertEqual(f.read(), g.read())
-        with open(self.state.jpath("apps"), "wb") as f:
-            f.write(v0)
-        self.assertEqual(self.state.jread_item("apps"), json.loads(v0))
+            with self.subTest(name):
+                with open(os.path.join(STATE_FIXTURES, f"{name}-v0.json"), "rb") as f:
+                    v0 = f.read()
+                record = json.loads(v0)
+                self.assertEqual(set(record), keys)
+                self.state.jwrite(ident, record)
+                with (
+                    open(self.state.jpath(ident), "rb") as f,
+                    open(os.path.join(STATE_FIXTURES, f"{name}-v1.json"), "rb") as g,
+                ):
+                    self.assertEqual(f.read(), g.read())
+                with open(self.state.jpath(ident), "wb") as f:
+                    f.write(v0)
+                read = self.state.jread_item(ident) if ident == "apps" else self.state.jread_steam(ident)
+                self.assertEqual(read, record)
+        with open(os.path.join(STATE_FIXTURES, "bulk-journal-steam-v0.json")) as f:
+            self.assertEqual(set(json.load(f)["parts"][0]), SteamPart.__required_keys__ | SteamPart.__optional_keys__)
+
+    def test_a_real_journal_has_only_the_fields_of_its_record(self) -> None:
+        # What apply writes, not only what a fixture holds: no field outside ItemJournal (and "v").
+        self.journal_crashed()
+        keys = ItemJournal.__required_keys__ | ItemJournal.__optional_keys__
+        self.assertLessEqual(set(self.journal("apps")), keys | {"v"})
 
 
 class StateFilesDurableTest(BulkBase):
