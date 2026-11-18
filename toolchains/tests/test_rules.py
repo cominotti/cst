@@ -59,7 +59,6 @@ from toolchains.adapters import processes as tc_processes
 from cst_core.ports import CommandResult
 from toolchains.application import python_uv as tca_python_uv
 from toolchains.adapters import rustup as tc_rustup
-from toolchains.cli import status as tc_status
 from toolchains.tests.test_prune_rust_build import NOW, TOOL, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
@@ -731,7 +730,7 @@ class ToolchainReportTest(RulesBase):
         c = self.repo("c")
         with open(os.path.join(c, "rust-toolchain.toml"), "w") as f:
             f.write('[toolchain]\nchannel = "1.80.0"\n')
-        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))
+        lines = "\n".join(tc_rustup.toolchain_lines(self.home, self.limits))
         self.assertIn("default:  stable", lines)
         self.assertRegex(lines, r"1\.98\.1 +pinned by ~/Workspace/a/rust-toolchain.toml")
         self.assertRegex(lines, r"nightly-2026-06-01 +pinned by ~/Workspace/b/rust-toolchain")
@@ -759,7 +758,7 @@ class ToolchainReportTest(RulesBase):
         os.makedirs(os.path.join(a, "scripts"))
         with open(os.path.join(a, "scripts/bench.sh"), "w") as f:
             f.write("RUSTUP_TOOLCHAIN=1.99.1 cargo bench   # not 1.95.0.1, not 21.95.0\n")
-        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))
+        lines = "\n".join(tc_rustup.toolchain_lines(self.home, self.limits))
         self.assertRegex(lines, r"nightly-2026-06-01 +named in ~/Workspace/lush/Makefile")
         self.assertRegex(lines, r"nightly +named in ~/Workspace/lush/Makefile \(not offered for removal\)")
         self.assertRegex(lines, r"1\.98\.0 +named in ~/Workspace/lush/.github/workflows/ci.yml")
@@ -786,7 +785,7 @@ class ToolchainReportTest(RulesBase):
         rh = os.path.join(self.tmp, "rustup")
         os.environ["RUSTUP_HOME"] = rh
         os.makedirs(os.path.join(rh, "toolchains", "1.95.0-x86_64-unknown-linux-gnu"))
-        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))  # no ~/Workspace: incomplete
+        lines = "\n".join(tc_rustup.toolchain_lines(self.home, self.limits))  # no ~/Workspace: incomplete
         self.assertIn("no removal command, because the search was incomplete", lines)
         self.assertNotIn("rustup toolchain uninstall", lines)
 

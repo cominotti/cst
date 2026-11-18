@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The boundaries the use cases (toolchains/application/) reach the machine
 through: cargo's build folders and who uses them, uv, the saved run summaries, the
-lines a run says and the user manager. cst_core's ClockPort gives the monotonic time;
-the adapters in toolchains/adapters/ implement these.
+lines a run says, the user manager, the run lock, the files CST keeps in the home and
+the reports of what is installed besides the caches. cst_core's ClockPort gives the
+monotonic time; the adapters in toolchains/adapters/ implement these.
 """
 
 from __future__ import annotations
@@ -298,4 +299,17 @@ class HomeFilesPort(Protocol):
     def put_wrapper(self, path: str, text: str, values: Mapping[str, str]) -> bool:
         """The wrapper through the installer, listed with VALUES, its component marked done;
         True when written (WriteFailed when it cannot be written)."""
+        ...
+
+
+class InstalledToolsPort(Protocol):
+    """What status reports of the tools installed besides the caches (read only)."""
+
+    def rust_toolchains(self) -> list[str]:
+        """The installed rustup toolchains, their size, and which files under ~/Workspace pin
+        or name them."""
+        ...
+
+    def sccache(self) -> list[str]:
+        """The sccache cache's size and, per running server, its numbers and where it runs."""
         ...

@@ -374,6 +374,7 @@ include = [
     "toolchains/application/prune.py",
     "toolchains/application/python_uv.py",
     "toolchains/application/rust_build.py",
+    "toolchains/application/status.py",
     "toolchains/cli/__init__.py",
     "toolchains/cli/auto.py",
     "toolchains/cli/config.py",

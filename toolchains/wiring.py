@@ -22,10 +22,12 @@ from toolchains.adapters.build_tree import CargoBuildTree
 from toolchains.adapters.home_files import HomeFiles, RunSummaries, ToolchainsLock, load_settings
 from toolchains.adapters.processes import cargo_procs
 from toolchains.adapters.program import RunOutput, home_folder, in_container, journal_stdout
+from toolchains.adapters.rustup import InstalledTools
 from toolchains.adapters.units import UserUnits
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
 from toolchains.application.config import ToolConfig
+from toolchains.application.status import ToolchainsStatus
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
@@ -154,3 +156,19 @@ def auto_timer(s: Session) -> AutoTimer:
 def tool_config(s: Session) -> ToolConfig:
     """config plan and apply over the session's adapters."""
     return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s))
+
+
+def toolchains_status(s: Session) -> ToolchainsStatus:
+    """status over the session's adapters."""
+    return ToolchainsStatus(
+        s.home,
+        s.prog,
+        s.out,
+        s.files,
+        s.machine.state,
+        InstalledTools(s.home, s.limits),
+        auto_timer(s),
+        tool_config(s),
+        lambda: settings(s),
+        lambda checked, tid: target(s, checked, tid),
+    )
