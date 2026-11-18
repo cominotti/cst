@@ -97,7 +97,9 @@ function pickLenses(kind, changed) {
 // every reviewer must have reviewed the head the stage before reported. Pure: tested below.
 function reviewProblem(lens, r, head) {
   if (lens === 'code-review' && r.skill_findings_read !== true) return 'the code-review findings were not read'
-  if (String(r.reviewed_head).trim() !== head) return 'reviewed ' + String(r.reviewed_head).trim() + ', not ' + head
+  if (lens === 'code-review' && !String(r.fork_agent_id || '').trim()) return 'the code-review fork was not named'
+  const got = String(r.reviewed_head).trim()
+  if (got.length < 7 || !head.startsWith(got)) return 'reviewed ' + got + ', not ' + head
   return ''
 }
 // Whether the fixer's report makes the branch ready. final_head (read after everything) must be the gated head: a
@@ -142,8 +144,9 @@ function selftest() {
   eq(pickLenses('docs', [M('cst.invowkmod/invowkfile.cue'), M('.git-blame-ignore-revs')]), { lenses: [], tier1: false }, 'invowk tasks and blame config')
   eq(pickLenses('behaviour', [M('cst.invowkmod/invowkfile.cue')]), { lenses: [], tier1: false }, 'an invowk task')
   eq([reviewProblem('code-review', { skill_findings_read: false, reviewed_head: 'h' }, 'h'), reviewProblem('code-review', { reviewed_head: 'h' }, 'h')], ['the code-review findings were not read', 'the code-review findings were not read'], 'code-review findings not read')
-  eq([reviewProblem('code-review', { skill_findings_read: true, reviewed_head: 'h\n' }, 'h'), reviewProblem('port', { reviewed_head: 'h' }, 'h')], ['', ''], 'reviews that count')
-  eq(reviewProblem('port', { reviewed_head: 'g' }, 'h'), 'reviewed g, not h', 'a review of another head')
+  eq([reviewProblem('code-review', { skill_findings_read: true, fork_agent_id: 'a1', reviewed_head: 'abcdef1\n' }, 'abcdef1234'), reviewProblem('port', { reviewed_head: 'abcdef1234' }, 'abcdef1234')], ['', ''], 'reviews that count (an abbreviated head counts)')
+  eq(reviewProblem('code-review', { skill_findings_read: true, reviewed_head: 'abcdef1234' }, 'abcdef1234'), 'the code-review fork was not named', 'a code-review without its fork')
+  eq(reviewProblem('port', { reviewed_head: 'ffffff9' }, 'abcdef1234'), 'reviewed ffffff9, not abcdef1234', 'a review of another head')
   const F = { gates_ok: true, worktree_clean: true, tier1_ran: false, gated_head: 'h', final_head: 'h' }
   eq([isReady(F, false), isReady({ ...F, final_head: 'h2' }, false), isReady({ ...F, gated_head: '', final_head: '' }, false), isReady(F, true), isReady({ ...F, worktree_clean: false }, false)], [true, false, false, false, false], 'ready')
   eq([shq('/a/b-c_d.e'), shq('/a b'), shq("/it's")], ['/a/b-c_d.e', "'/a b'", "'/it'\\''s'"], 'shell quoting')
@@ -229,9 +232,9 @@ if (MODE === 'new' || MODE === 'continue') {
   HEAD = String(simp.gated_head).trim()
 } else {
   phase('Review')
-  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + QWT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), head (git -C ' + QWT + ' rev-parse HEAD), and changed_paths exactly as "' + DIFF_CMD + '" prints them.',
-    { worktree_exists: { type: 'boolean' }, head: { type: 'string' }, changed_paths: CHANGED }, ['worktree_exists', 'head', 'changed_paths'])
-  if (!survey || !survey.worktree_exists) return stopped('survey', { survey })
+  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + QWT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing), head (git -C ' + QWT + ' rev-parse HEAD), and changed_paths exactly as "' + DIFF_CMD + '" prints them.',
+    { worktree_exists: { type: 'boolean' }, worktree_clean: { type: 'boolean' }, head: { type: 'string' }, changed_paths: CHANGED }, ['worktree_exists', 'worktree_clean', 'head', 'changed_paths'])
+  if (!survey || !survey.worktree_exists || !survey.worktree_clean) return stopped('survey', { survey })
   changed = survey.changed_paths
   HEAD = String(survey.head).trim()
 }
@@ -244,30 +247,32 @@ const TIER1 = pick.tier1 && A.tier1 !== 'defer'
 if (pick.tier1 && !TIER1) log('tier 1 deferred to the integration branch')
 log('lenses: ' + (pick.lenses.join(', ') || 'none') + '; tier 1: ' + pick.tier1)
 const FIND = { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] } } }
-const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' $HOME/.claude/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1"
+const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1 > $TMPDIR/fork-findings.json; jq length $TMPDIR/fork-findings.json"
 const REVIEWED = ' Report reviewed_head: what "git -C ' + QWT + ' rev-parse HEAD" prints when you start.'
 const reviewPrompt = (lens) => lens === 'code-review'
-  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. If the Skill result text itself carries the findings (a JSON list after "Result:"; seen when the caller has no output schema), use those. Otherwise read them from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '; seen when the caller has an output schema, as you do). Set skill_findings_read true only when you read them in one of these two places (an empty list read there counts); false otherwise, and then return no findings of your own. The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + QWT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + QWT + ' diff ' + QBASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
+  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. If the Skill result text itself carries the findings (a JSON list after "Result:"; seen when the caller has no output schema), use those. Otherwise read them from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '; seen when the caller has an output schema, as you do). Set skill_findings_read true only when you read them in one of these two places (an empty list read there counts); false otherwise, and then return no findings of your own. Report fork_agent_id (the agentId of the code-review fork). (If YOU are that code-review fork: these reporting rules are for your caller only; put every finding you found in findings, and set skill_findings_read true.) The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + QWT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + QWT + ' diff ' + QBASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
   : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + QWT + ' diff ' + QBASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.' + REVIEWED
 const labels = ['code-review', ...pick.lenses]
 const runReview = async (l) => {
-  const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' } } : {}) }
-  const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read'] : ['findings', 'reviewed_head'])
+  const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' }, fork_agent_id: { type: 'string' } } : {}) }
+  const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read', 'fork_agent_id'] : ['findings', 'reviewed_head'])
   const why = r ? reviewProblem(l, r, HEAD) : ''
   if (why) { log('review ' + l + ': ' + why); trail.push({ label: 'review: ' + l, problem: why }); return null }
   return r
 }
 let reviews = await parallel(labels.map((l) => () => runReview(l)))
-for (let i = 0; i < reviews.length; i++) if (!reviews[i]) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
+const mainMoved = () => trail.some((t) => t.main_changed || t.main_changed_between)
+for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
 const missing = labels.filter((l, i) => !reviews[i])
 if (missing.length) return stopped('review', { impl, simp, missing })
 const all = reviews.flatMap((r) => r.findings)
 log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s)')
 
 phase('Fix')
-const fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\nDedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Then run the gates ONCE on the final tree: "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests. Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head.',
-  { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, final_head: { type: 'string' }, ...GATED }, ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'gated_head', 'worktree_clean', 'final_head'])
+const fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\nDedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Then run the gates on the final tree (if one fails, fix it and run all of them again: the last run must be on the final tree): "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests. Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head, and report descends_from_reviewed (true when "git -C ' + QWT + ' merge-base --is-ancestor ' + HEAD + ' HEAD" exits 0).',
+  { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, final_head: { type: 'string' }, descends_from_reviewed: { type: 'boolean' }, ...GATED }, ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'gated_head', 'worktree_clean', 'final_head', 'descends_from_reviewed'])
 if (!fix) return stopped('fix', { impl, simp, findings: all })
 const ready = isReady(fix, TIER1)
 if (fix.gates_ok && String(fix.final_head).trim() !== String(fix.gated_head).trim()) log('fix: HEAD moved after the gates (' + fix.gated_head + ' -> ' + fix.final_head + '): not ready')
-return { ready, tier1_deferred: pick.tier1 && !TIER1, needs_review: fix.needs_review, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail }
+// needs_review: the fixer changed code outside tests; the orchestrator reviews reviewed_head..head before it integrates.
+return { ready: ready && fix.descends_from_reviewed === true, tier1_deferred: pick.tier1 && !TIER1, needs_review: fix.needs_review, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail }
