@@ -26,7 +26,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_btrfs_bulk.py): the checkout root holds the tests package.
@@ -86,6 +86,7 @@ class BulkBase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    @override
     def setUp(self) -> None:
         self.out: str = ""
         self.tmp = tempfile.mkdtemp(prefix="bulk-test-")
@@ -186,6 +187,7 @@ class BulkBase(unittest.TestCase):
         """The program as root (the user from bulk.conf or --user), over the same scratch paths and fakes."""
         return Wiring(TOOL, root=True, paths=self.paths, machine=self.machine, host=self.host)
 
+    @override
     def tearDown(self) -> None:
         for root, dirs, _ in os.walk(self.tmp):
             for d in dirs:
@@ -1826,6 +1828,7 @@ def _u_refuse(path: str) -> bool:
 class AsUserTest(unittest.TestCase):
     """as_user runs fn in a child process as the user (the uid and group calls faked: the run is not root)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-bulk-as-user-")
         self.addCleanup(shutil.rmtree, self.tmp)
