@@ -57,7 +57,7 @@ from btrfs.docker_gc.domain import (
     Volume,
 )
 from btrfs.docker_gc.ports import EventSink
-from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.domain.install import manifest_by_src
 from cst_core.ports import CommandResult
 from tests.probes import bytes_program
@@ -875,6 +875,55 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(GcPaths().installed, manifest_by_src()["btrfs/docker-gc"].dest)
 
 
+class ContainerRefusalTest(unittest.TestCase):
+    """Inside a toolbox or container (wiring.runs_in_container), the commands that talk to docker refuse."""
+
+    def test_each_command_refuses_and_names_the_host_command(self) -> None:
+        for (cmd, dry, write), on_host in (
+            (("run", False, False), "cst btrfs docker-gc run"),
+            (("run", True, False), "cst btrfs docker-gc run --dry-run"),
+            (("cleanup-now", False, False), "cst btrfs docker-gc cleanup-now"),
+            (("status", False, False), "cst btrfs docker-gc status"),
+            (("record", False, False), "sudo /usr/local/sbin/docker-gc record"),
+            (("settings", False, True), "sudo /usr/local/sbin/docker-gc settings --write"),
+            (("settings", False, False), "sudo /usr/local/sbin/docker-gc settings"),
+        ):
+            f = Fixture(config=FakeConfig(text=None, installed=None))
+            f.gc.in_container = True
+            self.assertEqual(f.gc.execute(cmd, dry=dry, write=write), 1, cmd)
+            self.assertEqual(len(f.console.lines), 1, f.console.lines)
+            line = f.console.lines[0]
+            self.assertTrue(line.startswith("ERR docker-gc "), line)
+            self.assertIn(
+                f"refused inside a toolbox or container: {PATHS.settings_file} there is the container's", line
+            )
+            self.assertTrue(line.endswith(f"Run it on the host: {on_host}"), line)
+            self.assertEqual((f.docker.calls, f.config.reads, f.config.text), ([], 0, None), cmd)
+
+    def test_settings_runs_when_both_files_are_named(self) -> None:
+        f = Fixture(config=FakeConfig(text=None, installed=None))
+        f.gc.in_container, f.gc.named_files = True, True
+        self.assertEqual(f.gc.execute("settings", write=True), 0, f.console.lines)
+        self.assertIsNotNone(f.config.text)
+        f.gc.named_files = False
+        self.assertEqual(f.gc.execute("run"), 1)
+        f = Fixture()
+        f.gc.in_container, f.gc.named_files = True, True
+        self.assertEqual(f.gc.execute("status"), 1, "a command that talks to docker refuses with the files named too")
+        self.assertEqual(f.docker.calls, [])
+
+    def test_the_wiring_tells_the_container(self) -> None:
+        named = {"DOCKER_GC_CONF": "/c", "DOCKER_GC_INSTALLED": "/i"}
+        for env, want in (
+            ({"CST_DOCKER_GC_CONTAINER": "1"}, (True, False)),
+            ({"CST_DOCKER_GC_CONTAINER": "0", **named}, (False, True)),
+            ({"CST_DOCKER_GC_CONTAINER": "1", "DOCKER_GC_CONF": "/c"}, (True, False)),
+        ):
+            gc = gc_wiring.build_docker_gc(env)
+            self.assertEqual((gc.in_container, gc.named_files), want, env)
+        self.assertEqual(gc_wiring.runs_in_container({}), HostExecutionContext().is_container())
+
+
 class StateFilesTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="docker-gc-test-")
@@ -1098,6 +1147,7 @@ class EntryTest(unittest.TestCase):
                 # Never the machine's settings file or installed docker-gc.
                 "DOCKER_GC_CONF": os.path.join(tmp, "docker-gc.conf"),
                 "DOCKER_GC_INSTALLED": os.path.join(tmp, "no-docker-gc"),
+                "CST_DOCKER_GC_CONTAINER": "0",  # on the host, also when the tests run in a toolbox
             }
             for args in (("status",), ("run", "--dry-run")):
                 r, w = os.pipe()

@@ -23,6 +23,7 @@ from btrfs.docker_gc.domain import (
     PlanInputs,
     Protection,
     RunSummary,
+    container_refusal,
     event_image,
     heartbeat_fresh,
     last_run_line,
@@ -132,10 +133,15 @@ class DockerGc:
         config: GcSettingsPort,
         paths: GcPaths,
         protect_env: str | None = None,
+        in_container: bool = False,
+        named_files: bool = False,
     ) -> None:
         self.settings = settings
         self.docker, self.state, self.host, self.console, self.clock = docker, state, host, console, clock
         self.config, self.paths, self.protect_env = config, paths, protect_env
+        # Inside a toolbox or container (container_refusal), and whether the caller named the
+        # settings file and the installed program (DOCKER_GC_CONF and DOCKER_GC_INSTALLED).
+        self.in_container, self.named_files = in_container, named_files
         self.protection = Protection((), "not read yet")
 
     def read_protection(self) -> None:
@@ -153,7 +159,15 @@ class DockerGc:
     def execute(self, command: GcCommand, *, dry: bool = False, write: bool = False) -> int:
         """Run one command; its exit status. A docker error is one journal line and exit 1; a state file of
         a newer docker-gc one line and NEWER_STATE_EXIT; protected registries it cannot tell (UnknownProtection)
-        one line and BAD_SETTINGS_EXIT, before anything else (the recorder needs no settings)."""
+        one line and BAD_SETTINGS_EXIT, before anything else (the recorder needs no settings). Inside a
+        toolbox or container, a command container_refusal names ends first: one line and exit 1."""
+        if self.in_container:
+            refused = container_refusal(
+                command, dry=dry, write=write, settings_file=self.paths.settings_file, named_files=self.named_files
+            )
+            if refused is not None:
+                self.console.error(refused)
+                return 1
         try:
             if command == "record":
                 return self.record()

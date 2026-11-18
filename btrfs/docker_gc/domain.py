@@ -156,6 +156,30 @@ def protected_registries(value: str) -> tuple[str, ...]:
     return tuple(r.strip() + "/" for r in value.split(",") if r.strip())
 
 
+# ---- inside a toolbox or container ------------------------------------------------------
+def container_refusal(command: str, *, dry: bool, write: bool, settings_file: str, named_files: bool) -> str | None:
+    """Why docker-gc does not run this command inside a toolbox or container, or None.
+
+    There /etc/cst/docker-gc.conf and the installed program are the container's (usually
+    missing), while docker reaches the host's engine through the shared socket: the host's
+    protected images would count as unprotected. So every command that talks to docker
+    refuses, the read-only ones too (status and a dry run would list those images as
+    removable). settings, which talks to no docker, runs only when the caller names both of
+    its files (DOCKER_GC_CONF and DOCKER_GC_INSTALLED: the installer's staged step does).
+    """
+    if command == "settings" and named_files:
+        return None
+    words = " ".join([command, *(["--dry-run"] if dry else []), *(["--write"] if write else [])])
+    on_host = (
+        f"sudo {GcPaths().installed} {words}" if command in ("record", "settings") else f"cst btrfs docker-gc {words}"
+    )
+    return (
+        f"docker-gc {words}: refused inside a toolbox or container: {settings_file} there is the "
+        "container's, not the host's, while docker reaches the host's engine, so the host's "
+        f"protected images would count as unprotected. Run it on the host: {on_host}"
+    )
+
+
 # ---- the settings file: which registries are protected ------------------------------
 # The exit status of a command that cannot tell which registries are protected (a settings file
 # it cannot read, or no file and an installed docker-gc it does not know): it removes nothing.

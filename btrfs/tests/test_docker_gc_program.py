@@ -241,6 +241,7 @@ class Program:
         self.now = time.time()
         self.set_docker(scenario(self.now))
         self.systemctl_rc = 0
+        self.container = "0"  # CST_DOCKER_GC_CONTAINER: "1" as inside a toolbox or container
 
     def set_docker(self, st: Mapping[str, object]) -> None:
         with open(self.docker_state, "w") as f:
@@ -278,6 +279,8 @@ class Program:
             "FAKE_DOCKER_STATE": self.docker_state,
             "FAKE_DOCKER_LOG": self.log,
             "FAKE_SYSTEMCTL_RC": str(self.systemctl_rc),
+            # On the host as far as docker-gc can tell, also when the tests run in a toolbox.
+            "CST_DOCKER_GC_CONTAINER": self.container,
         }
 
     def run(self, *args: str) -> tuple[int, str, str]:
@@ -486,6 +489,53 @@ class StatusTest(unittest.TestCase):
 LEGACY_DOMAIN = os.path.join(
     os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "legacy", "btrfs-docker_gc-domain.py@654bbda"
 )
+
+
+class ContainerTest(unittest.TestCase):
+    """Inside a toolbox or container the settings file and the installed program are the container's
+    (missing), while docker is the host's engine: no command that talks to docker runs there."""
+
+    def setUp(self) -> None:
+        self.p = Program(self)
+        self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
+        os.remove(self.p.conf)  # as in a toolbox: no settings file, no installed docker-gc
+        self.p.container = "1"
+
+    def test_nothing_that_talks_to_docker_runs(self) -> None:
+        images = self.p.docker()["images"]
+        for args, on_host in (
+            (("run",), "cst btrfs docker-gc run"),
+            (("run", "--dry-run"), "cst btrfs docker-gc run --dry-run"),
+            (("status",), "cst btrfs docker-gc status"),
+            (("cleanup-now",), "cst btrfs docker-gc cleanup-now"),
+            (("record",), "sudo /usr/local/sbin/docker-gc record"),
+        ):
+            rc, out, err = self.p.run(*args)
+            self.assertEqual((rc, out), (1, ""), args)
+            self.assertTrue(err.startswith(f"docker-gc {' '.join(args)}: refused inside a toolbox or container: "), err)
+            self.assertTrue(err.endswith(f"Run it on the host: {on_host}\n"), err)
+            self.assertEqual(self.p.calls(), [], args)
+        self.assertEqual(self.p.docker()["images"], images, "an image was removed")
+        self.assertFalse(os.path.exists(self.p.conf))
+
+    def test_settings_only_with_both_files_named(self) -> None:
+        # The installer's staged step names both (DOCKER_GC_CONF, DOCKER_GC_INSTALLED): it talks to no docker.
+        rc, _out, err = self.p.run("settings", "--write")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertTrue(os.path.exists(self.p.conf))
+        env = {k: v for k, v in self.p.env().items() if k != "DOCKER_GC_INSTALLED"}
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", self.p.tool, "settings"],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            cwd="/",
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertTrue(r.stderr.endswith("Run it on the host: sudo /usr/local/sbin/docker-gc settings\n"), r.stderr)
 
 
 class SettingsUpgradeTest(unittest.TestCase):

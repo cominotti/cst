@@ -28,6 +28,11 @@ Installed by `cst btrfs docker-gc enable` (CST) as
   docker-gc settings [--write]  the protected registries and where they come
                         from; while the settings file is missing, --write
                         writes it with what the installed docker-gc protects.
+
+On the host only: inside a toolbox or container its settings would be the
+container's while docker is the host's, so every command refuses there with
+exit 1 (settings only runs there when DOCKER_GC_CONF and DOCKER_GC_INSTALLED
+both name its files).
 """
 
 import os.path as _cst_path

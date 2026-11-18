@@ -12,7 +12,7 @@ from btrfs.docker_gc.adapters import DockerCli, GcHost, GcSettingsFile, GcStateF
 from btrfs.docker_gc.application import DockerGc
 from btrfs.docker_gc.domain import GcPaths, GcSettings
 from cst_core.adapters import SystemClockAdapter
-from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals as _restore_default_signals
 
 
@@ -42,6 +42,14 @@ def paths_from(env: Mapping[str, str]) -> GcPaths:
     )
 
 
+def runs_in_container(env: Mapping[str, str]) -> bool:
+    """Inside a toolbox or container: CST_DOCKER_GC_CONTAINER (1/0, the tests'), else what cst_core detects."""
+    forced = env.get("CST_DOCKER_GC_CONTAINER", "")
+    if forced in ("0", "1"):
+        return forced == "1"
+    return HostExecutionContext().is_container()
+
+
 def quiet_sigpipe() -> None:
     """SIGPIPE at its default: `docker-gc status | head` ends quietly (status and a dry run only read)."""
     _restore_default_signals()
@@ -62,4 +70,6 @@ def build_docker_gc(env: Mapping[str, str] | None = None) -> DockerGc:
         config=GcSettingsFile(paths),
         paths=paths,
         protect_env=values.get("DOCKER_GC_PROTECT"),
+        in_container=runs_in_container(values),
+        named_files="DOCKER_GC_CONF" in values and "DOCKER_GC_INSTALLED" in values,
     )
