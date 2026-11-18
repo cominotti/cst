@@ -13,7 +13,6 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import contextlib
 import io
 import json
@@ -25,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Mapping
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_gc.py): the checkout root holds the tests package.
@@ -32,11 +32,14 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from btrfs.docker_gc import adapters as gc_adapters, cli as gc_cli, domain as gc_domain, wiring as gc_wiring
+from btrfs.docker_gc import adapters as gc_adapters
+from btrfs.docker_gc import cli as gc_cli
+from btrfs.docker_gc import domain as gc_domain
+from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.docker_gc.application import DockerGc, Recording
 from btrfs.docker_gc.domain import (
-    NewerState,
     DAY,
+    NEWER_STATE_EXIT,
     Container,
     DockerEvent,
     EventsEnd,
@@ -46,6 +49,7 @@ from btrfs.docker_gc.domain import (
     GcState,
     Image,
     ImageDrop,
+    NewerState,
     PlanInputs,
     RunSummary,
     Volume,
@@ -168,6 +172,7 @@ class FakeState:
         self.state: GcState | None = None
         self.saved: list[GcState] = []
         self.summary: RunSummary | None = None
+        self.summary_error: NewerState | None = None
         self.lock_free = True
         self.save_error: OSError | None = None
 
@@ -184,6 +189,8 @@ class FakeState:
         self.state = state
 
     def load_summary(self) -> RunSummary | None:
+        if self.summary_error is not None:
+            raise self.summary_error
         return self.summary
 
     def save_summary(self, summary: RunSummary) -> None:
@@ -408,6 +415,13 @@ class ApplicationTest(unittest.TestCase):
         self.f.console.lines.clear()
         self.assertEqual(self.f.gc.apply(plan), 0)
         self.assertEqual(self.f.console.lines, [])
+
+    def test_a_newer_last_run_stops_the_run_even_on_a_fresh_boot(self) -> None:
+        # The uptime skip used to come first: on a machine up less than 10 minutes the run exited 0
+        # without looking, and the next run wrote over the newer summary.
+        self.f.host.up_for = 60.0
+        self.f.state.summary_error = NewerState("last-run.json is format 2")
+        self.assertEqual(self.f.gc.execute("run", dry=False), NEWER_STATE_EXIT)
 
     def test_a_second_run_while_the_lock_is_held_exits_0(self) -> None:
         self.f.state.lock_free = False

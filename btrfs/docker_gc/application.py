@@ -248,14 +248,15 @@ class DockerGc:
         """The weekly run (dry: only the list)."""
         if not self.docker_up():
             return
+        # The last run's summary is written at the end: one of a newer docker-gc stops the run here
+        # (NewerState), before anything is removed, instead of being written over; checked before
+        # the uptime skip, so a newer state stops the run on a fresh boot too.
+        self.state.load_summary()
         if self.host.uptime() < MIN_UPTIME and not dry:
             self.console.log(5, "booted less than 10 minutes ago; skipped this time")
             return
         if not self.take_lock():
             return
-        # The last run's summary is written at the end: one of a newer docker-gc stops the run here
-        # (NewerState), before anything is removed, instead of being written over.
-        self.state.load_summary()
         p = self.plan(self.clock.now())
         self.show(p)
         if dry:
