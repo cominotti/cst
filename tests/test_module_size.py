@@ -14,10 +14,11 @@ once the module is at the cap or under it. Nothing is added here: split a
 module that grows past the cap by command group or check area, not by layer
 (docs/architecture.md, "Package profile").
 
-Why 800: of the 122 package modules (2026-11-17) half are under 140 lines and
-nine in ten under 720; the eight over 800 are the ones the architecture
-review named as too big to read (toolchains/cli.py 2164, doctor/application.py
-1791, vm/cli.py 1471, ...), and the next four (753-776) keep some room.
+Why 800: of the 131 package modules (2026-11-17, after #43 split btrfs/bulk)
+half are under 140 lines and nine in ten under 720; the eight over 800 are
+the ones the architecture review named as too big to read (toolchains/cli.py
+2164, doctor/application.py 1791, vm/cli.py 1471, ...), and the next five
+(753-776) keep some room.
 
 Standard library only.
 """
@@ -34,8 +35,8 @@ MODULE_LINE_CAP: Final = 800
 
 # Modules over the cap, with their lines (tests/budgets.py: never above; lowered by `invowk cmd fix budgets`).
 OVER_CAP: Final[dict[str, int]] = {
-    "btrfs/bulk/adapters.py": 881,
-    "btrfs/bulk/steam.py": 1309,
+    "btrfs/bulk/adapters/user.py": 865,
+    "btrfs/bulk/domain.py": 821,
     "btrfs/snapshot/application.py": 1117,
     "doctor/application.py": 1791,
     "swap/application.py": 842,
