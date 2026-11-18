@@ -74,6 +74,16 @@
 
 set -Euo pipefail
 
+# list, caches and configure are the Python runtime's (btrfs-snapshot-runtime,
+# next to this file; installed beside it): handed over at once, with the
+# command line, before anything here runs. CST_LC_CTYPE: the caller's
+# LC_CTYPE ("" when unset), which Python changes at start under a C locale.
+case "${1:-}" in
+    list|caches|configure)
+        CST_LC_CTYPE="${LC_CTYPE+=${LC_CTYPE}}" exec /usr/bin/python3 -I -B \
+            "$(dirname "${BASH_SOURCE[0]}")/btrfs-snapshot-runtime" "$@" ;;
+esac
+
 # convert-planned --lock-held FD (the hourly run's first step, run by the Python
 # runtime under its lock): no word of the start that the caller already gave.
 ENGINE_STEP=0

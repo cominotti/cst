@@ -174,3 +174,22 @@ class ShippedUnitsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallOrderTest(unittest.TestCase):
+    """DESIGN 8.3: the bash front (btrfs/btrfs-snapshot) hands its commands to btrfs-snapshot-runtime,
+    so the runtime is written before the front and removed after it. install writes in manifest
+    order and remove deletes in the reverse order (tests/test_install_record.py), so its row comes
+    first, in the same component."""
+
+    def test_the_runtime_row_comes_before_the_front(self) -> None:
+        from cst_core.domain.install import INSTALL_MANIFEST, select_entries
+
+        srcs = [e.src for e in select_entries(INSTALL_MANIFEST, component="btrfs:snapshots")]
+        self.assertIn("btrfs/btrfs-snapshot-runtime", srcs)
+        self.assertLess(srcs.index("btrfs/btrfs-snapshot-runtime"), srcs.index("btrfs/btrfs-snapshot"))
+        by_src = {e.src: e for e in INSTALL_MANIFEST}
+        runtime, front = by_src["btrfs/btrfs-snapshot-runtime"], by_src["btrfs/btrfs-snapshot"]
+        # Side by side: the front runs the runtime from its own folder.
+        self.assertEqual(os.path.dirname(runtime.dest), os.path.dirname(front.dest))
+        self.assertEqual((runtime.kind, runtime.owner), ("python-entry", "root"))

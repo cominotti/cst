@@ -25,7 +25,7 @@ from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
+from cst_core.adapters.runtime import lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
 from cst_core.domain.contracts import first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
@@ -652,6 +652,20 @@ class LocalCstDispatchAdapterTest(unittest.TestCase):
                 undo_python_start()
                 self.assertEqual(os.environ.get("LC_CTYPE"), after)
                 self.assertNotIn("CST_LC_CTYPE", os.environ)
+
+    def test_restore_lc_ctype_leaves_the_signals_alone(self) -> None:
+        # The LC_CTYPE part only: a program with cleanup keeps SIGPIPE ignored.
+        before = signal.getsignal(signal.SIGPIPE)
+        self.addCleanup(signal.signal, signal.SIGPIPE, before)
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        with mock.patch.dict(os.environ, {"LC_CTYPE": "C.UTF-8", "CST_LC_CTYPE": "=C"}, clear=True):
+            restore_lc_ctype()
+            self.assertEqual(os.environ.get("LC_CTYPE"), "C")
+            self.assertNotIn("CST_LC_CTYPE", os.environ)
+        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+        with mock.patch.dict(os.environ, {"LC_CTYPE": "C.UTF-8", "CST_LC_CTYPE": ""}, clear=True):
+            restore_lc_ctype()
+            self.assertNotIn("LC_CTYPE", os.environ)
 
     def test_undo_python_start_gives_a_child_the_caller_s_lc_ctype(self) -> None:
         # A real Python under a C locale (no LC_ALL, LANG or LC_CTYPE: PEP 538 sets LC_CTYPE=C.UTF-8), and

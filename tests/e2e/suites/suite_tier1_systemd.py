@@ -1964,6 +1964,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         entries = {
             "/usr/local/sbin/btrfs-bulk": ("--help", 2),
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
+            "/usr/local/sbin/btrfs-snapshot-runtime": ("--help", 2),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
             "/usr/local/bin/btrfs-stall-report": ("--help", 0),
             # env -i below sets no HOME, which it needs before reading its arguments (as the bash did): exit 1.

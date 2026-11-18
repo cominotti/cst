@@ -95,6 +95,13 @@ def lc_ctype_handover() -> str:
     return "CST_LC_CTYPE=" + ("" if value is None else "=" + value)
 
 
+def restore_lc_ctype() -> None:
+    """Only the LC_CTYPE part of undo_python_start: the caller's LC_CTYPE back from CST_LC_CTYPE
+    (which goes), signals left as they are. For a program with cleanup (SIGPIPE stays ignored, so a
+    closed pipe cannot cut it short) that a shell front hands LC_CTYPE over to."""
+    _restore_lc_ctype(os.environ.pop("CST_LC_CTYPE", None))
+
+
 def undo_python_start() -> None:
     """Undo what Python changes at start, for the commands this program runs.
 

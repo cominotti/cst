@@ -1811,7 +1811,7 @@ After `snapshots setup`:
 
 | Path | What |
 |------|------|
-| `/usr/local/sbin/btrfs-snapshot`, `btrfs-snapshot-core`, `btrfs-notify`, `btrfs-bulk` | the programs |
+| `/usr/local/sbin/btrfs-snapshot`, `btrfs-snapshot-runtime`, `btrfs-snapshot-core`, `btrfs-notify`, `btrfs-bulk` | the programs ([section 15](#15-safety-rules-of-btrfs-snapshot-core): who does what) |
 | `/usr/local/bin/cst-pending-alerts`, `/etc/systemd/user/cst-pending-alerts.service`, `/var/lib/cst-alerts/` | alerts raised while nobody was logged in, shown at the next login ([README.md, section 4.9](README.md#49-desktop-alerts-btrfs-notify)); shared with the monitoring setup |
 | `/etc/systemd/system/btrfs-snapshot.{service,timer}` | hourly snapshots |
 | `/etc/systemd/system/btrfs-snapshot-nas.{service,timer}` | NAS backup (enabled only by `nas setup`) |
@@ -2395,6 +2395,16 @@ while new ones wait. After one day of waiting you get an alert.
 repository (`btrfs/btrfs-snapshot-core`). It creates and deletes the
 snapshots. It uses only Python's standard library, so nothing has to be
 installed. Its main idea: **a snapshot is deleted only if every rule agrees.**
+
+The program the units, `cst btrfs` and `btrfs-bulk` run is
+`/usr/local/sbin/btrfs-snapshot`, with the same commands as always. It is a
+bash front: the conversion engine (`convert`, `convert-boot`, `convert-one`,
+`planned-left`, `busy`) stays bash for good, and the other commands
+(`list`, `caches` and `configure`) go at once, with their command line, to
+`/usr/local/sbin/btrfs-snapshot-runtime` (Python, `btrfs/snapshot_runtime`),
+installed next to it, before it and removed after it. The runtime reads
+`snapshots.conf` with the same reader as `cst doctor` and runs
+`btrfs-snapshot-core` for every snapshot decision.
 
 ### What it considers "its own" (ownership)
 

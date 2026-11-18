@@ -62,6 +62,7 @@ SYSTEM_PYTHON: Final = "/usr/bin/python3"
 HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
     "btrfs/btrfs-bulk": (("--help",), 2),
     "btrfs/btrfs-snapshot-core": (("--help",), 0),
+    "btrfs/btrfs-snapshot-runtime": (("--help",), 2),
     "btrfs/btrfs-stall-monitord": (("--help",), 0),
     "btrfs/btrfs-stall-report": (("--help",), 0),
     "btrfs/cst-pending-alerts": (("--help",), 2),
