@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Unit tests for the shell side of the cache-folder exclusion: core_cache_args
-in btrfs/btrfs-snapshot (the core's options from SNAPSHOT_EXCLUDE_CACHES and
-SNAPSHOT_CACHES_SKIP) and what snap_status in btrfs/setup-snapshots.bash
-(`snapshots status`) shows for SNAPSHOT_EXCLUDE_CACHES.
+"""Unit tests for what snap_status in btrfs/setup-snapshots.bash (`snapshots
+status`) shows for SNAPSHOT_EXCLUDE_CACHES, and for the units that run
+btrfs/btrfs-snapshot. (btrfs-snapshot's own options from SNAPSHOT_EXCLUDE_CACHES
+and SNAPSHOT_CACHES_SKIP: test_snapshot_hourly.py, on the whole program.)
 
-btrfs-snapshot cannot be sourced in a test: it reads /etc/btrfs-setup and
-creates /var/lib/btrfs-snapshot at the top. The functions are cut out of the
-file and run in bash with stubs and variables of the test's own.
+shell_function cuts one function out of a script's text, for the
+setup-snapshots.bash and btrfs-setup.sh tests that still need it.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_snapshot_runtime -v
@@ -25,7 +24,6 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BTRFS = os.path.dirname(HERE)
-RUNTIME = os.path.join(BTRFS, "btrfs-snapshot")
 
 
 def shell_function(path: str, name: str) -> str:
@@ -36,133 +34,6 @@ def shell_function(path: str, name: str) -> str:
     if m is None:
         raise AssertionError(f"{name}() not found in {path}")
     return m.group(0)
-
-
-class CoreCacheArgsTest(unittest.TestCase):
-    skips: list[str]
-
-    def args(
-        self, exclude: str = "yes", skips: str = ".local/share/containers", workspace_subvol: bool = False
-    ) -> tuple[list[str], list[str]]:
-        script = "\n".join(
-            [
-                "set -Eeuo pipefail",
-                'log() { echo "<$1>btrfs-snapshot: $2"; }',
-                'is_subvol() { [[ "${WS_SUBVOL}" == 1 && "$1" == /var/home/u/Workspace ]]; }',
-                shell_function(RUNTIME, "core_sources"),
-                shell_function(RUNTIME, "core_cache_args"),
-                "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top",
-                'SNAPSHOT_EXCLUDE_CACHES="$1" SNAPSHOT_CACHES_SKIP="$2"',
-                'core_sources "72h" "48h"',
-                "core_cache_args",
-                'printf "arg %s\\n" "${CORE_CACHE_ARGS[@]}"',
-                'printf "skip %s\\n" "${CORE_CACHE_SKIPS[@]}"',
-            ]
-        )
-        with tempfile.TemporaryDirectory() as d:
-            # Files in the working folder: a '*' in the skip list must stay a '*'.
-            open(os.path.join(d, "a-file"), "w").close()
-            r = subprocess.run(
-                ["bash", "-c", script, "_", exclude, skips],
-                check=False,
-                cwd=d,
-                capture_output=True,
-                text=True,
-                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "WS_SUBVOL": "1" if workspace_subvol else "0"},
-                stdin=subprocess.DEVNULL,
-            )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        lines = r.stdout.splitlines()
-        self.skips = [ln[5:] for ln in lines if ln.startswith("skip ")]
-        return (
-            [ln[4:] for ln in lines if ln.startswith("arg ")],
-            [ln for ln in lines if not ln.startswith(("arg ", "skip "))],
-        )
-
-    def test_default_is_on_with_podman_kept_whole(self) -> None:
-        args, logs = self.args()
-        self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/.local/share/containers"])
-        self.assertEqual(logs, [])
-        # What `caches` gets (it takes no --exclude-caches).
-        self.assertEqual(self.skips, ["--caches-skip", "home=u/.local/share/containers"])
-
-    def test_off_keeps_the_skips_for_the_listing(self) -> None:
-        args, _ = self.args(exclude="no")
-        self.assertEqual(args, ["--caches-skip", "home=u/.local/share/containers"])
-        self.assertEqual(self.skips, args)
-
-    def test_a_typo_warns_and_stays_on(self) -> None:
-        args, logs = self.args(exclude="nope")
-        self.assertEqual(args[0], "--exclude-caches")
-        self.assertEqual(logs, ["<4>btrfs-snapshot: SNAPSHOT_EXCLUDE_CACHES='nope' is not yes or no; using yes"])
-
-    def test_paths_go_to_the_source_that_holds_them(self) -> None:
-        skips = "Workspace/big/target Workspace .local/share/containers/ ./notes"
-        args, _ = self.args(skips=skips, workspace_subvol=True)
-        self.assertEqual(
-            args,
-            [
-                "--exclude-caches",
-                "--caches-skip",
-                "Workspace=big/target",
-                "--caches-skip",
-                "Workspace=.",
-                "--caches-skip",
-                "home=u/.local/share/containers",
-                "--caches-skip",
-                "home=u/notes",
-            ],
-        )
-        # Until ~/Workspace is a subvolume it is part of the home snapshots.
-        args, _ = self.args(skips="Workspace/big/target", workspace_subvol=False)
-        self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/Workspace/big/target"])
-
-    def test_paths_outside_the_home_are_ignored_with_a_warning(self) -> None:
-        args, logs = self.args(skips="/etc ../other a/../../b x/./y ok *")
-        self.assertEqual(args, ["--exclude-caches", "--caches-skip", "home=u/ok", "--caches-skip", "home=u/*"])
-        self.assertEqual(len(logs), 4, logs)
-        self.assertTrue(all("is not a path inside your home; ignored" in ln for ln in logs))
-
-    def test_empty_skip_list(self) -> None:
-        args, logs = self.args(skips="")
-        self.assertEqual((args, logs), (["--exclude-caches"], []))
-
-
-class ListCachesTest(unittest.TestCase):
-    """`btrfs-snapshot caches --json` must print only the core's JSON on
-    stdout, also when the settings make core_cache_args warn."""
-
-    def test_warnings_go_to_stderr_not_into_the_json(self) -> None:
-        script = "\n".join(
-            [
-                "set -Eeuo pipefail",
-                'log() { echo "<$1>btrfs-snapshot: $2"; }',
-                "is_subvol() { return 1; }",
-                shell_function(RUNTIME, "core_sources"),
-                shell_function(RUNTIME, "core_cache_args"),
-                shell_function(RUNTIME, "list_caches"),
-                "HOME_DIR=/var/home/u HOME_MOUNT=/var/home HOME_SUBVOL=home TOP=/top SNAPDIR=/top/snapshots",
-                "HOME_PRESERVE=72h WS_PRESERVE=48h CONF=/etc/btrfs-snapshot/snapshots.conf",
-                "SNAPSHOT_EXCLUDE_CACHES=nope SNAPSHOT_CACHES_SKIP='/etc ok'",
-                "CORE=core",
-                'core() { printf \'{"args": "%s"}\\n\' "$*"; }',
-                "list_caches --json",
-            ]
-        )
-        r = subprocess.run(
-            ["bash", "-c", script],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len(r.stdout.splitlines()), 1, r.stdout)
-        self.assertTrue(r.stdout.startswith('{"args": "caches --snapdir /top/snapshots'), r.stdout)
-        self.assertIn("--caches-skip home=u/ok --json", r.stdout)
-        self.assertIn("SNAPSHOT_EXCLUDE_CACHES='nope' is not yes or no", r.stderr)
-        self.assertIn("'/etc' is not a path inside your home", r.stderr)
 
 
 class SnapStatusCachesTest(unittest.TestCase):
@@ -230,6 +101,75 @@ class SnapStatusCachesTest(unittest.TestCase):
         ]
         self.assertEqual(len(on), 1, on)
         self.assertIn("(u@nas:22)", on[0])
+
+
+class SetupHandsNoSeamTest(unittest.TestCase):
+    """Every btrfs-snapshot run of `cst btrfs snapshots ...` (setup-snapshots.bash, as root) is
+    started without CST_SNAPSHOT_ROOT, btrfs-snapshot's test seam, even when the caller has it.
+    (setup's live conversion: test_btrfs_setup.py, the setup cycle.)"""
+
+    def run_setup(self, body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "btrfs-snapshot")
+            with open(fake, "w", encoding="utf-8") as f:
+                f.write('#!/bin/bash\nprintf "%s|%s\\n" "$*" "${CST_SNAPSHOT_ROOT-unset}" >>"$T/seen"\n')
+            os.chmod(fake, 0o755)
+            script = "\n".join(
+                [
+                    'SRC="$1"; . "$1/setup-snapshots.bash"',
+                    'SNAP_RUNTIME="$T/btrfs-snapshot"; PROG=cst-btrfs-test',
+                    # What snap_disable does besides the purge (units, mounts, the btrbk configs of an
+                    # older version in the host's /etc/btrbk) is not this test's, and stays off the host.
+                    "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }; cst_remove() { :; }",
+                    """grep() { [[ " $* " == *" /etc/btrbk/"* ]] && return 1; command grep "$@"; }""",
+                    'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"',
+                    "export CST_SNAPSHOT_ROOT=/elsewhere",
+                    body,
+                ]
+            )
+            r = subprocess.run(
+                ["bash", "-c", script, "_", BTRFS],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": d},
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+            with open(os.path.join(d, "seen"), encoding="utf-8") as f:
+                return f.read().splitlines()
+
+    def test_list_caches_prune_and_purge(self) -> None:
+        self.assertEqual(
+            self.run_setup(
+                "snapshots_cmd list --json; snapshots_cmd caches; snapshots_cmd prune; "
+                "snapshots_cmd prune --confirm; snap_disable --purge >/dev/null"
+            ),
+            [
+                "list --json|unset",
+                "caches|unset",
+                "prune --dry-run --allow-mass-delete|unset",
+                "prune --allow-mass-delete|unset",
+                "purge|unset",
+            ],
+        )
+
+
+class ShippedUnitsTest(unittest.TestCase):
+    def test_no_unit_hands_the_test_seam_or_any_setting_to_btrfs_snapshot(self) -> None:
+        # CST_SNAPSHOT_ROOT moves every path of a root program into a test folder: the units
+        # that run btrfs-snapshot pass it no environment at all.
+        for name in ("btrfs-snapshot.service", "btrfs-snapshot-nas.service", "btrfs-subvol-convert.service"):
+            with open(os.path.join(BTRFS, "units", name), encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln and not ln.startswith(("#", "["))]
+            with self.subTest(name):
+                self.assertIn("ExecStart=/usr/local/sbin/btrfs-snapshot ", "\n".join(lines))
+                found = {ln.partition("=")[0].strip() for ln in lines} & {
+                    "Environment",
+                    "EnvironmentFile",
+                    "PassEnvironment",
+                }
+                self.assertEqual(found, set())
 
 
 if __name__ == "__main__":
