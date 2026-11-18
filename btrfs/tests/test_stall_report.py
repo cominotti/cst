@@ -28,7 +28,7 @@ import tempfile
 import time
 import unittest
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Protocol, cast
+from typing import Any, ClassVar, Protocol, cast, override
 
 # Run directly (python3 -I -B btrfs/tests/test_stall_report.py): the checkout root holds the tests package.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -135,6 +135,7 @@ class RecordTypesTest(unittest.TestCase):
 class ZswapAcrossUpgradeTest(unittest.TestCase):
     m: _StallReportModule
 
+    @override
     def setUp(self) -> None:
         self.m = load()
 
@@ -302,6 +303,7 @@ def episode(
 class ReportCase(unittest.TestCase):
     m: _StallReportModule
 
+    @override
     def setUp(self) -> None:
         self.m = load()
 
@@ -546,6 +548,7 @@ class OpenEpisodeFunctionTest(unittest.TestCase):
     m: ClassVar[_StallReportModule]
 
     @classmethod
+    @override
     def setUpClass(cls) -> None:
         cls.m = load()
 
@@ -785,6 +788,7 @@ class StallWatchWaitTest(unittest.TestCase):
     """btrfs/btrfs-stall-watch waits for the recorder to cover the end of the run, then
     saves the report of a window that reaches that sample. sleep is a no-op on PATH."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-stall-watch-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
