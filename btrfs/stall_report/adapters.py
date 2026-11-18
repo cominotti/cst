@@ -91,20 +91,18 @@ def analyse(
     load() read, and below's per-process section when asked (a window with 2+
     samples only, the last key of the result)."""
     recorded = Recorded([], [], [], [], [])
+    by_tag = {
+        StallRecordTag.META: recorded.metas,
+        StallRecordTag.SAMPLE: recorded.samples,
+        StallRecordTag.EPISODE: recorded.episodes,
+        StallRecordTag.EVENT: recorded.events,
+        StallRecordTag.ALERT: recorded.alerts,
+    }
     for r in recs:
-        match r.get("t"):
-            case StallRecordTag.META:
-                recorded.metas.append(r)
-            case StallRecordTag.SAMPLE:
-                recorded.samples.append(r)
-            case StallRecordTag.EPISODE:
-                recorded.episodes.append(r)
-            case StallRecordTag.EVENT:
-                recorded.events.append(r)
-            case StallRecordTag.ALERT:
-                recorded.alerts.append(r)
-            case _:
-                pass  # another kind of record: not read
+        tag = r.get("t")
+        kept = by_tag.get(tag) if isinstance(tag, str) else None  # another kind of record: not read
+        if kept is not None:
+            kept.append(r)
     res, meta = summarise(recorded, since, until, verbose=verbose, now=time.time())
     if with_below and res["samples"] >= 2:
         res["below"] = below_section(since, until)
