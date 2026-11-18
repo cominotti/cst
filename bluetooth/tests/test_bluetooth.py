@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import types
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -154,6 +154,7 @@ def general(text: str) -> list[str]:
 
 
 class MainConfTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -346,6 +347,7 @@ class MainConfTest(unittest.TestCase):
 
 
 class WirePlumberTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -373,6 +375,7 @@ class WirePlumberTest(unittest.TestCase):
 
 
 class SettingsTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -449,6 +452,7 @@ class SettingsTest(unittest.TestCase):
 
 
 class LiveParsingTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -528,6 +532,7 @@ class LiveParsingTest(unittest.TestCase):
 
 
 class LeAudioRenderTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -587,6 +592,7 @@ class LeAudioEffectTest(unittest.TestCase):
     """What WirePlumber makes of the files: roles, other fragments, the
     settings line that `le-audio on|off` writes."""
 
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
         self.tmp = tempfile.mkdtemp(prefix="bt-test-")
@@ -755,6 +761,7 @@ JOURNAL = """\
 
 
 class WatcherFailureTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
