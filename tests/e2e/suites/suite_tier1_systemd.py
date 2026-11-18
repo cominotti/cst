@@ -2461,7 +2461,9 @@ systemctl daemon-reload
 boot_unit() {
     rm -f "$s/exit"
     systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
-    [ "$(cat "$s/exit")" = "1 success" ] || { echo "exit status and result: $(cat "$s/exit")" >&2; return 1; }
+    for _ in $(seq 1 20); do [ -s "$s/exit" ] && break; sleep 0.25; done   # ExecStopPost may lag the job
+    [ "$(cat "$s/exit" 2>/dev/null)" = "1 success" ] ||
+        { echo "exit status and result: $(cat "$s/exit" 2>/dev/null)" >&2; return 1; }
 }
 # unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
 unit_log_has() {
