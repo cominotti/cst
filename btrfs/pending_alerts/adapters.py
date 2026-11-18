@@ -16,6 +16,7 @@ from btrfs.pending_alerts.domain import (
     MAX_FILES,
     MAX_RECORD,
     NAME,
+    TAG,
     Alert,
     Seen,
     PendingPaths,
@@ -122,10 +123,15 @@ def load_record(s: PendingPaths) -> dict[str, Seen]:
 
 
 def save_record(s: PendingPaths, text: str) -> None:
-    """Replace the record (folder 0700, file 0600). Raises OSError."""
+    """Replace the record (folder 0700, file 0600). OSError when the folder cannot be made (the run then
+    fails); a record that cannot be written or put in place is said on stderr and the old one stays, the
+    run going on as the bash version's "mv ... || rm -f" did."""
     os.makedirs(s.state_dir, exist_ok=True)
     os.chmod(s.state_dir, 0o700)
-    write_atomic(s.record, text, mode=0o600, durable=False, relabel=False)
+    try:
+        write_atomic(s.record, text, mode=0o600, durable=False, relabel=False)
+    except OSError as e:
+        print(f"{TAG}: cannot write {s.record}: {e.strerror}", file=sys.stderr)
 
 
 def notification_server_up(runner: CommandRunnerPort) -> bool:

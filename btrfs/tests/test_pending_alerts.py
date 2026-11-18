@@ -559,6 +559,19 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
         self.assertEqual(len(self.notifications()), 1)
 
+    def test_a_record_it_cannot_replace_still_ends_well(self) -> None:
+        # The folder is there but the new record cannot take the old one's place (here a folder holds
+        # its name): as bash's "mv ... || rm -f", the run still exits 0, and the old record stays, so
+        # the alert comes again at the next login.
+        self.alert(1)
+        os.makedirs(self.record)
+        r = self.run_prog()
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
+        self.assertTrue(os.path.isdir(self.record))
+        self.assertEqual(self.run_prog().returncode, 0)
+        self.assertEqual(len(self.notifications()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
