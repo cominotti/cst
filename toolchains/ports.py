@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The boundaries the prune use case (toolchains/application/) reaches the machine
-through: cargo's build folders and who uses them, uv, the saved run summaries, and the
-lines a run says. cst_core's ClockPort gives the monotonic time; the adapters in
-toolchains/adapters/ implement these.
+"""The boundaries the use cases (toolchains/application/) reach the machine
+through: cargo's build folders and who uses them, uv, the saved run summaries, the
+lines a run says and the user manager. cst_core's ClockPort gives the monotonic time;
+the adapters in toolchains/adapters/ implement these.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from cst_core.domain.values import Json
     from cst_core.ports import CommandResult
+    from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import CargoCache, Folder, Workspaces
     from toolchains.domain.prune import RunRecord
 
@@ -145,4 +146,44 @@ class RunOutputPort(Protocol):
     def where(self, path: str) -> str:
         """PATH as the lines show it: with ~, and where it really is when a link on the way
         leads elsewhere."""
+        ...
+
+
+class UserUnitsPort(Protocol):
+    """The user manager (systemctl --user), as auto on, auto off and status use it. The
+    calls made before files are removed are checked: Refused when the manager refuses or
+    gives no answer, so nothing is removed yet and a second run can finish the job."""
+
+    def active_state(self, name: str) -> str:
+        """What is-active says of NAME ('' when the manager could not be asked)."""
+        ...
+
+    def timer_facts(self, name: str) -> TimerFacts:
+        """What the manager says of the timer NAME (its next run only while it is active)."""
+        ...
+
+    def stop_if_running(self, name: str) -> bool:
+        """Stop NAME unless the manager says it is inactive or failed, both checked;
+        True when it was stopped."""
+        ...
+
+    def disable_timer(self, name: str) -> None:
+        """`disable --now` the timer NAME, checked, then forget its last run."""
+        ...
+
+    def reload(self) -> None:
+        """daemon-reload, checked (Refused)."""
+        ...
+
+    def reload_failed(self) -> bool:
+        """daemon-reload after unit files were removed: True (and an error line) when it failed."""
+        ...
+
+    def enable_now(self, name: str) -> None:
+        """`enable --now` NAME, checked (Refused)."""
+        ...
+
+    def manager_path(self) -> str | None:
+        """PATH of the user manager (what the timer's service runs with), or None when it
+        cannot be read."""
         ...

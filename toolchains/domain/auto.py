@@ -4,6 +4,7 @@ environment systemctl --user gets to reach this user's own manager; no I/O."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,16 @@ def render_service() -> str:
 
 def render_timer() -> str:
     return unit_timer([UNIT_HEADER], "CST: prune old toolchain caches, hourly", "hourly", "10min")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TimerFacts:
+    """What the user manager says of a timer: is-enabled, is-active ('' where it gave no
+    answer) and, only while it is active, its next run (show NextElapseUSecRealtime)."""
+
+    enabled: str
+    active: str
+    next_elapse: str = ""
 
 
 def label(key: str) -> str:

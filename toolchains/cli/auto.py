@@ -173,8 +173,8 @@ def cmd_auto_on(s: Session, *, unless_off: bool = False) -> int:
         s.out.say(f"{'written:  ' if put else 'unchanged:'} {label(name)}")
         changed = changed or put
     if changed:
-        s.units.systemctl("daemon-reload", check=True)
-    s.units.systemctl("enable", "--now", TIMER, check=True)
+        s.units.reload()
+    s.units.enable_now(TIMER)
     s.out.say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
     record_done(home, AUTO_COMPONENT, s.entry_file)
     if turned_off(home):
@@ -189,12 +189,8 @@ def stop_orphan_timer(s: Session) -> None:
     timer: what `auto off` left before it checked its `disable` (it removed
     the files anyway). Stopped when the manager does not say it is stopped;
     Refused when the manager gives no answer."""
-    # is-active prints the state; it exits 3 when the unit is not active,
-    # and 4 when the manager does not know it (nothing loaded it).
-    if s.units.before_removal(TIMER, "is-active", ok=(0, 3, 4)) in ("inactive", "failed"):
-        return
-    s.units.before_removal(TIMER, "stop")
-    s.out.say(f"stopped:   {TIMER} (it was still running although its file was gone)")
+    if s.units.stop_if_running(TIMER):
+        s.out.say(f"stopped:   {TIMER} (it was still running although its file was gone)")
 
 
 def cmd_auto_off(s: Session) -> int:
@@ -257,7 +253,7 @@ def cmd_auto_off(s: Session) -> int:
 def timer_text(s: Session) -> str:
     home = s.home
     if file_state(os.path.join(home, UNIT_DIR_REL, TIMER), render_timer()) == "missing":
-        if s.units.systemctl("is-active", TIMER) == "active":
+        if s.units.active_state(TIMER) == "active":
             return (
                 f"timer {TIMER}: still running although its file is gone (left by an earlier auto off); "
                 f"{s.prog} auto off stops it"
@@ -268,11 +264,8 @@ def timer_text(s: Session) -> str:
                 f"snapshots setup leaves it off; {s.prog} auto on turns it on)"
             )
         return f"timer {TIMER}: not installed ({s.prog} auto on)"
-    en = s.units.systemctl("is-enabled", TIMER)
-    ac = s.units.systemctl("is-active", TIMER)
-    txt = f"timer {TIMER}: {en or 'unknown'}, {ac or 'unknown'}"
-    if ac == "active":
-        nxt = s.units.systemctl("show", "-p", "NextElapseUSecRealtime", "--value", TIMER)
-        if nxt and nxt not in ("n/a", "0"):
-            txt += f", next {nxt}"
+    facts = s.units.timer_facts(TIMER)
+    txt = f"timer {TIMER}: {facts.enabled or 'unknown'}, {facts.active or 'unknown'}"
+    if facts.active == "active" and facts.next_elapse not in ("", "n/a", "0"):
+        txt += f", next {facts.next_elapse}"
     return txt

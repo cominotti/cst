@@ -1333,10 +1333,15 @@ class PackageLayersTest(Scratch):
 
     def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
-            self.assertEqual(tc_units.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
+            self.assertEqual(
+                tc_units.systemctl("is-active", "cst-toolchains-prune.timer", program=tc_wiring.systemctl_program()),
+                "active",
+            )
         self.assertIsNone(self.session().units.manager_path())
         with self.failing("is-active"), self.assertRaises(Refused):
-            tc_units.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
+            tc_units.systemctl(
+                "is-active", "cst-toolchains-prune.timer", check=True, program=tc_wiring.systemctl_program()
+            )
 
 
 class ParseSizeTest(unittest.TestCase):
@@ -1405,9 +1410,9 @@ class CommandFaultTextTest(unittest.TestCase):
             (None, f"cargo metadata: [Errno 2] No such file or directory: '{missing}'"),
         )
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": "/nonexistent/cst-systemctl"}):
-            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "")
+            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "")
             with self.assertRaises(Refused) as stop:
-                tc_units.systemctl("start", "x.service", check=True)
+                tc_units.systemctl("start", "x.service", check=True, program=tc_wiring.systemctl_program())
         self.assertEqual(
             str(stop.exception),
             "systemctl --user start x.service: [Errno 2] No such file or directory: '/nonexistent/cst-systemctl'",
@@ -1450,7 +1455,9 @@ class NotUtf8OutputTest(unittest.TestCase):
         self.assertEqual(tc_sccache.sccache_stats(sccache, env).get("Compile requests"), "7")
         systemctl = self.stub("systemctl", b"enabled\xff\n")
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
-            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
+            self.assertEqual(
+                tc_units.systemctl("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "enabled\ufffd"
+            )
 
 
 class SessionEnvTest(unittest.TestCase):
@@ -1470,7 +1477,7 @@ class SessionEnvTest(unittest.TestCase):
 
     def seen(self, **env: str) -> str:
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
-            return tc_units.systemctl("show-environment")
+            return tc_units.systemctl("show-environment", program=tc_wiring.systemctl_program())
 
     def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
         other = f"/run/user/{self.uid + 1}"

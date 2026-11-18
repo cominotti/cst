@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The composition root of cst-toolchains: what it reads of its environment (the
 program's name in hints, the journal's stream, the fixed "now" of tests, the stop
-of the re-run on the host), its re-run on the host from a toolbox, and the session
-every command runs with: the home, the adapters, and the targets built over them.
+of the re-run on the host, a test's systemctl stub), its re-run on the host from a
+toolbox, and the session every command runs with: the home, the adapters, and the
+targets built over them.
 
 toolchains/cli/ parses argv, asks this module for the session and runs one command.
 """
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
     from toolchains.domain.prune import Settings
-    from toolchains.ports import BuildTreePort, RunOutputPort, UvPort
+    from toolchains.ports import BuildTreePort, RunOutputPort, UserUnitsPort, UvPort
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,7 +51,7 @@ class Session:
     entry_file: str
     limits: Limits
     out: RunOutputPort
-    units: UserUnits
+    units: UserUnitsPort
     machine: TargetPorts
 
 
@@ -59,7 +60,7 @@ class Parts:
     """What a test gives instead of the real thing (None: the real one)."""
 
     limits: Limits | None = None
-    units: Callable[[RunOutputPort], UserUnits] | None = None
+    units: Callable[[RunOutputPort], UserUnitsPort] | None = None
     procs: Callable[[], list[CargoProc]] | None = None
     tree: BuildTreePort | None = None
     uv: UvPort | None = None
@@ -69,6 +70,11 @@ class Parts:
 def prog_name() -> str:
     """How hints name the frontend ("cst toolchains" through cst)."""
     return os.environ.get("CST_PROG") or "cst toolchains"
+
+
+def systemctl_program() -> str | None:
+    """The stub a test runs instead of systemctl (CST_TOOLCHAINS_SYSTEMCTL), or None: the real one."""
+    return os.environ.get("CST_TOOLCHAINS_SYSTEMCTL") or None
 
 
 def reexec_on_host(argv: Sequence[str], entry_file: str) -> int | None:
@@ -99,7 +105,7 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     procs = cargo_procs if p.procs is None else p.procs
     tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
-    units = (UserUnits if p.units is None else p.units)(out)
+    units = UserUnits(out, systemctl_program()) if p.units is None else p.units(out)
     return Session(home, now, prog, entry_file, limits, out, units, machine)
 
 

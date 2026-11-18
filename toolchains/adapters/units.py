@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """The user manager (systemctl --user): checked calls before files are
-removed, daemon-reload, the timer's disable, the manager's PATH (UserUnits; a
-test replaces its systemctl).
+removed, daemon-reload, the timer's enable and disable, what it says of a timer,
+the manager's PATH (UserUnits, the UserUnitsPort; a test replaces its systemctl,
+or names a stub program instead of systemctl).
 """
 
 from __future__ import annotations
@@ -16,16 +17,16 @@ if TYPE_CHECKING:
 
 from cst_core.adapters.runner import on_host_argv
 from cst_core.domain.errors import Refused
-from toolchains.domain.auto import own_session_env
+from toolchains.domain.auto import TimerFacts, own_session_env
 from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER, in_container
 
 
-def systemctl_cmd(*args: str) -> list[str]:
-    # Tests point this at a stub: no test may reach the real user manager.
-    stub = os.environ.get("CST_TOOLCHAINS_SYSTEMCTL")
-    if stub:
-        return [stub, "--user", *args]
+def systemctl_cmd(*args: str, program: str | None = None) -> list[str]:
+    # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads): no test may reach the
+    # real user manager.
+    if program:
+        return [program, "--user", *args]
     cmd = ["systemctl", "--user", *args]
     return on_host_argv(cmd, {}) if in_container() else cmd
 
@@ -37,10 +38,10 @@ def systemctl_env() -> dict[str, str]:
     return own_session_env(os.environ, uid, owner, own_exists=os.path.isdir(f"/run/user/{uid}"))
 
 
-def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
-    """Output (stripped) of systemctl --user; '' when it could not run.
+def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,), program: str | None = None) -> str:
+    """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    r = RUNNER.run(systemctl_cmd(*args), base_env=systemctl_env(), timeout=60, stdin="inherit")
+    r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=60, stdin="inherit")
     if r.cause is not None:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None
@@ -51,14 +52,41 @@ def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
 
 
 class UserUnits:
-    """The user manager, as auto on, auto off and status use it."""
+    """UserUnitsPort: the user manager, as auto on, auto off and status use it (PROGRAM: a
+    test's stub run instead of systemctl). Every call goes through systemctl(), which a
+    test's subclass may replace."""
 
-    def __init__(self, out: RunOutputPort) -> None:
+    def __init__(self, out: RunOutputPort, program: str | None = None) -> None:
         self.out = out
+        self.program = program
 
     def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
         """See systemctl()."""
-        return systemctl(*args, check=check, ok=ok)
+        return systemctl(*args, check=check, ok=ok, program=self.program)
+
+    def active_state(self, name: str) -> str:
+        return self.systemctl("is-active", name)
+
+    def timer_facts(self, name: str) -> TimerFacts:
+        enabled = self.systemctl("is-enabled", name)
+        active = self.systemctl("is-active", name)
+        if active != "active":
+            return TimerFacts(enabled, active)
+        return TimerFacts(enabled, active, self.systemctl("show", "-p", "NextElapseUSecRealtime", "--value", name))
+
+    def stop_if_running(self, name: str) -> bool:
+        # is-active prints the state; it exits 3 when the unit is not active,
+        # and 4 when the manager does not know it (nothing loaded it).
+        if self.before_removal(name, "is-active", ok=(0, 3, 4)) in ("inactive", "failed"):
+            return False
+        self.before_removal(name, "stop")
+        return True
+
+    def reload(self) -> None:
+        self.systemctl("daemon-reload", check=True)
+
+    def enable_now(self, name: str) -> None:
+        self.systemctl("enable", "--now", name, check=True)
 
     def before_removal(self, name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
         """systemctl --user ARGS NAME for a timer, checked, before auto on/off
