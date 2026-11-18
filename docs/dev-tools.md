@@ -40,7 +40,7 @@ still runs on the system Python with the standard library.
 ## Where the virtual environment lives
 
 Never inside the checkout: `~/Workspace` is snapshotted, and a `.venv` there
-would end up in every snapshot. `tests/uv-dev` (used by the invowk tasks) sets
+would end up in every snapshot unless it is marked as a cache (below). `tests/uv-dev` (used by the invowk tasks) sets
 
 - `UV_PROJECT_ENVIRONMENT=${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>`
 - `RUFF_CACHE_DIR=${XDG_CACHE_HOME:-~/.cache}/cst-dev-ruff/<key>`
@@ -58,7 +58,12 @@ it creates `.venv/` there and installs the `dev` group into it (that is how a
 the environment `tests/uv-dev` made instead
 (`${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>/bin/python`, after one
 `tests/uv-dev ruff --version`), or delete the `.venv/` it made; `.idea/` is
-in `.gitignore`.
+in `.gitignore`. No CST command makes one: `tests/uv-dev` is the only
+place in the repository that runs uv on this project (`uv run`; the invowk
+tasks, `tests/ruff_budget.py` and CI all go through it; `cst toolchains`
+runs only `uv --version` and `uv cache prune`, outside any project). uv writes a `CACHEDIR.TAG` into a `.venv/`
+it makes, so new snapshots drop one that uv made (unless
+`SNAPSHOT_EXCLUDE_CACHES=no`, [btrfs/SNAPSHOTS.md](../btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
 
 uv uses the system Python (`python-preference = "only-system"`) and never
 downloads one. `requires-python = ">=3.15"`: Fedora 45 ships Python 3.15 in
