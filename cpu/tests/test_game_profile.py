@@ -658,6 +658,23 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertEqual(out.count("unreadable:"), 3)  # a blank line and a kind it does not know are none
         self.assertIn("  drift: none", out)  # the readable records are still compared
 
+    def test_state_lists_the_idle_boxes_around_them_and_judges_no_newer_format(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        with open(self.state, "a") as f:
+            f.write("prop usr 'lushtext.slice CPUWeight new -\nprop usr steam-x.slice CPUWeight new -\n")
+        self.write(self.intended, "cst-game-intended 2\nprop sys machine.slice\n")
+        out, _ = self.run_profile("state")
+        self.assertIn("\n  other boxes     idle: steam-x.slice\n", out)  # bash's eval printed nothing here
+        self.assertEqual(
+            [x for x in out.split("\n") if "unreadable:" in x],
+            [
+                f"  unreadable: {self.state} line {len(self.read(self.state).split(chr(10))) - 2} (skipped):"
+                " prop usr 'lushtext.slice CPUWeight new -"
+            ],
+        )
+        self.assertIn("drift: not checked", out)
+
     def test_tick_says_nothing_about_them(self) -> None:
         self.run_profile("on")
         self.write(self.manual, "")

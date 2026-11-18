@@ -601,8 +601,12 @@ class GameProfile:
             if on:
                 self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
         if on:
-            for path, intended in ((p.state, False), (p.intended, True)):
-                for number, line in unreadable_lines(read_text(path) or "", intended=intended):
+            intended_text = read_text(p.intended) or ""
+            files = [(p.state, self._state_text(), False)]
+            if newer_intended(p.intended, intended_text) is None:  # a newer format's lines are not judged
+                files.append((p.intended, intended_text, True))
+            for path, text, intended in files:
+                for number, line in unreadable_lines(text, intended=intended):
                     self.say(f"  unreadable: {path} line {number} (skipped): {line}")
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
