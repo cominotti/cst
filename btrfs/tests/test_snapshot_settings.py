@@ -19,8 +19,10 @@ import os
 import re
 import subprocess
 import tempfile
+from typing import Final
 import unittest
 
+from btrfs.snapshot_runtime.domain import GuardError, guard_number
 from btrfs.tests.snapshot_fakes import SCRIPT
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.domain.text import file_lines, parse_snapshots_conf
@@ -99,3 +101,44 @@ class CorpusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardNumberTest(unittest.TestCase):
+    """guard_number (the runtime's space guard) against bash's (( free <= X * GIB )) under the
+    program's set -Euo pipefail: the same answer, or bash stopped where the runtime stops."""
+
+    BASH = 'set -Euo pipefail\nX="$1"; free="$2"; GIB=1\nif (( free <= X * GIB )); then echo le; else echo gt; fi\n'
+    # Bash evaluates these as expressions; for the runtime they are no number (named in the PR).
+    EXPRESSIONS: Final = ("1+1", "250*1", "(250)")
+
+    def bash(self, value: str, free: int) -> str:
+        r = subprocess.run(
+            ["/usr/bin/bash", "-c", self.BASH, "_", value, str(free)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        return r.stdout.strip() if r.returncode == 0 else "stop"
+
+    def test_the_same_answer_as_bash(self) -> None:
+        values = ["250", " 250 ", "\t250", "0250", "0", "", "-5", "+7", "0x10", "0X1f", "08", "09", "abc", "x y", "2.5"]
+        values += ["250GiB", "${X}", "'250'", "007", "999999999"]
+        for value in values:
+            for free in (0, 7, 8, 16, 168, 249, 250, 251, 2**40):
+                with self.subTest(value=value, free=free):
+                    n = guard_number(value)
+                    if n is GuardError.BAD_NUMBER:
+                        want = "gt"  # bash: an error line, and the comparison is false
+                    elif n is GuardError.NOT_A_NUMBER:
+                        want = "stop"
+                    else:
+                        want = "le" if free <= n else "gt"
+                    self.assertEqual(self.bash(value, free), want)
+
+    def test_expressions_are_the_known_difference(self) -> None:
+        for value in self.EXPRESSIONS:
+            with self.subTest(value=value):
+                self.assertIs(guard_number(value), GuardError.BAD_NUMBER)
+                self.assertEqual(self.bash(value, 1), "le")

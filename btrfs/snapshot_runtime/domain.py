@@ -5,9 +5,11 @@ defaults, btrfs-snapshot-core's command lines, and the texts of the journal line
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 import re
 from typing import Final
+
+from btrfs.health_check.domain import bash_int
 
 TAG: Final = "btrfs-snapshot"
 GIB: Final = 1024**3
@@ -22,11 +24,48 @@ SUBVOL_ROOT_INODE: Final = "256"
 
 
 DAY_S: Final = 86400
-CORE_LOCK_BUSY: Final = 3
-CORE_BLOCKED: Final = 4
 PURGE_BATCH: Final = 10
 # How many paths an alert names (head -n 3).
 SHOWN: Final = 3
+
+
+class CoreExit(IntEnum):
+    """btrfs-snapshot-core's exit status."""
+
+    OK = 0
+    ERROR = 1
+    USAGE = 2
+    LOCK_BUSY = 3
+    BLOCKED = 4  # a safety check blocked a creation or deletion
+
+
+class GuardError(StrEnum):
+    """A space-guard setting that is no integer, as bash arithmetic under set -u treats it: a word
+    that starts like a name (abc: an unset variable, the run stops), or anything else that is no
+    number (08, 2.5, 250GiB: an error line, and the comparison is false)."""
+
+    BAD_NUMBER = "bad-number"
+    NOT_A_NUMBER = "not-a-number"
+
+
+def guard_number(text: str) -> int | GuardError:
+    """A space-guard setting (GiB) as (( free <= SETTING * GIB )) reads it: blanks around it, empty
+    as 0, a sign, a decimal, a leading 0 octal, 0x hexadecimal."""
+    t = text.strip(" \t\n")
+    if not t:
+        return 0
+    m = re.fullmatch(r"([+-]?)(0[xX][0-9a-fA-F]+|[0-9]+)", t)
+    if m is None:
+        return GuardError.NOT_A_NUMBER if re.match(r"[A-Za-z_]", t) else GuardError.BAD_NUMBER
+    digits = m.group(2)
+    if digits[:2] in ("0x", "0X"):
+        n = int(digits, 16)
+    else:
+        found = bash_int(digits)
+        if found is None:
+            return GuardError.BAD_NUMBER
+        n = found
+    return -n if m.group(1) == "-" else n
 
 
 class Urgency(StrEnum):

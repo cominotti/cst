@@ -9,24 +9,25 @@ import os
 import re
 import sys
 
-from btrfs.health_check.domain import bash_int
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
 from btrfs.snapshot_runtime.domain import (
-    CORE_BLOCKED,
-    CORE_LOCK_BUSY,
     DAY_S,
+    EXIT_USAGE,
     GIB,
     NOT_SET_UP,
     PURGE_BATCH,
     SHOWN,
     AlertKind,
     CoreCommand,
+    CoreExit,
+    GuardError,
     Stderr,
     Urgency,
     blocked_alert,
     core_reason,
     head_spaced,
     nonempty_count,
+    guard_number,
     plan_entries,
     read_lines,
     source_args,
@@ -88,12 +89,12 @@ class CoreRun:
 def core_result(m: SnapshotRun, what: str, run: CoreRun) -> bool:
     """Alerts for the core's exit status; True only for 0."""
     match run.rc:
-        case 0:
+        case CoreExit.OK:
             clear_alert(m, AlertKind.BLOCKED)
             return True
-        case 3:
+        case CoreExit.LOCK_BUSY:
             m.log(5, f"{what}: another run holds {m.lock_path}; skipped")
-        case 4:
+        case CoreExit.BLOCKED:
             title, body = blocked_alert(run.reason, m.conf)
             send_alert(m, AlertKind.BLOCKED, Urgency.NORMAL, title, body)
         case _:
@@ -111,7 +112,7 @@ def prune_only(m: SnapshotRun) -> None:
     """Deletions by the normal retention only (no new snapshot this hour)."""
     s = m.settings
     run = CoreRun(m, CoreCommand.PRUNE, core_args(m, s["HOME_PRESERVE"], s["WS_PRESERVE"]))
-    if not core_result(m, "prune", run) and run.rc not in (CORE_LOCK_BUSY, CORE_BLOCKED):
+    if not core_result(m, "prune", run) and run.rc not in (CoreExit.LOCK_BUSY, CoreExit.BLOCKED):
         send_alert(
             m,
             AlertKind.PRUNE_FAILED,
@@ -133,18 +134,21 @@ def free_bytes(m: SnapshotRun) -> int | None:
     return None
 
 
-def gib_setting(m: SnapshotRun, key: str) -> int:
-    """A GiB setting as bash arithmetic reads it: digits (a leading 0 octal), blanks around them,
-    empty as 0. Anything else is no number here: said on stderr, and read as 0."""
-    text = m.settings[key].strip(" \t\n")
-    if not text:
-        return 0
-    sign = -1 if text.startswith("-") else 1
-    n = bash_int(text.lstrip("+-"))
-    if n is None:
-        print(f"btrfs-snapshot: {key}={m.settings[key]!r} is not a number; read as 0", file=sys.stderr, flush=True)
-        return 0
-    return sign * n
+class RunStopped(Exception):
+    """The run ends here with exit status 1 (where bash stopped the script: set -u)."""
+
+
+def at_or_below(m: SnapshotRun, free: int, key: str) -> bool:
+    """(( free <= KEY * GIB )) with KEY a GiB setting, as bash evaluated it (guard_number)."""
+    value = m.settings[key]
+    n = guard_number(value)
+    if n is GuardError.BAD_NUMBER:
+        print(f"{m.front}: ((: {key}={value!r}: not a number", file=sys.stderr, flush=True)
+        return False
+    if n is GuardError.NOT_A_NUMBER:
+        print(f"{m.front}: {key}={value!r} in {m.conf}: not a number", file=sys.stderr, flush=True)
+        raise RunStopped
+    return free <= n * GIB
 
 
 def skipped(m: SnapshotRun, path: str) -> bool:
@@ -204,18 +208,28 @@ def hourly(m: SnapshotRun, args: Sequence[str]) -> int:
         m.log(3, f"{m.core} is missing; re-run 'cst btrfs snapshots setup'")
         return 1
     # The planned conversions and the old trees: the engine's, under this lock.
-    m.run([m.front, "convert-planned", "--lock-held", str(fd)])
+    rc = m.rc(m.run([m.front, "convert-planned", "--lock-held", str(fd)]))
+    if rc != 0:
+        m.log(3, f"{m.front} convert-planned failed (rc={rc}); no snapshot this hour")
+        return 1
+    try:
+        return guarded(m)
+    except RunStopped:
+        return 1
+
+
+def guarded(m: SnapshotRun) -> int:
+    """hourly after the conversions: the space guard, the waits, the snapshot."""
+    s = m.settings
     free = free_bytes(m)
     if free is None:
         m.log(3, "cannot read free space")
         return 1
     paused = os.path.exists(f"{m.state}/paused")
-    emergency_gib = gib_setting(m, "EMERGENCY_AT_OR_BELOW_GIB")
-    if free <= emergency_gib * GIB:
+    if at_or_below(m, free, "EMERGENCY_AT_OR_BELOW_GIB"):
         return emergency(m, free)
     m.rm_f(f"{m.state}/emergency")
-    skip_gib, resume_gib = gib_setting(m, "SKIP_AT_OR_BELOW_GIB"), gib_setting(m, "RESUME_ABOVE_GIB")
-    if free <= skip_gib * GIB or (paused and free <= resume_gib * GIB):
+    if at_or_below(m, free, "SKIP_AT_OR_BELOW_GIB") or (paused and at_or_below(m, free, "RESUME_ABOVE_GIB")):
         m.touch(f"{m.state}/paused")
         send_alert(
             m,
@@ -238,7 +252,7 @@ def hourly(m: SnapshotRun, args: Sequence[str]) -> int:
         m.write(f"{m.state}/last-ok", f"{m.now()}\n")
         clear_alert(m, AlertKind.PRUNE_FAILED)
     # 3 (busy) and 4 (blocked, alerted) are no failures of this unit.
-    return 0 if run.rc in (0, CORE_LOCK_BUSY, CORE_BLOCKED) else 1
+    return 0 if run.rc in (CoreExit.OK, CoreExit.LOCK_BUSY, CoreExit.BLOCKED) else 1
 
 
 def emergency(m: SnapshotRun, free: int) -> int:
@@ -256,7 +270,7 @@ def emergency(m: SnapshotRun, free: int) -> int:
     )
     policy = s["EMERGENCY_PRESERVE"]
     run = CoreRun(m, CoreCommand.PRUNE, [*core_args(m, policy, policy), "--allow-mass-delete"])
-    if not core_result(m, "emergency purge", run) and run.rc not in (CORE_LOCK_BUSY, CORE_BLOCKED):
+    if not core_result(m, "emergency purge", run) and run.rc not in (CoreExit.LOCK_BUSY, CoreExit.BLOCKED):
         send_alert(
             m,
             AlertKind.PRUNE_FAILED,
@@ -361,7 +375,7 @@ def manual_prune(m: SnapshotRun, args: Sequence[str]) -> int:
                 extra.append(a)
             case _:
                 m.say(PRUNE_USAGE, sys.stderr)
-                return 2
+                return EXIT_USAGE
     run = CoreRun(m, CoreCommand.PRUNE, [*core_args(m, s["HOME_PRESERVE"], s["WS_PRESERVE"]), *extra])
     if run.rc == 0 and not dry:
         clear_alert(m, AlertKind.BLOCKED)

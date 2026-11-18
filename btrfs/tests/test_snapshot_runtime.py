@@ -182,12 +182,20 @@ class InstallOrderTest(unittest.TestCase):
     order and remove deletes in the reverse order (tests/test_install_record.py), so its row comes
     first, in the same component."""
 
-    def test_the_runtime_row_comes_before_the_front(self) -> None:
+    def test_the_runtime_is_written_before_the_front_and_removed_after_it(self) -> None:
+        from cst_core.application.install import InstallRequest, InstallService
         from cst_core.domain.install import INSTALL_MANIFEST, select_entries
+        from tests.test_install import MemoryTarget
 
-        srcs = [e.src for e in select_entries(INSTALL_MANIFEST, component="btrfs:snapshots")]
-        self.assertIn("btrfs/btrfs-snapshot-runtime", srcs)
-        self.assertLess(srcs.index("btrfs/btrfs-snapshot-runtime"), srcs.index("btrfs/btrfs-snapshot"))
+        entries = select_entries(INSTALL_MANIFEST, component="btrfs:snapshots")
+        target = MemoryTarget()
+        svc = InstallService(target, lambda e: f"{e.src}\n".encode())
+        req = InstallRequest()
+        list(svc.install(entries, req))
+        runtime, front = "/usr/local/sbin/btrfs-snapshot-runtime", "/usr/local/sbin/btrfs-snapshot"
+        self.assertLess(target.writes.index(runtime), target.writes.index(front))
+        removed = [ln.removeprefix("removed:   ") for ln in svc.remove([svc.placement(e, req) for e in entries])]
+        self.assertLess(removed.index(front), removed.index(runtime))
         by_src = {e.src: e for e in INSTALL_MANIFEST}
         runtime, front = by_src["btrfs/btrfs-snapshot-runtime"], by_src["btrfs/btrfs-snapshot"]
         # Side by side: the front runs the runtime from its own folder.

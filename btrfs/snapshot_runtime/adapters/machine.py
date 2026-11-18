@@ -23,10 +23,9 @@ from btrfs.snapshot_runtime.domain import (
     settings_problem_line,
     sources,
 )
-from cst_core.adapters.files import read_text
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.runtime import sibling_program
+from cst_core.adapters.runtime import program_path
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -55,8 +54,9 @@ class SnapshotRun:
         self.bulk_flag = f"{r}/etc/btrfs-setup/bulk-at-boot"
         self.bulk_state = f"{r}/var/lib/btrfs-bulk"
         self.runner = runner
-        # The bash front and engine (btrfs/btrfs-snapshot), next to this program.
-        self.front = sibling_program("btrfs/btrfs-snapshot", main_file) if main_file else ""
+        # The bash front and engine (btrfs/btrfs-snapshot), in this program's folder (installed, in
+        # a checkout or a copy alike), as the front finds this one.
+        self.front = os.path.join(os.path.dirname(program_path(main_file)), "btrfs-snapshot") if main_file else ""
         # The descriptors every command gets (the run's locks: fd 9 and 8 of the bash).
         self.fds: tuple[int, ...] = ()
         self.env_home = environ.get("HOME_DIR", "")
@@ -69,7 +69,8 @@ class SnapshotRun:
         name (hostname -s when unset) and the state folder."""
         self.settings["HOME_DIR"] = self.env_home
         if os.access(self.conf, os.R_OK):
-            got = parse_snapshots_conf(read_text(self.conf) or "")
+            # Bytes that are not UTF-8 kept as they are (bash kept them): surrogateescape.
+            got = parse_snapshots_conf(self.read_raw(self.conf))
             for problem in got.problems:
                 print(
                     settings_problem_line(self.conf, problem.line, problem.text, problem.reason),

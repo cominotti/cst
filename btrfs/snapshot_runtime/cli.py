@@ -3,6 +3,7 @@
 (btrfs/btrfs-snapshot) hands over, as it ran them."""
 
 from collections.abc import Sequence
+import io
 import os
 import sys
 
@@ -18,6 +19,10 @@ def main(argv: Sequence[str]) -> int:
     """argv: the program and the command line btrfs-snapshot got."""
     default_ctrl_c()
     restore_lc_ctype()
+    # A setting or path that is not UTF-8 goes out as the bytes it was, as bash wrote it.
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="surrogateescape")
     cmd = argv[1] if len(argv) > 1 else ""
     command = COMMANDS.get(cmd)
     if command is None:
