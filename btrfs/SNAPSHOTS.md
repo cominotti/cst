@@ -1866,8 +1866,8 @@ After `snapshots nas setup`, in addition:
 
 `setup`, `nas setup`, `nas disable` and the other commands that set a key
 write its value in single quotes (`NAS_PATH='/volume1/backup'`), or in double
-quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
-file) and CST's Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
+quotes when the value holds a `'`. `btrfs-snapshot` (bash and its Python runtime, which read the
+file as data, below) and CST's other Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
 is written only when its content changes; a mode changed by hand goes back
@@ -1886,7 +1886,10 @@ a warning on stderr (`... snapshots.conf line N: TEXT: REASON; ignored`, in
 the journal of the unit) and the snapshot runs without it. A line for a key
 that is not one of its settings (`SCRUB_LIMIT`, set by `cst btrfs`) is left
 to its own reader. Before, bash sourced the whole file as root, so every line
-ran. Its rules are those of `cst doctor`'s reader; a unit test checks the
+ran. `cst btrfs snapshots status` and `snapshots nas setup|status|enable`
+read the NAS settings the same way (through `btrfs-snapshot settings-lines`,
+the same filter), so they show and check what the units use, and run nothing
+in the file either. Its rules are those of `cst doctor`'s reader; a unit test checks the
 two on one corpus of lines. The next command that writes the file (`setup`
 lists it in its plan) puts them in quotes, with the same values. Your other
 lines stay as they are, and in any other CST settings file a backslash outside

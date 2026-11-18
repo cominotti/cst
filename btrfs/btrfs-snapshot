@@ -239,7 +239,9 @@ read_settings() {
         conf_line "${line}"; rc=$?
         if (( rc == 0 )); then
             # Only a plain assignment gets here: eval gives the value as bash reads it and runs nothing.
-            [[ "${SETTINGS}" == *" ${CONF_KEY} "* ]] && eval "${CONF_ASSIGN}"
+            if [[ "${SETTINGS}" == *" ${CONF_KEY} "* ]]; then
+                if (( SETTINGS_OUT )); then printf '%s\n' "${CONF_ASSIGN}"; else eval "${CONF_ASSIGN}"; fi
+            fi
         elif (( rc == 1 && ! ENGINE_STEP )); then
             text="${line#"${line%%[![:space:]]*}"}"
             text="${text%"${text##*[![:space:]]}"}"
@@ -248,6 +250,20 @@ read_settings() {
     done <"$1"
     return 0
 }
+SETTINGS_OUT=0
+
+# `settings-lines FILE KEY...` (internal): the lines of FILE that set one of
+# KEYs, as read_settings applies them (plain assignments, without "export"),
+# one per line; a warning on stderr for every problem line, as at the start.
+# For setup-snapshots.bash (cst btrfs snapshots status, nas): it reads the
+# settings the way this program does, and never sources the file. Nothing else
+# of this program runs.
+if [[ "${1:-}" == settings-lines ]]; then
+    [[ $# -ge 3 ]] || { echo "usage: btrfs-snapshot settings-lines FILE KEY..." >&2; exit 2; }
+    SETTINGS=" ${*:3} " SETTINGS_OUT=1
+    [[ -r "$2" ]] && read_settings "$2"
+    exit 0
+fi
 
 env_home="${HOME_DIR}"
 [[ -r "${CONF}" ]] && read_settings "${CONF}"

@@ -824,6 +824,32 @@ class SnapshotsConfTest(unittest.TestCase):
         with open(self.conf, "rb") as f:
             return f.read()
 
+    def test_nas_status_reads_the_file_as_btrfs_snapshot_does_and_runs_nothing_in_it(self) -> None:
+        # snapshots status and nas sourced snapshots.conf as root: a command line in it ran, and a
+        # value with $(...) was expanded, though btrfs-snapshot (the units) ignores both lines. Now
+        # they read it through btrfs-snapshot settings-lines: the same lines, nothing run.
+        ran, ran2 = os.path.join(self.tmp, "ran"), os.path.join(self.tmp, "ran2")
+        with open(self.conf, "w", encoding="utf-8") as f:
+            f.write(f"NAS_ENABLED=1\ntouch '{ran}'\nNAS_PATH=\"$(touch '{ran2}'; echo /volume1/x)\"\n")
+        r = self.run_bash("target_user=u; snap_nas status")
+        self.assertEqual(r.stdout, "NAS backup not set up: cst-btrfs-test snapshots nas setup --path ...\n")
+        self.assertFalse(os.path.exists(ran))
+        self.assertFalse(os.path.exists(ran2))
+        self.assertIn(f"<4>btrfs-snapshot: {self.conf} line 2: touch '{ran}': not a KEY=VALUE line; ignored", r.stderr)
+        self.assertIn(f"<4>btrfs-snapshot: {self.conf} line 3: NAS_PATH=", r.stderr)
+
+    def test_snap_conf_read_sets_only_the_keys_asked_from_plain_lines(self) -> None:
+        with open(self.conf, "w", encoding="utf-8") as f:
+            f.write("NAS_ENABLED=1 # on\nexport NAS_PATH='/volume1/b c'\nNAS_USER=old\\ name\nHOME_DIR='/x'\nPATH=/x\n")
+        body = (
+            'f() { local NAS_ENABLED=0 NAS_PATH="" NAS_USER="" HOME_DIR=keep; '
+            "snap_conf_read NAS_ENABLED NAS_PATH NAS_USER; "
+            'printf "[%s]" "$NAS_ENABLED" "$NAS_PATH" "$NAS_USER" "$HOME_DIR" "$PATH"; }; f'
+        )
+        r = self.run_bash(body, {"PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.stdout, "[1][/volume1/b c][old name][keep][/usr/bin:/bin]")
+        self.assertEqual(r.stderr, "")
+
     def test_written_values_read_the_same_in_bash_and_in_the_strict_reader(self) -> None:
         values = {f"K{i}": v for i, v in enumerate(WRITABLE)}
         self.set_values(values)
