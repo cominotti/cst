@@ -246,8 +246,8 @@ def _leaks(node: ast.AST, vocabulary: Mapping[str, str]) -> list[tuple[int, str]
 
 
 def _arm_subjects(test: ast.expr) -> set[str]:
-    """The subjects (as source text) an if test compares with string literals."""
-    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+    """The subjects (as source text) an if test compares with string literals (inside any and/or)."""
+    if isinstance(test, ast.BoolOp):
         return set().union(*(_arm_subjects(v) for v in test.values))
     if isinstance(test, ast.Compare):
         return {ast.unparse(subject) for subject, _ in _compared_strings(test)}
@@ -519,6 +519,18 @@ class PlantedTest(unittest.TestCase):
         self.assertEqual(self.rules(hits), [("pkg/cli.py", 2, "chain"), ("pkg/cli.py", 14, "chain")])
         self.assertIn("3 string arms on 'cmd'", str(hits[0]))
         self.assertEqual(hits[0].scope, "f")
+
+    def test_chain_arms_inside_and_or_count(self) -> None:
+        src = (
+            "def f(cmd: str, x: int, y: bool) -> int:\n"
+            "    if cmd == 'a' and x:\n        return 1\n"
+            "    elif (cmd == 'b' and y) or x == 2:\n        return 2\n"
+            "    elif cmd == 'c':\n        return 3\n"
+            "    return 0\n"
+        )
+        hits = self.plant({"pkg/cli.py": src})
+        self.assertEqual(self.rules(hits), [("pkg/cli.py", 2, "chain")])
+        self.assertIn("3 string arms on 'cmd'", str(hits[0]))
 
     def test_unit_numbers_outside_their_home(self) -> None:
         src = "A = 86400\nB = 24 * 60 * 60\nC = 2 * 3600\nD = 60\n\n\ndef f(rc: int) -> bool:\n    return rc == 127\n"
