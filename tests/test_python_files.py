@@ -17,6 +17,10 @@ never be linted. This test derives the Python files from the repository
   of the repository. A new file therefore joins the ty gate by itself (or,
   for a helper, by its entry), unless someone adds it to NOT_YET_CLEAN,
   which is an edit of this file that review can see;
+- no tracked Python file matches a git ignore rule, and there is no .ignore
+  file: ty leaves out the files those rules match (named in the ty gate or
+  not), while git keeps tracking them, so such a file would leave the gate
+  unseen;
 - nothing else takes a file or a diagnostic out of ty's check: no ty.toml
   (ty would read it instead of pyproject.toml), no [tool.ty] setting other
   than src.include, terminal.error-on-warning (which must be true),
@@ -50,7 +54,7 @@ import tomllib
 from typing import Any
 import unittest
 
-from tests.repo_files import REPO, repo_files
+from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 PYTHON_SHEBANG = re.compile(rb"^#!.*\bpython[0-9.]*\b")
 IGNORE_COMMENT = re.compile(r"#\s*(?:ty|type)\s*:\s*ignore\b")
@@ -126,10 +130,18 @@ def _is_folder_entry(entry: str, py_files: set[str]) -> bool:
     return any(p.startswith(entry + "/") for p in py_files)
 
 
-def ty_gated(py_files: set[str], ty_gate: Sequence[str]) -> set[str]:
-    """The Python files ty checks: each one named, and each *.py file below a listed folder."""
+def ty_gated(py_files: set[str], ty_gate: Sequence[str], ignored: frozenset[str] = frozenset()) -> set[str]:
+    """The Python files ty checks: each one named, and each *.py file below a listed folder.
+
+    A file in `ignored` (tracked, but a git ignore rule matches it) is left
+    out: ty skips it, even when it is named.
+    """
     folders = [e for e in ty_gate if _is_folder_entry(e, py_files)]
-    return {p for p in py_files if p in ty_gate or (p.endswith(".py") and any(p.startswith(f + "/") for f in folders))}
+    return {
+        p
+        for p in py_files - ignored
+        if p in ty_gate or (p.endswith(".py") and any(p.startswith(f + "/") for f in folders))
+    }
 
 
 PLAIN_ENTRY = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]*")
@@ -183,10 +195,14 @@ def problems(
     extend: Sequence[str],
     ty_gate: Sequence[str],
     not_clean: frozenset[str] = NOT_YET_CLEAN,
+    ignored: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """What is wrong with the lists, as text lines (empty: all fine)."""
+    """What is wrong with the lists, as text lines (empty: all fine).
+
+    ignored: the tracked files a git ignore rule matches (ignored_tracked_files()).
+    """
     out: list[str] = []
-    gated = ty_gated(py_files, ty_gate)
+    gated = ty_gated(py_files, ty_gate, ignored)
     extensionless = {p for p in py_files if not p.endswith(".py")}
     for p in sorted(extensionless - set(extend)):
         out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
@@ -206,7 +222,12 @@ def problems(
             f"{p}: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from NOT_YET_CLEAN "
             "in tests/test_python_files.py"
         )
-    for p in sorted(py_files - gated - not_clean):
+    for p in sorted(py_files & ignored):
+        out.append(
+            f"{p}: tracked, but a git ignore rule matches it, and ty leaves such a file out of its check "
+            "(named in [tool.ty.src] include or not); change the rule so that it no longer matches the file"
+        )
+    for p in sorted(py_files - gated - not_clean - ignored):
         if not p.endswith(".py"):
             where = "its path (ty finds no extensionless file by itself)"
         else:
@@ -225,6 +246,11 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
         out.append(
             "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
             "no longer applies; delete it"
+        )
+    for rel in sorted(f for f in files if os.path.basename(f) == ".ignore"):
+        out.append(
+            f"{rel}: ty leaves the files an .ignore file matches out of its check, and git does not see "
+            "the rule; delete it"
         )
     ty = conf.get("tool", {}).get("ty", {})
     names: set[str] = set()
@@ -399,6 +425,20 @@ class PythonFilesTest(unittest.TestCase):
             ],
         )
 
+    def test_a_git_ignored_python_file_leaves_the_ty_gate(self) -> None:
+        py = {"pkg/a.py", "pkg/b_local.py", "pkg/helper"}
+        gate = ["pkg", "pkg/helper"]
+        self.assertEqual(problems(py, ["pkg/helper"], gate, frozenset(), frozenset()), [])
+        skipped = (
+            "{}: tracked, but a git ignore rule matches it, and ty leaves such a file out of its check "
+            "(named in [tool.ty.src] include or not); change the rule so that it no longer matches the file"
+        )
+        self.assertEqual(
+            problems(py, ["pkg/helper"], gate, frozenset(), frozenset({"pkg/b_local.py", "pkg/helper", "notes.txt"})),
+            [skipped.format("pkg/b_local.py"), skipped.format("pkg/helper")],
+        )
+        self.assertNotIn("pkg/b_local.py", ty_gated(py, gate, frozenset({"pkg/b_local.py"})))
+
     def test_ty_settings_that_bypass_the_gate(self) -> None:
         def conf(
             terminal: Mapping[str, object] | None = None,
@@ -409,6 +449,16 @@ class PythonFilesTest(unittest.TestCase):
             return {"tool": {"ty": {"terminal": terminal, "src": src or {"include": ["a.py"]}, **more}}}
 
         self.assertEqual(ty_setting_problems(conf(), ["a.py", "pyproject.toml"]), [])
+        # ty's folder walk honours .ignore files, which git knows nothing of.
+        for where in (".ignore", "tests/.ignore"):
+            with self.subTest(ignore_file=where):
+                self.assertEqual(
+                    ty_setting_problems(conf(), ["a.py", where]),
+                    [
+                        f"{where}: ty leaves the files an .ignore file matches out of its check, and git "
+                        "does not see the rule; delete it"
+                    ],
+                )
         self.assertEqual(
             ty_setting_problems(conf(), ["a.py", "ty.toml"]),
             [
@@ -548,7 +598,7 @@ class PythonFilesTest(unittest.TestCase):
         py_files = python_files(REPO, files)
         extend, ty_gate = load_lists(conf)
         found = (
-            problems(py_files, extend, ty_gate)
+            problems(py_files, extend, ty_gate, ignored=frozenset(ignored_tracked_files()))
             + ann_ignore_problems(conf)
             + ruff_version_problems(conf)
             + typing_extensions_problems(conf)

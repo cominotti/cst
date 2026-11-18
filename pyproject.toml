@@ -124,11 +124,13 @@ possibly-unresolved-reference = "error"
 
 [tool.ty.src]
 # The ty gate: every Python file of the repository, by folder. ty finds the
-# *.py files below a folder by itself (git-ignored files are left out), but
-# not the extensionless helpers: each one is named, as in [tool.ruff]
-# extend-include. tests/test_python_files.py fails when a Python file of the
-# repository is under no folder here (or, for a helper, not named), and on
-# an entry that is not a folder or a Python file of the repository.
+# *.py files below a folder by itself, but not the extensionless helpers:
+# each one is named, as in [tool.ruff] extend-include. ty leaves out a file
+# a git ignore rule or an .ignore file matches, even a tracked or named one.
+# tests/test_python_files.py fails when a Python file of the repository is
+# under no folder here (or, for a helper, not named), on a tracked Python
+# file a git ignore rule matches, on an .ignore file, and on an entry that
+# is not a folder or a Python file of the repository.
 include = [
     ".github/scripts",
     "bluetooth",

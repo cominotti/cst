@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.repo_files import REPO, repo_files
+from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 
 class RepoFilesTest(unittest.TestCase):
@@ -36,9 +36,24 @@ class RepoFilesTest(unittest.TestCase):
         self.git("add", "b.py")
         self.assertEqual(repo_files(self.tmp), [".gitignore", "a/tool", "b.py"])
 
+    def test_lists_the_tracked_files_an_ignore_rule_matches(self) -> None:
+        self.git("init", "-q")
+        for name in ("a/keep.py", "a/b_local.py", "c_local.py"):
+            os.makedirs(os.path.dirname(os.path.join(self.tmp, name)), exist_ok=True)
+            with open(os.path.join(self.tmp, name), "w") as fh:
+                fh.write("")
+        self.git("add", "a/keep.py", "a/b_local.py")
+        self.assertEqual(ignored_tracked_files(self.tmp), [])
+        with open(os.path.join(self.tmp, ".gitignore"), "w") as fh:
+            fh.write("*_local.py\n")
+        # c_local.py is ignored but not tracked: git never lists it, and ty never sees it either.
+        self.assertEqual(ignored_tracked_files(self.tmp), ["a/b_local.py"])
+
     def test_outside_a_git_checkout_the_gates_are_skipped(self) -> None:
         with self.assertRaises(unittest.SkipTest):
             repo_files(self.tmp)
+        with self.assertRaises(unittest.SkipTest):
+            ignored_tracked_files(self.tmp)
 
     def test_a_checkout_git_cannot_read_fails_instead_of_skipping(self) -> None:
         # A .git that git does not accept stands for "dubious ownership" and

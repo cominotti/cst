@@ -175,6 +175,11 @@ repository:
   `tests/test_python_files.py` fails until it has one. An entry is a plain
   path to a folder with Python files or to a Python file (no pattern, no
   `.`). Never remove one, or add an ignore comment, to get a green run.
+  ty also leaves out a file that a git ignore rule or an `.ignore` file
+  matches, even a tracked one and even one named in the list, while git
+  keeps tracking it: the test fails on a tracked Python file a git ignore
+  rule matches (`git ls-files -ci --exclude-standard`) and on any
+  `.ignore` file, so that no file leaves the gate that way.
   (Until 2026-11 the list named every file, 330 entries: ty's compiled
   pattern for it passed its 1 MB limit, and it printed a warning on every
   run.)

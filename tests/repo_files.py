@@ -22,8 +22,21 @@ def repo_files(repo: str = REPO) -> list[str]:
     "dubious ownership", when the checkout belongs to another user), this
     fails: skipping there would turn the gates off without anyone noticing.
     """
+    return sorted(rel for rel in _ls_files(repo, "-co") if os.path.isfile(os.path.join(repo, rel)))
+
+
+def ignored_tracked_files(repo: str = REPO) -> list[str]:
+    """The tracked files a git ignore rule matches (.gitignore, info/exclude, the global one), sorted.
+
+    git keeps tracking such a file, but tools that walk folders the way git
+    ignores files (ty, ruff) leave it out. Skipped and failing as repo_files().
+    """
+    return sorted(_ls_files(repo, "-ci"))
+
+
+def _ls_files(repo: str, mode: str) -> list[str]:
     out = subprocess.run(
-        ["git", "-C", repo, "ls-files", "-co", "--exclude-standard"],
+        ["git", "-C", repo, "ls-files", mode, "--exclude-standard"],
         check=False,
         capture_output=True,
         text=True,
@@ -33,4 +46,4 @@ def repo_files(repo: str = REPO) -> list[str]:
         if not os.path.exists(os.path.join(repo, ".git")):
             raise unittest.SkipTest("not a git checkout: " + out.stderr.strip())
         raise AssertionError("git ls-files failed in a git checkout: " + out.stderr.strip())
-    return sorted(rel for rel in out.stdout.splitlines() if os.path.isfile(os.path.join(repo, rel)))
+    return out.stdout.splitlines()
