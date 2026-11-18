@@ -97,6 +97,8 @@ prints the fix, `chcon -R -t container_file_t <checkout>`.
 
 ## Mixed-version tests
 
+The history of this repository was rewritten on 2026-11-18. The commit SHAs in fixture names (`tests/fixtures/legacy/<file>@<sha>`) and the `(#NN)` pull request numbers in older commit subjects refer to the history before that date; the fixtures' contents are what the names describe.
+
 A test that runs a previous version of a program next to this checkout's (an
 upgrade over what an older CST installed, two copies sharing state files or a
 lock) takes that version from `tests/fixtures/legacy/<file>@<short-sha>`: the
