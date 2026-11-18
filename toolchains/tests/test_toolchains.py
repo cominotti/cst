@@ -31,7 +31,17 @@ sys.dont_write_bytecode = True
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from toolchains import domain as tc_domain
+from toolchains.cli import prune as tc_prune
+from toolchains.cli import auto as tc_auto
+from toolchains.cli import config as tc_config
+from toolchains.cli import status as tc_status
+from toolchains.adapters import program as tc_program
+from toolchains.adapters import build_tree as tc_build_tree
+from toolchains.adapters import cargo as tc_cargo
+from toolchains.adapters import rustup as tc_rustup
+from toolchains.adapters import sccache as tc_sccache
+from toolchains.adapters import units as tc_units
 from tests.probes import bytes_program
 from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load
 
@@ -920,7 +930,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-cst-toolchains")
         os.rename(prog, kept)
         os.symlink(kept, prog)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "ok")
+        self.assertEqual(tc_auto.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
@@ -928,7 +938,7 @@ class AutoTest(Scratch):
         old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
         with open(kept, "w") as f:
             f.write(old)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+        self.assertEqual(tc_auto.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
@@ -943,7 +953,7 @@ class AutoTest(Scratch):
         timer = os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")
         os.makedirs(os.path.dirname(timer))
         os.symlink("/dev/null", timer)
-        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "masked")
+        self.assertEqual(tc_auto.unit_states(self.home)["cst-toolchains-prune.timer"], "masked")
         rc, out, err = self.run_split("auto", "on")
         self.assertEqual(rc, 1, out + err)
         self.assertIn(
@@ -975,7 +985,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-timer")
         os.rename(timer, kept)
         os.symlink(kept, timer)
-        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "ok")
+        self.assertEqual(tc_auto.unit_states(self.home)["cst-toolchains-prune.timer"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertTrue(os.path.islink(timer))
@@ -995,8 +1005,8 @@ class AutoTest(Scratch):
         prog = self.write(".local/lib/cst/cst-toolchains", old)
         status = io.StringIO()
         with contextlib.redirect_stdout(status):
-            tc_cli.cmd_status(self.home, NOW, False)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+            tc_status.cmd_status(self.home, NOW, False)
+        self.assertEqual(tc_auto.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
@@ -1278,22 +1288,22 @@ class PackageLayersTest(Scratch):
 
     def test_cli_commands_run_on_the_scratch_home(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_cli.cmd_config(self.home, "apply"), 0)
+            self.assertEqual(tc_config.cmd_config(self.home, "apply"), 0)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_cli.cmd_status(self.home, NOW, True), 0)
-            self.assertEqual(tc_cli.cmd_prune(self.home, NOW, "plan", []), 0)
-            self.assertEqual(tc_cli.cmd_config(self.home, "plan"), 0)
-            self.assertEqual(tc_cli.cmd_auto_on(self.home, NOW), 0)
-            self.assertEqual(tc_cli.cmd_auto_off(self.home, NOW), 0)
+            self.assertEqual(tc_status.cmd_status(self.home, NOW, True), 0)
+            self.assertEqual(tc_prune.cmd_prune(self.home, NOW, "plan", []), 0)
+            self.assertEqual(tc_config.cmd_config(self.home, "plan"), 0)
+            self.assertEqual(tc_auto.cmd_auto_on(self.home, NOW), 0)
+            self.assertEqual(tc_auto.cmd_auto_off(self.home, NOW), 0)
 
     def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
-            self.assertEqual(tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
-        self.assertIsNone(tc_adapters.manager_path())
+            self.assertEqual(tc_units.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
+        self.assertIsNone(tc_units.manager_path())
         with self.failing("is-active"), self.assertRaises(Refused):
-            tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
+            tc_units.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
 
 
 class ParseSizeTest(unittest.TestCase):
@@ -1343,13 +1353,13 @@ class ClosedPipeTest(Scratch):
         restored: list[tuple[str, str | None]] = []
         for cmd, action in (("help", None), ("status", None), ("prune", "plan"), ("config", "plan")):
             with mock.patch.object(
-                tc_adapters, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
+                tc_program, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
             ):
-                tc_adapters.output_mode(cmd, action)
+                tc_program.output_mode(cmd, action)
         self.assertEqual(restored, [("help", None), ("status", None), ("prune", "plan"), ("config", "plan")])
-        with mock.patch.object(tc_adapters, "restore_default_signals", side_effect=AssertionError("restored")):
+        with mock.patch.object(tc_program, "restore_default_signals", side_effect=AssertionError("restored")):
             for cmd, action in (("prune", "apply"), ("config", "apply"), ("auto", "on"), ("auto", "off")):
-                tc_adapters.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
+                tc_program.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
 class CommandFaultTextTest(unittest.TestCase):
@@ -1358,27 +1368,27 @@ class CommandFaultTextTest(unittest.TestCase):
     def test_texts(self) -> None:
         missing = "/nonexistent/cst-cargo"
         self.assertEqual(
-            tc_adapters.ask_cargo([missing, "metadata"], {"PATH": "/usr/bin:/bin"}, "/"),
+            tc_cargo.ask_cargo([missing, "metadata"], {"PATH": "/usr/bin:/bin"}, "/"),
             (None, f"cargo metadata: [Errno 2] No such file or directory: '{missing}'"),
         )
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": "/nonexistent/cst-systemctl"}):
-            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "")
+            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "")
             with self.assertRaises(Refused) as stop:
-                tc_adapters.systemctl("start", "x.service", check=True)
+                tc_units.systemctl("start", "x.service", check=True)
         self.assertEqual(
             str(stop.exception),
             "systemctl --user start x.service: [Errno 2] No such file or directory: '/nonexistent/cst-systemctl'",
         )
         tmp = tempfile.mkdtemp(prefix="cst-tc-fault-")
         self.addCleanup(shutil.rmtree, tmp)
-        with mock.patch.object(tc_adapters.shutil, "which", return_value="/nonexistent/cst-rustup"):
-            self.assertEqual(tc_adapters.rustup_default(tmp, os.path.join(tmp, "rustup")), "")
+        with mock.patch.object(shutil, "which", return_value="/nonexistent/cst-rustup"):
+            self.assertEqual(tc_rustup.rustup_default(tmp, os.path.join(tmp, "rustup")), "")
         with (
-            mock.patch.object(tc_cli.shutil, "which", return_value="/nonexistent/cst-sccache"),
-            mock.patch.object(tc_cli, "sccache_sockets", return_value=[os.path.join(tmp, "cst-sccache-abc.sock")]),
-            mock.patch.object(tc_cli, "socket_answers", return_value=True),
+            mock.patch.object(shutil, "which", return_value="/nonexistent/cst-sccache"),
+            mock.patch.object(tc_sccache, "sccache_sockets", return_value=[os.path.join(tmp, "cst-sccache-abc.sock")]),
+            mock.patch.object(tc_sccache, "socket_answers", return_value=True),
         ):
-            self.assertIn("sccache server abc: no answer", tc_cli.sccache_status_lines(tmp))
+            self.assertIn("sccache server abc: no answer", tc_sccache.sccache_status_lines(tmp))
 
 
 class NotUtf8OutputTest(unittest.TestCase):
@@ -1395,19 +1405,19 @@ class NotUtf8OutputTest(unittest.TestCase):
     def test_replaced(self) -> None:
         env = {"PATH": "/usr/bin:/bin"}
         cargo = self.stub("cargo", b'{"build_directory": "/t/\xff"}')
-        self.assertEqual(tc_adapters.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
-        self.assertEqual(tc_adapters.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
+        self.assertEqual(tc_cargo.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
+        self.assertEqual(tc_program.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
         self.stub("rm", b"rm: \xff\n")
         with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:/usr/bin:/bin"}):
-            self.assertEqual(tc_adapters.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
+            self.assertEqual(tc_build_tree.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
         rustup = self.stub("rustup", b"stable\xff (default)\n")
-        with mock.patch.object(tc_adapters.shutil, "which", return_value=rustup):
-            self.assertEqual(tc_adapters.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
+        with mock.patch.object(shutil, "which", return_value=rustup):
+            self.assertEqual(tc_rustup.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
         sccache = self.stub("sccache", b"Compile requests  7\nCache location  /t/\xff\n")
-        self.assertEqual(tc_adapters.sccache_stats(sccache, env).get("Compile requests"), "7")
+        self.assertEqual(tc_sccache.sccache_stats(sccache, env).get("Compile requests"), "7")
         systemctl = self.stub("systemctl", b"enabled\xff\n")
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
-            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
+            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
 
 
 class SessionEnvTest(unittest.TestCase):
@@ -1427,7 +1437,7 @@ class SessionEnvTest(unittest.TestCase):
 
     def seen(self, **env: str) -> str:
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
-            return tc_adapters.systemctl("show-environment")
+            return tc_units.systemctl("show-environment")
 
     def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
         other = f"/run/user/{self.uid + 1}"

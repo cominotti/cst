@@ -35,7 +35,23 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from tests.package_view import PackageView
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from toolchains import cli as tc_cli, domain as tc_domain
+from toolchains.cli import prune as tc_prune
+from toolchains.cli import auto as tc_auto
+from toolchains.cli import config as tc_config
+from toolchains.cli import status as tc_status
+from toolchains.cli import rust_build as tc_rust_build
+from toolchains.cli import python_uv as tc_python_uv
+from toolchains.cli import targets as tc_targets
+from toolchains.adapters import program as tc_program
+from toolchains.adapters import home_files as tc_home_files
+from toolchains.adapters import build_tree as tc_build_tree
+from toolchains.adapters import processes as tc_processes
+from toolchains.adapters import cargo as tc_cargo
+from toolchains.adapters import uv as tc_uv
+from toolchains.adapters import rustup as tc_rustup
+from toolchains.adapters import sccache as tc_sccache
+from toolchains.adapters import units as tc_units
 
 sys.dont_write_bytecode = True
 
@@ -162,8 +178,27 @@ def load() -> ToolchainsModule:
     """The toolchains package as one namespace (cli, adapters, domain): a
     name set on it reaches every module that uses it; restore() undoes that.
     The program is the checkout's cst-toolchains (what main() would be told)."""
-    tc_adapters.Program.entry_file = TOOL
-    view = PackageView(tc_cli, tc_adapters, tc_domain)
+    tc_program.Program.entry_file = TOOL
+    view = PackageView(
+        tc_cli,
+        tc_prune,
+        tc_auto,
+        tc_config,
+        tc_status,
+        tc_rust_build,
+        tc_python_uv,
+        tc_targets,
+        tc_program,
+        tc_home_files,
+        tc_build_tree,
+        tc_processes,
+        tc_cargo,
+        tc_uv,
+        tc_rustup,
+        tc_sccache,
+        tc_units,
+        tc_domain,
+    )
     # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
     view.restore_default_signals = lambda: None
     return cast("ToolchainsModule", cast("object", view))

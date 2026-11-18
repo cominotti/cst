@@ -42,7 +42,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from toolchains import adapters as tc_adapters
+from toolchains.adapters import uv as tc_uv
 from toolchains.tests.test_prune_rust_build import NOW, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
@@ -441,7 +441,7 @@ class UvTest(UvBase):
             def run(_args: Sequence[str], exc: Exception = exc) -> subprocess.CompletedProcess[str]:
                 raise exc
 
-            lines, ok = tc_adapters.uv_prune_preview(run, self.cache)
+            lines, ok = tc_uv.uv_prune_preview(run, self.cache)
             self.assertFalse(ok)
             self.assertEqual(lines, [f"uv cache prune --dry-run failed: {exc}"])
 
