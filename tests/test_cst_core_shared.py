@@ -52,6 +52,8 @@ from cst_core.domain.text import (
     is_yes,
     parse_shell_assignments,
     parse_snapshots_conf,
+    printf_q,
+    printf_q_words,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
@@ -980,6 +982,50 @@ class VirshAdapterTest(unittest.TestCase):
             rec.calls[0][0],
             ["flatpak-spawn", "--host", "--env=LC_ALL=C", "virsh", "-c", "qemu:///system", "domstate", "vm1"],
         )
+
+
+class PrintfQTest(unittest.TestCase):
+    """printf_q and printf_q_words, the two sides of the state files a bash program writes with
+    printf %q and reads back with eval (the game profile's game.state), against bash itself."""
+
+    CORPUS: list[str] = (
+        [chr(i) for i in range(1, 128)]
+        + [f"a{chr(i)}b" for i in range(1, 128)]
+        + ["", "a b", "~a", "a~", "a=~b", "a:~", "#a", "a#", "-", "new", "it's", "lush\\x2dbatch.slice"]
+        + ["é", "aé b", "a\x01é", "\x85x", "a\tb\nc"]
+        # Printable for glibc, not for Python: a space (NBSP, em space), format characters (soft
+        # hyphen, zero-width space), a private-use character.
+        + ["a\u00a0b", "a\u2003b", "a\u00adb", "a\u200bb", "\ue000", "a\u00a0\tb"]
+    )
+
+    def bash_q(self, values: Sequence[str]) -> list[str]:
+        r = subprocess.run(
+            [BASH, "--norc", "--noprofile", "-c", 'for a in "$@"; do printf "%q\\0" "$a"; done', "_", *values],
+            check=True,
+            capture_output=True,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
+            stdin=subprocess.DEVNULL,
+        )
+        return r.stdout.decode("utf-8", "surrogateescape").split("\0")[:-1]
+
+    @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
+    def test_printf_q_writes_what_bash_writes(self) -> None:
+        for value, want in zip(self.CORPUS, self.bash_q(self.CORPUS), strict=True):
+            with self.subTest(value=value):
+                self.assertEqual(printf_q(value), want)
+
+    def test_words_read_back_what_printf_q_wrote(self) -> None:
+        for value in self.CORPUS:
+            with self.subTest(value=value):
+                self.assertEqual(printf_q_words(f"x {printf_q(value)}  y"), ["x", value, "y"])
+
+    def test_words_of_other_quoting_and_lines_bash_would_not_read_as_words(self) -> None:
+        self.assertEqual(printf_q_words("cgw /a ''"), ["cgw", "/a", ""])
+        self.assertEqual(printf_q_words("a'b c'\"d\\\"\" $'\\101\\x42'"), ['ab cd"', "AB"])
+        self.assertEqual(printf_q_words(""), [])
+        for line in ("a 'b", "a $x", "a `b`", "a;b", "a\\", "a (b)", 'a "$x"'):
+            with self.subTest(line=line):
+                self.assertIsNone(printf_q_words(line))
 
 
 class ShellAssignmentsTest(unittest.TestCase):

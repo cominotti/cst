@@ -86,7 +86,13 @@ the tests pass a fake host to `cli.main` and put a fake in `Watcher.live`.
 recording loop of `cpu-watch watch`, vm-pin's virsh calls and saved
 definition are in `cpu/adapters.py`; the rules and records in
 `cpu/domain.py`; the `quiet` loop stays in `cli.py` with its clock, pause
-and sampler passed in, and the apply prompt is cst_core's `confirm`.
+and sampler passed in, and the apply prompt is cst_core's `confirm`. The
+game profile (`cpu-game-profile`) is a light package of its own,
+`cpu/game`: the records of `game.state` and `game.intended` (written as
+bash's `printf %q` writes them, since an installed bash copy of an older CST
+reads them) and the drift rules in `domain.py`; `GameProfile` in
+`adapters.py` carries the paths, the settings and the runner across the
+steps of `on`, `off`, `tick` and `state`.
 
 **Full profile: add a layer only when it pays.** Reference package:
 `btrfs/docker_volumes_nocow` (a migration with rollback).

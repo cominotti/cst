@@ -95,7 +95,7 @@ PURE_MODULES: Final[frozenset[str]] = frozenset(
     {
         "__future__", "ast", "collections", "collections.abc", "dataclasses", "difflib", "enum", "fnmatch",
         "functools", "itertools", "json", "math", "operator", "posixpath", "re", "shlex", "stat",
-        "string", "textwrap", "tomllib", "typing", "xml.etree.ElementTree",
+        "string", "textwrap", "tomllib", "typing", "unicodedata", "xml.etree.ElementTree",
     }
 )  # fmt: skip
 PURE_NAMES: Final[dict[str, frozenset[str]]] = {
@@ -134,6 +134,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 152,
     "cpu/cli.py": 146,
+    "cpu/game/cli.py": 13,
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
     "swap/cli.py": 99,

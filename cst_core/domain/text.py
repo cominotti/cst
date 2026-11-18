@@ -4,6 +4,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 import re
+import unicodedata
 from typing import Final
 
 
@@ -224,6 +225,91 @@ def _printf_q_value(token: str) -> str | None:
     if not _PRINTF_Q_WORD.fullmatch(token) or token.startswith("~") or ":~" in token:
         return None
     return re.sub(r"\\(.)", lambda e: e.group(1), token, flags=re.S)
+
+
+# printf %q's rules (bash 5): the characters it puts a backslash before, and the ones that make it
+# write the $'...' form instead (any character that is not printable; in a UTF-8 locale, letters
+# such as é stay as they are).
+_Q_BACKSLASHED: Final = frozenset(" \t\n!\"$&'()*,;<>?[\\]^`{|}")
+_Q_ANSI_C_NAMES: Final = {7: "a", 8: "b", 9: "t", 10: "n", 11: "v", 12: "f", 13: "r", 27: "E", 39: "'", 92: "\\"}
+
+
+def _q_printable(ch: str) -> bool:
+    """A character printf %q leaves as it is in a UTF-8 locale (glibc's iswprint): what Python counts as
+    printable, and also the spaces (NBSP, U+2000...), format characters (soft hyphen, U+200B...) and
+    private-use characters Python does not. A code point that one of the two Unicode versions has not
+    assigned yet may still differ."""
+    return ch.isprintable() or unicodedata.category(ch) in ("Zs", "Cf", "Co")
+
+
+def printf_q(value: str) -> str:
+    """value as bash's `printf %q` writes it (in a UTF-8 locale): '' when empty; $'...' when it holds
+    a character that is not printable (a tab, a newline, a control character); else value with a
+    backslash before each character the shell would read as syntax (and before a # or ~ that starts
+    it, and a ~ after : or =). bash reads the result back (`eval`, a sourced line) as value; the
+    tests check it against the real bash, character by character. Exact for ASCII, which is all the
+    game profile writes (unit names, cgroup paths, values); see _q_printable for other characters."""
+    if value == "":
+        return "''"
+    if not all(_q_printable(ch) for ch in value):
+        out: list[str] = []
+        for ch in value:
+            code = ord(ch)
+            if code in _Q_ANSI_C_NAMES:
+                out.append("\\" + _Q_ANSI_C_NAMES[code])
+            elif _q_printable(ch):
+                out.append(ch)
+            else:
+                out.extend(f"\\{b:03o}" for b in ch.encode("utf-8", "surrogateescape"))
+        return "$'" + "".join(out) + "'"
+    out = []
+    for i, ch in enumerate(value):
+        tilde = ch == "~" and (i == 0 or value[i - 1] in ":=")
+        if ch in _Q_BACKSLASHED or tilde or (ch == "#" and i == 0):
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def _word_part(line: str, i: int) -> tuple[str, int] | None:
+    """One quoted or unquoted part of a word at line[i] (not a blank): (its value, where it ends)."""
+    ch = line[i]
+    if line.startswith("$'", i):
+        m = _PRINTF_Q_ANSI_C.match(line, i)
+        return None if m is None else (_ansi_c_value(m.group(1)), m.end())
+    if ch == "'":
+        end = line.find("'", i + 1)
+        return None if end < 0 else (line[i + 1 : end], end + 1)
+    if ch == '"':
+        m = re.compile(r'"((?:[^"\\$`]|\\["\\$`])*)"').match(line, i)
+        return None if m is None else (re.sub(r'\\(["\\$`])', r"\1", m.group(1)), m.end())
+    if ch == "\\":
+        return None if i + 1 >= len(line) else (line[i + 1], i + 2)
+    if ch in "$`;&|<>()":
+        return None
+    return ch, i + 1
+
+
+def printf_q_words(line: str) -> list[str] | None:
+    """The words of a line whose fields bash's `printf %q` wrote, as `eval "rec=(${line})"` reads
+    them back: blanks between words; each word of plain and backslash-escaped characters, '...',
+    "..." (no expansion) and $'...' parts. None for a line bash would not read as plain words
+    (an unclosed quote, an unescaped $, backtick or command syntax)."""
+    words: list[str] = []
+    i = 0
+    while i < len(line):
+        if line[i] in _BLANKS:
+            i += 1
+            continue
+        word: list[str] = []
+        while i < len(line) and line[i] not in _BLANKS:
+            part = _word_part(line, i)
+            if part is None:
+                return None
+            word.append(part[0])
+            i = part[1]
+        words.append("".join(word))
+    return words
 
 
 def parse_snapshots_conf(text: str) -> ShellAssignments:

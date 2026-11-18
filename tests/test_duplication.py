@@ -49,7 +49,10 @@ CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.07,
     "python type-1 W=8 cross-file lines": 0,
     "python type-2 W=8 duplicated %": 0.48,
-    "shell W=5 duplicated %": 0.45,
+    # 0.45 -> 0.48 with the game profile in Python: 600 shell lines with no copy left, so the
+    # copies cpu-setup.sh still shares with btrfs-setup.sh are a larger share (no new copy).
+    # cpu-setup.sh's own port takes them away.
+    "shell W=5 duplicated %": 0.48,
     "same-name definitions in >1 file": 0,
 }
 
@@ -94,19 +97,17 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 
 # Shell functions that several shell files may define, and why. A copy of a
 # helper is listed as one, with where it should live once; the installed
-# programs (btrfs-notify, btrfs-snapshot, cpu/game-profile) run without the
+# programs (btrfs-notify, btrfs-snapshot) run without the
 # checkout and cannot source a file of it. An entry no longer defined twice
 # passes; `invowk cmd fix budgets` deletes it.
 ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
-    "cpuset_delegated": "cpu-setup.sh's check and the installed cpu/game-profile's, which cannot source the checkout",
     "die": "each script's own error exit with its own program name",
     "in_container": "a copy in three setup scripts: the same toolbox check; to share in a sourced file",
     "install_all": "the install step of btrfs-setup.sh and of cpu-setup.sh: different files",
     "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
     "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",
     "log": "each program's journal tag; the installed programs cannot source a shared file",
-    "remove_game_dropins": "cpu-setup.sh's uninstall vs the installed game-profile's off",
     "root_fs_uuid": "a copy in btrfs-setup.sh and the degraded-boot setup: the same query; to share in a sourced file",
     "section": "each setup script's heading for its status output",
     "status": "each setup script's own status subcommand",

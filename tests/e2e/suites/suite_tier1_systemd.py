@@ -942,7 +942,7 @@ EOF
             [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 0 ]]
             # The game profile's answer: a drop-in with another name, which sorts
             # after 50-MemoryLow.conf, is applied after it whatever its folder.
-            zz="$(sed -n 's/^GAME_DROPIN=//p' /opt/cst-rw/cpu/game-profile)"
+            zz="$(cd /opt/cst-rw && python3 -I -B -c 'import sys; sys.path.insert(0, "."); from cpu.game.domain import GAME_DROPIN; print(GAME_DROPIN)')"
             [[ "$zz" == zz-* ]]
             mkdir -p /run/systemd/system/e2e-order.slice.d
             printf '[Slice]\nMemoryLow=16G\n' >"/run/systemd/system/e2e-order.slice.d/$zz"
@@ -1281,7 +1281,7 @@ echo E2E-OK
                 trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
                 ucg={ucg}
                 u() {{ systemctl --user -M tester@ "$@"; }}
-                gp() {{ bash /opt/cst-rw/cpu/game-profile "$@"; }}
+                gp() {{ python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }}
                 ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
                     XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
                 doc() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}   # exits non-zero on a WARN
@@ -1380,7 +1380,7 @@ echo E2E-OK
                     u stop "$j" 2>/dev/null || true
                 done
                 systemctl stop docker-e2eprobe.scope 2>/dev/null || true
-                bash /opt/cst-rw/cpu/game-profile off || true
+                python3 -I -B /opt/cst-rw/cpu/game-profile off || true
                 rm -rf /run/cpu-setup /etc/systemd/system.control/user-1000.slice.d
                 rm -f /etc/cpu-setup/cpu-setup.conf
                 if [[ -e /tmp/e2e-cpu-conf.bak ]]; then mv /tmp/e2e-cpu-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
@@ -1755,6 +1755,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
+            "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
             "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
             "/usr/local/sbin/cst-vm": ("help", 0),

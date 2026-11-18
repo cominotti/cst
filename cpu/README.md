@@ -297,8 +297,8 @@ uses the same five names as its default.) A byte that is not UTF-8 in this
 file, or in a mapped file's name that `cpu-watch` reads in `/proc/PID/maps`,
 is replaced and no longer stops `vm-pin` or `cpu-watch`.
 
-The game profile sources this file with bash, and `vm-pin` and `cst doctor`
-read it the same way (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
+The game profile, `vm-pin` and `cst doctor` read this file as bash reads
+it when it sources it (cst_core's settings reader) (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
 them). Keep to plain `KEY=value` lines: quote a value with blanks in single
 quotes. A line bash would read differently, or that it would run as a
 command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
@@ -1465,7 +1465,10 @@ this is harmless.
 
 | File | Installed as / used by |
 |------|------------------------|
-| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
+| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
+| `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
+| `game/adapters.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/cli.py` | The command line of `cpu-game-profile` |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
 | `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |
