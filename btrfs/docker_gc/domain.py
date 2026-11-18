@@ -228,7 +228,7 @@ def render_settings_file(registries: Sequence[str]) -> str:
 def _literal(node: ast.expr | None) -> object:
     try:
         return None if node is None else ast.literal_eval(node)
-    except ValueError:
+    except ValueError, TypeError:  # TypeError: an unhashable item of a set or dict literal
         return None
 
 
@@ -236,12 +236,12 @@ def builtin_protected(sources: Sequence[str]) -> tuple[str, ...] | None:
     """The registries a docker-gc protects with no DOCKER_GC_PROTECT anywhere, read from its Python
     sources without running them: the default of GcSettings.protected (CST from 2026-11-16), else
     the default of a `.get("DOCKER_GC_PROTECT", "...")` (the older ones). None: neither is there
-    (not a docker-gc CST wrote, or a source that does not parse)."""
+    (not a docker-gc CST wrote, or a source that does not parse or evaluate)."""
     env_default: tuple[str, ...] | None = None
     for source in sources:
         try:
             tree = ast.parse(source)
-        except SyntaxError, ValueError:
+        except SyntaxError, ValueError, MemoryError:  # MemoryError: the parser's nesting limit
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == "GcSettings":

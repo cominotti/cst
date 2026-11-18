@@ -704,6 +704,18 @@ class SettingsDomainTest(unittest.TestCase):
         self.assertIsNone(gc_domain.builtin_protected(["def broken(:\n", "x = 1\n"]))
         self.assertIsNone(gc_domain.builtin_protected([]))
 
+    def test_a_source_it_cannot_evaluate_shows_no_list(self) -> None:
+        # literal_eval raises TypeError on an unhashable set item, the parser MemoryError on a nesting
+        # too deep: no list (so a refusal, exit 78), never a traceback; the other sources still count.
+        unhashable = 'x.get({[]}, "a")\n'
+        self.assertIsNone(gc_domain.builtin_protected([unhashable]))
+        self.assertIsNone(gc_domain.builtin_protected(["-" * 200_000 + "1\n"]))
+        self.assertEqual(
+            gc_domain.builtin_protected([unhashable, "import os\n" + OLD_PROTECTED_LINE]), ("old.example:5000",)
+        )
+        with self.assertRaises(gc_domain.UnknownProtection):
+            gc_domain.resolve_protection(PATHS, env=None, file_text=None, installed=(unhashable,))
+
     def test_where_the_protected_registries_come_from(self) -> None:
         resolve = gc_domain.resolve_protection
         p = resolve(PATHS, env=None, file_text=f"DOCKER_GC_PROTECT={REGISTRY}\n", installed=("x",))
