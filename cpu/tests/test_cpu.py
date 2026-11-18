@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Unit tests for the cpu module: vm-pin XML rewriting, cpu-watch frame-time
-and run-summary helpers, cpu-watch quiet (fake /proc files and clock) and its
-dispatch from cpu-setup.sh (host and toolbox), the baseline drop-in name and
-its migration, and cpu-setup.sh CLI. The game profile's tests are in
-test_game_profile.py.
+and run-summary helpers, cpu-watch quiet (fake /proc files and clock). The game
+profile's tests are in test_game_profile.py, cpu-setup.sh's in test_cpu_setup.py.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest discover -s cpu/tests -t . -v
@@ -20,7 +18,6 @@ import functools
 import io
 import json
 import os
-import shutil
 import signal
 import stat
 import subprocess
@@ -40,7 +37,6 @@ CPU = os.path.dirname(HERE)
 REPO = os.path.dirname(CPU)
 VM_PIN = os.path.join(CPU, "vm-pin")
 CPU_WATCH = os.path.join(CPU, "cpu-watch")
-SETUP = os.path.join(REPO, "cpu-setup.sh")
 
 SAMPLE_DOMAIN_XML = """\
 <domain type="kvm" xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
@@ -685,263 +681,6 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
 
-class SetupQuietDispatchTest(unittest.TestCase):
-    """cpu-setup.sh quiet|watch|report: on the host it runs the checkout's
-    cpu-watch; inside a container it runs it on the host with flatpak-spawn,
-    handing over the QUIET_* limits that are set (flatpak-spawn does not pass
-    the environment on). A copy of the script whose container markers are
-    temporary files, with fake python3 and flatpak-spawn on PATH."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        t = self.tmp.name
-        os.makedirs(os.path.join(t, "cst", "cpu"))
-        os.makedirs(os.path.join(t, "bin"))
-        self.marker = os.path.join(t, "containerenv")
-        with open(SETUP) as f:
-            src = f.read()
-        line = next(ln for ln in src.splitlines() if ln.startswith("in_container()"))
-        patched = line.replace("/run/.containerenv", self.marker).replace("/.dockerenv", self.marker + "2")
-        self.assertNotEqual(line, patched)
-        self.script = os.path.join(t, "cst", "cpu-setup.sh")
-        with open(self.script, "w") as f:
-            f.write(src.replace(line, patched))
-        open(os.path.join(t, "cst", "cpu", "cpu-watch"), "w").close()
-        # Sourced at the top of cpu-setup.sh (only its install commands use it).
-        shutil.copy(os.path.join(REPO, "cst-install.bash"), os.path.join(t, "cst", "cst-install.bash"))
-        self.log = os.path.join(t, "log")
-        for name in ("python3", "flatpak-spawn"):
-            p = os.path.join(t, "bin", name)
-            with open(p, "w") as f:
-                f.write(f'#!/bin/bash\necho "{name} $*" >>"{self.log}"\n')
-            os.chmod(p, 0o755)
-
-    def run_setup(self, *args: str, env: Mapping[str, str] | None = None) -> tuple[int, list[str], str]:
-        r = subprocess.run(
-            ["bash", self.script, *args],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={"PATH": os.path.join(self.tmp.name, "bin") + ":/usr/bin:/bin", **(env or {})},
-            stdin=subprocess.DEVNULL,
-        )
-        log = []
-        if os.path.exists(self.log):
-            with open(self.log) as f:
-                log = f.read().splitlines()
-            os.remove(self.log)
-        return r.returncode, log, r.stderr
-
-    def test_host_runs_the_checkouts_cpu_watch(self) -> None:
-        watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
-        rc, log, err = self.run_setup("quiet", "--for", "5", env={"QUIET_CPU_PCT": "20"})
-        self.assertEqual((rc, log), (0, [f"python3 -I -B {watch} quiet --for 5"]), err)
-
-    def test_container_runs_it_on_the_host_with_the_limits(self) -> None:
-        open(self.marker, "w").close()
-        watch = os.path.join(self.tmp.name, "cst", "cpu", "cpu-watch")
-        rc, log, err = self.run_setup(
-            "quiet", "--wait", "2h", "--json", env={"QUIET_CPU_PCT": "20", "QUIET_WRITE_MBPS": "8", "QUIET_OTHER": "x"}
-        )
-        self.assertEqual(
-            (rc, log),
-            (
-                0,
-                [
-                    f"flatpak-spawn --host --env=QUIET_CPU_PCT=20 --env=QUIET_WRITE_MBPS=8 "
-                    f"python3 -I -B {watch} quiet --wait 2h --json"
-                ],
-            ),
-            err,
-        )
-        # No limit set: nothing extra (an empty list under set -u).
-        rc, log, err = self.run_setup("quiet")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} quiet"]), err)
-        rc, log, err = self.run_setup("report")
-        self.assertEqual((rc, log), (0, [f"flatpak-spawn --host python3 -I -B {watch} report"]), err)
-
-    def test_container_hands_over_every_limit_cpu_watch_reads(self) -> None:
-        # The list in cpu-setup.sh must follow cpu-watch's QUIET_LIMITS: a limit
-        # added there but not here would be dropped inside a toolbox.
-        open(self.marker, "w").close()
-        envs = [lim.env for lim in cpu_domain.QUIET_LIMITS]
-        self.assertTrue(envs)
-        rc, log, err = self.run_setup("quiet", env={v: str(i + 1) for i, v in enumerate(envs)})
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(len(log), 1, log)
-        for i, v in enumerate(envs):
-            self.assertIn(f" --env={v}={i + 1} ", log[0])
-
-    def test_help_lists_quiet(self) -> None:
-        r = subprocess.run(
-            ["bash", SETUP, "help"], capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
-        )
-        self.assertIn("quiet [--for SECONDS] [--wait MAX] [--json]", r.stdout)
-
-
-class CpuSetupScriptTest(unittest.TestCase):
-    """cpu-setup.sh: its help, the baseline drop-ins' name and their migration, and what
-    uninstall removes."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="cst-cpu-test-")
-        self.addCleanup(shutil.rmtree, self.tmp)
-
-    def test_machine_slice_dropin_has_cpu_and_io_weight(self) -> None:
-        dropin = os.path.join(CPU, "units", "machine.slice.d-10-cpu-setup.conf")
-        with open(dropin) as f:
-            lines = [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
-        self.assertEqual(lines, ["[Slice]", "CPUWeight=50", "IOWeight=50"])
-
-    def test_setup_help_and_unknown_command(self) -> None:
-        r = subprocess.run(
-            ["bash", SETUP, "help"],
-            env={**os.environ, "CST_PROG": "cst cpu"},
-            capture_output=True,
-            text=True,
-            check=True,
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertIn("Usage: cst cpu <command> [args]", r.stdout)
-
-        bad = subprocess.run(
-            ["bash", SETUP, "not-a-command"], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
-        self.assertEqual(bad.returncode, 2)
-
-    def test_e_cores_missing_returns_empty_cleanly(self) -> None:
-        # On uniform CPUs without /sys/devices/cpu_atom/cpus, e_cores() must exit 0 under set -e.
-        with open(SETUP) as f:
-            src = f.read()
-        line = next(line_text for line_text in src.splitlines() if line_text.startswith("e_cores()"))
-        fn = line.replace("/sys/devices/cpu_atom/cpus", "/nonexistent/cpu_atom/cpus")
-        r = subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", f'{fn}\necores="$(e_cores)"\nprintf \'<%s>\' "$ecores"'],
-            capture_output=True,
-            text=True,
-            check=True,
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(r.stdout, "<>")
-
-    def test_baseline_dropins_sort_before_the_runtime_overrides(self) -> None:
-        # systemd reads drop-ins in file-name order (byte order) and the last
-        # one read wins: the baseline must come first, so that the 50-<Prop>
-        # files of `systemctl set-property --runtime` win after a reload.
-        with open(SETUP) as f:
-            src = f.read()
-        name = next(line.split("=", 1)[1] for line in src.splitlines() if line.startswith("DROPIN_NAME="))
-        old = next(line.split("=", 1)[1].split()[0] for line in src.splitlines() if line.startswith("OLD_DROPIN_NAME="))
-        self.assertEqual(name, "10-cpu-setup.conf")
-        self.assertTrue(os.path.exists(os.path.join(CPU, "units", f"machine.slice.d-{name}")))
-        overrides = [
-            "50-CPUWeight.conf",
-            "50-IOWeight.conf",
-            "50-AllowedCPUs.conf",
-            "50-MemoryLow.conf",
-            "50-MemoryZSwapWriteback.conf",
-        ]
-        self.assertEqual(sorted(overrides + [name], key=os.fsencode)[0], name)
-        # The old name sorted after them (upper case before lower case): the bug.
-        self.assertEqual(sorted(overrides + [old], key=os.fsencode)[-1], old)
-        # The user drop-ins get the same name.
-        script = f"""
-eval "$(grep -E '^DROPIN_NAME=' {SETUP!r})"
-for fn in toolbox_dropin helper_dropin; do eval "$(grep "^${{fn}}()" {SETUP!r})"; done
-user_home() {{ echo /home/u; }}
-toolbox_dropin; helper_dropin; toolbox_dropin 50-cpu-setup.conf
-"""
-        r = subprocess.run(
-            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
-        self.assertEqual(
-            r.stdout.splitlines(),
-            [
-                "/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf",
-                "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf",
-                "/home/u/.config/systemd/user/user.slice.d/50-cpu-setup.conf",
-            ],
-            r.stderr,
-        )
-
-    def test_install_and_uninstall_remove_the_old_name(self) -> None:
-        home = os.path.join(self.tmp, "home")
-        unit_dir = os.path.join(self.tmp, "etc-systemd")
-        old = [
-            os.path.join(unit_dir, "machine.slice.d", "50-cpu-setup.conf"),
-            os.path.join(home, ".config/systemd/user/user.slice.d/50-cpu-setup.conf"),
-            os.path.join(home, ".config/systemd/user/flatpak-session-helper.service.d/50-cpu-setup.conf"),
-        ]
-        keep = [
-            os.path.join(unit_dir, "machine.slice.d", "10-cpu-setup.conf"),
-            os.path.join(unit_dir, "machine.slice.d", "10-swap-memory-low.conf"),  # the swap module's
-            # swap's drop-in under its old name, still there until swap's apply moves it
-            os.path.join(unit_dir, "machine.slice.d", "50-memory-low.conf"),
-            os.path.join(home, ".config/systemd/user/user.slice.d/10-cpu-setup.conf"),
-        ]
-        for p in old + keep:
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            open(p, "w").close()
-        script = f"""
-set -Eeuo pipefail
-UNIT_DIR={unit_dir!r}
-eval "$(grep -E '^(DROPIN_NAME|OLD_DROPIN_NAME|MACHINE_DROPIN)=' {SETUP!r})"
-for fn in toolbox_dropin helper_dropin; do eval "$(grep "^${{fn}}()" {SETUP!r})"; done
-eval "$(sed -n '/^remove_old_dropins()/,/^}}/p' {SETUP!r})"
-user_home() {{ echo {home!r}; }}
-target_user=tester
-remove_old_dropins
-remove_old_dropins   # again: nothing left, no error under set -e
-target_user=''
-remove_old_dropins
-"""
-        r = subprocess.run(
-            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        for p in old:
-            self.assertFalse(os.path.exists(p), p)
-        for p in keep:
-            self.assertTrue(os.path.exists(p), p)
-        self.assertEqual(r.stdout.count("removed"), 3, r.stdout)
-        # install and uninstall both call it, and install reloads both managers after.
-        with open(SETUP) as f:
-            src = f.read()
-        install = src[src.index("install_all() {") : src.index("\nuninstall() {")]
-        uninstall = src[src.index("\nuninstall() {") : src.index("# ---- docker builds.slice")]
-        self.assertLess(install.index("remove_old_dropins"), install.index("systemctl daemon-reload"))
-        self.assertIn("usys daemon-reload", install)
-        self.assertIn("remove_old_dropins", uninstall)
-
-    def test_uninstall_removes_leftover_memorylow_dropins(self) -> None:
-        rt = os.path.join(self.tmp, "run-systemd-system")
-        left = [
-            os.path.join(rt, "user.slice.d", "zz-cst-game.conf"),
-            os.path.join(rt, "user@1000.service.d", "zz-cst-game.conf"),
-        ]
-        keep = os.path.join(rt, "user-1000.slice.d", "10-other.conf")
-        for p in left + [keep]:
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            open(p, "w").close()
-        script = f"""
-set -Eeuo pipefail
-eval "$(grep -E '^GAME_DROPINS_GLOB=' {SETUP!r})"
-GAME_DROPINS_GLOB="{rt}/${{GAME_DROPINS_GLOB#/run/systemd/system/}}"
-eval "$(sed -n '/^remove_game_dropins()/,/^}}/p' {SETUP!r})"
-remove_game_dropins
-remove_game_dropins   # again: nothing left, no error under set -e
-"""
-        r = subprocess.run(
-            ["bash", "-c", script], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        for p in left:
-            self.assertFalse(os.path.exists(os.path.dirname(p)), p)
-        self.assertTrue(os.path.exists(keep))
-        self.assertEqual(r.stdout.count("removed"), 2, r.stdout)
-
-
 class VmPinCliTest(unittest.TestCase):
     """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
 
@@ -1263,49 +1002,6 @@ class QuietNumbersTest(unittest.TestCase):
             root = ET.fromstring(f"<domain><cpu mode='{mode}'/></domain>")
             cpu_domain.disable_features(root, ["cet-ss"])
             self.assertEqual(root.findall("cpu/feature"), [], mode)
-
-
-class DockerSliceInstallTest(unittest.TestCase):
-    """`docker-slice install` writes cpu:docker-slice (builds.slice, a
-    template) through the real installer, staged under the test's folder;
-    its bytes are what the shell wrote before it was a template: the file,
-    plus AllowedCPUs= only when there are E-cores."""
-
-    def setUp(self) -> None:
-        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-slice-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp)
-
-    def install(self, ecores: str) -> str:
-        script = f"""
-set -Eeuo pipefail
-. {REPO!r}/cst-install.bash
-_cst_installer_as() {{ shift; local c="$1"; shift; /usr/bin/python3 -I -B "$CST_INSTALLER" "$c" --root "$T/stage" "$@"; }}
-systemctl() {{ echo "systemctl $*"; }}
-e_cores() {{ printf '%s' {ecores!r}; }}
-UNIT_DIR=/etc/systemd/system; SRC={CPU!r}; DAEMON_JSON="$T/daemon.json"; PROG=cst-cpu-test
-eval "$(sed -n '/^docker_slice()/,/^}}/p' {SETUP!r})"
-docker_slice install
-"""
-        r = subprocess.run(
-            ["bash", "-c", script],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp},
-            stdin=subprocess.DEVNULL,
-        )
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("written:   " + self.tmp + "/stage/etc/systemd/system/builds.slice", r.stdout)
-        with open(os.path.join(self.tmp, "stage/etc/systemd/system/builds.slice")) as f:
-            return f.read()
-
-    def test_with_and_without_e_cores(self) -> None:
-        with open(os.path.join(CPU, "units/builds.slice.in")) as f:
-            plain = f.read().replace("@ALLOWED@\n", "")
-        self.assertEqual(self.install("16-23"), plain + "AllowedCPUs=16-23\n")
-        shutil.rmtree(os.path.join(self.tmp, "stage"))
-        self.assertEqual(self.install(""), plain)
-        self.assertNotIn("@", plain.split("[Slice]")[1])
 
 
 if __name__ == "__main__":

@@ -100,8 +100,8 @@ def undo_python_start() -> None:
 
     SIGPIPE and SIGXFSZ go back to their default (restore_default_signals),
     and LC_CTYPE to the caller's, as a shell wrapper (cst, swap-setup.sh,
-    cst-install.bash) hands it over in CST_LC_CTYPE (_restore_lc_ctype); the
-    setting itself is removed. Used by cst, `cst swap` and the installer.
+    cpu-setup.sh, cst-install.bash) hands it over in CST_LC_CTYPE (_restore_lc_ctype); the
+    setting itself is removed. Used by cst, `cst swap`, `cst cpu` and the installer.
     """
     restore_default_signals()
     _restore_lc_ctype(os.environ.pop("CST_LC_CTYPE", None))

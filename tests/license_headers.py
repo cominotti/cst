@@ -47,6 +47,10 @@ LICENSE_EXEMPT: Final[dict[str, str]] = {
     "doctor/tests/fixtures/*.json": "JSON has no comments (captured `rpm-ostree status --json` output)",
     "btrfs/tests/fixtures/steam/*.acf": "Steam's own app manifests, as Steam writes them, for the parser under test",
     "btrfs/tests/fixtures/steam/*.vdf": "Steam's own library files, as Steam writes them, for the parser under test",
+    "tests/fixtures/legacy/*": (
+        "captured data: programs of an older commit (named after the @), copied byte for byte, that tier 1 "
+        "installs as the previous version (tests/e2e/README.md, Mixed-version tests)"
+    ),
     "doctor/tests/fixtures/db-booted.txt": (
         "captured `rpm-ostree db list` output, copied whole into a fake package database"
     ),

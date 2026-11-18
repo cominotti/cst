@@ -49,10 +49,7 @@ CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.07,
     "python type-1 W=8 cross-file lines": 0,
     "python type-2 W=8 duplicated %": 0.48,
-    # 0.45 -> 0.48 with the game profile in Python: 600 shell lines with no copy left, so the
-    # copies cpu-setup.sh still shares with btrfs-setup.sh are a larger share (no new copy).
-    # cpu-setup.sh's own port takes them away.
-    "shell W=5 duplicated %": 0.48,
+    "shell W=5 duplicated %": 0.45,
     "same-name definitions in >1 file": 0,
 }
 
@@ -101,10 +98,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 # checkout and cannot source a file of it. An entry no longer defined twice
 # passes; `invowk cmd fix budgets` deletes it.
 ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
-    "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
     "die": "each script's own error exit with its own program name",
-    "in_container": "a copy in three setup scripts: the same toolbox check; to share in a sourced file",
-    "install_all": "the install step of btrfs-setup.sh and of cpu-setup.sh: different files",
+    "in_container": "a copy in the setup scripts still in bash: the same toolbox check; to share in a sourced file",
     "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
     "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",
     "log": "each program's journal tag; the installed programs cannot source a shared file",

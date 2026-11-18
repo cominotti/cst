@@ -19,8 +19,11 @@ composition root" below).
 
 ## Each module has two parts
 
-- The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status. Three are shims over Python:
-  `swap-setup.sh` runs `swap/cli.py`; `vm-setup.sh` and `toolchains-setup.sh` run `cst_core/route.py`, which
+- The bash entry point `<module>-setup.sh` handles plan/apply/install/uninstall/status. Four are shims over Python:
+  `swap-setup.sh` runs `swap/cli.py`; `cpu-setup.sh` runs `cpu/cpu-setup` (the `cpu.setup` package: its
+  help from the script's header, cpu-watch for watch/report/quiet, the toolbox refusal and the sudo re-run of
+  the script, then the root commands, which run the installer, systemctl and the checkout's programs as the bash
+  script did); `vm-setup.sh` and `toolchains-setup.sh` run `cst_core/route.py`, which
   routes each command by the table `ROUTING` next to `MODULES` in `cst_core/domain/dispatch.py` (read, user,
   root or as-user: flatpak-spawn from a toolbox, the toolbox refusal, the sudo or runuser re-run of the script)
   and execs the module's program; the script's header comment stays its help.
@@ -92,7 +95,12 @@ game profile (`cpu-game-profile`) is a light package of its own,
 bash's `printf %q` writes them, since an installed bash copy of an older CST
 reads them) and the drift rules in `domain.py`; `GameProfile` in
 `adapters.py` carries the paths, the settings and the runner across the
-steps of `on`, `off`, `tick` and `state`.
+steps of `on`, `off`, `tick` and `state`. `cpu/setup` (`cst cpu`'s own
+commands) has the full profile's `wiring.py` only: it reads what the shim
+hands over and the environment and re-runs the script through sudo;
+`CpuSetup` in its `adapters.py` carries the paths, the runner, the
+checkout and the target user across the steps of install, status and
+uninstall.
 
 **Full profile: add a layer only when it pays.** Reference package:
 `btrfs/docker_volumes_nocow` (a migration with rollback).
@@ -219,7 +227,7 @@ Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-
 
 - An extension-less Python program holds a docstring, the bootstrap, imports, one `main()` and the `__main__` guard (`tests/test_entrypoints.py`; `NOT_YET_THIN` is empty: every program is converted).
 - **The bootstrap** is one stanza, byte for byte the same in every entry point that imports CST code (`BOOTSTRAP` in `tests/test_entrypoints.py`): from a checkout it puts the checkout root on `sys.path` (under `python3 -I` a script sees only its own folder); inside an installed zipapp it does nothing. Nothing else changes `sys.path`.
-- Paths are never computed from `__file__` by hand: `cst_core.adapters.runtime` gives the checkout root, the program's own path and argv (to run itself again), a sibling program (checkout path, or its installed dest), and the installed bytes; `undo_python_start` undoes what Python changes at start (SIGPIPE ignored, LC_CTYPE=C.UTF-8 under a C locale) in `cst`, `cst swap` and the installer, whose shell wrappers hand the caller's LC_CTYPE over as `CST_LC_CTYPE`.
+- Paths are never computed from `__file__` by hand: `cst_core.adapters.runtime` gives the checkout root, the program's own path and argv (to run itself again), a sibling program (checkout path, or its installed dest), and the installed bytes; `undo_python_start` undoes what Python changes at start (SIGPIPE ignored, LC_CTYPE=C.UTF-8 under a C locale) in `cst`, `cst swap`, `cst cpu` and the installer, whose shell wrappers hand the caller's LC_CTYPE over as `CST_LC_CTYPE` (an installed program a unit starts, such as `cpu-game-profile`, has no wrapper: under a C locale its children see C.UTF-8).
 - `main()` is a docstring and one statement that hands argv to the package.
 - No re-export facades (`from m import a as a`, `__all__`, a package `__init__.py` importing its own submodules): tests import a name from the module that defines it and inject fakes through ports.
 

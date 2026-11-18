@@ -135,6 +135,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_report/cli.py": 152,
     "cpu/cli.py": 146,
     "cpu/game/cli.py": 13,
+    "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
@@ -193,6 +194,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
     "btrfs/snapshot": "btrfs/snapshot/wiring.py",
+    "cpu/setup": "cpu/setup/wiring.py",
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
     "swap": "swap/wiring.py",
@@ -259,6 +261,9 @@ LITERAL_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk restorecon": 1,
     "btrfs/stall_report flatpak-spawn": 1,
     "cpu qemu:///system": 1,
+    # Text cpu-setup.sh printed and wrote, word for word: the status line of the toolboxes' host
+    # commands and the comment of their drop-in. No call: the command line is runner.on_host_argv's.
+    "cpu/setup flatpak-spawn": 2,
     "doctor flatpak-spawn": 1,
     "doctor qemu:///system": 1,
     "toolchains flatpak-spawn": 1,
@@ -277,7 +282,6 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
     "cst_core/adapters/nocow.py:FS_IOC_SETFLAGS": "an ioctl request used inside nocow.py and by its tests",
-    "cst_core/adapters/runtime.py:SYSTEM_PYTHON": "used inside runtime.py and by the tests",
     "cst_core/adapters/runtime.py:running_archive": "used inside runtime.py and by the tests",
     "cst_core/adapters/zipapp.py:import_closure": "used inside zipapp.py and by the tests",
     "cst_core/application/install.py:PayloadFn": "the type of InstallService's payload function, used only inside install.py",

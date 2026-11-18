@@ -56,6 +56,7 @@ from cst_core.domain.text import (
     printf_q_words,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
+from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from toolchains.domain import auto as tcd_auto
@@ -1181,12 +1182,10 @@ class ShellAssignmentsTest(unittest.TestCase):
     @unittest.skipUnless(os.access(BASH, os.X_OK), "needs /usr/bin/bash")
     def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
         # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
-        with open(os.path.join(REPO, "cpu-setup.sh"), encoding="utf-8") as fh:
-            cpu = re.search(r"printf '%s\\n' (\"# Managed by cpu-setup\.sh.*?)\| cst_install_text", fh.read(), re.S)
         with open(os.path.join(REPO, "btrfs", "setup-snapshots.bash"), encoding="utf-8") as fh:
             snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
-        assert cpu is not None and snap is not None
-        generated = self.bash_text(f"target_user=alice; printf '%s\\n' {cpu.group(1)}")
+        assert snap is not None
+        generated = cpu_setup_conf_lines("alice")  # what cst cpu install writes
         # snapshots.conf as the real writer (snap_conf_set) leaves it, blanks and a ' included.
         conf = os.path.join(self.tmp, "snapshots.conf")
         quoted = self.bash_text(

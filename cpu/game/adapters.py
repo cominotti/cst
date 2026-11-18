@@ -78,7 +78,7 @@ def user_id(user: str) -> str:
         return ""
 
 
-def _read_stripped(path: str) -> str | None:
+def read_stripped(path: str) -> str | None:
     """A file's text without its last newlines (a shell's $(cat FILE)), None when it cannot be read."""
     text = read_text(path)
     return None if text is None else text.rstrip("\n")
@@ -94,7 +94,7 @@ def _write_line(path: str, value: str) -> bool:
     return True
 
 
-def _holds(path: str, needle: str) -> bool:
+def holds(path: str, needle: str) -> bool:
     """The file holds needle (grep -qsF): False when it cannot be read."""
     data = read_bytes(path)
     return data is not None and needle.encode() in data
@@ -228,13 +228,13 @@ class GameProfile:
     def gamemode_client(self) -> bool:
         """A process has GameMode's client library loaded (gamemoderun / libgamemodeauto)."""
         for maps in sorted(glob.glob(os.path.join(glob.escape(self.paths.proc), "[0-9]*", "maps"))):
-            if _holds(maps, "libgamemode"):
+            if holds(maps, "libgamemode"):
                 return True
         return False
 
     def gamemode_pid(self, pid: str) -> bool:
         """The process has GameMode's client library loaded."""
-        return _holds(os.path.join(self.paths.proc, pid, "maps"), "libgamemode")
+        return holds(os.path.join(self.paths.proc, pid, "maps"), "libgamemode")
 
     def user_cg(self) -> str:
         """The user manager's own cgroup folder."""
@@ -289,12 +289,12 @@ class GameProfile:
         f = f"{self.paths.cgroot}{cg}/cpuset.cpus"
         if not cg or not os.access(f, os.W_OK):
             return
-        old = _read_stripped(f) or ""
+        old = read_stripped(f) or ""
         if old == self.s.build_cpus:
             return
         self._append(self.paths.state, "cgw", f, old)
         if _write_line(f, self.s.build_cpus):
-            self._append(self.paths.intended, "cgw", f, self.s.build_cpus, _read_stripped(f) or "")
+            self._append(self.paths.intended, "cgw", f, self.s.build_cpus, read_stripped(f) or "")
         else:
             self.log(4, f"{unit}: could not write {f}")
 
@@ -398,7 +398,7 @@ class GameProfile:
             f = p.epp(cpu)
             if not os.access(f, os.W_OK):
                 continue
-            self._append(p.state, "epp", cpu, _read_stripped(f) or "")
+            self._append(p.state, "epp", cpu, read_stripped(f) or "")
             _write_line(f, "performance")
         self.log(5, on_text(s))
         return 0
@@ -465,7 +465,7 @@ class GameProfile:
             vals = show_values(res.stdout)
             if vals.get("LoadState") == "loaded":
                 now[(mgr, unit)] = vals
-        return drifted(recs, now, lambda f: (_read_stripped(f) or "") if os.path.exists(f) else None)
+        return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
 
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
@@ -515,12 +515,12 @@ class GameProfile:
             self.say(f"  toolboxes       weight={self.prop('usr', 'user.slice', 'CPUWeight')}")
             self.say(f"  app.slice       zswap writeback={self.prop('usr', 'app.slice', 'MemoryZSwapWriteback')}")
             cg = self.ask("usr", "show", "-P", "ControlGroup", "user.slice").stdout.rstrip("\n")
-            effective = _read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
+            effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
             self.say(f"  toolboxes       cpus effective={effective}")
             if on:
                 self.say(f"  other boxes     idle: {state_escapes(self._state_text())}")
         first = first_cpu(s.build_cpus)
-        self.say(f"  EPP cpu0 {_read_stripped(p.epp('0')) or ''}, cpu{first} {_read_stripped(p.epp(first)) or ''}")
+        self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
             for line in self.drift_report():
                 self.say(line)
