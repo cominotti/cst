@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
+import contextlib
 import json
 import os
 import re
@@ -175,10 +176,8 @@ class StateFiles:
         )
 
     def jdrop(self, ident: str) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.remove(self.jpath(ident))
-        except FileNotFoundError:
-            pass
 
     def journals(self) -> list[str]:
         """Ids with a journal (a move not finished or undone yet); a Steam game's
@@ -215,10 +214,8 @@ class StateFiles:
             # Durable (file and folder): the next boot acts on it.
             write_atomic(self.paths.flag, "".join(i + "\n" for i in ids), mode="umask", relabel=False)
         else:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.remove(self.paths.flag)
-            except FileNotFoundError:
-                pass
 
     # ---- the keep list ----
     def read_keep(self) -> tuple[set[str], list[str]]:

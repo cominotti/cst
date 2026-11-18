@@ -11,6 +11,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 import base64
+import contextlib
 import errno
 import json
 import os
@@ -104,10 +105,8 @@ def as_user[**P, R: Json](pw: Account | None, home: str, fn: Callable[P, R], *ar
 def idle_priority() -> None:
     """This process, and what it starts, at the lowest CPU priority and the
     idle IO class (the IO class only counts with the BFQ IO scheduler)."""
-    try:
+    with contextlib.suppress(OSError):
         os.nice(19)
-    except OSError:
-        pass
     if shutil.which("ionice"):
         subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
 
@@ -345,10 +344,8 @@ class UserFiles:
         """A new subvolume root has no SELinux label (unlabeled_t), and files
         created in it would inherit that: give it the policy's label (as the
         user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
-        try:
+        with contextlib.suppress(OSError):
             subprocess.run(["restorecon", path], check=False, capture_output=True)
-        except OSError:
-            pass
         return True
 
     def relabel(self, path: str) -> bool:
