@@ -999,21 +999,18 @@ class NotifyLoopTest(unittest.TestCase):
         self.addCleanup(release.set)
         started: list[list[str]] = []
 
-        class _Popen:
-            def __init__(self, argv: Sequence[str], **_kw: object) -> None:
-                started.append(list(argv))
-                release.wait(30)
-
-            def wait(self, timeout: float | None = None) -> int:
-                return 0
-
-            def kill(self) -> None:
-                return None
+        def start(argv: Sequence[str]) -> _Ended:
+            started.append(list(argv))
+            release.wait(30)
+            return _Ended()
 
         run_dir = tempfile.mkdtemp(prefix="cst-stall-alert-loop-")
         self.addCleanup(shutil.rmtree, run_dir, True)
         mon = self.monitor(_FakeNotifier(self.events, pings=3))
         mon.run_dir = run_dir
+        # The helper thread outlives this test (it waits on release): no global patch of subprocess.Popen,
+        # which would be gone when it starts the next program, so the real systemctl would run.
+        mon.alert_start = md_monitor.AlertStarter(mon.alert_start.argv, start)
         passes: list[int] = []
 
         def track_hung(d_tasks: Sequence[md_domain.DTask], now: float) -> None:
@@ -1025,10 +1022,7 @@ class NotifyLoopTest(unittest.TestCase):
         done = threading.Event()
 
         def run() -> None:
-            with (
-                mock.patch.object(subprocess, "Popen", _Popen),
-                mock.patch.object(md_monitor, "BASE_INTERVAL", 0.0),  # a sample (and an alert) at every pass
-            ):
+            with mock.patch.object(md_monitor, "BASE_INTERVAL", 0.0):  # a sample (and an alert) at every pass
                 mon.run()
             done.set()
 
@@ -1090,6 +1084,17 @@ def _eventually(cond: Callable[[], bool], timeout: float = 5.0) -> bool:
     return True
 
 
+class _Ended:
+    """A started program that has ended (exit status 0)."""
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
 class AlertHandOffTest(unittest.TestCase):
     """An alert is queued in the runtime folder and btrfs-stall-alert.service is started to send it. Starting a
     program waits until the child has exec'd it, which reads the disk: during a stall, minutes. The start runs
@@ -1104,22 +1109,8 @@ class AlertHandOffTest(unittest.TestCase):
         self.addCleanup(self.release.set)
         self.started: list[list[str]] = []
         self.lines: list[str] = []
-        test = self
-
-        class _Popen:
-            def __init__(self, argv: Sequence[str], **_kw: object) -> None:
-                test.started.append(list(argv))
-                test.release.wait(10)
-
-            def wait(self, timeout: float | None = None) -> int:
-                return 0
-
-            def kill(self) -> None:
-                return None
-
         topo = types.SimpleNamespace(fs={}, disks=[], top_devs=set(), containers={})
         for target, name, value in (
-            (subprocess, "Popen", _Popen),
             (md_monitor, "Topology", lambda: topo),
             (md_monitor, "Writer", lambda _log_dir: types.SimpleNamespace()),
             (md_monitor, "read_text", lambda _path: ""),
@@ -1129,6 +1120,25 @@ class AlertHandOffTest(unittest.TestCase):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def start(self, argv: Sequence[str]) -> _Ended:
+        """The start of the program, waiting for release (its exec, on the stalled disk)."""
+        self.started.append(list(argv))
+        self.release.wait(10)
+        return _Ended()
+
+    def monitor(self, run_dir: str) -> md_monitor.Monitor:
+        """A Monitor whose alert hand-off starts the program with self.start (no real program, no global patch:
+        the helper thread may outlive the test)."""
+        mon = md_monitor.Monitor("/nonexistent/log", run_dir)
+        self.assertEqual(mon.alert_start.argv, list(self.ALERT_ARGV))
+        mon.alert_start = md_monitor.AlertStarter(mon.alert_start.argv, self.start)
+        return mon
+
+    def test_the_program_is_started_with_no_output(self) -> None:
+        with mock.patch.object(subprocess, "Popen") as popen:
+            md_monitor._start_quietly(self.ALERT_ARGV)
+        popen.assert_called_once_with(list(self.ALERT_ARGV), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def alert_in_thread(self, mon: md_monitor.Monitor, kind: str) -> threading.Event:
         """alert() of kind from a thread of its own (as the loop calls it); set once it returned."""
@@ -1142,7 +1152,7 @@ class AlertHandOffTest(unittest.TestCase):
         return done
 
     def test_an_alert_returns_while_the_start_of_its_sender_waits(self) -> None:
-        mon = md_monitor.Monitor("/nonexistent/log", self.run_dir)
+        mon = self.monitor(self.run_dir)
         done = self.alert_in_thread(mon, "hung")
         self.assertTrue(done.wait(2), "alert() waited for the start of btrfs-stall-alert.service")
         self.assertEqual(len(os.listdir(self.run_dir)), 1)  # queued for the service
@@ -1150,21 +1160,22 @@ class AlertHandOffTest(unittest.TestCase):
         self.assertEqual(self.started, [list(self.ALERT_ARGV)])
 
     def test_alerts_while_a_start_waits_are_one_more_start_after_it(self) -> None:
-        mon = md_monitor.Monitor("/nonexistent/log", self.run_dir)
+        helpers = sum(t.name == "alert-start" for t in threading.enumerate())  # earlier tests' helpers live on
+        mon = self.monitor(self.run_dir)
         self.assertTrue(self.alert_in_thread(mon, "hung").wait(2))
         self.assertTrue(_eventually(lambda: len(self.started) == 1))
         for kind in ("fs-error", "commit"):
             self.assertTrue(self.alert_in_thread(mon, kind).wait(2), f"alert({kind!r}) waited")
         self.assertEqual(len(os.listdir(self.run_dir)), 3)
         self.assertEqual(len(self.started), 1)  # still waiting: no second program, no second thread
-        self.assertEqual([t.name for t in threading.enumerate() if t.name == "alert-start"], ["alert-start"])
+        self.assertEqual(sum(t.name == "alert-start" for t in threading.enumerate()), helpers + 1)
         self.release.set()
         self.assertTrue(_eventually(lambda: len(self.started) == 2))
         time.sleep(0.2)
         self.assertEqual(self.started, [list(self.ALERT_ARGV)] * 2)  # the service sends all three at its start
 
     def test_without_a_runtime_folder_nothing_is_started(self) -> None:
-        mon = md_monitor.Monitor("/nonexistent/log", "")
+        mon = self.monitor("")
         mon.alert("hung", "warn", "Task stuck", "body")
         time.sleep(0.1)
         self.assertEqual(self.started, [])
@@ -1174,7 +1185,7 @@ class AlertHandOffTest(unittest.TestCase):
         blocker = os.path.join(self.run_dir, "a-file")
         with open(blocker, "w", encoding="utf-8"):
             pass
-        mon = md_monitor.Monitor("/nonexistent/log", os.path.join(blocker, "run"))  # no folder can be made there
+        mon = self.monitor(os.path.join(blocker, "run"))  # no folder can be made there
         mon.alert("hung", "warn", "Task stuck", "body")
         time.sleep(0.1)
         self.assertEqual(self.started, [])
