@@ -153,7 +153,7 @@ def mixed_profiles(usage: str) -> bool:
 def missing_bytes(usage: str) -> str:
     """The "Device missing" value(s) of btrfs filesystem usage, blanks removed."""
     return lines_of(
-        [re.sub(_SPACE, "", (line.split(":") + [""])[1]) for line in file_lines(usage) if "Device missing" in line]
+        [re.sub(_SPACE, "", [*line.split(":"), ""][1]) for line in file_lines(usage) if "Device missing" in line]
     )
 
 
@@ -243,7 +243,7 @@ class Scrub:
 
 def parse_scrub(text: str) -> Scrub:
     lines = file_lines(text)
-    started = [(re.split(": +", line) + [""])[1] for line in lines if "Scrub started" in line]
+    started = [[*re.split(": +", line), ""][1] for line in lines if "Scrub started" in line]
     status = [awk_field(line, 2) for line in lines if line.startswith("Status:")]
     return Scrub(text, lines_of(started), lines_of(status))
 
