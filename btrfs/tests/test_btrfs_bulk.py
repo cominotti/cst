@@ -40,7 +40,8 @@ from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser, SteamJournal, SteamPart
+from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser
+from btrfs.bulk.domain.steam import SteamJournal, SteamPart
 from btrfs.bulk.adapters.host import Host, snapshot_env
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile

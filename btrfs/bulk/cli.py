@@ -9,17 +9,8 @@ import sys
 
 from btrfs.bulk.application.commands import boot, keep_ids, keep_report, steam_apply, steam_print, steam_survey
 from btrfs.bulk.application.items import apply, exit_status, report
-from btrfs.bulk.domain import (
-    BY_ID,
-    MAKE_DEFAULT,
-    BadSettings,
-    BulkCommand,
-    NoUser,
-    SteamArgs,
-    bulk_command,
-    parse_steam_args,
-    split_user_args,
-)
+from btrfs.bulk.domain import BY_ID, BadSettings, BulkCommand, NoUser, bulk_command, split_user_args
+from btrfs.bulk.domain.steam import MAKE_DEFAULT, SteamArgs, parse_steam_args
 from btrfs.bulk.wiring import Wiring
 
 USAGE = (

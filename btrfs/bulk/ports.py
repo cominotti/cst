@@ -11,15 +11,8 @@ from collections.abc import Collection
 from collections.abc import Sequence
 from typing import Protocol
 
-from btrfs.bulk.domain import (
-    Ctx,
-    FileRead,
-    Item,
-    ItemJournal,
-    SteamJournal,
-    SteamPart,
-    TreeSize,
-)
+from btrfs.bulk.domain import Ctx, Item, ItemJournal, TreeSize
+from btrfs.bulk.domain.steam import FileRead, SteamJournal, SteamPart
 
 
 class UserFilesPort(Protocol):

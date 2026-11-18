@@ -16,18 +16,8 @@ import os
 import re
 from typing import TypeGuard
 
-from btrfs.bulk.domain import (
-    BY_ID,
-    ITEMS,
-    KEEP_HEADER,
-    BadSettings,
-    BulkJournalKind,
-    BulkPaths,
-    ItemJournal,
-    SteamJournal,
-    SteamPhase,
-    dec,
-)
+from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkJournalKind, BulkPaths, ItemJournal
+from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format

@@ -16,13 +16,9 @@ import time
 from typing import Literal
 
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import (
-    MARGIN,
+from btrfs.bulk.domain import MARGIN, BulkJournalKind, Ctx, LstatKind, PathChain, Unexpected, present
+from btrfs.bulk.domain.steam import (
     STEAM_ROOT,
-    BulkJournalKind,
-    Ctx,
-    LstatKind,
-    PathChain,
     SteamApp,
     SteamAppState,
     SteamJournal,
@@ -33,7 +29,6 @@ from btrfs.bulk.domain import (
     SteamPhase,
     SteamRunning,
     SteamSurvey,
-    Unexpected,
     Vdf,
     VdfPair,
     acf_app,
@@ -46,7 +41,6 @@ from btrfs.bulk.domain import (
     lf_place_app,
     lf_validate,
     lf_with_library,
-    present,
     vdf_dump,
     vdf_load,
     vdf_parse,

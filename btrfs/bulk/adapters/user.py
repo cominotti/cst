@@ -24,21 +24,16 @@ import time
 from typing import TypedDict
 
 from btrfs.bulk.adapters.machine import HomeTree, Progress, kind
-from btrfs.bulk.domain import (
+from btrfs.bulk.domain import NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
+from btrfs.bulk.domain.steam import (
     CHUNK,
-    NOCOW_TOP,
     STEAM_BACKUPS,
     STEAM_READ_MAX,
-    TAG_TEXT,
     FileRead,
-    FlatpakAccess,
-    ItemJournal,
-    LstatKind,
     SteamJournal,
     SteamPart,
     SteamPartKind,
     SteamPartMode,
-    Unexpected,
     vdf_dump,
 )
 from cst_core.domain.values import Json

@@ -19,7 +19,6 @@ from btrfs.bulk.domain import (
     ITEMS,
     MARGIN,
     STATE_TEXT,
-    STEAMAPPS,
     BulkCommand,
     BulkDirState,
     BulkItemDetail,
@@ -43,6 +42,7 @@ from btrfs.bulk.domain import (
     present,
     row_text,
 )
+from btrfs.bulk.domain.steam import STEAMAPPS
 
 THE_LINK = "the link"  # what present() names when an item has no link
 
