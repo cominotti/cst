@@ -1048,8 +1048,9 @@ The Python code inside `vm/` (standard library only at run time):
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
   `CST_VM_*`, which move each path for the tests only, and the snapshot and
   merge timeouts). `cst doctor` builds the same settings for its VM checks.
-  It also builds the ports over the adapters (`local_backup`, `nas_backup`,
-  `timer_port`, `systemd`, `settings_port`, `images`, ...): vm is in
+  It also builds the use cases and the ports over the adapters (`local_backup`,
+  `nas_backup`, `timer_port`, `systemd`, `settings_port`, ...) and hands `vm/cli`
+  the image folders (`images`: an adapter, no port): vm is in
   `HEXAGONAL_PACKAGES`, so only `wiring.py` and `vm/adapters/` import an adapter.
 - `vm/application/`: the use cases that change the machine in several
   steps, typed against the ports of `vm/ports.py`. `backup.py`: the local
