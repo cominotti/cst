@@ -513,7 +513,7 @@ class ComponentInstallTest(unittest.TestCase):
         os.makedirs(self.stage)
         self.log = os.path.join(self.tmp, "log")
 
-    def run_bash(self, body: str) -> subprocess.CompletedProcess[str]:
+    def run_bash(self, body: str, *, want_rc: int = 0) -> subprocess.CompletedProcess[str]:
         script = "\n".join(
             [
                 STUBS,
@@ -552,7 +552,7 @@ class ComponentInstallTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             timeout=120,
         )
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, want_rc, r.stdout + r.stderr)
         return r
 
     def staged(self) -> list[str]:
@@ -627,6 +627,24 @@ class ComponentInstallTest(unittest.TestCase):
         self.assertIn(f"unchanged: {conf}", r.stdout)
         with open(conf) as f:
             self.assertTrue(f.read().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+
+    def test_docker_gc_stops_at_an_installed_program_it_does_not_know(self) -> None:
+        # No settings file and a /usr/local/sbin/docker-gc that is not CST's: enable and the purge
+        # stop with 78 at `settings --write` (set -e), before they change anything.
+        prog = os.path.join(self.stage, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(prog))
+        other = "#!/bin/sh\necho another docker-gc\n"
+        with open(prog, "w") as f:
+            f.write(other)
+        for action in ("enable", "disable --purge"):
+            r = self.run_bash(f"docker_gc {action}", want_rc=78)
+            self.assertIn("does not show which registries it protects", r.stdout + r.stderr, action)
+            self.assertEqual(self.staged(), ["/usr/local/sbin/docker-gc"], action)
+            with open(prog) as f:
+                self.assertEqual(f.read(), other, action)
+            if os.path.exists(self.log):
+                with open(self.log) as f:
+                    self.assertNotIn("systemctl", f.read(), action)
 
     def test_docker_gc_purge_with_nothing_installed_writes_no_settings(self) -> None:
         r = self.run_bash("docker_gc disable --purge")
