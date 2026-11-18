@@ -17,14 +17,12 @@ from btrfs.stall_report.domain.records import (
     CgroupTotals,
     DiskTotals,
     Episode,
-    EpisodeRecord,
     FsTotals,
     MetaRecord,
     OpenEpisode,
     Recorded,
     SampleRecord,
     Sig,
-    SigRecord,
 )
 
 
@@ -308,19 +306,17 @@ def summarise(
 
     cat_n, other_n = {}, {}
     cap_eps = []  # (start, end, corrected max_d) of episodes of daemons v3-v7 with non-storage waits
-    ep: EpisodeRecord | Episode
-    s: SigRecord | Sig
-    for ep in episodes:
+    for record in episodes:
         sigs: list[Sig] = []
-        for s in ep["sigs"]:
-            cat = classify(s["sig"], s.get("examples", []), list(s.get("comms", {})), s.get("kind"))
+        for rec in record["sigs"]:
+            cat = classify(rec["sig"], rec.get("examples", []), list(rec.get("comms", {})), rec.get("kind"))
             bucket = other_n if cat in NON_STORAGE else cat_n
-            bucket[cat] = bucket.get(cat, 0) + s["n"]
-            s = {**s, "cat": cat, "task_samples": s["n"]}
+            bucket[cat] = bucket.get(cat, 0) + rec["n"]
+            s: Sig = {**rec, "cat": cat, "task_samples": rec["n"]}
             if not verbose:
                 s.pop("examples", None)
             sigs.append(s)
-        ep = {**ep, "sigs": sigs}
+        ep: Episode = {**record, "sigs": sigs}
         if "max_d_all" not in ep:
             # Recorded by daemon v2, whose max_d counted every D-state task
             # (FUSE and idle waits too): estimate the storage ones as the mean
@@ -361,7 +357,8 @@ def summarise(
     res["non_storage_waits"] = other_n
     # v3-v7 samples during an episode with memory or maintenance waits: cap
     # at the episode's estimate (their "d" counted those waits as storage).
-    for ts, d, v5 in old_d:
+    for ts, recorded_d, v5 in old_d:
+        d = recorded_d
         for start, end, max_d in cap_eps:
             if start <= ts <= end:
                 d = min(d, max_d)
