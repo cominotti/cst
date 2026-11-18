@@ -73,10 +73,7 @@ def main(
         return 2
 
     cmd, args = argv[0], argv[1:]
-    if cmd == "wp-others":
-        if not args:
-            print(f"bt-helper: usage: see {argv0} (no arguments)", file=err)
-            return 2
+    if cmd == "wp-others" and args:  # with no NAME: the usage error below (not in _ARITY)
         for where, path in host.other_fragments(args[0], args[1:]):
             print(f"{where}|{path}", file=out)
         return 0
