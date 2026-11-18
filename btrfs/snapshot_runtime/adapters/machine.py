@@ -8,6 +8,7 @@ from collections.abc import Buffer, Callable, Mapping, Sequence
 import contextlib
 import io
 import os
+import signal
 import sys
 import time
 from typing import TextIO
@@ -329,3 +330,15 @@ def keep_bytes_on_output() -> None:
     both are the one journal stream: they go away together."""
     sys.stdout = _bash_like(1, getattr(sys.stdout, "encoding", None) or "utf-8")
     sys.stderr = _bash_like(2, getattr(sys.stderr, "encoding", None) or "utf-8")
+
+
+def sigpipe_handed_over() -> bool:
+    """CST_SIGPIPE_IGNORED=1 (which goes): the front started with SIGPIPE ignored, as systemd runs
+    its services. Python ignores SIGPIPE whatever it got, so only the front can tell. Then the
+    commands this run starts get SIGPIPE ignored too, as bash's children did (a closed journal
+    stream is EPIPE for them, not a kill), and SIGXFSZ at its default, as bash had it; otherwise
+    both at their default (subprocess restores them)."""
+    if os.environ.pop("CST_SIGPIPE_IGNORED", "") != "1":
+        return False
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    return True
