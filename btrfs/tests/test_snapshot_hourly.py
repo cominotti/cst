@@ -18,7 +18,7 @@ import subprocess
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import GIB, SCRIPT, USAGE, RuntimeTest, log
+from btrfs.tests.snapshot_fakes import GIB, SCRIPT, USAGE, RuntimeTest, log, read
 from tests.test_module_routing import userns_root
 
 HOME_POLICY = "72h 7d 4w 3m"
@@ -649,7 +649,33 @@ class AlertStampTest(Base):
         _, sent = self.paused_run()
         self.assertEqual(len(sent), 1)
 
-    def test_without_btrfs_notify_only_the_journal_line(self) -> None:
+    def test_an_alert_btrfs_notify_cannot_take_is_kept_for_cst_doctor(self) -> None:
+        # btrfs-notify missing (btrfs:alerts half removed) or failing: the alert went only to the
+        # journal. cst_core's Notifier keeps it in the pending alerts folder (cst doctor and the next
+        # login show it) and says so; the once-a-day stamp stays unset, so the next run tries again.
+        pending = self.path("var/lib/cst-alerts/pending")
+        for name, setup, why in (
+            ("failing", lambda: self.machine(notify_rc=1), "exited 1"),
+            ("missing", lambda: os.remove(self.path("usr/local/sbin/btrfs-notify")), "is not installed"),
+        ):
+            with self.subTest(name):
+                shutil.rmtree(pending, ignore_errors=True)
+                setup()
+                out, _ = self.paused_run()
+                (kept,) = os.listdir(pending)
+                path = os.path.join(pending, kept)
+                text = read(path)
+                self.assertTrue(text.startswith("cst-alert 1\nurgency=normal\napp=btrfs-snapshot\n"), text)
+                self.assertIn("\ntitle=Snapshots paused: low space\n", text)
+                notify = self.path("usr/local/sbin/btrfs-notify")
+                self.assertIn(
+                    log(3, f"alert not delivered ({notify} {why}): Snapshots paused: low space; kept in {path} "
+                        "(cst doctor shows it)"),
+                    out.splitlines(),
+                )  # fmt: skip
+                self.assertFalse(os.path.exists(self.state_file("alerted-paused")))
+
+    def test_without_btrfs_notify_nothing_is_sent_and_no_stamp_is_set(self) -> None:
         os.remove(self.path("usr/local/sbin/btrfs-notify"))
         out, sent = self.paused_run()
         self.assertEqual(sent, [])

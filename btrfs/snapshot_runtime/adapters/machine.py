@@ -20,6 +20,7 @@ from btrfs.snapshot_runtime.domain import (
     SUBVOL_ROOT_INODE,
     TAG,
     Stderr,
+    Urgency,
     CacheArgs,
     Sources,
     cache_args,
@@ -29,7 +30,8 @@ from btrfs.snapshot_runtime.domain import (
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import state_format
+from cst_core.adapters.notify import PENDING_ALERTS, Notifier, Urgency as NotifyUrgency
+from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -55,7 +57,8 @@ class SnapshotRun:
         self.plan = f"{r}/etc/btrfs-setup/convert-plan"
         self.state = f"{r}/var/lib/btrfs-snapshot"
         self.core = f"{r}/usr/local/sbin/btrfs-snapshot-core"
-        self.notify = f"{r}/usr/local/sbin/btrfs-notify"
+        self.notify = f"{r}{NOTIFY_PROGRAM}"
+        self.pending_alerts = f"{r}{PENDING_ALERTS}"
         self.lock_path = f"{r}/run/btrfs-snapshot.lock"
         self.run_dir = f"{r}/run/btrfs-snapshot"
         self.pin_file = f"{self.run_dir}/pinned"
@@ -164,7 +167,16 @@ class SnapshotRun:
         res = self._call(lambda: self.runner.run(argv, output="capture", input_text=input_text, pass_fds=self.fds))
         return res.fault is None and res.returncode == 0
 
-    def _call(self, call: Callable[[], CommandResult]) -> CommandResult:
+    def desktop_alert(self, urgency: Urgency, title: str, body: str) -> bool:
+        """btrfs-notify -u URGENCY -a btrfs-snapshot TITLE BODY through cst_core's Notifier: True when
+        btrfs-notify showed the alert or kept it for the next login. When it is missing, fails or
+        does not answer within 60 s, the Notifier keeps the alert in the pending alerts folder (cst
+        doctor and the next login show it) and says so in the journal; False then."""
+        notifier = Notifier(self.runner, self.notify, self.pending_alerts, log=self.log)
+        level: NotifyUrgency = "critical" if urgency is Urgency.CRITICAL else "normal"
+        return self._call(lambda: notifier.send(level, TAG, title, body)) == "sent"
+
+    def _call[T](self, call: Callable[[], T]) -> T:
         """One command; a signal trap_stop caught while it ran ends the run once it is done (bash
         runs a trap after the foreground command, which is never killed for it)."""
         self.in_command = True
