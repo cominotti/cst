@@ -47,7 +47,8 @@ export const meta = {
 //   review agent drops findings on files outside this change's paths and, with a base other than main, findings
 //   that come only from the base's own commits. Named lookup through .claude/workflows was
 //   not tried before the first merge (scriptPath was).
-// - Every agent pastes the output of GUARD_CMD for the main checkout before and after; the script stops when an
+// - Every agent pastes the output of GUARD_CMD for the main checkout (its HEAD, status lines, staged and unstaged
+//   contents and untracked files' contents) before and after; the script stops when an
 //   agent's two readings differ or when one agent's "before" differs from the previous agent's "after".
 // - The branch head is checked the same way: simplify reports the head it leaves (and a clean worktree), every
 //   reviewer the head it reviewed (it must be that one), and the fixer the head it gated and the head after
@@ -104,6 +105,16 @@ function isReady(fix, tier1) {
   return !!(fix.gates_ok && fix.worktree_clean && (!tier1 || fix.tier1_ran) && fix.gated_head && String(fix.final_head).trim() === String(fix.gated_head).trim())
 }
 
+// A path as one shell word: as it is when it needs no quoting. Pure: tested below.
+function shq(s) { return /^[A-Za-z0-9_\/.,+:@%=-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'" }
+// Why the worktree path cannot work ('' when it can): inside the main checkout, its folder shows up in the guard's
+// status and stops the run as soon as it is created. Pure: tested below.
+function worktreeProblem(main, wt) {
+  if (!wt.startsWith('/')) return 'must be an absolute path'
+  if (wt === main || wt.startsWith(main + '/')) return 'must be outside the main checkout ' + main
+  return ''
+}
+
 function selftest() {
   const eq = (a, b, what) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error('selftest ' + what + ': ' + JSON.stringify(a) + ' != ' + JSON.stringify(b)) }
   const throws = (f, what) => { try { f() } catch (e) { return } throw new Error('selftest ' + what + ': did not throw') }
@@ -134,6 +145,8 @@ function selftest() {
   eq(reviewProblem('port', { reviewed_head: 'g' }, 'h'), 'reviewed g, not h', 'a review of another head')
   const F = { gates_ok: true, worktree_clean: true, tier1_ran: false, gated_head: 'h', final_head: 'h' }
   eq([isReady(F, false), isReady({ ...F, final_head: 'h2' }, false), isReady({ ...F, gated_head: '', final_head: '' }, false), isReady(F, true), isReady({ ...F, worktree_clean: false }, false)], [true, false, false, false, false], 'ready')
+  eq([shq('/a/b-c_d.e'), shq('/a b'), shq("/it's")], ['/a/b-c_d.e', "'/a b'", "'/it'\\''s'"], 'shell quoting')
+  eq([worktreeProblem('/r/cst', '/r/cst-wt-x'), worktreeProblem('/r/cst', '/r/cst/.wt/x'), worktreeProblem('/r/cst', '/r/cst'), worktreeProblem('/r/cst', 'wt')], ['', 'must be outside the main checkout /r/cst', 'must be outside the main checkout /r/cst', 'must be an absolute path'], 'worktree path')
   return 'ok'
 }
 
@@ -149,16 +162,20 @@ if (!/^[a-z0-9][a-z0-9-]*$/.test(A.slug)) throw new Error('args.slug: [a-z0-9-]'
 if (!['refactor', 'behaviour', 'docs'].includes(A.kind)) throw new Error('args.kind: refactor | behaviour | docs')
 if (A.tier1 !== undefined && !['run', 'defer'].includes(A.tier1)) throw new Error('args.tier1: run | defer')
 const MAIN = A.main.replace(/\/$/, '')
-const WT = A.worktree || MAIN + '-wt-' + A.slug
+const WT = String(A.worktree || MAIN + '-wt-' + A.slug).replace(/\/$/, '')
 const BRANCH = A.branch || 'change/' + A.slug
 const BASE = A.base || 'main'
+const wtProblem = worktreeProblem(MAIN, WT)
+if (wtProblem) throw new Error('args.worktree: ' + wtProblem)
 
-const GUARD_CMD = 'git -C ' + MAIN + ' rev-parse HEAD; git -C ' + MAIN + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + MAIN + ' diff | sha256sum'
-const DIFF_CMD = 'git -C ' + WT + ' diff --name-status --no-renames ' + BASE + '...HEAD'
-const GATE_TAIL = 'Then report gated_head (git -C ' + WT + ' rev-parse HEAD) and worktree_clean (true when git -C ' + WT + ' status --porcelain prints nothing).'
+const QM = shq(MAIN), QWT = shq(WT), QBASE = shq(BASE), QBRANCH = shq(BRANCH)
+// The main checkout's state: HEAD, the status lines, the staged and unstaged contents, the untracked files' contents.
+const GUARD_CMD = 'git -C ' + QM + ' rev-parse HEAD; git -C ' + QM + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + QM + ' diff HEAD | sha256sum; (cd ' + QM + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
+const DIFF_CMD = 'git -C ' + QWT + ' diff --name-status --no-renames ' + QBASE + '...HEAD'
+const GATE_TAIL = 'Then report gated_head (git -C ' + QWT + ' rev-parse HEAD) and worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing).'
 const shared = (stage, rereadBrief) => [
   'Repository rules: AGENTS.md ("Rules", "Commands", "Test gotchas") and .agents/rules/*.md apply; the kind "' + A.kind + '" decides the proof (.agents/rules/refactor-vs-behaviour.md).',
-  'Work only in the worktree ' + WT + ' (branch ' + BRANCH + '). Your shell starts in the main checkout on EVERY call: use git -C ' + WT + ', absolute paths, or "cd ' + WT + ' && ..." inside the same command. Never edit, commit or check out anything in ' + MAIN + '.',
+  'Work only in the worktree ' + WT + ' (branch ' + BRANCH + '). Your shell starts in the main checkout on EVERY call: use git -C ' + QWT + ', absolute paths, or "cd ' + QWT + ' && ..." inside the same command. Never edit, commit or check out anything in ' + MAIN + '.',
   'Shared machine: TMPDIR=$HOME/.cache/cst-change-' + A.slug + '/' + stage + ' for anything you run (remove that folder when done), a timeout on every harness you write, no large files in /tmp; never sudo, never tier 2 E2E, never git stash, never push; repository text in English, with no personal or private names.',
   'Do not invoke the code-review or simplify skills unless this prompt says so.' + (rereadBrief ? ' Re-read the brief ' + A.brief + ' before your final check: it may have grown.' : ''),
   'Guard: run exactly "' + GUARD_CMD + '" as your first and as your last command, and paste each output verbatim into main_before and main_after.',
@@ -195,15 +212,15 @@ let impl = null, simp = null, changed = [], HEAD = ''
 if (MODE === 'new' || MODE === 'continue') {
   phase('Implement')
   const start = MODE === 'new'
-    ? 'Create the worktree: git -C ' + MAIN + ' worktree add -b ' + BRANCH + ' ' + WT + ' ' + BASE + '. If the branch or the worktree already exists, stop and report it (check_ok false).'
+    ? 'Create the worktree: git -C ' + QM + ' worktree add -b ' + QBRANCH + ' ' + QWT + ' ' + QBASE + '. If the branch or the worktree already exists, stop and report it (check_ok false).'
     : 'The worktree ' + WT + ' exists: continue from its state' + ' (read ' + A.notes + '/DESIGN-' + A.slug + '.md if it exists).'
-  impl = await guarded('implement', 'Implement', shared('implement', true) + '\n\nStage: implement "' + A.title + '". ' + start + ' Follow the brief ' + A.brief + (design ? ' and the design note ' + A.notes + '/DESIGN-' + A.slug + '.md' : '') + '. Commits of one kind each, with their proof; tests with the change (a behaviour change has a test that fails on the old code, checked). While working run "cd ' + WT + ' && invowk cmd test module <module>"; at the end run "cd ' + WT + ' && invowk cmd check" once: check_ok is true only when it passed, and check holds its summary. ' + GATE_TAIL + ' Return changed_paths exactly as "' + DIFF_CMD + '" prints them.',
+  impl = await guarded('implement', 'Implement', shared('implement', true) + '\n\nStage: implement "' + A.title + '". ' + start + ' Follow the brief ' + A.brief + (design ? ' and the design note ' + A.notes + '/DESIGN-' + A.slug + '.md' : '') + '. Commits of one kind each, with their proof; tests with the change (a behaviour change has a test that fails on the old code, checked). While working run "cd ' + QWT + ' && invowk cmd test module <module>"; at the end run "cd ' + QWT + ' && invowk cmd check" once: check_ok is true only when it passed, and check holds its summary. ' + GATE_TAIL + ' Return changed_paths exactly as "' + DIFF_CMD + '" prints them.',
     { commits: { type: 'array', items: { type: 'string' } }, changed_paths: CHANGED, check_ok: { type: 'boolean' }, check: { type: 'string' }, notes: { type: 'string' }, ...GATED }, ['commits', 'changed_paths', 'check_ok', 'check', 'gated_head', 'worktree_clean'])
   if (!impl) return stopped('implement')
   if (!impl.check_ok || !impl.worktree_clean) return stopped('implement', { impl })
 
   phase('Simplify')
-  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + WT + ' diff ' + BASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + WT + ' && invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits. Commit every edit you keep: the review sees only commits. ' + GATE_TAIL,
+  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + QWT + ' diff ' + QBASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + QWT + ' && invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits. Commit every edit you keep: the review sees only commits. ' + GATE_TAIL,
     { commits: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, changed_paths: CHANGED, ...GATED }, ['commits', 'summary', 'changed_paths', 'gated_head', 'worktree_clean'])
   if (!simp) return stopped('simplify', { impl })
   if (!simp.worktree_clean) { log('simplify: the worktree has uncommitted edits: stopping'); return stopped('simplify', { impl, simp }) }
@@ -211,7 +228,7 @@ if (MODE === 'new' || MODE === 'continue') {
   HEAD = String(simp.gated_head).trim()
 } else {
   phase('Review')
-  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + WT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), head (git -C ' + WT + ' rev-parse HEAD), and changed_paths exactly as "' + DIFF_CMD + '" prints them.',
+  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + QWT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), head (git -C ' + QWT + ' rev-parse HEAD), and changed_paths exactly as "' + DIFF_CMD + '" prints them.',
     { worktree_exists: { type: 'boolean' }, head: { type: 'string' }, changed_paths: CHANGED }, ['worktree_exists', 'head', 'changed_paths'])
   if (!survey || !survey.worktree_exists) return stopped('survey', { survey })
   changed = survey.changed_paths
@@ -227,10 +244,10 @@ if (pick.tier1 && !TIER1) log('tier 1 deferred to the integration branch')
 log('lenses: ' + (pick.lenses.join(', ') || 'none') + '; tier 1: ' + pick.tier1)
 const FIND = { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] } } }
 const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' $HOME/.claude/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1"
-const REVIEWED = ' Report reviewed_head: what "git -C ' + WT + ' rev-parse HEAD" prints when you start.'
+const REVIEWED = ' Report reviewed_head: what "git -C ' + QWT + ' rev-parse HEAD" prints when you start.'
 const reviewPrompt = (lens) => lens === 'code-review'
-  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. Read the findings from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '). Set skill_findings_read true only when you read them there (an empty list read there counts); false otherwise, and then return no findings of your own. The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + WT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + WT + ' diff ' + BASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
-  : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + WT + ' diff ' + BASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.' + REVIEWED
+  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. Read the findings from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '). Set skill_findings_read true only when you read them there (an empty list read there counts); false otherwise, and then return no findings of your own. The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + QWT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + QWT + ' diff ' + QBASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
+  : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + QWT + ' diff ' + QBASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.' + REVIEWED
 const labels = ['code-review', ...pick.lenses]
 const runReview = async (l) => {
   const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' } } : {}) }
@@ -247,7 +264,7 @@ const all = reviews.flatMap((r) => r.findings)
 log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s)')
 
 phase('Fix')
-const fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\nDedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Then run the gates ONCE on the final tree: "cd ' + WT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + WT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests. Nothing edits after you. Just before your last guard command, run "git -C ' + WT + ' rev-parse HEAD" and report its output as final_head.',
+const fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\nDedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Then run the gates ONCE on the final tree: "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests. Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head.',
   { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, final_head: { type: 'string' }, ...GATED }, ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'gated_head', 'worktree_clean', 'final_head'])
 if (!fix) return stopped('fix', { impl, simp, findings: all })
 const ready = isReady(fix, TIER1)
