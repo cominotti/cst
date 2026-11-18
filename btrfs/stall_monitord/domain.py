@@ -44,6 +44,9 @@ FLUSH_EVERY = 10.0  # s between hand-offs to the writer thread
 KEEP_DAYS = 8
 ALERT_COMMIT_MS = 5000
 ALERT_MIN_GAP = 15 * 60  # s between alerts of the same kind
+# The alert hand-off starts btrfs-stall-alert.service from a helper thread and
+# waits at most this long for `systemctl --no-block start` (then kills it).
+ALERT_START_WAIT = 60.0
 CGROUP_RESCAN = 30.0  # s between container cgroup discovery
 SLICES = ("system.slice", "user.slice", "machine.slice")
 VMSTAT_KEYS = (

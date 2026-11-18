@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import errno
 import json
 import os
@@ -11,11 +11,14 @@ import queue
 import select
 import signal
 import subprocess
+import threading
 import time
+from typing import Protocol
 
 from btrfs.stall_monitord.domain import (
     ALERT_COMMIT_MS,
     ALERT_MIN_GAP,
+    ALERT_START_WAIT,
     BASE_INTERVAL,
     CMDLINE_SLOW,
     CMDLINE_WAIT,
@@ -78,6 +81,70 @@ from cst_core.adapters.files import write_atomic
 from cst_core.domain.contracts import state_format
 
 
+class _Started(Protocol):
+    """What AlertStarter needs of the program it started (a subprocess.Popen; a fake in the tests)."""
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+    def kill(self) -> None: ...
+
+
+def _start_quietly(argv: Sequence[str]) -> _Started:
+    return subprocess.Popen(list(argv), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class AlertStarter:
+    """Starts a program (`systemctl --no-block start btrfs-stall-alert.service`) from one helper thread, so the
+    sampling loop never waits for it.
+
+    Starting a program waits until the child has exec'd it, and exec reads the program from the disk: during
+    the stalls the daemon records, that can take minutes. request() only marks a start as wanted and returns.
+    The helper starts the program once for every request still pending when it gets to it (requests made
+    meanwhile are merged: the service sends every queued alert at each start), waits at most `wait` seconds
+    for it, then kills it. One thread, never more (the unit's TasksMax).
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        start: Callable[[Sequence[str]], _Started] = _start_quietly,
+        wait: float = ALERT_START_WAIT,
+    ) -> None:
+        self.argv = list(argv)
+        self._start = start
+        self._wait = wait
+        self._wanted = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def request(self) -> None:
+        """Ask for one more start; returns at once."""
+        self._wanted.set()
+        if self._thread is not None and self._thread.is_alive():
+            return
+        thread = threading.Thread(target=self._serve, name="alert-start", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError as e:  # no thread (the unit's TasksMax reached): the alert stays queued
+            log(f"alert hand-off: {self.argv[-1]} not started ({e}); the alert stays queued", 4)
+            return
+        self._thread = thread
+
+    def _serve(self) -> None:
+        while True:
+            self._wanted.wait()
+            self._wanted.clear()
+            try:
+                child = self._start(self.argv)
+            except OSError as e:
+                log(f"alert hand-off failed: {e}", 4)
+                continue
+            try:
+                child.wait(timeout=self._wait)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                log(f"alert hand-off: {' '.join(self.argv)} did not end in {self._wait:g} s; killed", 4)
+
+
 class Monitor:
     """The daemon: its state across samples, the probes, samples, episodes, hung and busy tasks, the kernel log and the alerts."""
 
@@ -98,6 +165,8 @@ class Monitor:
         self.commit_alerted: dict[str, int] = {}  # uuid -> commits count already alerted for
         self.want_episode: str | None = None  # reason set by the probe; sampled right away
         self.last_alert: dict[str, float] = {}
+        # btrfs-stall-alert.service sends the queued alerts; started from a helper thread (AlertStarter).
+        self.alert_start = AlertStarter(["systemctl", "--no-block", "start", "btrfs-stall-alert.service"])
         self.stack_ok = self.probe_stack_access()
         self.stack_fail = 0
         self.d_since: dict[str, DTaskSince] = {}  # tid -> {first (stuck since), busy (in D since), comm, pid, slices}
@@ -496,13 +565,10 @@ class Monitor:
             write_atomic(
                 path, alert_text(level, title, body).encode("utf-8"), mode="umask", durable=False, relabel=False
             )
-            subprocess.Popen(
-                ["systemctl", "--no-block", "start", "btrfs-stall-alert.service"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
         except OSError as e:
             log(f"alert hand-off failed: {e}", 4)
+            return
+        self.alert_start.request()
 
     # ---- main loop -----------------------------------------------------------
 
