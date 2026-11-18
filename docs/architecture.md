@@ -34,24 +34,106 @@ composition root" below).
 
 ## Package layout
 
-Python packages follow the Hexagonal Architecture + DDD layout
-(`domain.py` / `domain/` for pure rules and frozen `slots=True` dataclasses,
-`ports.py` / `ports/` for `Protocol` boundaries, `application.py` for use
-cases, `adapters.py` / `adapters/` for host I/O and subprocesses, `cli.py`
-for a program's commands). Only swap, doctor, `cst_core` and btrfs's
-bulk, docker-gc, docker-volumes-nocow and snapshot have an application layer
-with ports; in the other packages `cli.py` orchestrates the commands and
-still does some I/O itself. `tests/test_architecture.py`
+Python packages follow Hexagonal Architecture with a pure core, in one of
+two profiles (next section): `domain.py` / `domain/` for pure rules and
+frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
+and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
+profile only, `ports.py` / `ports/` for `Protocol` boundaries,
+`application.py` for use cases, `wiring.py` and `presenter.py`. Only swap,
+doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
+snapshot have the full profile; in the other packages `cli.py` orchestrates the
+commands and some still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
-each `cli.py` so it only shrinks: new logic goes into `domain` (pure),
+each `cli.py`: new logic goes into `domain` (pure),
 `application` (with ports) or `adapters` (I/O). The I/O left outside the
-adapters has a budget per package and layer that only goes down
+adapters has a budget per package and layer that it may not go above
 (`IO_BUDGETS`, see "Static gates beyond lint and types" below).
+
+## Package profile
+
+"Hexagonal + DDD" in CST means a pure functional core (functions and frozen
+dataclasses) with the I/O at the edges, not a domain-model framework. Each
+package has the light profile unless a layer of the full one pays for itself.
+
+**Light profile, the default.** Reference package: `btrfs/chrome_cache`.
+
+- `domain.py`: pure rules and value types (frozen dataclasses, `TypedDict`
+  for JSON shapes, `NewType` where a value crosses a boundary). No I/O.
+- `adapters.py`: the I/O, through the cst_core primitives (runner, files,
+  locks, journal, systemd, virsh; see
+  [reuse-primitives](../.agents/rules/reuse-primitives.md)).
+- `cli.py`: parse argv, call one function, print, return the exit status.
+  Its `main` is the composition root: it builds the adapters and may read
+  the environment; it does no other I/O of its own.
+- Functions first; a class only when it carries state across steps.
+- Tests fake cst_core's `CommandRunnerPort` or `FileSystemPort`, or the
+  adapter functions, instead of a port of the package's own.
+
+`btrfs/chrome_cache/cli.py` still has 7 lines of I/O of its own (closing
+folder descriptors, a folder test, resolving and `os.stat`-ing the home, the
+uid checks), counted in
+`IO_BUDGETS`; they belong in its adapters, in a refactor of their own.
+
+**Full profile: add a layer only when it pays.** Reference package:
+`btrfs/docker_volumes_nocow` (a migration with rollback).
+
+- `application.py`: only for a use case with two or more steps that change
+  the machine and must roll back or resume (journals, twins, renames,
+  multi-step installs).
+- `ports.py`: the `Protocol`s `application.py` is typed against
+  (application never imports adapters). Keep them few and shaped as
+  boundaries (how the machine is reached: docker, the volume tree, the state
+  store), never one method per shell command. Where no test needs a fake of
+  its own, type the use case with cst_core's `CommandRunnerPort` /
+  `FileSystemPort` and fake those.
+- `wiring.py`: only when the program reads its environment and also re-runs
+  itself (sudo, runuser); otherwise the construction stays in `cli.py`'s
+  `main`.
+- `presenter.py`: only when there are two or more output formats (text and
+  `--json`).
+
+**What the gates check in each profile.**
+
+- Every package: no I/O in a `domain` module (also in `application`),
+  frozen slotted dataclasses in `domain`, no outer-layer imports from
+  `domain`, `ports` or `application`, a role for every module, the
+  `cli.py` size (`CLI_CEILINGS`), the I/O outside adapters
+  (`IO_BUDGETS`), the module size cap and the duplication measure.
+- Light: `cli.py` may import adapters and read the environment
+  (`LIGHT_CLI_ALLOWED`: `os.environ`, `os.getenv`; a write to the
+  environment, a re-exec or `sys.executable` still counts). Nothing asks
+  for ports, application, wiring or presenter.
+- Full (`HEXAGONAL_PACKAGES`): `cli.py` and `presenter.py` do no I/O at
+  all, only `wiring.py` and the adapters import an adapter, and only
+  `wiring.py` reads the environment or re-runs the program (see "The
+  composition root" below).
+
+**Size and cohesion.** No package module is over 800 lines
+(`tests/test_module_size.py`; today's larger modules are in `OVER_CAP`, each
+never above its entry). Split a big module by command group or check area,
+not by layer. A big `cli.py` becomes a `cli/` folder, the same way
+`domain.py` becomes `domain/`: `cli/__init__.py` (the `main`) and one
+`cli/<group>.py` per command group. Every file in it has the cli role and
+its rules (in a light package each may read the environment, in a full one
+none does I/O), and `CLI_CEILINGS` caps the folder as a whole
+(`<package>/cli/`): the split moves the `<package>/cli.py` entry to that
+key by hand, at most its old value, and then moving code between the files
+changes nothing. Import the group modules by their full name
+(`from vm.cli import net`): the import graph of the gates (`tests/code_graph.py`)
+follows only absolute imports, like the rest of CST.
+
+**Gates and metrics.** Budgets, ceilings and allow-lists fail only when the
+code is above them (the sets that must stay empty, such as `NOT_YET_CLEAN`,
+and `LICENSE_EXEMPT`, each entry of which must match a file, still fail on
+an entry nothing needs); `invowk cmd fix budgets` lowers them to the measured
+values and never raises one. Never reshape code that moves or deletes data
+only to satisfy a metric (Sonar's cognitive complexity, the duplication
+measure).
 
 ## The composition root: `wiring.py`
 
-In a package with an application layer, one module puts the program
-together: `<pkg>/wiring.py`. It is the only place that
+In a package of the full profile (see "Package profile" above), one module
+puts the program together: `<pkg>/wiring.py`. It is the only place that
 
 - reads the process environment (`os.environ`: `CST_PROG`, what a shell
   wrapper hands over, the test overrides), and turns it into values for the
@@ -78,8 +160,16 @@ module, use `os.environ`, `sys.executable` and `os.execvp` without them
 counting as I/O; anything else it does (files, commands) counts in its
 package's `IO_BUDGETS` like everywhere else. cst_core's `wiring.py` serves
 its programs: `cst` (`cli.py`), the installer and the module router
-(`route.py`). Every package converted from now on follows the same split
-and joins `HEXAGONAL_PACKAGES`.
+(`route.py`). A package that gets an application layer follows the same
+split and joins `HEXAGONAL_PACKAGES`.
+
+A package of the light profile (not in `HEXAGONAL_PACKAGES`) has no
+`wiring.py`: its `cli.py` `main` is the composition root. It builds the
+adapters and may read the environment (`LIGHT_CLI_ALLOWED`: reads of
+`os.environ` and `os.getenv`) without them counting as I/O. A write to
+`os.environ`, the `sudo`/`runuser` re-exec and `sys.executable` still
+count in its `IO_BUDGETS`; a program that re-runs itself gets a
+`wiring.py` and the full profile's rule.
 
 ## Most helpers are Python scripts with no `.py` extension
 
@@ -107,19 +197,20 @@ when it lacks an option: the rule [reuse-primitives](../.agents/rules/reuse-prim
 All of them run in the unit suite:
 
 - `tests/test_architecture.py`: layer imports; frozen slotted dataclasses in `domain`; no direct I/O in `domain` or `application`, as an allow-list of what they may import and use (`PURE_MODULES`, `PURE_NAMES`, resolved through aliases and `from m import x`; the I/O builtins fail); every package module reached from an entry point (`ORPHAN_ALLOWED` and `ORPHAN_ALLOWED_FILES` are empty: no shadow modules). Also:
-  - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table that only shrinks;
+  - every package module has one role (`module_role`: domain, ports, application, adapters, presenter, wiring, cli or entry); the few that have none yet are in `UNLAYERED_ALLOWED` with their reason, a table nothing is added to;
   - the I/O a module does outside its adapters (the lines `direct_io_problems` reports, with print, `sys.stdout`/`stderr`/`argv`/`exit` and argparse allowed) has a budget per package and role, `IO_BUDGETS`: moving code to an adapter lowers it, moving it from `cli.py` into another module of the same package does not hide it;
-  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides (see "The composition root" above);
+  - a package in `HEXAGONAL_PACKAGES` has a `cli.py` and a `presenter.py` with no I/O at all, and only its composition point (`wiring.py`) and its adapters import an adapter; a package that meets this is added (the test says so); `WIRING_ALLOWED` is what a `wiring.py` may use besides, and `LIGHT_CLI_ALLOWED` what the `cli.py` of a light package may (see "The composition root" above);
   - no module imports a private name (`_x`) from another module of the repository;
   - each shared primitive has an owner in cst_core (`PRIMITIVE_OWNERS`: `subprocess`, `os.replace`, `os.fsync`, temporary files, `fcntl.flock`, the NOCOW ioctl), and so do the literals that betray a copy of one (`PRIMITIVE_LITERALS`); a call or a literal outside its owner counts against its package's budget (`PRIMITIVE_BUDGETS`, `LITERAL_BUDGETS`), docstrings aside;
-  - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons, only shrinks).
-- Budgets (`tests/budgets.py`) are counts per package and layer that only go down: a count above its entry fails, and a count below it fails too until the lower number is written down, so that what was removed cannot come back. A key missing from a table is 0. A failing gate prints the measured table to paste in.
+  - every public top-level name of cst_core's domain, ports, adapters and application has a production user outside its file (`CORE_NAMES_WITHOUT_USER`, with reasons; nothing is added to it).
+- Budgets (`tests/budgets.py`) are counts per package and layer, never above their entry: a count above its entry fails, a count at or below it passes. A key missing from a table is 0. The same holds for every ceiling and allow-list of the gates (`CLI_CEILINGS`, the duplication `CEILINGS`, `UNLAYERED_ALLOWED`, `CORE_NAMES_WITHOUT_USER`, `ALLOWED_SAME_NAMES`, `ALLOWED_SHELL_SAME_NAMES`): only what is over them, or missing from them, fails. So a change that removes something does not have to edit a table, and parallel changes do not conflict on the numbers. `invowk cmd fix budgets` (`tests/fix_budgets.py`; a dry run, `--apply` writes) measures every table with the function its gate uses and lowers it to the measured values: numbers go down, a budget entry at 0 and an allow-list entry nothing needs any more are deleted; it never raises a number or adds an entry. A failing gate prints the measured table. (User decision 2026-11-17; before it, a count below its entry failed too.)
 - `tests/test_distribution.py`: the manifest and the repository agree; every python-entry zipapp holds what it imports (AST import closure) and loads no code by path; modes fit the runner; entries with a known help mode run it from `/` with `/usr/bin/python3 -I`; sourced shell files exist; every shell file of the checkout (`tests/shell_files.py`, the list `invowk cmd test lint` runs bash -n and shellcheck on) is an installed shell program, a setup entry point or sourced library, a checkout-only executable or an E2E script (`SHELL_TEST_SCRIPTS`), and parses. Its tier 1 twin (`test_11_...` in `tests/e2e/suites/suite_tier1_systemd.py`) installs the whole manifest for real and runs every entry as root and as a user.
 - `tests/test_unit_contract.py`: every unit CST installs or generates (`tests/unit_files.py`) names, in its `Exec*=` lines, only programs the manifest installs (kind python-entry or shell, with a mode its runner can run), and in its `Condition*=`/`Assert*=` lines only files the manifest installs, for every path under `/usr/local/` or `%h/.local/`. Tier 1's `test_16` runs `systemd-analyze verify` and `security` on the same units.
 - `tests/test_bytecode.py`: every `python3 -I` that starts a CST program from the checkout (setup scripts, Python argv lists) passes `-B`, so no `__pycache__` lands in the checkout (as root it would be root's and block `git clean`); `-I -c` and `-I -` (inline code) are exempt.
 - `tests/test_docs.py`: every relative link and anchor in the Markdown files resolves; every document is in the AGENTS.md index; every skill in `.agents/skills` has a SKILL.md with its name and a description, every rule a description; `.claude/rules` and `.claude/skills` link to `.agents`.
 - `tests/test_license_headers.py`: every file of the checkout carries `SPDX-License-Identifier: MPL-2.0` once, in its comment syntax, on line 1 or right after a line that must stay first (shebang, `# shellcheck shell=`, XML declaration, `# syntax=`, Markdown frontmatter); the rules and `LICENSE_EXEMPT` (each entry matches a file and gives its reason) live in `tests/license_headers.py`, which also inserts the line (`invowk cmd fix license`). It also checks that the help printed from a script's header comment shows no license line and that every `.in` template renders with the line in its destination's syntax.
-- `tests/test_duplication.py`: a ratchet on copied code (Python type 1 and type 2 clones, shell clones, the same top-level name defined in several files, the same shell function defined in several shell files: `ALLOWED_SHELL_SAME_NAMES` holds each allowed one with its reason). Its `CEILINGS` only go down: lower a number in the change that removes copies. The entry bootstrap and the bodies of `Protocol` classes are the same by design and are not counted; type 2 skips lines of literals only (type 1 still counts them). A name in `ALLOWED_SAME_NAMES` carries its reason, and an entry that is no longer defined twice fails.
+- `tests/test_module_size.py`: no package module is over `MODULE_LINE_CAP` (800) physical lines; `OVER_CAP` names today's larger modules with their size, never above (`invowk cmd fix budgets` lowers an entry and deletes it once the module is at the cap or under it). A module that grows past the cap is split by command group or check area, not by layer ("Package profile" above).
+- `tests/test_duplication.py`: a ratchet on copied code (Python type 1 and type 2 clones, shell clones, the same top-level name defined in several files, the same shell function defined in several shell files: `ALLOWED_SHELL_SAME_NAMES` holds each allowed one with its reason). Its `CEILINGS` fail only when a measurement is above them; `invowk cmd fix budgets` lowers them. The entry bootstrap and the bodies of `Protocol` classes are the same by design and are not counted; type 2 also leaves out declarations (the fields of a `@dataclass`, `TypedDict` or `NamedTuple`, and an `__init__` that only stores its parameters) and lines of literals only (type 1 still counts both). A left-out block is a barrier: no window runs across it. A name in `ALLOWED_SAME_NAMES` carries its reason; an entry that is no longer defined twice passes, and `invowk cmd fix budgets` deletes it.
 
 ## Toolbox vs host
 

@@ -21,15 +21,19 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   commands; in the modules without an application layer (all but swap,
   doctor, cst_core, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow and
   btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
-  size of each one so that layer only shrinks: new logic goes into domain
-  (pure) or adapters (I/O), or into an application layer with ports.
+  size of each one: new logic goes into domain (pure) or adapters (I/O),
+  or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
   application, adapters, presenter, wiring, cli or entry. A module with
-  none is in UNLAYERED_ALLOWED with its reason; that table only shrinks.
+  none is in UNLAYERED_ALLOWED with its reason; nothing is added there.
+  Like domain/, ports/ and adapters/, the cli role has a folder form for a
+  program with many commands: cli/__init__.py and one cli/<group>.py per
+  command group, every file with the cli role and its rules, and one
+  CLI_CEILINGS entry for the folder as a whole (cli_key).
 - The I/O a module does itself outside its adapters ("hard I/O": the lines
   direct_io_problems reports, with print, sys.stdout/stderr/argv/exit and
   argparse allowed, the bootstrap left out) has a budget per package and
-  layer, IO_BUDGETS, that only goes down (tests/budgets.py). Moving code to
+  layer, IO_BUDGETS, that it may not go above (tests/budgets.py). Moving code to
   an adapter lowers it; moving it from cli.py into another unlayered module
   does not hide it.
 - A package in HEXAGONAL_PACKAGES has a cli.py and a presenter.py with no
@@ -37,7 +41,12 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   adapters import an adapter. The composition point is where a program
   reads its environment, its own executable and re-runs itself through
   sudo or runuser: WIRING_ALLOWED names what a wiring.py may use for that
-  without it counting as hard I/O (no other module gets it).
+  without it counting as hard I/O (no other module of such a package gets it).
+- A package not in HEXAGONAL_PACKAGES and without a wiring.py has the
+  light profile (domain, adapters, cli; docs/architecture.md, "Package
+  profile"): its cli.py is its composition root and may read the environment (LIGHT_CLI_ALLOWED: reads
+  of os.environ, os.getenv) without it counting; a write to os.environ
+  (env_write_lines), the re-exec and sys.executable still count.
 - No module imports a private name (`_x`) from another module of the
   repository: a name another module needs is public.
 - Shared primitives have one owner each (PRIMITIVE_OWNERS: running a
@@ -46,16 +55,20 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   (PRIMITIVE_LITERALS: the container markers, flatpak-spawn, the libvirt
   URI, LC_ALL, restorecon, systemd-escape). Other modules use them through
   cst_core; today's other sites have a budget per package
-  (PRIMITIVE_BUDGETS, LITERAL_BUDGETS) that only goes down.
+  (PRIMITIVE_BUDGETS, LITERAL_BUDGETS) that they may not go above.
 - Every public top-level name of cst_core's shared layers has a production
   user outside its file; CORE_NAMES_WITHOUT_USER lists the exceptions with
-  their reason, and only shrinks.
+  their reason, and nothing is added there.
+- Every table above fails only when the code is above it: a count over its
+  budget, a module or name missing from its allow-list. An entry the code
+  no longer needs passes; `invowk cmd fix budgets` (tests/fix_budgets.py)
+  lowers the counts and deletes those entries, and never raises or adds one.
 
 Standard library only.
 """
 
 import ast
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 import os
 from typing import Final, Literal
 import unittest
@@ -107,8 +120,10 @@ ORPHAN_ALLOWED: Final[frozenset[str]] = frozenset()
 ORPHAN_ALLOWED_FILES: Final[dict[str, str]] = {}
 OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 
-# Code lines of each package's cli.py (cli_code_lines), a ceiling that only goes down (see the
-# module docstring). A new cli.py is added here on purpose.
+# Code lines of each package's cli.py (cli_code_lines), a ceiling (see the module
+# docstring; a missing entry is 0). A new cli.py is added here on purpose. A
+# cli/ folder has one entry for all its files, "<package>/cli/" (cli_key), so
+# splitting a cli.py into it moves the entry and cannot raise the total.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 89,
@@ -131,7 +146,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
 ENTRY_MODULES: Final[frozenset[str]] = frozenset({"cst_core/installer.py", "cst_core/route.py"})
 
 # Package modules with no role yet, and why. Each holds use cases and their
-# I/O together; splitting one into its layers removes its line. Only shrinks.
+# I/O together; splitting one into its layers removes its line. Never grows.
 UNLAYERED_ALLOWED: Final[dict[str, str]] = {
     "bluetooth/ldac_watch.py": "the LDAC watcher: its loop, the pw-dump reads and the bitrate changes in one module",
     "btrfs/stall_monitord/monitor.py": "the stall daemon's sampling loop: its /proc and /sys reads with the episode rules",
@@ -150,23 +165,34 @@ CLI_ALLOWED: Final[frozenset[str]] = frozenset(
 # commands and the rest of os still count as hard I/O there.
 WIRING_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.execvp", "sys.executable"})
 
+# What the cli.py of a light-profile package (one not in HEXAGONAL_PACKAGES:
+# domain, adapters and cli, no wiring.py) may use besides CLI_ALLOWED: its
+# main is the composition root, so it may read the environment. Writes to it
+# (env_write_lines), the re-exec and sys.executable still count; in a
+# full-profile package only wiring.py reads the environment.
+LIGHT_CLI_ALLOWED: Final[frozenset[str]] = frozenset({"os.environ", "os.getenv"})
+# Methods of os.environ that change it.
+ENV_WRITERS: Final[frozenset[str]] = frozenset(
+    {"pop", "popitem", "setdefault", "update", "clear", "__setitem__", "__delitem__", "__ior__"}
+)
+
 # The roles whose hard I/O has a budget. adapters do I/O by design; domain
 # and application have none (test_repository_layers_obey_hexagonal_boundaries).
 IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wiring", "cli", "entry", "unlayered"})
 
 # Hard I/O lines per "<package> <role>" (see the module docstring and
-# tests/budgets.py). Only goes down; a missing key is 0.
+# tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
     "btrfs/chrome_cache cli": 7,
-    "btrfs/stall_monitord cli": 3,
+    "btrfs/stall_monitord cli": 1,
     "btrfs/stall_monitord unlayered": 50,
     "btrfs/stall_report cli": 1,
     "btrfs/stall_report unlayered": 4,
-    "cpu cli": 36,
+    "cpu cli": 35,
     "cst_core entry": 1,
-    "toolchains cli": 57,
-    "vm cli": 82,
+    "toolchains cli": 54,
+    "vm cli": 80,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
@@ -214,7 +240,7 @@ PRIMITIVE_LITERALS: Final[dict[str, frozenset[str]]] = {
 }
 
 # Calls of a primitive outside its owners, per "<package> <primitive>"
-# (tests/budgets.py). Only goes down.
+# (tests/budgets.py). Never above; a missing key is 0.
 PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
     "btrfs/bulk os.fsync": 3,
@@ -235,7 +261,7 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
 }
 
 # Uses of a primitive's literal outside its owners (docstrings aside), per
-# "<package> <literal>". Only goes down.
+# "<package> <literal>". Never above; a missing key is 0.
 LITERAL_BUDGETS: Final[dict[str, int]] = {
     "bluetooth LC_ALL": 1,
     "btrfs/bulk restorecon": 1,
@@ -254,7 +280,7 @@ CORE_SHARED_PREFIXES: Final = ("cst_core/domain/", "cst_core/ports/", "cst_core/
 # Public top-level names of those layers with no production user outside
 # their file ("path:name" -> why). Adopt the name where a module keeps its
 # own copy, make it private when only its file uses it, or delete it; then
-# remove its line. Only shrinks.
+# remove its line (or let `invowk cmd fix budgets` do it). Never grows.
 CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/adapters/files.py:FileOwner": "the type of write_atomic's owner argument; callers pass the literal",
     "cst_core/adapters/nocow.py:FS_IOC_GETFLAGS": "an ioctl request used inside nocow.py and by its tests",
@@ -303,6 +329,8 @@ def module_role(rel: str) -> ModuleRole | None:
     filename, dirs = parts[-1], parts[:-1]
     if filename == "adapters.py" or "adapters" in dirs:
         return "adapters"
+    if filename.endswith(".py") and "cli" in dirs:
+        return "cli"  # the folder form: cli/__init__.py and cli/<group>.py
     if not filename.endswith(".py") or filename == "__init__.py" or rel in ENTRY_MODULES:
         return "entry"
     named: dict[str, ModuleRole] = {"presenter.py": "presenter", "wiring.py": "wiring", "cli.py": "cli"}
@@ -470,12 +498,70 @@ def cli_code_lines(source: str) -> int:
     )
 
 
-def hard_io_lines(source: str, rel: str) -> list[int]:
-    """The lines where a module does I/O itself (CLI_ALLOWED aside, and WIRING_ALLOWED in a wiring.py; the bootstrap left out)."""
+def env_write_lines(source: str, rel: str) -> list[int]:
+    """Lines that change os.environ: an item set or deleted, a method of ENV_WRITERS called, or os.environ rebound.
+
+    A write through another name (`env = os.environ; env["A"] = "1"`) is not seen.
+    """
+    tree = ast.parse(source, filename=rel)
+    bound = _bindings(tree)
+
+    def is_environ(node: ast.expr) -> bool:
+        name = _dotted(node)
+        if name is None:
+            return False
+        head, _, rest = name.partition(".")
+        return head in bound and (f"{bound[head]}.{rest}" if rest else bound[head]) == "os.environ"
+
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value):
+            lines.add(node.lineno)
+        elif isinstance(node, ast.AugAssign) and is_environ(node.target):
+            lines.add(node.lineno)
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node):
+            lines.add(node.lineno)  # os.environ = ..., del os.environ
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ENV_WRITERS
+            and is_environ(node.func.value)
+        ):
+            lines.add(node.lineno)
+    return sorted(lines)
+
+
+def light_cli_modules(rels: Collection[str], full: Collection[str]) -> set[str]:
+    """The cli.py files among `rels` that are a light package's composition root.
+
+    Light: the package is not in `full` (HEXAGONAL_PACKAGES) and has no wiring.py among `rels`.
+    """
+    return {
+        rel
+        for rel in rels
+        if module_role(rel) == "cli" and package_of(rel) not in full and f"{package_of(rel)}/wiring.py" not in rels
+    }
+
+
+def hard_io_lines(source: str, rel: str, *, light_cli: bool = False) -> list[int]:
+    """The lines where a module does I/O itself (the bootstrap left out).
+
+    CLI_ALLOWED is allowed everywhere; WIRING_ALLOWED too in a wiring.py. With
+    `light_cli` (a light package's cli.py, see light_cli_modules) a cli.py may
+    also read the environment (LIGHT_CLI_ALLOWED); its writes still count.
+    """
     blanked = source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)  # same line numbers
-    allowed = CLI_ALLOWED | WIRING_ALLOWED if module_role(rel) == "wiring" else CLI_ALLOWED
-    found = direct_io_problems(blanked, rel, allowed)
-    return sorted({int(p.split(":")[1]) for p in found})
+    light = light_cli and module_role(rel) == "cli"
+    if module_role(rel) == "wiring":
+        allowed = CLI_ALLOWED | WIRING_ALLOWED
+    elif light:
+        allowed = CLI_ALLOWED | LIGHT_CLI_ALLOWED
+    else:
+        allowed = CLI_ALLOWED
+    found = {int(p.split(":")[1]) for p in direct_io_problems(blanked, rel, allowed)}
+    if light:
+        found |= set(env_write_lines(blanked, rel))
+    return sorted(found)
 
 
 def _read(rel: str) -> str:
@@ -488,15 +574,16 @@ def package_modules() -> list[str]:
     return [rel for rel in production_python() if "/" in rel and not rel.startswith(".")]
 
 
-def io_measure(sources: dict[str, str]) -> dict[str, int]:
-    """Hard I/O lines per "<package> <role>" for the budgeted roles."""
+def io_measure(sources: dict[str, str], full: Collection[str] = HEXAGONAL_PACKAGES) -> dict[str, int]:
+    """Hard I/O lines per "<package> <role>" for the budgeted roles (`full`: the full-profile packages)."""
+    light = light_cli_modules(set(sources), full)
     out: dict[str, int] = {}
     for rel, source in sources.items():
         role = module_role(rel) or "unlayered"
         if role not in IO_BUDGETED_ROLES:
             continue
         key = f"{package_of(rel)} {role}"
-        out[key] = out.get(key, 0) + len(hard_io_lines(source, rel))
+        out[key] = out.get(key, 0) + len(hard_io_lines(source, rel, light_cli=rel in light))
     return out
 
 
@@ -674,6 +761,49 @@ def orphan_modules(package_files: list[str], reachable: set[str]) -> list[str]:
     ]
 
 
+def cli_key(rel: str) -> str:
+    """The CLI_CEILINGS key of a cli module: a cli.py's own path, or "<package>/cli/" for each file of a cli/ folder."""
+    return rel if rel.endswith("/cli.py") else f"{package_of(rel)}/cli/"
+
+
+def cli_measure(sources: Mapping[str, str]) -> dict[str, int]:
+    """Code lines (cli_code_lines) of the cli modules among `sources`, per cli_key."""
+    out: dict[str, int] = {}
+    for rel, source in sources.items():
+        if module_role(rel) == "cli":
+            out[cli_key(rel)] = out.get(cli_key(rel), 0) + cli_code_lines(source)
+    return out
+
+
+def cli_sizes() -> dict[str, int]:
+    """Code lines of every package's cli.py or cli/ folder: what CLI_CEILINGS caps."""
+    return cli_measure({rel: _read(rel) for rel in package_modules() if module_role(rel) == "cli"})
+
+
+def unlayered_modules() -> set[str]:
+    """The package modules with no role: what UNLAYERED_ALLOWED must name."""
+    return {rel for rel in package_modules() if module_role(rel) is None}
+
+
+def measure_io() -> dict[str, int]:
+    """Hard I/O lines per "<package> <role>" over the repository: what IO_BUDGETS caps."""
+    return io_measure({rel: _read(rel) for rel in package_modules()})
+
+
+def measure_primitives() -> tuple[dict[str, int], dict[str, int]]:
+    """(primitive calls, primitive literals) outside their owners: what PRIMITIVE_BUDGETS and LITERAL_BUDGETS cap."""
+    sources = {rel: _read(rel) for rel in production_python()}
+    return (
+        primitive_measure(sources, primitive_calls, PRIMITIVE_OWNERS),
+        primitive_measure(sources, primitive_literals, PRIMITIVE_LITERALS),
+    )
+
+
+def core_names_missing_a_user() -> set[str]:
+    """ "path:name" of the cst_core shared names without a user: what CORE_NAMES_WITHOUT_USER must name."""
+    return set(core_names_without_user({rel: _read(rel) for rel in production_python()}))
+
+
 # Modules that still load a monolith by its path (SourceFileLoader); each
 # stage that turns the monolith into a package import removes its line.
 PATH_LOADS_NOT_YET: Final[frozenset[str]] = frozenset()
@@ -816,18 +946,13 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(wired, [], "files wired in (or gone) since: remove them from ORPHAN_ALLOWED_FILES")
 
     def test_cli_modules_do_not_grow(self) -> None:
-        sizes: dict[str, int] = {}
-        for rel in production_python():
-            if rel.endswith("/cli.py"):
-                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
-                    sizes[rel] = cli_code_lines(fh.read())
-        self.assertEqual(sorted(sizes), sorted(CLI_CEILINGS), "every package cli.py has a ceiling, and only those")
-        over = [
-            f"{rel}: {n} lines, ceiling {CLI_CEILINGS[rel]}"
-            for rel, n in sorted(sizes.items())
-            if n > CLI_CEILINGS[rel]
-        ]
-        self.assertEqual(over, [], "cli.py grew: put new logic in domain, application (with ports) or adapters")
+        over = budget_problems(cli_sizes(), CLI_CEILINGS, "code lines")
+        self.assertEqual(
+            over,
+            [],
+            "cli.py grew: put new logic in domain, application (with ports) or adapters "
+            "(a new cli.py gets its CLI_CEILINGS entry on purpose)",
+        )
         self.assertEqual(
             cli_code_lines('"""Doc."""\nimport os\nfrom a import (\n    b,\n)\n\n\ndef f():\n    return 1\n'), 2
         )
@@ -840,6 +965,9 @@ class ArchitectureGateTest(unittest.TestCase):
             ("swap/presenter.py", "presenter"),
             ("vm/wiring.py", "wiring"),
             ("vm/cli.py", "cli"),
+            ("vm/cli/__init__.py", "cli"),
+            ("vm/cli/domains.py", "cli"),
+            ("btrfs/bulk/cli/move.py", "cli"),
             ("vm/__init__.py", "entry"),
             ("vm/cst-vm", "entry"),
             ("cst_core/installer.py", "entry"),
@@ -848,18 +976,47 @@ class ArchitectureGateTest(unittest.TestCase):
             with self.subTest(rel=rel):
                 self.assertEqual(module_role(rel), role)
 
+    def test_a_cli_folder_is_one_cli_layer(self) -> None:
+        self.assertEqual(package_of("vm/cli/domains.py"), "vm")
+        self.assertEqual(package_of("btrfs/bulk/cli/__init__.py"), "btrfs/bulk")
+        self.assertEqual(cli_key("vm/cli.py"), "vm/cli.py")
+        self.assertEqual(cli_key("vm/cli/domains.py"), "vm/cli/")
+        body = "def f():\n    return 1\n"
+        # The files of a cli/ folder share one ceiling: moving code between them changes nothing.
+        self.assertEqual(
+            cli_measure(
+                {"vm/cli/__init__.py": body, "vm/cli/net.py": body * 2, "swap/cli.py": body, "vm/domain.py": body}
+            ),
+            {"vm/cli/": 6, "swap/cli.py": 2},
+        )
+        self.assertEqual(
+            budget_problems(cli_measure({"vm/cli/net.py": body * 3}), {"vm/cli.py": 6}, "code lines"),
+            ["vm/cli/: 6 code lines, budget 0: the change added 6"],
+            "a split needs its folder entry, by hand",
+        )
+        # Every file of the folder is a light package's composition root: reads count in none, writes in all.
+        reads = "import os\ndef main():\n    return os.environ.get('A')\n"
+        folder = {"vm/cli/__init__.py": reads, "vm/cli/net.py": reads, "vm/adapters.py": "import os\n"}
+        self.assertEqual(light_cli_modules(set(folder), frozenset()), {"vm/cli/__init__.py", "vm/cli/net.py"})
+        self.assertEqual(io_measure(folder, full=frozenset()), {"vm cli": 0})
+        self.assertEqual(io_measure(folder, full={"vm"}), {"vm cli": 2})
+        # The inner layers may not import it, and a full package's folder still does no I/O.
+        self.assertTrue(architecture_problems("from vm.cli.net import main\n", "vm/domain.py", "domain"))
+        wired = {"vm/wiring.py": "def build():\n    return 1\n", "vm/cli/net.py": "import os\nos.getcwd()\n"}
+        self.assertEqual(
+            hexagonal_problems("vm", "vm/wiring.py", wired),
+            ["vm/cli/net.py:2: does I/O itself (move it into an adapter)"],
+        )
+
     def test_every_package_module_has_a_role(self) -> None:
-        files = package_modules()
-        unlayered = sorted(rel for rel in files if module_role(rel) is None)
-        problems = [rel for rel in unlayered if rel not in UNLAYERED_ALLOWED]
+        problems = sorted(unlayered_modules() - set(UNLAYERED_ALLOWED))
         self.assertEqual(
             problems,
             [],
             "modules with no role: name them domain.py, ports.py, application.py, adapters.py, presenter.py, "
             "wiring.py or cli.py (or put them in such a folder):\n" + "\n".join(problems),
         )
-        stale = sorted(set(UNLAYERED_ALLOWED) - set(unlayered))
-        self.assertEqual(stale, [], "these have a role now (or are gone): remove them from UNLAYERED_ALLOWED")
+        # An entry whose module has a role now (or is gone) passes; `invowk cmd fix budgets` deletes it.
 
     def test_cli_allowed_names_are_not_io(self) -> None:
         src = (
@@ -871,6 +1028,9 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertTrue(direct_io_problems(src, "pkg/application.py"), "the inner layers still refuse them")
         bad = "import os\nimport sys\ndef main():\n    sys.stdin.read()\n    return os.environ['A']\n"
         self.assertEqual(hard_io_lines(bad, "pkg/cli.py"), [4, 5])
+        self.assertEqual(
+            hard_io_lines(bad, "pkg/cli.py", light_cli=True), [4], "a light cli.py may read the environment"
+        )
 
     def test_only_a_wiring_module_may_read_the_environment_and_re_run_itself(self) -> None:
         src = (
@@ -881,18 +1041,83 @@ class ArchitectureGateTest(unittest.TestCase):
         )
         self.assertEqual(hard_io_lines(src, "pkg/wiring.py"), [])
         self.assertEqual(hard_io_lines(src, "pkg/cli.py"), [4, 6, 8])
+        self.assertEqual(
+            hard_io_lines(src, "pkg/cli.py", light_cli=True),
+            [6, 8],
+            "a light cli.py reads, but writes and re-execs count",
+        )
         self.assertEqual(hard_io_lines(src, "pkg/presenter.py"), [4, 6, 8])
         self.assertEqual(hard_io_lines(src, "pkg/sub/thing.py"), [4, 6, 8])
         # Everything else still counts in a wiring.py: files, commands, the rest of os.
         other = "import os\nimport subprocess\ndef f():\n    open('x')\n    subprocess.run(['a'])\n    os.getcwd()\n"
         self.assertEqual(hard_io_lines(other, "pkg/wiring.py"), [2, 4, 5, 6])
-        self.assertEqual(io_measure({"vm/wiring.py": src, "vm/cli.py": src}), {"vm wiring": 0, "vm cli": 3})
+        # A package with a wiring.py reads its environment there, whatever HEXAGONAL_PACKAGES says.
+        self.assertEqual(
+            io_measure({"vm/wiring.py": src, "vm/cli.py": src}, full=frozenset()), {"vm wiring": 0, "vm cli": 3}
+        )
+
+    def test_a_light_cli_may_read_the_environment(self) -> None:
+        src = (
+            "import os\nimport sys\nfrom os import environ\n"
+            "def main():\n    a = os.environ.get('A')\n    b = os.getenv('B')\n"
+            "    c = environ['C']\n    d = os.environ if a else {}\n    return a, b, c, d\n"
+        )
+        self.assertEqual(hard_io_lines(src, "vm/cli.py", light_cli=True), [], "reads in a light package's cli.py")
+        self.assertEqual(io_measure({"vm/cli.py": src}, full=frozenset()), {"vm cli": 0})
+        # In a full-profile package only wiring.py reads the environment.
+        self.assertEqual(hard_io_lines(src, "vm/cli.py"), [3, 5, 6, 8])
+        self.assertEqual(io_measure({"vm/cli.py": src}, full={"vm"}), {"vm cli": 4})
+        self.assertEqual(hard_io_lines(src, "vm/wiring.py"), [6])  # os.getenv is not in WIRING_ALLOWED
+        # Only the cli.py of a light package: its other modules still count a read.
+        self.assertEqual(hard_io_lines(src, "vm/thing.py", light_cli=True), [3, 5, 6, 8])
+        self.assertEqual(
+            io_measure({"vm/cli.py": src, "vm/thing.py": src}, full=frozenset()), {"vm cli": 0, "vm unlayered": 4}
+        )
+        # Writes, the re-exec and sys.executable still count in a light cli.
+        writes = (
+            "import os\nimport sys\nfrom os import environ\n"
+            "def main():\n    os.environ['A'] = '1'\n    environ.pop('B', None)\n"
+            "    del os.environ['C']\n    os.environ.update({'D': '1'})\n    os.environ.setdefault('E', '')\n"
+            "    os.putenv('F', '1')\n    os.execvp('sudo', [sys.executable])\n    os.environ |= {}\n"
+        )
+        self.assertEqual(hard_io_lines(writes, "vm/cli.py", light_cli=True), [5, 6, 7, 8, 9, 10, 11, 12])
+        self.assertEqual(env_write_lines(writes, "vm/cli.py"), [5, 6, 7, 8, 9, 12])
+        rebound = "import os\ndef main():\n    os.environ = {}\n    del os.environ\n    environ = {}\n"
+        self.assertEqual(
+            hard_io_lines(rebound, "vm/cli.py", light_cli=True), [3, 4], "a local named environ is no write"
+        )
+
+    def test_a_light_package_is_not_pushed_into_the_full_profile(self) -> None:
+        light = {
+            "vm/domain.py": "from dataclasses import dataclass\n@dataclass(frozen=True, slots=True)\nclass Plan:\n    x: int\n",
+            "vm/adapters.py": "import os\ndef listing(p):\n    return os.listdir(p)\n",
+            "vm/cli.py": "import os\nimport sys\nfrom vm.adapters import listing\n"
+            "def main():\n    print(listing(os.environ.get('HOME', '/')))\n    sys.exit(0)\n",
+        }
+        # No ports, application, wiring or presenter: nothing counts against it ...
+        self.assertEqual(io_measure(light, full=frozenset()), {"vm cli": 0})
+        self.assertEqual(architecture_problems(light["vm/domain.py"], "vm/domain.py", "domain"), [])
+        # ... and it does not meet the full profile, so it is never told to join HEXAGONAL_PACKAGES.
+        self.assertTrue(hexagonal_problems("vm", "vm/wiring.py", light))
+        # Its domain is still held pure and its cli.py's other I/O still counts.
+        self.assertTrue(architecture_problems("import os\nX = os.listdir('.')\n", "vm/domain.py", "domain"))
+        self.assertEqual(io_measure({"vm/cli.py": "import os\nos.listdir('.')\n"}, full=frozenset()), {"vm cli": 1})
+        # A package with a wiring.py is judged by the full rule: an environment read in its cli.py
+        # keeps it from being "ready" for HEXAGONAL_PACKAGES.
+        wired = {
+            "vm/wiring.py": "import os\nfrom vm.adapters import listing\ndef build():\n    return listing\n",
+            "vm/adapters.py": light["vm/adapters.py"],
+            "vm/cli.py": "import os\nfrom vm.wiring import build\ndef main():\n    return build()(os.environ.get('A'))\n",
+        }
+        self.assertEqual(
+            hexagonal_problems("vm", "vm/wiring.py", wired), ["vm/cli.py:4: does I/O itself (move it into an adapter)"]
+        )
 
     def test_the_bootstrap_is_not_counted(self) -> None:
         self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])
 
     def test_io_budgets(self) -> None:
-        measured = io_measure({rel: _read(rel) for rel in package_modules()})
+        measured = measure_io()
         problems = budget_problems(measured, IO_BUDGETS, "hard I/O lines")
         self.assertEqual(
             problems,
@@ -953,7 +1178,7 @@ class ArchitectureGateTest(unittest.TestCase):
             pkg
             for pkg, sources in by_package.items()
             if pkg not in HEXAGONAL_PACKAGES
-            and f"{pkg}/cli.py" in sources
+            and any(module_role(rel) == "cli" for rel in sources)
             and not hexagonal_problems(pkg, f"{pkg}/wiring.py", sources)
         )
         self.assertEqual(ready, [], "these packages follow the rules now: add them to HEXAGONAL_PACKAGES")
@@ -999,9 +1224,8 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(primitive_literals(src, "x.py"), [(4, "LC_ALL"), (4, "flatpak-spawn"), (4, "qemu:///system")])
 
     def test_primitives_have_one_owner(self) -> None:
-        sources = {rel: _read(rel) for rel in production_python()}
-        calls = primitive_measure(sources, primitive_calls, PRIMITIVE_OWNERS)
-        lits = primitive_measure(sources, primitive_literals, PRIMITIVE_LITERALS)
+        calls, lits = measure_primitives()
+        sources = set(production_python())
         problems = budget_problems(calls, PRIMITIVE_BUDGETS, "calls") + budget_problems(
             lits, LITERAL_BUDGETS, "literals"
         )
@@ -1020,15 +1244,13 @@ class ArchitectureGateTest(unittest.TestCase):
                     self.assertIn(rel, sources, "an owner that does not exist")
 
     def test_core_names_have_a_user(self) -> None:
-        missing = core_names_without_user({rel: _read(rel) for rel in production_python()})
-        new = [name for name in missing if name not in CORE_NAMES_WITHOUT_USER]
+        new = sorted(core_names_missing_a_user() - set(CORE_NAMES_WITHOUT_USER))
         self.assertEqual(
             new,
             [],
             "public cst_core names nothing outside their file uses: use them, make them private or delete them",
         )
-        stale = sorted(set(CORE_NAMES_WITHOUT_USER) - set(missing))
-        self.assertEqual(stale, [], "these have a user now (or are gone): remove them from CORE_NAMES_WITHOUT_USER")
+        # An entry with a user now (or gone) passes; `invowk cmd fix budgets` deletes it.
         self.assertEqual(
             core_names_without_user(
                 {

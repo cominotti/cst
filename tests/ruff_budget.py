@@ -1,14 +1,15 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: MPL-2.0
-"""Ruff budgets: rule hits that may only go down (the end of `invowk cmd test pylint`).
+"""Ruff budgets: rule hits that may not go above their entry (the end of `invowk cmd test pylint`).
 
 Use: python3 -I -B tests/ruff_budget.py   (from anywhere; needs uv, like tests/uv-dev)
 
 Some ruff rules have hits today that are not fixed yet, so they cannot be in
 the `select` list of pyproject.toml (`ruff check` would fail). This script
 runs ruff with them added, reads its JSON output and compares the number of
-hits per package with RUFF_BUDGETS (tests/budgets.py: a count above or below
-its entry fails, a missing key is 0):
+hits per package with RUFF_BUDGETS (tests/budgets.py: a count above its
+entry fails, a count below it passes and `invowk cmd fix budgets` lowers
+the entry; a missing key is 0):
 
 - BLE001: `except Exception` (blind except) where a narrower error was meant;
 - SLF001: a private member (`obj._x`) used outside its class, production
@@ -145,9 +146,14 @@ def run_ruff(args: Sequence[str]) -> list[Mapping[str, object]]:
     return [rec for rec in data if isinstance(rec, dict)]
 
 
+def measure() -> dict[str, int]:
+    """Hits of RULES per key over the checkout (runs ruff): what RUFF_BUDGETS caps."""
+    return rule_counts(run_ruff(["--ignore-noqa", "--extend-select", ",".join(RULES)]))
+
+
 def main() -> int:
     rules = ",".join(RULES)
-    counted = rule_counts(run_ruff(["--ignore-noqa", "--extend-select", rules]))
+    counted = measure()
     problems = budget_problems(counted, RUFF_BUDGETS, "hits")
     problems += unused_noqa(run_ruff(["--extend-select", f"RUF100,{rules}"]))
     for line in problems:

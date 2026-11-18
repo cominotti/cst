@@ -46,10 +46,11 @@ and `swap/swap-status` into the `swap/` package. Read it with
 5. **Delete the bash**: the old files, their names in the `test lint` script
    list in `cst.invowkmod/invowkfile.cue`, and their `INSTALL_MANIFEST` rows
    (kind `shell`) or `SETUP_ENTRYPOINTS` entries when they go away.
-6. **Lower the ceilings**: in `CEILINGS` of `tests/test_duplication.py`,
-   set `shell W=5 duplicated %` (and any other metric that went down) to the
-   new measured value. Never raise one; `CLI_CEILINGS` applies to the new
-   `cli.py`.
+6. **Lower the ceilings**: run `invowk cmd fix budgets` (a dry run) and
+   then `invowk cmd fix budgets --apply`: it sets `shell W=5 duplicated %`
+   in `CEILINGS` of `tests/test_duplication.py` (and every other table the
+   change brought down) to the new measured value. It never raises one;
+   neither do you. `CLI_CEILINGS` applies to the new `cli.py`.
 7. **Docs in the same change**: the module README's file table and test
    command, README.md "Other files in this folder", and docs/architecture.md where it
    names which modules have an application layer.

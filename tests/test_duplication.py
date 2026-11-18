@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Duplication ratchet: copied code in production may only go down.
+"""Duplication ceilings: copied code in production may not go above them.
 
-CEILINGS holds today's measurements (tests/duplication.py says how each is
-taken). A change that copies code over a ceiling fails here; a change that
-removes copies lowers the ceiling to the new number in the same change, so
-the copies cannot come back. The run prints the numbers measured.
+CEILINGS holds the highest value allowed for each measurement
+(tests/duplication.py says how each is taken). A change that copies code
+over a ceiling fails here; a value below its ceiling passes, and
+`invowk cmd fix budgets` lowers the ceilings to the measured values (never
+raising one), so the copies cannot come back once it has run. The run prints
+the numbers measured.
 
 Where the hexagonal conversion left them (main before it, same method):
 - python type 1, W=8, cross-file lines: 0 (main: 0);
 - python type 2, W=8: 1.04 % (main: 0.85 %; 1.37 % before the /proc walk and
   the flag and config-state checks of toolchains were merged; the rest is
   the shape of thin adapters, ports' implementations and property lists, see
-  the PR);
+  the PR); 0.57 % (from 0.83 %) once record fields and plain `__init__`
+  bodies were left out of type 2 (2026-11; the `__init__` rule moved
+  nothing: no such body was in a duplicated window);
 - shell, W=5: 0.47 % (main: 1.28 %);
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its
   reason (main: 43 names, none allowed).
@@ -23,7 +27,10 @@ import unittest
 
 from tests.code_graph import production_python
 from tests.duplication import (
+    BARRIER,
     clones,
+    declared_lines,
+    measured_python,
     normalized_python,
     normalized_shell,
     python_clones,
@@ -31,23 +38,23 @@ from tests.duplication import (
     shell_clones,
     shell_function_names,
     shell_same_name_definitions,
-    without_protocol_bodies,
 )
 from tests.budgets import is_test_file
 from tests.repo_files import REPO
 from tests.shell_files import shell_files
 from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
-# One table: metric -> ceiling. Lower a number when a change brings it down.
+# One table: metric -> ceiling. `invowk cmd fix budgets` lowers a number the code is below.
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.08,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.87,
-    "shell W=5 duplicated %": 0.46,
+    "python type-2 W=8 duplicated %": 0.57,
+    "shell W=5 duplicated %": 0.45,
     "same-name definitions in >1 file": 0,
 }
 
-# Names that several files may define, and why.
+# Names that several files may define, and why. An entry no longer defined
+# twice passes; `invowk cmd fix budgets` deletes it.
 # Each was compared body to body: none is a copy of another (a copy goes to
 # cst_core instead). Most are the same verb in different programs.
 ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
@@ -88,7 +95,8 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 # Shell functions that several shell files may define, and why. A copy of a
 # helper is listed as one, with where it should live once; the installed
 # programs (btrfs-notify, btrfs-snapshot, cpu/game-profile) run without the
-# checkout and cannot source a file of it.
+# checkout and cannot source a file of it. An entry no longer defined twice
+# passes; `invowk cmd fix budgets` deletes it.
 ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "check_syntax": "a copy in btrfs-setup.sh and cpu-setup.sh: the same check; to share in a sourced file",
     "cpuset_delegated": "cpu-setup.sh's check and the installed cpu/game-profile's, which cannot source the checkout",
@@ -111,16 +119,26 @@ def _shell_files() -> list[str]:
     return [rel for rel in shell_files() if not is_test_file(rel)]
 
 
-def without_declared_copies(source: str) -> str:
-    """The source without the code that is the same everywhere by design (see tests/duplication.py)."""
-    return without_protocol_bodies(without_bootstrap(source))
+def measured_lines(source: str, *, type2: bool) -> list[str]:
+    """What the measure reads of one source: the bootstrap removed, the declared lines as barriers."""
+    return measured_python(without_bootstrap(source), type2=type2)
+
+
+def same_names_defined() -> set[str]:
+    """The top-level names defined in more than one production file, and "main": what ALLOWED_SAME_NAMES may name."""
+    return {*same_name_definitions(REPO, production_python(), ["main"]), "main"}
+
+
+def shell_same_names_defined() -> set[str]:
+    """The shell functions defined in more than one shell file: what ALLOWED_SHELL_SAME_NAMES may name."""
+    return set(shell_same_name_definitions(REPO, _shell_files(), []))
 
 
 def measure() -> dict[str, float]:
     """The current value of every metric in CEILINGS."""
     prod = production_python()
-    t1 = python_clones(REPO, prod, 8, type2=False, prepare=without_declared_copies)
-    t2 = python_clones(REPO, prod, 8, type2=True, prepare=without_declared_copies)
+    t1 = python_clones(REPO, prod, 8, type2=False, prepare=without_bootstrap)
+    t2 = python_clones(REPO, prod, 8, type2=True, prepare=without_bootstrap)
     sh = shell_clones(REPO, _shell_files(), 5)
     names = same_name_definitions(REPO, prod, ALLOWED_SAME_NAMES)
     return {
@@ -140,7 +158,7 @@ class DuplicationRatchetTest(unittest.TestCase):
             print(f"  {key:<38} {measured[key]:>8} / {ceiling}", file=sys.stderr)
         over = {k: (measured[k], c) for k, c in CEILINGS.items() if measured[k] > c}
         self.assertEqual(over, {}, "duplication went up (measured, ceiling); share the code instead of copying it")
-        self.assertEqual(set(measured), set(CEILINGS))
+        self.assertEqual(set(measured), set(CEILINGS), "one ceiling per measurement")
 
     def test_type1_finds_a_copied_block_and_type2_a_renamed_copy(self) -> None:
         body = "".join(f"    x{i} = f(a, {i})\n" for i in range(8))
@@ -190,12 +208,64 @@ class DuplicationRatchetTest(unittest.TestCase):
         files = {"port": port, "impl": impl, "e1": entry, "e2": entry}
         raw = clones({p: normalized_python(s, type2=False) for p, s in files.items()}, 8)
         self.assertEqual(set(raw.per_file), {"port", "impl", "e1", "e2"})
-        kept = clones({p: normalized_python(without_declared_copies(s), type2=False) for p, s in files.items()}, 8)
+        kept = clones({p: measured_lines(s, type2=False) for p, s in files.items()}, 8)
         self.assertEqual(kept.duplicated, 0)
         # The adapter's own code still counts: a copied body is still found.
         body = "".join(f"        x{i} = f({i})\n" for i in range(8))
-        two = {p: without_declared_copies(f"class {p}:\n    def g(self):\n{body}") for p in ("B", "C")}
-        self.assertEqual(clones({p: normalized_python(s, type2=False) for p, s in two.items()}, 8).cross_file, 18)
+        two = {p: measured_lines(f"class {p}:\n    def g(self):\n{body}", type2=False) for p in ("B", "C")}
+        self.assertEqual(clones(two, 8).cross_file, 18)
+
+    def test_type2_leaves_out_record_fields_and_plain_inits_and_type1_keeps_them(self) -> None:
+        fields = "".join(f"    f{i}: int\n" for i in range(9))
+        records = {
+            "dc": f"from dataclasses import dataclass\n\n@dataclass(frozen=True, slots=True)\nclass A:\n{fields}",
+            "td": f"from typing import TypedDict\n\nclass B(TypedDict):\n{fields.replace('f', 'g')}",
+            "nt": f"import typing\n\nclass C(typing.NamedTuple):\n{fields.replace('f', 'h')}",
+        }
+        defaults = "from dataclasses import dataclass, field\n\n@dataclass\nclass D:\n    a: int = 0\n    b: list[int] = field(\n        default_factory=list\n    )\n    C = 1\n"
+        self.assertEqual(
+            declared_lines(defaults, records=True), {5, 6, 7, 8}, "fields with defaults, not a plain assignment"
+        )
+        self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in records.items()}, 8).cross_file, 27)
+        report = clones({p: measured_lines(s, type2=True) for p, s in records.items()}, 8)
+        self.assertEqual(report.duplicated, 0)
+        self.assertEqual(report.code_lines, 7, "fields are no code lines")
+        # Type 1 still finds a field list copied word for word.
+        same = {p: measured_lines(records["dc"].replace("class A", f"class {p}"), type2=False) for p in ("X", "Y")}
+        self.assertEqual(clones(same, 8).cross_file, 18)
+
+        # An __init__ that only stores its parameters is a declaration; one that computes is code.
+        def init(cls: str, op: str) -> str:
+            args = ", ".join(f"a{i}" for i in range(8))
+            body = "".join(f"        self.a{i} = {op.format(i)}\n" for i in range(8))
+            return f"class {cls}:\n    def __init__(self, {args}):\n{body}"
+
+        plain = {p: measured_lines(init(p, "a{}"), type2=True) for p in ("P", "Q")}
+        self.assertEqual(clones(plain, 8).duplicated, 0)
+        computed = {p: measured_lines(init(p, "a{} + 1"), type2=True) for p in ("P", "Q")}
+        self.assertEqual(clones(computed, 8).cross_file, 20)
+        self.assertEqual(declared_lines(records["dc"], records=False), set())
+
+    def test_a_generic_protocol_body_is_left_out(self) -> None:
+        port = "from typing import Protocol\n\nclass P[T](Protocol):\n    def f(self) -> T: ...\n"
+        old_style = (
+            "import typing\n\nclass Q(typing.Protocol[T]):\n    def f(self) -> T: ...\n    def g(self) -> T: ...\n"
+        )
+        self.assertEqual(declared_lines(port, records=False), {4})
+        self.assertEqual(declared_lines(old_style, records=False), {4, 5})
+
+    def test_a_left_out_block_does_not_join_the_lines_around_it(self) -> None:
+        fields = "".join(f"    f{i}: int\n" for i in range(9))
+        code = "    def m(self):\n" + "".join(f"        x{i} = self.f{i} + {i}\n" for i in range(5))
+        files = {
+            "a": f"@dataclass\nclass A:\n{fields}{code}",
+            "b": f"@dataclass\nclass B:\n{code}",
+        }
+        # Deleting a's fields would make its class line and method read as b's eight lines.
+        self.assertEqual(clones({p: measured_lines(s, type2=True) for p, s in files.items()}, 8).duplicated, 0)
+        self.assertIn(BARRIER, measured_lines(files["a"], type2=True))
+        deleted = {p: [x for x in measured_lines(s, type2=True) if x != BARRIER] for p, s in files.items()}
+        self.assertEqual(clones(deleted, 8).cross_file, 16)
 
     def test_type2_skips_data_rows_and_type1_keeps_them(self) -> None:
         rows = {p: "X = (\n" + "".join(f'    "{p}{i}",\n' for i in range(9)) + ")\n" for p in ("a", "b")}
@@ -216,17 +286,10 @@ class DuplicationRatchetTest(unittest.TestCase):
             {},
             "a shell function defined in several files: share it, or add it to ALLOWED_SHELL_SAME_NAMES with the reason",
         )
-        stale = sorted(set(ALLOWED_SHELL_SAME_NAMES) - set(every))
-        self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SHELL_SAME_NAMES")
 
     def test_shell_function_names(self) -> None:
         src = "f() {\n  :\n}\nfunction g {\n:\n}\n  h_2 ()\n{ :; }\nfunction k() { :; }\necho x() # not one\n"
         self.assertEqual(shell_function_names(src), {"f", "g", "h_2", "k"})
-
-    def test_every_allowed_name_is_still_defined_twice(self) -> None:
-        defined = same_name_definitions(REPO, production_python(), ["main"])
-        stale = sorted(set(ALLOWED_SAME_NAMES) - set(defined) - {"main"})
-        self.assertEqual(stale, [], "no longer defined in two files: remove from ALLOWED_SAME_NAMES")
 
     def test_same_name_definitions_skip_allowed_names(self) -> None:
         names = same_name_definitions(REPO, production_python(), ALLOWED_SAME_NAMES)

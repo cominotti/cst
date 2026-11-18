@@ -12,12 +12,21 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
 
 ## The package
 
-- [ ] The code lives in a package: `domain.py` (pure rules, frozen
-      `slots=True` dataclasses), `ports.py` (`Protocol` boundaries),
-      `adapters.py` (host I/O, subprocesses), `cli.py` (the commands), and
-      `application.py` only with ports. `tests/test_architecture.py` checks
-      the layers (`PURE_MODULES`, `PURE_NAMES`), and every module must be
+- [ ] The code lives in a package of the light profile
+      ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile);
+      reference `btrfs/chrome_cache`): `domain.py` (pure rules, frozen
+      `slots=True` dataclasses), `adapters.py` (host I/O, subprocesses,
+      through cst_core) and `cli.py` (parse argv, build the adapters, call
+      one function, print). Add `application.py` with `ports.py`, `wiring.py`
+      or `presenter.py` only when the profile's reason for each holds (the
+      full profile, reference `btrfs/docker_volumes_nocow`; the package then
+      joins `HEXAGONAL_PACKAGES`). `tests/test_architecture.py` checks the
+      layers (`PURE_MODULES`, `PURE_NAMES`), and every module must be
       reached from an entry point.
+- [ ] No module over 800 lines (`tests/test_module_size.py`): split by
+      command group or check area, not by layer. A big `cli.py` becomes
+      `cli/__init__.py` and `cli/<group>.py` (one `CLI_CEILINGS` entry,
+      `<package>/cli/`, for the folder).
 - [ ] A new `cli.py` gets its line in `CLI_CEILINGS` (same file).
 - [ ] Shared needs come from `cst_core`
       ([reuse-primitives](../../rules/reuse-primitives.md)), not a copy:
@@ -43,9 +52,10 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       `CHECKOUT_ONLY_EXECUTABLES` instead; `tests/test_distribution.py`
       fails on a file in neither.
 - [ ] `pyproject.toml`: the entry in `[tool.ruff] extend-include`; every new
-      Python file (tests too) in `[tool.ty.src] include` and in the
-      `"!{...}" = ["ANN"]` typed entry. `tests/test_python_files.py` checks
-      it; `NOT_YET_CLEAN` stays empty; no ignore comments.
+      Python file (tests too) in `[tool.ty.src] include`, fully annotated
+      (ruff's ANN rules apply to every file; no per-file-ignores entry may
+      switch them off). `tests/test_python_files.py` checks it;
+      `NOT_YET_CLEAN` stays empty; no ignore comments.
 - [ ] `HELP_MODES` in `tests/test_distribution.py`: an argv that returns
       before the program touches the machine, and its exit status.
 - [ ] The same entry in the `entries` table of
@@ -59,7 +69,9 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       `cst_install_as` and removes it with `cst_installed_dests`. The copy on
       the machine changes only when that install runs again.
 - [ ] Unit tests in the module's `tests/`, importing the package and injecting
-      fakes through its ports. A command that changes the machine: skill
+      fakes: through cst_core's `CommandRunnerPort` / `FileSystemPort` (or
+      the adapter functions) in a light package, through its ports in a full
+      one. A command that changes the machine: skill
       [cst-new-command](../cst-new-command/SKILL.md).
 - [ ] The module README's file table names the helper and where it is
       installed.

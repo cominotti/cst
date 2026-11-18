@@ -95,7 +95,7 @@ before changing that module.
 | `cst doctor` checks | [doctor/README.md](doctor/README.md) |
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
 | Python dev tools: uv, ruff, ty, pinned versions, mutation testing | [docs/dev-tools.md](docs/dev-tools.md) |
-| How the code fits together: `cst` dispatch, modules, the install manifest, entry points, package layout, static gates | [docs/architecture.md](docs/architecture.md) |
+| How the code fits together: `cst` dispatch, modules, the install manifest, entry points, package layout and profile (light or full), static gates | [docs/architecture.md](docs/architecture.md) |
 | What `cst_core` already provides: reuse it before you write | [.agents/rules/reuse-primitives.md](.agents/rules/reuse-primitives.md) |
 
 ## Agent rules and skills
@@ -122,9 +122,10 @@ invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
 invowk cmd test license                       # the license header gate only (tests/test_license_headers.py)
 invowk cmd fix license [--apply]              # list the files without the SPDX line; --apply adds it
+invowk cmd fix budgets [--apply]              # list the budget and ceiling entries the code is below; --apply lowers them
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
-invowk cmd test types                         # ty on the ty gate list + annotations on the typed list (through uv)
+invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
@@ -133,6 +134,14 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
+- Budgets and ceilings (`IO_BUDGETS`, `RUFF_BUDGETS`, `CEILINGS`, the
+  allow-lists `invowk cmd fix budgets` lists, ...) fail only when the code is
+  above an entry: never above; lowered with `invowk cmd fix budgets`. The
+  sets that must stay empty (`NOT_YET_CLEAN`, `ORPHAN_ALLOWED`, ...) and
+  `LICENSE_EXEMPT` still fail on a stale entry. A change that removes something
+  need not edit them; run `invowk cmd fix budgets --apply` when you want the
+  lower numbers recorded. It never raises an entry or adds one; raising one
+  by hand needs its reason in the pull request.
 - `tests/run_unit.py` lists every skipped test with its reason and fails on a
   skip that `EXPECTED_SKIPS` there does not name (only skips that depend on
   the machine: a tool, root, the file system). Never add a skip there to get a
@@ -144,8 +153,9 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean and strictly annotated: it is
-  listed in `[tool.ty.src] include` and in the `!{...} = ["ANN"]` entry of
-  `pyproject.toml`, and an extensionless helper also in `extend-include`.
+  listed in `[tool.ty.src] include` of `pyproject.toml`, and an
+  extensionless helper also in `extend-include`. ruff's annotation rules
+  (ANN) apply to every file: no per-file-ignores entry ignores them.
   No ignore comments, nothing added to `NOT_YET_CLEAN`, no `[tool.ty]`
   setting that switches a file or a rule off: fix the code.
   `tests/test_python_files.py` fails on each

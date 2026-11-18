@@ -17,9 +17,12 @@ never be linted. This test derives the Python files from the repository
   than src.include, terminal.error-on-warning (which must be true) and
   rules raised to "error" (rules.<name> = "error"; "warn" or "ignore"
   fails), and no ignore comment in a ty-gated file;
-- the typed list (the "!{...}" ANN entry of [tool.ruff.lint.per-file-ignores],
-  whose functions must all be annotated) names only files of the ty gate, and
-  no other entry ignores ANN (that would switch it off for the typed files).
+- ruff's annotation rules (ANN, which `invowk cmd test types` runs on every
+  Python file) are switched off for no file: no entry of
+  [tool.ruff.lint.per-file-ignores] or extend-per-file-ignores, and no
+  [tool.ruff.lint] ignore or extend-ignore, names an ANN rule or ALL; nor
+  does the older top-level [tool.ruff] form of these settings, which ruff
+  still reads.
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
@@ -39,7 +42,6 @@ import unittest
 from tests.repo_files import REPO, repo_files
 
 PYTHON_SHEBANG = re.compile(rb"^#!.*\bpython[0-9.]*\b")
-TYPED_KEY = re.compile(r"^!\{([^{}]+)\}$")
 IGNORE_COMMENT = re.compile(r"#\s*(?:ty|type)\s*:\s*ignore\b")
 # The [tool.ty] settings the gate allows, as "table.key". Any other one could
 # take files or diagnostics out of ty's check (src.exclude, overrides, a rule
@@ -69,42 +71,48 @@ def python_files(repo: str, files: Iterable[str]) -> set[str]:
     return {rel for rel in files if is_python(os.path.join(repo, rel))}
 
 
-def load_lists(conf: Mapping[str, Any]) -> tuple[list[str], list[str], list[str]]:
-    """(ruff extend-include, ty gate list, typed list) from the parsed pyproject.toml."""
+def load_lists(conf: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """(ruff extend-include, ty gate list) from the parsed pyproject.toml."""
     tool = conf.get("tool", {})
     ruff = tool.get("ruff", {})
     extend = list(ruff.get("extend-include", []))
     ty_gate = list(tool.get("ty", {}).get("src", {}).get("include", []))
-    lint = ruff.get("lint", {})
-    # Any entry that ignores an ANN rule counts. A second one would silence
-    # ANN for the typed files too (two "!{...}" entries each ignore ANN for
-    # the other's files) while ruff still reports "All checks passed".
-    ann = [
-        (key, rules)
-        for table in ("per-file-ignores", "extend-per-file-ignores")
-        for key, rules in lint.get(table, {}).items()
-        if any(r == "ALL" or r.startswith("ANN") for r in rules)
-    ]
-    if len(ann) > 1:
-        raise AssertionError(
-            "only one per-file-ignores entry may ignore ANN (the typed list), not " + ", ".join(repr(k) for k, _ in ann)
-        )
-    typed = []
-    for key, rules in ann:
-        m = TYPED_KEY.match(key)
-        if rules != ["ANN"] or not m:
-            raise AssertionError(
-                f'the ANN entry of per-file-ignores must read "!{{file,...}}" = ["ANN"], not {key!r} = {rules!r}'
-            )
-        typed += [p.strip() for p in m.group(1).split(",")]
-    return extend, ty_gate, typed
+    return extend, ty_gate
+
+
+def _ignores_ann(rules: object) -> bool:
+    return isinstance(rules, list) and any(r == "ALL" or str(r).startswith("ANN") for r in rules)
+
+
+def _sub(table: object, key: str) -> dict[str, object]:
+    """The sub-table `key` of a parsed TOML table ({} when there is none)."""
+    value = table.get(key) if isinstance(table, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:
+    """Every ruff setting that switches an ANN rule off, as text lines (empty: ANN applies to every file)."""
+    ruff = _sub(_sub(dict(conf), "tool"), "ruff")
+    out: list[str] = []
+    # ruff still reads the older top-level [tool.ruff] form of these settings.
+    for section, settings in (("tool.ruff", ruff), ("tool.ruff.lint", _sub(ruff, "lint"))):
+        for table in ("per-file-ignores", "extend-per-file-ignores"):
+            for key, rules in sorted(_sub(settings, table).items()):
+                if _ignores_ann(rules):
+                    out.append(
+                        f"[{section}.{table}] {key!r} = {rules!r}: ignores ANN; annotate the files instead "
+                        "(every Python file is fully annotated)"
+                    )
+        for key in ("ignore", "extend-ignore"):
+            if _ignores_ann(settings.get(key)):
+                out.append(f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead")
+    return out
 
 
 def problems(
     py_files: set[str],
     extend: Sequence[str],
     ty_gate: Sequence[str],
-    typed: Sequence[str],
     not_clean: frozenset[str] = NOT_YET_CLEAN,
 ) -> list[str]:
     """What is wrong with the lists, as text lines (empty: all fine)."""
@@ -114,7 +122,7 @@ def problems(
         out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
     for p in sorted(set(extend) - extensionless):
         out.append(f"{p}: in [tool.ruff] extend-include but not an extensionless Python file of the repository")
-    for name, items in (("extend-include", extend), ("[tool.ty.src] include", ty_gate), ("typed list", typed)):
+    for name, items in (("extend-include", extend), ("[tool.ty.src] include", ty_gate)):
         dups = sorted({p for p in items if items.count(p) > 1})
         out += [f"{p}: listed twice in {name}" for p in dups]
     for p in sorted(set(ty_gate) - py_files):
@@ -134,10 +142,6 @@ def problems(
             f"{p}: a Python file outside the ty gate; make ty clean on it and add it to "
             "[tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
         )
-    for p in sorted(set(typed) - set(ty_gate)):
-        out.append(f"{p}: in the typed list but not in the ty gate ([tool.ty.src] include)")
-    if not typed:
-        out.append('no typed list: per-file-ignores has no "!{...}" = ["ANN"] entry')
     return out
 
 
@@ -207,10 +211,9 @@ class PythonFilesTest(unittest.TestCase):
         def check(
             extend: Sequence[str] = ("other", "tool"),
             ty_gate: Sequence[str] = ("a.py", "tool"),
-            typed: Sequence[str] = ("tool",),
             not_clean: Sequence[str] = ("other",),
         ) -> list[str]:
-            return problems(py, list(extend), list(ty_gate), list(typed), frozenset(not_clean))
+            return problems(py, list(extend), list(ty_gate), frozenset(not_clean))
 
         self.assertEqual(check(), [])
         self.assertEqual(
@@ -228,13 +231,11 @@ class PythonFilesTest(unittest.TestCase):
             "x.py: in [tool.ty.src] include but not a Python file of the repository",
             check(ty_gate=["a.py", "tool", "x.py"]),
         )
-        self.assertIn("other: in the typed list but not in the ty gate ([tool.ty.src] include)", check(typed=["other"]))
         self.assertIn("tool: listed twice in extend-include", check(extend=["other", "tool", "tool"]))
-        self.assertIn('no typed list: per-file-ignores has no "!{...}" = ["ANN"] entry', check(typed=[]))
 
     def test_every_python_file_is_ty_gated_or_not_yet_clean(self) -> None:
         def check(py: Iterable[str], ty_gate: Iterable[str], not_clean: Iterable[str]) -> list[str]:
-            return problems(set(py), ["tool"], list(ty_gate), ["tool"], frozenset(not_clean))
+            return problems(set(py), ["tool"], list(ty_gate), frozenset(not_clean))
 
         outside = (
             "{}: a Python file outside the ty gate; make ty clean on it and add it to "
@@ -336,32 +337,35 @@ class PythonFilesTest(unittest.TestCase):
                 ],
             )
 
-    def test_typed_list_parsing(self) -> None:
+    def test_no_setting_switches_ann_off(self) -> None:
         conf = tomllib.loads(
-            '[tool.ruff]\nextend-include = ["a/b"]\n[tool.ruff.lint.per-file-ignores]\n'
-            '"tests/*" = ["B"]\n"!{a/b, c.py}" = ["ANN"]\n[tool.ty.src]\ninclude = ["a/b", "c.py"]\n'
+            '[tool.ruff]\nextend-include = ["a/b"]\n[tool.ruff.lint]\nignore = ["E501"]\n'
+            '[tool.ruff.lint.per-file-ignores]\n"tests/*" = ["B"]\n[tool.ty.src]\ninclude = ["a/b", "c.py"]\n'
         )
-        self.assertEqual(load_lists(conf), (["a/b"], ["a/b", "c.py"], ["a/b", "c.py"]))
-        # Each of these would switch ANN off for a typed file without ruff saying so.
+        self.assertEqual(load_lists(conf), (["a/b"], ["a/b", "c.py"]))
+        self.assertEqual(ann_ignore_problems(conf), [])
+        # Each of these would switch ANN off for some files without ruff saying so.
         for bad in (
-            '"!a/b" = ["ANN"]\n',  # not the "!{...}" form
-            '"!{a/b}" = ["ANN"]\n"!{c.py}" = ["ANN"]\n',  # two typed entries
-            '"!{a/b}" = ["ANN"]\n"a/*" = ["B", "ANN001"]\n',  # another entry ignoring ANN
-            '"!{a/b}" = ["ANN", "B"]\n',  # more than ANN
-            '"!{a/b}" = ["ANN"]\n[tool.ruff.lint.extend-per-file-ignores]\n"c.py" = ["ALL"]\n',
+            '[tool.ruff.lint.per-file-ignores]\n"!{a/b}" = ["ANN"]\n',  # the old typed-list form
+            '[tool.ruff.lint.per-file-ignores]\n"a/*" = ["B", "ANN001"]\n',
+            '[tool.ruff.lint.extend-per-file-ignores]\n"c.py" = ["ALL"]\n',
+            '[tool.ruff.lint]\nignore = ["ANN401"]\n',
+            '[tool.ruff.lint]\nextend-ignore = ["ANN"]\n',
+            '[tool.ruff]\nper-file-ignores = {"a.py" = ["ANN"]}\n',  # the older top-level form
+            '[tool.ruff]\nignore = ["ANN001"]\n',
         ):
             with self.subTest(bad=bad):
-                with self.assertRaises(AssertionError):
-                    load_lists(tomllib.loads("[tool.ruff.lint.per-file-ignores]\n" + bad))
+                self.assertEqual(len(ann_ignore_problems(tomllib.loads(bad))), 1)
 
     def test_every_python_file_is_under_the_gates(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, "pyproject.toml"), "rb") as fh:
             conf = tomllib.load(fh)
         py_files = python_files(REPO, files)
-        extend, ty_gate, typed = load_lists(conf)
+        extend, ty_gate = load_lists(conf)
         found = (
-            problems(py_files, extend, ty_gate, typed)
+            problems(py_files, extend, ty_gate)
+            + ann_ignore_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, set(ty_gate) & py_files)
         )

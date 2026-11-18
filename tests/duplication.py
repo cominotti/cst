@@ -32,19 +32,29 @@ with, except for three things that make the numbers a little lower:
   statement is still measured, as one line, and an identical import block
   still counts.
 
-Two kinds of code are the same in several files by design, and another gate
-checks them; the ratchet leaves them out (tests/test_duplication.py,
-`without_declared_copies`):
+Some code is the same in several files by design; the measure leaves it
+out:
 - the entry-point bootstrap, which tests/test_entrypoints.py requires to be
-  byte for byte the same in every entry point;
+  byte for byte the same in every entry point (tests/test_duplication.py
+  removes it before measuring);
 - the body of a `Protocol` class (a port): its method stubs restate the
   signatures its adapters implement, and the type checker compares the two.
-  The adapter's code still counts.
+  The adapter's code still counts;
+- type 2 only, declarations (`declared_lines`): the fields of a record
+  class (a `@dataclass`, a `TypedDict`, a `NamedTuple`: `name: type` and
+  `name: type = default` lines) and an `__init__` whose body only assigns
+  its parameters to attributes. With every name replaced, any two records of
+  eight fields read the same (`N : N` eight times), which says nothing about
+  copied code. Type 1 still measures them as written, so a field list copied
+  word for word is still found.
+A left-out line is a barrier, not a deletion (`BARRIER`): no window runs
+across it and it is not a code line, so the lines before and after it do not
+join into a block the file does not have.
 """
 
 import ast
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 import io
 import keyword
@@ -68,6 +78,9 @@ _TRIVIAL_LINES: Final = frozenset({")", "]", "}", "),", "],", "},", "else :", "t
 # Type 2: what a data row (a line of literals only, `"rd_ios",`) becomes.
 _DATA_TOKENS: Final = frozenset({"S", "0", "True", "False", "None", ",", ":", "(", ")", "[", "]", "{", "}", "-"})
 _SHELL_TRIVIAL: Final = frozenset({"fi", "done", "esac", "}", "{", ";;", "else", "then", "do"})
+# Stands for left-out lines in a normalized file: no window holds it, and it is no code line.
+BARRIER: Final = "\0"
+_RECORD_BASES: Final = frozenset({"TypedDict", "NamedTuple"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +99,11 @@ class CloneReport:
         return 100 * self.duplicated / max(self.code_lines, 1)
 
 
-def normalized_python(source: str, *, type2: bool) -> list[str]:
-    """The code lines of `source`, normalized, in order ([] when it does not tokenize)."""
+def normalized_python(source: str, *, type2: bool, skip: AbstractSet[int] = frozenset()) -> list[str]:
+    """The code lines of `source`, normalized, in order ([] when it does not tokenize).
+
+    The lines in `skip` (1-based) become one BARRIER per run of them.
+    """
     try:
         toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except tokenize.TokenError, SyntaxError, IndentationError:
@@ -127,29 +143,89 @@ def normalized_python(source: str, *, type2: bool) -> list[str]:
             text = tk.string
         lines[tk.start[0] if import_line is None else import_line].append(text)
         prev = tk.type
-    out = []
+    out: list[str] = []
     for ln in sorted(lines):
+        if ln in skip:
+            if not out or out[-1] != BARRIER:
+                out.append(BARRIER)
+            continue
         s = " ".join(lines[ln])
         if s not in _TRIVIAL_LINES and not (type2 and set(s.split()) <= _DATA_TOKENS):
             out.append(s)
     return out
 
 
-def without_protocol_bodies(source: str) -> str:
-    """`source` with the body of every `Protocol` class blanked (line numbers kept)."""
+def _simple_name(node: ast.expr) -> str | None:
+    """`X` for `X`, `mod.X`, `X[T]` or `X(...)` (a base class or a decorator), else None."""
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Subscript):  # Protocol[T]
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id
+    return node.attr if isinstance(node, ast.Attribute) else None
+
+
+def _is_record(node: ast.ClassDef) -> bool:
+    """A `@dataclass`, `TypedDict` or `NamedTuple` class."""
+    return any(_simple_name(b) in _RECORD_BASES for b in node.bases) or any(
+        _simple_name(d) == "dataclass" for d in node.decorator_list
+    )
+
+
+def _assigns_parameters_only(node: ast.FunctionDef) -> bool:
+    """An `__init__` whose body (its docstring aside) is only `self.x = x` for its parameters."""
+    if node.name != "__init__":
+        return False
+    params = {a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
+    body = node.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    if not body:
+        return False
+    for stmt in body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target, value = stmt.targets[0], stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            target, value = stmt.target, stmt.value
+        else:
+            return False
+        if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self"):
+            return False
+        if not (isinstance(value, ast.Name) and value.id in params):
+            return False
+    return True
+
+
+def _lines(node: ast.stmt) -> range:
+    """The 1-based lines a statement spans."""
+    return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+
+
+def declared_lines(source: str, *, records: bool) -> set[int]:
+    """The lines the measure leaves out (1-based): `Protocol` bodies; with `records`, also record
+    fields and `__init__` bodies that only assign their parameters (see the module docstring)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return source
-    lines = source.splitlines(keepends=True)
+        return set()
+    out: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and any(
-            (isinstance(b, ast.Name) and b.id == "Protocol") or (isinstance(b, ast.Attribute) and b.attr == "Protocol")
-            for b in node.bases
-        ):
-            for i in range(node.body[0].lineno - 1, (node.end_lineno or node.lineno)):
-                lines[i] = "\n"
-    return "".join(lines)
+        if isinstance(node, ast.ClassDef):
+            if any(_simple_name(b) == "Protocol" for b in node.bases):
+                out.update(range(node.body[0].lineno, _lines(node).stop))
+            elif records and _is_record(node):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        out.update(_lines(stmt))
+        elif records and isinstance(node, ast.FunctionDef) and _assigns_parameters_only(node):
+            out.update(_lines(node))
+    return out
+
+
+def measured_python(source: str, *, type2: bool) -> list[str]:
+    """What the measure reads of one source: normalized, with its `declared_lines` as barriers."""
+    return normalized_python(source, type2=type2, skip=declared_lines(source, records=type2))
 
 
 def normalized_shell(source: str) -> list[str]:
@@ -168,7 +244,9 @@ def clones(norm: Mapping[str, list[str]], window: int) -> CloneReport:
     index: dict[tuple[str, ...], list[tuple[str, int]]] = defaultdict(list)
     for path, lines in norm.items():
         for i in range(len(lines) - window + 1):
-            index[tuple(lines[i : i + window])].append((path, i))
+            block = tuple(lines[i : i + window])
+            if BARRIER not in block:
+                index[block].append((path, i))
     dup: dict[str, set[int]] = defaultdict(set)
     cross: dict[str, set[int]] = defaultdict(set)
     for occ in index.values():
@@ -181,7 +259,7 @@ def clones(norm: Mapping[str, list[str]], window: int) -> CloneReport:
                 cross[p].update(range(i, i + window))
     return CloneReport(
         files=len(norm),
-        code_lines=sum(len(v) for v in norm.values()),
+        code_lines=sum(len(v) - v.count(BARRIER) for v in norm.values()),
         duplicated=sum(len(v) for v in dup.values()),
         cross_file=sum(len(v) for v in cross.values()),
         per_file={p: len(v) for p, v in sorted(dup.items(), key=lambda kv: -len(kv[1]))},
@@ -196,11 +274,11 @@ def python_clones(
     type2: bool,
     prepare: Callable[[str], str] = lambda source: source,
 ) -> CloneReport:
-    """Clone report of the given Python files (`prepare` edits each source first)."""
+    """Clone report of the given Python files (`prepare` edits each source first; `declared_lines` are left out)."""
     norm: dict[str, list[str]] = {}
     for rel in files:
         with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
-            norm[rel] = normalized_python(prepare(fh.read()), type2=type2)
+            norm[rel] = measured_python(prepare(fh.read()), type2=type2)
     return clones(norm, window)
 
 
