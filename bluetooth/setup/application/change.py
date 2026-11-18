@@ -23,7 +23,7 @@ from bluetooth.domain import (
 )
 from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed
-from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, matches_a_line
+from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, changes_machine, matches_a_line
 from cst_core.domain.errors import Refused, shell_exit_status
 
 SPACE = r"[ \t\n\r\f\v]"
@@ -52,7 +52,11 @@ class Change(Checks):
         try:
             return commands.get(self.o.cmd, self.le_audio)()
         except BrokenPipeError:
-            raise  # a closed stdout ends the run as SIGPIPE ended the shell (wiring.run_guarded)
+            if not changes_machine(self.o):
+                raise  # a command that only reads ends by SIGPIPE (wiring.run_guarded)
+            self.m.console.out_closed()
+            self.err(f"{prog}: stopped: its output was closed.{self.undo_hint() if changing else ''}\n")
+            return 1
         except Refused as e:
             self.err(f"{prog}: ERROR: {e}\n")
             return 1

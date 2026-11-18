@@ -28,6 +28,9 @@ class SetupTerminal:
         sys.stderr.write(text)
         sys.stderr.flush()
 
+    def out_closed(self) -> None:
+        drop_stdout()
+
     def ask(self, prompt: str) -> str | None:
         """bash's read -rp: the prompt on stderr, one line, blanks around it dropped; None without a terminal."""
         if not sys.stdin.isatty():
