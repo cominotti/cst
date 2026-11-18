@@ -11,7 +11,8 @@ from typing import Any
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
-from vm.adapters import booted_deployment, has_managed_save, package_versions, run, virsh
+from vm import application
+from vm.adapters import COMMANDS_OF_VM, booted_deployment, package_versions, run, virsh
 from vm.adapters.backup import (
     fingerprint,
     precreate_nocow,
@@ -68,7 +69,7 @@ def check_shut_off(vm: str) -> None:
             f"{vm} is {state or 'in an unknown state'}: shut it down first (a copy of a running "
             f"VM is not consistent). From Windows, or: virsh -c {URI} shutdown {vm}"
         )
-    if has_managed_save(vm):
+    if application.has_managed_save(COMMANDS_OF_VM, vm):
         raise Refused(
             f"{vm} was saved (managed save), not shut down: its disks are only consistent with "
             f"the saved memory. Start it and shut Windows down, then run the backup again "

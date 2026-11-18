@@ -55,3 +55,25 @@ class TimerPort(Protocol):
     def schedule(self, unit: str) -> tuple[str, str]:
         """(next run of unit, last result of its service), "" when unknown."""
         ...
+
+
+class VmCommandsPort(Protocol):
+    """virsh on this machine (libvirt's qemu:///system), as vm.adapters.VmCommands runs it: in the C
+    locale, with vm's answers for a virsh that is missing (127) or does not answer (124)."""
+
+    def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
+        """(exit status, stdout, stderr) of virsh ARGS."""
+        ...
+
+
+class DefinitionStorePort(Protocol):
+    """VM definitions as files: the copy kept before tune changes a definition, and a definition
+    given to libvirt from its text."""
+
+    def save(self, vm: str, stamp: str, text: str) -> str:
+        """Keep text (it holds --security-info secrets) as VM's definition before tune; its path."""
+        ...
+
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define of text: (exit status, stdout, stderr)."""
+        ...

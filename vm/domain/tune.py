@@ -6,10 +6,31 @@ the same rules.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import re
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.libvirt_xml import keep_prefixes
+
+
+@dataclass(frozen=True, slots=True)
+class TunePlan:
+    """What tune would change in a VM's definition (vm.application.plan_tune): its state, the guest
+    (kind: windows, linux or unknown, and why), the definition's root element, the knobs and whether
+    bus changes are allowed, the changes, what is held back, the notes, the unified diff."""
+
+    vm: str
+    state: str
+    kind: str
+    why: str
+    root: ET.Element
+    knobs: dict[str, bool]
+    allow_bus: bool
+    changes: list[str]
+    held: list[str]
+    notes: list[str]
+    diff: list[str]
+
 
 DRIVER_WANTED = (("cache", "none"), ("io", "native"), ("discard", "unmap"), ("detect_zeroes", "unmap"))
 

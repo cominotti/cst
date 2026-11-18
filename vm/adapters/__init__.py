@@ -315,17 +315,3 @@ def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
     conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
     return {k: conf.get(k, "yes").strip().lower() not in ("no", "0", "false", "off") for k in KNOBS}
-
-
-def domain_state(vm: str) -> str:
-    rc, so, err = virsh("domstate", vm)
-    if rc != 0:
-        raise Refused(f"virsh domstate {vm}: {first_line(err) or f'exit {rc}'}")
-    return first_line(so)
-
-
-def has_managed_save(vm: str) -> bool:
-    rc, so, err = virsh("list", "--all", "--with-managed-save", "--name")
-    if rc != 0:
-        raise Refused(f"virsh list --with-managed-save: {first_line(err) or f'exit {rc}'}")
-    return vm in (ln.strip() for ln in so.splitlines())

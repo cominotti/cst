@@ -9,6 +9,7 @@ import os
 import signal
 import struct
 import sys
+import tempfile
 import time
 from types import FrameType
 from typing import Any, TextIO
@@ -20,6 +21,7 @@ from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.domain.errors import Refused
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER
 from vm.domain import NOT_INSTALLED, VmSettings
+from vm.ports import VmCommandsPort
 
 
 def utc_now(override: str | None = None) -> tuple[float, str]:
@@ -266,3 +268,32 @@ def describe_entry(e: Mapping[str, Any]) -> str:
         f"{e['vm']:<16} {e['timestamp']}  {e.get('mode', '?'):<7}  deployment {dep.get('version') or '?'}"
         f"  {qemu}  {e['path']}{gone}"
     )
+
+
+class DefinitionFiles:
+    """DefinitionStorePort on this machine: the definitions tune keeps under
+    BACKUP_DIR/VM/definitions/ (folders 0700, the file 0600 from the start: it holds
+    --security-info secrets, graphics passwords), and virsh define through a temporary file."""
+
+    def __init__(self, backup_dir: str, commands: VmCommandsPort) -> None:
+        self.backup_dir = backup_dir
+        self.commands = commands
+
+    def save(self, vm: str, stamp: str, text: str) -> str:
+        keep = os.path.join(self.backup_dir, vm, "definitions")
+        for d in (self.backup_dir, os.path.join(self.backup_dir, vm), keep):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)
+        saved = os.path.join(keep, f"{stamp}.before-tune.xml")
+        with os.fdopen(os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(text)
+        return saved
+
+    def define(self, text: str) -> tuple[int, str, str]:
+        fd, tmp = tempfile.mkstemp(prefix="cst-vm-tune.", suffix=".xml")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            return self.commands.virsh(("define", tmp), 60, detach=None)
+        finally:
+            os.unlink(tmp)

@@ -62,6 +62,34 @@ NOW = 1794100000
 PATHS = vm_wiring.vm_paths({})
 
 
+class FakeCommands:
+    """A VmCommandsPort over a fake virsh function (args, timeout, detach) -> (rc, stdout, stderr)."""
+
+    def __init__(self, virsh: Callable[..., tuple[int, str, str]]) -> None:
+        self.fake = virsh
+
+    def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
+        return self.fake(*args, timeout=timeout, detach=detach)
+
+
+class _NoCommands:
+    """A runner that refuses every command: a test that reaches the real virsh fails."""
+
+    def run(self, argv: Sequence[str], **_: object) -> CommandResult:
+        raise AssertionError(f"a test ran a real command: {list(argv)}")
+
+    def call(self, *args: str, **_: object) -> CommandResult:
+        raise AssertionError(f"a test ran the real virsh: {list(args)}")
+
+
+def no_real_commands() -> AbstractContextManager[object]:
+    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) raises instead of running anything."""
+    stack = ExitStack()
+    stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", _NoCommands()))
+    stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", _NoCommands()))
+    return stack
+
+
 def patch_vm(name: str, new: object) -> AbstractContextManager[object]:
     """Patch `name` in every loaded vm module that has it (the cli groups, adapters,
     domain), so every caller sees the fake, wherever it lives (a fake virsh must reach
@@ -989,9 +1017,10 @@ class TuneCommandTest(unittest.TestCase):
                 "CST_VM_NONROOT_OK": "1",
             }
         )
+        self.commands = FakeCommands(virsh)
         patches: list[AbstractContextManager[object]] = [
-            patch_vm("virsh", virsh),
             patch_vm("knobs", _knobs),
+            no_real_commands(),
         ]
         for p in patches:
             self.enterContext(p)
@@ -1002,8 +1031,8 @@ class TuneCommandTest(unittest.TestCase):
         def _confirm(q: str) -> bool:
             return answer
 
-        with patch_vm("confirm", _confirm), mock.patch("sys.stdout", out):
-            rc = vm_cli_tune.cmd_tune(self.cfg, "win11-devbox", apply, flag)
+        with mock.patch("sys.stdout", out):
+            rc = vm_cli_tune.cmd_tune(self.cfg, "win11-devbox", apply, flag, commands=self.commands, confirm=_confirm)
         return rc, out.getvalue()
 
     def test_plan_windows_without_flag(self) -> None:
