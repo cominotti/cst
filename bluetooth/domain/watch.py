@@ -116,14 +116,10 @@ class Tracker:
         rate: int,
         settle: float = SETTLE,
         cooldown: float = COOLDOWN,
-        relapse: float = RELAPSE,
-        max_tries: int = MAX_TRIES,
     ) -> None:
         self.rate = rate
         self.settle = settle
         self.cooldown = cooldown
-        self.relapse = relapse
-        self.max_tries = max_tries
         self.card: int | None = None
         self.out: int | None = None
         self.tried: bool = False
@@ -159,14 +155,14 @@ class Tracker:
             self.since = None
             return what, why
         assert snap is not None
-        if not self.failed and self.fixed is not None and now - self.fixed < self.relapse:
+        if not self.failed and self.fixed is not None and now - self.fixed < RELAPSE:
             # The wrong rate is back soon after a fix, on the same connection:
             # the headset set the stream up again by itself. Another bounce
             # would not hold either and would only repeat the dropout.
             self.failed = f"the headset went back to {snap['rate']} Hz by itself {now - self.fixed:.0f} s after the fix"
         if self.failed:
             return "done", f"{self.failed}: given up until it connects again"
-        if self.tries >= self.max_tries:
+        if self.tries >= MAX_TRIES:
             return "done", f"{self.tries} attempts on this connection already: given up until it connects again"
         if self.tried:
             return "done", "already tried once on this connection"
