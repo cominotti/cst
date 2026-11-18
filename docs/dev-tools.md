@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools: uv, ruff, ty, zizmor, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, coverage.py, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -12,6 +12,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations (every Python file). Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
 | [zizmor](https://docs.zizmor.sh/) 1.32.0 | audit of the workflows, the composite actions and `dependabot.yml` in `.github` (see "The workflow audit") | `pyproject.toml`, `uv.lock` |
+| [coverage.py](https://coverage.readthedocs.io/) 7.17.3 | statement and branch coverage of the unit suite, for `invowk cmd test coverage` (its own `coverage` group; the nightly runs it; see "Coverage") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
@@ -24,6 +25,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
 invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
+invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/domain.py
@@ -217,6 +219,41 @@ drops `--offline`, the config or `--strict-collection`, or it gives zizmor
 an option that leaves findings out (`--min-severity`,
 `--min-confidence`, `--persona`, `--collect`). `tests/uv-dev zizmor
 --offline --no-ignores .github` shows what the exceptions hide.
+
+## Coverage
+
+`invowk cmd test coverage` runs the whole unit suite (`tests/run_unit.py`,
+with its gates) under coverage.py, from the `coverage` group, counting
+statements and branches of the production code (`[tool.coverage.run]` in
+`pyproject.toml` leaves the tests out). It takes as long as a unit run, so
+`check` and CI's fast gates do not run it; the nightly workflow does, in
+the same Fedora 45 image and as the same user as the fast gates, and
+uploads the reports as the `nightly-coverage-report` artifact.
+
+`--out DIR` (absolute, outside the checkout; by default a new folder under
+`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`) receives `report.txt` (per
+file), `coverage.json`, `html/index.html` (each file with the lines no
+test ran), `floors.txt` and coverage.py's data file. The task stops when a
+unit test fails.
+
+The last step, `tests/coverage_floors.py`, adds the numbers up per package
+and layer (the keys of the budgets, such as `swap domain`) and fails when a
+**domain** or **application** layer is below its entry in
+`COVERAGE_FLOORS`: the percentage of statements and branches covered,
+together. The other layers are only reported. Many of their tests start
+the real program as a child (`/usr/bin/python3 -I ...`), which coverage.py
+cannot follow, so a low number there (`btrfs/pending_alerts` shows 0 %)
+says nothing about the tests. Domain and application code is tested in the
+test process, with fakes behind the ports.
+
+The floors are the reverse of a budget: a measurement may not go **below**
+its entry. A key without an entry passes (a new package; add its floor
+from the next nightly report); an entry whose key is no longer measured
+fails (rename it with its package, or delete it). They were set from one
+run in a Fedora 45 toolbox, rounded down to a whole percent, minus 2, since
+CI skips a few tests a workstation runs. Raise a floor by hand when a
+report shows room; `invowk cmd fix budgets` never touches this table, and
+nothing lowers it to get a green run.
 
 ## Mutation testing (optional)
 

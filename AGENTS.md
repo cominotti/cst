@@ -128,6 +128,7 @@ invowk cmd test pylint                        # ruff check + ruff format --check
 invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
+invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```

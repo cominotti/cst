@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Developer tools for this repository only: the ruff linter, the ty type
-# checker and the zizmor workflow audit (and, in their own group, the
-# cosmic-ray mutation tester). CST
+# checker and the zizmor workflow audit (and, in their own groups, the
+# cosmic-ray mutation tester and coverage.py). CST
 # itself is not a Python package and installs nothing from here: its helpers
 # run on the system's /usr/bin/python3 with the standard library only.
 # See docs/dev-tools.md for the pinned versions, where the tools' virtual
@@ -18,6 +18,7 @@ requires-python = ">=3.15"
 [dependency-groups]
 dev = ["ruff==0.17.5", "ty==0.0.104", "zizmor==1.32.0"]
 mutation = ["cosmic-ray==8.9.0"]
+coverage = ["coverage==7.17.3"]
 
 [tool.uv]
 package = false
@@ -79,6 +80,16 @@ select = ["F", "B", "UP", "E9", "PLW1510"]
 # For C901, which is not selected above: tests/ruff_budget.py counts the
 # functions over this complexity per package, a budget never above its entry.
 max-complexity = 15
+
+# ---- coverage.py --------------------------------------------------------------
+
+[tool.coverage.run]
+# `invowk cmd test coverage` (the nightly): the unit suite under coverage.py,
+# statements and branches, production code only. tests/coverage_floors.py
+# then checks COVERAGE_FLOORS. See docs/dev-tools.md, "Coverage".
+branch = true
+source = ["."]
+omit = ["tests/*", "*/tests/*"]
 
 # ---- ty ---------------------------------------------------------------------
 
@@ -317,6 +328,7 @@ include = [
     "swap/wiring.py",
     "tests/__init__.py",
     "tests/budgets.py",
+    "tests/coverage_floors.py",
     "tests/code_graph.py",
     "tests/duplication.py",
     "tests/e2e/__init__.py",
@@ -339,6 +351,7 @@ include = [
     "tests/shell_files.py",
     "tests/test_architecture.py",
     "tests/test_bytecode.py",
+    "tests/test_coverage_floors.py",
     "tests/test_cst_core.py",
     "tests/test_cst_core_shared.py",
     "tests/test_distribution.py",

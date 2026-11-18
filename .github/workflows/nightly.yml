@@ -67,6 +67,60 @@ jobs:
       - name: Run the fast gates (invowk cmd check)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
+  # The unit suite under coverage.py: a second unit run (about 6 minutes), so
+  # nightly only. Same image, tools and user as the fast gates, so the same
+  # tests skip. Fails when a domain or application layer drops below its
+  # floor (COVERAGE_FLOORS of tests/coverage_floors.py); the report is an
+  # artifact either way.
+  coverage:
+    name: Unit Coverage and Floors (Fedora 45)
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 25
+    steps:
+      - name: Install Fedora 45 tools and create non-root CI user
+        run: |
+          set -euo pipefail
+          # gettext-envsubst provides envsubst, needed by sigstore/cosign-installer inside setup-invowk.
+          dnf -y install --setopt=install_weak_deps=False git-core python3 ShellCheck curl tar gzip findutils util-linux diffutils gettext-envsubst
+          id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same reason as in ci.yml: the checkout belongs to root, the tests run as ci.
+      - name: Let the ci user's git read the checkout
+        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      # The same uv pin as ci.yml (version and archive SHA256); move both together.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.0'
+          checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
+          enable-cache: 'false'
+
+      # The reports go outside the checkout, into a folder the ci user creates.
+      - name: Run the unit suite under coverage.py and check the floors
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test coverage --out /tmp/cst-coverage
+
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-coverage-report
+          path: |
+            /tmp/cst-coverage/
+            !/tmp/cst-coverage/coverage.data
+          if-no-files-found: ignore
+          retention-days: 14
+
   # The E2E tiers need Docker, loop devices and the btrfs kernel module, so
   # they run on the Ubuntu host runner. Only the tiers run here; the static
   # gates above run in Fedora 45, like CI's fast-gates.
