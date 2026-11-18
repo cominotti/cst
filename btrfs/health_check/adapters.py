@@ -234,12 +234,12 @@ def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | 
     # knobs are needed.
     conf_path = m.path(RECLAIM_CONF)
     conf = m.text(conf_path) or ""
-    for knob in KNOBS:
-        if f"/sys/fs/btrfs/{uuid}/allocation/data/{knob}" in conf and m.cat(f"{alloc}/data/{knob}") != "1":
-            problems.append(
-                f"btrfs {mnt}: automatic reclaim is configured but data/{knob} is off - run "
-                f"'systemd-tmpfiles --create {conf_path}'"
-            )
+    problems.extend(
+        f"btrfs {mnt}: automatic reclaim is configured but data/{knob} is off - run "
+        f"'systemd-tmpfiles --create {conf_path}'"
+        for knob in KNOBS
+        if f"/sys/fs/btrfs/{uuid}/allocation/data/{knob}" in conf and m.cat(f"{alloc}/data/{knob}") != "1"
+    )
     # reclaim_errors counts since mount (it resets on reboot). The state file remembers boot id and
     # count, so errors right after a reboot are still compared against 0, and a damaged file just
     # restarts at 0.
@@ -302,13 +302,17 @@ def degraded_boot_problems(m: Probe) -> list[str]:
         nxt = next_root(m)
         if nxt:
             ups.append(m.path(f"{nxt}/usr/lib/udev/rules.d/64-btrfs.rules"))
-        for up in ups:
-            if UPSTREAM_RULE_LINE not in (m.text(up) or ""):
-                problems.append(f"udev: {up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)")
+        problems.extend(
+            f"udev: {up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+            for up in ups
+            if UPSTREAM_RULE_LINE not in (m.text(up) or "")
+        )
     flags = m.path("/run/btrfs-allow-degraded")
-    for name in _glob_names(flags):
-        if os.path.exists(f"{flags}/{name}"):
-            problems.append(f"btrfs {name}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)")
+    problems.extend(
+        f"btrfs {name}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)"
+        for name in _glob_names(flags)
+        if os.path.exists(f"{flags}/{name}")
+    )
     folder = m.path("/var/lib/btrfs-degraded-boot")
     for name in _glob_names(folder):
         marker = f"{folder}/{name}"
