@@ -20,6 +20,7 @@ USAGE: Final = (
 )
 NOT_SET_UP: Final = "not set up; run 'cst btrfs snapshots setup'"
 EXIT_USAGE: Final = 2
+EXIT_STOPPED: Final = 143  # bash's trap 'exit 143' TERM INT HUP (nas)
 # stat -c %i of a btrfs subvolume's root folder.
 SUBVOL_ROOT_INODE: Final = "256"
 
@@ -362,7 +363,6 @@ SFTP_TIMEOUT_S: Final = 60
 NAS_LOCK_WAIT_S: Final = 1800
 CHECK_FAILURES_ALERTED: Final = 3
 SUMMARY_CHARS: Final = 300
-EXIT_STOPPED: Final = 143  # bash's trap 'exit 143' TERM INT HUP
 
 
 class ResticExit(IntEnum):
