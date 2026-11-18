@@ -6,6 +6,7 @@ from collections.abc import Iterator
 import shlex
 import time
 
+from cst_core.domain.values import DAY
 from doctor.application.shared import check, deployments, installed_packages
 from doctor.domain import (
     INFO,
@@ -148,7 +149,7 @@ def check_staged(host: DoctorHostPort) -> Iterator[Result]:
     ts = pending.get("timestamp")
     age = ""
     if isinstance(ts, (int, float)) and ts > 0:
-        days = (host.now - ts) / 86400
+        days = (host.now - ts) / DAY
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
         age = f", built {when}"
         if days >= STAGED_OLD_DAYS:

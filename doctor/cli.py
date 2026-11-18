@@ -14,7 +14,7 @@ from typing import TextIO
 from doctor import wiring
 from doctor.application import registry
 from cst_core.domain.errors import Usage
-from doctor.domain import NAME, parse_args
+from doctor.domain import NAME, DoctorCommand, parse_args
 from doctor.presenter import render
 
 
@@ -36,7 +36,7 @@ def main(
     except Usage as e:
         print(f"{prog}: {e}\nusage: {prog} [--brief] | help", file=sys.stderr)
         return 2
-    if cmd == "help":
+    if cmd == DoctorCommand.HELP:
         print(doc.replace("doctor [--brief]", f"{prog} [--brief]", 1), file=stdout)
         return 0
     host = wiring.host(env, entry_file)

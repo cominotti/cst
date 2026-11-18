@@ -4,8 +4,15 @@
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from cst_core.domain.install import INSTALL_MANIFEST, InstallEntry, expand_dest, manifest_by_src
-from cst_core.domain.record import ROOT_RECORD, USER_RECORD_REL, InstallRecord, RecordedFile, RecordFormatError
+from cst_core.domain.install import INSTALL_MANIFEST, InstallEntry, Owner, expand_dest, manifest_by_src
+from cst_core.domain.record import (
+    ROOT_RECORD,
+    USER_RECORD_REL,
+    ComponentState,
+    InstallRecord,
+    RecordedFile,
+    RecordFormatError,
+)
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import INFO, OK, WARN, HostPath, Result, ViewPath, host_join, is_unit_file, unit_exec_paths
 from doctor.ports import CheckFn, DoctorHostPort, InstalledFilesPort
@@ -96,7 +103,7 @@ def _record_results(
     summary lines."""
     out = _InstallFindings()
     for component, state in sorted(rec.components.items()):
-        if state == "pending":
+        if state == ComponentState.PENDING:
             fix = refresh(host, component)
             out.results.append(
                 Result(WARN, f"{component}: installed only in part (its last `{fix or component}` did not finish)", fix)
@@ -115,7 +122,7 @@ def _record_results(
 
 
 def _without_record(
-    host: DoctorHostPort, files: InstalledFilesPort, owner: str, recorded: frozenset[str] = frozenset()
+    host: DoctorHostPort, files: InstalledFilesPort, owner: Owner, recorded: frozenset[str] = frozenset()
 ) -> Iterator[Result]:
     """The components the record does not list (none: no record; installs from before it): each one's
     installed files against this checkout, as INFO."""
@@ -157,7 +164,7 @@ def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None 
     than this checkout, units whose programs are gone; without a record, the payload comparison."""
     if installed is None:
         return
-    for owner, path in (("root", HostPath(ROOT_RECORD)), ("user", host_join(host.home, USER_RECORD_REL))):
+    for owner, path in ((Owner.ROOT, HostPath(ROOT_RECORD)), (Owner.USER, host_join(host.home, USER_RECORD_REL))):
         try:
             rec = installed.record(host.path(path))
         except RecordFormatError as e:
@@ -170,5 +177,5 @@ def check_install(host: DoctorHostPort, *, installed: InstalledFilesPort | None 
         if rec is None:
             yield from _without_record(host, installed, owner)
         else:
-            yield from _record_results(host, installed, rec, path, host.home if owner == "user" else "")
+            yield from _record_results(host, installed, rec, path, host.home if owner == Owner.USER else "")
             yield from _without_record(host, installed, owner, frozenset(f.component for f in rec.files.values()))

@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 from cst_core.domain.text import first_line
 from doctor.application.shared import check
-from doctor.domain import INFO, WARN, Result, unit_results
+from doctor.domain import INFO, WARN, Result, UnitScope, unit_results
 from doctor.ports import CheckFn, DoctorHostPort
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -35,7 +35,7 @@ def check_system_units(host: DoctorHostPort) -> Iterator[Result]:
     if units is None:
         yield Result(WARN, f"system units: not checked (systemctl: {err})")
         return
-    yield from unit_results("system", units)
+    yield from unit_results(UnitScope.SYSTEM, units)
 
 
 @check(CHECKS, "services")
@@ -47,4 +47,4 @@ def check_user_units(host: DoctorHostPort) -> Iterator[Result]:
     if units is None:
         yield Result(WARN, f"user units: not checked (systemctl --user: {err})")
         return
-    yield from unit_results("user", units)
+    yield from unit_results(UnitScope.USER, units)
