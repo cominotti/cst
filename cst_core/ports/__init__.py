@@ -289,6 +289,11 @@ class SystemdPort(Protocol):
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
+    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
+        """`systemctl show -p PROP... unit` as {prop: value} (the host's systemd from a toolbox);
+        {} when systemctl cannot answer."""
+        ...
+
 
 class InstallTargetPort(Protocol):
     """The files `install` reads and writes (the real root, or a staging folder in tests)."""

@@ -128,7 +128,7 @@ bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-wat
 # swap
 swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root   swap:core
 swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root   swap:core
-swap/units/machine.slice.d-50-memory-low.conf       /etc/systemd/system/machine.slice.d/50-memory-low.conf        644  root  unit          root   swap:core
+swap/units/machine.slice.d-10-swap-memory-low.conf  /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf   644  root  unit          root   swap:core
 # toolchains
 toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user   toolchains:auto
 toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user   toolchains:sccache

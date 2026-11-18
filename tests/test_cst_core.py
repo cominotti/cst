@@ -44,7 +44,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import CommandFailed, CommandResult
+from cst_core.ports import CommandFailed, CommandResult, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -302,6 +302,29 @@ class AdaptersTest(unittest.TestCase):
         # systemctl's message comes back with its exit status: swap apply shows both.
         self.assertEqual(sysd.stop("dev-zram0.swap"), CommandResult(1, "", "failed"))
         self.assertEqual(sysd.escape_path("/dev/mapper/swap0", suffix="swap"), "dev-mapper-swap0.swap")
+
+    def test_systemctl_show_reads_properties_on_the_host(self) -> None:
+        seen: list[tuple[list[str], dict[str, object]]] = []
+
+        class Recording:
+            def __init__(self, result: CommandResult) -> None:
+                self.result = result
+
+            def run(self, argv: Sequence[str], *, check: bool = False, **options: object) -> CommandResult:
+                seen.append((list(argv), {"check": check, **options}))
+                return self.result
+
+        out = "MemoryLow=51539607552\nDropInPaths=/etc/a.conf /run/b=c.conf\n"
+        sysd = SystemctlAdapter(Recording(CommandResult(0, out, "")))
+        self.assertEqual(
+            sysd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths")),
+            {"MemoryLow": "51539607552", "DropInPaths": "/etc/a.conf /run/b=c.conf"},
+        )
+        argv, options = seen[0]
+        self.assertEqual(argv, ["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"])
+        self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
+        failing = SystemctlAdapter(Recording(CommandResult(1, "", "Failed to connect to bus")))
+        self.assertEqual(failing.show(UnitName("machine.slice"), ("MemoryLow",)), {})
 
     def test_host_execution_context_and_clock(self) -> None:
         host = HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000)

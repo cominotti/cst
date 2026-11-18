@@ -1057,6 +1057,126 @@ class ZswapParamsTest(Scratch):
         )
 
 
+class SwapSettingsDoctorTest(Scratch):
+    """check_swap_settings: the partition /etc/cst/swap.conf names (cst swap apply refuses without
+    one), or that an older CST set swap up and apply writes the file."""
+
+    def write(self, rel: str, text: str) -> None:
+        p = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "swap partition" in ln]
+
+    def test_nothing_where_swap_is_not_set_up(self) -> None:
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+    def test_ok_with_a_partition(self) -> None:
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout), ["  ok     swap partition: 0a1b2c3d-02 (4096 bytes, /etc/cst/swap.conf)"]
+        )
+        self.assert_read_only()
+
+    def test_a_problem_warns(self) -> None:
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4 GiB\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: /etc/cst/swap.conf SWAP_SIZE_BYTES=4 GiB: the partition's exact size in bytes"
+                " (blockdev --getsize64 /dev/disk/by-partuuid/...): cst swap apply refuses until it is fixed"
+            ],
+        )
+
+    def test_an_older_cst_set_it_up(self) -> None:
+        self.write(
+            "etc/fstab",
+            "UUID=x / btrfs defaults 0 0\n"
+            "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n",
+        )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
+                " `cst swap apply` writes it from /etc/crypttab"
+            ],
+        )
+        self.assertIn("swap apply", r.stdout.split("swap partition:", 1)[1])
+        self.assert_read_only()
+
+    def test_installed_but_not_configured(self) -> None:
+        self.write("etc/tmpfiles.d/zswap.conf", "")
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+                " refuses (swap/README.md, section 2.3)"
+            ],
+        )
+
+
+class MachineSliceMemoryLowDoctorTest(Scratch):
+    """check_machine_slice_memory_low: the same answer as cst swap status (an "over" row there)."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    RUN = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+
+    def write(self, host_path: str, text: str) -> None:
+        p = os.path.join(self.root, host_path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
+
+    def show(self, memory_low: str, *dropins: str) -> None:
+        d = os.path.join(self.tmp, "show", "sys")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "machine.slice"), "w") as f:
+            f.write(f"LoadState=loaded\nMemoryLow={memory_low}\nDropInPaths={' '.join(dropins)}\n")
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "machine.slice MemoryLow" in ln]
+
+    def install(self) -> None:
+        with open(os.path.join(REPO, "swap", "units", "machine.slice.d-10-swap-memory-low.conf")) as f:
+            self.write(self.CST, f.read())
+
+    def test_a_drop_in_after_cst_s_is_named(self) -> None:
+        self.install()
+        self.write(self.RUN, "[Slice]\nMemoryLow=1G\n")
+        self.show(str(2**30), self.CST, self.RUN)
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                f"  info   machine.slice MemoryLow 1.0 GiB: set by {self.RUN}, which systemd applies after CST's"
+                f" {self.CST} (48.0 GiB); cst swap leaves it"
+            ],
+        )
+        self.assertNotIn("revert", r.stdout)
+        self.assert_read_only()
+
+    def test_ok_with_cst_s_value(self) -> None:
+        self.install()
+        self.show(str(48 * 2**30), self.CST)
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [f"  ok     machine.slice MemoryLow 48.0 GiB, from {self.CST}"])
+
+    def test_nothing_without_cst_s_drop_in_or_an_answer(self) -> None:
+        self.show(str(2**30), self.RUN)
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+        self.install()
+        os.remove(os.path.join(self.tmp, "show", "sys", "machine.slice"))
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+
 class DockerNocowPostponedTest(Scratch):
     """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
     keeps of the boots at which its migration had to wait."""

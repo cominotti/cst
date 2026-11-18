@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Concrete infrastructure adapters implementing cst_core ports (the runner: cst_core.adapters.runner; virsh: cst_core.adapters.virsh; files: cst_core.adapters.files; zipapps: cst_core.adapters.zipapp)."""
 
+from collections.abc import Sequence
 import time
 
 from cst_core.ports import CommandResult, CommandRunnerPort, UnitName
@@ -48,3 +49,12 @@ class SystemctlAdapter:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
         return UnitName(res.stdout.strip())
+
+    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
+        """`systemctl show -p PROP... unit` as {prop: value}, on the host from a toolbox (read-only, so
+        also from plan and status there); {} when systemctl fails or cannot start."""
+        argv = ["systemctl", "show", *(a for p in props for a in ("-p", p)), unit]
+        res = self._runner.run(argv, check=False, timeout=20, locale_c=True, on_host=True)
+        if res.returncode != 0:
+            return {}
+        return dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line)
