@@ -10,7 +10,8 @@ import json
 import re
 from typing import Final
 
-from btrfs.health_check.domain import bash_int
+from btrfs.health_check.domain import awk_field, bash_div, bash_int
+from cst_core.domain.text import read_fields
 
 TAG: Final = "btrfs-snapshot"
 USAGE: Final = (
@@ -84,7 +85,7 @@ class _Arith:
             elif m == 0:
                 raise ValueError("division by 0")
             else:
-                q = abs(n) // abs(m) * (1 if (n >= 0) == (m > 0) else -1)
+                q = bash_div(n, m)
                 n = q if op == "/" else n - q * m
         return n
 
@@ -306,8 +307,7 @@ def plan_entries(text: str) -> list[tuple[str, str]]:
     line; empty paths and comments (# in the strategy) left out."""
     out: list[tuple[str, str]] = []
     for line in text.split("\n")[:-1]:
-        words = re.split(r"[ \t]+", line.strip(" \t"), maxsplit=1)
-        strategy, path = words[0], (words[1] if len(words) > 1 else "")
+        strategy, path = read_fields(line, 2)
         if not path or strategy.startswith("#"):
             continue
         out.append((strategy, path))
@@ -418,9 +418,8 @@ def restic_time(name: str, entry: str) -> str:
 def features_type(out: str) -> str:
     """The type of device-id-for-hardlinks in restic features' table (awk $1 == ... {print $2})."""
     for line in out.split("\n"):
-        fields = re.split(r"[ \t]+", line.strip(" \t"))
-        if fields[0] == "device-id-for-hardlinks":
-            return [*fields, ""][1]
+        if awk_field(line, 1) == "device-id-for-hardlinks":
+            return awk_field(line, 2)
     return ""
 
 

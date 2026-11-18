@@ -9,6 +9,7 @@ import os
 import re
 import sys
 
+from btrfs.health_check.domain import awk_field
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
 from btrfs.snapshot_runtime.domain import (
     DAY_S,
@@ -128,8 +129,7 @@ def free_bytes(m: SnapshotRun) -> int | None:
     out = m.capture(["btrfs", "filesystem", "usage", "-b", "/var"])
     for line in out.split("\n"):
         if "Free (estimated)" in line:
-            fields = re.split(r"[ \t]+", line.strip(" \t"))
-            n = [*fields, "", "", ""][2]  # awk's $3
+            n = awk_field(line, 3)
             return int(n) if re.fullmatch(r"[0-9]+", n) else None
     return None
 
