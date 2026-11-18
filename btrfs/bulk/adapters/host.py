@@ -22,6 +22,15 @@ from cst_core.adapters.notify import PENDING_ALERTS, Notifier
 from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
 
 
+# btrfs-snapshot's test seam (every file below another folder): never handed on to the runs below.
+SNAPSHOT_SEAM = "CST_SNAPSHOT_ROOT"
+
+
+def snapshot_env() -> dict[str, str]:
+    """This process's environment for a btrfs-snapshot run: without its test seam."""
+    return {k: v for k, v in os.environ.items() if k != SNAPSHOT_SEAM}
+
+
 def is_root() -> bool:
     return os.geteuid() == 0
 
@@ -79,6 +88,7 @@ class Host:
                 check=False,
                 capture_output=True,
                 text=True,
+                env=snapshot_env(),
                 timeout=300,
             )
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -93,7 +103,11 @@ class Host:
         """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
         subvolume (its convert_one: reflink clone + switch, busy -> later)."""
         r = subprocess.run(
-            ["bash", self.snapshot_program(), "convert-one", bulk], check=False, capture_output=True, text=True
+            ["bash", self.snapshot_program(), "convert-one", bulk],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=snapshot_env(),
         )
         return (r.stdout + r.stderr).splitlines()
 

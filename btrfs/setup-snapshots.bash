@@ -17,6 +17,9 @@ SNAP_NAS_KEY=/etc/btrfs-setup/ssh/id_ed25519
 SNAP_SSH_ALIAS=btrfs-setup-nas          # Host block restic's ssh uses (same name in btrfs-snapshot)
 SNAP_RESTIC_PW=/etc/btrfs-setup/restic-password
 SNAP_RUNTIME=/usr/local/sbin/btrfs-snapshot
+# btrfs-snapshot, always run without CST_SNAPSHOT_ROOT: that is its test seam
+# (every file below another folder), never handed on to a run as root.
+snap_runtime() { ( unset CST_SNAPSHOT_ROOT; "${SNAP_RUNTIME}" "$@" ); }
 # One snapshot per hour when the subvolume changed. /home: every hour 3 days,
 # a day 1 week, a week 1 month, a month 3 months. ~/Workspace (its own
 # subvolume): every hour 2 days, a day 1 week. btrfs-snapshot has the values.
@@ -376,7 +379,7 @@ snap_setup() {
     # 3. Old cargo targets (before converting, so they are not cloned for nothing).
     snap_clean_targets_apply "${home}"
     # 4. Live conversion; what is busy now is done at the next boot, before login.
-    /usr/local/sbin/btrfs-snapshot convert
+    snap_runtime convert
     if [[ -e "${SNAP_BOOT_FLAG}" ]]; then
         systemctl enable btrfs-subvol-convert.service
     else
@@ -552,7 +555,7 @@ snap_disable() {
     if [[ -x "${SNAP_RUNTIME}" ]]; then
         # Only what btrfs-snapshot-core owns (name, read-only subvolume, Parent
         # UUID of /home or ~/Workspace); anything else in the directory stays.
-        "${SNAP_RUNTIME}" purge || echo "WARNING: deleting the snapshots failed; see the messages above" >&2
+        snap_runtime purge || echo "WARNING: deleting the snapshots failed; see the messages above" >&2
     elif [[ -d "${SNAP_TOP}/${SNAP_DIR_NAME}" ]]; then
         echo "WARNING: ${SNAP_RUNTIME} is missing: snapshots in ${SNAP_TOP}/${SNAP_DIR_NAME} not deleted" >&2
     fi
@@ -965,9 +968,9 @@ snap_prune() {
     local rc=0
     [[ -x "${SNAP_RUNTIME}" ]] || { echo "Not set up: ${PROG} snapshots setup" >&2; exit 1; }
     case "${1:-}" in
-        --confirm) "${SNAP_RUNTIME}" prune --allow-mass-delete || rc=$? ;;
+        --confirm) snap_runtime prune --allow-mass-delete || rc=$? ;;
         "")
-            "${SNAP_RUNTIME}" prune --dry-run --allow-mass-delete || rc=$?
+            snap_runtime prune --dry-run --allow-mass-delete || rc=$?
             (( rc == 0 )) && echo "Dry run, nothing deleted. Delete the above with: ${PROG} snapshots prune --confirm" ;;
         *) echo "snapshots prune [--confirm]" >&2; exit 2 ;;
     esac
@@ -982,7 +985,7 @@ snapshots_cmd() {
         status) snap_status ;;
         list|caches)
             [[ -x "${SNAP_RUNTIME}" ]] || { echo "Not set up: ${PROG} snapshots setup" >&2; exit 1; }
-            "${SNAP_RUNTIME}" "${action}" "$@" ;;
+            snap_runtime "${action}" "$@" ;;
         prune) snap_prune "$@" ;;
         clean-targets) snap_clean_targets "$@" ;;
         disable) snap_disable "$@" ;;

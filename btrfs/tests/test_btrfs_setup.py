@@ -937,7 +937,7 @@ snap_install_runtime() { echo "runtime installed"; }
 snap_user_configs() { :; }
 snap_activate() { echo "activated"; }
 snap_status() { echo "status"; }
-function /usr/local/sbin/btrfs-snapshot { echo "btrfs-snapshot $*"; }
+function /usr/local/sbin/btrfs-snapshot { echo "btrfs-snapshot $* (seam: ${CST_SNAPSHOT_ROOT-unset})"; }
 """
 
     def test_setup_cycle_on_an_old_file_plan_apply_and_a_second_run(self) -> None:
@@ -958,9 +958,11 @@ function /usr/local/sbin/btrfs-snapshot { echo "btrfs-snapshot $*"; }
         self.assertIn("3 line(s) that an older CST wrote with backslashes", r.stdout)
         self.assertIn("No terminal to confirm", r.stderr)
         self.assertEqual(self.raw(), before)
-        # apply: the file is in quotes, every value as bash read the old file.
-        r = self.run_bash(self.SETUP_STUBS + "snap_setup --yes")
+        # apply: the file is in quotes, every value as bash read the old file. The live conversion
+        # never gets btrfs-snapshot's test seam, also when the caller has it.
+        r = self.run_bash(self.SETUP_STUBS + "export CST_SNAPSHOT_ROOT=/elsewhere\nsnap_setup --yes")
         self.assertIn("activated", r.stdout)
+        self.assertIn("btrfs-snapshot convert (seam: unset)\n", r.stdout)
         self.assertEqual(self.bash_values(sorted(old)), want)
         got = parse_shell_assignments(self.text())
         self.assertEqual(got.problems, ())
