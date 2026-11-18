@@ -5,6 +5,7 @@ from collections.abc import Iterator
 import os
 import time
 
+from cst_core.domain.contracts import Urgency
 from cst_core.domain.values import DAY
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import (
@@ -99,7 +100,7 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
     for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
         when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
         yield Result(
-            ERROR if urgency == "critical" else WARN,
+            ERROR if urgency == Urgency.CRITICAL else WARN,
             f"alert you have not seen yet ({urgency}, {when}): {title} ("
             + (
                 f"shown at your next login; the fix shows it now, as does {host.cst} btrfs status)"

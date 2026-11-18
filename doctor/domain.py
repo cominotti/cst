@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
@@ -432,7 +432,7 @@ def parse_alert_text(data: str) -> tuple[str, str, int] | None:
             break
         k, _, v = line.partition("=")
         head[k] = v
-    if head.get("urgency") not in ("critical", "normal") or not head.get("title"):
+    if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or not head.get("title"):
         return None
     last = int(head["last"]) if head.get("last", "").isdigit() else 0
     return head["urgency"], head["title"][:200], last
