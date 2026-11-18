@@ -13,8 +13,10 @@ from btrfs.bulk.domain import (
     BY_ID,
     MAKE_DEFAULT,
     BadSettings,
+    BulkCommand,
     NoUser,
     SteamArgs,
+    bulk_command,
     parse_steam_args,
     split_user_args,
 )
@@ -35,7 +37,7 @@ def steam_cmd(w: Wiring, args: Sequence[str]) -> int:
         return 2
     sub, ids, allow_copy = parsed.sub, list(parsed.ids), parsed.allow_copy
     b = w.bulk(parsed.user_args)
-    if sub == "plan":
+    if sub == BulkCommand.PLAN:
         sv = steam_survey(b, ids, allow_copy)
         steam_print(b, sv)
         if not sv["fatal"]:
@@ -82,27 +84,27 @@ def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) 
 
 def run(w: Wiring, argv: Sequence[str]) -> int:
     """One command of btrfs-bulk (argv[0] the program)."""
-    cmd = argv[1] if len(argv) > 1 else "status"
-    if cmd in ("keep", "unkeep"):
+    cmd = bulk_command(argv[1] if len(argv) > 1 else BulkCommand.STATUS)
+    if cmd in (BulkCommand.KEEP, BulkCommand.UNKEEP):
         return keep_cmd(w, cmd, argv[2:])
-    if cmd == "steam":
+    if cmd == BulkCommand.STEAM:
         return steam_cmd(w, argv[2:])
-    if cmd not in ("plan", "apply", "status", "boot"):
+    if cmd is None:
         print(USAGE, file=sys.stderr)
         return 2
     try:
         b = w.bulk(argv[2:])
     except BadSettings as e:
-        if cmd == "boot":  # before any login: the alert waits for it (btrfs-notify keeps it)
+        if cmd == BulkCommand.BOOT:  # before any login: the alert waits for it (btrfs-notify keeps it)
             w.host.alert(
                 "~/Bulk: nothing moved at boot",
                 f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
             )
         raise
-    if cmd in ("plan", "status"):
+    if cmd in (BulkCommand.PLAN, BulkCommand.STATUS):
         report(b, cmd)
         return 0
-    if cmd == "boot":
+    if cmd == BulkCommand.BOOT:
         return boot(b)
     b.boots.forget()  # a new request gets its two boots again
     deferred, problems = apply(b)

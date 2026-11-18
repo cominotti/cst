@@ -20,9 +20,11 @@ from btrfs.bulk.domain import (
     ITEMS,
     KEEP_HEADER,
     BadSettings,
+    BulkJournalKind,
     BulkPaths,
     ItemJournal,
     SteamJournal,
+    SteamPhase,
     dec,
 )
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
@@ -72,10 +74,10 @@ _STEAM_REQUIRED: KeyTypes = {
     "parts": (list,),
 }
 _STEAM_OPTIONAL: KeyTypes = {"stamp2": (int,), "conflict": (bool,), "undo": (bool,)}
-STEAM_PHASES = ("prepared", "switching", "switched", "finishing")
+STEAM_PHASES = tuple(SteamPhase)
 
 
-def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> TypeGuard[Mapping[str, object]]:
+def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
     """obj is a JSON object with every required key and each known key of its type (a bool is
     no int here, as JSON tells them apart)."""
     if not isinstance(obj, dict):
@@ -93,20 +95,24 @@ def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> TypeGuard[Mapp
 
 def is_item_journal(obj: object) -> TypeGuard[ItemJournal]:
     """A journal-<id>.json's JSON has the shape btrfs-bulk writes (kind copy or subvol)."""
-    return _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL) and obj["kind"] in ("copy", "subvol")
+    return (
+        isinstance(obj, dict)
+        and _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL)
+        and obj["kind"] in (BulkJournalKind.COPY, BulkJournalKind.SUBVOL)
+    )
 
 
 def is_steam_journal(obj: object) -> TypeGuard[SteamJournal]:
     """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
     phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
-    if not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
+    if not isinstance(obj, dict) or not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
         return False
     appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
     return (
-        obj["kind"] == "steam"
+        obj["kind"] == BulkJournalKind.STEAM
         and dec(appid)
         and phase in STEAM_PHASES
-        and (phase == "prepared" or "stamp2" in obj)
+        and (phase == SteamPhase.PREPARED or "stamp2" in obj)
         and isinstance(parts, list)
         and all(_fits(p, _PART_REQUIRED, _PART_OPTIONAL) for p in parts)
     )

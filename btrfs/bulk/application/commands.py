@@ -28,7 +28,14 @@ from btrfs.bulk.domain import (
     STEAM_APP,
     STEAM_MARGIN,
     STEAM_ROOT,
+    BulkCommand,
+    BulkItemState,
     Ctx,
+    FlatpakAccess,
+    LstatKind,
+    SteamAppState,
+    SteamMoveResult,
+    SteamPartMode,
     SteamApp,
     SteamRunning,
     SteamSurvey,
@@ -76,7 +83,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         sv["fatal"] = "steam is kept out of ~/Bulk by choice: 'cst btrfs bulk unkeep steam' first"
         return sv
     try:
-        cid = steam_marker(b, T) if b.tree.kind(T) == "dir" else None
+        cid = steam_marker(b, T) if b.tree.kind(T) == LstatKind.DIR else None
 
         def settle(t: Vdf) -> Vdf:
             return lf_with_library(t, T, present(cid, "the marker's contentid"), b.tree.realpath)
@@ -105,15 +112,15 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
 def steam_library_problem(b: Bulk, target: str, kept: set[str]) -> str:
     """Why ~/Bulk/steam (target) cannot take games yet, or '': it must be in place, and the Flatpak may use it."""
     state, detail = classify(b, BY_ID["steam"], set(), kept)
-    if state != "ok":
+    if state != BulkItemState.OK:
         return f"~/Bulk/steam is not in place ({state} {detail}): run 'cst btrfs bulk apply' first"
     try:
         f = b.user.flatpak_state(STEAM_APP, target)
     except (OSError, RuntimeError, Unexpected) as e:
         f = f"cannot be checked ({e})"
-    if f != "ok":
+    if f != FlatpakAccess.OK:
         return (
-            f"the Steam Flatpak may not use {target} yet ({'not installed' if f == 'absent' else f}): "
+            f"the Steam Flatpak may not use {target} yet ({'not installed' if f == FlatpakAccess.ABSENT else f}): "
             "run 'cst btrfs bulk apply' first"
         )
     return ""
@@ -127,9 +134,9 @@ def survey_apps(b: Bulk, sv: SteamSurvey, pair: VdfPair, ids: Sequence[str]) -> 
     else:
         sel = [(i, False) for i in sorted(b.tree.steam_manifests(src) | b.tree.steam_manifests(T), key=int)]
     sv["apps"] = [steam_app(b, pair, i, explicit) for i, explicit in sel]
-    if any(a["state"] == "move" for a in sv["apps"]):
+    if any(a["state"] == SteamAppState.MOVE for a in sv["apps"]):
         sv["free"] = b.tree.free_bytes(T)
-        sv["copy_bytes"] = sum(a["copy_bytes"] for a in sv["apps"] if a["state"] == "move")
+        sv["copy_bytes"] = sum(a["copy_bytes"] for a in sv["apps"] if a["state"] == SteamAppState.MOVE)
         if sv["free"] < STEAM_MARGIN:
             sv["space"] = f"less than {gib(STEAM_MARGIN)} free in ~/Bulk"
 
@@ -163,7 +170,7 @@ def print_library(b: Bulk, sv: SteamSurvey, pair: VdfPair) -> None:
         row(b, "", "apply writes both again")
     if sv["idx"] is not None:
         row(b, LIBRARY_ROW, f"ok (library {sv['idx']})")
-    elif any(a["state"] == "move" for a in sv["apps"]):
+    elif any(a["state"] == SteamAppState.MOVE for a in sv["apps"]):
         n = max(int(i) for i in lf_libraries(pair["tree"])) + 1
         row(
             b,
@@ -177,14 +184,14 @@ def print_library(b: Bulk, sv: SteamSurvey, pair: VdfPair) -> None:
 def print_apps(b: Bulk, sv: SteamSurvey) -> None:
     """steam_print's line (or lines) on each app."""
     texts = {
-        "ok": lambda a: "ok (in ~/Bulk/steam)",
-        "skip": lambda a: f"skipped: a tool, not a game; move it with --app {a['id']}",
-        "update": lambda a: f"NEEDS A LOOK: mid-update ({a['why']}): let Steam finish, close it, run again",
-        "look": lambda a: f"NEEDS A LOOK: {a['why']} (nothing touched)",
+        SteamAppState.OK: lambda a: "ok (in ~/Bulk/steam)",
+        SteamAppState.SKIP: lambda a: f"skipped: a tool, not a game; move it with --app {a['id']}",
+        SteamAppState.UPDATE: lambda a: f"NEEDS A LOOK: mid-update ({a['why']}): let Steam finish, close it, run again",
+        SteamAppState.LOOK: lambda a: f"NEEDS A LOOK: {a['why']} (nothing touched)",
     }
     for a in sv["apps"]:
         name = f"{a['id']} {a['name']}".strip()
-        if a["state"] != "move":
+        if a["state"] != SteamAppState.MOVE:
             row(b, name, texts[a["state"]](a))
             continue
         lines = steam_move_lines(b.ctx, a, sv["copy"])
@@ -193,7 +200,7 @@ def print_apps(b: Bulk, sv: SteamSurvey) -> None:
             row(b, "", line)
     if not sv["apps"]:
         row(b, "games", "none installed")
-    elif not any(a["state"] in ("move", "ok") for a in sv["apps"]):
+    elif not any(a["state"] in (SteamAppState.MOVE, SteamAppState.OK) for a in sv["apps"]):
         row(b, "games", "nothing to move by default; name one with --app ID")
 
 
@@ -202,7 +209,11 @@ def print_shader_caches(b: Bulk, sv: SteamSurvey) -> None:
     src, _ = steam_roots(b.ctx)
     for a in sv["apps"]:
         sc = os.path.join(src, "steamapps", "shadercache", a["id"])
-        if a["state"] in ("move", "ok") and b.tree.kind(sc) == "dir" and not b.tree.empty_dir(sc):
+        if (
+            a["state"] in (SteamAppState.MOVE, SteamAppState.OK)
+            and b.tree.kind(sc) == LstatKind.DIR
+            and not b.tree.empty_dir(sc)
+        ):
             row(
                 b,
                 f"shader cache of {a['id']}",
@@ -260,8 +271,8 @@ def steam_apply_locked(b: Bulk, ids: Sequence[str], *, allow_copy: bool) -> int:
     sv = survey_to_apply(b, ids, allow_copy=allow_copy)
     if isinstance(sv, int):
         return sv
-    movers = [a for a in sv["apps"] if a["state"] == "move"]
-    rc = 1 if any(a["state"] in ("look", "update") for a in sv["apps"]) else 0
+    movers = [a for a in sv["apps"] if a["state"] == SteamAppState.MOVE]
+    rc = 1 if any(a["state"] in (SteamAppState.LOOK, SteamAppState.UPDATE) for a in sv["apps"]) else 0
     if refuse_copies(b, [a for a in movers if a["copy_bytes"] and not allow_copy]):
         rc = 1
     movers = [a for a in movers if allow_copy or not a["copy_bytes"]]
@@ -282,7 +293,12 @@ def start_moves(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) -
         b.out.log("not enough free space in ~/Bulk: nothing done")
         return 1
     sample = next(
-        (p.get("sample", "") for a in movers for p in a["parts"] if p.get("mode") == "reflink" and p.get("sample")),
+        (
+            p.get("sample", "")
+            for a in movers
+            for p in a["parts"]
+            if p.get("mode") == SteamPartMode.REFLINK and p.get("sample")
+        ),
         "",
     )
     failed = library_ready(b, sv, sample, " (no game moved)")
@@ -345,19 +361,19 @@ def move_games(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) ->
     moved = 0
     for a in sorted(movers, key=lambda x: int(x["id"])):
         res = move_game(b, sv, a)
-        if res == "ok":
+        if res == SteamMoveResult.OK:
             moved += 1
-        elif res == "space":
+        elif res == SteamMoveResult.SPACE:
             rc = 1
         else:
-            return 5 if res in ("running", "busy") else 1
+            return 5 if res in (SteamMoveResult.RUNNING, SteamMoveResult.BUSY) else 1
     if moved:
         b.out.say(MAKE_DEFAULT)
         b.out.say("Then start Steam: Settings > Storage lists both libraries; the moved games are in ~/Bulk/steam.")
     return rc
 
 
-def move_game(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
+def move_game(b: Bulk, sv: SteamSurvey, a: SteamApp) -> SteamMoveResult:
     """One game's move, logged: ok | space | running | busy | changed | failed (an error)."""
     log = b.out.log
     name = f"{a['id']} {a['name']}"
@@ -371,10 +387,10 @@ def move_game(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
         res = steam_move(b, sv, a)
     except (OSError, RuntimeError, Unexpected) as e:
         log(f"NEEDS A LOOK: {name}: {e}; no further game moved this run")
-        return "failed"
-    if res == "ok":
+        return SteamMoveResult.FAILED
+    if res == SteamMoveResult.OK:
         log(f"{'done:':<10} {name}: in ~/Bulk/steam now ({hms(b.host.now() - t0)})")
-    elif res == "space":
+    elif res == SteamMoveResult.SPACE:
         log(
             f"NEEDS A LOOK: {name}: not enough free space in ~/Bulk for a real copy of "
             f"{gib(a['copy_bytes'])} (needs {gib(steam_copy_need(b, a))}: {gib(steam_copy_floor(b))} must stay "
@@ -384,9 +400,9 @@ def move_game(b: Bulk, sv: SteamSurvey, a: SteamApp) -> str:
         log(
             f"{'stopped:':<10} {name}: "
             + {
-                "running": "Steam started: undone, nothing moved; close it and run again",
-                "busy": "in use (open files): undone; close what uses it and run again",
-                "changed": "written to during the move: undone; run again",
+                SteamMoveResult.RUNNING: "Steam started: undone, nothing moved; close it and run again",
+                SteamMoveResult.BUSY: "in use (open files): undone; close what uses it and run again",
+                SteamMoveResult.CHANGED: "written to during the move: undone; run again",
             }[res]
         )
     return res
@@ -429,7 +445,7 @@ def keep_ids(state: BulkStatePort, cmd: str, ids: Sequence[str]) -> OSError | No
     keep file (or the flag) could not be written, else None."""
     lock = state.run_lock()
     try:
-        if cmd == "keep":
+        if cmd == BulkCommand.KEEP:
             state.edit_keep(ids, set())
             # Busy items waiting for the boot (and those inside them): not any more.
             state.write_flag(
@@ -448,7 +464,7 @@ def keep_report(tree: HomeTreePort, out: OutputPort, ctx: Ctx | None, cmd: str, 
     """What keep/unkeep did, item by item (ctx None: the home is unknown)."""
     for ident in ids:
         item = BY_ID[ident]
-        if cmd == "unkeep":
+        if cmd == BulkCommand.UNKEEP:
             out.say(f"{ident}: no longer kept; the next 'cst btrfs bulk apply' moves it into ~/Bulk")
             continue
         out.say(
@@ -457,6 +473,6 @@ def keep_report(tree: HomeTreePort, out: OutputPort, ctx: Ctx | None, cmd: str, 
         )
         if ctx and item.link:
             L = ctx.link(item)
-            if L and tree.kind(L) == "link" and tree.link_target(L) == ctx.target(item):
+            if L and tree.kind(L) == LstatKind.LINK and tree.link_target(L) == ctx.target(item):
                 out.say(f"  ~/{item.link} is still a link into ~/Bulk: to bring the data back, see")
                 out.say("  btrfs/SNAPSHOTS.md, section 12 (Undo one Bulk link)")

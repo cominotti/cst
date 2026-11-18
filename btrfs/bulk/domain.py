@@ -12,6 +12,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import NoReturn
 from typing import NotRequired
 from typing import TypedDict
@@ -19,7 +20,7 @@ import os
 import re
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
-from cst_core.domain.values import format_bytes_gib_mib
+from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
@@ -102,6 +103,108 @@ BY_ID = {i.id: i for i in ITEMS}
 NOCOW_TOP = "emulators"
 
 
+class BulkCommand(StrEnum):
+    """btrfs-bulk's commands (argv[1]); plan and apply are also steam's, plan and status report's modes."""
+
+    PLAN = "plan"
+    APPLY = "apply"
+    STATUS = "status"
+    BOOT = "boot"
+    KEEP = "keep"
+    UNKEEP = "unkeep"
+    STEAM = "steam"
+
+
+def bulk_command(word: str) -> BulkCommand | None:
+    """The command argv names; None for any other word (the usage, exit 2)."""
+    return next((c for c in BulkCommand if c == word), None)
+
+
+class LstatKind(StrEnum):
+    """What lstat finds at a path (HomeTreePort.kind), no link followed."""
+
+    ABSENT = "absent"
+    LINK = "link"
+    DIR = "dir"
+    OTHER = "other"
+
+
+class PathChain(StrEnum):
+    """HomeTreePort.chain over every component of base/rel; its other answers
+    are 'symlink:<path>' and 'file:<path>' (the first that is not a folder)."""
+
+    OK = "ok"
+    ABSENT = "absent"
+
+
+class BulkTargetState(StrEnum):
+    """HomeTreePort.target_state of ~/Bulk/<target>; its other answer is 'bad:<reason>'."""
+
+    ABSENT = "absent"
+    EMPTY = "empty"
+    DATA = "data"
+
+
+class BulkDirState(StrEnum):
+    """HomeTreePort.bulk_state: ~/Bulk itself."""
+
+    OK = "ok"
+    CREATE = "create"
+    PLAIN = "plain"
+    BAD = "bad"
+
+
+class CacheTagState(StrEnum):
+    """HomeTreePort.tag_state: ~/Bulk/CACHEDIR.TAG."""
+
+    OK = "ok"
+    CREATE = "create"
+    BAD = "bad"
+
+
+class FlatpakAccess(StrEnum):
+    """May the app use a path: UserFilesPort.flatpak (absent, ok, added) and flatpak_state (absent, ok, missing)."""
+
+    ABSENT = "absent"
+    OK = "ok"
+    ADDED = "added"
+    MISSING = "missing"
+
+
+class BulkItemState(StrEnum):
+    """classify's state of an item."""
+
+    KEPT = "kept"
+    OK = "ok"
+    MKDIR = "mkdir"
+    LINK = "link"
+    MOVE = "move"
+    MOVE_SUBVOL = "move-subvol"
+    NOCOW = "nocow"
+    WAIT = "wait"
+    UNEXPECTED = "unexpected"
+
+
+class BulkItemDetail(StrEnum):
+    """The details of classify that the code tells apart (the others are text: why it waits or needs a look)."""
+
+    NOLINK = "nolink"
+    LINKED = "linked"
+    EMPTY = "empty"
+    STALE = "stale"
+    SUBVOLUME = "subvolume"
+
+
+class BulkItemResult(StrEnum):
+    """What act did with an item; its other answers are 'unexpected:<why>' and 'failed:<why>'."""
+
+    OK = "ok"
+    BUSY = "busy"
+    CHANGED = "changed"
+    KEPT = "kept"
+    WAIT = "wait"
+
+
 class Unexpected(Exception):
     """A state this tool does not change by itself."""
 
@@ -150,7 +253,7 @@ def du_text(size: TreeSize) -> str:
 
 def kept_text(item: Item, detail: str) -> str:
     where = "kept in /home (by choice)" if item.link else "left out (by choice)"
-    if detail == "linked":
+    if detail == BulkItemDetail.LINKED:
         return (
             f"{where}, but still a link into ~/Bulk: move the data back "
             "(btrfs/SNAPSHOTS.md, section 12), or 'bulk unkeep " + item.id + "'"
@@ -159,11 +262,11 @@ def kept_text(item: Item, detail: str) -> str:
 
 
 STATE_TEXT = {
-    "ok": "ok",
-    "mkdir": "create the folder",
-    "link": "create the folder and the link",
-    "move-subvol": "a subvolume (earlier setup): renamed into ~/Bulk (instant), then the link",
-    "wait": "waits",
+    BulkItemState.OK: "ok",
+    BulkItemState.MKDIR: "create the folder",
+    BulkItemState.LINK: "create the folder and the link",
+    BulkItemState.MOVE_SUBVOL: "a subvolume (earlier setup): renamed into ~/Bulk (instant), then the link",
+    BulkItemState.WAIT: "waits",
 }
 # ---- Steam: move installed games into the ~/Bulk/steam library ---------------------------------
 # `btrfs-bulk steam plan|apply [--app ID]...`. Steam must be closed. The game's
@@ -417,7 +520,9 @@ def lf_files(src: str) -> list[str]:
 
 def hms(seconds: float) -> str:
     s = int(seconds)
-    return f"{s // 3600}h{s % 3600 // 60:02d}m{s % 60:02d}s" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+    return (
+        f"{s // HOUR}h{s % HOUR // MINUTE:02d}m{s % MINUTE:02d}s" if s >= HOUR else f"{s // MINUTE}m{s % MINUTE:02d}s"
+    )
 
 
 STEAM_USAGE = "usage: btrfs-bulk steam plan|apply [--app ID]... [--copy] [--user NAME]"
@@ -454,7 +559,7 @@ def parse_steam_args(args: Sequence[str]) -> SteamArgs | tuple[str, ...]:
             value = f" {args[i + 1]!r}" if a == "--app" and i + 1 < len(args) else ""
             return (f"btrfs-bulk steam: bad argument {a!r}{value}", STEAM_USAGE)
         i += 2
-    if sub not in ("plan", "apply"):
+    if sub not in (BulkCommand.PLAN, BulkCommand.APPLY):
         return (STEAM_USAGE,)
     return SteamArgs(sub, tuple(ids), user_args, allow_copy)
 
@@ -535,6 +640,58 @@ def present[T](value: T | None, what: str) -> T:
 # The field order of these TypedDicts was chosen so that no eight lines repeat
 # another record (tests/test_duplication.py, type 2): reordering them can fail
 # that gate. JSON keys do not depend on it.
+class BulkJournalKind(StrEnum):
+    """The kind of a journal: an item's copy or subvolume move, a Steam game's move."""
+
+    COPY = "copy"
+    SUBVOL = "subvol"
+    STEAM = "steam"
+
+
+class SteamPhase(StrEnum):
+    """SteamJournal's phase, in order."""
+
+    PREPARED = "prepared"
+    SWITCHING = "switching"
+    SWITCHED = "switched"
+    FINISHING = "finishing"
+
+
+class SteamPartKind(StrEnum):
+    """SteamPart's kind."""
+
+    DIR = "dir"
+    FILE = "file"
+
+
+class SteamPartMode(StrEnum):
+    """SteamPart's mode: how it moves."""
+
+    REFLINK = "reflink"
+    COPY = "copy"
+
+
+class SteamAppState(StrEnum):
+    """SteamApp's state."""
+
+    MOVE = "move"
+    OK = "ok"
+    SKIP = "skip"
+    UPDATE = "update"
+    LOOK = "look"
+
+
+class SteamMoveResult(StrEnum):
+    """What the move of one game came to (steam_move, move_game)."""
+
+    OK = "ok"
+    RUNNING = "running"
+    BUSY = "busy"
+    CHANGED = "changed"
+    SPACE = "space"
+    FAILED = "failed"
+
+
 class ItemJournal(TypedDict):
     """journal-<id>.json of one item's move. kind: copy | subvol."""
 
@@ -589,7 +746,7 @@ class SteamApp(TypedDict):
 
     id: str
     name: str
-    state: str
+    state: SteamAppState
     parts: list[SteamPart]
     why: str
     size: str
