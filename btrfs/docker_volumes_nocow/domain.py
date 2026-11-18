@@ -116,9 +116,9 @@ def daemon_args(args: Sequence[str]) -> DaemonArgs:
     """Read dockerd's argv (args[0] is the program); the last of each option wins."""
     root, config = None, DAEMON_JSON
     rest = iter(args[1:])
-    for arg in rest:
-        if arg.startswith("-g") and arg[2:3] not in ("", "="):
-            arg = "-g=" + arg[2:]  # the shorthand with its value attached: -g/path
+    for raw in rest:
+        # the shorthand with its value attached: -g/path
+        arg = "-g=" + raw[2:] if raw.startswith("-g") and raw[2:3] not in ("", "=") else raw
         key, eq, value = arg.partition("=")
         if key not in ("--data-root", "-g", "--graph", "--config-file"):
             continue
