@@ -3192,15 +3192,32 @@ EOF
     def test_86_cpu_game_profile_refuses_a_settings_line_bash_would_run(self) -> None:
         """With a line in cpu-setup.conf that bash would expand (`BUILD_CPUS=$(nproc)`), the real
         game profile does not switch on: exit 1, the line in its output, no game.state, machine.slice's
-        weight as it was; `off` still works; with the line fixed, `on` and `off` work again."""
+        weight as it was. The watchdog's tick, run as a unit with a GameMode client running (a process
+        that maps a file named libgamemode), does not start cpu-game.service (a stub that records its
+        starts): its unit ends in success, the line is named once, a second tick says nothing. `off`
+        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-86-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            systemctl daemon-reload
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-86-conf.bak ]]; then mv /tmp/e2e-86-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rm -rf /run/cpu-setup /tmp/e2e-86-client.pid /tmp/e2e-86-ready /tmp/e2e-86-starts /tmp/e2e-86-libgamemode.so
+            """,
+            check=False,
+        )
         out = exec_bash(
             self.SYSTEMD_CONTAINER,
             r"""
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-86-conf.bak
             install -d /etc/cpu-setup
-            printf '%s
-' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            printf '%s\n' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
             gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
             base=$(systemctl show -P CPUWeight machine.slice)
             rc=0; got=$(gp on) || rc=$?
@@ -3210,16 +3227,40 @@ EOF
             test ! -e /run/cpu-setup/game.state
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
             grep -q 'settings: /etc/cpu-setup/cpu-setup.conf line 2' <<<"$(gp state)"
+            # The watchdog, a game running, the profile off: cpu-game.service is not started.
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-86-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-86-libgamemode.so /tmp/e2e-86-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-86-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-86-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-86-client.pid)/maps"
+            tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-86-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick; }
+            first=$(tick 1)   # exit 0: the unit does not fail
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
+            second=$(tick 2)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            sleep 1
+            test ! -e /tmp/e2e-86-starts
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            test ! -e /run/cpu-setup/game.state
             gp off
             sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
+            # Fixed: the watchdog starts the unit again.
+            grep -q 'switching on' <<<"$(tick 3)"
+            for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
+            test -e /tmp/e2e-86-starts
+            kill "$(cat /tmp/e2e-86-client.pid)"
+            systemctl stop cpu-game.service
+            rm -f "$stub"
+            systemctl daemon-reload
             touch /run/cpu-setup/manual
             gp on
             [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
             gp off
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
-            rm -f /etc/cpu-setup/cpu-setup.conf
-            [[ ! -e /tmp/e2e-86-conf.bak ]] || mv /tmp/e2e-86-conf.bak /etc/cpu-setup/cpu-setup.conf
-            rm -rf /run/cpu-setup
             echo E2E-OK
             """,
         ).stdout

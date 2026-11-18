@@ -510,6 +510,9 @@ class GameProfile:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(p.suppress)
             elif not os.path.exists(p.suppress):
+                if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
+                    self.warn_once("GameMode client running, profile not switched on")
+                    return 0
                 self.log(5, "GameMode client running but profile off: switching on")
                 self.ctl("sys", "start", "--no-block", "cpu-game.service")
             return 0
@@ -518,8 +521,8 @@ class GameProfile:
             self.ctl("sys", "stop", "--no-block", "cpu-game.service")
             return 0
         if self.problems:
-            self.refuse("tick changed nothing")
-            return 1
+            self.warn_once("tick changes nothing")
+            return 0
         self.pin_docker()  # containers started meanwhile
         self.protect_steam()  # the game's own scope, started after 'on'
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
@@ -532,6 +535,20 @@ class GameProfile:
             self.log(3, line)
         self.log(3, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works)")
 
+    def warn_once(self, what: str) -> None:
+        """The watchdog's word on the settings file's problem lines: logged at the first tick that meets
+        them (and again when they change), then quiet until the next boot (the mark is in /run); the
+        watchdog's unit does not fail on them."""
+        text = describe_problems(self.paths.conf, self.problems)
+        mark = os.path.join(self.paths.run, "settings-warned")
+        if read_text(mark) == text:
+            return
+        for line in text.split("\n"):
+            self.log(4, line)
+        self.log(4, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works; said once per boot)")
+        with contextlib.suppress(OSError):
+            write_atomic(mark, text, mode=0o644, durable=False, relabel=False)
+
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
         """What is applied now, and which settings drifted from what 'on' set."""
@@ -540,7 +557,9 @@ class GameProfile:
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
         for line in describe_problems(p.conf, self.problems).split("\n") if self.problems else ():
-            self.say(f"  settings: {line} (sets nothing: 'on' and 'tick' refuse until it is fixed)")
+            self.say(
+                f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+            )
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line("builds.slice")

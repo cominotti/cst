@@ -305,10 +305,13 @@ quotes. A line bash would read differently, or that it would run as a
 command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
 sets nothing for `vm-pin`: `plan` and `status` print it with its line
 number, `apply` refuses to start, and `cst doctor` warns. The game profile
-then does not switch on (`cpu-game.service` fails, its journal names the
-line), a `tick` while it is on changes nothing (it still switches the
-profile off when the game ends), `off` still undoes everything, and
-`cst cpu game state` shows the line.
+then does not switch on (`cpu-game.service` fails when GameMode or `cst cpu
+game on` starts it, its journal names the line). The watchdog does not start
+it while a game runs, and with the profile already on its `tick` changes
+nothing (it still switches the profile off when the game ends); it names
+the line in the journal once per boot (again when the lines change; its mark
+is `/run/cpu-setup/settings-warned`), and its unit does not fail. `off`
+still undoes everything, and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|

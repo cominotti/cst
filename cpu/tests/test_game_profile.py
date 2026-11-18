@@ -628,9 +628,19 @@ class SettingsProblemTest(GameProfileCase):
         self.set_now("sys", "machine.slice", CPUWeight="50")
         p, out = self.problem_profile()
         self.systemd.actions = []
-        self.assertEqual(p.tick(), 1)
-        self.assertIn("<3>game-profile: tick changed nothing: a line of", out.getvalue())
+        self.assertEqual(p.tick(), 0)  # the watchdog's unit does not fail on it
+        conf = self.paths.conf
+        self.assertEqual(
+            out.getvalue(),
+            f"<4>game-profile: {conf} line 2: BUILD_CPUS=$(nproc): $, ` or \\ outside single quotes: bash would expand it"
+            " (use single quotes)\n"
+            f"<4>game-profile: tick changes nothing: a line of {conf} sets nothing (fix it; 'off' still works;"
+            " said once per boot)\n",
+        )
         self.assertEqual(self.sets(self.systemd.actions), [])
+        p, out = self.problem_profile()
+        self.assertEqual(p.locked("tick"), 0)  # the next tick: said already
+        self.assertEqual(out.getvalue(), "")
         os.remove(self.manual)
         self.no_game()
         self.systemd.actions = []
@@ -641,6 +651,33 @@ class SettingsProblemTest(GameProfileCase):
         self.assertEqual(
             self.now("sys", "machine.slice", "CPUWeight"), "50"
         )  # the override is gone; the store keeps the fake's last
+
+    def test_a_tick_with_a_game_running_does_not_start_the_unit_on_would_fail(self) -> None:
+        # Profile off, a GameMode client running: 'on' would refuse, so the watchdog does not start
+        # cpu-game.service (which would fail again every 30 s); it says why once per boot.
+        p, out = self.problem_profile()
+        self.assertEqual(p.locked("tick"), 0)
+        self.assertNotIn(f"{SYS} start --no-block cpu-game.service", self.systemd.actions)
+        self.assertIn("<4>game-profile: GameMode client running, profile not switched on: a line of", out.getvalue())
+        self.assertFalse(os.path.exists(self.state))
+        for _ in range(2):
+            p, out = self.problem_profile()
+            self.assertEqual(p.tick(), 0)
+            self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.systemd.actions, [])
+        # Another problem line: said again.
+        self.write(self.paths.conf, "TARGET_USER='testuser'\nP_CORES=`nproc`\n")
+        settings, problems = read_settings(self.paths.conf)
+        out = io.StringIO()
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems, out=out)
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("line 2: P_CORES=`nproc`", out.getvalue())
+        # Fixed: the watchdog switches the profile on again.
+        self.write(self.paths.conf, "TARGET_USER='testuser'\n")
+        p = load_profile(self.paths, self.systemd)
+        self.systemd.actions = []
+        self.assertEqual(p.tick(), 0)
+        self.assertEqual(self.systemd.actions, [f"{SYS} start --no-block cpu-game.service"])
 
     def test_the_program_builds_the_profile_over_the_settings_file(self) -> None:
         self.write(self.paths.conf, "TARGET_USER='testuser'\nBUILD_CPUS=$(nproc)\n")
@@ -655,7 +692,9 @@ class SettingsProblemTest(GameProfileCase):
         p, out = self.problem_profile()
         self.assertEqual(p.state(), 0)
         self.assertIn(f"\n  settings: {self.paths.conf} line 2: BUILD_CPUS=$(nproc): ", out.getvalue())
-        self.assertIn("(sets nothing: 'on' and 'tick' refuse until it is fixed)\n", out.getvalue())
+        self.assertIn(
+            "(sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)\n", out.getvalue()
+        )
 
 
 class GameProfileEscapesTest(GameProfileCase):
