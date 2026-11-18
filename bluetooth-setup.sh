@@ -115,7 +115,10 @@ usage() {
 # in_container: inside a toolbox or another container. Tests set CST_BT_CONTAINER
 # (1: inside, 0: on the host) and CST_BT_ROOT (where the host's / is seen from
 # here, for /etc and /usr/share), as doctor's tests set CST_DOCTOR_CONTAINER
-# and CST_DOCTOR_ROOT.
+# and CST_DOCTOR_ROOT. They are for the tests only: CST_BT_CONTAINER=0 in a
+# toolbox would lift the refusal of the commands that change the machine, and
+# CST_BT_ROOT names the main.conf that apply writes through sudo. Run as root,
+# the script drops both before it starts again as SUDO_USER.
 in_container() {
     case "${CST_BT_CONTAINER:-}" in
         1) return 0 ;;
@@ -198,7 +201,8 @@ if [[ ${EUID} -eq 0 ]]; then
     env_args=("HOME=$(getent passwd "${user}" | cut -d: -f6)" "USER=${user}" "LOGNAME=${user}"
               "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus")
     [[ -n "${CST_PROG:-}" ]] && env_args+=("CST_PROG=${CST_PROG}")
-    exec runuser -u "${user}" -- env -u XDG_CONFIG_HOME -u SUDO_USER "${env_args[@]}" "${SELF}" "${orig_args[@]}"
+    exec runuser -u "${user}" -- env -u XDG_CONFIG_HOME -u CST_BT_ROOT -u CST_BT_CONTAINER -u SUDO_USER \
+        "${env_args[@]}" "${SELF}" "${orig_args[@]}"
 fi
 # revert --check and le-audio without on/off only read, like plan.
 if [[ "${cmd}" == apply || ( "${cmd}" == revert && ${CHECK} -eq 0 ) || ( "${cmd}" == le-audio && -n "${le_set}" ) ]] &&

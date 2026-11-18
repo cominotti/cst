@@ -2732,6 +2732,30 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_96_bluetooth_as_root_drops_the_test_overrides(self) -> None:
+        """Run as root with SUDO_USER, `cst bluetooth` runs again as that user without the
+        unit tests' overrides CST_BT_ROOT and CST_BT_CONTAINER (sudo -E or a root shell could
+        pass them on): plan reads the real /etc/bluetooth/main.conf, not the one under the
+        folder CST_BT_ROOT names, and does not take itself for a run inside a toolbox
+        (/run/host/etc). The EUID branch cannot run in the unit tests (no root there)."""
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, "rm -rf /tmp/bt96", check=False)
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            mkdir -p /etc/bluetooth /tmp/bt96/etc/bluetooth
+            printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf
+            printf '[General]\\n# elsewhere\\n' >/tmp/bt96/etc/bluetooth/main.conf
+            """,
+        )
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "rc=0; SUDO_USER=tester CST_BT_ROOT=/tmp/bt96 CST_BT_CONTAINER=1 "
+            "/opt/cst-rw/cst bluetooth plan --device 00:11:22:33:44:55 || rc=$?; echo rc=$rc",
+            check=False,
+        )
+        self.assertIn("; host /etc in /etc\n", r.stdout, r.stdout + r.stderr)
+        self.assertIn("rc=10", r.stdout, r.stdout + r.stderr)
+
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own
