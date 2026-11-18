@@ -27,7 +27,8 @@ from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.ports import CommandRunnerPort
 
-PENDING_ALERTS = state_format("alert-spool").folder
+_SPOOL = state_format("alert-spool")
+PENDING_ALERTS = _SPOOL.folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
 
@@ -85,7 +86,7 @@ def _keep_alert(pending: str, urgency: Urgency, app: str, title: str, body: str)
         stamp = int(time.time())
         first, count = _earlier(path)
         text = (
-            f"cst-alert 1\nurgency={level}\napp={app}\nfirst={stamp if first is None else first}\n"
+            f"cst-alert {_SPOOL.version}\nurgency={level}\napp={app}\nfirst={stamp if first is None else first}\n"
             f"last={stamp}\ncount={count + 1}\ntitle={title}\n\n{body}\n"
         )
         write_atomic(path, text, mode=0o644, relabel=False)

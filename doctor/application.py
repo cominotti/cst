@@ -1720,8 +1720,7 @@ def _unit_findings(
         return False
     bad = False
     for prog in unit_exec_paths(text, home):
-        p = host.path(HostPath(prog))
-        if not (host.isfile(p) and host.stat(p).st_mode & 0o111):
+        if not runs(host, HostPath(prog)):
             out.results.append(
                 Result(WARN, f"{dest} runs {prog}, which is missing or not executable", refresh(host, f.component))
             )

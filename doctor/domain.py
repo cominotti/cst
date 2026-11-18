@@ -60,13 +60,14 @@ TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
 BTRFS_SYSFS = HostPath("/sys/fs/btrfs")
 RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
-HEALTH_CHECK_HOST = HostPath(manifest_by_src()["btrfs/btrfs-health-check"].dest)
+_BY_SRC = manifest_by_src()  # the install manifest by source, for the installed paths below
+HEALTH_CHECK_HOST = HostPath(_BY_SRC["btrfs/btrfs-health-check"].dest)
 # btrfs-notify, which a VM backup that fails alerts through (its manifest dest).
-NOTIFY_HOST = HostPath(manifest_by_src()["btrfs/btrfs-notify"].dest)
-PENDING_READER_HOST = HostPath(manifest_by_src()["btrfs/cst-pending-alerts"].dest)  # shows them at a login
+NOTIFY_HOST = HostPath(_BY_SRC["btrfs/btrfs-notify"].dest)
+PENDING_READER_HOST = HostPath(_BY_SRC["btrfs/cst-pending-alerts"].dest)  # shows them at a login
 # The installed units whose programs alert through it (the VM backup timers have their own check).
 ALERTING_UNITS = tuple(
-    HostPath(manifest_by_src()[f"btrfs/units/{name}"].dest)
+    HostPath(_BY_SRC[f"btrfs/units/{name}"].dest)
     for name in (
         "btrfs-bulk-boot.service",
         "btrfs-health-check.service",
@@ -114,7 +115,7 @@ GAME_INTENDED = HostPath(state_format("game-intended").path)
 GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
 GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
-GAME_PROFILE_HOST = manifest_by_src()["cpu/game-profile"].dest
+GAME_PROFILE_HOST = _BY_SRC["cpu/game-profile"].dest
 
 # The top-level slices of the user manager that CST knows: app.slice (desktop
 # apps and the game), session.slice (gnome-shell), background.slice (GNOME's
