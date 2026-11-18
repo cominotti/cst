@@ -55,7 +55,10 @@ class LocalSetupFiles(LocalFileSystemAdapter):
         write_atomic(path, text, mode=mode, durable=False, relabel=False)
 
     def write_through(self, path: str, text: str) -> None:
-        mode = stat.S_IMODE(os.stat(path).st_mode) if os.path.exists(path) else 0o644
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            mode = 0o644
         write_atomic(path, text, mode=mode, durable=False, relabel=False)
 
     def copy(self, src: str, dest: str) -> None:

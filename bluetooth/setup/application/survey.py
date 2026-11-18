@@ -57,18 +57,21 @@ def read_settings(host: BluetoothHostPort, paths: Paths) -> tuple[dict[str, str]
     it cannot read: the first leaves the settings empty, the second (the user's file) ends the
     run with exit 1."""
     files: list[tuple[str, str]] = []
+    user: str | None = None
     try:
         for path in (paths.default_settings, paths.user_settings):
             text = host.read_or_none(path)
             if text is not None:
                 files.append((path, text))
+        user = next((t for p, t in files if p == paths.user_settings), "")
         shown, said = settings_report(files)
     except (OSError, ValueError) as e:
         shown, said = "", f"bt-helper: {e}\n"
-    try:
-        user = host.read_or_none(paths.user_settings) or ""
-    except (OSError, ValueError) as e:
-        return Exit(1, err=f"{said}bt-helper: {e}\n")
+    if user is None:  # not read yet: settings-keys read it again
+        try:
+            user = host.read_or_none(paths.user_settings) or ""
+        except (OSError, ValueError) as e:
+            return Exit(1, err=f"{said}bt-helper: {e}\n")
     return read_settings_output(shown), tuple(set_keys(user)), said
 
 
@@ -530,16 +533,18 @@ class Survey:
             "missing": ("write", f"the LDAC rate watcher (LDAC_RATE={rate})"),
             "conflict": ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
         }
-        if self.lw_unit_st in unit_rows:
-            self.item(unit_rows[self.lw_unit_st][0], self.lw_unit_label(), unit_rows[self.lw_unit_st][1])
         prog_rows = {
             "ok": ("ok", "same as bt-ldac-watch in CST"),
             "change": ("update", "older copy (apply installs the one in CST)"),
             "missing": ("write", "copy of bluetooth/bt-ldac-watch"),
             "conflict": ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
         }
-        if self.lw_prog_st in prog_rows:
-            self.item(prog_rows[self.lw_prog_st][0], self.lw_prog_label(), prog_rows[self.lw_prog_st][1])
+        for rows, state, label in (
+            (unit_rows, self.lw_unit_st, self.lw_unit_label()),
+            (prog_rows, self.lw_prog_st, self.lw_prog_label()),
+        ):
+            if (row := rows.get(state)) is not None:
+                self.item(row[0], label, row[1])
         if self.lw_enabled == "enabled" and self.lw_active == "active":
             if self.lw_unit_st == "ok" and self.lw_prog_st == "ok":
                 self.item("ok", svc, "enabled, active")
