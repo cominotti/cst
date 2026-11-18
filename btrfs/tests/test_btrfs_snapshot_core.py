@@ -836,7 +836,7 @@ class BtrbkOracleTests(unittest.TestCase):
             ("America/New_York", "2026-11-01"),
         ):
             tz = zoneinfo.ZoneInfo(tzname)
-            snaps = [snap(f"{day} {h:02d}:{m:02d}", seq) for h in range(0, 5) for m in (0, 30) for seq in (0, 1)]
+            snaps = [snap(f"{day} {h:02d}:{m:02d}", seq) for h in range(5) for m in (0, 30) for seq in (0, 1)]
             for now_h in ("05:10", "23:00"):
                 for policy in ("3h", "2h 1d", "1h 1d 1w 1m 1y"):
                     self.compare(snaps, at(f"{day} {now_h}", tz), policy, tzname)
