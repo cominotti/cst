@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from cst_core.domain.install import COMPONENTS
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.domain.text import ShellAssignments, parse_shell_assignments, parse_snapshots_conf
-from doctor.domain import SNAP_CONF, WARN, Deployment, HostPath, OstreeAnswer, Result, ViewPath
+from doctor.domain import SNAP_CONF, WARN, Deployment, HostPath, OstreeAnswer, Result, ViewPath, is_deployment
 from doctor.ports import CheckFn, DoctorHostPort
 
 
@@ -57,7 +57,9 @@ def ostree_deployments(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deploym
     status = query_status(host.run)
     if not isinstance(status, OstreeStatus):
         return (None, None, status), []
-    return (status.booted, status.pending, ""), status.deployments
+    booted = status.booted if is_deployment(status.booted) else None
+    pending = status.pending if is_deployment(status.pending) else None
+    return (booted, pending, ""), [d for d in status.deployments if is_deployment(d)]
 
 
 def installed_packages(host: DoctorHostPort, d: Deployment) -> list[str] | None:

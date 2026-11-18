@@ -9,6 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from doctor.application.shared import (
@@ -39,6 +40,7 @@ from doctor.domain import (
     VM_TIMER_WANTS,
     WARN,
     HostPath,
+    OverlayKind,
     Result,
     parse_offered_features_xml,
     virt_changes,
@@ -64,7 +66,7 @@ def virsh(host: DoctorHostPort, *args: str, ro: bool = True) -> tuple[int, str, 
 
 
 def virsh_problem(rc: int, err: str) -> str:
-    if rc == 127:
+    if rc == ExitStatus.NOT_FOUND:
         return "no virsh: libvirt is not installed"
     return first_line(err) or f"virsh exit {rc}"
 
@@ -359,66 +361,67 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                 continue
             if state in VM_LIVE_STATES:
                 kind = (
-                    "live"
+                    OverlayKind.LIVE
                     if dev in live
-                    else "definition"
+                    else OverlayKind.DEFINITION
                     if sources is not None and sources.get(dev) == base
-                    else "unknown"
+                    else OverlayKind.UNKNOWN
                 )
             elif state in ("shut off", "crashed"):
-                kind = "offline" if file_newer(host, HostPath(path), HostPath(base)) else "unknown"
+                kind = OverlayKind.OFFLINE if file_newer(host, HostPath(path), HostPath(base)) else OverlayKind.UNKNOWN
             else:
-                kind = "unknown"
-            if kind == "live":
-                yield Result(
-                    WARN,
-                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
-                    f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
-                    f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
-                    f"command below. Then check that `virsh domblklist {vm} --details` (also with "
-                    f"--inactive) shows {base}, and remove the overlay file {guide}",
-                    f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
-                )
-            elif kind == "definition":
-                yield Result(
-                    WARN,
-                    f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
-                    f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
-                    f"the image). Point the disk back with the command below (<source file='{base}'/>, "
-                    f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
-                    f"then remove the overlay file {guide}",
-                    f"{v} edit {q(vm)}",
-                )
-            elif kind == "offline":
-                yield Result(
-                    WARN,
-                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
-                    f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
-                    f"command below, then point the disk back with `virsh edit {vm}` (<source "
-                    f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
-                    f"--inactive`, and remove the overlay file {guide}",
-                    f"sudo qemu-img commit -p {q(path)}",
-                )
-            elif state in ("shut off", "crashed"):
-                yield Result(
-                    WARN,
-                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
-                    f"cannot tell whether that overlay still holds the guest's last writes: the image is "
-                    f"newer, or the times are unreadable. The image is newer both after a merge cut short "
-                    f"(the overlay is still needed) and after a merge that left the definition behind "
-                    f"(stale). Do not remove or commit anything yet: look at the times with the command "
-                    f"below and at the backup's own message or alert {guide}",
-                    f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}",
-                )
-            else:
-                yield Result(
-                    WARN,
-                    f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
-                    f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
-                    f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
-                    f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
-                    f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details",
-                )
+                kind = OverlayKind.UNKNOWN
+            match kind:
+                case OverlayKind.LIVE:
+                    yield Result(
+                        WARN,
+                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
+                        f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
+                        f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
+                        f"command below. Then check that `virsh domblklist {vm} --details` (also with "
+                        f"--inactive) shows {base}, and remove the overlay file {guide}",
+                        f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
+                    )
+                case OverlayKind.DEFINITION:
+                    yield Result(
+                        WARN,
+                        f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
+                        f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
+                        f"the image). Point the disk back with the command below (<source file='{base}'/>, "
+                        f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
+                        f"then remove the overlay file {guide}",
+                        f"{v} edit {q(vm)}",
+                    )
+                case OverlayKind.OFFLINE:
+                    yield Result(
+                        WARN,
+                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
+                        f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
+                        f"command below, then point the disk back with `virsh edit {vm}` (<source "
+                        f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
+                        f"--inactive`, and remove the overlay file {guide}",
+                        f"sudo qemu-img commit -p {q(path)}",
+                    )
+                case _ if state in ("shut off", "crashed"):
+                    yield Result(
+                        WARN,
+                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
+                        f"cannot tell whether that overlay still holds the guest's last writes: the image is "
+                        f"newer, or the times are unreadable. The image is newer both after a merge cut short "
+                        f"(the overlay is still needed) and after a merge that left the definition behind "
+                        f"(stale). Do not remove or commit anything yet: look at the times with the command "
+                        f"below and at the backup's own message or alert {guide}",
+                        f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}",
+                    )
+                case _:
+                    yield Result(
+                        WARN,
+                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
+                        f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
+                        f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
+                        f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
+                        f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details",
+                    )
 
 
 @check(CHECKS, "vm")

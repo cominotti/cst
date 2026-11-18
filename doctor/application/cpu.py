@@ -212,7 +212,7 @@ def cgroup_units(host: DoctorHostPort, path: ViewPath) -> list[tuple[str, ViewPa
         names = sorted(host.listdir(path))
     except OSError:
         return []
-    return [(n[1:] if n.startswith("_") else n, view_join(path, n)) for n in names if host.isdir(view_join(path, n))]
+    return [(n.removeprefix("_"), view_join(path, n)) for n in names if host.isdir(view_join(path, n))]
 
 
 @check(CHECKS, "cpu")

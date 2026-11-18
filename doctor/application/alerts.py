@@ -5,6 +5,7 @@ from collections.abc import Iterator
 import os
 import time
 
+from cst_core.domain.values import DAY
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import (
     ALERT_KEEP_DAYS,
@@ -85,7 +86,7 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
             st = host.lstat(p)
         except OSError:
             continue
-        if not host.isfile(p) or host.islink(p) or host.now - st.st_mtime > ALERT_KEEP_DAYS * 86400:
+        if not host.isfile(p) or host.islink(p) or host.now - st.st_mtime > ALERT_KEEP_DAYS * DAY:
             continue
         a = read_alert(host, p)
         if a is None:

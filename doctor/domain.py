@@ -6,10 +6,11 @@ layers).
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from enum import StrEnum
 import os.path
 import re
 import shlex
-from typing import Any, NewType, Self
+from typing import NewType, Self, TypedDict, TypeIs
 import xml.etree.ElementTree as ET
 
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
@@ -18,6 +19,7 @@ from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
+from cst_core.domain.values import HOUR, Json
 from swap.domain import SETTINGS_REL
 
 NAME = "cst-doctor"
@@ -43,6 +45,31 @@ def view_join(base: ViewPath, *parts: str) -> ViewPath:
 
 OK, INFO, WARN, ERROR = "ok", "info", "WARN", "ERROR"
 SEVERITY: dict[str, int] = {OK: 0, INFO: 1, WARN: 2, ERROR: 3}
+
+
+class DoctorCommand(StrEnum):
+    """What `cst doctor`'s command line asks for (parse_args)."""
+
+    HELP = "help"
+    RUN = "run"
+
+
+class UnitScope(StrEnum):
+    """Whose systemd manager a unit check asks: the system's or the user's (systemctl --user)."""
+
+    SYSTEM = "system"
+    USER = "user"
+
+
+class OverlayKind(StrEnum):
+    """What a VM disk left on a backup overlay is: written live, named only by a stale definition,
+    newer than its image with the VM off, or not known."""
+
+    LIVE = "live"
+    DEFINITION = "definition"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
+
 
 STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
 ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
@@ -107,7 +134,7 @@ SCRUB_UNIT = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service")
 SCRUB_DROPIN = HostPath("/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf")
 _SCRUB_SIZE = re.compile(r"[0-9]+[KkMmGgTt]?")
 _SCRUB_LIMIT_LINE = re.compile(r"[ \t]*(?:export[ \t]+)?SCRUB_LIMIT(?![A-Za-z0-9_])")
-_SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.M)
+_SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.MULTILINE)
 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
@@ -172,9 +199,36 @@ class Result(tuple):
 
 
 # A deployment of `rpm-ostree status --json`: JSON with many keys of many
-# types (str, bool, int, lists, dicts), read with .get and checked where it
-# matters. CST does not build it, so it is not a TypedDict.
-type Deployment = dict[str, Any]
+# types, read with .get and checked where it matters. These are the keys
+# doctor reads; rpm-ostree writes others, which stay in the dict unread.
+Deployment = TypedDict(
+    "Deployment",
+    {
+        "booted": bool,
+        "staged": bool,
+        "pinned": bool,
+        "osname": str,
+        "version": str,
+        "checksum": str,
+        "timestamp": int,
+        "requested-packages": list[str],
+        "requested-local-packages": list[str],
+        "requested-local-fileoverride-packages": list[str],
+        "base-remote-replacements": Json,
+        "base-local-replacements": list[Json],
+        "requested-base-local-replacements": list[str],
+        "base-removals": list[Json],
+        "requested-base-removals": list[str],
+    },
+    total=False,
+)
+
+
+def is_deployment(d: object) -> TypeIs[Deployment]:
+    """A deployment as cst_core.domain.ostree hands it (a JSON object, kept as it is)."""
+    return isinstance(d, dict)
+
+
 # (booted, pending, error) of ostree_deployments.
 type OstreeAnswer = tuple[Deployment | None, Deployment | None, str]
 # (name, epoch, version, release, arch) of a package, from parse_nevra.
@@ -340,9 +394,9 @@ def describe(d: Deployment) -> str:
     return f"pending deployment {ver} (next boot)"
 
 
-def unit_results(scope: str, units: list[str]) -> Iterator[Result]:
+def unit_results(scope: UnitScope, units: list[str]) -> Iterator[Result]:
     """Yield ok/WARN/info Results for failed systemd units in system or user scope."""
-    user = scope == "user"
+    user = scope == UnitScope.USER
     sysctl = "systemctl --user" if user else "sudo systemctl"
     journal = "journalctl --user" if user else "journalctl"
     real = [u for u in units if not TRANSIENT.match(u)]
@@ -396,8 +450,8 @@ def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
 def parse_unalloc_thresholds_text(text: str) -> tuple[int, int] | None:
     """Extract (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB) from btrfs-health-check's source: the bash version's
     `NAME=50` lines, or the Python version's `NAME: Final = 50` (btrfs/health_check/domain.py)."""
-    w = re.search(r"^UNALLOC_MIN_GIB(?:=|: Final = )(\d+)\b", text, re.M)
-    c = re.search(r"^UNALLOC_CRIT_GIB(?:=|: Final = )(\d+)\b", text, re.M)
+    w = re.search(r"^UNALLOC_MIN_GIB(?:=|: Final = )(\d+)\b", text, re.MULTILINE)
+    c = re.search(r"^UNALLOC_CRIT_GIB(?:=|: Final = )(\d+)\b", text, re.MULTILINE)
     if w and c:
         return int(w.group(1)), int(c.group(1))
     return None
@@ -436,9 +490,7 @@ def read_intended(text: str) -> list[tuple[str, ...]]:
             f = shlex.split(line)
         except ValueError:
             continue
-        if len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr"):
-            out.append(tuple(f))
-        elif len(f) == 4 and f[0] == "cgw":
+        if (len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr")) or (len(f) == 4 and f[0] == "cgw"):
             out.append(tuple(f))
     return out
 
@@ -456,8 +508,8 @@ def cpu_time(secs: float | None) -> str:
     """Human-readable CPU-seconds (and CPU-hours above 1 hour)."""
     if secs is None:
         return "CPU time unknown"
-    if secs >= 3600:
-        return f"{secs:,.0f} CPU-seconds ({secs / 3600:.1f} CPU-hours)"
+    if secs >= HOUR:
+        return f"{secs:,.0f} CPU-seconds ({secs / HOUR:.1f} CPU-hours)"
     return f"{secs:,.0f} CPU-seconds"
 
 
@@ -507,7 +559,7 @@ def parse_offered_features_xml(xml_text: str) -> tuple[set[str | None] | None, s
 
 def summary(results: Sequence[tuple[str, Result]]) -> tuple[str, int]:
     """Format the doctor summary line and return (line, exit_code)."""
-    counts = {s: 0 for s in SEVERITY}
+    counts = dict.fromkeys(SEVERITY, 0)
     for _, r in results:
         counts[r.status] += 1
     worst = max((SEVERITY[r.status] for _, r in results), default=0)
@@ -516,19 +568,19 @@ def summary(results: Sequence[tuple[str, Result]]) -> tuple[str, int]:
     return line, (1 if worst >= SEVERITY[WARN] else 0)
 
 
-def parse_args(argv: Sequence[str]) -> tuple[str, bool]:
-    """Parse `cst doctor` CLI flags into ('help'|'run', brief)."""
-    if argv and argv[0] in ("help", "-h", "--help"):
+def parse_args(argv: Sequence[str]) -> tuple[DoctorCommand, bool]:
+    """Parse `cst doctor` CLI flags into (help or run, brief)."""
+    if argv and argv[0] in (DoctorCommand.HELP, "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
-        return "help", False
+        return DoctorCommand.HELP, False
     brief = False
     for a in argv:
         if a == "--brief" and not brief:
             brief = True
         else:
             raise Usage(f"unknown argument '{a}'")
-    return "run", brief
+    return DoctorCommand.RUN, brief
 
 
 def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:
@@ -576,8 +628,8 @@ def unit_exec_paths(text: str, home: str) -> list[str]:
         key, sep, value = line.strip().partition("=")
         if not sep or key.strip() not in _EXEC_COMMANDS:
             continue
-        for word in value.split():
-            word = word.lstrip("-@:+!|")
+        for raw in value.split():
+            word = raw.lstrip("-@:+!|")
             if word.startswith("%h/") and home:
                 word = home.rstrip("/") + word[2:]
             if word.startswith(roots) and word not in out:

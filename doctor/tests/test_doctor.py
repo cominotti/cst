@@ -30,7 +30,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from typing import Protocol
+from typing import Protocol, Self, override
 import types
 import unittest
 from unittest import mock
@@ -86,7 +86,7 @@ from vm.wiring import vm_settings
 class _ScandirIter(Protocol):
     def __iter__(self) -> Iterator[os.DirEntry[str]]: ...
     def __next__(self) -> os.DirEntry[str]: ...
-    def __enter__(self) -> _ScandirIter: ...
+    def __enter__(self) -> Self: ...
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object, /) -> None: ...
     def close(self) -> None: ...
 
@@ -155,6 +155,7 @@ exec "$@"
 class Scratch(unittest.TestCase):
     """A scratch host root, stub commands, and helpers to run the doctor."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-doctor-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -256,6 +257,7 @@ class Scratch(unittest.TestCase):
 
 # ---- names and versions ------------------------------------------------------------------------
 class ClassifyTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         with open(os.path.join(FIX, "db-booted.txt")) as f:
             self.pkgs = [ln.strip() for ln in f if ln.startswith(" ")]
@@ -1351,7 +1353,7 @@ CPU_FEATURES = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry
 CAPS_QEMU11 = (
     "<domainCapabilities><cpu><mode name='host-passthrough' supported='yes'/>"
     "<mode name='host-model' supported='yes'><model>Arrow</model>"
-    + "".join(f"<feature policy='require' name='{n}'/>" for n in CPU_FEATURES + ("invtsc",))
+    + "".join(f"<feature policy='require' name='{n}'/>" for n in (*CPU_FEATURES, "invtsc"))
     + "</mode></cpu></domainCapabilities>\n"
 )
 CAPS_QEMU10 = (
@@ -1376,6 +1378,7 @@ class GameProfileTest(Scratch):
     """The cpu check: drift of the game profile's settings (cpu/game-profile
     records them in /run/cpu-setup/game.intended)."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.run_dir = os.path.join(self.root, "run", "cpu-setup")
@@ -1566,6 +1569,7 @@ class UserManagerBoxesTest(Scratch):
     does not know (WARN), systemd-run jobs straight in app.slice (info). Reads
     a fixture /sys/fs/cgroup only."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.ucg = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", "user-1000.slice", "user@1000.service")
@@ -1709,6 +1713,7 @@ class UserManagerBoxesTest(Scratch):
 
 
 class VmTest(Scratch):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.virsh = os.path.join(self.tmp, "virsh")
@@ -2373,6 +2378,7 @@ class CommandLineTest(Scratch):
         calls: list[str] = []
 
         class Tools(doc_adapters.VmTools):
+            @override
             def knobs(self, path: str) -> dict[str, bool]:
                 calls.append(path)
                 return {"VM_NOCOW": False}
@@ -2421,6 +2427,7 @@ class InstallAreaTest(Scratch):
     """The install area: the install records under the fixture root (written by the real installer's
     use case, staged there), the files as they are, and this checkout."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.host = doc_adapters.Host(self.env, repo=REPO)
@@ -2749,7 +2756,7 @@ class HermeticTest(Scratch):
             spawned = (
                 [a for a in args[2:] if not a.startswith("--env=")] if args[:2] == ["flatpak-spawn", "--host"] else []
             )
-            names = [args[0]] + spawned[:1]
+            names = [args[0], *spawned[:1]]
             found = [(n, shutil.which(n, path=path)) for n in names]
             seen.extend(found)
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
@@ -2776,6 +2783,7 @@ class HermeticTest(Scratch):
         self.assertEqual(crashed, [])
         return seen
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.virsh_dir = os.path.join(self.tmp, "virsh")
@@ -2795,6 +2803,7 @@ class CstIntegrationTest(Scratch):
     """`cst doctor` and the doctor section of `cst status`, on a copy of cst
     with no module scripts (so status runs no module and never asks sudo)."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
@@ -2932,6 +2941,7 @@ class DoctorFactsTest(unittest.TestCase):
     """What several checks ask (the domains, each definition, rpm-ostree) is
     asked once per Host and kept by the application, not on the host port."""
 
+    @override
     def setUp(self) -> None:
         self.calls: list[tuple[str, ...]] = []
 
@@ -2946,7 +2956,10 @@ class DoctorFactsTest(unittest.TestCase):
                 calls.append(args)
                 return CommandResult(0, "win\n" if args[0] == "list" else "<domain/>", "")
 
-        mock.patch.object(host, "virsh", lambda *, read_only: Virsh()).start()
+        def virsh(*, read_only: bool) -> Virsh:
+            return Virsh()
+
+        mock.patch.object(host, "virsh", virsh).start()
         self.addCleanup(mock.patch.stopall)
         return host
 
