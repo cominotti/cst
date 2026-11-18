@@ -50,6 +50,11 @@ jobs:
           checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
           enable-cache: 'false'
 
+      # Known vulnerabilities in the locked dev tools (uv.lock, every group). It
+      # needs the network, so it runs here and not in the fast gates.
+      - name: Audit the locked dev tools (uv audit)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd ci uv-audit
+
       - name: Audit invowk module security (JSON report)
         # As root, like the summary step it replaces: the report goes into the
         # checkout and the summary into GITHUB_STEP_SUMMARY, which the ci user cannot write.

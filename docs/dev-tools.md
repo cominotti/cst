@@ -63,8 +63,10 @@ the environment `tests/uv-dev` made instead
 (`${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>/bin/python`, after one
 `tests/uv-dev ruff --version`), or delete the `.venv/` it made; `.idea/` is
 in `.gitignore`. No CST command makes one: `tests/uv-dev` is the only
-place in the repository that runs uv on this project (`uv run`; the invowk
-tasks, `tests/ruff_budget.py` and CI all go through it; `cst toolchains`
+place in the repository that runs a tool through uv on this project (`uv run`; the invowk
+tasks, `tests/ruff_budget.py` and CI all go through it; the one other uv
+command on it is `uv audit`, below, which reads `uv.lock` and makes no
+environment; `cst toolchains`
 runs only `uv --version` and `uv cache prune`, outside any project). uv writes a `CACHEDIR.TAG` into a `.venv/`
 it makes, so new snapshots drop one that uv made (unless
 `SNAPSHOT_EXCLUDE_CACHES=no`, [btrfs/SNAPSHOTS.md](../btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
@@ -423,6 +425,21 @@ request. `git blame` skips the whole commit, so any config or doc lines it
 changed are skipped too (#16 also added the format gate to the config and
 the docs; #32, the SPDX header line in every file, also added the header
 gate and its fixer).
+
+## Known vulnerabilities in the pins (`uv audit`)
+
+`invowk cmd ci uv-audit` runs `uv audit --locked --preview-features
+audit-command`: every package of `uv.lock`, in every group (`dev`,
+`mutation`, `coverage`), is looked up in the public vulnerability database,
+and a known vulnerability fails it. `--locked` stops it when `uv.lock` does
+not match `pyproject.toml`; `--preview-features audit-command` only silences
+the notice that the command is new in uv 0.12. It needs the network, so the
+nightly workflow runs it (in its static gates job) and `check` does not.
+When it fails, upgrade that pin (below), or the tool that pulls it in.
+`tests/test_workflow_audit.py` fails when the nightly stops running the task
+or the task drops `--locked` or leaves packages out (`--no-group`,
+`--only-group`, `--no-dev`, `--only-dev`, `--no-default-groups`,
+`--ignore`, `--frozen`).
 
 ## Upgrading a pin
 

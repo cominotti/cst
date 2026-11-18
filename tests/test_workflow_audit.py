@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Static gate: nothing switches the workflow audit off.
+"""Static gate: nothing switches the workflow audit or the nightly's uv audit off.
 
 `invowk cmd test workflows` (part of `invowk cmd check`) runs zizmor offline
 on .github: the workflows, the composite actions and dependabot.yml. Its
@@ -11,6 +11,9 @@ what zizmor itself cannot:
   every file, and zizmor then counts none of its findings as ignored);
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
+- the nightly runs `invowk cmd ci uv-audit`, and that task runs
+  `uv audit --locked` on every dependency group (no --no-group,
+  --only-group, --no-dev, --only-dev, --ignore, --frozen);
 - `invowk cmd check` runs `invowk cmd test workflows`, and that task gives
   zizmor --offline, the config file and --strict-collection (without it, a
   file zizmor cannot parse is skipped with a warning and the audit passes),
@@ -35,6 +38,16 @@ CONFIG = ".github/zizmor.yml"
 INVOWKFILE = "cst.invowkmod/invowkfile.cue"
 AUDIT_COMMAND = "tests/uv-dev zizmor"
 FILTER_OPTIONS = ("--min-severity", "--min-confidence", "--persona", "--collect")
+NIGHTLY = ".github/workflows/nightly.yml"
+UV_AUDIT_FILTERS = (
+    "--no-group",
+    "--only-group",
+    "--no-dev",
+    "--only-dev",
+    "--no-default-groups",
+    "--ignore",
+    "--frozen",
+)
 INLINE_IGNORE = re.compile(r"zizmor\s*:\s*ignore\b")
 _KEY = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
 
@@ -121,6 +134,20 @@ def task_problems(cue: str) -> list[str]:
     return out
 
 
+def uv_audit_problems(cue: str, nightly: str) -> list[str]:
+    """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes)."""
+    out: list[str] = []
+    if not any(line.strip().endswith("invowk cmd ci uv-audit") for line in nightly.splitlines()):
+        out.append(f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`")
+    words = (task_script(cue, "ci uv-audit") or "").split()
+    if words[:2] != ["uv", "audit"] or "--locked" not in words:
+        out.append(f"{INVOWKFILE}: the task `ci uv-audit` must run uv audit --locked")
+    for option in UV_AUDIT_FILTERS:
+        if any(w == option or w.startswith(option + "=") for w in words):
+            out.append(f"{INVOWKFILE}: `ci uv-audit` passes {option}, which leaves packages out of the audit")
+    return out
+
+
 GOOD_CONFIG = """# header
 rules:
   github-env:
@@ -144,8 +171,13 @@ GOOD_CUE = '''cmds: [
 		name:        "test workflows"
 		script: {content: "tests/uv-dev zizmor --offline --strict-collection --config .github/zizmor.yml .github"}
 	},
+	{
+		name:        "ci uv-audit"
+		script: {content: "uv audit --locked --preview-features audit-command"}
+	},
 ]
 '''
+GOOD_NIGHTLY = "      - name: x\n        run: runuser -u ci -- invowk cmd ci uv-audit\n"
 
 
 class WorkflowAuditTest(unittest.TestCase):
@@ -220,16 +252,39 @@ class WorkflowAuditTest(unittest.TestCase):
             [f"{INVOWKFILE}: the task `test workflows` does not run {AUDIT_COMMAND}"],
         )
 
+    def test_the_nightly_audits_every_locked_package(self) -> None:
+        self.assertEqual(uv_audit_problems(GOOD_CUE, GOOD_NIGHTLY), [])
+        self.assertEqual(
+            uv_audit_problems(GOOD_CUE, "      - run: invowk cmd check\n"),
+            [f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`"],
+        )
+        self.assertEqual(
+            uv_audit_problems(GOOD_CUE.replace("uv audit --locked", "uv audit"), GOOD_NIGHTLY),
+            [f"{INVOWKFILE}: the task `ci uv-audit` must run uv audit --locked"],
+        )
+        for option in ("--no-group mutation", "--only-dev", "--ignore=GHSA-1", "--frozen"):
+            with self.subTest(option=option):
+                self.assertEqual(
+                    uv_audit_problems(GOOD_CUE.replace("--locked", f"--locked {option}"), GOOD_NIGHTLY),
+                    [
+                        f"{INVOWKFILE}: `ci uv-audit` passes {option.split('=')[0].split()[0]}, "
+                        "which leaves packages out of the audit"
+                    ],
+                )
+
     def test_the_repository_keeps_the_audit_on(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, CONFIG), encoding="utf-8") as fh:
             config = fh.read()
         with open(os.path.join(REPO, INVOWKFILE), encoding="utf-8") as fh:
             cue = fh.read()
+        with open(os.path.join(REPO, NIGHTLY), encoding="utf-8") as fh:
+            nightly = fh.read()
         found = (
             config_problems(config)
             + inline_ignores(REPO, [f for f in files if f.startswith(".github/")])
             + task_problems(cue)
+            + uv_audit_problems(cue, nightly)
         )
         self.assertEqual(found, [], "the workflow audit misses something (see docs/dev-tools.md):\n" + "\n".join(found))
 

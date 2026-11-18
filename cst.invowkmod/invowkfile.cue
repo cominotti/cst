@@ -424,6 +424,20 @@ cmds: [
 		}]
 	},
 	{
+		// Needs the network (the vulnerability database): the nightly runs it, `check` does not.
+		name:        "ci uv-audit"
+		category:    "ci"
+		description: "Check every package of uv.lock (all dependency groups) against the known vulnerabilities, with uv audit --locked (needs the network; the nightly runs it)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "uv audit --locked --preview-features audit-command"}
+		}]
+	},
+	{
 		name:        "ci pin-invowk"
 		category:    "ci"
 		description: "Print the archive and binary SHA256 pins for .github/actions/setup-invowk (downloads to a temp dir; verifies cosign)"
