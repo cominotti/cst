@@ -107,7 +107,9 @@ def timer_off(timers: TimerFilesPort, systemd: SystemdPort, vm: str, report: Cal
         elif st != "missing":
             timers.remove(p)
             report(TimerStep("removed", p))
-    timers.forget([p for p, st in states.items() if st not in ("missing", "masked")])
+    # A file already missing is forgotten too: removed by hand, or by an earlier off that stopped before
+    # its forget (a rerun then clears the record).
+    timers.forget([p for p, st in states.items() if st != "masked"])
     _reload(systemd)  # best effort
     return []
 

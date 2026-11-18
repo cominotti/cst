@@ -1954,7 +1954,9 @@ class TimerUseCaseTest(unittest.TestCase):
         timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
         steps: list[vm_domain.TimerStep] = []
         self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", steps.append), [])
-        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p", "reload"])
+        # /u already gone (removed by hand, or an earlier off stopped after its removal): forgotten too,
+        # or the record keeps it and doctor warns "missing" for a timer that is off.
+        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p /u", "reload"])
         self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
         # The last daemon-reload is best effort: its failure leaves the files removed.
         timers = FakeTimers({"/p": "ok"}, [self.unit])
