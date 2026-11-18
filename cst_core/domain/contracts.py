@@ -85,7 +85,12 @@ def first_line_version(text: str, magic: str) -> int | None:
     words = text.split("\n", 1)[0].split()
     if not words or words[0] != magic:
         return 0
-    return int(words[1]) if len(words) == 2 and re.fullmatch("[0-9]+", words[1]) else None
+    if len(words) != 2 or not re.fullmatch("[0-9]+", words[1]):
+        return None
+    try:
+        return int(words[1])
+    except ValueError:  # more digits than int() converts (sys.get_int_max_str_digits): no version either
+        return None
 
 
 def version_of(data: object, field: str) -> int | None:

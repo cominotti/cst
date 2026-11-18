@@ -1324,6 +1324,7 @@ class StateContractsTest(unittest.TestCase):
             "cst-game-intended 1 2\n",
             "cst-game-intended \u00b2\n",  # a digit for str.isdigit, not for int()
             "cst-game-intended \u0661\n",  # an Arabic-Indic one: int() reads it, the format does not
+            "cst-game-intended " + "9" * 5000 + "\n",  # more digits than int() converts: ValueError
         ):
             with self.subTest(text=text):
                 self.assertIsNone(first_line_version(text, "cst-game-intended"))
