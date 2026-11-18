@@ -1343,6 +1343,8 @@ case "${1:-}" in
     configure) configure ;;
     planned-left) planned_left ;;
     busy) shift; busy "$@" ;;
-    convert-one) lock -x; convert_single "${2:?usage: btrfs-snapshot convert-one PATH}" ;;
+    convert-one)
+        [[ -n "${2:-}" ]] || { echo "usage: btrfs-snapshot convert-one PATH" >&2; exit 2; }
+        lock -x; convert_single "$2" ;;
     *) echo "usage: btrfs-snapshot hourly|nas|convert|convert-boot|list [--json]|caches [--json]|prune [--dry-run] [--allow-mass-delete]|purge|planned-left|busy [--home DIR] PATH...|convert-one PATH" >&2; exit 2 ;;
 esac

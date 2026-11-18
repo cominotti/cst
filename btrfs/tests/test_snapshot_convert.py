@@ -486,9 +486,14 @@ class ConvertOneTest(Base):
         )
 
     def test_without_a_path(self) -> None:
-        r = self.run_prog("convert-one")
-        self.assertEqual((r.returncode, r.stdout), (1, ""))
-        self.assertTrue(r.stderr.endswith(": 2: usage: btrfs-snapshot convert-one PATH\n"), r.stderr)
+        # A usage error (exit 2), told before the lock is taken: it does not wait for another run.
+        # Before, bash's own "${2:?}" message and exit 1, after the lock.
+        with self.hold_lock():
+            for args in ((), ("",)):
+                with self.subTest(args):
+                    p = self.start_prog("convert-one", *args)
+                    out, err = p.communicate(timeout=30)  # the old code waited here for the lock
+                    self.assertEqual((p.returncode, out, err), (2, "", "usage: btrfs-snapshot convert-one PATH\n"))
 
     def test_waits_for_the_lock(self) -> None:
         bulk = self.tree("Bulk")
