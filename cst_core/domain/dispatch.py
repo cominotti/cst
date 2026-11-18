@@ -275,7 +275,7 @@ def script_help(script_text: str, prog: str, *, words: str = "[args]") -> str:
         if number < 2:
             continue
         if "SPDX-License-Identifier:" not in line:
-            out.append(line[2:] if line.startswith("# ") else line[1:] if line.startswith("#") else line)
+            out.append(line[2:] if line.startswith("# ") else line.removeprefix("#"))
         if number > 2 and not line:
             break
     return "\n".join(out) + f"\nUsage: {prog} <command> {words}\n"

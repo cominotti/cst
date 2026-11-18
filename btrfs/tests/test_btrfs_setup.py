@@ -68,7 +68,7 @@ def assignment(name: str) -> str:
     """The line (or lines, for an array) that sets NAME at the top of btrfs-setup.sh."""
     with open(SETUP) as f:
         text = f.read()
-    m = re.search(rf"^{name}=(\(.*?\)|[^\n]*)$", text, re.M | re.S)
+    m = re.search(rf"^{name}=(\(.*?\)|[^\n]*)$", text, re.MULTILINE | re.DOTALL)
     if m is None:
         raise AssertionError(f"{name}= not found in {SETUP}")
     return m.group(0)
@@ -983,7 +983,7 @@ def service_lines(unit: str) -> list[str]:
     """The [Service] lines of btrfs/units/UNIT as shipped, without blanks and comments."""
     with open(os.path.join(BTRFS, "units", unit)) as f:
         text = f.read()
-    m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
     assert m is not None, text
     return [ln for ln in m.group(1).splitlines() if ln and not ln.startswith("#")]
 

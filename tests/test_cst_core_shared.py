@@ -1207,7 +1207,7 @@ class ShellAssignmentsTest(unittest.TestCase):
     def test_the_files_cst_writes_and_ships_have_no_problem(self) -> None:
         # The upgrade path: every file CST generates or ships reads without a problem, as bash reads it.
         with open(os.path.join(REPO, "btrfs", "setup-snapshots.bash"), encoding="utf-8") as fh:
-            snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.S)
+            snap = re.search(r"<<'DEFAULTS'\n(.*?)\nDEFAULTS\n", fh.read(), re.DOTALL)
         assert snap is not None
         generated = cpu_setup_conf_lines("alice")  # what cst cpu install writes
         # snapshots.conf as the real writer (snap_conf_set) leaves it, blanks and a ' included.

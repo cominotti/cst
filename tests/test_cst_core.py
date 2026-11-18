@@ -867,7 +867,7 @@ class CstCommandTest(unittest.TestCase):
         self.addCleanup(proc.wait, 30)
         self.addCleanup(proc.kill)  # cleanups run last first: kill, wait, close
         out = b""
-        while not (started := re.search(rb"^module (\d+)$", out, re.M)):
+        while not (started := re.search(rb"^module (\d+)$", out, re.MULTILINE)):
             self.assertTrue(select.select([r], [], [], 10)[0], f"no module line: {out!r}")
             out += os.read(r, 4096)
         # The module sleeps, cst waits for it: neither writes while the pipe is non-blocking.

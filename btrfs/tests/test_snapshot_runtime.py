@@ -30,7 +30,7 @@ def shell_function(path: str, name: str) -> str:
     """The definition of the shell function NAME in PATH ('name() {' to '}')."""
     with open(path) as f:
         text = f.read()
-    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.M | re.S)
+    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL)
     if m is None:
         raise AssertionError(f"{name}() not found in {path}")
     return m.group(0)

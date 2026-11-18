@@ -54,7 +54,7 @@ DISPATCH: Final = 'case "${1:-}" in'
 # The section comments of the install path; the argument dispatch is the
 # part between the prelude and "guards".
 SECTIONS: Final = ("guards", "files", "self-test", "initramfs overlay")
-SECTION: Final = re.compile(r"^# -+ (" + "|".join(map(re.escape, SECTIONS)) + r") -+$", re.M)
+SECTION: Final = re.compile(r"^# -+ (" + "|".join(map(re.escape, SECTIONS)) + r") -+$", re.MULTILINE)
 
 RULE: Final = "/etc/udev/rules.d/65-btrfs-last-resort.rules"
 SERVICE: Final = "/etc/systemd/system/btrfs-last-resort@.service"
@@ -96,7 +96,7 @@ write_if_changed() {
     [[ "${dest}" == "${R}"/* ]] || dest="${R}${dest}"
     real_write_if_changed "${dest}" "$2"
 }"""
-REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.M))
+REPOINTED: Final = frozenset(re.findall(r"^([A-Z_]+)=", REPOINT, re.MULTILINE))
 # sha256 of the generated files as the previous version of the script
 # wrote them (main at a2cbb82, the version installed today): an install of
 # it must stay current.
@@ -431,7 +431,7 @@ R="{self.root}"
     # ---------------------------------------------------- harness checks --
     def test_every_path_setting_is_pointed_into_the_fake_root(self) -> None:
         prelude = script_parts()["prelude"]
-        settings = set(re.findall(r"^([A-Z_]+)=", prelude, re.M))
+        settings = set(re.findall(r"^([A-Z_]+)=", prelude, re.MULTILINE))
         self.assertEqual(settings - NOT_PATHS, REPOINTED)
         out = self.ok(
             "for v in " + " ".join(sorted(REPOINTED)) + ' ; do declare -n ref="$v"; printf "%s\\n" "${ref[@]}"; done'

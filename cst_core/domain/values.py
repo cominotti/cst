@@ -141,7 +141,7 @@ class Duration:
     def parse_float(cls, spec: str, *, allow_unitless: bool = False, positive_only: bool = False) -> float:
         """Parse a possibly fractional duration into seconds as float."""
         pattern = r"\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*" if allow_unitless else r"\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*"
-        m = re.fullmatch(pattern, spec, re.I)
+        m = re.fullmatch(pattern, spec, re.IGNORECASE)
         if not m:
             raise DomainValidationError(f"invalid duration {spec!r}")
         unit = m.group(2).lower() or "s"

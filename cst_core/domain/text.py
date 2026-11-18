@@ -203,12 +203,14 @@ def parse_shell_assignments(text: str, *, bash_sourced: bool = True) -> ShellAss
 # btrfs/setup-snapshots.bash) left values there: plain characters and backslash-escaped
 # ones, or $'...' with the escapes %q uses. Neither form expands anything in bash (no
 # unescaped $, backtick, quote, blank or command syntax; the ~ rule is checked apart).
-_OLD_WRITER_LINE: Final = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.S)
-_PRINTF_Q_WORD: Final = re.compile(r"(?:[^ \t\n\r\f\v'\"\\$`;&|<>()]|\\.)+", re.S)
+_OLD_WRITER_LINE: Final = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
+_PRINTF_Q_WORD: Final = re.compile(r"(?:[^ \t\n\r\f\v'\"\\$`;&|<>()]|\\.)+", re.DOTALL)
 # Possessive quantifiers: an escape takes as many octal or hex digits as bash takes (up to
 # 3 or 2) and is never split again, so a line with no closing quote fails in linear time
 # instead of trying every way to cut each \NNN (exponential backtracking).
-_PRINTF_Q_ANSI_C: Final = re.compile(r"\$'((?:[^'\\]|\\(?:[abeEfnrtv\\'\"?]|[0-7]{1,3}+|x[0-9A-Fa-f]{1,2}+))*+)'", re.S)
+_PRINTF_Q_ANSI_C: Final = re.compile(
+    r"\$'((?:[^'\\]|\\(?:[abeEfnrtv\\'\"?]|[0-7]{1,3}+|x[0-9A-Fa-f]{1,2}+))*+)'", re.DOTALL
+)
 _ANSI_C_ESCAPE: Final = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9A-Fa-f]{1,2}))")
 _ANSI_C_CHARS: Final = {
     "a": 7, "b": 8, "e": 27, "E": 27, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63,
@@ -240,7 +242,7 @@ def _printf_q_value(token: str) -> str | None:
         return _ansi_c_value(m.group(1))
     if not _PRINTF_Q_WORD.fullmatch(token) or token.startswith("~") or ":~" in token:
         return None
-    return re.sub(r"\\(.)", lambda e: e.group(1), token, flags=re.S)
+    return re.sub(r"\\(.)", lambda e: e.group(1), token, flags=re.DOTALL)
 
 
 # printf %q's rules (bash 5): the characters it puts a backslash before, and the ones that make it
