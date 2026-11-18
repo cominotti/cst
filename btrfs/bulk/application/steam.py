@@ -250,9 +250,11 @@ def app_held(b: Bulk, app: SteamApp, info: dict[str, str], *, explicit: bool) ->
         return True
     sa = os.path.join(steam_roots(b.ctx)[0], "steamapps")
     busy = [info["mid"]] if info["mid"] else []
-    for rel in (f"downloading/{appid}", f"temp/{appid}", f"workshop/downloads/{appid}", f"workshop/temp/{appid}"):
-        if nonempty(b, os.path.join(sa, rel)):
-            busy.append(f"steamapps/{rel} is not empty")
+    busy.extend(
+        f"steamapps/{rel} is not empty"
+        for rel in (f"downloading/{appid}", f"temp/{appid}", f"workshop/downloads/{appid}", f"workshop/temp/{appid}")
+        if nonempty(b, os.path.join(sa, rel))
+    )
     if busy:
         app["state"], app["why"] = SteamAppState.UPDATE, "; ".join(busy)
         return True

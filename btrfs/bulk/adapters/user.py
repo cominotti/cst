@@ -126,8 +126,7 @@ def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
             out.append((rel, "f", st.st_size, st.st_mtime_ns, mode, ""))
         elif stat.S_ISDIR(m):
             out.append((rel, "d", 0, st.st_mtime_ns, mode, ""))
-            for n in os.listdir(path):
-                stack.append((os.path.join(path, n), f"{rel}/{n}" if rel else n))
+            stack.extend((os.path.join(path, n), f"{rel}/{n}" if rel else n) for n in os.listdir(path))
         else:
             out.append((rel, "o", 0, st.st_mtime_ns, mode, str(stat.S_IFMT(m))))
     return sorted(out)
