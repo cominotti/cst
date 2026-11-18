@@ -1775,10 +1775,8 @@ class RustcWrapperTest(unittest.TestCase):
                 self.assertEqual(self.who(self.rustc(), "x"), ["systemd-run", "sccache", "rustc"], label)
         self.assertFalse(os.path.exists(pwned))
 
-    def test_parallel_compiles_try_a_failing_start_once(self) -> None:
-        # The compiles that waited for the lock of a failed start do not try
-        # again: one systemd-run for 8 parallel compiles.
-        self.user_manager(start_fails=True)
+    def run_parallel(self, n: int) -> None:
+        """Run N wrappers at once (cargo's parallel rustc), each to exit 0; the log starts empty."""
         assert self.sh is not None
         env = self.wrapper_env()
         open(self.log, "w").close()
@@ -1791,11 +1789,17 @@ class RustcWrapperTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            for i in range(8)
+            for i in range(n)
         ]
         for p in procs:
             _, err = p.communicate(timeout=60)
             self.assertEqual(p.returncode, 0, err)
+
+    def test_parallel_compiles_try_a_failing_start_once(self) -> None:
+        # The compiles that waited for the lock of a failed start do not try
+        # again: one systemd-run for 8 parallel compiles.
+        self.user_manager(start_fails=True)
+        self.run_parallel(8)
         who = [c["who"] for c in self.calls()]
         self.assertEqual((who.count("systemd-run"), who.count("sccache"), who.count("rustc")), (1, 8, 8), who)
 
@@ -1893,23 +1897,7 @@ class RustcWrapperTest(unittest.TestCase):
         # scope's folder exists (start_delay): without the lock, or with the
         # folder alone as the test, each would start its own server.
         self.user_manager(start_delay="0.5")
-        assert self.sh is not None
-        env = self.wrapper_env()
-        open(self.log, "w").close()
-        procs = [
-            subprocess.Popen(
-                [self.sh, self.script, self.rustc(), "--crate-name", f"c{i}"],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            for i in range(8)
-        ]
-        for p in procs:
-            _, err = p.communicate(timeout=60)
-            self.assertEqual(p.returncode, 0, err)
+        self.run_parallel(8)
         calls = self.calls()
         who = [c["who"] for c in calls]
         self.assertEqual((who.count("systemd-run"), who.count("start")), (1, 1), who)
