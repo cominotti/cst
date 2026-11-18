@@ -85,7 +85,7 @@ def parse_psi(path: str) -> list[float | int] | None:
         fields = line.split()
         if not fields or fields[0] not in ("some", "full"):
             continue
-        vals = {k: v for k, v in (f.split("=", 1) for f in fields[1:] if "=" in f)}
+        vals = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
         idx = 0 if fields[0] == "some" else 2
         res[idx] = float(vals.get("avg10", 0))
         res[idx + 1] = int(vals.get("total", 0))
