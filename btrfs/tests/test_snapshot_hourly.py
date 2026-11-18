@@ -18,7 +18,7 @@ import subprocess
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import GIB, SCRIPT, USAGE, RuntimeTest, log, read
+from btrfs.tests.snapshot_fakes import GIB, SCRIPT, UMASK, USAGE, RuntimeTest, log, read
 from tests.test_module_routing import userns_root
 
 HOME_POLICY = "72h 7d 4w 3m"
@@ -454,6 +454,24 @@ class HourlyTest(Base):
             (r.returncode, r.stdout), (0, log(5, "another conversion/snapshot run is active; skipped") + "\n")
         )
         self.assertEqual(self.calls_but_hostname(), [])
+
+
+class StateRecordTest(Base):
+    def test_last_ok_is_replaced_whole_never_rewritten_in_place(self) -> None:
+        # The records (last-ok, nas-last-ok, nas-repo-id, ...) were truncated and rewritten in place:
+        # a power loss or ENOSPC in between left an empty file (health-check then stopped checking
+        # staleness; an empty nas-repo-id starts every NAS record over). Now a new file is renamed
+        # over the old one: another link to the old file keeps the old content.
+        last_ok = self.write(self.state_file("last-ok"), "1\n")
+        kept = os.path.join(self.tmp, "old-last-ok")
+        os.link(last_ok, kept)
+        self.core(snapshot={})
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertNotEqual(self.read_state("last-ok"), "1\n")
+        self.assertEqual(read(kept), "1\n")
+        self.assertEqual(self.mode(last_ok), 0o666 & ~UMASK)
 
 
 class ClosedStdoutTest(Base):

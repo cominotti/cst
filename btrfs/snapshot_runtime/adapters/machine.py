@@ -27,7 +27,7 @@ from btrfs.snapshot_runtime.domain import (
     settings_problem_line,
     sources,
 )
-from cst_core.adapters.files import LocalFileSystemAdapter
+from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import PENDING_ALERTS, Notifier, Urgency as NotifyUrgency
@@ -278,10 +278,11 @@ class SnapshotRun:
 
     @staticmethod
     def write(path: str, text: str) -> None:
-        """echo/printf ... >PATH (umask mode); a failure said on stderr, as bash's redirection."""
+        """echo/printf ... >PATH, but replaced whole: a temporary file, synced, renamed over it, so a
+        crash, a power loss or a full disk leaves the old record or the new one, never an empty or
+        cut one (umask mode, as a new file gets). A failure is said on stderr, as bash's redirection."""
         try:
-            with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
-                f.write(text)
+            write_atomic(path, text, mode="umask", durable="file", relabel=False)
         except OSError as e:
             print(f"{TAG}: {path}: {e.strerror}", file=sys.stderr, flush=True)
 
