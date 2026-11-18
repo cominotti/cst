@@ -920,7 +920,7 @@ class VirshAdapterTest(unittest.TestCase):
 
     def test_options_reach_the_runner(self) -> None:
         runner = _RecordingRunner()
-        virsh = core_adapters.SubprocessVirshAdapter("qemu:///x", runner, on_host=False, decode_errors="strict")
+        virsh = core_adapters.SubprocessVirshAdapter("qemu:///x", runner, on_host=False)
         virsh.call("domstate", "vm1", timeout=15, start_new_session=True)
         argv, opts = runner.calls[-1]
         self.assertEqual(argv, ["virsh", "-c", "qemu:///x", "domstate", "vm1"])
@@ -930,7 +930,6 @@ class VirshAdapterTest(unittest.TestCase):
             "locale_c": True,
             "new_session": True,
             "on_host": False,
-            "decode_errors": "strict",
         }
         self.assertEqual(opts, want)
         ro = core_adapters.SubprocessVirshAdapter(runner=runner, read_only=True)

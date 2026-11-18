@@ -315,8 +315,8 @@ class SubprocessVirshAdapter:
     """VirshPort adapter: `virsh [-r] -c URI ARGS` in the C locale, through a CommandRunnerPort.
 
     on_host: inside a container, virsh runs on the host (flatpak-spawn --host);
-    read_only: -r, for the queries libvirt answers on a read-only connection;
-    decode_errors: what the runner does with output that is not UTF-8.
+    read_only: -r, for the queries libvirt answers on a read-only connection.
+    Output that is not UTF-8 is decoded as the runner does by default (U+FFFD).
     ctx only builds the default runner (the runner decides on_host): a ctx
     next to a runner is refused, since it would be ignored.
     """
@@ -329,7 +329,6 @@ class SubprocessVirshAdapter:
         *,
         on_host: bool = True,
         read_only: bool = False,
-        decode_errors: DecodeErrors = "replace",
     ) -> None:
         if runner is not None and ctx is not None:
             raise ValueError("SubprocessVirshAdapter: ctx only builds the default runner; give the runner its ctx")
@@ -337,7 +336,6 @@ class SubprocessVirshAdapter:
         self._runner = SubprocessCommandRunner(ctx) if runner is None else runner
         self._on_host = on_host
         self._read_only = read_only
-        self._decode_errors: DecodeErrors = decode_errors
 
     def call(
         self,
@@ -355,7 +353,6 @@ class SubprocessVirshAdapter:
             locale_c=True,
             new_session=start_new_session,
             on_host=self._on_host,
-            decode_errors=self._decode_errors,
         )
 
     def domains(self, *, all_domains: bool = True) -> list[VmName]:
