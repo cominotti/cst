@@ -236,10 +236,10 @@ class OrphanTest(RulesBase):
 
     def test_no_workspace_or_no_claim_means_no_orphans(self) -> None:
         self.folder("ee/0123456789abcd", 10)
-        rc, out = self.run_main("prune", "plan")
+        _rc, out = self.run_main("prune", "plan")
         self.assert_no_orphans(out, "~/Workspace not found")
         os.makedirs(self.ws)
-        rc, out = self.run_main("prune", "plan")
+        _rc, out = self.run_main("prune", "plan")
         self.assert_no_orphans(out, "no workspace claims any folder")
         _rc, _out = self.run_main("prune", "apply")
         self.assertTrue(self.present("ee/0123456789abcd"))

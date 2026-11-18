@@ -466,7 +466,7 @@ class SnapshotsSetupTest(Scratch):
     def test_preview_has_no_apply_hint(self) -> None:
         # setup applies the settings itself after the confirmation: its
         # preview must not tell the user to run `config apply` by hand.
-        rc, out = self.run_main("config", "plan")
+        _rc, out = self.run_main("config", "plan")
         self.assertIn("Apply with:", out)  # the plain command still has it
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
