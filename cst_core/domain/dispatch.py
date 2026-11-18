@@ -246,9 +246,9 @@ def step_down_argv(user: str, uid: int, home: str, *, unset: Sequence[str], then
     return ["runuser", "-u", user, "--", "env", *drop, *session, *then]
 
 
-def script_help(script_text: str, prog: str) -> str:
+def script_help(script_text: str, prog: str, *, words: str = "[args]") -> str:
     """A setup script's help: its header from line 2 to the first empty line (the license
-    line left out, "# " taken off), then the usage line. What
+    line left out, "# " taken off), then the usage line ("Usage: PROG <command> WORDS"). What
     `sed -n '2,/^$/{/SPDX-License-Identifier:/!p;}' | sed 's/^# \\{0,1\\}//'` printed."""
     out: list[str] = []
     lines = script_text.split("\n")
@@ -261,4 +261,4 @@ def script_help(script_text: str, prog: str) -> str:
             out.append(line[2:] if line.startswith("# ") else line[1:] if line.startswith("#") else line)
         if number > 2 and not line:
             break
-    return "\n".join(out) + f"\nUsage: {prog} <command> [args]\n"
+    return "\n".join(out) + f"\nUsage: {prog} <command> {words}\n"

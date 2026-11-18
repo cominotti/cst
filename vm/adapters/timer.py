@@ -6,14 +6,17 @@ from collections.abc import Callable, Mapping, Sequence
 import functools
 import os
 
+from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.files import is_masked_unit, owned_file_state_at, unit_file_state_at
 from cst_core.adapters.install import program_installer
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.errors import Refused
-from vm.adapters import TIMER_COMPONENT, systemctl
+from cst_core.ports import UnitName
+from vm.adapters import TIMER_COMPONENT, fault_words, systemctl
 from vm.domain import (
     SERVICE,
     TIMER,
@@ -122,6 +125,13 @@ def timer_file_states(
     return states
 
 
+def timer_property(unit: str, prop: str) -> str:
+    """One property of unit, from the systemd cst-vm runs under (cst_core's show, on_host=False:
+    not the host's from a toolbox), in the C locale, 120 s at most; "" when it cannot answer."""
+    systemd = SystemctlAdapter(SubprocessCommandRunner(words=fault_words), timeout=120, locale_c=True)
+    return systemd.show(UnitName(unit), (prop,), on_host=False).get(prop, "").strip()
+
+
 class TimerFiles:
     """TimerPort on this machine: the files of timer_files (built once, from entry_file, the running
     cst-vm), written through the installer, and systemctl (vm.adapters.systemctl's answers)."""
@@ -171,6 +181,6 @@ class TimerFiles:
         systemctl("daemon-reload")
 
     def schedule(self, unit: str) -> tuple[str, str]:
-        rc, nxt, _ = systemctl("show", "-p", "NextElapseUSecRealtime", "--value", unit)
-        rc2, last, _ = systemctl("show", "-p", "Result", "--value", unit.replace(".timer", ".service"))
-        return (nxt if rc == 0 else ""), (last if rc2 == 0 else "")
+        return timer_property(unit, "NextElapseUSecRealtime"), timer_property(
+            unit.replace(".timer", ".service"), "Result"
+        )

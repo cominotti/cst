@@ -53,6 +53,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLER = os.path.join(REPO, "cst_core", "installer.py")
 LIB = os.path.join(REPO, "cst-install.bash")
 SYSTEM_PYTHON = "/usr/bin/python3"
+# main's (654bbda) btrfs/docker_gc/domain.py, its built-in registry replaced by an invented one.
+LEGACY_GC_DOMAIN = os.path.join(REPO, "tests", "fixtures", "legacy", "btrfs-docker_gc-domain.py@654bbda")
 
 
 def entry(
@@ -495,12 +497,16 @@ class InstallerCliTest(unittest.TestCase):
         self.assertEqual(plan.returncode, 0, plan.stderr)
         self.assertEqual(self.files(), {}, "plan wrote something")
         n = len(select_entries(INSTALL_MANIFEST, module="btrfs"))
-        self.assertEqual(plan.stdout.decode().count("would write: "), n)
+        # And docker-gc's settings, written before its program (nothing installed: none protected).
+        conf = f"{self.stage}/etc/cst/docker-gc.conf"
+        self.assertEqual(plan.stdout.decode().count("would write: "), n + 1)
+        self.assertIn(f"would write: {conf} (from {self.stage}/usr/local/sbin/docker-gc, before", plan.stdout.decode())
         self.assertEqual(self.cli("check", *sel).returncode, 1)
 
         first = self.cli("install", *sel)
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(first.stdout.decode().count("written:   "), n)
+        self.assertEqual(first.stdout.decode().count("written:   "), n + 1)
+        self.assertEqual(first.stdout.decode().splitlines()[0], f"written:   {conf} (DOCKER_GC_PROTECT=)")
         self.assertEqual(self.cli("check", *sel).returncode, 0, "status after apply is not current")
         second = self.cli("install", *sel)
         self.assertEqual(second.stdout.decode().count("unchanged: "), n, second.stdout)
@@ -517,6 +523,69 @@ class InstallerCliTest(unittest.TestCase):
         for d in dests:
             os.unlink(self.stage + d)
         self.assertEqual(self.cli("check", *sel).returncode, 1, "uninstall left files current")
+
+    def stage_old_docker_gc(self) -> str:
+        """main's (654bbda) docker-gc as it installed it: a zipapp whose domain.py has a registry built in."""
+        prog = os.path.join(self.stage, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(prog))
+        with zipfile.ZipFile(prog, "w") as z:
+            z.writestr("__main__.py", "raise SystemExit(1)\n")
+            z.write(LEGACY_GC_DOMAIN, "btrfs/docker_gc/domain.py")
+        os.chmod(prog, 0o755)
+        return prog
+
+    def test_every_install_path_keeps_the_registry_of_an_older_docker_gc(self) -> None:
+        # The installer replaces docker-gc by component, by module, by owner or by name: each time
+        # the settings file is missing, it is first written from the installed copy.
+        conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
+        sets = ["--set", "UUID=u", "--set", "OPTIONS=o", "--set", "USER=u", "--set", "ALLOWED=a"]
+        for sel in (
+            ["--component", "btrfs:docker-gc"],
+            ["--module", "btrfs", "--set", "UUID=u", "--set", "OPTIONS=o"],
+            ["--owner", "root", *sets],
+            ["btrfs/docker-gc"],
+        ):
+            with self.subTest(sel=sel):
+                shutil.rmtree(self.stage)
+                os.makedirs(self.stage)
+                prog = self.stage_old_docker_gc()
+                plan = self.cli("plan", "--root", self.stage, *sel)
+                self.assertIn(f"would write: {conf} (from {prog}, before it is replaced)", plan.stdout.decode())
+                self.assertFalse(os.path.exists(conf), "plan wrote the settings")
+                r = self.cli("install", "--root", self.stage, *sel)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = r.stdout.decode().splitlines()
+                self.assertEqual(out[0], f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)")
+                self.assertIn(f"written:   {prog}", out)
+                self.assertTrue(Path(conf).read_text().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+                self.assertEqual(stat.S_IMODE(os.stat(conf).st_mode), 0o644)
+                # From now on the file is there: a second install runs no step and changes nothing.
+                again = self.cli("install", "--root", self.stage, *sel).stdout.decode()
+                self.assertNotIn(conf, again)
+                self.assertEqual({line.split()[0] for line in again.splitlines()}, {"unchanged:"})
+
+    def test_a_remove_keeps_the_registry_of_an_older_docker_gc(self) -> None:
+        prog = self.stage_old_docker_gc()
+        conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
+        r = self.cli("remove", "--root", self.stage, "--component", "btrfs:docker-gc")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.decode().splitlines()[:2], [
+            f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", f"removed:   {prog}"])  # fmt: skip
+        self.assertTrue(Path(conf).read_text().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+
+    def test_an_installed_docker_gc_it_cannot_read_stops_the_install_before_any_write(self) -> None:
+        prog = os.path.join(self.stage, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(prog))
+        Path(prog).write_text("print('not a docker-gc of CST')\n")
+        for command in ("install", "remove"):
+            r = self.cli(command, "--root", self.stage, "--component", "btrfs:docker-gc")
+            self.assertEqual(r.returncode, 1, command)
+            self.assertIn(
+                f"{prog}: its settings {self.stage}/etc/cst/docker-gc.conf could not be written", r.stderr.decode()
+            )
+            self.assertEqual(r.stdout, b"")
+            self.assertEqual(Path(prog).read_text(), "print('not a docker-gc of CST')\n")
+            self.assertEqual(sorted(self.files()), ["usr/local/sbin/docker-gc"], "something was written")
 
     def test_component_selects_install_plan_dests_and_srcs(self) -> None:
         sel = ["--root", self.stage, "--component", "btrfs:snapshots"]

@@ -1729,7 +1729,9 @@ EOF
         unit files; a second `disable` changes nothing; `enable` again runs
         the recorder again; `disable --purge` removes the program, the units
         and /var/lib/docker-gc, and status says the timer is not installed; a
-        second purge changes nothing; `enable` after it writes everything again."""
+        second purge changes nothing; `enable` after it writes everything again. Its settings
+        /etc/cst/docker-gc.conf: the first `enable` writes it (root, 0644; nothing protected, no
+        docker-gc was installed), the second leaves it, `disable --purge` keeps it."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             DOCKER_UP_FN
@@ -1741,9 +1743,10 @@ EOF
             bin=/usr/local/sbin/docker-gc
             units=(docker-gc-recorder.service docker-gc.service docker-gc.timer)
             stamp=/var/lib/systemd/timers/stamp-docker-gc.timer
+            conf=/etc/cst/docker-gc.conf   # its settings: kept by a purge
             remove_all() {
                 systemctl disable --now "${units[@]}" 2>/dev/null || true
-                rm -f "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp"
+                rm -f "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp" "$conf"
             }
             cleanup() {
                 remove_all
@@ -1796,6 +1799,9 @@ EOF
             for f in "$bin" "${units[@]/#//etc/systemd/system/}"; do
                 grep -qxF "written:   $f" <<<"$out" || { echo "no 'written:   $f'" >&2; exit 1; }
             done
+            # Its settings first: no docker-gc was installed, so no registry is protected.
+            grep -qxF "written:   $conf (DOCKER_GC_PROTECT=)" <<<"$out"
+            [[ "$(stat -c '%a %U' "$conf")" == "644 root" ]]
             [[ "$(systemctl is-enabled docker-gc-recorder.service)" == enabled ]]
             [[ "$(systemctl is-enabled docker-gc.timer)" == enabled ]]
             systemctl is-active docker-gc.timer
@@ -1809,6 +1815,7 @@ EOF
             out="$(cst btrfs docker-gc enable 2>&1)" || { show "second enable" "$out"; exit 1; }
             show "second enable" "$out"
             no_writes "the second enable" "$out"
+            grep -qxF "unchanged: $conf" <<<"$out"
             recorder_runs
 
             # 3. disable: nothing enabled or running, the stamp forgotten; the program and units stay.
@@ -1853,6 +1860,8 @@ EOF
             out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show purge "$out"; exit 1; }
             show purge "$out"
             grep -qF 'docker-gc removed: program, units and recorded state' <<<"$out"
+            grep -qxF "kept:      $conf (the settings: which registries are protected)" <<<"$out"
+            test -f "$conf"
             for f in "$bin" "${units[@]/#//etc/systemd/system/}" "$stamp" /var/lib/docker-gc; do
                 if [[ -e "$f" ]]; then echo "purge left $f" >&2; exit 1; fi
             done
@@ -2225,7 +2234,9 @@ echo E2E-OK
         (the build-cache prune runs buildx, whose state is in
         /var/lib/docker-gc/buildx). A runner booted less than
         10 minutes ago would make the run skip itself (MIN_UPTIME): then, and
-        only then, a test drop-in shows the unit a later /proc/uptime."""
+        only then, a test drop-in shows the unit a later /proc/uptime. Before that run, the
+        sandboxed docker-gc.service reads /etc/cst/docker-gc.conf: with a line it cannot read it
+        ends with 78 and names the line in its journal."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             DOCKER_UP_FN
@@ -2238,8 +2249,10 @@ echo E2E-OK
             state=/var/lib/docker-gc
             uptime_dropin=/run/systemd/system/docker-gc.service.d/90-e2e-uptime.conf
             show() { sed "s/^/test_13 $1: /" <<<"$2" >&2; }   # the CI log
+            conf=/etc/cst/docker-gc.conf
             cleanup() {
                 cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
+                rm -f "$conf"
                 docker images -q e2e-gc-probe | sort -u | xargs -r docker image rm -f >/dev/null 2>&1 || true
                 rm -rf "$(dirname "$uptime_dropin")" /run/e2e-uptime /var/tmp/e2e-gc-probe /run/e2e-gc-plain
                 systemctl stop docker.service e2e-dind.service 2>/dev/null || true
@@ -2328,6 +2341,17 @@ echo E2E-OK
                 printf '[Service]\nBindReadOnlyPaths=/run/e2e-uptime:/proc/uptime\n' >"$uptime_dropin"
                 systemctl daemon-reload
             fi
+            # The sandboxed run reads /etc/cst/docker-gc.conf (ProtectSystem=strict leaves /etc readable):
+            # a line it cannot read stops it with 78 before it asks docker anything; then a valid file.
+            grep -qxF 'DOCKER_GC_PROTECT=' "$conf"   # enable wrote it: no docker-gc was installed before
+            echo 'DOCKER_GC_PROTCT=e2e-registry.example' >>"$conf"
+            t_bad="$(date +%s)"
+            if systemctl start docker-gc.service; then echo "a settings file it cannot read did not stop the run" >&2; exit 1; fi
+            [[ "$(systemctl show -P ExecMainStatus docker-gc.service)" == 78 ]] || { journal docker-gc.service; exit 1; }
+            journalctl -q --no-pager -o cat -u docker-gc.service --since "@$t_bad" |
+                grep -qF "$conf line 9: DOCKER_GC_PROTCT: unknown setting" || { journal docker-gc.service; exit 1; }
+            printf 'DOCKER_GC_PROTECT=e2e-registry.example\n' >"$conf"
+            systemctl reset-failed docker-gc.service
             rm -f "$state/last-run.json"
             out="$(cst btrfs docker-gc run 2>&1)" || { show run "$out"; journal docker-gc.service; exit 1; }
             show run "$out"

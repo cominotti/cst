@@ -287,11 +287,23 @@ class SystemdPort(Protocol):
         """`systemctl restart unit`: its exit status and what it printed."""
         ...
 
+    def enable(self, unit: UnitName, *, now: bool = False) -> CommandResult:
+        """`systemctl enable [--now] unit`: its exit status and what it printed."""
+        ...
+
+    def disable(self, unit: UnitName, *, now: bool = False) -> CommandResult:
+        """`systemctl disable [--now] unit`: its exit status and what it printed."""
+        ...
+
+    def clean(self, unit: UnitName, *, what: str) -> CommandResult:
+        """`systemctl clean --what=WHAT unit` (what="state": a timer's Persistent= stamp)."""
+        ...
+
     def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
-    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
-        """`systemctl show -p PROP... unit` as {prop: value} (the host's systemd from a toolbox);
-        {} when systemctl cannot answer."""
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+        """`systemctl show -p PROP... unit` as {prop: value}; {} when systemctl cannot answer.
+        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs)."""
         ...
 
 
@@ -332,6 +344,15 @@ class UnitVerifierPort(Protocol):
 
     def verify(self, units: Mapping[str, bytes]) -> UnitVerdict:
         """{unit file name: bytes}, verified together (a timer next to its service)."""
+        ...
+
+
+class SettingsStepPort(Protocol):
+    """Runs a manifest program's SettingsStep (cst_core.domain.settings_steps) from the checkout."""
+
+    def run(self, src: str, args: Sequence[str], env: Mapping[str, str]) -> CommandResult:
+        """The checkout's src with args, env added to its environment (the step's two variables: the
+        installed copy and the settings file, both as the install sees them, staged under --root)."""
         ...
 
 

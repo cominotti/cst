@@ -50,20 +50,32 @@ from doctor.ports import CheckFn, DoctorHostPort
 CHECKS: list[tuple[str, CheckFn]] = []
 
 
-# The checkout's copies the doctor reads (host.repo_path gives where they are).
-HEALTH_CHECK_SRC = "btrfs/btrfs-health-check"
+# Where btrfs-health-check's levels are: in the checkout (host.repo_path gives where it is), and the same
+# module inside the installed zipapp.
+HEALTH_CHECK_SRC = "btrfs/health_check/domain.py"
 
 
 # ---- btrfs: chunk allocation ---------------------------------------------------------------------
 def unalloc_thresholds(host: DoctorHostPort, *, health_check_repo: str | None = None) -> tuple[int, int]:
     """(warn_gib, crit_gib) from btrfs-health-check: the installed copy (the one
-    that alerts), else the repository's; the defaults if neither reads. An
-    installed copy older than this checkout shows in the install area."""
+    that alerts: the levels module inside its zipapp, or the text of a bash
+    version), else the checkout's; the defaults if none reads. An installed
+    copy older than this checkout shows in the install area."""
+    installed = host.path(HEALTH_CHECK_HOST)
     repo_path = host.repo_path(HEALTH_CHECK_SRC) if health_check_repo is None else ViewPath(health_check_repo)
-    for path in (host.path(HEALTH_CHECK_HOST), repo_path):
+
+    def text_of(path: ViewPath) -> str:
+        with host.open_text(path) as f:
+            return f.read(65536)
+
+    readers = (
+        lambda: host.zip_text(installed, HEALTH_CHECK_SRC, 65536),
+        lambda: text_of(installed),
+        lambda: text_of(repo_path),
+    )
+    for read in readers:
         try:
-            with host.open_text(path) as f:
-                text = f.read(65536)
+            text = read()
         except OSError:
             continue
         parsed = parse_unalloc_thresholds_text(text)
