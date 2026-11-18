@@ -72,12 +72,22 @@ jobs:
   # its own: a new advisory or a vulnerability database that does not answer
   # fails this job only, and the static gates above still run.
   # tests/test_workflow_audit.py keeps it the last step of a job with no
-  # `if:` or `continue-on-error:`.
+  # `if:` or `continue-on-error:`. In the Fedora 45 image, like the gates:
+  # pyproject.toml needs Python 3.15 from the system (no Python downloads),
+  # which the runner host does not have. As root: it writes nothing.
   uv-audit:
-    name: Audit the Locked Dev Tools (uv audit)
+    name: Audit the Locked Dev Tools (uv audit, Fedora 45)
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45
     timeout-minutes: 10
     steps:
+      - name: Install Fedora 45 tools
+        run: |
+          set -euo pipefail
+          # gettext-envsubst provides envsubst, needed by sigstore/cosign-installer inside setup-invowk.
+          dnf -y install --setopt=install_weak_deps=False git-core python3 curl tar gzip findutils util-linux diffutils gettext-envsubst
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

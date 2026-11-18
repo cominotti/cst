@@ -478,7 +478,8 @@ audit-command`: every package of `uv.lock`, in every group (`dev`,
 and a known vulnerability fails it. `--locked` stops it when `uv.lock` does
 not match `pyproject.toml`; `--preview-features audit-command` only silences
 the notice that the command is new in uv 0.12. It needs the network, so the
-nightly workflow runs it, in a job of its own (`uv-audit`), so that a new
+nightly workflow runs it, in a job of its own (`uv-audit`, in the Fedora 45
+image: the project needs the system's Python 3.15), so that a new
 advisory or a database that does not answer fails that job only and the
 nightly's static gates still run; `check` does not run it.
 When it fails, upgrade that pin (below), or the tool that pulls it in.
