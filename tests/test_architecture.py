@@ -103,7 +103,7 @@ PURE_NAMES: Final[dict[str, frozenset[str]]] = {
     "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),
     "time": frozenset({"gmtime", "localtime", "strftime", "struct_time"}),
     "io": frozenset({"StringIO"}),
-    "datetime": frozenset({"date", "datetime", "timedelta", "timezone", "tzinfo"}),
+    "datetime": frozenset({"UTC", "date", "datetime", "timedelta", "timezone", "tzinfo"}),
     "datetime.datetime": frozenset({"fromisoformat", "fromtimestamp", "strptime"}),
 }
 # Builtins that reach the terminal, files or run code.
@@ -143,7 +143,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
     "toolchains/cli/": 934,
-    "vm/cli/": 1066,
+    "vm/cli/": 1019,
 }
 
 
@@ -186,7 +186,7 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 1,
     "toolchains cli": 16,
-    "vm cli": 61,
+    "vm cli": 53,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition

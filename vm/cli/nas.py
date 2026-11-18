@@ -7,9 +7,6 @@ import json
 import os
 import re
 import signal
-import subprocess
-import sys
-import threading
 import time
 from typing import Any
 
@@ -25,8 +22,6 @@ from vm.adapters import (
     domain_state_or_none,
     nas_settings,
     package_versions,
-    restic,
-    restic_env,
     virsh,
 )
 from vm.adapters.backup import (
@@ -44,6 +39,7 @@ from vm.adapters.backup import (
     write_index,
 )
 from vm.cli.backup import check_shut_off
+from vm.domain.backup import ResticSummary
 from vm.domain import (
     VmSettings,
     DomainParts,
@@ -73,7 +69,7 @@ def restic_ready(cfg: VmSettings, nas: Mapping[str, Any]) -> None:
     on an overlay."""
     # --no-lock: it only proves the repository opens, also while the /home
     # NAS job holds the lock (its prune), which the backup waits for.
-    rc, _, err = restic(nas, "cat", "config", "--no-lock", timeout=300)
+    rc, _, err = wiring.restic().run(nas["env"], ["cat", "config", "--no-lock"], 300)
     if rc == 0:
         return
     why = {
@@ -84,58 +80,6 @@ def restic_ready(cfg: VmSettings, nas: Mapping[str, Any]) -> None:
         12: f"{cfg.paths.restic_password} does not open the repository",
     }.get(rc, first_line(err) or f"restic exit {rc}")
     raise Refused(f"NAS repository not usable: {why}. Nothing was changed (no snapshot taken)")
-
-
-def restic_backup(nas: Mapping[str, Any], args: Sequence[str], timeout: int) -> tuple[int, dict[str, Any]]:
-    """restic backup --json: stderr goes through, the status lines become a
-    progress line every minute, the summary is kept. (rc, summary or {})."""
-    env = restic_env(nas["env"])
-    try:
-        p = subprocess.Popen(["restic", *args], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, env=env)
-    except FileNotFoundError:
-        return 127, {}
-    timer = threading.Timer(timeout, p.kill)
-    timer.start()
-    summary: dict[str, Any] = {}
-    shown = 0.0
-    try:
-        assert p.stdout is not None
-        for line in p.stdout:
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                print(f"  restic: {line.rstrip()}", flush=True)
-                continue
-            if not isinstance(msg, dict):
-                continue
-            kind = msg.get("message_type")
-            if kind == "summary":
-                summary = msg
-            elif kind == "status" and time.monotonic() - shown >= 60:
-                shown = time.monotonic()
-                done, total = msg.get("bytes_done") or 0, msg.get("total_bytes") or 0
-                print(
-                    f"  restic: {100 * float(msg.get('percent_done') or 0):.0f} % ({format_bytes_gib_mib(done, mib_decimals=1)} of "
-                    f"{format_bytes_gib_mib(total, mib_decimals=1)} read)",
-                    flush=True,
-                )
-            elif kind == "error":
-                err = msg.get("error") or {}
-                print(f"  restic error: {msg.get('item') or ''} {err.get('message') or err}", file=sys.stderr)
-        rc = p.wait()
-    except BaseException:
-        p.terminate()
-        try:
-            p.wait(60)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
-        raise
-    finally:
-        timer.cancel()
-    if rc == -signal.SIGKILL:
-        rc = 124
-    return rc, summary
 
 
 def commit_back(cfg: VmSettings, vm: str, overlaid: Mapping[str, tuple[str, str]]) -> tuple[list[str], dict[str, str]]:
@@ -356,7 +300,7 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
     failure: BaseException | None = None
     before: dict[str, tuple[Any, ...]] = {}
     snap = ""
-    summary: dict[str, Any] = {}
+    summary: ResticSummary = {}
     try:
         if live:
             # The UEFI variables and the TPM state have no snapshot: read live, checked after.
@@ -391,8 +335,8 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
                 f"  reading {p} ({k}, {format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)"
             )
         try:
-            rc, summary = restic_backup(
-                nas,
+            rc, summary = wiring.restic().backup(
+                nas["env"],
                 [
                     "backup",
                     "--json",
@@ -405,13 +349,16 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
                     *paths,
                 ],
                 timeout,
+                wiring.progress(),
             )
         finally:
             unstage(stage)
         snap = str(summary.get("snapshot_id") or "")
         if rc != 0 or not snap:
             if snap:
-                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)  # incomplete (rc 3): not a backup
+                wiring.restic().run(
+                    nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800
+                )  # incomplete (rc 3): not a backup
             why = {
                 3: "some files could not be read",
                 124: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
@@ -434,7 +381,7 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
             try:
                 check_shut_off(vm)
             except Refused as e:
-                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)
+                wiring.restic().run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800)
                 raise Refused(
                     f"the VM's state changed during the backup, the copy is not consistent "
                     f"(restic snapshot {snap[:8]} forgotten): {e}"
@@ -448,7 +395,7 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
 
             changed = [p for p, _ in sources if now_fp(p) != before[p]]
             if changed:
-                restic(nas, "forget", "--retry-lock", RETRY_LOCK, snap)
+                wiring.restic().run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800)
                 raise Refused(
                     "changed during the backup (the VM was started?), the copy is not consistent "
                     f"(restic snapshot {snap[:8]} forgotten): {', '.join(changed)}"
@@ -649,8 +596,8 @@ def take_snapshot(
 
 def nas_snapshot_ids(vm: str, nas: Mapping[str, Any]) -> set[str] | None:
     """The ids of the VM's restic snapshots, or None when not readable."""
-    rc, so, _ = restic(
-        nas, "snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}", timeout=300
+    rc, so, _ = wiring.restic().run(
+        nas["env"], ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"], 300
     )
     try:
         return {s["id"] for s in json.loads(so) if isinstance(s, dict) and s.get("id")} if rc == 0 else None
@@ -665,7 +612,7 @@ def retention(cfg: VmSettings, vm: str, nas: Mapping[str, Any]) -> None:
             f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {cfg.paths.vm_conf}: nothing forgotten"
         )
         return
-    rc, so, err = restic(nas, *forget_args(vm, nas["host"], weekly, monthly))
+    rc, so, err = wiring.restic().run(nas["env"], forget_args(vm, nas["host"], weekly, monthly), 1800)
     if rc != 0:
         print(
             f"  note: restic forget failed ({first_line(err) or f'exit {rc}'}): the backup is fine, the "

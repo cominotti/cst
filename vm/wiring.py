@@ -16,8 +16,9 @@ from cst_core.domain.record import ROOT_RECORD
 from cst_core.adapters import SystemctlAdapter, terminal
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import SystemdPort
-from vm.adapters import COMMANDS_OF_VM, NAME, fault_words
-from vm.adapters.backup import DefinitionFiles
+from vm.adapters import COMMANDS_OF_VM, NAME, fault_words, run
+from vm.adapters.backup import DefinitionFiles, TerminalLines
+from vm.adapters.restic import Restic
 from vm.adapters.timer import TimerFiles
 from vm.domain import VmPaths, VmSettings
 from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
@@ -93,6 +94,16 @@ def vm_commands() -> VmCommandsPort:
 def definition_store(cfg: VmSettings) -> DefinitionStorePort:
     """The definitions tune keeps under the backup folder."""
     return DefinitionFiles(cfg.paths.backup_dir)
+
+
+def restic() -> Restic:
+    """restic as cst-vm runs it (vm.adapters.run: the C locale, its words for a missing restic)."""
+    return Restic(run)
+
+
+def progress() -> TerminalLines:
+    """What a backup prints, as it goes: this process's stdout and stderr."""
+    return TerminalLines()
 
 
 def ask(question: str) -> bool:

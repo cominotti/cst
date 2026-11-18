@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The vm module's reach into the host: virsh, rpm, rpm-ostree and restic, and
+"""The vm module's reach into the host: virsh, rpm, rpm-ostree and restic (vm.adapters.restic), and
 the settings files (systemctl: cst_core's SystemctlAdapter, with fault_words). vm.adapters.backup has the backups' files
 and the run of a backup, vm.adapters.timer the weekly timer's files,
 vm.adapters.images the VM image folders.
@@ -13,10 +13,9 @@ import os
 import socket
 import sys
 import tempfile
-from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT
-from cst_core.adapters.runner import SubprocessCommandRunner, c_locale
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import (
     read_text,
@@ -263,16 +262,6 @@ def booted_deployment() -> dict[str, Json] | None:
         return None
     d = status.booted
     return {"version": d.get("version"), "checksum": d.get("checksum"), "timestamp": d.get("timestamp")}
-
-
-def restic(nas: Mapping[str, Any], *args: str, timeout: int = 1800) -> tuple[int, str, str]:
-    return run(["restic", *args], timeout=timeout, extra_env=nas["env"])
-
-
-def restic_env(extra: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a restic run that streams its output (restic backup --json): this
-    process's, in the C locale, with extra (the repository's variables) on top."""
-    return {**c_locale(os.environ), **extra}
 
 
 def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str]:

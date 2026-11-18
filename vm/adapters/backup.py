@@ -201,6 +201,17 @@ def safe_output() -> None:
         sys.stdout, sys.stderr = SafeStream(sys.stdout), SafeStream(sys.stderr)
 
 
+class TerminalLines:
+    """ProgressPort on this process's terminal: each line printed when it comes, to sys.stdout or
+    sys.stderr as they are then (a backup's SafeStream, see safe_output)."""
+
+    def say(self, text: str, *, flush: bool = False) -> None:
+        print(text, flush=flush)
+
+    def warn(self, text: str) -> None:
+        print(text, file=sys.stderr)
+
+
 def notify(s: VmSettings, urgency: Urgency, title: str, body: str) -> None:
     """A CST desktop alert (btrfs-notify keeps it for the next login when no
     session shows it; without btrfs-notify, cst_core keeps it there and says

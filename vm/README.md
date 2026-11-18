@@ -1028,14 +1028,17 @@ The Python code inside `vm/` (standard library only at run time):
   `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
   `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
-- `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`,
-  `restic` (with `LC_ALL=C`, through cst_core's
+- `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`
+  (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
   files, and `fault_words`, cst-vm's words for a command that is missing or does not
   answer (systemctl runs through cst_core's `SystemctlAdapter` with them, in the C
   locale, 120 s at most). `backup.py`: the
   backup index, fingerprints and sizes, the stop signals, the per-VM lock and
-  the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
+  the alert. `restic.py`: restic (`Restic`: a command, and `restic backup
+  --json` with its progress), generic: it takes the repository's variables at
+  each call and names no VM, so the /home NAS backup can use it as it is.
+  `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
   and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
   system folder through `sudo` when not root). `nocow apply` has no
   application layer: it marks folders one by one, nothing to roll back.
