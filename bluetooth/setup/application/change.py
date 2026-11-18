@@ -141,7 +141,9 @@ class Change(Checks):
 
     def restore_a2dp(self) -> None:
         """After a WirePlumber restart only HFP comes back by itself: reconnect the Audio Sink and
-        switch back to A2DP, unless the headset's microphone is in use."""
+        switch back to A2DP, unless the headset's microphone is in use (no headset: nothing to do)."""
+        if not self.headset:
+            return
         info = self.bt_info()
         if not matches_a_line(info, rf"^{SPACE}*BREDR\.Connected: yes"):
             return
@@ -217,6 +219,7 @@ class Change(Checks):
         self.preconditions()
         self.compute_plan()
         self.refuse_conflicts()
+        self.save_headset()
         self.apply_files()
         if not self.run_restarts():
             return 0
@@ -231,6 +234,17 @@ class Change(Checks):
             raise self.die("verification found problems (see above).")
         self.done()
         return 0
+
+    def save_headset(self) -> None:
+        """The headset of CST's LDAC rule saved as DEVICE in the user's file (an older CST set it by
+        default, so the rule was its only record): apply, and revert before it removes the rule."""
+        if not self.device_save:
+            return
+        self.out("== settings: the headset of CST's LDAC rule\n")
+        if self.o.check:
+            self.out(f"would save DEVICE={self.c.device} in {self.tilde(self.p.user_settings)}\n")
+        else:
+            self.save_setting("DEVICE", self.c.device)
 
     def refuse_conflicts(self) -> None:
         """apply stops at a file of CST's name that CST did not write."""
@@ -276,12 +290,14 @@ class Change(Checks):
             self.out(f"           Experimental = true, KernelExperimental = {ISO_UUID}\n")
         else:
             self.out(f"unchanged: {p.main_conf} (Experimental and KernelExperimental already set in [General])\n")
-        self.out(f"== WirePlumber: {self.wp_conf}\n")
+        self.out(f"== WirePlumber: {self.wp_conf or 'no LDAC rule (no headset)'}\n")
         if self.legacy:
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
         if self.wp_state == "ok":
             self.out(f"unchanged: {self.wp_conf}\n")
+        elif self.wp_state == "none":
+            self.out(f"skipped:   {self.no_headset()}\n")
         elif self.wp_state == "adopt":
             self.write_wp()
             self.out(f"adopted:   {self.wp_conf} (comments renewed, settings unchanged: no restart)\n")
@@ -307,6 +323,8 @@ class Change(Checks):
                 self.err(f"WARNING: could not set the bearer: {said or 'no output'}\n")
         elif self.bearer_state == "unpaired":
             self.err(f"WARNING: {c.device} is not paired; bearer not changed\n")
+        elif self.bearer_state == "noheadset":
+            self.err(f"WARNING: BEARER={c.bearer} is for a headset, and none is set; bearer not changed\n")
 
     def done(self) -> None:
         """apply's last lines, after checks that all passed."""
@@ -422,6 +440,7 @@ class Change(Checks):
         if not (f.is_file(mc) and not f.is_symlink(mc)):
             raise self.die(f"{mc} is missing or a symlink")
         changed_mc = self.revert_main_conf()
+        self.save_headset()  # the rule goes next: it may be the only place that names the headset
         wp, le = self.revert_files()
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
         self.lw_plan()
@@ -471,8 +490,10 @@ class Change(Checks):
         """The rule and the drop-in removed when they are CST's; whether each was."""
         p, f, check = self.p, self.m.files, self.o.check
         wp = le = False
-        self.out(f"== WirePlumber: {self.wp_conf}\n")
-        if not f.exists(self.wp_conf):
+        self.out(f"== WirePlumber: {self.wp_conf or 'no LDAC rule (no headset)'}\n")
+        if not self.headset:
+            self.out(f"unchanged: {self.no_headset()}\n")
+        elif not f.exists(self.wp_conf):
             self.out("unchanged: the rule does not exist\n")
         elif not (f.contains(self.wp_conf, MARKER, quiet=True) or f.contains(self.wp_conf, OLD_WP_MARKER, quiet=True)):
             self.err(f"WARNING: {self.wp_conf} was not written by CST or apply-le-audio.sh: left alone\n")

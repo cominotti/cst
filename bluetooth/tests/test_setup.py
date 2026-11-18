@@ -105,7 +105,7 @@ class StoppedTest(unittest.TestCase):
         m = Machine(self)
         m.put(m.main_conf, GENERAL)
         m.services()
-        m.user_settings("LE_AUDIO=on\n")
+        m.user_settings(f"DEVICE={MAC}\nLE_AUDIO=on\n")
         os.chmod(m.settings, 0)
         line = f"bt-helper: [Errno 13] Permission denied: '{m.settings}'\n"
         for args in (("plan",), ("le-audio", "off", "--yes")):
@@ -115,6 +115,7 @@ class StoppedTest(unittest.TestCase):
     def test_a_rule_file_it_cannot_read_stops_before_any_change(self) -> None:
         m = Machine(self)
         m.put(m.main_conf, GENERAL)
+        m.user_settings(f"DEVICE={MAC}\n")
         m.services()
         os.makedirs(m.wp_dir)
         with open(m.wp_conf, "wb") as f:
@@ -183,8 +184,8 @@ class StepDownTest(unittest.TestCase):
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
 CLASSIC = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n"
 BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n"
-HELP_SHA256 = "6a1b1fbbc920728e0dccc240c6f2e3ba99a6d0c6c8dca643d957d6b097089e78"
-USAGE_SHA256 = "47a3592bb308a5e7b7c9ae3472fc830bae3b8b4eee678de83b8f6c7b777830f6"
+HELP_SHA256 = "fb64a1365efa65790a1299e85279627d2340828584a7fcef22416f39edd1c9a6"
+USAGE_SHA256 = "e2b4c726f647f493f7f7d1690e60a00d5d4f5884b0f37aeb4fe95a0d140541a8"
 LW = "cst-bt-ldac48.service"
 
 
@@ -200,9 +201,14 @@ def wp_label(path: str) -> str:
 class SetupCase(unittest.TestCase):
     """A test with a fake machine: main.conf, the user's settings, bluetoothd and WirePlumber running."""
 
-    def machine(self, main_conf: str = VENDOR, settings: str | None = None, *, services: bool = True) -> Machine:
+    def machine(
+        self, main_conf: str = VENDOR, settings: str | None = None, *, services: bool = True, headset: bool = True
+    ) -> Machine:
+        """headset: the user's settings name the headset MAC (CST ships none), first in the file."""
         m = Machine(self)
         m.put(m.main_conf, main_conf)
+        if headset and "DEVICE" not in (settings or ""):
+            settings = f"DEVICE={MAC}\n" + (settings or "")
         if settings is not None:
             m.user_settings(settings)
         if services:
@@ -225,6 +231,172 @@ class SetupCase(unittest.TestCase):
         seen = [w for c in calls for w in wanted if c == w or c.startswith(w + " ")]
         firsts = [w for i, w in enumerate(seen) if w not in seen[:i]]
         self.assertEqual(firsts, list(wanted), calls)
+
+
+# The LDAC rule main's (535aea1) apply wrote, for an invented headset (MAC): what a machine set up with
+# the old default headset (DEVICE in bluetooth/bluetooth.conf) has, next to a settings file without DEVICE.
+OLD_RULE = os.path.join(os.path.dirname(SETUP), "tests", "fixtures", "legacy", f"50-bluez-{DEV}.conf@535aea1")
+HINT = "no headset set: set DEVICE=AA:BB:CC:DD:EE:FF in ~/.config/cst/bluetooth.conf"
+
+
+class HeadsetTest(SetupCase):
+    """CST ships no headset (DEVICE in bluetooth/bluetooth.conf is empty). The headset is --device,
+    else DEVICE in the user's settings, else (no DEVICE line there) the one LDAC rule CST wrote:
+    what a machine set up with the old default has; apply, and revert before it removes the rule,
+    save it as DEVICE. With none, plan, apply, status and revert skip the headset's parts."""
+
+    def old_rule(self, m: Machine, name: str | None = None) -> str:
+        with open(OLD_RULE, encoding="utf-8") as f:
+            return m.put(os.path.join(m.wp_dir, name) if name else m.wp_conf, f.read())
+
+    def plan(self, m: Machine, *args: str) -> str:
+        r = m.run("plan", *args, env={"CST_PROG": "cst-t"})
+        self.assertIn(r.returncode, (0, 10), r.text)
+        return r.stdout
+
+    def test_only_rules_cst_wrote_name_a_headset(self) -> None:
+        m = self.machine(DONE, headset=False)
+        self.old_rule(m)
+        self.old_rule(m, f"50-bluez-{DEV}.conf.bak")  # a backup: WirePlumber does not read it
+        m.put(os.path.join(m.wp_dir, "50-bluez-11_22_33_44_55_66.conf"), "monitor.bluez.rules = []\n")
+        self.old_rule(m, "50-bluez-jbl.conf")  # not an address
+        self.assertIn(f"Headset {MAC} (from CST's LDAC rule; apply saves it as DEVICE in ", self.plan(m))
+        # A second rule (the old script's marker counts, a lower-case name too): no headset is taken.
+        m.put(os.path.join(m.wp_dir, "50-bluez-aa_bb_cc_dd_ee_ff.conf"), f"# {OLD_WP}\n")
+        out = self.plan(m)
+        self.assertIn("Headset none (no DEVICE set)", out)
+        self.assertIn(
+            row(
+                "skip",
+                "the headset's LDAC rule",
+                f"no headset set, and CST has LDAC rules for several ({MAC} AA:BB:CC:DD:EE:FF): "
+                "set DEVICE=<one of them> in ~/.config/cst/bluetooth.conf, or use --device MAC",
+            ),
+            out,
+        )
+
+    def test_the_headset_of_an_older_setup_is_kept_and_saved(self) -> None:
+        # The upgrade from main's install: its rule, and a settings file without DEVICE.
+        settings = "# CST bluetooth settings (override bluetooth/bluetooth.conf in the repo)\nLE_AUDIO=off\n"
+        m = self.machine(DONE, settings, headset=False)
+        rule = self.old_rule(m)
+        out = self.plan(m)
+        self.assertIn(
+            f"Headset {MAC} (from CST's LDAC rule; apply saves it as DEVICE in ~/.config/cst/bluetooth.conf)", out
+        )
+        self.assertIn(
+            row(
+                "set",
+                "~/.config/cst/bluetooth.conf",
+                f"DEVICE={MAC}: the headset of CST's LDAC rule (CST no longer ships a default headset)",
+            ),
+            out,
+        )
+        self.assertIn(row("ok", wp_label(rule), f"up to date (LDAC auto for {MAC})"), out)
+        self.assertIn("\nApply with: cst-t apply\n", out)
+        self.assertEqual(self.text(m.settings), settings, "plan changed the settings")
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertIn(f"written:   ~/.config/cst/bluetooth.conf: DEVICE={MAC}\n", r.stdout, r.text)
+        self.assertIn(f"unchanged: {rule}\n", r.stdout)
+        self.assertEqual(self.text(m.settings), settings + f"DEVICE={MAC}\n")
+        with open(OLD_RULE, encoding="utf-8") as f:
+            self.assertEqual(self.text(rule), f.read())
+        out = self.plan(m)
+        self.assertIn(f"Headset {MAC} (settings)", out)
+        self.assertNotIn("~/.config/cst/bluetooth.conf ", out)
+
+    def test_revert_saves_the_headset_of_the_rule_it_removes(self) -> None:
+        # Before any apply saved it, the rule is the only place that names the headset.
+        m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)
+        rule = self.old_rule(m)
+        r = m.run("revert", "--check")
+        self.assertIn(f"would save DEVICE={MAC} in ~/.config/cst/bluetooth.conf\n", r.stdout, r.text)
+        self.assertIn(f"would remove {rule}\n", r.stdout)
+        self.assertEqual((self.text(m.settings), os.path.exists(rule)), ("LE_AUDIO=off\n", True))
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertLess(
+            r.stdout.index(f"written:   ~/.config/cst/bluetooth.conf: DEVICE={MAC}"),
+            r.stdout.index(f"removed:   {rule}"),
+        )
+        self.assertEqual(self.text(m.settings), f"LE_AUDIO=off\nDEVICE={MAC}\n")
+        self.assertFalse(os.path.exists(rule))
+        self.assertIn(f"Headset {MAC} (settings)", self.plan(m))
+
+    def test_without_a_headset_its_parts_are_skipped(self) -> None:
+        m = self.machine(settings="BEARER=bredr\nLDAC_RATE=48000\n", headset=False)
+        m.adapter(listed=False)
+        out = self.plan(m)
+        self.assertIn("Headset none (no DEVICE set), LDAC quality auto", out)
+        for line in (
+            row(
+                "skip",
+                "the headset's LDAC rule",
+                f"{HINT} (bluetoothctl devices lists the paired ones), or use --device MAC",
+            ),
+            row("skip", "preferred bearer", "BEARER=bredr is for a headset, and none is set: apply leaves it"),
+            row("skip", "LDAC rate watcher", "off: no headset is set (LDAC_RATE=48000 needs one)"),
+            row("update", "main.conf [General] Experimental", "(not set) -> true"),
+        ):
+            self.assertIn(line, out)
+        r = m.run("apply", "--yes")
+        self.assertIn(f"skipped:   {HINT}", r.stdout, r.text)
+        self.assertIn("WARNING: BEARER=bredr is for a headset, and none is set; bearer not changed\n", r.stderr)
+        self.assertIn("written:   " + m.main_conf, r.stdout)
+        self.assertIn(
+            row("skip", "headset", f"{HINT} (bluetoothctl devices lists the paired ones), or use --device MAC"),
+            r.stdout,
+        )
+        self.assertEqual(self.text(m.settings), "BEARER=bredr\nLDAC_RATE=48000\n", "apply wrote a headset")
+        self.assertFalse([n for n in os.listdir(m.wp_dir) if n.startswith("50-bluez-")], "apply wrote a rule")
+        self.assertFalse(os.path.exists(m.lw_unit), "apply set up the watcher")
+        self.assertFalse([c for c in r.calls if c.startswith(("bluetoothctl", "timeout"))], r.calls)
+        self.assertEqual(m.run("plan").returncode, 0)
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"unchanged: {HINT}", r.stdout)
+
+    def test_an_empty_device_in_your_file_means_none(self) -> None:
+        m = self.machine(DONE, "DEVICE=\n", headset=False)
+        rule = self.old_rule(m)
+        self.assertIn("Headset none (no DEVICE set)", self.plan(m))
+        self.assertEqual(m.run("revert", "--yes").returncode, 0)
+        self.assertTrue(os.path.exists(rule), "revert removed the rule of a headset that is not set")
+        self.assertEqual(self.text(m.settings), "DEVICE=\n")
+
+    def test_your_device_wins_over_a_rule_and_is_not_rewritten(self) -> None:
+        m = self.machine(DONE, "DEVICE=AA:BB:CC:DD:EE:FF\n", headset=False)
+        rule = self.old_rule(m)
+        out = self.plan(m)
+        self.assertIn("Headset AA:BB:CC:DD:EE:FF (settings)", out)
+        self.assertNotIn(f"DEVICE={MAC}", out)
+        m.run("apply", "--yes", "--no-restart")
+        self.assertEqual(self.text(m.settings), "DEVICE=AA:BB:CC:DD:EE:FF\n")
+        with open(OLD_RULE, encoding="utf-8") as f:
+            self.assertEqual(self.text(rule), f.read(), "apply changed the rule of another headset")
+
+    def test_a_rule_it_cannot_read_names_no_headset(self) -> None:
+        # The search for the rule's headset happens before any command runs: no traceback.
+        m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)
+        os.makedirs(m.wp_dir)
+        with open(m.wp_conf, "wb") as f:
+            f.write(b"# \xff\n")
+        locked = m.put(os.path.join(m.wp_dir, "50-bluez-11_22_33_44_55_66.conf"), f"# {OLD_WP}\n", mode=0)
+        for args in (("plan",), ("status",), ("revert", "--check")):
+            r = m.run(*args)
+            self.assertNotIn("Traceback", r.stderr, args)
+        self.assertIn("Headset none (no DEVICE set)", self.plan(m))
+        os.chmod(locked, 0o600)
+
+    def test_the_option_wins_and_is_not_saved(self) -> None:
+        m = self.machine(DONE, "LE_AUDIO=off\n", headset=False)
+        self.old_rule(m)
+        out = self.plan(m, "--device", "aa:bb:cc:dd:ee:ff")
+        self.assertIn("Headset AA:BB:CC:DD:EE:FF (--device)", out)
+        self.assertNotIn(row("set", "~/.config/cst/bluetooth.conf", f"DEVICE={MAC}"), out)
+        r = m.run("plan", "--device", "headset")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("got 'headset'", r.stderr)
 
 
 class CommandLineTest(SetupCase):
@@ -393,7 +565,8 @@ class PlanTest(SetupCase):
         ):
             self.assertIn(line, r.stdout)
         self.assertEqual(self.text(m.main_conf), VENDOR, "plan changed main.conf")
-        self.assertFalse(os.path.exists(os.path.join(m.home, ".config")))
+        self.assertFalse(os.path.exists(m.wp_dir), "plan wrote a WirePlumber file")
+        self.assertEqual(self.text(m.settings), f"DEVICE={MAC}\n", "plan changed the settings")
 
     def test_nothing_to_do_and_the_changed_files_diffs(self) -> None:
         m = self.machine(DONE)
@@ -700,7 +873,7 @@ class LeAudioTest(SetupCase):
         # apply's checks read the drop-in again after writing it.
         self.assertIn(row("ok", "LE Audio", "off (the CST default; PipeWire offers only classic profiles)"), r.stdout)
         self.assertNotIn("not in place yet", r.stdout)
-        m.user_settings("LE_AUDIO=on\n")
+        m.user_settings(f"DEVICE={MAC}\nLE_AUDIO=on\n")
         r = m.run("plan")
         self.assertIn(
             row(
@@ -1033,7 +1206,7 @@ class LeAudioCommandTest(SetupCase):
         self.assertIn("must run on the host", r.stderr)
 
     def test_keeps_the_other_lines_and_the_link(self) -> None:
-        m = self.machine(DONE)
+        m = self.machine(DONE, headset=False)
         real = m.put("dotfiles.conf", "# mine\nLDAC_RATE=48000", mode=0o600)
         os.makedirs(os.path.dirname(m.settings))
         os.symlink(real, m.settings)
@@ -1045,7 +1218,7 @@ class LeAudioCommandTest(SetupCase):
         self.assertEqual(self.text(real), "# mine\nLDAC_RATE=48000\nLE_AUDIO=off\n")
 
     def test_shows_the_setting(self) -> None:
-        m = self.machine(DONE)
+        m = self.machine(DONE, headset=False)
         r = m.run("le-audio", env={"CST_PROG": "cst-t"}, container=True)
         self.assertEqual(r.returncode, 0, r.text)
         self.assertEqual(
@@ -1497,7 +1670,7 @@ class ScratchFileTest(SetupCase):
 
     def test_every_command_needs_its_scratch_file(self) -> None:
         # bluetooth-setup.sh made it first, for every command but help: no TMPDIR, no run.
-        m = self.machine()
+        m = self.machine(headset=False)
         env = {"TMPDIR": os.path.join(m.tmp, "missing")}
         for args in (
             ("plan",),

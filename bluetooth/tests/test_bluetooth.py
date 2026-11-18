@@ -380,7 +380,8 @@ class SettingsTest(unittest.TestCase):
     def test_defaults_file(self) -> None:
         with open(DEFAULTS) as f:
             s = self.m.merged_settings([f.read()])
-        self.assertEqual(s, {"DEVICE": MAC, "LDAC_QUALITY": "auto", "BEARER": "", "LDAC_RATE": "", "LE_AUDIO": "off"})
+        # No headset: CST ships none (an address in the repository would be one person's).
+        self.assertEqual(s, {"DEVICE": "", "LDAC_QUALITY": "auto", "BEARER": "", "LDAC_RATE": "", "LE_AUDIO": "off"})
 
     def test_user_file_wins_and_parsing(self) -> None:
         user = "# mine\nDEVICE = 'aa:bb:cc:dd:ee:ff'   # other headset\nBEARER=\"le\"\nFOO=1\nnot a line\nLDAC_RATE=48000\n"
