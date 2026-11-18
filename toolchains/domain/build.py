@@ -163,7 +163,11 @@ CARGO_ENV = ("CARGO_HOME", "CARGO_BUILD_BUILD_DIR", "RUSTUP_HOME", "RUSTUP_TOOLC
 @dataclasses.dataclass(frozen=True, slots=True)
 class CargoProc:
     """A cargo (or cargo-*) process of the user, as /proc shows it: cwd None when it
-    cannot be read; env holds only the CARGO_ENV variables it was started with."""
+    cannot be read; env holds only the CARGO_ENV variables it was started with. read:
+    False when its command line or its environment came back empty or could not be
+    read (a process that is starting or ending, or one started with no environment):
+    then which folder it builds in is unknown (its --manifest-path and its cargo
+    settings are not known)."""
 
     pid: str
     comm: str
@@ -171,6 +175,7 @@ class CargoProc:
     exe: str = ""
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    read: bool = True
 
 
 # The answers of one run are kept under (command, folder, settings).
