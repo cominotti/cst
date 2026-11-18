@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 import difflib
+from enum import StrEnum
 from itertools import islice
 import re
 from typing import Literal, NamedTuple, NotRequired, TypedDict
@@ -18,8 +19,30 @@ import xml.etree.ElementTree as ET
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
+from cst_core.domain.values import HOUR, MINUTE
 
 URI = "qemu:///system"
+
+
+class VmPinAction(StrEnum):
+    """What `cpu-vm-pin` does (its first argument): show, show the change, or make it."""
+
+    STATUS = "status"
+    PLAN = "plan"
+    APPLY = "apply"
+
+
+class CpuWatchOption(StrEnum):
+    """The options of `cpu-watch watch` (END: the command to record follows)."""
+
+    END = "--"
+    LABEL_SHORT = "-l"
+    LABEL = "--label"
+    GAME = "--game"
+    SECONDS = "--seconds"
+    MANGOHUD = "--mangohud"
+
+
 GAME_STATE = state_format(StateFormatKey.GAME_STATE).path  # cpu/game-profile: the profile is on
 # The columns of a cpu-watch run's samples.csv (watch writes them, summarize reads them by name).
 SAMPLE_FIELDS = (
@@ -463,7 +486,7 @@ def duration(text: str) -> float:
     m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip())
     if not m or float(m.group(1)) <= 0:
         raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)")
-    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
+    return float(m.group(1)) * {"": 1, "s": 1, "m": MINUTE, "h": HOUR}[m.group(2)]
 
 
 def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, float | None, bool, dict[str, float]]:

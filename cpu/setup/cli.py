@@ -12,7 +12,7 @@ import sys
 from cst_core.domain.dispatch import script_help
 from cst_core.ports import ModuleRoutePort
 from cpu.setup import wiring
-from cpu.setup.domain import route
+from cpu.setup.domain import CpuRoute, route
 
 
 def main(
@@ -32,12 +32,12 @@ def main(
     cmd = argv[0] if argv and argv[0] else "help"  # ${1:-help}
     rest = list(argv[1:])
     where = route(cmd)
-    if where == "help":
+    if where == CpuRoute.HELP:
         machine.say("out", script_help(machine.read_text(h.script), prog))
         return 0
-    if where == "watch":
+    if where == CpuRoute.WATCH:
         return machine.exec_replace(wiring.watch_argv(h, cmd, rest, in_container=machine.is_container()))
-    if where == "unknown":
+    if where == CpuRoute.UNKNOWN:
         machine.say("err", f"Unknown command: {cmd}\n{script_help(machine.read_text(h.script), prog)}")
         return 2
     if machine.is_container():

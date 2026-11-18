@@ -28,6 +28,7 @@ from cpu.domain import (
     QuietSample,
     Reading,
     RunMeta,
+    VmPinAction,
     WatchCounters,
     lows,
     pressure_field,
@@ -78,8 +79,8 @@ def vm_pin_settings(path: str, action: str) -> dict[str, str]:
     Python's SIGPIPE handling (its temporary XML file is removed in a
     finally); status and plan print them and, since they only read, get
     SIGPIPE back at its default: `cst cpu vm-pin plan | head` ends quietly."""
-    settings = conf(path, refuse=action == "apply")
-    if action != "apply":
+    settings = conf(path, refuse=action == VmPinAction.APPLY)
+    if action != VmPinAction.APPLY:
         restore_default_signals()
     return settings
 
