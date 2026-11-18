@@ -173,6 +173,7 @@ class FakeState:
         self.saved: list[GcState] = []
         self.summary: RunSummary | None = None
         self.summary_error: NewerState | None = None
+        self.state_error: NewerState | None = None
         self.lock_free = True
         self.save_error: OSError | None = None
 
@@ -180,6 +181,8 @@ class FakeState:
         return self.state is not None
 
     def load_state(self) -> GcState:
+        if self.state_error is not None:
+            raise self.state_error
         return self.state or GcState(since=NOW, images={}, heartbeat=0)
 
     def save_state(self, state: GcState) -> None:
@@ -416,11 +419,14 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(self.f.gc.apply(plan), 0)
         self.assertEqual(self.f.console.lines, [])
 
-    def test_a_newer_last_run_stops_the_run_even_on_a_fresh_boot(self) -> None:
+    def test_a_newer_state_stops_the_run_even_on_a_fresh_boot(self) -> None:
         # The uptime skip used to come first: on a machine up less than 10 minutes the run exited 0
         # without looking, and the next run wrote over the newer summary.
         self.f.host.up_for = 60.0
         self.f.state.summary_error = NewerState("last-run.json is format 2")
+        self.assertEqual(self.f.gc.execute("run", dry=False), NEWER_STATE_EXIT)
+        self.f.state.summary_error = None
+        self.f.state.state_error = NewerState("last-used.json is format 2")
         self.assertEqual(self.f.gc.execute("run", dry=False), NEWER_STATE_EXIT)
 
     def test_a_second_run_while_the_lock_is_held_exits_0(self) -> None:
