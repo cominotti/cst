@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import csv
+import dataclasses
 import difflib
 import functools
 import io
@@ -22,6 +23,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -321,6 +323,27 @@ def sample_too_early(taken: list[int]) -> cpu_domain.QuietSample:
     """A quiet sample that must not be taken: noted in TAKEN."""
     taken.append(1)
     raise AssertionError("sampled before the usage check")
+
+
+class WatchRowTest(unittest.TestCase):
+    """cpu-watch watch: one samples.csv row from two readings of the counters."""
+
+    PREV = cpu_domain.WatchCounters(t=100.0, sys=5_000, vm=1_000_000, builds=4_000_000, game=(10_000, 2_000, 30))
+    CUR = cpu_domain.WatchCounters(t=102.0, sys=9_000, vm=4_000_000, builds=3_000_000, game=(13_000, 2_600, 90))
+
+    def test_rates_per_second_of_wall_time(self) -> None:
+        row = cpu_domain.watch_row(self.CUR, self.PREV, start=90.0, profile_on=True, pid=4242, p_mhz=4100, e_mhz=3200)
+        self.assertEqual(len(row), len(cpu_domain.SAMPLE_FIELDS))
+        # 2 s apart: game wait 3000 us -> 1.5 ms/s, memory stall 0.3 ms/s, 30 switches/s, system 2.0 ms/s,
+        # 1.5 VM CPUs; the builds' counter went down (a cgroup gone): 0, never negative.
+        self.assertEqual(row, [12.0, 1, 4242, 1.5, 0.3, 30, 2.0, 4100, 3200, 1.5, 0.0])
+
+    def test_game_columns_stay_empty_until_two_readings_have_the_game(self) -> None:
+        no_game = dataclasses.replace(self.PREV, game=None)
+        for cur, prev in ((self.CUR, no_game), (dataclasses.replace(self.CUR, game=None), self.PREV)):
+            with self.subTest(cur=cur.game, prev=prev.game):
+                row = cpu_domain.watch_row(cur, prev, start=90.0, profile_on=False, pid=None, p_mhz=0, e_mhz=0)
+                self.assertEqual(row, [12.0, 0, "", "", "", "", 2.0, 0, 0, 1.5, 0.0])
 
 
 class FakeProc:
@@ -1665,7 +1688,8 @@ class VmPinCliTest(unittest.TestCase):
         out = io.StringIO()
         with (
             unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
-            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", return_value=dict(self.CONF)),
+            # autospec: a call that does not fit vm_pin_settings(path, action) fails.
+            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", autospec=True, return_value=dict(self.CONF)),
             contextlib.redirect_stdout(out),
         ):
             rc = cpu_cli.vm_pin(argv, doc="DOC")
@@ -1741,6 +1765,69 @@ class VmPinCliTest(unittest.TestCase):
             self.run_vm_pin(["plan"], bad_xml)
         rc, out, calls = self.run_vm_pin(["bogus"], SAMPLE_DOMAIN_XML)
         self.assertEqual((rc, out, calls), (2, "DOC\n", []))
+
+    def test_save_definition_once_keeps_the_first_and_is_private_from_the_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            etc = os.path.join(tmp, "etc", "cpu-setup")
+            old_umask = os.umask(0)  # 0600 comes from the open, not from the umask
+            try:
+                path = cpu_adapters.save_definition_once(etc, "box", "<domain>first</domain>\n")
+            finally:
+                os.umask(old_umask)
+            self.assertEqual(path, os.path.join(etc, "box.xml.before-vm-pin"))
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            # A later apply keeps the first one: it is the one to go back to.
+            self.assertEqual(cpu_adapters.save_definition_once(etc, "box", "<domain>second</domain>\n"), path)
+            with open(path) as f:
+                self.assertEqual(f.read(), "<domain>first</domain>\n")
+            self.assertEqual(os.listdir(etc), ["box.xml.before-vm-pin"])
+
+    def test_apply_saves_the_definition_then_defines_the_pinned_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cpu_domain.CpuPaths(runs=tmp, conf=os.path.join(tmp, "absent.conf"), etc=os.path.join(tmp, "etc"))
+            defined: list[tuple[str, bool]] = []
+            temp_files: list[str] = []
+
+            def adapter_virsh(*args: str, check: bool = True) -> str:
+                # define_domain's call: the temporary file still exists while virsh reads it.
+                temp_files.append(args[1])
+                with open(args[1]) as f:
+                    defined.append((f.read(), check))
+                self.assertEqual(args[0], "define")
+                return ""
+
+            def cli_virsh(*args: str, check: bool = True) -> str:
+                return SAMPLE_DOMAIN_XML
+
+            for answer in ("n", "y"):
+                out = io.StringIO()
+                with (
+                    unittest.mock.patch.object(cpu_cli, "virsh", cli_virsh),
+                    unittest.mock.patch.object(cpu_adapters, "virsh", adapter_virsh),
+                    unittest.mock.patch.object(cpu_cli, "confirm", return_value=answer == "y") as confirm,
+                    contextlib.redirect_stdout(out),
+                ):
+                    self.assertEqual(cpu_cli.vm_pin(["apply", "box"], doc="DOC", paths=paths), 0)
+                self.assertIn(
+                    "\nDefine box with 12 vCPUs pinned to 12-23 (CPU features to be disabled: ",
+                    confirm.call_args.args[0],
+                )
+                if answer == "n":
+                    self.assertTrue(out.getvalue().endswith("Nothing changed.\n"))
+                    self.assertFalse(os.path.exists(paths.etc), "no is no: nothing saved")
+                    self.assertEqual(defined, [])
+            backup = os.path.join(paths.etc, "box.xml.before-vm-pin")
+            with open(backup) as f:
+                self.assertEqual(f.read(), SAMPLE_DOMAIN_XML)
+            after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", cpu_domain.CPU_DISABLE_DEFAULT.split())
+            self.assertEqual(defined, [(after, True)])
+            self.assertFalse(os.path.exists(temp_files[0]), "the temporary definition is removed")
+            self.assertTrue(
+                out.getvalue().endswith(
+                    "Defined. Effective at the next start of box (shut it down and start it when convenient).\n"
+                    f"Previous definition saved in {backup} (restore: virsh -c {cpu_domain.URI} define {backup}).\n"
+                )
+            )
 
     def test_virsh_adapter(self) -> None:
         ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")

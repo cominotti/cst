@@ -15,12 +15,11 @@ import re
 import sys
 from typing import TextIO
 
+from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
 from cpu.adapters import (
-    CLOCK,
-    SLEEP,
     cpu_paths,
     define_domain,
     quiet_sample,
@@ -43,6 +42,9 @@ from cpu.domain import (
     quiet_tests,
     quiet_text,
 )
+
+# The clock and the pause of `cpu-watch quiet` (its tests pass their own).
+CLOCK = SystemClockAdapter()
 
 
 def vm_pin(argv: Sequence[str], doc: str, paths: CpuPaths | None = None) -> int:
@@ -95,7 +97,7 @@ def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
 
 
 # ---- cpu-watch ---------------------------------------------------------------
-def watch(argv: Sequence[str], paths: CpuPaths | None = None) -> int:
+def watch(argv: Sequence[str]) -> int:
     """`cpu-watch watch ...`: record a run, print its summary; the exit status is CMD's (0 without one)."""
     label = "run"
     game: str | None = None
@@ -124,15 +126,14 @@ def watch(argv: Sequence[str], paths: CpuPaths | None = None) -> int:
             print(f"unknown argument {a}", file=sys.stderr)
             return 2
     label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
-    runs = (cpu_paths() if paths is None else paths).runs
-    run_dir, rc = record_run(runs, label=label, game=game, seconds=seconds, mangohud=mangohud, cmd=cmd)
+    run_dir, rc = record_run(cpu_paths().runs, label=label, game=game, seconds=seconds, mangohud=mangohud, cmd=cmd)
     print(summarize(run_dir))
     return rc if rc else 0
 
 
-def report(argv: Sequence[str], paths: CpuPaths | None = None) -> None:
+def report(argv: Sequence[str]) -> None:
     """`cpu-watch report [RUN...]`: one line per run."""
-    runs_dir = (cpu_paths() if paths is None else paths).runs
+    runs_dir = cpu_paths().runs
     runs = recorded_runs(runs_dir, argv)
     if not runs:
         print(f"no runs in {runs_dir}; record one with: cst cpu watch -l <label> [-- <cmd>]")
@@ -145,8 +146,8 @@ def report(argv: Sequence[str], paths: CpuPaths | None = None) -> None:
 def quiet(
     argv: Sequence[str],
     sample: Callable[[], QuietSample] | None = None,
-    sleep: Callable[[float], object] = SLEEP,
-    clock: Callable[[], float] = CLOCK,
+    sleep: Callable[[float], object] = CLOCK.sleep,
+    clock: Callable[[], float] = CLOCK.monotonic,
     out: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> int:

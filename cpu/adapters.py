@@ -48,9 +48,6 @@ VIRSH_TIMEOUT = 60  # seconds for one virsh call
 # virsh where vm-pin runs (also in a toolbox: not moved to the host); output
 # that is not UTF-8 is replaced.
 VIRSH: VirshPort = SubprocessVirshAdapter(URI, on_host=False)
-# The clock and the pause of `cpu-watch quiet` (its tests pass their own).
-CLOCK: Callable[[], float] = time.monotonic
-SLEEP: Callable[[float], None] = time.sleep
 
 
 def cpu_paths() -> CpuPaths:
@@ -362,7 +359,9 @@ def summarize(run_dir: str) -> str:
     return out
 
 
-def quiet_sample(proc: str = PROC, game_state: str = GAME_STATE, clock: Callable[[], float] = CLOCK) -> QuietSample:
+def quiet_sample(
+    proc: str = PROC, game_state: str = GAME_STATE, clock: Callable[[], float] = time.monotonic
+) -> QuietSample:
     """One reading of each test's file (s['v'][test name]) and whether the game
     profile is on. A file that cannot be read or parsed leaves its reason in
     s['err'][test name] instead."""
