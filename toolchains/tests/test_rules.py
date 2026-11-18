@@ -38,7 +38,7 @@ import time
 import tomllib
 import unittest
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, override
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -98,6 +98,7 @@ def key_of(folder: str) -> str:
 
 
 class RulesBase(Base):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.ws = os.path.join(self.home, "Workspace")
@@ -374,6 +375,7 @@ class IncrementalTest(RulesBase):
 
 
 class UvBase(RulesBase):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.cache = os.path.join(self.home, ".cache/uv")
@@ -937,6 +939,7 @@ class SccacheConfigTest(RulesBase):
     """The opt-in sccache item of `config`: the rustc-wrapper key in [build]
     and the wrapper file."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.cfg_path = os.path.join(self.home, ".cargo/config.toml")
@@ -1547,6 +1550,7 @@ class RustcWrapperTest(unittest.TestCase):
     clean environment (no SCCACHE_*, CARGO_INCREMENTAL or XDG_RUNTIME_DIR
     inherited)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-wrapper-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)

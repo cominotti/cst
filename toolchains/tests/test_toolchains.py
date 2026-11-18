@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import override
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -94,6 +95,7 @@ FAKE_SYSTEMCTL = FAKE_LOG + FAKE_ANSWERS
 class Scratch(unittest.TestCase):
     """A scratch home, a stub systemctl, and the program loaded as a module."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1456,6 +1458,7 @@ class NotUtf8OutputTest(unittest.TestCase):
     """cargo, ionice'd commands, rm, rustup, sccache and systemctl: bytes of
     their output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-tc-bytes-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1488,6 +1491,7 @@ class SessionEnvTest(unittest.TestCase):
     uid's XDG_RUNTIME_DIR (root's /run/user/0, which sudo and runuser pass on) and a bus inside it
     become this user's; this user's own folder and bus stay. The stub prints what reached it."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-tc-session-"))
         self.addCleanup(shutil.rmtree, self.tmp)
