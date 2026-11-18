@@ -306,7 +306,9 @@ command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
 sets nothing for `vm-pin`: `plan` and `status` print it with its line
 number, `apply` refuses to start, and `cst doctor` warns. The game profile
 then does not switch on (`cpu-game.service` fails when GameMode or `cst cpu
-game on` starts it, its journal names the line). The watchdog does not start
+game on` starts it, its journal names the line; the by-hand mark `cst cpu game
+on` made is dropped, so a profile a later game switches on is switched off
+when that game ends). The watchdog does not start
 it while a game runs, and with the profile already on its `tick` changes
 nothing (it still switches the profile off when the game ends); it names
 the line in the journal once per boot (again when the lines change, when it

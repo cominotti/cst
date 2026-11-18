@@ -794,6 +794,22 @@ class SettingsProblemTest(GameProfileCase):
         self.assertEqual(self.systemd.actions, [])
         self.assertEqual(p.locked("on"), 1)  # what the unit's ExecStart gets
 
+    def test_a_refused_on_drops_the_by_hand_mark_and_a_later_game_is_switched_off(self) -> None:
+        self.write(self.manual, "")  # 'cst cpu game on' makes it, then starts cpu-game.service
+        p, _ = self.problem_profile()
+        self.assertEqual(p.on(), 1)
+        self.assertFalse(os.path.exists(self.manual))
+        p, _ = self.profile(GameSettings())  # no TARGET_USER: refused the same way
+        self.write(self.manual, "")
+        self.assertEqual(p.on(), 1)
+        self.assertFalse(os.path.exists(self.manual))
+        # Fixed; a game switches the profile on, and its end switches it off again.
+        self.write(self.paths.conf, "TARGET_USER='testuser'\n")
+        self.run_profile("on")
+        self.no_game()
+        _, actions = self.run_profile("tick")
+        self.assertEqual(actions, [f"{SYS} stop --no-block cpu-game.service"])
+
     def test_tick_changes_nothing_but_still_switches_off_and_off_works(self) -> None:
         self.run_profile("on")  # switched on before the line was broken
         self.write(self.manual, "")

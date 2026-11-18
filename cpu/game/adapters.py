@@ -389,6 +389,11 @@ class GameProfile:
         if os.path.exists(p.state):
             self.log(6, "already on")
             return 0
+        if self.problems or not s.target_user:
+            # Not switched on: a by-hand mark ('cst cpu game on' makes it first) would keep a profile a
+            # later game switches on from being switched off when that game ends.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(p.manual)
         if self.problems:
             self.refuse("not switched on")
             return 1
