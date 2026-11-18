@@ -1751,7 +1751,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
             "/usr/local/bin/btrfs-stall-report": ("--help", 0),
-            "/usr/local/bin/cst-pending-alerts": ("--help", 2),
+            # env -i below sets no HOME, which it needs before reading its arguments (as the bash did): exit 1.
+            "/usr/local/bin/cst-pending-alerts": ("--help", 1),
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
@@ -3507,7 +3508,8 @@ journal_has() {{
         journalctl --sync 2>/dev/null || true
         if journalctl -q --no-pager -o json -u cst-e2e-health-check.service --since "@$start" | python3 -I -c '
 import json, sys
-for line in sys.stdin:
+# All of it first: leaving early would end journalctl with SIGPIPE, and pipefail would fail the match.
+for line in sys.stdin.read().splitlines():
     e = json.loads(line)
     if (e.get("MESSAGE"), e.get("SYSLOG_IDENTIFIER"), e.get("PRIORITY")) == (sys.argv[1], "btrfs-health-check", sys.argv[2]):
         sys.exit(0)
