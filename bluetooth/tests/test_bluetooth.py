@@ -1780,6 +1780,44 @@ class WatcherRunTest(unittest.TestCase):
         self.assertEqual(bt_adapters.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3), (124, ""))
 
 
+class UnreadableInputTest(unittest.TestCase):
+    """bt-helper on a file it cannot read or decode: one line on stderr, exit 1 (no traceback)."""
+
+    def helper(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-I", HELPER, *args], check=False, input=stdin, capture_output=True, text=True
+        )
+
+    def test_a_file_it_cannot_read_is_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "main.conf")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("[General]\n")
+            os.chmod(p, 0)
+            for args in (["general-show", p], ["general-apply", p], ["settings", DEFAULTS, p], ["settings-keys", p]):
+                r = self.helper(*args)
+                self.assertEqual((r.returncode, r.stdout), (1, ""), args)
+                self.assertEqual(r.stderr, f"bt-helper: [Errno 13] Permission denied: '{p}'\n", args)
+
+    def test_a_file_that_is_not_utf8_is_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "50-bluez.conf")
+            with open(p, "wb") as f:
+                f.write(b"# \xff\n")
+            for args in (
+                ["wp-state", p, "AA:BB:CC:DD:EE:FF", "auto"],
+                ["le-state", p],
+                ["settings-set", p, "LE_AUDIO", "on"],
+            ):
+                r = self.helper(*args)
+                self.assertEqual((r.returncode, r.stdout), (1, ""), args)
+                self.assertEqual(
+                    r.stderr,
+                    "bt-helper: 'utf-8' codec can't decode byte 0xff in position 2: invalid start byte\n",
+                    args,
+                )
+
+
 class NotUtf8OutputTest(unittest.TestCase):
     """run(): bytes of pw-dump's or pactl's output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
 

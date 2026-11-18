@@ -79,6 +79,7 @@ _USERNS: Final = (
 # a test.
 EXPECTED_SKIPS: Final[dict[str, str]] = {
     "bluetooth.tests.test_bluetooth.WirePlumberResolveTest": "needs libwireplumber-0.5 (not in CI, not in a toolbox)",
+    "bluetooth.tests.test_setup.StepDownTest.test_the_test_overrides_do_not_reach_the_run_as_the_user": _USERNS,
     "btrfs.tests.test_btrfs_bulk.BulkTest.test_root_reads_bulk_user_with_the_one_settings_reader": "not as root",
     "btrfs.tests.test_btrfs_snapshot_core.BtrbkOracleTests": "needs btrbk (perl) to compare with",
     "btrfs.tests.test_btrfs_snapshot_core.CacheWalkTests.test_drop_failure_keeps_the_tag_and_goes_on": "not as root",

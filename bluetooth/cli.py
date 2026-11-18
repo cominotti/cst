@@ -40,7 +40,7 @@ from bluetooth.domain import (
     unit_state,
     wp_state,
 )
-from bluetooth.adapters import run_watcher, stdin_snapshot
+from bluetooth.adapters import one_line_errors, run_watcher, stdin_snapshot
 from bluetooth.domain.watch import decide
 from bluetooth.ports import BluetoothHostPort
 
@@ -64,6 +64,7 @@ _ARITY: Final[dict[str, int]] = {
 }
 
 
+@one_line_errors
 def main(
     argv: Sequence[str],
     host: BluetoothHostPort,
@@ -73,10 +74,11 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
-    """Dispatch one `bt-helper` command against `host` and return its exit status."""
+    """Dispatch one `bt-helper` command against `host` and return its exit status. A file it
+    cannot read or decode is one line on stderr ("bt-helper: " and the error), exit 1
+    (one_line_errors)."""
     out = sys.stdout if stdout is None else stdout
     err = sys.stderr if stderr is None else stderr
-
     if not argv:
         if doc:
             out.write(doc)
@@ -138,8 +140,7 @@ def main(
         out.write(new)
         return 10 if changed else 0
     if cmd == "settings-keys":
-        text = host.read_or_none(args[0])
-        for k in set_keys(text or ""):
+        for k in set_keys(host.read_or_none(args[0]) or ""):
             print(k, file=out)
         return 0
     if cmd == "lw-failure":
