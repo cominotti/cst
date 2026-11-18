@@ -159,7 +159,7 @@ class Topology:
             if dev.startswith("/dev/"):
                 name = os.path.basename(os.path.realpath(dev))
                 self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
-                for n in [name] + block_parents(name):
+                for n in [name, *block_parents(name)]:
                     self.disks.setdefault(n, "swap")
 
     def scan_cgroups(self, now: float) -> None:

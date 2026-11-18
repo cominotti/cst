@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's analysis of one window, no I/O: coverage, pressure and peaks, the btrfs, disk, memory and cgroup totals, the categories of the episodes' waits, the corrections for records of older daemons, and an episode still open."""
 
+import itertools
 import math
 
 from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE
@@ -136,7 +137,7 @@ def summarise(
     pswpout_v7 = 0  # pswpout of the v7+ sample pairs (compared with zswpwb)
     v6_since, v7_since = first_at.get(6), first_at.get(7)
     zswap_ok = False  # some sample pair came from a v7+ daemon (zswap counters usable)
-    for a, b in zip(samples, samples[1:], strict=False):
+    for a, b in itertools.pairwise(samples):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             gaps += 1
