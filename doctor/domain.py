@@ -490,9 +490,7 @@ def read_intended(text: str) -> list[tuple[str, ...]]:
             f = shlex.split(line)
         except ValueError:
             continue
-        if len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr"):
-            out.append(tuple(f))
-        elif len(f) == 4 and f[0] == "cgw":
+        if (len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr")) or (len(f) == 4 and f[0] == "cgw"):
             out.append(tuple(f))
     return out
 
