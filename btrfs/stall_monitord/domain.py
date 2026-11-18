@@ -86,7 +86,8 @@ KMSG_SEVERE = re.compile(
     r"|csum failed|I/O error|nvme\S*: .*(?:timeout|reset|abort)",
     re.IGNORECASE,
 )
-# "BTRFS error (device dm-0 state EA): ..." / "I/O error, dev nvme0n1, sector ..."
+# The device a kernel line names, as in "BTRFS error (device dm-0 state EA): ..."
+# or "I/O error, dev nvme0n1, sector ...".
 KMSG_DEVICE = re.compile(r"\(device ([\w.-]+)[ )]|\bdev ([\w.-]+),")
 GENERIC_FRAME = re.compile(
     r"^(?:__schedule|schedule|schedule_timeout|schedule_timeout_uninterruptible"
@@ -106,7 +107,7 @@ GENERIC_FRAME = re.compile(
 def parse_stack(text: str | None) -> list[str]:
     frames = []
     for line in (text or "").splitlines():
-        # "[<0>] btrfs_commit_transaction+0x7c3/0xb40 [btrfs]"
+        # A line reads like "[<0>] btrfs_commit_transaction+0x7c3/0xb40 [btrfs]".
         part = line.split("] ", 1)[-1].strip()
         if part:
             frames.append(part.split("+", 1)[0].split(" ", 1)[0])
