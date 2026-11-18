@@ -2026,6 +2026,23 @@ class VmNasBackupTest(VmTest):
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
         self.assertNotIn("vm.conf line 1", r.stdout)
 
+    def test_a_cpu_setup_conf_line_warns_that_the_game_profile_does_not_switch_on(self) -> None:
+        # No bash program of this CST sources cpu-setup.conf any more: the game profile is Python, and
+        # refuses to switch on over such a line.
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='tester'\nBUILD_CPUS=$(nproc)\n")
+        r = self.run_tool()
+        line = next((x for x in r.stdout.split("\n") if "cpu-setup.conf line 2" in x), "")
+        self.assertIn("WARN", line)
+        self.assertIn(
+            "CST's Python programs take nothing from the line (the game profile does not switch on), and the cst"
+            " commands that change the machine with these settings refuse to run until it is fixed",
+            line,
+        )
+        self.assertNotIn("bash, which also sources", line)
+
     def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
         # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.
         self.deployments(rollback_pinned=True)

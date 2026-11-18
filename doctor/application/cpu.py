@@ -59,7 +59,8 @@ def game_again(host: DoctorHostPort) -> str:
 
 @check(CHECKS, "cpu")
 def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
-    yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True)
+    # Read with bash's rules (an older CST's bash copies sourced it), but no bash program of this CST does.
+    yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True, note=" (the game profile does not switch on)")
 
 
 def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
