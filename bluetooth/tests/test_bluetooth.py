@@ -552,7 +552,16 @@ class LeAudioRenderTest(unittest.TestCase):
 
     def test_classic_roles_are_pipewire_defaults_without_le(self) -> None:
         # PipeWire 1.6.11 (man pipewire-props): the default bluez5.roles.
-        default = "a2dp_sink a2dp_source bap_sink bap_source bap_bcast_sink bap_bcast_source hfp_hf hfp_ag".split()
+        default = [
+            "a2dp_sink",
+            "a2dp_source",
+            "bap_sink",
+            "bap_source",
+            "bap_bcast_sink",
+            "bap_bcast_source",
+            "hfp_hf",
+            "hfp_ag",
+        ]
         self.assertEqual(list(self.m.CLASSIC_ROLES), [r for r in default if not r.startswith("bap_")])
 
     def test_state(self) -> None:
