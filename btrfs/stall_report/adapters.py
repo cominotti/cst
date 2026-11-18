@@ -18,7 +18,7 @@ from btrfs.stall_monitord.domain import StallRecordTag
 from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
 from btrfs.stall_report.domain.window import summarise
 from cst_core.domain.contracts import StateFormatKey, state_format
-from cst_core.domain.values import DAY
+from cst_core.domain.values import DAY, MINUTE
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
 
@@ -43,7 +43,7 @@ def report_window(since: str | None, until: str | None) -> tuple[float, float]:
     """(since, until) of the report: --until (default now), --since (default 30 min before now)."""
     now = time.time()
     end = parse_time(until, now)
-    start = parse_time(since, now - 1800)
+    start = parse_time(since, now - 30 * MINUTE)
     if start >= end:
         sys.exit("--since must be before --until")
     return start, end
