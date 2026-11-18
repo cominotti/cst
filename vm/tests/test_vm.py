@@ -946,7 +946,7 @@ class TuneTransformTest(unittest.TestCase):
             _child(b, "driver").attrib,
             {"name": "qemu", "cache": "none", "io": "native", "discard": "unmap", "detect_zeroes": "unmap"},
         )
-        self.assertEqual(list(b)[0].tag, "driver")
+        self.assertEqual(next(iter(b)).tag, "driver")
         self.assertIn("disk vda: cache writeback -> none", changes)
         self.assertNotIn("disk vda: discard", " ".join(changes))
         self.assertFalse(any(" bus " in c for c in changes))  # virtio-blk stays
@@ -1149,7 +1149,7 @@ class TuneCommandTest(unittest.TestCase):
         self.assertEqual((rc, len(self.defined)), (0, 1))
 
     def test_windows_steps_ask_for_a_full_shutdown(self) -> None:
-        rc, out = self.run_cmd(False, False)
+        _rc, out = self.run_cmd(False, False)
         self.assertIn("shutdown /s /t 0", out)
         self.assertIn("Fast Startup", out)
 
@@ -1295,12 +1295,12 @@ class NocowTest(unittest.TestCase):
             return real_scandir(p)
 
         with mock.patch.object(os, "scandir", scandir):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("NOCOW mark (+C): not readable as your user (root-only folder): cst-vm nocow plan --root", out)
         self.assertNotIn("still copy-on-write", out)
         self.assertNotIn(": no:", out)
         # Readable listing but unreadable image flags (qemu's 0600 files): reported as unknown.
-        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+        _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("images whose mark is not readable as your user: win.qcow2", out)
         self.assertNotIn("still copy-on-write", out)
 
@@ -1309,7 +1309,7 @@ class NocowTest(unittest.TestCase):
             return False
 
         with patch_vm("is_btrfs", _not_btrfs):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("not on btrfs (NOCOW does not apply)", out)
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
@@ -1323,9 +1323,9 @@ class NocowTest(unittest.TestCase):
             return dict(ALL_ON, VM_NOCOW=False)
 
         with patch_vm("knobs", _knobs_off):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
             self.assertIn("VM_NOCOW=no", out)
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
             self.assertIn("nothing to do", out)
 
     def test_apply_marks_user_folders_and_uses_sudo_for_the_system_one(self) -> None:
@@ -1462,7 +1462,7 @@ class NocowTest(unittest.TestCase):
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
-        rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
+        _rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertIn("already has the NOCOW mark", out)
         self.flags[self.boxes] = 0
         with mock.patch("sys.stdin", io.StringIO("")), self.assertRaises(Refused):
@@ -1481,7 +1481,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
+            _rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)

@@ -647,7 +647,7 @@ class LiveBackupTest(Nas):
         # The fixture main's readers were shown to read (tests/fixtures/state-formats/vm-index-v1.json).
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
-            nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
+            nas = next(e for e in json.load(f)["backups"] if e["mode"] == "nas")
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         [real] = [
             e
