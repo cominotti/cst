@@ -718,6 +718,14 @@ class SettingsDomainTest(unittest.TestCase):
             with self.assertRaises(gc_domain.UnknownProtection) as cm:
                 resolve(PATHS, env=None, file_text=None, installed=unknown)
             self.assertIn("/etc/cst/docker-gc.conf is missing, and the installed", str(cm.exception))
+        # This docker-gc has no registry of its own (it reads the file): with the file gone that is no
+        # "none" (the next run would remove what was protected), but a refusal.
+        with open(gc_domain.__file__) as f:
+            this_one = f.read()
+        with self.assertRaises(gc_domain.UnknownProtection) as cm:
+            resolve(PATHS, env=None, file_text=None, installed=(this_one,))
+        self.assertIn("/usr/local/sbin/docker-gc reads them from that file: write", str(cm.exception))
+        self.assertIn("(DOCKER_GC_PROTECT= for none)", str(cm.exception))
         p = resolve(PATHS, env="e.example", file_text=None, installed=None)
         self.assertEqual(
             (p.registries, p.to_write, p.source), (("e.example",), (), "DOCKER_GC_PROTECT in the environment")

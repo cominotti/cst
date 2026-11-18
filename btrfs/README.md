@@ -1615,9 +1615,20 @@ own Python source (it never runs it), and protects those: `status`, `run
 before `enable` runs. `enable` first runs `docker-gc settings --write`,
 which writes the file with that list when it is missing (and changes
 nothing when it is there), and only then installs the new program, which has
-no registry built in. With no docker-gc installed the file gets an empty list.
-When the installed program is not one it knows, it refuses (exit 78) and asks
-you to write the file yourself. To see the list and where it comes from
+no registry built in. Every other way the program gets replaced or deleted
+does the same: `cst_core/installer.py install` or `remove` of
+`btrfs/docker-gc` (by name, `--component btrfs:docker-gc`, `--module btrfs`
+or `--owner root`) first writes the missing file from the installed copy
+(`installer.py plan` lists it as `would write:`), and stops before it changes
+anything when that fails. With no docker-gc installed the file gets an empty
+list. When the installed program is not one it knows, it refuses (exit 78)
+and asks you to write the file yourself.
+
+**Never "none" by mistake.** The docker-gc of this CST has no registry of its
+own: it reads the file. If the file is gone while it is installed (removed by
+hand), every run, `status` and `cleanup-now` stop with exit 78 and say so,
+instead of running with nothing protected; write the file again
+(`DOCKER_GC_PROTECT=` protects none). To see the list and where it comes from
 without changing anything (exit 10: `enable` would write the file), from the
 top of the CST folder:
 

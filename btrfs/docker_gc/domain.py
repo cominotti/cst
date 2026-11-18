@@ -270,16 +270,20 @@ def resolve_protection(
     installed docker-gc protects (installed: its sources; None: no program installed): an older one
     had a registry built in, and the file keeps it once `docker-gc settings --write` writes it.
     Raises UnknownProtection for a file it cannot read, and for a missing file with an installed
-    program whose list it cannot tell: never "none" by mistake."""
+    program that has no list of its own (this docker-gc, which reads the file, or one it does not
+    know): never "none" by mistake."""
     path, prog = paths.settings_file, paths.installed
     if file_text is not None:
         base = Protection(parse_settings_file(path, file_text), f"DOCKER_GC_PROTECT in {path}")
     elif installed is None:
         base = Protection((), f"no {path}, and no docker-gc installed", to_write=())
-    elif (built_in := builtin_protected(installed)) is None:
+    elif not (built_in := builtin_protected(installed)):
+        # Fail closed. Only an older docker-gc has a list of its own, never an empty one; this one
+        # (an empty default) reads it from the file, so the file being gone is no "none".
+        what = "reads them from that file" if built_in == () else "does not show which registries it protects"
         raise UnknownProtection(
-            f"{path} is missing, and the installed {prog} does not show which registries it protects: "
-            f"write {path} with DOCKER_GC_PROTECT=<registries, comma-separated> (empty for none); "
+            f"{path} is missing, and the installed {prog} {what}: write {path} with "
+            f"DOCKER_GC_PROTECT=<registries, comma-separated> (DOCKER_GC_PROTECT= for none); "
             "nothing is removed until then"
         )
     else:

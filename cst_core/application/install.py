@@ -18,6 +18,7 @@ done (mark).
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+import itertools
 import posixpath
 
 from cst_core.domain.errors import Refused
@@ -30,6 +31,7 @@ from cst_core.domain.install import (
     render_template,
     template_keys,
 )
+from cst_core.domain.settings_steps import SETTINGS_STEPS
 from cst_core.domain.record import (
     ROOT_RECORD,
     USER_RECORD_REL,
@@ -43,7 +45,7 @@ from cst_core.domain.record import (
     without_files,
 )
 from cst_core.domain.values import DomainValidationError
-from cst_core.ports import InstallRecordPort, InstallTargetPort, UnitVerifierPort
+from cst_core.ports import InstallRecordPort, InstallTargetPort, SettingsStepPort, UnitVerifierPort
 
 # The bytes install writes for an entry (a zipapp for a python-entry, the
 # file for the rest), before template rendering.
@@ -111,12 +113,14 @@ class InstallService:
         record: InstallRecordPort | None = None,
         commit: str = "unknown",
         verifier: UnitVerifierPort | None = None,
+        steps: SettingsStepPort | None = None,
     ) -> None:
         self._target = target
         self._payload = payload
         self._record = record
         self._commit = commit
         self._verifier = verifier
+        self._steps = steps
 
     def desired(self, entry: InstallEntry, values: Mapping[str, str] | None = None) -> bytes:
         """The bytes the entry's dest must hold (DomainValidationError: a template value missing or unused)."""
@@ -227,7 +231,43 @@ class InstallService:
         """
         todo = self._prepare(entries, req)
         todo.sort(key=lambda pd: pd[0].kind == "unit")
-        return self._write_all(todo, req)
+        replaced = [p for p, data in todo if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root)]
+        done = self._settings_steps(replaced)
+        return itertools.chain(done, self._write_all(todo, req))
+
+    def _due_steps(self, places: Sequence[Placement]) -> list[tuple[Placement, str]]:
+        """The places with a SettingsStep whose settings file is missing, and that file: staged under
+        the same root as the place (its path is that root followed by its dest)."""
+        if self._steps is None:
+            return []
+        due: list[tuple[Placement, str]] = []
+        for p in places:
+            step = SETTINGS_STEPS.get(p.src or "")
+            if step is None or not p.path.endswith(p.dest):
+                continue
+            settings = staged(p.path[: len(p.path) - len(p.dest)], step.settings_file)
+            if self._target.current(settings) is None:
+                due.append((p, settings))
+        return due
+
+    def _settings_steps(self, places: Sequence[Placement]) -> list[str]:
+        """Run the SettingsStep of each place about to be replaced or removed while its settings file
+        is missing; their `written:` lines. A step that fails raises InstallRefused: nothing else changed."""
+        lines: list[str] = []
+        runner = self._steps
+        if runner is None:
+            return lines
+        for p, settings in self._due_steps(places):
+            step = SETTINGS_STEPS[p.src or ""]
+            r = runner.run(p.src or "", step, program=p.path, settings=settings)
+            out = [line for line in r.stdout.splitlines() if line.strip()]
+            if r.returncode != 0:
+                raise InstallRefused(
+                    f"{p.path}: its settings {settings} could not be written from it (exit {r.returncode}); "
+                    "nothing was changed" + "".join(f"\n  {line}" for line in out)
+                )
+            lines += [line for line in out if line.startswith("written:")]
+        return lines
 
     def _write_all(self, todo: Sequence[tuple[Placement, bytes]], req: InstallRequest) -> Iterator[str]:
         trees = self._trees(todo)
@@ -326,7 +366,9 @@ class InstallService:
 
     def remove(self, places: Sequence[Placement]) -> Iterator[str]:
         """Remove each file (a link itself) and its line in the record; `removed:   PATH` for each that
-        was there. Works without a record (an install from before it): the files are the manifest's."""
+        was there. Works without a record (an install from before it): the files are the manifest's.
+        A program with a SettingsStep that is there runs it first, while its settings file is missing."""
+        yield from self._settings_steps([p for p in places if self._target.current(p.path) is not None])
         gone: list[Placement] = []
         try:
             for p in places:
@@ -341,14 +383,18 @@ class InstallService:
     def plan(self, entries: Sequence[InstallEntry], req: InstallRequest) -> tuple[list[str], int]:
         """What install would do, changing nothing: (report lines, number of files to write)."""
         lines: list[str] = []
-        todo = 0
+        replaced: list[Placement] = []
         for p, data in self._prepare(entries, req):
             if self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
                 lines.append(f"unchanged: {p.path}")
             else:
                 lines.append(f"would write: {p.path}")
-                todo += 1
-        return lines, todo
+                replaced.append(p)
+        # A settings file install would write first, from the program it replaces (SettingsStep).
+        settings = [
+            f"would write: {path} (from {p.path}, before it is replaced)" for p, path in self._due_steps(replaced)
+        ]
+        return settings + lines, len(replaced) + len(settings)
 
 
 def _adding(files: Mapping[str, tuple[RecordedFile, bool]]) -> Callable[[InstallRecord], InstallRecord]:

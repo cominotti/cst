@@ -497,6 +497,42 @@ echo E2E-OK
 """
 
 
+# test_103: docker-gc run --dry-run of the program at argv[1] with its settings file at argv[2], against
+# the fake docker and systemctl of btrfs/tests/test_docker_gc_program.py and its scenario (an old image of
+# its protected registry, registry.example.com/team/db:1, and old unprotected ones), with the recorder
+# running and a fresh record: a protected image is "held back", the others are listed for removal.
+GC_DRY_RUN = r"""
+import json, os, subprocess, sys, tempfile, time
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests import test_docker_gc_program as t
+prog, conf = sys.argv[1], sys.argv[2]
+tmp = tempfile.mkdtemp(prefix="e2e-gc-dry-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+fakes = os.path.join(tmp, "bin")
+os.mkdir(fakes)
+for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
+    path = os.path.join(fakes, name)
+    with open(path, "w") as f:
+        f.write(text.replace("@PYTHON@", sys.executable))
+    os.chmod(path, 0o755)
+now = time.time()
+with open(os.path.join(tmp, "docker.json"), "w") as f:
+    json.dump(t.scenario(now), f)
+state = os.path.join(tmp, "state")
+os.mkdir(state)
+with open(os.path.join(state, "last-used.json"), "w") as f:
+    json.dump({"since": t.OLD + 30 * t.DAY, "images": {t.sha("8"): now - t.DAY}, "heartbeat": now}, f)
+env = {
+    "PATH": fakes + ":/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": state, "DOCKER_GC_RUNTIME": os.path.join(tmp, "run"),
+    "DOCKER_GC_CONF": conf, "DOCKER_GC_INSTALLED": prog,
+    "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(tmp, "calls.log"),
+}
+r = subprocess.run([prog, "run", "--dry-run"], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
+sys.stdout.write(r.stdout)
+sys.stderr.write(r.stderr)
+sys.exit(r.returncode)
+"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
@@ -1788,6 +1824,12 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
     # Components whose units run a program of another one (btrfs-stall-alert.service runs btrfs-notify):
     # installed first, as btrfs-setup.sh install does, and removed after.
     COMPONENT_NEEDS: Mapping[str, tuple[str, ...]] = {"btrfs:core": ("btrfs:alerts",)}
+    # Settings a component's install needs, written first (and removed after) when they are not there:
+    # over a docker-gc it does not know (the plain-script copy below) without its settings file, the
+    # installer refuses (it cannot tell what that copy protects).
+    COMPONENT_FILES: Mapping[str, Mapping[str, str]] = {
+        "btrfs:docker-gc": {"/etc/cst/docker-gc.conf": "DOCKER_GC_PROTECT=\n"}
+    }
 
     def test_19_every_component_full_cycle_on_the_container_root(self) -> None:
         """Each component of the manifest, installed for real on the container's / (root's as root,
@@ -1824,6 +1866,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             self.skipTest(f"{comp}: already there (another test's): {present.split()}")
         cleanup = f"{run}{installer} remove {home} --component {comp} >/dev/null"
         self.addCleanup(exec_bash, c, cleanup, check=False)
+        for path, text in self.COMPONENT_FILES.get(comp, {}).items():
+            q = shlex.quote(path)
+            made_file = exec_bash(
+                c,
+                f'[[ -e {q} ]] || {{ install -d -m 0755 "$(dirname {q})"; printf %s {shlex.quote(text)} >{q}; echo made; }}',
+            ).stdout
+            if "made" in made_file:
+                self.addCleanup(exec_bash, c, f"rm -f {q}", check=False)
         made_needs: list[str] = []
         for need in self.COMPONENT_NEEDS.get(comp, ()):
             # Installed (and removed after) only when none of its files is there: another test's stay.
@@ -1892,6 +1942,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         if exec_bash(c, f"for f in {dests}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("docker-gc is installed already (another test's)")
         copy = "/var/tmp/e2e-cst-verify"
+        # The install writes docker-gc's settings first (none installed: none protected); removed after.
+        if not exec_bash(c, "[[ ! -e /etc/cst/docker-gc.conf ]] || echo there").stdout.strip():
+            self.addCleanup(exec_bash, c, "rm -f /etc/cst/docker-gc.conf", check=False)
         self.addCleanup(
             exec_bash,
             c,
@@ -2878,6 +2931,81 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF "written:   $conf (DOCKER_GC_PROTECT=$reg)" <<<"$out"
             grep -qxF "kept:      $conf (the settings: which registries are protected)" <<<"$out"
             [[ ! -e "$bin" && "$(tail -n 1 "$conf")" == "DOCKER_GC_PROTECT=$reg" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_103_docker_gc_installer_keeps_the_registry_of_mains_install(self) -> None:
+        """Every install path writes docker-gc's settings before it replaces the program, not only
+        `enable`. Staged under /var/tmp/e2e-gc-manifest: main's install (654bbda; its zipapp with the
+        domain.py of tests/fixtures/legacy, a registry built in) and no /etc/cst/docker-gc.conf. The
+        installer's plan names the settings file and writes nothing; `installer.py install --owner
+        root` (the whole manifest of root) writes the file with that registry, before the new program;
+        that installed docker-gc's `run --dry-run` (a fake docker with an old image of the registry and
+        old unprotected ones, the recorder running) still holds the registry's image back ("protected
+        registry") and lists the others; a second install changes nothing. Fail closed: with the file
+        removed, the same dry run exits 78 and asks docker nothing."""
+        c = self.SYSTEMD_CONTAINER
+        stage = "/var/tmp/e2e-gc-manifest"
+        self.addCleanup(exec_bash, c, f"rm -rf {stage} /var/tmp/e2e-gc-dry-*", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_103 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            stage={stage}
+            prog="$stage/usr/local/sbin/docker-gc"
+            conf="$stage/etc/cst/docker-gc.conf"
+            reg=registry.example.com
+            show() {{ sed "s/^/test_103 $1: /" <<<"$2" >&2; }}   # the CI log
+            rm -rf "$stage" && install -d -m 0755 "$stage" "$(dirname "$prog")"
+            dry_run() {{ /usr/bin/python3 -I -c {shlex.quote(GC_DRY_RUN)} "$prog" "$conf"; }}
+
+            # 1. main's install: its zipapp, with main's domain.py; no settings file.
+            python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[2], "w"); z.writestr("__main__.py", "raise SystemExit(1)\\n"); z.write(sys.argv[1], "btrfs/docker_gc/domain.py"); z.close()' \
+                /opt/cst-rw/tests/fixtures/legacy/btrfs-docker_gc-domain.py@654bbda "$prog"
+            chmod 0755 "$prog"
+
+            # 2. The plan names the settings file, first, and writes nothing.
+            plan="$({installer} plan --root "$stage" --owner root {sets})"
+            show plan "$(head -n 3 <<<"$plan")"
+            [[ "$(head -n 1 <<<"$plan")" == "would write: $conf (from $prog, before it is replaced)" ]]
+            [[ ! -e "$conf" ]]
+
+            # 3. The whole manifest of root: the settings first, with the registry, then the new program.
+            out="$({installer} install --root "$stage" --owner root {sets})"
+            show install "$(head -n 3 <<<"$out")"
+            [[ "$(head -n 1 <<<"$out")" == "written:   $conf (DOCKER_GC_PROTECT=$reg)" ]]
+            grep -qxF "written:   $prog" <<<"$out"
+            [[ "$(tail -n 1 "$conf")" == "DOCKER_GC_PROTECT=$reg" && "$(stat -c '%a %U' "$conf")" == "644 root" ]]
+            /usr/bin/python3 -I -c 'import sys, zipfile; sys.exit("btrfs/docker_gc/application.py" not in zipfile.ZipFile(sys.argv[1]).namelist())' "$prog"
+
+            # 4. The installed docker-gc still holds the registry's image back; the others are listed.
+            rc=0; out="$(dry_run 2>&1)" || rc=$?
+            show "dry run" "$out"
+            [[ "$rc" == 0 ]]
+            grep -qxF "held back: 1 image(s) (protected registry: cleanup-now only)" <<<"$out"
+            grep -qF "  alpine:old  (last use " <<<"$out"
+            if grep -qF "$reg/team/db" <<<"$out"; then echo "the protected image is listed for removal" >&2; exit 1; fi
+            grep -qxF "(dry run: nothing removed)" <<<"$out"
+
+            # 5. A second install changes nothing (no settings step: the file is there).
+            again="$({installer} install --root "$stage" --owner root {sets})"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
+
+            # 6. Fail closed: this docker-gc has no registry of its own; without the file it removes nothing.
+            rm -f "$conf"
+            rc=0; out="$(dry_run 2>&1)" || rc=$?
+            show "dry run, no settings" "$out"
+            [[ "$rc" == 78 ]]
+            grep -qF "$conf is missing, and the installed $prog reads them from that file" <<<"$out"
             echo E2E-OK
             """,
         ).stdout

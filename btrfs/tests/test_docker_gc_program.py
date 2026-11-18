@@ -25,6 +25,14 @@ import unittest
 import zipfile
 from datetime import UTC, datetime
 
+# Run directly (python3 -I -B btrfs/tests/test_docker_gc_program.py): the checkout root holds cst_core.
+CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if CHECKOUT not in sys.path:
+    sys.path.insert(0, CHECKOUT)
+
+from cst_core.adapters.zipapp import entry_payload
+from cst_core.domain.install import INSTALL_MANIFEST
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
 RECORDER_UNIT = os.path.join(os.path.dirname(HERE), "units", "docker-gc-recorder.service")
@@ -541,6 +549,21 @@ class SettingsUpgradeTest(unittest.TestCase):
             rc, out, _ = self.p.run(*args)
             self.assertEqual(rc, 78, args)
             self.assertIn(f"{self.p.conf} is missing, and the installed {self.p.installed} does not show", out)
+        self.assertFalse(os.path.exists(self.p.conf))
+        self.assertEqual(self.p.calls(), [], "it asked docker before it knew what is protected")
+
+    def test_this_docker_gc_installed_without_its_settings_file_removes_nothing(self) -> None:
+        # Fail closed: the docker-gc of this CST, as the installer writes it (its zipapp), has no
+        # registry of its own; with its settings file gone (an install that did not write it, a file
+        # removed by hand) every command but the recorder stops with 78 and never asks docker,
+        # instead of running with nothing protected.
+        entry = next(e for e in INSTALL_MANIFEST if e.src == "btrfs/docker-gc")
+        with open(self.p.installed, "wb") as f:
+            f.write(entry_payload(CHECKOUT, entry))
+        for args in (("status",), ("run", "--dry-run"), ("run",), ("cleanup-now",), ("settings", "--write")):
+            rc, out, _ = self.p.run(*args)
+            self.assertEqual(rc, 78, args)
+            self.assertIn(f"{self.p.conf} is missing, and the installed {self.p.installed} reads them from that", out)
         self.assertFalse(os.path.exists(self.p.conf))
         self.assertEqual(self.p.calls(), [], "it asked docker before it knew what is protected")
 

@@ -15,8 +15,9 @@ from cst_core.adapters.runtime import checkout_commit, checkout_root, install_pa
 from cst_core.application.install import InstallService
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
+from cst_core.domain.settings_steps import SettingsStep
 from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
-from cst_core.ports import CommandRunnerPort, UnitVerdict, WriteFailed
+from cst_core.ports import CommandResult, CommandRunnerPort, UnitVerdict, WriteFailed
 
 
 class LocalInstallTarget:
@@ -116,6 +117,21 @@ class JsonInstallRecord:
     def sha256(self, data: bytes) -> str:
         """hashlib.sha256 in hex."""
         return hashlib.sha256(data).hexdigest()
+
+
+class CheckoutSettingsStep:
+    """SettingsStepPort: the checkout's copy of the program, on python (the interpreter the installer
+    runs on), with the two paths in its environment; its output merged, at most 120 s."""
+
+    def __init__(self, checkout: str, python: str, runner: CommandRunnerPort | None = None) -> None:
+        self._checkout = checkout
+        self._python = python
+        self._runner = runner or SubprocessCommandRunner()
+
+    def run(self, src: str, step: SettingsStep, *, program: str, settings: str) -> CommandResult:
+        argv = [self._python, "-I", "-B", os.path.join(self._checkout, src), *step.args]
+        env = {step.env_program: program, step.env_file: settings}
+        return self._runner.run(argv, env=env, timeout=120, output="merge")
 
 
 class SystemdUnitVerifier:

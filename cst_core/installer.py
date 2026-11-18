@@ -46,6 +46,13 @@ template units are not), and when that fails none of them is written (exit 1,
 the lines about them on stderr; a note when systemd-analyze is missing). A file that
 cannot be written ends the run with "cst installer: cannot write DEST: REASON"
 (exit 1), after the lines of the files written before it.
+Before a program of SETTINGS_STEPS (cst_core/domain/settings_steps.py: btrfs/docker-gc)
+is replaced by install or deleted by remove, while its settings file is missing
+(under --root when staged), the checkout's copy of it writes that file from
+the installed copy (docker-gc: `settings --write`, the registries an older
+docker-gc had built in); plan lists that file as "would write:". When it
+fails (exit 78: an installed program it does not know) nothing is changed
+(exit 1, its lines on stderr).
 """
 
 import os.path as _cst_path
