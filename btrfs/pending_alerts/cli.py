@@ -2,6 +2,7 @@
 """cst-pending-alerts' commands (show at a login, --list) and main()."""
 
 from collections.abc import Sequence
+from functools import partial
 import os
 import sys
 
@@ -51,6 +52,7 @@ def list_alerts(s: PendingPaths) -> int:
     root = HostExecutionContext().is_root()
     btime = boot_time()
     rec = {} if root else load_record(s)
+    at = partial(happened_at, btime=btime)
     n = 0
     for mtime, name in pending_files(s):
         alert = read_pending(s, name)
@@ -58,7 +60,7 @@ def list_alerts(s: PendingPaths) -> int:
             continue
         n += 1
         mark = "" if root else MARKS[seen_as(rec, name, mtime)]
-        print(list_line(alert, lambda e: happened_at(e, btime), mark))
+        print(list_line(alert, at, mark))
     if not n:
         print("none")
     return 0
@@ -69,10 +71,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
     if migrate_record(s):
         log(6, f"moved {s.old_state_dir} to {s.state_dir}")
     rec = load_record(s)
-    btime = boot_time()
-
-    def at(epoch: int) -> str:
-        return happened_at(epoch, btime)
+    at = partial(happened_at, btime=boot_time())
 
     todo: list[tuple[str, str, Alert]] = []  # oldest first: (mtime, name, alert as first read)
     for mtime, name in pending_files(s):

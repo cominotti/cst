@@ -64,11 +64,13 @@ def pending_files(s: PendingPaths) -> list[tuple[str, str]]:
     except OSError:
         return []
     for e in entries:
+        if not NAME.fullmatch(e.name):
+            continue
         try:
             st = e.stat(follow_symlinks=False)
         except OSError:
             continue
-        if NAME.fullmatch(e.name) and e.is_file(follow_symlinks=False) and st.st_size <= MAX_FILE:
+        if e.is_file(follow_symlinks=False) and st.st_size <= MAX_FILE:
             if now - st.st_mtime_ns < KEEP_DAYS * 86400 * 10**9:
                 found.append((st.st_mtime_ns, e.name))
     return [(find_mtime(ns), name) for ns, name in sorted(found)[-MAX_FILES:]]

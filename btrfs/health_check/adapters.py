@@ -56,15 +56,15 @@ from btrfs.health_check.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.adapters.journal import log
+from cst_core.domain.contracts import NOTIFY_PROGRAM
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 type _Stderr = Literal["pass", "drop", "merge"]
-_BY_SRC = manifest_by_src()
-NOTIFY = _BY_SRC["btrfs/btrfs-notify"].dest
-RECLAIM_CONF = _BY_SRC["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
+NOTIFY = NOTIFY_PROGRAM
+RECLAIM_CONF = manifest_by_src()["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +87,8 @@ class Probe:
 
     def cat(self, p: str) -> str | None:
         """The file's text as $(cat FILE) keeps it; None when it cannot be read."""
-        data = read_bytes(p)
-        return None if data is None else output(data.decode("utf-8", "surrogateescape"))
+        text = self.text(p)
+        return None if text is None else output(text)
 
     def text(self, p: str) -> str | None:
         """The file's whole text; None when it cannot be read."""
@@ -510,9 +510,8 @@ def swap_disks(m: Probe, members: Sequence[str]) -> list[str]:
         return []
     found: list[str] = []
     for dev in swap_partitions(m.text(swaps) or ""):
-        for line in file_lines(m.run(["lsblk", "-lnso", "NAME,TYPE", dev], "drop").stdout):
-            name, kind = read_fields(line, 2)
-            if kind == "disk" and name.startswith("nvme") and name not in members and name not in found:
+        for name in disks_of(m.run(["lsblk", "-lnso", "NAME,TYPE", dev], "drop").stdout):
+            if name.startswith("nvme") and name not in members and name not in found:
                 found.append(name)
     return found
 

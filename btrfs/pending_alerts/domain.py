@@ -228,7 +228,7 @@ def plan_login(urgencies: Sequence[str]) -> tuple[list[int], list[int]]:
     crit = [i for i, u in enumerate(urgencies) if u == "critical"]
     norm = [i for i, u in enumerate(urgencies) if u != "critical"]
     room = max(MAX_SHOWN - len(crit), 0)
-    nskip = len(norm) - room if len(norm) > room else 0
+    nskip = max(len(norm) - room, 0)
     return norm[:nskip], sorted(crit + norm[nskip:])
 
 
