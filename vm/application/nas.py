@@ -278,7 +278,7 @@ def nas_run(
                 f"{vm}: the running VM's disks differ from its definition (changed since it started): "
                 "restart it, then back up"
             )
-        for _t, (_, overlay) in specs.items():
+        for _, overlay in specs.values():
             if store.lexists(overlay):
                 raise Refused(f"{overlay} already exists: wait a second and run it again")
         agent = agent_state(live_xml)
@@ -517,9 +517,13 @@ def take_snapshot(
             while True:
                 # The truth is what the VM runs on, also when virsh failed or timed out.
                 cur, _ = blklist(p.commands, vm)
-                for t, (base, overlay) in specs.items():
-                    if (cur.get(t) == overlay) if cur is not None else p.store.exists(overlay):
-                        overlaid[t] = (base, overlay)
+                overlaid.update(
+                    {
+                        t: (base, overlay)
+                        for t, (base, overlay) in specs.items()
+                        if ((cur.get(t) == overlay) if cur is not None else p.store.exists(overlay))
+                    }
+                )
                 if settled or len(overlaid) == len(specs) or p.clock.monotonic() >= deadline:
                     break
                 p.clock.sleep(5)
