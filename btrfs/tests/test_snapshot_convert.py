@@ -543,10 +543,14 @@ class BusyTest(Base):
         self.assertEqual((r.returncode, self.lines(r.stdout)), (0, [repo]))
 
     def test_home_without_a_folder(self) -> None:
-        # Bug (phase 1 list, minor): no usage message, bash's own "unbound variable" (exit 1).
-        r = self.run_prog("busy", "--home")
-        self.assertEqual((r.returncode, r.stdout), (1, ""))
-        self.assertIn("2: unbound variable", r.stderr)
+        # A usage error (exit 2) with the usage line, also for an empty folder (it would match
+        # every bind mount). Before, bash's own "unbound variable" and exit 1.
+        for args in (("--home",), ("--home", ""), ("--home", "", self.home)):
+            with self.subTest(args):
+                r = self.run_prog("busy", *args)
+                self.assertEqual(
+                    (r.returncode, r.stdout, r.stderr), (2, "", "usage: btrfs-snapshot busy [--home DIR] PATH...\n")
+                )
 
 
 if __name__ == "__main__":

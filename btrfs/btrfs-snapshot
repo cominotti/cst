@@ -1300,6 +1300,8 @@ busy() {
     local p home="" src
     local -a anc=()
     if [[ "${1:-}" == --home ]]; then
+        # An empty DIR would match every bind mount: a usage error, like a missing one.
+        [[ -n "${2:-}" ]] || { echo "usage: btrfs-snapshot busy [--home DIR] PATH..." >&2; exit 2; }
         home="${2%/}"
         shift 2
         mapfile -t anc < <(mount_sources)
