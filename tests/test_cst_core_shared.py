@@ -832,6 +832,17 @@ class CommandRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.run(["true"], output="stdout", on_line=lambda ln: None, timeout=1)
 
+    def test_on_line_splits_at_newlines_only(self) -> None:
+        # As a shell's read: a carriage return stays in its line (text mode would make it a line end).
+        runner = core_runner.SubprocessCommandRunner()
+        seen: list[str] = []
+        probe = [self.py, "-I", "-c", "import sys; sys.stdout.buffer.write(b'a\\rb\\r\\nc\\xff\\n')"]
+        res = runner.run(probe, output="stdout", on_line=seen.append)
+        self.assertEqual(seen, ["a\rb\r", "c\ufffd"])
+        self.assertEqual(res.stdout, "a\rb\r\nc\ufffd\n")
+        with self.assertRaises(UnicodeDecodeError):
+            runner.run(probe, output="stdout", on_line=seen.append, decode_errors="strict")
+
     def test_on_line_refuses_capture_whose_stderr_could_fill_and_hang(self) -> None:
         # With stderr captured, a command that writes more than the pipe holds to stderr while its
         # stdout is read to the end would never end: refused, and merge does not hang on it.

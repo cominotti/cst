@@ -242,15 +242,14 @@ class SubprocessCommandRunner:
     @staticmethod
     def _stream(cmd: Sequence[str], kw: _RunKwargs, on_line: Callable[[str], None]) -> CommandResult:
         """subprocess.Popen with the same arguments: each line of stdout goes to on_line (without its
-        newline) as soon as the command writes it; the result holds the whole stdout and stderr."""
+        newline) as soon as the command writes it; the result holds the whole stdout. Lines end at
+        \n only, as a shell's read sees them: a \r stays in its line (no universal newlines)."""
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdin=kw.get("stdin"),
                 stdout=subprocess.PIPE,
                 stderr=kw.get("stderr"),
-                text=True,
-                errors=kw.get("errors"),
                 env=kw.get("env"),
                 cwd=kw.get("cwd"),
                 start_new_session=kw.get("start_new_session", False),
@@ -264,12 +263,14 @@ class SubprocessCommandRunner:
             return _fault_result(cmd, fault, exc)
         except OSError as exc:
             return _fault_result(cmd, "unstartable", exc)
+        errors = kw.get("errors", "strict")
         out: list[str] = []
         assert proc.stdout is not None
         with proc:
-            for line in proc.stdout:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", errors)
                 out.append(line)
-                on_line(line[:-1] if line.endswith("\n") else line)
+                on_line(line.removesuffix("\n"))
             rc = proc.wait()
         return CommandResult(rc, "".join(out), "", argv=tuple(cmd))
 
