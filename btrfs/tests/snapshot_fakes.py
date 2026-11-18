@@ -18,7 +18,9 @@ contract between the two programs, and its answers (exit status, output) come
 from the description. stat answers 256 (a subvolume's root inode) for the
 folders the fake btrfs created or the test marked, and passes every other call
 to the real stat; cp drops --reflink=always (the scratch folder may not be
-btrfs) and runs the real cp.
+btrfs) and runs the real cp, then does what machine.json says happens during
+the clone (cp_write: a write into the source, cp_open: a process that opens
+it), or fails with cp_err on stderr.
 
 Nothing in here touches the real host: the fake btrfs deletes only below the
 scratch folder, and the unit tests never gain privileges (tests/run_unit.py).
@@ -207,7 +209,17 @@ if name == "cp":
     if m.get("cp_err"):
         sys.stderr.write(m["cp_err"])
         sys.exit(m.get("cp_rc", 1))
-    os.execv("/usr/bin/cp", ["cp"] + [a for a in args if a != "--reflink=always"])
+    import subprocess
+    rc = subprocess.run(["/usr/bin/cp"] + [a for a in args if a != "--reflink=always"]).returncode
+    # What happens while the clone runs: a write into the source, a process that opens it.
+    if m.get("cp_write"):
+        with open(m["cp_write"], "a") as f:
+            f.write("late")
+    if m.get("cp_open"):
+        link, target = m["cp_open"]
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+    sys.exit(rc)
 if name in ("chcon", "restorecon"):
     sys.exit(0)
 if name == "hostname":
@@ -388,6 +400,20 @@ class RuntimeTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             timeout=120,
         )
+
+    def start_prog(self, *args: str) -> subprocess.Popen[str]:
+        """The program started in the background (the caller waits for it)."""
+        p = subprocess.Popen(
+            ["bash", SCRIPT, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self.env,
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+        )
+        self.addCleanup(p.kill)
+        return p
 
     def forget_calls(self) -> None:
         with contextlib.suppress(FileNotFoundError):

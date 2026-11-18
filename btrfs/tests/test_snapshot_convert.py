@@ -1,0 +1,521 @@
+# SPDX-License-Identifier: MPL-2.0
+"""Behaviour tests for btrfs/btrfs-snapshot: convert, convert-boot, convert-one,
+planned-left and busy (no root, no btrfs needed).
+
+The whole bash program runs on the fake machine of snapshot_fakes.py. A folder
+becomes a "subvolume" when the fake btrfs creates it (stat then answers 256
+for its inode, also after a rename); the clone is the real cp without
+--reflink. The open files, working folders and mapped files of processes, and
+the mount tables of other mount namespaces, are links and files below the
+root's /proc.
+
+Not reachable from a test folder: a nested subvolume inside a planned folder
+(find -inum 256 reads the real inode numbers), a late write between the switch
+and the last check (no hook between two mv calls), and the entry count of the
+clone differing (cp copies all).
+
+Run with: invowk cmd test module btrfs.tests.test_snapshot_convert
+"""
+
+import os
+import re
+import stat
+import time
+import unittest
+
+from btrfs.tests.snapshot_fakes import RuntimeTest, read
+
+PLAN = "etc/btrfs-setup/convert-plan"
+BOOT_FLAG = "etc/btrfs-setup/convert-at-boot"
+FIRST = "Converting planned directories (busy ones wait for the next boot)..."
+BOOT_FIRST = "btrfs-snapshot: converting the directories the desktop session kept busy..."
+
+
+def log(level: int, text: str) -> str:
+    return f"<{level}>btrfs-snapshot: {text}"
+
+
+class Base(RuntimeTest):
+    def is_subvol(self, path: str) -> bool:
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        found = self.described().get("subvols")
+        return isinstance(found, list) and f"{st.st_dev}:{st.st_ino}" in found
+
+    def tree(self, rel: str) -> str:
+        """A plain folder below the home with a file and a sub-folder."""
+        p = os.path.join(self.home, rel)
+        os.makedirs(os.path.join(p, "sub"))
+        self.write(os.path.join(p, "file"), "data\n")
+        self.write(os.path.join(p, "sub", "inner"), "inner\n")
+        os.chmod(p, 0o750)
+        return p
+
+    def plan(self, *lines: str) -> None:
+        self.write(PLAN, "".join(ln + "\n" for ln in lines))
+
+    def leftovers(self) -> list[str]:
+        """Names in the home that a conversion leaves next to a folder."""
+        return sorted(n for n in os.listdir(self.home) if ".subvol-new" in n or ".pre-subvol-" in n or "aside" in n)
+
+    def assert_converted(self, path: str) -> None:
+        self.assertTrue(self.is_subvol(path), path)
+        self.assertEqual(read(os.path.join(path, "file")), "data\n")
+        self.assertEqual(read(os.path.join(path, "sub", "inner")), "inner\n")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o750)
+
+    def lines(self, text: str) -> list[str]:
+        return text.splitlines()
+
+
+class PlannedLeftTest(Base):
+    def test_no_plan(self) -> None:
+        r = self.run_prog("planned-left")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    def test_what_is_left(self) -> None:
+        plain = self.tree("plain")
+        sub = self.tree("sub")
+        self.mark_subvol(sub)
+        skipped = self.tree("skipped")
+        self.write(self.state_file("skipped"), f"{skipped}\tis or contains a mountpoint\n")
+        under_plain = os.path.join(plain, "cache")
+        os.makedirs(under_plain)
+        under_sub = os.path.join(sub, "cache")
+        os.makedirs(under_sub)
+        self.plan(
+            "# copy /commented",
+            "",
+            f"copy {plain}",
+            f"copy {sub}",
+            f"copy {skipped}",
+            f"copy {self.home}/absent",
+            f"copy {self.home}/no-parent/absent",
+            f"aside {under_plain}",
+            f"aside {under_sub}",
+            f"aside {self.home}/no-aside",
+        )
+        r = self.run_prog("planned-left")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr), (0, [plain, f"{self.home}/absent", under_plain], "")
+        )
+        self.assertEqual(self.calls("btrfs"), [])
+
+
+class ConvertTest(Base):
+    def test_a_plain_folder_becomes_a_subvolume_and_the_old_tree_goes(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.write(BOOT_FLAG, "")
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(5, f"convert: {ws}: now a subvolume, old tree removed"),
+                log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+            ],
+        )
+        self.assertEqual(r.stderr, "")
+        self.assert_converted(ws)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(read(self.state_file("drop-pending")), "")
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        new = f"{ws}.subvol-new"
+        self.assertEqual(
+            [c for c in self.calls() if c[0] in ("btrfs", "cp", "chcon")],
+            [
+                ["btrfs", "subvolume", "create", new],
+                ["chcon", f"--reference={ws}", new],
+                ["cp", "-a", "--reflink=always", f"{ws}/.", f"{new}/"],
+            ],
+        )
+
+    def test_a_busy_folder_waits_for_the_next_boot(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.busy(os.path.join(ws, "sub", "inner"))
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(5, f"convert: {ws}: in use, left for later"),
+                log(5, "planned dirs: 0 done, 1 left for later (in use or failed)"),
+            ],
+        )
+        self.assertFalse(self.is_subvol(ws))
+        self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+        self.assertEqual(self.calls("btrfs"), [])
+
+    def test_every_kind_of_use_counts(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        for link in ("cwd", "root", "exe", "fd/7"):
+            with self.subTest(link):
+                self.busy(f"{ws}/sub (deleted)" if link == "exe" else f"{ws}/sub", pid=200, link=link)
+                self.run_prog("convert")
+                self.assertFalse(self.is_subvol(ws))
+                os.remove(self.path(f"proc/200/{link}"))
+        # A folder whose name only starts like the planned one is not it.
+        self.busy(f"{ws}-other/x")
+        self.run_prog("convert")
+        self.assertTrue(self.is_subvol(ws))
+
+    def test_a_bind_mount_of_the_tree_in_another_mount_namespace_counts(self) -> None:
+        ws = self.tree("Work space")
+        self.plan(f"copy {ws}")
+        self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw,relatime - btrfs /dev/dm-0 rw\n")
+        self.write("proc/300/mountinfo", "50 40 0:42 /home/u/Work\\040space/sub /src rw - btrfs /dev/dm-0 rw\n")
+        os.makedirs(self.path("proc/300/ns"))
+        os.symlink("mnt:[4026532001]", self.path("proc/300/ns/mnt"))
+        r = self.run_prog("convert")
+        self.assertIn(log(5, f"convert: {ws}: in use, left for later"), self.lines(r.stdout))
+        self.assertFalse(self.is_subvol(ws))
+
+    def test_a_cache_is_put_aside_before_its_parent_is_cloned(self) -> None:
+        cache = self.tree(".cache")
+        uv = os.path.join(cache, "uv")
+        os.makedirs(os.path.join(uv, "wheels"))
+        self.plan(f"aside {uv}", f"copy {cache}")
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(5, f"aside: {uv}: moved out of the way, deleted in the background"),
+                log(5, f"convert: {cache}: now a subvolume, old tree removed"),
+                log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+            ],
+        )
+        self.assert_converted(cache)
+        self.assertFalse(os.path.exists(uv))
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(read(self.state_file("drop-pending")), "")
+
+    def test_a_busy_cache_stays_and_its_parent_is_still_cloned(self) -> None:
+        cache = self.tree(".cache")
+        uv = os.path.join(cache, "uv")
+        os.makedirs(uv)
+        self.busy(uv)
+        self.plan(f"aside {uv}", f"copy {cache}")
+        r = self.run_prog("convert")
+        self.assertEqual(
+            self.lines(r.stdout)[1:],
+            [
+                log(5, f"aside: {uv}: in use, left for later"),
+                log(5, f"convert: {cache}: in use, left for later"),
+                log(5, "planned dirs: 0 done, 2 left for later (in use or failed)"),
+            ],
+        )
+        self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+
+    def test_an_absent_folder_becomes_an_empty_subvolume(self) -> None:
+        target = os.path.join(self.home, ".local", "share", "new")
+        os.makedirs(os.path.dirname(target))
+        os.chmod(os.path.dirname(target), 0o700)
+        self.plan(f"copy {target}", f"copy {self.home}/no-parent/x")
+        r = self.run_prog("convert")
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(5, f"convert: {target}: created as an empty subvolume"),
+                log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+            ],
+        )
+        self.assertTrue(self.is_subvol(target))
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o755)
+        self.assertIn(["restorecon", target], self.calls())
+        self.assertFalse(os.path.exists(f"{self.home}/no-parent"))
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+
+    def test_what_cannot_be_converted_is_skipped_and_remembered(self) -> None:
+        real = self.tree("real")
+        link = os.path.join(self.home, "link")
+        os.symlink(real, link)
+        mounted = self.tree("mounted")
+        holds = self.tree("holds")
+        self.machine(mountpoints=[mounted], mounts=["/", f"{holds}/sub"])
+        self.plan(f"copy {link}", f"copy {mounted}", f"copy {holds}")
+        r = self.run_prog("convert")
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(4, f"convert: {link}: not a directory (a symlink or file), skipped"),
+                log(4, f"convert: {mounted}: is or contains a mountpoint, skipped"),
+                log(4, f"convert: {holds}: is or contains a mountpoint, skipped"),
+            ],
+        )
+        self.assertEqual(
+            read(self.state_file("skipped")),
+            f"{link}\tnot a directory (a symlink or file)\n{mounted}\tis or contains a mountpoint\n"
+            f"{holds}\tis or contains a mountpoint\n",
+        )
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        # The cause went away: the next run converts it and forgets the skip.
+        self.machine(mountpoints=[], mounts=["/"])
+        self.run_prog("convert")
+        self.assertTrue(self.is_subvol(mounted))
+        self.assertEqual(read(self.state_file("skipped")), f"{link}\tnot a directory (a symlink or file)\n")
+
+    def test_an_interrupted_conversion_is_finished(self) -> None:
+        ws = os.path.join(self.home, "Workspace")
+        new = self.tree("Workspace.subvol-new")
+        self.mark_subvol(new)
+        self.plan(f"copy {ws}")
+        r = self.run_prog("convert")
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                FIRST,
+                log(4, f"convert: {ws}: finished an interrupted conversion"),
+                log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+            ],
+        )
+        self.assert_converted(ws)
+        self.assertEqual(self.calls("btrfs"), [])
+
+    def test_a_failed_clone_leaves_the_folder_unchanged(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(cp_err="cp: failed to clone 'x' from 'y': Operation not supported\n")
+        r = self.run_prog("convert")
+        self.assertEqual(
+            self.lines(r.stdout)[1:],
+            [
+                log(3, f"clone {ws}: cp: failed to clone 'x' from 'y': Operation not supported"),
+                log(3, f"convert: {ws}: clone failed; left unchanged"),
+                log(5, "planned dirs: 0 done, 1 left for later (in use or failed)"),
+            ],
+        )
+        self.assertFalse(self.is_subvol(ws))
+        self.assertEqual(self.leftovers(), [])
+        self.assertIn(["btrfs", "subvolume", "delete", f"{ws}.subvol-new"], self.calls())
+        self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+
+    def test_a_warning_of_cp_is_a_failed_clone(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(cp_err="cp: cannot preserve security context\n", cp_rc=0)
+        r = self.run_prog("convert")
+        self.assertIn(log(3, f"convert: {ws}: clone failed; left unchanged"), self.lines(r.stdout))
+        self.assertFalse(self.is_subvol(ws))
+
+    def test_a_write_during_the_clone_discards_it(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(cp_write=os.path.join(ws, "file"))
+        time.sleep(0.01)
+        r = self.run_prog("convert")
+        self.assertIn(
+            log(4, f"convert: {ws}: written to during the clone, skipped (retried later)"), self.lines(r.stdout)
+        )
+        self.assertFalse(self.is_subvol(ws))
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(read(os.path.join(ws, "file")), "data\nlate")
+
+    def test_a_process_that_starts_using_it_during_the_clone_discards_it(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(cp_open=[self.path("proc/400/cwd"), f"{ws}/sub"])
+        r = self.run_prog("convert")
+        self.assertIn(log(4, f"convert: {ws}: started being used, skipped"), self.lines(r.stdout))
+        self.assertFalse(self.is_subvol(ws))
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_subvolume_cannot_be_created(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(create_rc=1)
+        r = self.run_prog("convert")
+        self.assertIn(log(3, f"convert: {ws}: cannot create subvolume"), self.lines(r.stdout))
+        self.assertEqual(self.leftovers(), [])
+
+    def test_old_trees_left_by_an_earlier_run_are_deleted(self) -> None:
+        old = self.tree("x.pre-subvol-20261101T000000")
+        mounted = self.tree("y.pre-subvol-20261101T000000")
+        other = self.tree("not-an-old-tree")
+        self.machine(mounts=[f"{mounted}/sub"])
+        self.write(self.state_file("drop-pending"), f"{old}\n{mounted}\n{other}\n{self.home}/gone\n\n")
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(read(self.state_file("drop-pending")), f"{mounted}\n{other}\n")
+        self.assertTrue(os.path.isdir(other))
+
+
+class ConvertBootTest(Base):
+    def test_without_the_flag_nothing_happens(self) -> None:
+        self.plan(f"copy {self.tree('Workspace')}")
+        r = self.run_prog("convert-boot")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual([c[0] for c in self.calls()], ["hostname"])
+
+    def test_converts_and_leaves_the_old_tree_to_the_hourly_run(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.write(BOOT_FLAG, "")
+        r = self.run_prog("convert-boot")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                BOOT_FIRST,
+                log(5, f"convert: {ws}: now a subvolume; the old tree is deleted by the hourly run"),
+                log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+            ],
+        )
+        self.assert_converted(ws)
+        (old,) = read(self.state_file("drop-pending")).splitlines()
+        self.assertRegex(old, "^" + re.escape(ws) + r"\.pre-subvol-\d{8}T\d{6}$")
+        self.assertTrue(os.path.isdir(old))
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        self.assertFalse(os.path.exists(self.state_file("boot-attempts")))
+
+    def test_counts_its_attempts_and_gives_up_after_two_boots(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.write(BOOT_FLAG, "")
+        self.busy(ws)
+        for attempt in ("1", "2"):
+            r = self.run_prog("convert-boot")
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(self.read_state("boot-attempts"), attempt + "\n")
+            self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+        self.forget_calls()
+        r = self.run_prog("convert-boot")
+        title, body = (
+            "Subvolume conversion at boot gave up",
+            f"Left: {ws}  - see 'journalctl -u btrfs-subvol-convert'.",
+        )
+        self.assertEqual((r.returncode, self.lines(r.stdout)), (0, [log(4, f"{title}: {body}")]))
+        self.assertEqual(self.notified(), [["-u", "critical", "-a", "btrfs-snapshot", title, body]])
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        self.assertFalse(os.path.exists(self.state_file("boot-attempts")))
+        self.assertEqual(self.calls("mountpoint"), [])
+
+    def test_an_empty_attempts_file_counts_as_none(self) -> None:
+        self.plan(f"copy {self.tree('Workspace')}")
+        self.write(BOOT_FLAG, "")
+        self.write(self.state_file("boot-attempts"), "")
+        self.busy(os.path.join(self.home, "Workspace"))
+        self.assertEqual(self.run_prog("convert-boot").returncode, 0)
+        self.assertEqual(self.read_state("boot-attempts"), "1\n")
+
+    def test_an_attempts_file_that_is_not_a_number_fails_every_boot(self) -> None:
+        # Bug (phase 1 list): bash reads the word as a variable name (unbound under set -u):
+        # the unit fails at every boot, never counts, never gives up, and the flag stays.
+        self.plan(f"copy {self.tree('Workspace')}")
+        self.write(BOOT_FLAG, "")
+        self.write(self.state_file("boot-attempts"), "x\n")
+        r = self.run_prog("convert-boot")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("x: unbound variable", r.stderr)
+        self.assertEqual(self.read_state("boot-attempts"), "x\n")
+        self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+
+
+class ConvertOneTest(Base):
+    def test_one_folder_outside_the_plan(self) -> None:
+        bulk = self.tree("Bulk")
+        r = self.run_prog("convert-one", bulk)
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr),
+            (0, [log(5, f"convert: {bulk}: now a subvolume, old tree removed")], ""),
+        )
+        self.assert_converted(bulk)
+        self.assertEqual(self.leftovers(), [])
+        # Already one: nothing to do, still success.
+        r = self.run_prog("convert-one", bulk)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_busy_or_impossible_is_a_failure(self) -> None:
+        bulk = self.tree("Bulk")
+        self.busy(bulk)
+        r = self.run_prog("convert-one", bulk)
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout)), (1, [log(5, f"convert: {bulk}: in use, left for later")])
+        )
+        r = self.run_prog("convert-one", f"{self.home}/no-parent/Bulk")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        link = os.path.join(self.home, "link")
+        os.symlink(bulk, link)
+        r = self.run_prog("convert-one", link)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            self.lines(r.stdout), [log(4, f"convert: {link}: not a directory (a symlink or file), skipped")]
+        )
+
+    def test_without_a_path(self) -> None:
+        r = self.run_prog("convert-one")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertTrue(r.stderr.endswith(": 2: usage: btrfs-snapshot convert-one PATH\n"), r.stderr)
+
+    def test_waits_for_the_lock(self) -> None:
+        bulk = self.tree("Bulk")
+        with self.hold_lock():
+            p = self.start_prog("convert-one", bulk)
+            time.sleep(1)
+            self.assertIsNone(p.poll())
+            self.assertEqual(self.calls("btrfs"), [])
+        _, err = p.communicate(timeout=60)
+        self.assertEqual((p.returncode, err), (0, ""))
+        self.assert_converted(bulk)
+
+
+class BusyTest(Base):
+    def test_the_paths_some_process_uses(self) -> None:
+        a, b, c, d, e = (os.path.join(self.home, n) for n in ("a", "b", "c", "d", "e"))
+        self.busy(f"{a}/x", pid=10)
+        self.busy(b, pid=11, link="cwd")
+        self.busy(f"{c}/bin/tool (deleted)", pid=12, link="exe")
+        self.write(
+            "proc/13/maps",
+            f"7f00-7f10 r--p 00000000 00:2a 1234    {d}/model.gguf (deleted)\n7f10-7f20 rw-p 0 0 0 [heap]\n",
+        )
+        r = self.run_prog("busy", e, d, c, b, a, f"{a}-other")
+        self.assertEqual((r.returncode, self.lines(r.stdout), r.stderr), (0, [d, c, b, a], ""))
+
+    def test_no_paths(self) -> None:
+        self.busy(self.home)
+        r = self.run_prog("busy")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_bind_mounts_in_other_mount_namespaces(self) -> None:
+        self.mountinfo(
+            f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n31 1 0:43 / /other rw - ext4 x rw\n"
+        )
+        os.makedirs(self.path("proc/300/ns"))
+        os.symlink("mnt:[4026532001]", self.path("proc/300/ns/mnt"))
+        self.write(
+            "proc/300/mountinfo",
+            "50 40 0:42 /home/u/.m2 /root/.m2 rw - btrfs x rw\n"
+            "51 40 0:42 /home/u /var/home/u rw - btrfs x rw\n"
+            "52 40 0:43 /home/u/elsewhere /e rw - ext4 x rw\n",
+        )
+        m2 = os.path.join(self.home, ".m2")
+        repo = os.path.join(m2, "repository")
+        mounted = os.path.join(self.home, "elsewhere")
+        # Without --home: only a mount of the path itself or of something below it.
+        r = self.run_prog("busy", repo, m2, mounted)
+        self.assertEqual((r.returncode, self.lines(r.stdout)), (0, [m2]))
+        # With --home: also a mount of a folder between the home and the path, not the home itself.
+        r = self.run_prog("busy", "--home", self.home + "/", repo, os.path.join(self.home, "Documents"))
+        self.assertEqual((r.returncode, self.lines(r.stdout)), (0, [repo]))
+
+    def test_home_without_a_folder(self) -> None:
+        # Bug (phase 1 list, minor): no usage message, bash's own "unbound variable" (exit 1).
+        r = self.run_prog("busy", "--home")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("2: unbound variable", r.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
