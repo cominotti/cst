@@ -100,8 +100,10 @@ jobs:
   # The unit suite under coverage.py: a second unit run (about 6 minutes), so
   # nightly only. Same image, tools and user as the fast gates, so the same
   # tests skip. Fails when a domain or application layer drops below its
-  # floor (COVERAGE_FLOORS of tests/coverage_floors.py); the report is an
-  # artifact either way.
+  # floor (COVERAGE_FLOORS of tests/coverage_floors.py); the reports are an
+  # artifact whether the floors hold or not. A failing unit test stops the
+  # task before it writes any report (docs/dev-tools.md, "Coverage"): the
+  # job's log shows that test, and there is no artifact.
   coverage:
     name: Unit Coverage and Floors (Fedora 45)
     runs-on: ubuntu-24.04
