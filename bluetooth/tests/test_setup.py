@@ -503,7 +503,7 @@ class RestartTest(SetupCase):
     def test_restarts_in_order(self) -> None:
         m = self.machine(settings="LE_AUDIO=on\n")
         m.put("bt-journal", BAP_REGISTERED)
-        m.adapter()
+        m.adapter(listed=False)  # it answers the wait after the restart; the checks find none
         r = m.run("apply", "--yes")
         self.order(
             r.calls,
@@ -1451,7 +1451,7 @@ class EnvironmentTest(SetupCase):
 
     def test_no_leak(self) -> None:
         m = self.machine(DONE)
-        m.adapter()
+        m.adapter(listed=False)
         for extra in ({}, {"LC_CTYPE": "C"}, {"LC_CTYPE": "pt_BR.UTF-8", "LANG": "C"}):
             log = os.path.join(m.state, "env-log")
             if os.path.exists(log):

@@ -297,9 +297,13 @@ class Machine:
         # The adapter answers right after a restart (apply waits up to 15 s for it).
         self.put("prop-org.bluez.Adapter1-Powered", "b true\n")
 
-    def adapter(self, *, iso: bool = True, bap: bool = True) -> None:
-        """One Bluetooth adapter in org.bluez: its ISO feature on and BAP's PACs (as wanted)."""
-        self.put("objects.json", json.dumps(OBJECTS))
+    def adapter(self, *, iso: bool = True, bap: bool = True, listed: bool = True) -> None:
+        """One Bluetooth adapter in org.bluez: its ISO feature on and BAP's PACs (as wanted).
+        listed=False: only its properties answer (GetManagedObjects lists no adapter), so a run
+        on the host never reaches the kernel ISO socket check, which opens a real Bluetooth
+        socket with /usr/bin/python3 (no stub can stand in for it there; run() refuses)."""
+        if listed:
+            self.put("objects.json", json.dumps(OBJECTS))
         self.put("prop-org.bluez.Adapter1-ExperimentalFeatures", f'as 1 "{ISO}"\n' if iso else "as 0\n")
         self.put(
             "prop-org.bluez.Media1-SupportedUUIDs",
@@ -338,6 +342,8 @@ class Machine:
         """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; closed_stdout:
         its stdout a pipe nobody reads, as `| head` leaves it; root: as root in a user namespace,
         unshare -r, where this user is root with no privilege outside)."""
+        if not container and self.has("objects.json"):
+            raise AssertionError("an adapter listed on the host: the checks would open a real Bluetooth socket")
         log = os.path.join(self.state, "log")
         if os.path.exists(log):
             os.unlink(log)
