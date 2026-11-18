@@ -51,5 +51,3 @@ def show_step(step: TimerStep) -> None:
             print(f"Off: {step.path}")
         case TimerStepKind.LEFT:
             print(f"  left as it is: {step.path} (masked with systemctl mask)")
-        case _:
-            pass
