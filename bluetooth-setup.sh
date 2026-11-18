@@ -291,7 +291,13 @@ BACKUP=""
 trap 'rm -f "${TMP}"' EXIT
 # Only for the commands that change something (revert --check exits 10 on purpose).
 if [[ "${cmd}" == apply || ( "${cmd}" == revert && ${CHECK} -eq 0 ) ]]; then
-    trap 'echo "${PROG}: stopped: a command failed (exit $?). Backup of main.conf: ${BACKUP:-none taken}. Undo: ${PROG} revert" >&2' ERR
+    # Named once: with set -E the trap also runs in each $(...) and function the
+    # failure passes through, which printed the same line two or more times.
+    stopped() {
+        (( BASH_SUBSHELL )) ||
+            echo "${PROG}: stopped: a command failed (exit $1). Backup of main.conf: ${BACKUP:-none taken}. Undo: ${PROG} revert" >&2
+    }
+    trap 'stopped $?' ERR
 fi
 
 # ---- output ------------------------------------------------------------------------

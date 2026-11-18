@@ -9,6 +9,7 @@ Run from the repository root:
     invowk cmd test module bluetooth.tests.test_setup
 """
 
+import os
 import unittest
 
 from bluetooth.tests.setup_fakes import ISO, SETUP, Machine
@@ -69,6 +70,22 @@ class StoppedTest(unittest.TestCase):
         )
         with open(m.main_conf, encoding="utf-8") as f:
             self.assertEqual(f.read(), GENERAL)
+
+    def test_a_failure_inside_a_nested_step_is_named_once(self) -> None:
+        # The rule's folder cannot be written: the step fails inside a $(...) of a function.
+        m = Machine(self)
+        m.put(m.main_conf, GENERAL)
+        m.services()
+        os.makedirs(m.wp_dir)
+        os.chmod(m.wp_dir, 0o555)
+        self.addCleanup(os.chmod, m.wp_dir, 0o755)
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, 1, r.text)
+        stops = [line for line in r.stderr.splitlines() if ": stopped: " in line]
+        self.assertEqual(len(stops), 1, r.stderr)
+        self.assertRegex(stops[0], r"stopped: a command failed \(exit 1\)\. Backup of main\.conf: \S+/main\.conf\.bak-\d{8}-\d{6}\. Undo: ")
+        self.assertTrue(r.stderr.endswith(stops[0] + "\n"), r.stderr)
+        self.assertFalse(os.path.exists(m.wp_conf))
 
 
 if __name__ == "__main__":
