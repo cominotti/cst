@@ -398,6 +398,25 @@ class BackupTest(Base):
         rc, lines, _ = self.nas()
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
 
+    def test_a_time_budget_bash_arithmetic_refuses_stops_the_run(self) -> None:
+        # 08 is no number for bash (a leading 0 is octal): its run stopped there with exit 1, after
+        # its exit trap had unmounted (found by the parity harness of the port; 010 is 8 seconds).
+        for value in ("08", "08m"):
+            with self.subTest(value):
+                self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT=value)
+                rc, lines, _ = self.nas()
+                self.assertEqual((rc, lines), (1, []))
+                self.assertEqual(self.calls_but_hostname(), [])
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="010")
+        rc, lines, _ = self.nas()
+        self.assertEqual(
+            lines[-2:],
+            [
+                log(4, "NAS: home: no time left in this run (NAS_TIMEOUT=010)"),
+                log(4, "NAS backup failed for 1 of 1 source(s); will retry next run"),
+            ],
+        )
+
     def test_the_hourly_run_holding_the_lock(self) -> None:
         with self.hold_lock():
             p = self.start_prog("nas")

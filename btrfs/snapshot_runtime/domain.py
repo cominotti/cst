@@ -329,13 +329,14 @@ RESTIC_DAMAGE_RE: Final = re.compile(
 _UNITS: Final[Mapping[str, int]] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": DAY_S}
 
 
-def duration_s(text: str) -> int:
-    """Seconds of a timeout(1) duration (N, Ns, Nm, Nh, Nd); 6 h if it cannot be read."""
+def duration_s(text: str) -> int | None:
+    """Seconds of a timeout(1) duration (N, Ns, Nm, Nh, Nd); 6 h if it cannot be read. None for a
+    number bash arithmetic refused (08: a leading 0 is octal), which stopped bash's run."""
     m = re.fullmatch(r"([0-9]+)([smhd]?)", text)
     if m is None:
         return DEFAULT_NAS_TIMEOUT_S
     n = bash_int(m.group(1))
-    return (int(m.group(1)) if n is None else n) * _UNITS[m.group(2)]
+    return None if n is None else n * _UNITS[m.group(2)]
 
 
 def restic_line(line: str) -> str:

@@ -173,6 +173,29 @@ class SettingsTest(Base):
         self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:24h 2d"])
         self.assertEqual(self.call_envs("btrfs-snapshot-core"), [{}])
 
+    def test_a_line_with_a_carriage_return_is_ignored(self) -> None:
+        # A Windows line end: bash would keep the \r in the value, so the line is warned on and
+        # ignored, and the line after it still counts (found by the parity harness of the port: a
+        # reader that turns \r\n into \n applied it).
+        self.conf("HOME_PRESERVE='24h'\r\nWS_PRESERVE='12h'\n")
+        r = self.run_prog("list")
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stderr)),
+            (
+                0,
+                [
+                    log(
+                        4,
+                        f"{conf} line 4: HOME_PRESERVE='24h': a carriage return (Windows line end): bash keeps it "
+                        "in the value; ignored",
+                    )
+                ],
+            ),
+        )
+        call = self.core_calls()[0]
+        self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:72h 7d 4w 3m"])
+
     def test_without_a_settings_file_it_is_not_set_up(self) -> None:
         os.remove(self.path("etc/btrfs-setup/snapshots.conf"))
         r = self.run_prog("hourly")

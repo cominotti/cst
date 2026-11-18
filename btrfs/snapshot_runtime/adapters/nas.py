@@ -15,6 +15,7 @@ import glob
 import os
 import shutil
 import signal
+import sys
 
 from btrfs.health_check.domain import bash_div
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
@@ -65,10 +66,15 @@ class Nas:
     # ---- numbers, as bash arithmetic read them -----------------------------------------------
     def number(self, key: str) -> int | None:
         """A numeric setting; None where bash's comparison failed (and was false)."""
-        n = guard_number(self.m.settings[key])
+        value = self.m.settings[key]
+        n = guard_number(value)
         if n is GuardError.NOT_A_NUMBER:
+            print(f"{self.m.front}: {key}={value!r} in {self.m.conf}: not a number", file=sys.stderr, flush=True)
             raise RunStopped
-        return None if n is GuardError.BAD_NUMBER else n
+        if n is GuardError.BAD_NUMBER:
+            print(f"{self.m.front}: ((: {key}={value!r}: not a number", file=sys.stderr, flush=True)
+            return None
+        return n
 
     def time_left(self) -> int:
         return self.deadline - self.m.now()
@@ -473,7 +479,11 @@ class Nas:
 
     def backups(self) -> None:
         m, s = self.m, self.m.settings
-        self.deadline = m.now() + duration_s(s["NAS_TIMEOUT"])
+        budget = duration_s(s["NAS_TIMEOUT"])
+        if budget is None:
+            print(f"{m.front}: NAS_TIMEOUT={s['NAS_TIMEOUT']!r}: not a number", file=sys.stderr, flush=True)
+            raise RunStopped
+        self.deadline = m.now() + budget
         os.environ["RESTIC_REPOSITORY"] = self.repository
         os.environ["RESTIC_PASSWORD_FILE"] = m.restic_password
         os.environ["RESTIC_CACHE_DIR"] = m.restic_cache

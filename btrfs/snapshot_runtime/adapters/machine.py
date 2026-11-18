@@ -125,8 +125,14 @@ class SnapshotRun:
             lambda: self.runner.run(argv, output=output, input_text=input_text, pass_fds=fds, on_line=on_line, env=env)
         )
         if res.fault is not None:
-            what = "command not found" if res.fault == "missing" else "cannot be run"
-            print(f"{TAG}: {argv[0]}: {what}", file=sys.stderr, flush=True)
+            # As bash says it (without its line number).
+            if res.fault != "missing":
+                what = "Permission denied"
+            elif "/" in argv[0]:
+                what = "No such file or directory"
+            else:
+                what = "command not found"
+            print(f"{self.front or TAG}: {argv[0]}: {what}", file=sys.stderr, flush=True)
         return res
 
     def rc(self, res: CommandResult) -> int:
@@ -247,7 +253,7 @@ class SnapshotRun:
     def read(path: str) -> str | None:
         """$(cat PATH 2>/dev/null) without the trailing newlines: None when it cannot be read."""
         try:
-            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
                 return f.read().rstrip("\n")
         except OSError:
             return None
@@ -256,7 +262,7 @@ class SnapshotRun:
     def read_raw(path: str) -> str:
         """The whole text of PATH ("" when it cannot be read)."""
         try:
-            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
                 return f.read()
         except OSError:
             return ""
