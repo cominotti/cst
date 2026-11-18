@@ -50,7 +50,7 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
         ("cpu_conf", "CST_VM_CPU_CONF", "/etc/cpu-setup/cpu-setup.conf"),
         ("system_images", "CST_VM_SYSTEM_IMAGES", "/var/lib/libvirt/images"),
         # The NAS backup reuses the restic repository, password and cache of the /home NAS backup
-        # (btrfs/btrfs-snapshot: NAS_SSH_ALIAS, RESTIC_PASSWORD, RESTIC_CACHE; a test checks they
+        # (btrfs-snapshot's runtime, btrfs/snapshot_runtime: NAS_SSH_ALIAS, its restic paths; a test checks they
         # stay the same). The password never leaves its root-only file.
         ("nas_conf", "CST_VM_NAS_CONF", "/etc/btrfs-setup/snapshots.conf"),
         ("restic_password", "CST_VM_RESTIC_PASSWORD", "/etc/btrfs-setup/restic-password"),

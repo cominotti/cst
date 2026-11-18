@@ -51,7 +51,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VM_DIR = os.path.dirname(HERE)
 TOOL = os.path.join(VM_DIR, "cst-vm")
 REPO = os.path.dirname(VM_DIR)
-SNAPSHOT_RUNTIME = os.path.join(REPO, "btrfs", "btrfs-snapshot")
 UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
 STAMP = "20261108T010640Z"
@@ -991,21 +990,17 @@ class SharedRepositoryTest(Nas):
 
 class ConstantsTest(unittest.TestCase):
     def test_nas_default_paths_match_btrfs_snapshot(self) -> None:
-        # The defaults themselves, as its assignments spell them (a path below
-        # the test seam's "${R}", empty outside the tests). It goes when
-        # btrfs-snapshot is converted to Python and imports these values.
-        with open(SNAPSHOT_RUNTIME) as f:
-            text = f.read()
+        # btrfs-snapshot's NAS backup is its Python runtime's (btrfs/snapshot_runtime): its paths
+        # outside the test seam (no CST_SNAPSHOT_ROOT) and its ssh alias.
+        from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
+        from btrfs.snapshot_runtime.domain import NAS_SSH_ALIAS
+        from cst_core.adapters.runner import SubprocessCommandRunner
 
-        def shell(name: str) -> str:
-            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.M)
-            assert m_re is not None
-            return m_re.group(1)
-
-        self.assertEqual(shell("NAS_SSH_ALIAS"), vm_domain.NAS_SSH_ALIAS)
-        self.assertEqual(shell("RESTIC_PASSWORD"), "/etc/btrfs-setup/restic-password")
-        self.assertEqual(shell("RESTIC_CACHE"), "/var/cache/btrfs-snapshot-restic")
-        self.assertEqual(shell("CONF"), "/etc/btrfs-setup/snapshots.conf")
+        run = SnapshotRun({}, SubprocessCommandRunner())
+        self.assertEqual(NAS_SSH_ALIAS, vm_domain.NAS_SSH_ALIAS)
+        self.assertEqual(run.restic_password, "/etc/btrfs-setup/restic-password")
+        self.assertEqual(run.restic_cache, "/var/cache/btrfs-snapshot-restic")
+        self.assertEqual(run.conf, "/etc/btrfs-setup/snapshots.conf")
 
     def test_forget_args_are_scoped(self) -> None:
         a = vm_domain.forget_args("win", "sophia", 4, 3)
