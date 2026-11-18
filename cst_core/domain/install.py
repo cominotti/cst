@@ -183,6 +183,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
     """
 .github/scripts/pin_invowk.py
 bluetooth/bt-helper
+bluetooth/bt-setup
 btrfs/btrfs-stall-watch
 btrfs/chrome-cache
 btrfs/tests/realbtrfs-snapshot-core.sh
@@ -202,7 +203,7 @@ tests/uv-dev
 # Repository files that look installable (a config or data file next to a
 # module) but are read from the checkout only, with the reason.
 CHECKOUT_ONLY_FILES: Final[Mapping[str, str]] = {
-    "bluetooth/bluetooth.conf": "defaults read by bluetooth-setup.sh from the checkout; never copied",
+    "bluetooth/bluetooth.conf": "defaults read by bluetooth/bt-setup (cst bluetooth) from the checkout; never copied",
 }
 
 

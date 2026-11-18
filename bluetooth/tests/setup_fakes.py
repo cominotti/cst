@@ -46,12 +46,12 @@ STUBS = (
 FAKE = r"""#!/bin/bash
 # The fake machine of bluetooth/tests/test_setup.py: one script for every
 # command it stands in for (named by $0). Its state is files in $FAKE_STATE;
-# every call is logged there (log: the command line; env-log: the CST_, LC_
+# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the CST_, LC_
 # and PYTHON variables it got, to catch a leak).
 S="${FAKE_STATE:?}"
 me="${0##*/}"
 log() { printf '%s\n' "$*" >>"$S/log"; }
-if [[ "$me" != python3 || "$*" == *wp-roles* ]]; then
+if [[ "$me" != sleep && ( "$me" != python3 || "$*" == *wp-roles* ) ]]; then
     log "$me $*"
     { printf '%s:' "$me"; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
 fi
@@ -85,7 +85,13 @@ case "$me" in
             esac
             args+=("$a")
         done
-        [[ -e "$S/fail-sudo-$1" ]] && exit "$(cat "$S/fail-sudo-$1")"
+        if [[ -e "$S/fail-sudo-$1" ]]; then
+            how="$(cat "$S/fail-sudo-$1")"
+            [[ "$how" == TERM ]] && kill -TERM $$  # killed by a signal
+            [[ "$how" == PARENT-TERM ]] && { kill -TERM "$PPID"; exit 0; }  # the program gets SIGTERM
+            [[ "$how" == PARENT-HUP ]] && { kill -HUP "$PPID"; exec "${args[@]}"; }  # SIGHUP, the step done
+            exit "$how"
+        fi
         exec "${args[@]}"
         ;;
     systemctl)
@@ -284,14 +290,20 @@ class Machine:
         return os.path.exists(os.path.join(self.state, name))
 
     def services(self) -> None:
-        """bluetoothd and the session's WirePlumber running (with their bus name)."""
+        """bluetoothd and the session's WirePlumber running (with their bus name), the adapter powered."""
         self.unit("system", "bluetooth", inv="bt-0")
         self.unit("user", "wireplumber", inv="wp-0", pid=4242)
         self.put("bus-names", ":1.7 4242 wireplumber danilo :1.7 user@1000.service - -\n")
+        # The adapter answers right after a restart (apply waits up to 15 s for it).
+        self.put("prop-org.bluez.Adapter1-Powered", "b true\n")
 
-    def adapter(self, *, iso: bool = True, bap: bool = True) -> None:
-        """One Bluetooth adapter in org.bluez: its ISO feature on and BAP's PACs (as wanted)."""
-        self.put("objects.json", json.dumps(OBJECTS))
+    def adapter(self, *, iso: bool = True, bap: bool = True, listed: bool = True) -> None:
+        """One Bluetooth adapter in org.bluez: its ISO feature on and BAP's PACs (as wanted).
+        listed=False: only its properties answer (GetManagedObjects lists no adapter), so a run
+        on the host never reaches the kernel ISO socket check, which opens a real Bluetooth
+        socket with /usr/bin/python3 (no stub can stand in for it there; run() refuses)."""
+        if listed:
+            self.put("objects.json", json.dumps(OBJECTS))
         self.put("prop-org.bluez.Adapter1-ExperimentalFeatures", f'as 1 "{ISO}"\n' if iso else "as 0\n")
         self.put(
             "prop-org.bluez.Media1-SupportedUUIDs",
@@ -323,28 +335,38 @@ class Machine:
         env: Mapping[str, str] | None = None,
         stdin_text: str | None = None,
         timeout: float = 120,
+        closed_stdout: bool = False,
+        ignore_hup: bool = False,
         root: bool = False,
     ) -> Run:
-        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; root: as root
-        in a user namespace, unshare -r, where this user is root with no privilege outside)."""
+        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; closed_stdout:
+        its stdout a pipe nobody reads, as `| head` leaves it; root: as root in a user namespace,
+        unshare -r, where this user is root with no privilege outside)."""
+        if not container and self.has("objects.json"):
+            raise AssertionError("an adapter listed on the host: the checks would open a real Bluetooth socket")
         log = os.path.join(self.state, "log")
         if os.path.exists(log):
             os.unlink(log)
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        start = ["bash", "-c", 'trap "" HUP; exec bash "$0" "$@"'] if ignore_hup else ["bash"]
         r = subprocess.run(
-            [*(["/usr/bin/unshare", "-r"] if root else []), "bash", SETUP, *args],
+            [*(["/usr/bin/unshare", "-r"] if root else []), *start, SETUP, *args],
             check=False,
-            capture_output=True,
+            stdout=write_end if closed_stdout else subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=self.env(container=container, extra=env),
             input=stdin_text,
             stdin=None if stdin_text is not None else subprocess.DEVNULL,
             timeout=timeout,
         )
+        os.close(write_end)
         calls: list[str] = []
         if os.path.exists(log):
             with open(log, encoding="utf-8") as f:
                 calls = f.read().splitlines()
-        return Run(r.returncode, r.stdout, r.stderr, calls)
+        return Run(r.returncode, r.stdout or "", r.stderr, calls)
 
     def env_log(self) -> str:
         """What the stubs saw of the CST_, LC_, LANG and PYTHON variables, one line per call."""

@@ -3096,6 +3096,101 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_95_bluetooth_python_program_with_the_bash_one_runuser_and_le_audio(self) -> None:
+        """`cst bluetooth` after its port to Python (bluetooth/bt-setup), with the real user
+        manager and WirePlumber. Mixed versions share the record of restarts still owed and
+        the files, both ways: the previous bash program (the fixture
+        tests/fixtures/legacy/bluetooth-setup.sh@d4d8c91, in a copy of the checkout outside the
+        noexec /tmp) applies
+        without restarting and the Python one's plan still owes WirePlumber's restart (exit
+        10), its apply makes it, and the bash one's plan has nothing to do (exit 0); then the
+        other way round with another LDAC quality. Run as root with SUDO_USER, the program runs
+        again as that user (runuser: the user's settings are read); without SUDO_USER it
+        refuses (exit 1). `le-audio on` writes the setting and runs apply in the same process
+        (exec), which writes the files; `le-audio off` likewise."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -f /home/tester/.config/cst/bluetooth.conf",
+            check=False,
+        )
+        # Not under /tmp: Docker's --tmpfs /tmp is noexec, and the old program must run.
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, "rm -rf /opt/cst-old", check=False)
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf
+            rm -rf /opt/cst-old && cp -a /opt/cst-rw /opt/cst-old
+            install -m 0755 '/opt/cst-rw/tests/fixtures/legacy/bluetooth-setup.sh@d4d8c91' /opt/cst-old/bluetooth-setup.sh
+            chown -R tester: /opt/cst-old
+            """,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_95 FAILED at line $LINENO: $BASH_COMMAND" >&2; echo "--- bt95.out:" >&2; cat /tmp/bt95.out >&2' ERR
+            NEW=/opt/cst-rw/bluetooth-setup.sh
+            OLD=/opt/cst-old/bluetooth-setup.sh
+            # apply PROGRAM LINE ARGS...: exit 1 (its checks find no Bluetooth adapter in the
+            # container), after the step that prints LINE.
+            apply() {
+                local prog="$1" line="$2"
+                shift 2
+                rc=0; "$prog" apply "$@" >/tmp/bt95.out 2>&1 || rc=$?
+                [[ $rc == 1 ]]
+                grep -qF 'no Bluetooth adapter in org.bluez' /tmp/bt95.out
+                grep -qF "$line" /tmp/bt95.out
+            }
+            grep -q 'bluetooth/bt-setup' "$NEW"
+            if grep -q 'bluetooth/bt-setup' "$OLD"; then echo "the previous program is the new one" >&2; exit 1; fi
+            mkdir -p /home/tester/.config/cst
+            printf 'DEVICE=00:11:22:33:44:55\nLDAC_QUALITY=sq\n' >/home/tester/.config/cst/bluetooth.conf
+            # The bash program skips the restart; the Python one still owes it, makes it; bash: nothing to do.
+            apply "$OLD" 'Not restarted (--no-restart)' --yes --no-restart
+            rc=0; "$NEW" plan >/tmp/bt95.out 2>&1 || rc=$?
+            [[ $rc == 10 ]]
+            grep -qF '(still owed: an earlier run did not restart it)' /tmp/bt95.out
+            apply "$NEW" 'restart:   wireplumber (your session; audio stops for a moment)' --yes
+            rc=0; "$OLD" plan >/tmp/bt95.out 2>&1 || rc=$?
+            [[ $rc == 0 ]]
+            grep -qx 'Nothing to do.' /tmp/bt95.out
+            # The other way round, with another quality.
+            apply "$NEW" 'Not restarted (--no-restart)' --yes --no-restart --ldac-quality hq
+            rc=0; "$OLD" plan --ldac-quality hq >/tmp/bt95.out 2>&1 || rc=$?
+            [[ $rc == 10 ]]
+            grep -qF '(still owed: an earlier run did not restart it)' /tmp/bt95.out
+            apply "$OLD" 'restart:   wireplumber (your session; audio stops for a moment)' --yes --ldac-quality hq
+            rc=0; "$NEW" plan --ldac-quality hq >/tmp/bt95.out 2>&1 || rc=$?
+            [[ $rc == 0 ]]
+            # le-audio on: the setting, then apply in the same process (its files written).
+            out="$(/opt/cst-rw/cst bluetooth le-audio on --yes --no-restart 2>&1 || true)"
+            grep -qF 'written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=on' <<<"$out"
+            # cst names itself by the path it was run as when it is not the cst on PATH.
+            grep -qE '^Now: (/opt/cst-rw/)?cst bluetooth apply --yes --no-restart$' <<<"$out"
+            grep -qF '== BlueZ: /etc/bluetooth/main.conf' <<<"$out"
+            grep -qx 'LE_AUDIO=on' /home/tester/.config/cst/bluetooth.conf
+            test ! -e /home/tester/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf
+            out="$(/opt/cst-rw/cst bluetooth le-audio off --yes --no-restart 2>&1 || true)"
+            grep -qF 'written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=off' <<<"$out"
+            test -e /home/tester/.config/wireplumber/wireplumber.conf.d/90-cst-le-audio-off.conf
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # As root: with SUDO_USER it runs again as that user (tester's settings: quality sq).
+        root = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "rc=0; SUDO_USER=tester /opt/cst-rw/cst bluetooth plan || rc=$?; echo rc=$rc",
+            check=False,
+        )
+        self.assertIn("Headset 00:11:22:33:44:55 (settings), LDAC quality sq", root.stdout, root.stdout + root.stderr)
+        self.assertIn("rc=10", root.stdout)
+        refused = exec_bash(self.SYSTEMD_CONTAINER, "env -u SUDO_USER /opt/cst-rw/cst bluetooth plan", check=False)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("ERROR: run it from your user account (needs SUDO_USER)", refused.stderr)
+
     def test_83_sccache_server_starts_in_its_own_scope_from_a_capped_compile(self) -> None:
         """The real rustc wrapper (installed by `cst toolchains config apply
         --sccache`), real cargo and the real user manager, with a fake sccache

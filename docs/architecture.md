@@ -84,6 +84,10 @@ the JSON of `pw-dump`, `pactl` and `busctl` as `TypedDict`s and the parts of
 it both read). Its `ports.py` predates the profile: `cli.main`
 and the watcher are typed against `BluetoothHostPort` and `LiveAudioPort`;
 the tests pass a fake host to `cli.main` and put a fake in `Watcher.live`.
+`cst bluetooth` itself (`bluetooth/setup/`, run by `bluetooth/bt-setup`) is a
+package of its own in the full profile: it reads its environment and runs
+itself again (`runuser` from root, `le-audio`'s apply), and `apply` resumes
+the restarts an earlier run did not make; see "Full profile" below.
 
 `cpu` follows it too: its `cli.py` does no I/O of its own. The
 recording loop of `cpu-watch watch`, vm-pin's virsh calls and saved
@@ -196,7 +200,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, `btrfs/bulk`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, `bluetooth/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other

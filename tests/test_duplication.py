@@ -98,13 +98,10 @@ ALLOWED_SAME_NAMES: Final[dict[str, str]] = {
 # checkout and cannot source a file of it. An entry no longer defined twice
 # passes; `invowk cmd fix budgets` deletes it.
 ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
-    "die": "each script's own error exit with its own program name",
-    "in_container": "a copy in the setup scripts still in bash: the same toolbox check; to share in a sourced file",
     "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
     "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",
     "log": "each program's journal tag; the installed programs cannot source a shared file",
     "root_fs_uuid": "a copy in btrfs-setup.sh and the degraded-boot setup: the same query; to share in a sourced file",
-    "section": "each setup script's heading for its status output",
     "status": "each setup script's own status subcommand",
     "uninstall": "each setup script's own uninstall subcommand",
     "usage": "each script's help, printed from its own header",
