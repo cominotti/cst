@@ -147,6 +147,19 @@ def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
         )
 
 
+def private_dirs(*folders: str) -> None:
+    """Each folder, in order, made 0700 (also when it exists: the backups hold secrets)."""
+    for d in folders:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+
+
+def write_private(path: str, text: str) -> None:
+    """A new file (an existing one: FileExistsError), 0600 from the start: it may hold secrets."""
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+        f.write(text)
+
+
 class BackupFiles(LocalFileSystemAdapter):
     """BackupStorePort on this machine: the paths of cfg, the functions of this module (and the
     path tests of cst_core's LocalFileSystemAdapter: os.path.isfile, isdir, exists, lexists)."""
@@ -174,17 +187,14 @@ class BackupFiles(LocalFileSystemAdapter):
         return probe, st.f_bavail * st.f_frsize
 
     def make_backup_folder(self, backup_dir: str, vm_dir: str, dest_dir: str) -> None:
-        for d in (backup_dir, vm_dir):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+        private_dirs(backup_dir, vm_dir)
         os.mkdir(dest_dir, 0o700)
 
     def copy(self, src: str, dest: str, mode: str, *, big: bool) -> None:
         copy(self.cfg, src, dest, mode, big)
 
     def write_private(self, path: str, text: str) -> None:
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-            f.write(text)
+        write_private(path, text)
 
     def remove_tree(self, path: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
@@ -193,17 +203,14 @@ class BackupFiles(LocalFileSystemAdapter):
         """domain.xml (with --security-info: graphics passwords; restic stores it
         encrypted) and manifest.json, 0600 in a 0700 folder. Returns the folder."""
         d = os.path.join(self.cfg.paths.nas_stage, vm)
-        for x in (self.cfg.paths.nas_stage, d):
-            os.makedirs(x, mode=0o700, exist_ok=True)
-            os.chmod(x, 0o700)
+        private_dirs(self.cfg.paths.nas_stage, d)
         for name, text in ((DOMAIN_XML, xml_text), (MANIFEST_JSON, manifest)):
             path = os.path.join(d, name)
             try:
                 os.unlink(path)
             except FileNotFoundError:
                 pass
-            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-                f.write(text)
+            write_private(path, text)
         return d
 
     def unstage(self, folder: str) -> None:
@@ -414,10 +421,7 @@ class DefinitionFiles:
 
     def save(self, vm: str, stamp: str, text: str) -> str:
         keep = os.path.join(self.backup_dir, vm, "definitions")
-        for d in (self.backup_dir, os.path.join(self.backup_dir, vm), keep):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+        private_dirs(self.backup_dir, os.path.join(self.backup_dir, vm), keep)
         saved = os.path.join(keep, f"{stamp}.before-tune.xml")
-        with os.fdopen(os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-            f.write(text)
+        write_private(saved, text)
         return saved

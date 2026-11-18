@@ -21,7 +21,7 @@ from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
 from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
 
-def _why(r: CommandResult) -> str:
+def _why(r: CommandResult | CommandFailed) -> str:
     """systemctl's first line of stderr, else its exit status."""
     return first_line(r.stderr) or f"exit {r.returncode}"
 
@@ -31,7 +31,7 @@ def _reload(systemd: SystemdPort) -> str:
     try:
         systemd.daemon_reload()
     except CommandFailed as e:
-        return f"systemctl daemon-reload: {first_line(e.stderr) or f'exit {e.returncode}'}"
+        return f"systemctl daemon-reload: {_why(e)}"
     return ""
 
 

@@ -1042,7 +1042,7 @@ The Python code inside `vm/` (standard library only at run time):
   each call and names no VM, so the /home NAS backup can use it as it is.
   `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
   and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
-  system folder through `sudo` when not root); `ImageFolders` is their port's adapter. `nocow apply` has no
+  system folder through `sudo` when not root); `ImageFolders` gives them to `vm/cli` through `wiring.images` (no use case is typed against them, so no port). `nocow apply` has no
   application layer: it marks folders one by one, nothing to roll back.
 - `vm/wiring.py`: the composition root: the environment of one run becomes a
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides

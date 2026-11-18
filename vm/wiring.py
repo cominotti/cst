@@ -29,9 +29,6 @@ from vm.domain import VmArgs, VmPaths, VmSettings
 from vm.ports import (
     BackupStorePort,
     DefinitionStorePort,
-    ImagesPort,
-    ProgressPort,
-    ResticPort,
     SettingsPort,
     TimerFilesPort,
     VmCommandsPort,
@@ -110,16 +107,6 @@ def definition_store(cfg: VmSettings) -> DefinitionStorePort:
     return DefinitionFiles(cfg.paths.backup_dir)
 
 
-def restic() -> ResticPort:
-    """restic as cst-vm runs it (vm.adapters.run: the C locale, its words for a missing restic)."""
-    return Restic(run)
-
-
-def progress() -> ProgressPort:
-    """What a backup prints, as it goes: this process's stdout and stderr."""
-    return TerminalLines()
-
-
 def backup_store(cfg: VmSettings) -> BackupStorePort:
     """The backups' files on this machine (cfg's paths)."""
     return BackupFiles(cfg)
@@ -131,8 +118,8 @@ def local_backup(cfg: VmSettings) -> LocalBackup:
         commands=vm_commands(),
         store=backup_store(cfg),
         clock=clock(),
-        out=progress(),
-        root=effective_root(),
+        out=TerminalLines(),
+        root=running_as_root(),
     )
 
 
@@ -147,13 +134,13 @@ def nas_backup(cfg: VmSettings) -> NasBackup:
         commands=vm_commands(),
         store=backup_store(cfg),
         settings=settings_port(cfg),
-        restic=restic(),
+        restic=Restic(run),  # vm.adapters.run: the C locale, cst-vm's words for a missing restic
         signals=StopSignals(),
         lock=lambda vm: VmLock(vm, cfg.paths.run_dir),
         alert=lambda title, body: notify(cfg, "critical", title, body),
         clock=clock(),
-        out=progress(),
-        root=effective_root(),
+        out=TerminalLines(),
+        root=running_as_root(),
     )
 
 
@@ -162,8 +149,9 @@ def running_as_root() -> bool:
     return effective_root()
 
 
-def images(cfg: VmSettings) -> ImagesPort:
-    """The VM image folders on this machine (cfg's paths, the user's home)."""
+def images(cfg: VmSettings) -> ImageFolders:
+    """The VM image folders on this machine (cfg's paths, the user's home): no use case is typed
+    against them (nocow and status only read and mark them), so no port."""
     return ImageFolders(cfg)
 
 

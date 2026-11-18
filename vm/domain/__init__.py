@@ -305,7 +305,13 @@ def domain_parts(xml_text: str) -> DomainParts:
 def stored(dest_dir: str, src: str) -> str:
     """Where a source path is kept inside the backup: its absolute path
     under files/, so names never collide and restoring is one cp each."""
-    return os.path.join(dest_dir, "files", src.lstrip("/"))
+    return os.path.join(dest_dir, stored_name(src))
+
+
+def stored_name(src: str) -> str:
+    """stored()'s path relative to the backup folder (the manifest's "stored"): src is a resolved
+    absolute path (realpath), so this is what os.path.relpath of stored() gives, without a cwd."""
+    return os.path.join("files", src.lstrip("/"))
 
 
 def restore_lines(vm: str, dest_dir: str, copied: Sequence[tuple[str, bool]], tpm_dir: str) -> list[str]:

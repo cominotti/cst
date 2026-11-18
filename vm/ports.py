@@ -7,7 +7,7 @@ from typing import Protocol
 
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.values import Json
-from vm.domain import ImageProbe, NasRepo, TimerStep
+from vm.domain import NasRepo, TimerStep
 from vm.domain.backup import Fingerprint, IndexEntry, ResticSummary
 
 # One NAS backup per VM at a time: the lock of the VM named, held while the block runs (Refused
@@ -46,8 +46,10 @@ class TimerFilesPort(Protocol):
 
 
 class VmCommandsPort(Protocol):
-    """virsh on this machine (libvirt's qemu:///system), as vm.adapters.VmCommands runs it: in the C
-    locale, with vm's answers for a virsh that is missing (127) or does not answer (124)."""
+    """The commands cst vm runs on this machine, as vm.adapters.VmCommands runs them: virsh
+    (libvirt's qemu:///system), rpm (the virtualization packages) and rpm-ostree (the booted
+    deployment), in the C locale, with vm's answers for a command that is missing (127) or does not
+    answer (124)."""
 
     def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
         """(exit status, stdout, stderr) of virsh ARGS."""
@@ -227,20 +229,4 @@ class SignalsPort(Protocol):
 
     def ignored(self) -> AbstractContextManager[None]:
         """While it lasts, the stops are ignored (the merge back); the handlers before it after."""
-        ...
-
-
-class ImagesPort(Protocol):
-    """The VM image folders (libvirt's and the user's): what they look like, and their NOCOW mark."""
-
-    def folders(self) -> list[ImageProbe]:
-        """Every known folder, probed."""
-        ...
-
-    def needs_mark(self, folder: ImageProbe) -> bool:
-        """nocow apply would act on it."""
-        ...
-
-    def mark(self, folder: ImageProbe, say: Callable[[str], None]) -> str:
-        """Set the mark (say shows each sudo command first); an error text, or ""."""
         ...

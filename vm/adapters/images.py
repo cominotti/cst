@@ -168,7 +168,8 @@ def mark_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
 
 
 class ImageFolders:
-    """ImagesPort on this machine: image_dirs of cfg, probe_dir, needs_mark and mark_dir."""
+    """The VM image folders of cfg on this machine (image_dirs, probe_dir), and their mark
+    (needs_mark, mark_dir), for vm/cli through vm.wiring.images."""
 
     def __init__(self, cfg: VmSettings) -> None:
         self.cfg = cfg

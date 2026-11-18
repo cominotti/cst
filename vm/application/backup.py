@@ -4,7 +4,6 @@ every backup makes before it copies anything (also the NAS backup's, vm.applicat
 
 from dataclasses import dataclass
 import os.path
-import posixpath
 import shlex
 
 from cst_core.domain.errors import Refused
@@ -12,7 +11,7 @@ from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state, has_managed_save
-from vm.domain import FULL_MARGIN, SHUT_OFF, URI, VmSettings, domain_parts, restore_lines, stored
+from vm.domain import FULL_MARGIN, SHUT_OFF, URI, VmSettings, domain_parts, restore_lines, stored, stored_name
 from vm.domain.backup import (
     DOMAIN_XML,
     MANIFEST_JSON,
@@ -183,7 +182,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
             "files": [
                 {
                     "source": src,
-                    "stored": posixpath.relpath(stored(dest_dir, src), dest_dir),
+                    "stored": stored_name(src),
                     "kind": copied_kind(src, tpm_dir, big=big),
                     "allocated": sizes[src][0],
                     "apparent": sizes[src][1],
