@@ -54,8 +54,7 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     unreadable = 0
 
     def note(pid: str, comm: str, path: str) -> None:
-        if path.endswith(" (deleted)"):
-            path = path[: -len(" (deleted)")]
+        path = path.removesuffix(" (deleted)")
         for p in pre:
             if path.startswith(p + "/"):
                 parts = path[len(p) + 1 :].split("/")

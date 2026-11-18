@@ -147,7 +147,7 @@ def measure(folder: Folder, dev: int, now: float) -> Folder:
                     folder.inc[sub].size += s.st_blocks * 512
                 if stat.S_ISDIR(s.st_mode):
                     stack.append((e.path, depth + 1, sub))
-    folder.activity = newest if newest else now
+    folder.activity = newest or now
     if folder.foreign:
         folder.problem = folder.problem or f"{folder.foreign} entr(y/ies) on another filesystem"
     return folder

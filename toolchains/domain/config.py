@@ -68,10 +68,10 @@ class ToolSettingState(StrEnum):
 CARGO_CFG_REL = ".cargo/config.toml"
 UV_CFG_REL = ".config/uv/uv.toml"
 WS = r"[^\S\n]"  # a blank that is not a line break (grep's [[:space:]] within a line)
-CARGO_HAS_BUILD_DIR = re.compile(rf"^{WS}*build-dir{WS}*=|^{WS}*build\.build-dir", re.M)
-CARGO_HAS_BUILD = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]|^{WS}*build\.", re.M)
-UV_HAS_LINK_MODE = re.compile(rf"^{WS}*link-mode{WS}*=", re.M)
-UV_HAS_TABLE = re.compile(rf"^{WS}*\[", re.M)
+CARGO_HAS_BUILD_DIR = re.compile(rf"^{WS}*build-dir{WS}*=|^{WS}*build\.build-dir", re.MULTILINE)
+CARGO_HAS_BUILD = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]|^{WS}*build\.", re.MULTILINE)
+UV_HAS_LINK_MODE = re.compile(rf"^{WS}*link-mode{WS}*=", re.MULTILINE)
+UV_HAS_TABLE = re.compile(rf"^{WS}*\[", re.MULTILINE)
 
 
 def cargo_text(home: str) -> str:
@@ -203,13 +203,13 @@ SCCACHE_REBUILD = (
     "turning it on rebuilds nothing: the cache fills as crates are compiled anew "
     "(a new worktree, cargo update, a new toolchain)"
 )
-BUILD_HEADER = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]{WS}*(?:#.*)?$", re.M)
-KEY_LINE = re.compile(rf"^{WS}*[A-Za-z0-9_.\"'-]+{WS}*=", re.M)
-ANY_HEADER = re.compile(rf"^{WS}*\[", re.M)
+BUILD_HEADER = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]{WS}*(?:#.*)?$", re.MULTILINE)
+KEY_LINE = re.compile(rf"^{WS}*[A-Za-z0-9_.\"'-]+{WS}*=", re.MULTILINE)
+ANY_HEADER = re.compile(rf"^{WS}*\[", re.MULTILINE)
 SCCACHE_STATS = re.compile(
     # The value: from its first to its last non-blank (no lazy .*? before \s*: that backtracks).
     r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S(?:.*\S)?)[^\S\n]*$",
-    re.M,
+    re.MULTILINE,
 )
 
 
@@ -335,7 +335,7 @@ def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
                 if pos < 0:
                     pos = len(text)
                 rest = text[pos:]
-                cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest if rest else "\n"))
+                cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest or "\n"))
         elif not headers:
             sep = "" if not text or text.endswith("\n") else "\n"
             cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
