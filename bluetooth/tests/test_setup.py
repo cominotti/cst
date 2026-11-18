@@ -1476,7 +1476,7 @@ class ScratchFileTest(SetupCase):
     def test_a_closed_stdout_ends_the_run_by_sigpipe(self) -> None:
         m = self.machine()
         env = self.scratch(m)
-        for args in (("plan",), ("status",), ("revert", "--check"), ("le-audio",), ("apply", "--yes")):
+        for args in (("plan",), ("status",), ("revert", "--check"), ("le-audio",)):
             r = m.run(*args, closed_stdout=True, env=env)
             self.assertEqual((r.returncode, r.stderr), (-signal.SIGPIPE, ""), args)
             self.assertEqual(os.listdir(env["TMPDIR"]), [], args)
@@ -1522,6 +1522,29 @@ class ScratchFileTest(SetupCase):
         self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
         self.assertEqual(os.listdir(env["TMPDIR"]), [])
         self.assertEqual(self.text(m.main_conf), VENDOR)
+
+
+class ClosedOutputTest(SetupCase):
+    """stdout closed by its reader (`| head`): a command that only reads ends quietly by SIGPIPE
+    (ScratchFileTest); one that changes the machine stops with a message instead, its scratch
+    file removed."""
+
+    def test_changing_commands_stop_with_a_message(self) -> None:
+        m = self.machine()
+        scratch = os.path.join(m.tmp, "scratch")
+        os.mkdir(scratch)
+        env = {"TMPDIR": scratch, "CST_PROG": "cst-t"}
+        for args in (("apply", "--yes"), ("revert", "--yes")):
+            r = m.run(*args, closed_stdout=True, env=env)
+            self.assertEqual(r.returncode, 1, r.text)
+            self.assertEqual(
+                r.stderr, "cst-t: stopped: its output was closed. Backup of main.conf: none taken. Undo: cst-t revert\n"
+            )
+            self.assertEqual(os.listdir(scratch), [], args)
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+        r = m.run("le-audio", "on", closed_stdout=True, env=env)
+        self.assertEqual((r.returncode, r.stderr), (1, "cst-t: stopped: its output was closed.\n"))
+        self.assertEqual(os.listdir(scratch), [])
 
 
 if __name__ == "__main__":

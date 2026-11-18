@@ -22,6 +22,10 @@ class SetupConsolePort(Protocol):
         """Write text to stderr, at once."""
         ...
 
+    def out_closed(self) -> None:
+        """stdout's reader went away: what is still written there goes nowhere."""
+        ...
+
     def ask(self, prompt: str) -> str | None:
         """A line typed on the terminal after the prompt (shown on stderr); None when stdin is no terminal."""
         ...
