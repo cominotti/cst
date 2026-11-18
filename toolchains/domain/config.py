@@ -331,9 +331,8 @@ def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
             # After the table's last key (the build-dir line CST writes),
             # else right after the header.
             spots = ([text.find("\n", keys[-1].start())] if keys else []) + [h.end()]
-            for pos in spots:
-                if pos < 0:
-                    pos = len(text)
+            for spot in spots:
+                pos = len(text) if spot < 0 else spot
                 rest = text[pos:]
                 cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest or "\n"))
         elif not headers:
