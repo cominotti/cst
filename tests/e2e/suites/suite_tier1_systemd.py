@@ -3168,6 +3168,14 @@ EOF
                 st=$($second state)
                 grep -q '^game profile: ON (by hand)' <<<"$st"
                 grep -q 'drift: none' <<<"$st" || {{ echo "$second state: $st" >&2; exit 1; }}
+                # Each copy reads the records of the other's game.intended (past the format line): a
+                # drift is seen by its state and set again by its tick.
+                systemctl set-property --runtime machine.slice CPUWeight=77
+                st=$($second state)
+                grep -qF "DRIFT: machine.slice CPUWeight is '77', the profile set '10'" <<<"$st" \
+                    || {{ echo "$second state saw no drift: $st" >&2; exit 1; }}
+                $second tick
+                [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || {{ echo "$second tick did not repair" >&2; exit 1; }}
                 $second off
                 test ! -e /run/cpu-setup/game.state
                 test -z "$(ls /run/systemd/system/*.d/zz-cst-game.conf 2>/dev/null)"
@@ -3204,10 +3212,11 @@ EOF
             kill "$(cat /tmp/e2e-86-client.pid 2>/dev/null)" 2>/dev/null || true
             systemctl stop cpu-game.service 2>/dev/null || true
             rm -f /run/systemd/system/cpu-game.service
-            systemctl daemon-reload
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-86-conf.bak ]]; then mv /tmp/e2e-86-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
             rm -rf /run/cpu-setup /tmp/e2e-86-client.pid /tmp/e2e-86-ready /tmp/e2e-86-starts /tmp/e2e-86-libgamemode.so
+            systemctl daemon-reload || true
             """,
             check=False,
         )
