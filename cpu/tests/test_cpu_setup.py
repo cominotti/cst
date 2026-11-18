@@ -623,8 +623,10 @@ class UninstallTest(CpuSetupCase):
         self.assertEqual(
             self.runner.joined(),
             [
-                "systemctl stop cpu-game.service",
+                # The watchdog first: a tick between the two would switch the profile back on, just
+                # before its unit and its off program are deleted.
                 "systemctl disable --now cpu-game-watchdog.timer",
+                "systemctl stop cpu-game.service",
                 f"{inst} remove --component cpu:core",
                 f"runuser -u tester -- {inst} remove --home {self.home} --component cpu:gamemode",
                 "systemctl --user -M tester@ daemon-reload",

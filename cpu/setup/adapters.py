@@ -373,8 +373,10 @@ class CpuSetup:
     def uninstall(self) -> int:
         """What install added, except the settings, the group, the cst link, builds.slice and the VM."""
         p = self.paths
-        self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
+        # The watchdog first: a tick between the two would start the profile again, just before its
+        # unit and its off program are deleted.
         self.run(["systemctl", "disable", "--now", "cpu-game-watchdog.timer"], check=False, quiet=True)
+        self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
         # Without the watchdog nothing would remove one left behind (the reload below then drops its MemoryLow).
         self.remove_game_dropins()
         self.installer("remove", "--component", "cpu:core")
