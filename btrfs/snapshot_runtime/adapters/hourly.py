@@ -13,7 +13,6 @@ from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
 from btrfs.snapshot_runtime.domain import (
     DAY_S,
     EXIT_USAGE,
-    GIB,
     NOT_SET_UP,
     PURGE_BATCH,
     SHOWN,
@@ -32,6 +31,7 @@ from btrfs.snapshot_runtime.domain import (
     read_lines,
     source_args,
 )
+from cst_core.domain.values import GIB
 
 NL = "\n"
 LOCK_BUSY = "another conversion/snapshot run is active; skipped"

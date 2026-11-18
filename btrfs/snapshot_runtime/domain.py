@@ -13,7 +13,6 @@ from typing import Final
 from btrfs.health_check.domain import bash_int
 
 TAG: Final = "btrfs-snapshot"
-GIB: Final = 1024**3
 USAGE: Final = (
     "usage: btrfs-snapshot hourly|nas|convert|convert-boot|list [--json]|caches [--json]|prune [--dry-run] "
     "[--allow-mass-delete]|purge|planned-left|busy [--home DIR] PATH...|convert-one PATH"
