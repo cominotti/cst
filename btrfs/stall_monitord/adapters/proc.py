@@ -10,6 +10,7 @@ import os
 import queue
 import threading
 import time
+from typing import override
 
 from btrfs.stall_monitord.domain import (
     CGROUP_RESCAN,
@@ -286,6 +287,7 @@ class Writer(threading.Thread):
         self.q: queue.Queue[list[tuple[float, str]] | None] = queue.Queue(maxsize=64)
         self.last_housekeeping_day: str | None = None
 
+    @override
     def run(self) -> None:
         while True:
             batch = self.q.get()
