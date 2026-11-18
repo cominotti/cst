@@ -122,7 +122,9 @@ class ValueObjectsTest(unittest.TestCase):
         cs = CpuSet.parse("0-3,6,12-13")
         self.assertEqual(cs.cpus, frozenset({0, 1, 2, 3, 6, 12, 13}))
         self.assertEqual(cs.sorted_cpus(), (0, 1, 2, 3, 6, 12, 13))
-        for bad in ("", " , ", "3-1", "a-b", "0-1-2", "cpu0"):
+        # Digits other than ASCII 0-9 ("²" passes str.isdigit, int() refuses it): an error of the
+        # parser, not a ValueError from int().
+        for bad in ("", " , ", "3-1", "a-b", "0-1-2", "cpu0", "²", "0-²", "٣"):
             with self.subTest(bad=bad), self.assertRaises(DomainValidationError):
                 CpuSet.parse(bad)
         with self.assertRaises(DomainValidationError):

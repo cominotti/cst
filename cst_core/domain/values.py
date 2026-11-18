@@ -170,14 +170,14 @@ class CpuSet:
                 raise DomainValidationError(f"invalid empty range element in {spec!r}")
             if "-" in token:
                 start_s, sep, end_s = token.partition("-")
-                if not sep or "-" in end_s or not start_s.isdigit() or not end_s.isdigit():
+                if not sep or "-" in end_s or not _is_index(start_s) or not _is_index(end_s):
                     raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
                 start, end = int(start_s), int(end_s)
                 if start > end:
                     raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
                 selected.update(range(start, end + 1))
             else:
-                if not token.isdigit():
+                if not _is_index(token):
                     raise DomainValidationError(f"invalid CPU index {token!r} in {spec!r}")
                 selected.add(int(token))
         return cls(frozenset(selected))
@@ -185,6 +185,11 @@ class CpuSet:
     def sorted_cpus(self) -> tuple[int, ...]:
         """Return CPU indices in ascending order."""
         return tuple(sorted(self.cpus))
+
+
+def _is_index(text: str) -> bool:
+    """A CPU index as the kernel writes one: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
+    return text.isascii() and text.isdigit()
 
 
 @dataclass(frozen=True, slots=True)
