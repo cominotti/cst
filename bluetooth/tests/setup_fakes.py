@@ -46,12 +46,12 @@ STUBS = (
 FAKE = r"""#!/bin/bash
 # The fake machine of bluetooth/tests/test_setup.py: one script for every
 # command it stands in for (named by $0). Its state is files in $FAKE_STATE;
-# every call is logged there (log: the command line; env-log: the CST_, LC_
+# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the CST_, LC_
 # and PYTHON variables it got, to catch a leak).
 S="${FAKE_STATE:?}"
 me="${0##*/}"
 log() { printf '%s\n' "$*" >>"$S/log"; }
-if [[ "$me" != python3 || "$*" == *wp-roles* ]]; then
+if [[ "$me" != sleep && ( "$me" != python3 || "$*" == *wp-roles* ) ]]; then
     log "$me $*"
     { printf '%s:' "$me"; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
 fi

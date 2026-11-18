@@ -9,11 +9,18 @@ Run from the repository root:
     invowk cmd test module bluetooth.tests.test_setup
 """
 
+from collections.abc import Sequence
+import hashlib
+import json
 import os
 import pwd
+import re
+import stat
 import unittest
 
-from bluetooth.tests.setup_fakes import ISO, SETUP, Machine
+from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
+from bluetooth.tests.test_bluetooth import JOURNAL, OLD_WP, VENDOR
+from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from tests.test_module_routing import userns_root
 
 GENERAL = "[General]\n#Experimental = false\n"
@@ -144,6 +151,1282 @@ class StepDownTest(unittest.TestCase):
                 f"runuser -u {me.pw_name} -- env {unset} {session} {os.path.realpath(SETUP)} plan --device AA:BB:CC:DD:EE:FF"
             ],
         )
+
+
+DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
+CLASSIC = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n"
+BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n"
+HELP_SHA256 = "6a1b1fbbc920728e0dccc240c6f2e3ba99a6d0c6c8dca643d957d6b097089e78"
+USAGE_SHA256 = "47a3592bb308a5e7b7c9ae3472fc830bae3b8b4eee678de83b8f6c7b777830f6"
+LW = "cst-bt-ldac48.service"
+
+
+def row(word: str, label: str, note: str = "") -> str:
+    """One line of plan's and status's tables, as the program prints it."""
+    return f"  {word:<9} {label:<52} {note}\n"
+
+
+def wp_label(path: str) -> str:
+    return "wireplumber.conf.d/" + os.path.basename(path)
+
+
+class SetupCase(unittest.TestCase):
+    """A test with a fake machine: main.conf, the user's settings, bluetoothd and WirePlumber running."""
+
+    def machine(self, main_conf: str = VENDOR, settings: str | None = None, *, services: bool = True) -> Machine:
+        m = Machine(self)
+        m.put(m.main_conf, main_conf)
+        if settings is not None:
+            m.user_settings(settings)
+        if services:
+            m.services()
+        return m
+
+    def text(self, path: str) -> str:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def after(self, calls: Sequence[str], first: str) -> list[str]:
+        """The calls after the first one that starts with first."""
+        for i, c in enumerate(calls):
+            if c.startswith(first):
+                return list(calls[i + 1 :])
+        self.fail(f"no call {first!r} in {calls}")
+
+    def order(self, calls: Sequence[str], *wanted: str) -> None:
+        """The calls that are one of wanted (or it and more words) come first in that order."""
+        seen = [w for c in calls for w in wanted if c == w or c.startswith(w + " ")]
+        firsts = [w for i, w in enumerate(seen) if w not in seen[:i]]
+        self.assertEqual(firsts, list(wanted), calls)
+
+
+class CommandLineTest(SetupCase):
+    """The options, their errors and the help, before anything is read from the machine."""
+
+    def test_help(self) -> None:
+        m = Machine(self)
+        for args in (("help",), ("-h",), ("--help",), ("",), ()):
+            r = m.run(*args, env={"CST_PROG": "cst bluetooth"})
+            self.assertEqual((r.returncode, r.stderr), (0, ""), args)
+            self.assertEqual(hashlib.sha256(r.stdout.encode()).hexdigest(), HELP_SHA256, r.stdout)
+            self.assertTrue(
+                r.stdout.startswith("\nbluetooth-setup.sh  (the " + "\u0060bluetooth\u0060 module of CST"), r.stdout
+            )
+            self.assertTrue(r.stdout.endswith("\nUsage: cst bluetooth <command> [options]\n"))
+            self.assertEqual(r.calls, [])
+        r = m.run("help")
+        self.assertTrue(r.stdout.endswith(f"\nUsage: {SETUP} <command> [options]\n"))
+        r = m.run("nonsense", env={"CST_PROG": "cst bluetooth"})
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertEqual(hashlib.sha256(r.stderr.encode()).hexdigest(), USAGE_SHA256, r.stderr)
+        self.assertTrue(r.stderr.startswith("Unknown command: nonsense\n\nbluetooth-setup.sh  (the"))
+
+    def test_usage_errors(self) -> None:
+        m = self.machine()
+        cases = {
+            ("plan", "--ldac-quality", "best"): "cst-t plan: the LDAC quality must be auto, hq, sq or mq (got 'best')",
+            ("plan", "--bearer=usb"): "cst-t plan: the bearer must be le, bredr or last-used (got 'usb')",
+            ("plan", "--bogus"): "cst-t plan: unknown option '--bogus' (see cst-t help)",
+            (
+                "plan",
+                "--device",
+                "nope",
+            ): "cst-t plan: the device must be a MAC address like AA:BB:CC:DD:EE:FF (got 'nope'; set DEVICE in "
+            + m.settings
+            + " or use --device)",
+            ("status", "--force"): "cst-t status: unknown option '--force' (see cst-t help)",
+            ("apply", "--check"): "cst-t apply: unknown option '--check' (see cst-t help)",
+            ("plan", "--device"): "cst-t plan: --device needs a value",
+            ("plan", "--device", "--force"): "cst-t plan: --device needs a value",
+            (
+                "plan",
+                "--le-audio",
+                "maybe",
+            ): "cst-t plan: LE Audio must be on or off (got 'maybe'; LE_AUDIO in the settings or --le-audio)",
+            ("apply", "--le-audio"): "cst-t apply: --le-audio needs a value",
+            ("revert", "--le-audio", "on"): "cst-t revert: unknown option '--le-audio' (see cst-t help)",
+            (
+                "plan",
+                "--le-audio=yes",
+            ): "cst-t plan: LE Audio must be on or off (got 'yes'; LE_AUDIO in the settings or --le-audio)",
+            ("le-audio", "maybe"): "cst-t le-audio: say on or off (got 'maybe')",
+            ("le-audio", "on", "--le-audio", "off"): "cst-t le-audio: unknown option '--le-audio' (see cst-t help)",
+            ("le-audio", "on", "--device", MAC): "cst-t le-audio: unknown option '--device' (see cst-t help)",
+            ("le-audio", "on", "--force"): "cst-t le-audio: unknown option '--force' (see cst-t help)",
+            ("le-audio", "--yes", "on"): "cst-t le-audio: unknown option 'on' (see cst-t help)",
+            ("plan", "stray"): "cst-t plan: unknown option 'stray' (see cst-t help)",
+            (
+                "plan",
+                "--ldac-quality",
+                "best",
+                "--bearer",
+                "x",
+            ): "cst-t plan: the bearer must be le, bredr or last-used (got 'x')",
+            (
+                "plan",
+                "--le-audio",
+                "x",
+                "--ldac-quality",
+                "y",
+            ): "cst-t plan: LE Audio must be on or off (got 'x'; LE_AUDIO in the settings or --le-audio)",
+        }
+        for args, err in cases.items():
+            r = m.run(*args, env={"CST_PROG": "cst-t"})
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (2, "", err + "\n"), args)
+            self.assertEqual(r.calls, [], args)
+
+    def test_values_and_flags(self) -> None:
+        m = self.machine(DONE, "DEVICE=aa:bb:cc:dd:ee:ff\nBEARER=bredr\n")
+        r = m.run("plan", "--device", "", "--bearer", "")
+        # --device "": the settings' DEVICE; --bearer "": no bearer (it overrides the settings).
+        self.assertIn("Headset AA:BB:CC:DD:EE:FF (settings), LDAC quality auto", r.stdout)
+        self.assertIn(row("ok", "preferred bearer", "left alone (no BEARER set)"), r.stdout)
+        r = m.run("plan", "--device=11:22:33:44:55:66", "--ldac-quality=hq", "--le-audio=on")
+        self.assertIn(
+            "Headset 11:22:33:44:55:66 (--device), LDAC quality hq, LE Audio on (--le-audio, this run only)", r.stdout
+        )
+        self.assertIn("bluetoothctl info 11:22:33:44:55:66", r.calls)
+        # --force=anything is --force.
+        m.unit("system", "bluetooth", inv="bt-0")
+        r = m.run("apply", "--force=no", "--yes", "--no-restart")
+        self.assertIn(
+            "Not restarted (--no-restart). To finish: sudo systemctl restart bluetooth && systemctl --user restart wireplumber",
+            r.stdout,
+        )
+
+    def test_bad_settings_are_named(self) -> None:
+        for text, err in (
+            ("DEVICE=headset\n", "got 'headset'"),
+            ("LDAC_RATE=96000\n", "LDAC_RATE must be empty (watcher off) or 48000 (got '96000' in the settings)"),
+            ("LE_AUDIO=true\n", "LE Audio must be on or off (got 'true'"),
+            ("BEARER=usb\n", "the bearer must be le, bredr or last-used (got 'usb')"),
+        ):
+            m = self.machine(settings=text)
+            r = m.run("plan")
+            self.assertEqual(r.returncode, 2, text)
+            self.assertIn(err, r.stderr)
+        m = self.machine(settings="DEVICE=headset\n")
+        self.assertIn(m.settings, m.run("plan").stderr)
+        # le-audio on|off fixes a broken LE_AUDIO itself.
+        m = self.machine(settings="LE_AUDIO=true\n")
+        r = m.run("le-audio", "off", "--no-restart")
+        self.assertIn("written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=off", r.stdout)
+
+    def test_bt_timeout(self) -> None:
+        m = self.machine(DONE, "BEARER=bredr\n")
+        m.put("bt-info", "\tPaired: yes\n\tPreferredBearer: bredr\n")
+        for raw, via in (
+            ("", "timeout 5 "),
+            ("7", "timeout 7 "),
+            ("08", "timeout 8 "),
+            ("007", "timeout 7 "),
+            ("0", "direct"),
+        ):
+            env = {} if raw == "" else {"BT_TIMEOUT": raw}
+            r = m.run("plan", env=env)
+            self.assertEqual(r.returncode, 10, r.text)
+            info = r.calls.index(f"bluetoothctl info {MAC}")
+            self.assertTrue(r.calls[info + 1].startswith(f"  stdin=/dev/null via={via}"), (raw, r.calls))
+        for bad in ("soon", "1234567890", "-1", " 5"):
+            r = m.run("plan", env={"BT_TIMEOUT": bad})
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertEqual(r.stderr, f"BT_TIMEOUT must be a whole number of seconds (got '{bad}')\n")
+
+
+class PlanTest(SetupCase):
+    def test_fresh_machine(self) -> None:
+        m = self.machine()
+        r = m.run("plan", env={"CST_PROG": "cst-t"})
+        self.assertEqual((r.returncode, r.stderr), (10, ""), r.text)
+        self.assertTrue(
+            r.stdout.startswith("Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews")
+        )
+        self.assertIn(
+            f"Headset {MAC} (settings), LDAC quality auto, LE Audio off (the CST default); host /etc in {m.root}/etc\n",
+            r.stdout,
+        )
+        for line in (
+            row("update", "main.conf [General] Experimental", "(not set) -> true"),
+            row("update", "main.conf [General] KernelExperimental", f"(not set) -> {ISO} (ISO socket)"),
+            row("write", wp_label(m.wp_conf), "missing"),
+            row("write", wp_label(m.le_conf), "LE Audio off (the CST default): PipeWire will offer only A2DP and HFP"),
+            row("ok", "preferred bearer", "left alone (no BEARER set)"),
+            row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"),
+            row(
+                "restart",
+                "bluetooth.service",
+                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
+            ),
+            row("restart", "wireplumber (your session)", "audio stops for a moment; A2DP is restored afterwards"),
+            row("", "", "(the LE Audio change takes effect only with this restart)"),
+            "\n== main.conf, as apply would write it\n",
+            f"    --- {m.main_conf}\t",
+            "    +KernelExperimental = " + ISO + "\n",
+            "\nApply with: cst-t apply\n",
+        ):
+            self.assertIn(line, r.stdout)
+        self.assertEqual(self.text(m.main_conf), VENDOR, "plan changed main.conf")
+        self.assertFalse(os.path.exists(os.path.join(m.home, ".config")))
+
+    def test_nothing_to_do_and_the_changed_files_diffs(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--yes", "--no-restart")
+        m.services()  # restarted by hand: nothing owed
+        os.unlink(m.pending)
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertTrue(r.stdout.endswith("\nNothing to do.\n"), r.stdout)
+        self.assertIn(row("ok", "main.conf [General] Experimental", "true"), r.stdout)
+        self.assertIn(row("ok", wp_label(m.wp_conf), f"up to date (LDAC auto for {MAC})"), r.stdout)
+        self.assertIn(
+            row("ok", wp_label(m.le_conf), "LE Audio off (the CST default): PipeWire offers only A2DP and HFP"),
+            r.stdout,
+        )
+        self.assertIn(row("ok", "bluetooth.service", "no restart needed"), r.stdout)
+        # Another quality: the rule's diff, and only WirePlumber restarts.
+        r = m.run("plan", "--ldac-quality", "hq")
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(
+            row("update", wp_label(m.wp_conf), "differs (apply writes LDAC hq; the old file is kept as .bak)"), r.stdout
+        )
+        self.assertIn(f"\n== {wp_label(m.wp_conf)}, as apply would write it\n    --- {m.wp_conf}\t", r.stdout)
+        self.assertIn("    +++ /dev/fd/", r.stdout)
+        self.assertIn(
+            '    -        bluez5.a2dp.ldac.quality = "auto"\n    +        bluez5.a2dp.ldac.quality = "hq"\n', r.stdout
+        )
+        self.assertIn(row("ok", "bluetooth.service", "no restart needed"), r.stdout)
+        self.assertIn(
+            row("restart", "wireplumber (your session)", "audio stops for a moment; A2DP is restored afterwards"),
+            r.stdout,
+        )
+        r = m.run("apply", "--ldac-quality", "hq", "--no-restart")
+        self.assertIn(f"backup:    {m.wp_conf}.bak\n", r.stdout)
+        self.assertIn(f"written:   {m.wp_conf} (LDAC hq)\n", r.stdout)
+        self.assertIn('bluez5.a2dp.ldac.quality = "auto"', self.text(m.wp_conf + ".bak"))
+
+    def test_the_old_scripts_files_are_adopted(self) -> None:
+        m = self.machine(DONE)
+        m.put(m.wp_conf, OLD_WP)
+        m.put(os.path.join(m.wp_dir, "50-jbl-live-beam-4.conf"), OLD_WP)
+        r = m.run("plan")
+        self.assertIn(
+            row(
+                "adopt",
+                wp_label(m.wp_conf),
+                "up to date; written by apply-le-audio.sh or with older comments: apply only renews the comments, no restart",
+            ),
+            r.stdout,
+        )
+        self.assertIn(
+            row(
+                "remove",
+                "wireplumber.conf.d/50-jbl-live-beam-4.conf",
+                "older name of the same rule (apply-le-audio.sh)",
+            ),
+            r.stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"removed:   {m.wp_dir}/50-jbl-live-beam-4.conf (older name of the same rule)\n", r.stdout)
+        self.assertIn(f"adopted:   {m.wp_conf} (comments renewed, settings unchanged: no restart)\n", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(m.wp_dir, "50-jbl-live-beam-4.conf")))
+        self.assertIn("# managed-by: bluetooth-setup.sh (CST)", self.text(m.wp_conf))
+        self.assertEqual(stat.S_IMODE(os.stat(m.wp_conf).st_mode), 0o644)
+
+    def test_foreign_rule_is_a_conflict_and_apply_stops(self) -> None:
+        m = self.machine(DONE)
+        m.put(m.wp_conf, "monitor.bluez.rules = []\n")
+        r = m.run("plan")
+        self.assertIn(
+            row(
+                "CONFLICT",
+                wp_label(m.wp_conf),
+                "not written by CST or the old script: apply refuses; move it away by hand",
+            ),
+            r.stdout,
+        )
+        r = m.run("apply", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            r.stderr,
+            f"cst-t: ERROR: {m.wp_conf} was not written by CST or apply-le-audio.sh: move it away, then run apply again.\n",
+        )
+        self.assertEqual(self.text(m.main_conf), DONE)
+
+    def test_main_conf_missing_or_a_link(self) -> None:
+        m = self.machine()
+        os.unlink(m.main_conf)
+        r = m.run("plan", env={"CST_PROG": "cst-t"})
+        self.assertEqual(
+            (r.returncode, r.stderr),
+            (1, f"cst-t: ERROR: {m.main_conf} does not exist (is the bluez package installed?)\n"),
+        )
+        real = m.put("real-main.conf", VENDOR)
+        os.symlink(real, m.main_conf)
+        r = m.run("status", env={"CST_PROG": "cst-t"})
+        self.assertEqual(
+            (r.returncode, r.stderr), (1, f"cst-t: ERROR: {m.main_conf} is a symlink: refusing to edit it\n")
+        )
+        r = m.run("revert", "--check", env={"CST_PROG": "cst-t"})
+        self.assertEqual((r.returncode, r.stderr), (1, f"cst-t: ERROR: {m.main_conf} is missing or a symlink\n"))
+
+
+class RestartTest(SetupCase):
+    """apply's restarts: in order, each failure stops what depends on it; the record of restarts owed."""
+
+    def test_restarts_in_order(self) -> None:
+        m = self.machine(settings="LE_AUDIO=on\n")
+        m.put("bt-journal", BAP_REGISTERED)
+        m.adapter()
+        r = m.run("apply", "--yes")
+        self.order(
+            r.calls,
+            "sudo cp -p",
+            "sudo install -m 0644",
+            "sudo mv -f",
+            "sudo systemctl restart bluetooth",
+            "busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered",
+            "systemctl --user restart wireplumber",
+        )
+        after = self.after(r.calls, "systemctl --user restart wireplumber")
+        self.assertTrue(after[0].startswith("systemctl show -p InvocationID --value bluetooth"), after)  # the BAP wait
+        self.assertIn("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n", r.stdout)
+        self.assertIn("restart:   wireplumber (your session; audio stops for a moment)\n", r.stdout)
+        self.assertFalse(os.path.exists(m.pending))
+        self.assertNotEqual(m.unit_inv("system", "bluetooth"), "bt-0")
+
+    def test_no_bap_wait_with_le_audio_off(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("apply", "--yes")
+        after = self.after(r.calls, "systemctl --user restart wireplumber")
+        self.assertEqual(after[0], f"bluetoothctl info {MAC}", after)  # restore_a2dp, no BAP wait
+        self.assertNotIn("sudo systemctl restart bluetooth", r.calls)
+
+    def test_no_restart_hint_names_only_what_is_needed(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("apply", "--no-restart")
+        self.assertIn("Not restarted (--no-restart). To finish: systemctl --user restart wireplumber\n", r.stdout)
+        self.assertNotIn("restart", " ".join(c for c in r.calls if not c.startswith("systemctl --user is-")))
+        m = self.machine()
+        r = m.run("apply", "--no-restart")
+        self.assertIn(
+            "Not restarted (--no-restart). To finish: sudo systemctl restart bluetooth && systemctl --user restart wireplumber\n",
+            r.stdout,
+        )
+
+    def test_failed_bluetooth_restart_stops_before_wireplumber(self) -> None:
+        m = self.machine()
+        m.put("fail-sudo-systemctl", "1")
+        r = m.run("apply", "--yes", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1, r.text)
+        self.assertIn(
+            "cst-t: ERROR: bluetooth.service was not restarted. To finish: sudo systemctl restart bluetooth && systemctl --user restart wireplumber\n",
+            r.stderr,
+        )
+        self.assertRegex(
+            r.stderr,
+            r"cst-t: ERROR: a restart failed \(see above\)\. Backup of main\.conf: \S+\.bak-\d{8}-\d{6}\. Undo: cst-t revert\n$",
+        )
+        self.assertNotIn("systemctl --user restart wireplumber", r.calls)
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+
+    def test_failed_wireplumber_restart(self) -> None:
+        m = self.machine(DONE)
+        m.flag("units/user-wireplumber.fail")
+        r = m.run("apply", "--yes", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(
+            "Job for wireplumber failed.\ncst-t: ERROR: wireplumber was not restarted. To finish: systemctl --user restart wireplumber\n",
+            r.stderr,
+        )
+        self.assertTrue(
+            r.stderr.endswith(
+                "cst-t: ERROR: a restart failed (see above). Backup of main.conf: none taken. Undo: cst-t revert\n"
+            )
+        )
+
+    def test_a_cancelled_question_keeps_both_owed(self) -> None:
+        m = self.machine(settings="BEARER=bredr\n")
+        m.put("bt-info", "\tPaired: yes\n")
+        r = m.run("apply", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(
+            "No terminal to ask on: use --yes to restart. To finish later: sudo systemctl restart bluetooth && systemctl --user restart wireplumber\n",
+            r.stdout,
+        )
+        self.assertTrue(
+            r.stdout.endswith(
+                "\nNot done yet: the restarts above, the preferred bearer and the checks.\nAfter restarting, run: cst-t apply\n"
+            ),
+            r.stdout,
+        )
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+        self.assertFalse([c for c in r.calls if "restart" in c or "bearer" in c], r.calls)
+        r = m.run("apply", "--no-restart", "--bearer", "")
+        self.assertIn(row("", "", "(still owed: an earlier run did not restart it)"), m.run("plan").stdout)
+
+    def test_restore_a2dp_after_the_restart(self) -> None:
+        m = self.machine(DONE)
+        m.put("bt-info", "\tPaired: yes\n\tBREDR.Connected: yes\n\tLE.Connected: no\n")
+        m.put("pactl-cards", json.dumps(cards(active="headset-head-unit")))
+        r = m.run("apply", "--yes")
+        self.assertIn(f"pactl set-card-profile bluez_card.{DEV} a2dp-sink", r.calls)
+        self.assertIn("restored:  the headset is back on A2DP\n", r.stdout)
+        # Its microphone in use (a call): left alone.
+        m.put("pactl-sources", json.dumps([{"index": 7, "name": f"bluez_input.{DEV}.0"}]))
+        m.put("pactl-outputs", json.dumps([{"source": 7}]))
+        r = m.run("apply", "--yes", "--force")
+        self.assertIn(
+            "WARNING: the headset is in headset-head-unit with its microphone in use; A2DP not restored (switch the profile after the call)\n",
+            r.stderr,
+        )
+        self.assertNotIn(f"pactl set-card-profile bluez_card.{DEV} a2dp-sink", r.calls)
+        # Already on A2DP: nothing to do.
+        m.put("pactl-cards", json.dumps(cards()))
+        r = m.run("apply", "--yes", "--force")
+        self.assertNotIn("restored:", r.stdout)
+        self.assertNotIn("WARNING: the headset", r.stderr)
+
+
+class RestartOwedTest(SetupCase):
+    """A restart that was not made stays owed while its unit runs with the same invocation ID."""
+
+    def test_owed_until_apply_restarts(self) -> None:
+        m = self.machine()
+        r = m.run("apply", "--yes", "--no-restart")
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+        self.assertEqual(stat.S_IMODE(os.stat(m.pending).st_mode), 0o644)
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(
+            row(
+                "restart",
+                "bluetooth.service",
+                "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
+            )
+            + row("", "", "(still owed: an earlier run did not restart it)"),
+            r.stdout,
+        )
+        self.assertEqual(r.stdout.count("(still owed: an earlier run did not restart it)"), 2)
+        r = m.run("apply", "--yes")
+        self.order(r.calls, "sudo systemctl restart bluetooth", "systemctl --user restart wireplumber")
+        self.assertFalse(os.path.exists(m.pending))
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_restart_by_hand_or_a_stop_ends_what_is_owed(self) -> None:
+        m = self.machine()
+        m.run("apply", "--yes", "--no-restart")
+        m.unit("user", "wireplumber", inv="wp-by-hand")
+        r = m.run("plan")
+        self.assertEqual(r.stdout.count("still owed"), 1)  # bluetoothd's; WirePlumber follows it
+        self.assertIn(
+            row("restart", "wireplumber (your session)", "audio stops for a moment; A2DP is restored afterwards"),
+            r.stdout,
+        )
+        m.unit("system", "bluetooth", active=False)  # stopped (it keeps its last ID): reads main.conf when it starts
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_status_says_what_is_owed_also_when_checks_fail(self) -> None:
+        m = self.machine()
+        m.run("apply", "--yes", "--no-restart")
+        owed = "A restart an earlier run did not make is still owed (bluetooth.service wireplumber.service): cst-t apply makes it.\n"
+        r = m.run("status", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("\n" + owed, r.stdout)
+        self.assertRegex(r.stdout, r"\d check\(s\) failed, \d warning\(s\)\.\n$")
+        m.adapter()
+        m.flag("iso-socket")
+        m.put("wp-roles", CLASSIC)
+        r = m.run("status", container=True, env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn(owed + "All checks passed", r.stdout)
+
+    def test_a_unit_that_does_not_run_owes_nothing(self) -> None:
+        m = self.machine()
+        m.unit("system", "bluetooth", active=False)
+        m.run("apply", "--no-restart")
+        self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
+
+    def test_an_unreadable_record_is_replaced(self) -> None:
+        m = self.machine(DONE)
+        os.makedirs(os.path.dirname(m.pending))
+        with open(m.pending, "wb") as f:
+            f.write(b"\xff{")
+        self.assertNotIn("still owed", m.run("plan").stdout)
+        m.run("apply", "--no-restart")
+        self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
+
+
+class LeAudioTest(SetupCase):
+    """The LE Audio drop-in (LE_AUDIO=off): written, adopted, removed, left alone; plan, status, revert."""
+
+    def test_off_on_off(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"written:   {m.le_conf} (LE Audio off: PipeWire offers only A2DP and HFP)\n", r.stdout)
+        self.assertIn(
+            "override.monitor.bluez.properties = {\n  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n}",
+            self.text(m.le_conf),
+        )
+        self.assertEqual(stat.S_IMODE(os.stat(m.le_conf).st_mode), 0o644)
+        # apply's checks read the drop-in again after writing it.
+        self.assertIn(row("ok", "LE Audio", "off (the CST default; PipeWire offers only classic profiles)"), r.stdout)
+        self.assertNotIn("not in place yet", r.stdout)
+        m.user_settings("LE_AUDIO=on\n")
+        r = m.run("plan")
+        self.assertIn(
+            row(
+                "remove",
+                wp_label(m.le_conf),
+                "LE Audio on (~/.config/cst/bluetooth.conf): apply removes it and restarts WirePlumber",
+            ),
+            r.stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"removed:   {m.le_conf} (LE Audio on)\n", r.stdout)
+        self.assertFalse(os.path.exists(m.le_conf))
+        self.assertIn(
+            row("ok", "LE Audio", "on (~/.config/cst/bluetooth.conf): PipeWire offers the bap-* profiles too"),
+            m.run("plan").stdout,
+        )
+        r = m.run("plan", "--le-audio", "off")
+        self.assertIn(
+            row(
+                "write",
+                wp_label(m.le_conf),
+                "LE Audio off (--le-audio, this run only): PipeWire will offer only A2DP and HFP",
+            ),
+            r.stdout,
+        )
+
+    def test_changed_and_foreign_drop_ins(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        good = self.text(m.le_conf)
+        m.put(m.le_conf, good.replace("hfp_ag ]", "hfp_ag bap_sink ]"))
+        r = m.run("plan")
+        self.assertIn(
+            row("update", wp_label(m.le_conf), "differs (apply rewrites it: LE Audio off; restarts WirePlumber)"),
+            r.stdout,
+        )
+        self.assertIn(f"\n== {wp_label(m.le_conf)}, as apply would write it\n", r.stdout)
+        self.assertIn("    -  bluez5.roles = [ a2dp_sink a2dp_source hfp_hf hfp_ag bap_sink ]\n", r.stdout)
+        m.put(m.le_conf, "override.monitor.bluez.properties = { bluez5.roles = [ a2dp_sink ] }\n")
+        r = m.run("plan")
+        self.assertIn(
+            row("CONFLICT", wp_label(m.le_conf), "not written by CST: apply refuses; move it away by hand"), r.stdout
+        )
+        r = m.run("apply", env={"CST_PROG": "cst-t"})
+        self.assertEqual(
+            (r.returncode, r.stderr),
+            (1, f"cst-t: ERROR: {m.le_conf} was not written by CST: move it away, then run apply again.\n"),
+        )
+        r = m.run("apply", "--le-audio", "on", "--no-restart")
+        self.assertIn(f"WARNING: {m.le_conf} was not written by CST: left alone (it may keep LE Audio off)\n", r.stderr)
+        self.assertTrue(os.path.exists(m.le_conf))
+        self.assertIn(
+            row("CONFLICT", wp_label(m.le_conf), "not written by CST: left alone (it may keep LE Audio off)"),
+            m.run("plan", "--le-audio", "on").stdout,
+        )
+
+    def test_older_comments_are_adopted_without_a_restart(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        os.unlink(m.pending)
+        m.put(m.le_conf, self.text(m.le_conf).replace("# managed-by", "# an older comment\n# managed-by", 1))
+        r = m.run("plan")
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(
+            row("adopt", wp_label(m.le_conf), "LE Audio off; older comments: apply only renews them, no restart"),
+            r.stdout,
+        )
+        self.assertIn(row("ok", "wireplumber (your session)", "no restart needed"), r.stdout)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"adopted:   {m.le_conf} (comments renewed, no restart)\n", r.stdout)
+        self.assertIn("== restarts\nnone needed\n", r.stdout)
+        self.assertNotIn("an older comment", self.text(m.le_conf))
+
+    def test_revert_removes_the_drop_in(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn(f"would remove {m.le_conf} (LE Audio on again)\n", r.stdout)
+        self.assertIn("would restart wireplumber\n", r.stdout)
+        self.assertTrue(os.path.exists(m.le_conf))
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(
+            f"removed:   {m.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n",
+            r.stdout,
+        )
+        self.assertIn(f"removed:   {m.wp_conf}\n", r.stdout)
+        self.assertIn("systemctl --user restart wireplumber", r.calls)
+        self.assertNotIn("sudo systemctl restart bluetooth", r.calls)
+        self.assertFalse(os.path.exists(m.le_conf))
+        r = m.run("revert")
+        self.assertTrue(r.stdout.endswith("== restarts\nnone needed\n"), r.stdout)
+
+    def test_revert_leaves_foreign_files(self) -> None:
+        m = self.machine(DONE)
+        m.put(m.le_conf, "monitor.bluez.properties = { }\n")
+        m.put(m.wp_conf, "monitor.bluez.rules = []\n")
+        r = m.run("revert")
+        self.assertIn(f"WARNING: {m.le_conf} was not written by CST: left alone\n", r.stderr)
+        self.assertIn(f"WARNING: {m.wp_conf} was not written by CST or apply-le-audio.sh: left alone\n", r.stderr)
+        self.assertTrue(os.path.exists(m.le_conf) and os.path.exists(m.wp_conf))
+
+    def test_the_effective_roles_check(self) -> None:
+        m = self.machine(DONE)
+        label = "WirePlumber bluez5.roles"
+
+        def status(*args: str) -> str:
+            r = m.run("status", *args, env={"CST_PROG": "cst-t"})
+            return r.stdout
+
+        m.put("wp-roles", CLASSIC)
+        out = status()
+        self.assertIn(row("ok", label, "[ a2dp_sink a2dp_source hfp_hf hfp_ag ] (no LE Audio roles)"), out)
+        r = m.run("status")
+        self.assertIn(f"  XDG_CONFIG_HOME={m.home}/.config", r.calls)
+        m.put("wp-roles", "le|[a2dp_sink, bap_sink]\n")
+        self.assertIn(
+            row(
+                "BAD",
+                label,
+                "[a2dp_sink, bap_sink]: LE Audio roles in it although LE Audio is off; another WirePlumber file adds them (see the files above)",
+            ),
+            status(),
+        )
+        m.put("wp-roles", "default|\n")
+        self.assertIn(
+            row("note", label, "not set yet (PipeWire's defaults, with LE Audio): cst-t apply writes the CST file"),
+            status(),
+        )
+        m.run("apply", "--no-restart")
+        self.assertIn(
+            row(
+                "BAD",
+                label,
+                "not set: WirePlumber does not use the CST file, so PipeWire's defaults (with LE Audio) apply",
+            ),
+            status(),
+        )
+        self.assertIn(
+            row("ok", label, "not set: the PipeWire defaults (LE Audio roles included)"), status("--le-audio", "on")
+        )
+        m.put("wp-roles", CLASSIC)
+        self.assertIn(
+            row(
+                "warn",
+                label,
+                "[ a2dp_sink a2dp_source hfp_hf hfp_ag ]: no LE Audio roles although LE Audio is on (a WirePlumber file other than CST's sets them)",
+            ),
+            status("--le-audio", "on"),
+        )
+        m.flag("wp-roles", on=False)
+        self.assertIn(row("warn", label, "could not be read (libwireplumber-0.5 not found on the host)"), status())
+
+    def test_other_fragments_are_named(self) -> None:
+        m = self.machine(DONE)
+        m.put(os.path.join(m.wp_dir, "51-mine.conf"), "monitor.bluez.properties = {\n  bluez5.enable-msbc = true\n}\n")
+        late = m.put(
+            os.path.join(m.root, "etc/xdg/wireplumber/wireplumber.conf.d/99-late.conf"),
+            "monitor.bluez.properties = { bluez5.roles = [ bap_sink ] }\n",
+        )
+        r = m.run("plan")
+        self.assertIn(
+            row(
+                "warn",
+                "~/.config/wireplumber/wireplumber.conf.d/51-mine.conf",
+                "also sets monitor.bluez.properties: while LE Audio is off the CST file replaces that section, so its settings there do not apply",
+            ),
+            r.stdout,
+        )
+        self.assertIn(
+            row(
+                "warn",
+                late,
+                "sets monitor.bluez.properties after the CST file: it can bring the LE Audio roles back (status checks them)",
+            ),
+            r.stdout,
+        )
+        self.assertNotIn("monitor.bluez.properties", m.run("plan", "--le-audio", "on").stdout)
+
+    def test_bearer_warnings(self) -> None:
+        m = self.machine(DONE)
+        m.put("bt-info", "\tPaired: yes\n\tPreferredBearer: le\n")
+        warn = row(
+            "warn",
+            "preferred bearer",
+            f"{MAC} prefers LE while LE Audio is off: cst-t apply --bearer bredr (or BEARER=bredr in the settings)",
+        )
+        self.assertIn(warn, m.run("status", env={"CST_PROG": "cst-t"}).stdout)
+        self.assertNotIn("prefers LE", m.run("status", "--le-audio", "on").stdout)
+        m.put("bt-info", "\tPaired: yes\n\tPreferredBearer: bredr\n")
+        self.assertNotIn("prefers LE", m.run("status").stdout)
+        r = m.run("plan", "--bearer", "le")
+        self.assertIn(
+            row(
+                "warn",
+                "preferred bearer",
+                "BEARER=le while LE Audio is off: connections the PC starts get no audio profile; use bredr",
+            ),
+            r.stdout,
+        )
+        self.assertIn(row("set", "preferred bearer", "-> le (only for connections the PC starts)"), r.stdout)
+        m.put("bt-info", "\tPaired: no\n")
+        self.assertIn(
+            row("skip", "preferred bearer", f"{MAC} is not paired: apply leaves it"),
+            m.run("plan", "--bearer", "le").stdout,
+        )
+
+
+class LinkTest(SetupCase):
+    """A file of CST's that is a link is judged by what it points to; a write replaces the link, never its target."""
+
+    def test_a_linked_rule(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        kept = os.path.join(m.home, "dotfiles-wp.conf")
+        os.rename(m.wp_conf, kept)
+        os.symlink(kept, m.wp_conf)
+        r = m.run("plan")
+        self.assertEqual(r.stderr, "")
+        self.assertIn(row("ok", wp_label(m.wp_conf), f"up to date (LDAC auto for {MAC})"), r.stdout)
+        with open(kept, "a", encoding="utf-8") as f:
+            f.write("monitor.bluez.properties = { bluez5.hw-volume = [ ] }\n")
+        self.assertIn(
+            row("update", wp_label(m.wp_conf), "differs (apply writes LDAC auto; the old file is kept as .bak)"),
+            m.run("plan").stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertTrue(r.stderr.endswith("ERROR: verification found problems (see above).\n"), r.text)
+        self.assertFalse(os.path.islink(m.wp_conf))
+        self.assertIn("bluez5.hw-volume", self.text(kept), "the link was written through")
+        os.unlink(m.wp_conf)
+        os.symlink(kept, m.wp_conf)
+        r = m.run("revert")
+        self.assertIn(f"removed:   {m.wp_conf}\n", r.stdout)
+        self.assertFalse(os.path.lexists(m.wp_conf))
+        self.assertTrue(os.path.isfile(kept))
+
+    def test_a_linked_drop_in(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        kept = os.path.join(m.home, "dotfiles-le.conf")
+        os.rename(m.le_conf, kept)
+        os.symlink(kept, m.le_conf)
+        r = m.run("apply", "--no-restart")
+        self.assertIn("unchanged: LE Audio off\n", r.stdout)
+        self.assertTrue(os.path.islink(m.le_conf))
+        with open(kept, "a", encoding="utf-8") as f:
+            f.write("monitor.bluez.properties = { bluez5.hw-volume = [ ] }\n")
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"written:   {m.le_conf} (LE Audio off: PipeWire offers only A2DP and HFP)\n", r.stdout)
+        self.assertFalse(os.path.islink(m.le_conf))
+        self.assertIn("bluez5.hw-volume", self.text(kept))
+        os.unlink(m.le_conf)
+        os.symlink(kept, m.le_conf)
+        r = m.run("apply", "--le-audio", "on", "--no-restart")
+        self.assertIn(f"removed:   {m.le_conf} (LE Audio on)\n", r.stdout)
+        self.assertFalse(os.path.lexists(m.le_conf))
+        self.assertTrue(os.path.isfile(kept))
+        os.symlink(os.path.join(m.home, "gone.conf"), m.le_conf)
+        self.assertIn(
+            row("ok", "LE Audio", "on (--le-audio, this run only): PipeWire offers the bap-* profiles too"),
+            m.run("plan", "--le-audio", "on").stdout,
+        )
+        self.assertIn(
+            row("write", wp_label(m.le_conf), "LE Audio off (the CST default): PipeWire will offer only A2DP and HFP"),
+            m.run("plan").stdout,
+        )
+
+    def test_a_link_to_something_not_ours_stays_a_conflict(self) -> None:
+        m = self.machine(DONE)
+        os.makedirs(m.wp_dir)
+        foreign = m.put("foreign.conf", "monitor.bluez.properties = { }\n")
+        folder = os.path.join(m.home, "a-folder")
+        os.mkdir(folder)
+        for target in (foreign, os.devnull, folder):
+            os.symlink(target, m.le_conf)
+            os.symlink(target, m.wp_conf)
+            r = m.run("plan")
+            self.assertEqual(r.stderr, "", target)
+            self.assertIn(
+                row("CONFLICT", wp_label(m.le_conf), "not written by CST: apply refuses; move it away by hand"),
+                r.stdout,
+            )
+            self.assertIn(
+                row(
+                    "CONFLICT",
+                    wp_label(m.wp_conf),
+                    "not written by CST or the old script: apply refuses; move it away by hand",
+                ),
+                r.stdout,
+            )
+            r = m.run("revert")
+            self.assertEqual(r.stderr.count("left alone"), 2, (target, r.stderr))
+            self.assertNotIn("grep:", r.stderr)
+            self.assertTrue(os.path.islink(m.le_conf) and os.path.islink(m.wp_conf), target)
+            os.unlink(m.le_conf)
+            os.unlink(m.wp_conf)
+
+
+class LeAudioCommandTest(SetupCase):
+    """le-audio [on|off]: the setting in the user's file, then apply; without on/off it only shows it."""
+
+    def test_without_a_settings_folder(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("le-audio", "on", "--yes", "--no-restart", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1, r.text)  # apply's checks: no adapter on this machine
+        self.assertEqual(r.stderr, "cst-t: ERROR: verification found problems (see above).\n")
+        self.assertTrue(
+            r.stdout.startswith(
+                "written:   ~/.config/cst/bluetooth.conf: LE_AUDIO=on\nNow: cst-t apply --yes --no-restart\n== BlueZ: "
+            ),
+            r.stdout,
+        )
+        self.assertTrue(self.text(m.settings).endswith("\nLE_AUDIO=on\n"), self.text(m.settings))
+        self.assertEqual(stat.S_IMODE(os.stat(m.settings).st_mode), 0o644)
+        r = m.run("le-audio", "on", env={"CST_PROG": "cst-t"})
+        self.assertTrue(
+            r.stdout.startswith("unchanged: ~/.config/cst/bluetooth.conf already has LE_AUDIO=on\nNow: cst-t apply\n"),
+            r.stdout,
+        )
+        # In a toolbox it only shows the setting; changing it is the host's.
+        r = m.run("le-audio", "off", container=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("must run on the host", r.stderr)
+
+    def test_keeps_the_other_lines_and_the_link(self) -> None:
+        m = self.machine(DONE)
+        real = m.put("dotfiles.conf", "# mine\nLDAC_RATE=48000", mode=0o600)
+        os.makedirs(os.path.dirname(m.settings))
+        os.symlink(real, m.settings)
+        m.run("le-audio", "on", "--no-restart")
+        self.assertTrue(os.path.islink(m.settings))
+        self.assertEqual(self.text(real), "# mine\nLDAC_RATE=48000\nLE_AUDIO=on\n")
+        self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o600)
+        m.run("le-audio", "off", "--no-restart")
+        self.assertEqual(self.text(real), "# mine\nLDAC_RATE=48000\nLE_AUDIO=off\n")
+
+    def test_shows_the_setting(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("le-audio", env={"CST_PROG": "cst-t"}, container=True)
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertEqual(
+            r.stdout,
+            "LE Audio in PipeWire: off (the CST default)\n"
+            + row("write", wp_label(m.le_conf), "LE Audio off (the CST default): PipeWire will offer only A2DP and HFP")
+            + "Turn it on: cst-t le-audio on\n",
+        )
+        self.assertFalse(os.path.exists(os.path.dirname(m.settings)))
+        m.user_settings("LE_AUDIO=on\n")
+        self.assertIn("Turn it off: cst-t le-audio off\n", m.run("le-audio", env={"CST_PROG": "cst-t"}).stdout)
+
+
+class MainConfTest(SetupCase):
+    """main.conf: backed up and replaced through sudo; revert takes the two keys from the oldest backup."""
+
+    def test_apply_writes_it_through_sudo(self) -> None:
+        for selinux in (False, True):
+            m = self.machine()
+            m.flag("selinux", on=selinux)
+            r = m.run("apply", "--yes", "--no-restart")
+            sudo = [c for c in r.calls if c.startswith("sudo ")]
+            backup = re.fullmatch(r"backup:    (\S+)", r.stdout.splitlines()[1])
+            assert backup is not None, r.stdout
+            ctx = " --preserve=context" if selinux else ""
+            z = " -Z" if selinux else ""
+            self.assertEqual(len(sudo), 3, sudo)
+            self.assertEqual(sudo[0], f"sudo cp -p{ctx} {m.main_conf} {backup.group(1)}")
+            self.assertRegex(sudo[1], rf"^sudo install -m 0644 -o root -g root{z} \S+ {re.escape(m.main_conf)}\.new$")
+            self.assertEqual(sudo[2], f"sudo mv -f {m.main_conf}.new {m.main_conf}")
+            self.assertEqual(self.text(backup.group(1)), VENDOR)
+            self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
+            self.assertIn(
+                f"written:   {m.main_conf}\n           Experimental = true, KernelExperimental = {ISO}\n", r.stdout
+            )
+            r = m.run("apply", "--yes", "--no-restart")
+            self.assertIn(
+                f"unchanged: {m.main_conf} (Experimental and KernelExperimental already set in [General])\n", r.stdout
+            )
+
+    def test_revert_to_the_oldest_backup(self) -> None:
+        m = self.machine(DONE)
+        old = m.put(m.main_conf + ".bak-20240101-000000", VENDOR)
+        newer = m.put(m.main_conf + ".bak-20250101-000000", DONE)
+        os.utime(old, (1_000_000, 1_000_000))
+        os.utime(newer, (2_000_000, 2_000_000))
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(f"would set the two keys as in {old}:\n    --- {m.main_conf}\t", r.stdout)
+        self.assertIn("would restart bluetooth.service (after asking) and wireplumber\n", r.stdout)
+        self.assertEqual(self.text(m.main_conf), DONE)
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"           the two keys as in {old}\n", r.stdout)
+        self.assertNotIn("KernelExperimental = " + ISO, self.text(m.main_conf))
+        self.order(
+            r.calls,
+            "sudo cp -p",
+            "sudo install",
+            "sudo mv -f",
+            "sudo systemctl restart bluetooth",
+            "systemctl --user restart wireplumber",
+        )
+        r = m.run("revert", "--check")
+        self.assertIn("unchanged: Experimental and KernelExperimental are already as in ", r.stdout)
+
+    def test_revert_without_a_backup(self) -> None:
+        m = self.machine(DONE)
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"WARNING: no backup {m.main_conf}.bak-* found; main.conf not changed\n", r.stderr)
+
+
+class WatcherTest(SetupCase):
+    """The LDAC rate watcher (LDAC_RATE=48000): installed through the installer, enabled, started; removed."""
+
+    def test_install_then_nothing_then_remove(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        r = m.run("apply", "--no-restart")
+        self.assertEqual(r.returncode, 1, r.text)  # verification: no adapter here
+        lw = [c for c in r.calls if c.startswith("systemctl --user") and "is-" not in c and "show" not in c]
+        self.assertEqual(
+            lw,
+            [
+                "systemctl --user daemon-reload",
+                f"systemctl --user enable {LW}",
+                f"systemctl --user start {LW}",
+            ],
+        )
+        self.assertTrue(os.access(m.lw_prog, os.X_OK))
+        self.assertIn("--rate 48000", self.text(m.lw_unit))
+        self.assertIn(f"enabled:   {LW} (starts with your session)\n", r.stdout)
+        self.assertIn(f"started:   {LW} (logs: journalctl --user -u {LW})\n", r.stdout)
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
+        rec = json.loads(self.text(m.record))
+        self.assertEqual(sorted(rec["files"]), sorted([m.lw_prog, m.lw_unit]))
+        self.assertEqual(rec["files"][m.lw_unit]["src"], None)
+        self.assertEqual(rec["files"][m.lw_prog]["src"], "bluetooth/bt-ldac-watch")
+        self.assertEqual(rec["components"], {"bluetooth:ldac": "done"})
+        r = m.run("plan")
+        self.assertIn(row("ok", f"{LW} (your session)", "enabled, active"), r.stdout)
+        self.assertIn(
+            row(
+                "note",
+                "LDAC rate watcher",
+                "on because ~/.config/cst/bluetooth.conf sets LDAC_RATE=48000 (CST default: off)",
+            ),
+            r.stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"unchanged: {LW} enabled and active\n", r.stdout)
+        self.assertEqual(
+            [c for c in r.calls if c.startswith("systemctl --user") and "is-" not in c and "show" not in c], []
+        )
+        with open(m.lw_prog, "a", encoding="utf-8") as f:
+            f.write("# old\n")
+        self.assertIn(
+            row("update", "~/.local/lib/cst/bt-ldac-watch", "older copy (apply installs the one in CST)"),
+            m.run("plan").stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"systemctl --user restart {LW}", r.calls)
+        self.assertIn(f"restarted: {LW} (new files)\n", r.stdout)
+        m.user_settings("")
+        r = m.run("plan")
+        self.assertIn(
+            row("remove", "LDAC rate watcher", f"LDAC_RATE is empty: apply stops and removes {LW} and its program"),
+            r.stdout,
+        )
+        r = m.run("apply", "--no-restart")
+        self.assertEqual(
+            [c for c in r.calls if c.startswith("systemctl --user") and "is-" not in c and "show" not in c],
+            [
+                f"systemctl --user disable --now {LW}",
+                "systemctl --user daemon-reload",
+            ],
+        )
+        self.assertIn(f"removed:   {m.lw_unit} (stopped and disabled)\nremoved:   {m.lw_prog}\n", r.stdout)
+        self.assertFalse(
+            os.path.exists(m.lw_prog) or os.path.exists(os.path.dirname(m.lw_prog)) or os.path.exists(m.lw_unit)
+        )
+        self.assertEqual(json.loads(self.text(m.record))["files"], {})
+        self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), m.run("plan").stdout)
+
+    def test_plan_and_status_name_the_last_failure(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.put("lw-journal", JOURNAL)
+        r = m.run("plan")
+        self.assertRegex(
+            r.stdout, r"  warn      LDAC rate watcher +its last attempt failed at 2026-11-11T14:11:58-03:00: "
+        )
+        m.run("apply", "--no-restart")
+        r = m.run("status", env={"CST_PROG": "cst-t"})
+        self.assertRegex(r.stdout, r"  warn      LDAC rate watcher +its last attempt failed at ")
+        self.assertIn(
+            row("", "", "to turn it off: remove LDAC_RATE from ~/.config/cst/bluetooth.conf, then cst-t apply"),
+            r.stdout,
+        )
+        m.user_settings("")
+        r = m.run("plan")
+        self.assertNotIn("its last attempt failed", r.stdout)
+        self.assertIn(
+            row("warn", LW, "running although LDAC_RATE is empty: cst-t apply stops and removes it"),
+            m.run("status", env={"CST_PROG": "cst-t"}).stdout,
+        )
+
+    def test_the_program_and_the_unit_as_links(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.run("apply", "--no-restart")
+        for path, word in ((m.lw_prog, "~/.local/lib/cst/bt-ldac-watch"), (m.lw_unit, f"systemd/user/{LW}")):
+            kept = path + ".kept"
+            os.rename(path, kept)
+            os.symlink(kept, path)
+            r = m.run("plan")
+            self.assertEqual(r.stderr, "")
+            self.assertIn(
+                row(
+                    "ok", word, "same as bt-ldac-watch in CST" if path == m.lw_prog else "up to date (LDAC to 48000 Hz)"
+                ),
+                r.stdout,
+            )
+            with open(kept, "a", encoding="utf-8") as f:
+                f.write("# changed by hand\n")
+            r = m.run("plan")
+            self.assertEqual(r.stderr, "")
+            self.assertIn(
+                row(
+                    "update",
+                    word,
+                    "older copy (apply installs the one in CST)"
+                    if path == m.lw_prog
+                    else "differs (apply rewrites it)",
+                ),
+                r.stdout,
+            )
+            r = m.run("apply", "--no-restart")
+            self.assertFalse(os.path.islink(path))
+            with open(kept, "rb") as f:
+                self.assertTrue(f.read().endswith(b"# changed by hand\n"), "the link was written through")
+
+    def test_foreign_masked_and_folder_units_are_conflicts(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        os.makedirs(os.path.dirname(m.lw_unit))
+        foreign = m.put("foreign.service", "[Service]\nExecStart=/bin/true\n")
+        folder = os.path.join(m.home, "a-folder")
+        os.mkdir(folder)
+        for target in (foreign, os.devnull, folder):
+            os.symlink(target, m.lw_unit)
+            r = m.run("plan")
+            self.assertEqual(r.stderr, "")
+            self.assertIn(
+                row("CONFLICT", f"systemd/user/{LW}", "not written by CST: apply refuses; move it away by hand"),
+                r.stdout,
+            )
+            r = m.run("apply", env={"CST_PROG": "cst-t"})
+            self.assertEqual(
+                (r.returncode, r.stderr),
+                (1, f"cst-t: ERROR: {m.lw_unit} was not written by CST: move it away, then run apply again.\n"),
+            )
+            os.unlink(m.lw_unit)
+        m.put(m.lw_unit, "[Service]\nExecStart=/bin/true\n")
+        r = m.run("revert", "--check")
+        self.assertIn(f"WARNING: {m.lw_unit} was not written by CST: left alone\n", r.stderr)
+        m.user_settings("")
+        self.assertIn(row("CONFLICT", f"systemd/user/{LW}", "not written by CST: left alone"), m.run("plan").stdout)
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"WARNING: {m.lw_unit} was not written by CST: left alone\n", r.stderr)
+        self.assertFalse([c for c in r.calls if "disable" in c])
+
+    def test_revert_removes_it_and_check_changes_nothing(self) -> None:
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.run("apply", "--no-restart")
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(f"would stop, disable and remove {LW} and {m.lw_prog}\n", r.stdout)
+        self.assertTrue(os.path.exists(m.lw_prog))
+        r = m.run("revert", "--yes")
+        self.assertIn(f"systemctl --user disable --now {LW}", r.calls)
+        self.assertFalse(os.path.exists(m.lw_prog) or os.path.exists(m.lw_unit))
+
+    def test_a_cancelled_restart_still_sets_up_the_watcher(self) -> None:
+        m = self.machine(settings="LDAC_RATE=48000\n")
+        r = m.run("apply", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"systemctl --user start {LW}", r.calls)
+        self.assertTrue(
+            r.stdout.endswith("Not done yet: the restarts above and the checks.\nAfter restarting, run: cst-t apply\n"),
+            r.stdout,
+        )
+
+
+class ApplyTest(SetupCase):
+    def test_the_order_of_the_steps(self) -> None:
+        m = self.machine(settings="LDAC_RATE=48000\nBEARER=bredr\n")
+        m.put("bt-info", "\tPaired: yes\n\tPreferredBearer: le\n")
+        r = m.run("apply", "--yes")
+        sections = [ln for ln in r.stdout.splitlines() if ln.startswith("== ")]
+        self.assertEqual(
+            [s if s.startswith("== headset") else s.split(":")[0] for s in sections],
+            [
+                "== BlueZ",
+                "== WirePlumber",
+                "== LE Audio",
+                "== restarts",
+                "== LDAC rate watcher",
+                "== preferred bearer",
+                "== services",
+                "== LE Audio",
+                f"== headset {MAC} in PipeWire",
+            ][: len(sections)],
+        )
+        self.order(
+            r.calls,
+            "sudo mv -f",
+            "sudo systemctl restart bluetooth",
+            "systemctl --user restart wireplumber",
+            f"systemctl --user start {LW}",
+            f"bluetoothctl bearer {MAC} bredr",
+            "systemctl is-active --quiet bluetooth",
+        )
+        bearer = r.calls.index(f"bluetoothctl bearer {MAC} bredr")
+        self.assertTrue(r.calls[bearer + 1].startswith("  stdin=/dev/null via=timeout 5 bluetoothctl bearer"), r.calls)
+        self.assertIn(
+            "set:       PreferredBearer = bredr (for connections the PC starts; disconnect and reconnect)\n", r.stdout
+        )
+        self.assertEqual(r.returncode, 1)  # no adapter on this machine
+        self.assertTrue(r.stderr.endswith(": ERROR: verification found problems (see above).\n"), r.stderr)
+        self.assertIn(row("BAD", "adapter", "no Bluetooth adapter in org.bluez"), r.stdout)
+
+    def test_a_bearer_that_does_not_change(self) -> None:
+        m = self.machine(DONE, "BEARER=bredr\n")
+        m.put("bt-info", "\tPaired: yes\n\tPreferredBearer: le\n")
+        m.flag("bearer-stuck")
+        r = m.run("apply", "--no-restart", env={"BT_TIMEOUT": "0"})
+        bearer = r.calls.index(f"bluetoothctl bearer {MAC} bredr")
+        self.assertEqual(r.calls[bearer + 1], "  stdin=/dev/null via=direct")
+        self.assertIn("WARNING: could not set the bearer: Failed to set bearer\n", r.stderr)
+        m.put("bt-info", "\tPaired: no\n")
+        r = m.run("apply", "--no-restart")
+        self.assertIn(f"WARNING: {MAC} is not paired; bearer not changed\n", r.stderr)
+
+    def test_preconditions(self) -> None:
+        m = self.machine()
+        m.flag("no-session")
+        r = m.run("apply", env={"CST_PROG": "cst-t"})
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertEqual(
+            r.stderr,
+            "cst-t: ERROR: no systemd --user session (XDG_RUNTIME_DIR/D-Bus): run it in your desktop or login session\n",
+        )
+        r = m.run("revert", env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(
+            r.stderr,
+            "cst-t: ERROR: no systemd --user session (XDG_RUNTIME_DIR/D-Bus): run it in your desktop or login session\n",
+        )
+        self.assertEqual(m.run("revert", "--check").returncode, 0)
+
+
+class StatusTest(SetupCase):
+    def test_a_healthy_machine_in_a_toolbox(self) -> None:
+        m = self.machine(DONE)
+        m.run("apply", "--no-restart")
+        m.services()
+        os.unlink(m.pending)
+        m.adapter()
+        m.flag("iso-socket")
+        m.put("wp-roles", CLASSIC)
+        dump = pw_dump(rate=96000)
+        m.put("pw-dump.json", json.dumps(dump))
+        r = m.run("status", container=True, env={"CST_PROG": "cst-t"})
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.text)
+        for line in (
+            row("ok", "bluetooth.service", "active"),
+            row("ok", "wireplumber (your session)", "active"),
+            row("ok", "LE Audio", "off (the CST default; PipeWire offers only classic profiles)"),
+            row("", "", "turn on with: cst-t le-audio on"),
+            row("ok", "adapter ISO feature", "on for /org/bluez/hci0"),
+            row("ok", "kernel ISO socket", "opens"),
+            row("ok", "BAP in BlueZ", "Sink and Source PAC in Media1"),
+            row("ok", "PipeWire BAP LC3 endpoint", "not registered (as wanted with LE Audio off)"),
+            f"\n== headset {MAC} in PipeWire\n",
+            row(
+                "warn",
+                "LDAC sample rate",
+                "96000 Hz, set up by the headset: fewer bits per sample at the same bitrate; LDAC_RATE=48000 turns on the watcher (see bluetooth/README.md)",
+            ),
+            "\nAll checks passed, 1 warning(s).\n",
+        ):
+            self.assertIn(line, r.stdout)
+        self.assertRegex(
+            r.stdout,
+            r"  ok        headset +profile a2dp-sink, rule ldac.quality=auto, node codec ldac, quality auto, rate 96000 Hz\n",
+        )
+        hosted = [c for c in r.calls if c.startswith("flatpak-spawn --host ")]
+        self.assertIn("flatpak-spawn --host timeout 10 pw-dump", hosted)
+        self.assertTrue(
+            any(
+                c.startswith(f"flatpak-spawn --host env XDG_CONFIG_HOME={m.home}/.config python3 -I -B ")
+                and c.endswith("/bluetooth/bt-helper wp-roles")
+                for c in hosted
+            ),
+            hosted,
+        )
+        self.assertNotIn("pactl", " ".join(r.calls))  # only apply's A2DP restore asks pactl
+
+    def test_status_after_problems(self) -> None:
+        m = self.machine(DONE)
+        m.unit("user", "wireplumber", active=False)
+        m.adapter(iso=False, bap=False)
+        m.put("bt-journal", BAP_REGISTERED)
+        m.unit("user", "wireplumber", active=False, pid=4242)
+        r = m.run("status", container=True, env={"CST_PROG": "cst-t"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(row("BAD", "wireplumber (your session)", "not active"), r.stdout)
+        self.assertIn(
+            row(
+                "BAD",
+                "adapter ISO feature",
+                f"{ISO} not on for /org/bluez/hci0 (KernelExperimental not in effect? restart bluetooth)",
+            ),
+            r.stdout,
+        )
+        self.assertIn(
+            row("BAD", "BAP in BlueZ", "not in Media1 (Experimental not in effect? restart bluetooth)"), r.stdout
+        )
+        self.assertIn(row("BAD", "kernel ISO socket", "not available"), r.stdout)
+        self.assertIn(
+            row("warn", "PipeWire BAP LC3 endpoint", "still registered: LE Audio off takes effect after cst-t apply"),
+            r.stdout,
+        )
+        self.assertIn(
+            row("warn", "pw-dump", "no answer: PipeWire stuck? (systemctl --user restart pipewire wireplumber)"),
+            r.stdout,
+        )
+        self.assertRegex(r.stdout, r"\n4 check\(s\) failed, \d warning\(s\)\.\n$")
+
+
+class EnvironmentTest(SetupCase):
+    """The commands get the caller's environment: nothing added, LC_CTYPE as it was."""
+
+    def test_no_leak(self) -> None:
+        m = self.machine(DONE)
+        m.adapter()
+        for extra in ({}, {"LC_CTYPE": "C"}, {"LC_CTYPE": "pt_BR.UTF-8", "LANG": "C"}):
+            log = os.path.join(m.state, "env-log")
+            if os.path.exists(log):
+                os.unlink(log)
+            m.run("status", env=extra)
+            m.run("apply", "--no-restart", env=extra)
+            seen = {word for line in m.env_log().splitlines() for word in line.split(":", 1)[1].split()}
+            want = {"CST_BT_CONTAINER=0", f"CST_BT_ROOT={m.root}"} | {f"{k}={v}" for k, v in extra.items()}
+            self.assertEqual(seen, want, extra)
 
 
 if __name__ == "__main__":
