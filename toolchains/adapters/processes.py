@@ -117,17 +117,22 @@ def cargo_procs(uid: int | None = None) -> list[CargoProc]:
             exe = os.readlink(os.path.join(base, "exe"))
         except OSError:
             pass
+        raw = b""
         try:
             with open(os.path.join(base, "cmdline"), "rb") as f:
                 args = tuple(a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1])
             with open(os.path.join(base, "environ"), "rb") as f:
-                for item in f.read().split(b"\0"):
-                    k, sep, v = item.decode("utf-8", "replace").partition("=")
-                    if sep and k in CARGO_ENV:
-                        env[k] = v
+                raw = f.read()
         except OSError:
             pass
+        for item in raw.split(b"\0"):
+            k, sep, v = item.decode("utf-8", "replace").partition("=")
+            if sep and k in CARGO_ENV:
+                env[k] = v
         if not os.path.exists(base):
             continue  # ended meanwhile
-        out.append(CargoProc(pid, comm, cwd, exe, args, env))
+        # Empty (the kernel gives nothing while a process starts or ends; also a cargo started with
+        # no environment, which one read cannot tell apart) or unreadable: its settings are not
+        # known, so neither is its folder (never guessed as cargo's defaults).
+        out.append(CargoProc(pid, comm, cwd, exe, args, env, read=bool(args) and bool(raw)))
     return out

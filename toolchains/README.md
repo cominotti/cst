@@ -590,9 +590,13 @@ Times in the future (a wrong clock) are ignored.
   version computes the same folder name), its `--manifest-path`, `+toolchain`
   and cargo settings from its environment. This only reads; it never
   downloads anything. If the answer cannot be found out (for example a
-  `cargo install` that runs outside any project), **nothing** is deleted
-  while that cargo runs: `plan` says so, and `apply` stops and tries again
-  next hour.
+  `cargo install` that runs outside any project, or a cargo whose command
+  line or environment in `/proc` comes back empty or cannot be read, as
+  happens while a process starts or ends: its settings are never guessed as
+  cargo's defaults; a cargo started with no environment at all, as with
+  `env -i`, looks the same and counts the same), **nothing** is deleted
+  while that cargo runs: `plan` says so, and `apply` stops and tries
+  again next hour.
 - Anything in `~/.cache/cargo-build` whose name is not cargo's: cargo's names
   are two hex digits, a slash, and 14 hex digits (`3c/e36df2f7349a98`).
   Everything else is shown as `left alone`.

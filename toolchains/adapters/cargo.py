@@ -65,6 +65,8 @@ def cargo_binary(p: CargoProc, home: str) -> str:
 def cargo_query(p: CargoProc, home: str) -> CargoQuery | str:
     """The `cargo metadata` that tells the build folder of process P (with
     its cache key, command, env and cwd); or why it cannot be asked."""
+    if not p.read:
+        return "its command line or environment in /proc came back empty or could not be read: as while it starts or ends, or when it was started with no environment at all"
     cwd = p.cwd
     if not isinstance(cwd, str) or not cwd or cwd.endswith(" (deleted)") or not os.path.isdir(cwd):
         return f"its working folder {cwd or '(unreadable)'} is not reachable"
