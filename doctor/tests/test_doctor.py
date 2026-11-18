@@ -20,6 +20,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -2136,6 +2137,28 @@ class CommandLineTest(Scratch):
                 areas.append(a)
         self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "install"])
 
+    def test_every_module_that_registers_checks_is_an_area(self) -> None:
+        # registry.CHECKS holds only the checks of the modules in AREAS: a module of doctor/application/
+        # that registers checks (@check) and is missing there would drop them from the report unseen.
+        app_dir = os.path.join(DOCTOR_DIR, "application")
+        registering: list[str] = []
+        for fn in sorted(os.listdir(app_dir)):
+            if not fn.endswith(".py") or fn == "__init__.py":
+                continue
+            module = importlib.import_module(f"doctor.application.{fn.removesuffix('.py')}")
+            if module is not doc_registry and getattr(module, "CHECKS", None):
+                registering.append(module.__name__)
+        self.assertIn("doctor.application.vm", registering)  # the scan finds the area modules
+        areas = [m.__name__ for m in doc_registry.AREAS]
+        self.assertEqual(sorted(registering), sorted(areas))
+        self.assertEqual(len(set(areas)), len(areas), "an area listed twice would print its checks twice")
+        # One area name per module, and no two modules share one: the report starts a new "== area"
+        # header each time the area changes, so a check registered under another module's name would
+        # split that area in two.
+        names = [{area for area, _ in m.CHECKS} for m in doc_registry.AREAS]
+        self.assertEqual([len(n) for n in names], [1] * len(names), names)
+        self.assertEqual(len(set().union(*names)), len(names), names)
+
 
 class InstallAreaTest(Scratch):
     """The install area: the install records under the fixture root (written by the real installer's
@@ -2528,7 +2551,11 @@ class CstIntegrationTest(Scratch):
         for fn in os.listdir(DOCTOR_DIR):
             if fn.endswith(".py"):
                 shutil.copy(os.path.join(DOCTOR_DIR, fn), os.path.join(self.repo, "doctor"))
-        shutil.copytree(os.path.join(DOCTOR_DIR, "application"), os.path.join(self.repo, "doctor", "application"))
+        shutil.copytree(
+            os.path.join(DOCTOR_DIR, "application"),
+            os.path.join(self.repo, "doctor", "application"),
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         self.cst = os.path.join(self.repo, "cst")
         self.env["CST_NAME"] = "cst"
 

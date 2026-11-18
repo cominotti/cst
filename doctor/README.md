@@ -556,9 +556,9 @@ The code is split into four layers under `doctor/`:
 - `doctor/application/`: the checks, one module per check area
   (`rpm_ostree.py`, `services.py`, `alerts.py`, `btrfs.py`, `cpu.py`,
   `swap.py`, `vm.py`, `install.py`), each with its own probes.
-  `registry.py` holds `CHECKS` (the areas in their output order),
-  `wired_checks` and `run_checks`. `shared.py` holds what several areas use:
-  the `@check` decorator, the settings-file readers, and `DoctorFacts`: what
+  `registry.py` holds `AREAS` (the area modules in their output order),
+  `CHECKS` (their checks, in that order), `wired_checks` and `run_checks`.
+  `shared.py` holds what several areas use: the `@check` decorator, the settings-file readers, and `DoctorFacts`: what
   several checks ask (rpm-ostree with every deployment, through cst_core's
   one query `cst_core.domain.ostree`, the libvirt domains, each VM's
   definition), asked once per `Host` and kept here, not on the host port.

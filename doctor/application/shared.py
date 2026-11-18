@@ -116,7 +116,7 @@ def settings_of(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool = Tr
 def conf_value(host: DoctorHostPort, path: HostPath, key: str) -> str | None:
     """The value of KEY in a settings file that bash also sources (the last
     assignment wins, as in bash and in vm-pin), or None. A problem line sets
-    nothing; check_settings_files reports it."""
+    nothing; settings_file_warnings reports it."""
     parsed = settings_of(host, path)
     return None if parsed is None else parsed.values.get(key)
 

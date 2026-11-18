@@ -123,8 +123,10 @@ key by hand, at most its old value, and then moving code between the files
 changes nothing. Import the group modules by their full name
 (`from vm.cli import net`): the import graph of the gates (`tests/code_graph.py`)
 follows only absolute imports, like the rest of CST. A big `application.py`
-becomes an `application/` folder the same way, one module per use case or
-check area, each with the application role (`doctor/application/`: one
+becomes an `application/` folder: one module per use case or check area,
+each with the application role and its rules. There is no folder ceiling
+as for `cli/`: each module stays under the 800-line cap, and the split
+deletes the `OVER_CAP` entry (`doctor/application/`: one
 module per check area, and `registry.py` with the areas in their output
 order, and `shared.py` with what several areas use). Its `__init__.py`
 imports none of the folder's modules: the re-export gate of

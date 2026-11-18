@@ -12,7 +12,7 @@ import sys
 from typing import TextIO
 
 from doctor import wiring
-from doctor.application import registry as app
+from doctor.application import registry
 from cst_core.domain.errors import Usage
 from doctor.domain import NAME, parse_args
 from doctor.presenter import render
@@ -40,5 +40,5 @@ def main(
         print(doc.replace("doctor [--brief]", f"{prog} [--brief]", 1), file=stdout)
         return 0
     host = wiring.host(env, entry_file)
-    checks = app.wired_checks(wiring.vm_tools(), wiring.installed_files(entry_file))
-    return render(app.run_checks(host, checks), brief, stdout, host.container, prog)
+    checks = registry.wired_checks(wiring.vm_tools(), wiring.installed_files(entry_file))
+    return render(registry.run_checks(host, checks), brief, stdout, host.container, prog)
