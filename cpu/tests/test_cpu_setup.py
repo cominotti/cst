@@ -652,7 +652,7 @@ class UninstallTest(CpuSetupCase):
         with unittest.mock.patch("locale.strxfrm", lambda s: "".join(chr(0x10FFFF - ord(c)) for c in s)):
             _, out, _ = self.command("uninstall")
         removed = [line for line in out.split("\n") if line.startswith("removed '") and "zz-cst-game" in line]
-        self.assertEqual(removed, [f"removed '{rt}/{u}.d/zz-cst-game.conf'" for u in reversed(sorted(units))])
+        self.assertEqual(removed, [f"removed '{rt}/{u}.d/zz-cst-game.conf'" for u in sorted(units, reverse=True)])
 
     def test_the_root_commands_sort_names_as_bash_did(self) -> None:
         h = Handed(script=f"{REPO}/cpu-setup.sh", arg0="cpu-setup.sh", cst_prog="", sudo_user="tester", quiet={})
