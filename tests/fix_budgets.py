@@ -44,6 +44,7 @@ from tests import (
     ruff_budget,
     test_architecture as arch,
     test_duplication as dup,
+    test_magic_values as magic,
     test_module_size as size,
     test_typing_budget as typing_budget,
 )
@@ -105,6 +106,7 @@ TABLES: Final[tuple[Table, ...]] = (
     Table(DUP, "ALLOWED_SAME_NAMES", "names", dup.same_names_defined),
     Table(DUP, "ALLOWED_SHELL_SAME_NAMES", "names", dup.shell_same_names_defined),
     Table("tests/ruff_budget.py", "RUFF_BUDGETS", "budget", ruff_budget.measure),
+    Table("tests/test_magic_values.py", "MAGIC_CEILINGS", "budget", magic.measure),
     Table("tests/test_module_size.py", "OVER_CAP", "budget", size.module_sizes, default=size.MODULE_LINE_CAP),
 )
 

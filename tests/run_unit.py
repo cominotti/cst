@@ -76,6 +76,7 @@ GATE_MODULES: Final = (
     "tests.test_entrypoints",
     "tests.test_fix_budgets",
     "tests.test_license_headers",
+    "tests.test_magic_values",
     "tests.test_module_size",
     "tests.test_python_files",
     "tests.test_repo_paths",
