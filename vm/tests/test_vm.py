@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
+import datetime
 import io
 import json
 import os
@@ -425,6 +426,36 @@ class BackupTest(Scratch):
         self.assertIn(f"sudo cp --reflink=auto -a {dest}/files{self.disk} {self.disk}", r.stdout)
         self.assertIn("not against losing the disks", r.stdout)
         self.assertNotIn("s3cret", r.stdout + r.stderr)
+
+    def test_an_unreadable_rpm_ostree_answer_records_no_deployment(self) -> None:
+        # Every answer rpm-ostree status --json could give that names no booted deployment: the backup
+        # goes on and records null. {"deployments": 5} stopped it with a TypeError before.
+        status = os.path.join(self.fix, "status.json")
+        answers: list[str | None] = [
+            '{"deployments": 5}',
+            '{"deployments": true}',
+            '{"deployments": null}',
+            "{}",
+            "[]",
+            "not json",
+            '{"deployments": [{"booted": false, "version": "45.0"}, "x"]}',
+            None,  # rpm-ostree fails
+        ]
+        for i, answer in enumerate(answers):
+            with self.subTest(answer=answer):
+                if answer is None:
+                    os.unlink(status)
+                else:
+                    with open(status, "w") as f:
+                        f.write(answer)
+                self.env["CST_VM_NOW"] = str(NOW + 10 * i)
+                r = self.run_tool("backup", "win")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+                stamp = datetime.datetime.fromtimestamp(NOW + 10 * i, datetime.UTC)
+                dest = os.path.join(self.backups, "win", stamp.strftime("%Y%m%dT%H%M%SZ"))
+                with open(os.path.join(dest, "manifest.json")) as f:
+                    self.assertIsNone(json.load(f)["deployment"])
 
     def test_read_only_commands_stop_quietly_on_a_closed_pipe_and_a_backup_does_not(self) -> None:
         # `cst vm status | head -1` ended in "Exception ignored ... BrokenPipeError",
