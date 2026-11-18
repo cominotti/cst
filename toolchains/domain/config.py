@@ -63,6 +63,13 @@ class ToolSettingState(StrEnum):
     UNREADABLE = "unreadable"
 
 
+class ConfigTool(StrEnum):
+    """The tool whose settings file config edits (cargo's build-dir, uv's link-mode)."""
+
+    CARGO = "cargo"
+    UV = "uv"
+
+
 # Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
 # comments, same rules): a setting already there is never changed.
 CARGO_CFG_REL = ".cargo/config.toml"

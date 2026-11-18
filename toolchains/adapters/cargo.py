@@ -12,7 +12,7 @@ import shutil
 import stat
 import subprocess
 import time
-from typing import TYPE_CHECKING, TypedDict, TypeIs
+from typing import TYPE_CHECKING, Final, TypedDict, TypeIs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -60,11 +60,14 @@ def is_cargo_metadata(data: object) -> TypeIs[CargoMetadata]:
     return isinstance(data, dict)
 
 
+CARGO_PROGRAM: Final = "cargo"  # the file name of cargo's program (not a ConfigTool)
+
+
 def cargo_binary(p: CargoProc, home: str) -> str:
     """The cargo to ask: the process's own program when it is a cargo (the
     same version computes the same folder name), else the user's."""
     exe = str(p.exe)
-    if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == "cargo" and os.access(exe, os.X_OK):
+    if exe and not exe.endswith(" (deleted)") and os.path.basename(exe) == CARGO_PROGRAM and os.access(exe, os.X_OK):
         return exe
     ch = str(p.env.get("CARGO_HOME") or os.environ.get("CARGO_HOME", ""))
     for c in (

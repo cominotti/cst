@@ -23,6 +23,7 @@ from toolchains.domain.config import (
     CARGO_HAS_BUILD_DIR,
     ConfigLine,
     ConfigMark,
+    ConfigTool,
     ConfigView,
     LEAN_REBUILD,
     LeanState,
@@ -87,15 +88,15 @@ class ToolConfig:
     out: RunOutputPort
     settings: Callable[[], Settings]
 
-    def items(self) -> list[tuple[str, str, ToolSettingState, str]]:
+    def items(self) -> list[tuple[ConfigTool, str, ToolSettingState, str]]:
         """[(name, path, state, text to append)]; state: set | by-hand | write |
         unreadable."""
         home = self.home
-        out: list[tuple[str, str, ToolSettingState, str]] = []
+        out: list[tuple[ConfigTool, str, ToolSettingState, str]] = []
         # (name, file, "our setting is there", "the table is there, set by hand", what apply appends)
         for name, rel, ours, by_hand, append in (
-            ("cargo", CARGO_CFG_REL, CARGO_HAS_BUILD_DIR, CARGO_HAS_BUILD, cargo_text(home)),
-            ("uv", UV_CFG_REL, UV_HAS_LINK_MODE, UV_HAS_TABLE, UV_TEXT),
+            (ConfigTool.CARGO, CARGO_CFG_REL, CARGO_HAS_BUILD_DIR, CARGO_HAS_BUILD, cargo_text(home)),
+            (ConfigTool.UV, UV_CFG_REL, UV_HAS_LINK_MODE, UV_HAS_TABLE, UV_TEXT),
         ):
             path = os.path.join(home, rel)
             text = self.files.read_settings(path)
@@ -393,7 +394,7 @@ class ToolConfig:
         out: list[ConfigLine] = []
         for name, path, st, _ in self.items():
             shown = tilde(path, home)
-            if name == "cargo":
+            if name == ConfigTool.CARGO:
                 match st:
                     case ToolSettingState.SET:
                         if self.files.build_dir_is_csts():
@@ -469,26 +470,27 @@ class ToolConfig:
             return 0
         rc = 0
         for name, path, st, text in self.items():
-            if st == ToolSettingState.UNREADABLE:
-                self.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
-                rc = 1
-            elif name == "cargo" and st == ToolSettingState.SET:
-                self.out.say(f"kept:      {path} (build-dir already set)")
-            elif name == "cargo" and st == ToolSettingState.BY_HAND:
-                self.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
-                self.out.say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
-            elif name == "uv" and st == ToolSettingState.SET:
-                self.out.say(f"kept:      {path} (link-mode already set)")
-            elif name == "uv" and st == ToolSettingState.BY_HAND:
-                self.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
-            else:
-                err = self.files.append(path, text)
-                if err:
-                    # For example a ~/.cargo owned by root after a `sudo cargo`:
-                    # report it and go on with the other setting.
-                    self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+            match name, st:
+                case _, ToolSettingState.UNREADABLE:
+                    self.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
                     rc = 1
-                    continue
-                self.out.say(f"written:   {path}")
+                case ConfigTool.CARGO, ToolSettingState.SET:
+                    self.out.say(f"kept:      {path} (build-dir already set)")
+                case ConfigTool.CARGO, ToolSettingState.BY_HAND:
+                    self.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
+                    self.out.say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
+                case ConfigTool.UV, ToolSettingState.SET:
+                    self.out.say(f"kept:      {path} (link-mode already set)")
+                case ConfigTool.UV, ToolSettingState.BY_HAND:
+                    self.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
+                case _:
+                    err = self.files.append(path, text)
+                    if err:
+                        # For example a ~/.cargo owned by root after a `sudo cargo`:
+                        # report it and go on with the other setting.
+                        self.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+                        rc = 1
+                        continue
+                    self.out.say(f"written:   {path}")
         rc = max(rc, self.lean_apply(settings, lean))
         return max(rc, self.sccache_apply(settings, sccache))
