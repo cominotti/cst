@@ -620,6 +620,16 @@ GIB = 1024**3
 DEV_SECTORS = 1536 * GIB // 512  # 1.5 TiB block devices
 
 
+def zipapp(members: dict[str, bytes], method: int = zipfile.ZIP_STORED) -> bytes:
+    """A zip archive behind a shebang line, as an installed zipapp: these members, compressed with method."""
+    buf = io.BytesIO(b"#!/usr/bin/python3 -I\n")
+    buf.seek(0, io.SEEK_END)
+    with zipfile.ZipFile(buf, "w", compression=method) as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
 class BtrfsTest(Scratch):
     """check_btrfs_allocation on a fixture /sys/fs/btrfs tree (RAID1 over
     two dm-crypt devices unless a test changes it)."""
@@ -863,16 +873,14 @@ class BtrfsTest(Scratch):
         # inside it is the one that alerts, so its values count.
         hc = os.path.join(self.root, "usr", "local", "sbin")
         os.makedirs(hc)
-        buf = io.BytesIO(b"#!/usr/bin/python3 -I\n")
-        buf.seek(0, io.SEEK_END)
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("__main__.py", "")
-            zf.writestr(
-                "btrfs/health_check/domain.py",
-                "UNALLOC_MIN_GIB: Final = 70  # early warning\nUNALLOC_CRIT_GIB: Final = 9\n",
-            )
+        data = zipapp(
+            {
+                "__main__.py": b"",
+                "btrfs/health_check/domain.py": b"UNALLOC_MIN_GIB: Final = 70  # early warning\nUNALLOC_CRIT_GIB: Final = 9\n",
+            }
+        )
         with open(os.path.join(hc, "btrfs-health-check"), "wb") as f:
-            f.write(buf.getvalue())
+            f.write(data)
         self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=REPO)), (70, 9))
         # What install writes holds the checkout's levels where doctor looks for them (the defaults are
         # set apart, so only a read can give them).
@@ -885,11 +893,16 @@ class BtrfsTest(Scratch):
                 doc_btrfs.unalloc_thresholds(no_repo), (hc_domain.UNALLOC_MIN_GIB, hc_domain.UNALLOC_CRIT_GIB)
             )
 
-    def test_without_an_installed_copy_the_checkout_s_levels_count(self) -> None:
+    def checkout_with_levels(self, warn: int, crit: int) -> str:
+        """A checkout whose btrfs/health_check/domain.py holds these levels."""
         repo = os.path.join(self.tmp, "checkout")
         os.makedirs(os.path.join(repo, "btrfs", "health_check"))
         with open(os.path.join(repo, "btrfs", "health_check", "domain.py"), "w", encoding="utf-8") as f:
-            f.write("UNALLOC_MIN_GIB: Final = 61\nUNALLOC_CRIT_GIB: Final = 6\n")
+            f.write(f"UNALLOC_MIN_GIB: Final = {warn}\nUNALLOC_CRIT_GIB: Final = {crit}\n")
+        return repo
+
+    def test_without_an_installed_copy_the_checkout_s_levels_count(self) -> None:
+        repo = self.checkout_with_levels(61, 6)
         self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=repo)), (61, 6))
 
     def test_a_damaged_or_foreign_installed_zipapp_falls_back_to_the_checkout_s_levels(self) -> None:
@@ -897,18 +910,11 @@ class BtrfsTest(Scratch):
         # odd flags) is read as unreadable: the checkout's levels count, and the allocation check runs.
         hc = os.path.join(self.root, "usr", "local", "sbin")
         os.makedirs(hc)
-        repo = os.path.join(self.tmp, "checkout")
-        os.makedirs(os.path.join(repo, "btrfs", "health_check"))
-        with open(os.path.join(repo, "btrfs", "health_check", "domain.py"), "w", encoding="utf-8") as f:
-            f.write("UNALLOC_MIN_GIB: Final = 61\nUNALLOC_CRIT_GIB: Final = 6\n")
+        repo = self.checkout_with_levels(61, 6)
         member = "btrfs/health_check/domain.py"
 
         def archive(content: bytes, method: int) -> bytearray:
-            buf = io.BytesIO(b"#!/usr/bin/python3 -I\n")
-            buf.seek(0, io.SEEK_END)
-            with zipfile.ZipFile(buf, "w", compression=method) as zf:
-                zf.writestr(member, content)
-            return bytearray(buf.getvalue())
+            return bytearray(zipapp({member: content}, method))
 
         def patched(local: dict[int, int], central: dict[int, int], method: int = zipfile.ZIP_STORED) -> bytes:
             # Sets bits (offset: mask) in the member's local header and in its central directory entry.
