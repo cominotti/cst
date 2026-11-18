@@ -41,7 +41,6 @@ ANY_BUDGETS: Final[dict[str, int]] = {
     "doctor domain": 1,
     "tests tests": 6,
     "toolchains tests": 1,
-    "vm cli": 7,
     "vm tests": 5,
 }
 CAST_BUDGETS: Final[dict[str, int]] = {

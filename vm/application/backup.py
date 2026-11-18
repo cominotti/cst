@@ -13,7 +13,7 @@ from cst_core.domain.values import format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state, has_managed_save
 from vm.domain import FULL_MARGIN, URI, VmSettings, domain_parts, restore_lines, stored
-from vm.domain.backup import CopiedFile, Fingerprint, Manifest, index_entry, manifest_text, utc_stamp
+from vm.domain.backup import Fingerprint, Manifest, index_entry, manifest_text, utc_stamp
 from vm.ports import BackupStorePort, ProgressPort, VmCommandsPort
 
 
@@ -165,23 +165,22 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
             )
         # The definition holds --security-info secrets (graphics passwords): 0600 from the start.
         store.write_private(os.path.join(dest_dir, "domain.xml"), xml_text)
-        files: list[CopiedFile] = [
-            {
-                "source": src,
-                "stored": posixpath.relpath(stored(dest_dir, src), dest_dir),
-                "kind": "disk" if big else ("tpm" if src == tpm_dir else "nvram"),
-                "allocated": sizes[src][0],
-                "apparent": sizes[src][1],
-            }
-            for src, big in copied
-        ]
         manifest: Manifest = {
             "vm": vm,
             "uuid": parts.uuid,
             "timestamp": stamp,
             "epoch": int(epoch),
             "mode": mode,
-            "files": files,
+            "files": [
+                {
+                    "source": src,
+                    "stored": posixpath.relpath(stored(dest_dir, src), dest_dir),
+                    "kind": "disk" if big else ("tpm" if src == tpm_dir else "nvram"),
+                    "allocated": sizes[src][0],
+                    "apparent": sizes[src][1],
+                }
+                for src, big in copied
+            ],
             "versions": p.commands.package_versions(),
             "deployment": p.commands.booted_deployment(),
             "notes": notes,

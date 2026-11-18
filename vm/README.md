@@ -1051,7 +1051,13 @@ The Python code inside `vm/` (standard library only at run time):
   backup (`backup_local`) and the checks every backup makes first, over
   `VmCommandsPort`, `BackupStorePort` (the backups' files and the index,
   `vm/adapters/backup.py`'s `BackupFiles`), cst_core's `ClockPort` and a
-  `ProgressPort` (the lines it prints as it goes). `__init__.py`: `backup-timer on` and
+  `ProgressPort` (the lines it prints as it goes). `nas.py`: the NAS backup
+  (`backup_nas`: the snapshot, restic, the merge back, the retention), moved
+  from the cli as it was, over the same ports plus `SettingsPort` (vm.conf and
+  the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
+  the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,
+  held during the snapshot call, ignored during the merge back), the per-VM
+  lock and the critical alert. `__init__.py`: `backup-timer on` and
   `off` (`TimerFilesPort`: the timer's files through the installer and the
   links that say which timer is on, its adapter `vm/adapters/timer.py`'s
   `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,

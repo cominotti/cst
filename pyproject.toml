@@ -399,6 +399,7 @@ include = [
     "vm/adapters/timer.py",
     "vm/application/__init__.py",
     "vm/application/backup.py",
+    "vm/application/nas.py",
     "vm/cli/__init__.py",
     "vm/cli/backup.py",
     "vm/cli/nas.py",

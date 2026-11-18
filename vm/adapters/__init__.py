@@ -275,24 +275,6 @@ def booted_deployment() -> dict[str, Json] | None:
     return {"version": d.get("version"), "checksum": d.get("checksum"), "timestamp": d.get("timestamp")}
 
 
-def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str]:
-    """({target: source}, problem) from virsh domblklist --details."""
-    rc, so, err = virsh("domblklist", vm, "--details", *(["--inactive"] if inactive else []))
-    if rc != 0:
-        return None, first_line(err) or f"exit {rc}"
-    out: dict[str, str] = {}
-    for ln in so.splitlines():
-        parts = ln.split(None, 3)
-        if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
-            out[parts[2]] = parts[3].strip()
-    return out, ""
-
-
-def domain_state_or_none(vm: str) -> str | None:
-    rc, so, _ = virsh("domstate", vm)
-    return first_line(so) if rc == 0 else None
-
-
 def nas_settings(cfg: VmSettings) -> NasRepo:
     """{host, env, repo} for restic, from the /home NAS backup's settings.
     Refused when that backup is not set up: its setup creates the
@@ -322,6 +304,19 @@ def nas_settings(cfg: VmSettings) -> NasRepo:
             "RESTIC_CACHE_DIR": cfg.paths.restic_cache,
         },
     }
+
+
+class VmConfFiles:
+    """SettingsPort on this machine: the settings files of cfg's paths, read at each call."""
+
+    def __init__(self, cfg: VmSettings) -> None:
+        self.cfg = cfg
+
+    def number(self, key: str) -> int:
+        return conf_number(self.cfg.paths, key)
+
+    def nas_repo(self) -> NasRepo:
+        return nas_settings(self.cfg)
 
 
 def knobs(paths: VmPaths) -> dict[str, bool]:

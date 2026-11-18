@@ -86,7 +86,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "toolchains tests FBT002": 1,
     "vm BLE001": 3,
     "vm C901": 4,
-    "vm FBT001": 17,
+    "vm FBT001": 15,
     "vm FBT002": 4,
     "vm tests FBT001": 9,
     "vm tests FBT002": 7,

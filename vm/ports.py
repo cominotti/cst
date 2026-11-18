@@ -2,12 +2,17 @@
 """The ports vm/application.py is typed against: how a use case reaches the machine."""
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.values import Json
-from vm.domain import TimerStep
-from vm.domain.backup import Fingerprint, IndexEntry
+from vm.domain import NasRepo, TimerStep
+from vm.domain.backup import Fingerprint, IndexEntry, ResticSummary
+
+# One NAS backup per VM at a time: the lock of the VM named, held while the block runs (Refused
+# when another backup holds it).
+type LockPort = Callable[[str], AbstractContextManager[object]]
 
 
 class TimerFilesPort(Protocol):
@@ -56,6 +61,11 @@ class VmCommandsPort(Protocol):
         """{package: name-version-release.arch or "not installed"} of the virtualization packages."""
         ...
 
+    def detached(self) -> AbstractContextManager[None]:
+        """While it lasts, every command runs in a session of its own (a Ctrl-C or a closed
+        terminal cannot reach it); a call's own detach= wins."""
+        ...
+
     def booted_deployment(self) -> dict[str, Json] | None:
         """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None."""
         ...
@@ -93,6 +103,8 @@ class BackupStorePort(Protocol):
 
     def exists(self, path: str) -> bool: ...
 
+    def lexists(self, path: str) -> bool: ...
+
     def realpath(self, path: str) -> str: ...
 
     def has_backing_file(self, path: str) -> bool:
@@ -128,10 +140,70 @@ class BackupStorePort(Protocol):
         """Remove path and what is in it, as far as it goes."""
         ...
 
+    def stage(self, vm: str, xml_text: str, manifest: str) -> str:
+        """domain.xml and manifest.json of a NAS backup, 0600 in the 0700 staging folder of vm (for
+        restic to read); the folder."""
+        ...
+
+    def unstage(self, folder: str) -> None:
+        """The staged files removed, as far as it goes."""
+        ...
+
+    def remove_overlay(self, path: str) -> str | None:
+        """Remove a merged overlay file (gone already: fine); why not, when it could not be."""
+        ...
+
+    def drop(self, path: str) -> None:
+        """Remove a file this run made and libvirt never used, as far as it goes."""
+        ...
+
     def read_index(self) -> list[IndexEntry]:
         """The backups in the index ([] when there is none); Refused for one of a newer cst vm."""
         ...
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
         """Replace the index, durably."""
+        ...
+
+
+class SettingsPort(Protocol):
+    """The settings files cst vm reads (/etc/cst/vm.conf, the /home NAS backup's snapshots.conf),
+    read again at each call."""
+
+    def number(self, key: str) -> int:
+        """A whole number of vm.conf (its default when missing or not a number >= 0)."""
+        ...
+
+    def nas_repo(self) -> NasRepo:
+        """The restic repository of the /home NAS backup; Refused when that backup is not set up."""
+        ...
+
+
+class ResticPort(Protocol):
+    """restic against the repository its RESTIC_* variables (env) name."""
+
+    def run(self, env: Mapping[str, str], args: Sequence[str], timeout: int) -> tuple[int, str, str]:
+        """(exit status, stdout, stderr) of restic ARGS."""
+        ...
+
+    def backup(
+        self, env: Mapping[str, str], args: Sequence[str], timeout: int, out: ProgressPort
+    ) -> tuple[int, ResticSummary]:
+        """restic ARGS (a backup --json): its progress to out as it runs; (exit status, its summary)."""
+        ...
+
+
+class SignalsPort(Protocol):
+    """The stop signals of this process (SIGTERM, SIGHUP, SIGINT) during a NAS backup."""
+
+    def catch_stops(self) -> None:
+        """From now on a stop raises Stop (vm.domain.backup), so the overlays are merged back."""
+        ...
+
+    def held(self) -> AbstractContextManager[object]:
+        """While it lasts, the stops wait (blocked): a stop never kills the snapshot call."""
+        ...
+
+    def ignored(self) -> AbstractContextManager[None]:
+        """While it lasts, the stops are ignored (the merge back); the handlers before it after."""
         ...

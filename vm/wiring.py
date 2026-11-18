@@ -16,13 +16,22 @@ from cst_core.domain.record import ROOT_RECORD
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter, terminal
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import SystemdPort
-from vm.adapters import COMMANDS_OF_VM, NAME, effective_root, fault_words, run
-from vm.adapters.backup import BackupFiles, DefinitionFiles, TerminalLines
+from vm.adapters import COMMANDS_OF_VM, NAME, VmConfFiles, effective_root, fault_words, run
+from vm.adapters.backup import BackupFiles, DefinitionFiles, StopSignals, TerminalLines, VmLock, notify
 from vm.adapters.restic import Restic
 from vm.adapters.timer import TimerFiles
 from vm.application.backup import LocalBackup
+from vm.application.nas import NasBackup
 from vm.domain import VmPaths, VmSettings
-from vm.ports import BackupStorePort, DefinitionStorePort, TimerFilesPort, VmCommandsPort
+from vm.ports import (
+    BackupStorePort,
+    DefinitionStorePort,
+    ProgressPort,
+    ResticPort,
+    SettingsPort,
+    TimerFilesPort,
+    VmCommandsPort,
+)
 
 
 def vm_env() -> Mapping[str, str]:
@@ -97,12 +106,12 @@ def definition_store(cfg: VmSettings) -> DefinitionStorePort:
     return DefinitionFiles(cfg.paths.backup_dir)
 
 
-def restic() -> Restic:
+def restic() -> ResticPort:
     """restic as cst-vm runs it (vm.adapters.run: the C locale, its words for a missing restic)."""
     return Restic(run)
 
 
-def progress() -> TerminalLines:
+def progress() -> ProgressPort:
     """What a backup prints, as it goes: this process's stdout and stderr."""
     return TerminalLines()
 
@@ -117,6 +126,27 @@ def local_backup(cfg: VmSettings) -> LocalBackup:
     return LocalBackup(
         commands=vm_commands(),
         store=backup_store(cfg),
+        clock=SystemClockAdapter(),
+        out=progress(),
+        root=effective_root(),
+    )
+
+
+def settings_port(cfg: VmSettings) -> SettingsPort:
+    """The settings files cst vm reads (cfg's paths)."""
+    return VmConfFiles(cfg)
+
+
+def nas_backup(cfg: VmSettings) -> NasBackup:
+    """What `cst vm backup --nas` reaches on this machine."""
+    return NasBackup(
+        commands=vm_commands(),
+        store=backup_store(cfg),
+        settings=settings_port(cfg),
+        restic=restic(),
+        signals=StopSignals(),
+        lock=lambda vm: VmLock(vm, cfg.paths.run_dir),
+        alert=lambda title, body: notify(cfg, "critical", title, body),
         clock=SystemClockAdapter(),
         out=progress(),
         root=effective_root(),

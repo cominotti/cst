@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 """The records of the backups: an index entry, the two manifests, restic's summary of a backup,
-and the fingerprint of a source. Pure."""
+the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). Pure."""
 
 import datetime
 import json
 from typing import NotRequired, TypedDict
 
+from cst_core.domain.errors import Refused
 from cst_core.domain.values import Json
 
 # What changes when something writes to a file or a folder tree (vm.adapters.backup.fingerprint):
@@ -58,6 +59,17 @@ class Manifest(TypedDict):
     versions: dict[str, str]
     deployment: dict[str, Json] | None
     notes: list[str]
+
+
+class Stop(Exception):
+    """SIGTERM/SIGHUP/SIGINT (systemd stopping the unit, a closed terminal,
+    Ctrl-C): raised so the overlays are always committed back before the
+    program ends."""
+
+
+class Uncertain(Refused):
+    """virsh snapshot-create-as did not answer in time and libvirt's result
+    stayed unclear: the overlay files are kept, an alert is sent."""
 
 
 class ResticSummary(TypedDict, total=False):

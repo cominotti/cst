@@ -2,7 +2,8 @@
 """The backups' files and the run of a backup: the index, the fingerprints and sizes of what
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 import datetime
 import json
 import os
@@ -23,7 +24,7 @@ from cst_core.domain.text import first_line
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
-from vm.domain.backup import Fingerprint, IndexEntry
+from vm.domain.backup import Fingerprint, IndexEntry, Stop
 
 
 def utc_now(override: str | None = None) -> tuple[float, str]:
@@ -196,17 +197,50 @@ class BackupFiles(LocalFileSystemAdapter):
     def remove_tree(self, path: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
+    def stage(self, vm: str, xml_text: str, manifest: str) -> str:
+        """domain.xml (with --security-info: graphics passwords; restic stores it
+        encrypted) and manifest.json, 0600 in a 0700 folder. Returns the folder."""
+        d = os.path.join(self.cfg.paths.nas_stage, vm)
+        for x in (self.cfg.paths.nas_stage, d):
+            os.makedirs(x, mode=0o700, exist_ok=True)
+            os.chmod(x, 0o700)
+        for name, text in (("domain.xml", xml_text), ("manifest.json", manifest)):
+            path = os.path.join(d, name)
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(text)
+        return d
+
+    def unstage(self, folder: str) -> None:
+        for name in ("domain.xml", "manifest.json"):
+            try:
+                os.unlink(os.path.join(folder, name))
+            except OSError:
+                pass
+
+    def remove_overlay(self, path: str) -> str | None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return str(e.strerror)
+        return None
+
+    def drop(self, path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
     def read_index(self) -> list[IndexEntry]:
         return read_index(self.cfg)
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
         write_index(entries, self.cfg.paths.index)
-
-
-class Stop(Exception):
-    """SIGTERM/SIGHUP/SIGINT (systemd stopping the unit, a closed terminal,
-    Ctrl-C): raised so the overlays are always committed back before the
-    program ends."""
 
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
@@ -230,6 +264,28 @@ class signals_held:
 
     def __exit__(self, *_: object) -> None:
         signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
+
+
+class StopSignals:
+    """SignalsPort of this process: on_signal for the stops, signals_held, and the stops ignored
+    during a block (the handlers before it put back after it)."""
+
+    def catch_stops(self) -> None:
+        for sig in STOP_SIGNALS:
+            signal.signal(sig, on_signal)
+
+    def held(self) -> signals_held:
+        return signals_held()
+
+    @contextmanager
+    def ignored(self) -> Generator[None]:
+        old = {s: signal.signal(s, signal.SIG_IGN) for s in STOP_SIGNALS}
+        try:
+            yield
+        finally:
+            for s, h in old.items():
+                if h is not None:
+                    signal.signal(s, h)
 
 
 class SafeStream:

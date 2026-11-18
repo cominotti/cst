@@ -16,9 +16,10 @@ from cst_core.domain.text import first_line
 from cst_core.ports import WriteFailed
 from vm import wiring
 from vm.adapters import default_vm, prepare_command
-from vm.adapters.backup import Stop, notify, safe_output
+from vm.adapters.backup import notify, safe_output
 from vm.cli import backup, nas, nocow, status, timer, tune
 from vm.domain import VmSettings, parse_args
+from vm.domain.backup import Stop
 
 
 # The usage line, after "usage: PROG ".

@@ -84,6 +84,9 @@ class FakeCommands:
     def package_versions(self) -> dict[str, str]:
         raise AssertionError("tune reads no package version")
 
+    def detached(self) -> AbstractContextManager[None]:
+        raise AssertionError("tune runs nothing detached")
+
     def booted_deployment(self) -> dict[str, Json] | None:
         raise AssertionError("tune reads no deployment")
 
