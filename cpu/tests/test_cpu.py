@@ -1234,6 +1234,8 @@ toolbox_dropin; helper_dropin; toolbox_dropin 50-cpu-setup.conf
         keep = [
             os.path.join(unit_dir, "machine.slice.d", "10-cpu-setup.conf"),
             os.path.join(unit_dir, "machine.slice.d", "10-swap-memory-low.conf"),  # the swap module's
+            # swap's drop-in under its old name, still there until swap's apply moves it
+            os.path.join(unit_dir, "machine.slice.d", "50-memory-low.conf"),
             os.path.join(home, ".config/systemd/user/user.slice.d/10-cpu-setup.conf"),
         ]
         for p in old + keep:
