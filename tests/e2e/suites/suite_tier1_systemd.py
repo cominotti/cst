@@ -607,6 +607,17 @@ grep -qxF "removed:   $rule" <<<"$out"
 [[ -z "$(rules)" ]]
 grep -qxF "DEVICE=$mac" "$conf"
 
+# 5b. Before any apply saved it, the rule is the only place that names the headset: revert saves it as
+# DEVICE first, then removes the rule.
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$rule"
+printf '%s\n' "$settings" >"$conf"
+out="$(bt revert --yes --no-restart 2>&1)"
+show "revert before apply" "$out"
+saved="$(grep -nxF "written:   ~/.config/cst/bluetooth.conf: DEVICE=$mac" <<<"$out" | cut -d: -f1)"
+gone="$(grep -nxF "removed:   $rule" <<<"$out" | cut -d: -f1)"
+[[ -n "$saved" && -n "$gone" && "$saved" -lt "$gone" ]]
+[[ "$(cat "$conf")" == "$settings"$'\n'"DEVICE=$mac" && -z "$(rules)" ]]
+
 # 6. No headset at all: plan, apply and a second apply skip its parts and write nothing for one;
 # the old script's first rule name, which only a headset's rule replaces, stays.
 rm -f "$conf"
@@ -2904,8 +2915,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         wrote this text for it) and a settings file without DEVICE. plan names that headset and
         that apply saves it, and writes nothing; apply --no-restart saves DEVICE (the other lines
         kept) and leaves the rule, apply then makes only the owed WirePlumber restart (bluetoothd
-        does not run here, as in test_80); a second apply changes nothing and plan has nothing to do; revert removes
-        the rule and keeps DEVICE. Then no headset at all: plan, apply and a second apply skip
+        does not run here, as in test_80); a second apply changes nothing and plan has nothing to
+        do; revert removes the rule and keeps DEVICE. A revert before any apply saved DEVICE saves
+        it first, then removes the rule. Then no headset at all: plan, apply and a second apply skip
         the headset's LDAC rule and checks, write main.conf and the LE Audio drop-in, and no
         headset's rule or setting, and the old script's first rule name (only a headset's rule
         replaces it) stays; revert says there is no rule to remove."""
