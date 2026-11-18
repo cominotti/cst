@@ -37,6 +37,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The token stays out of .git/config: nothing after the checkout uses git
+          # with it (zizmor's artipacked audit).
+          persist-credentials: false
 
       - name: Prepare E2E systemd image for clean install smoke test
         uses: ./.github/actions/prep-e2e-runner

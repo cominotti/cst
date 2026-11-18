@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools for the Python code: uv, ruff, ty, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -11,6 +11,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
 | [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations (every Python file). Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
+| [zizmor](https://docs.zizmor.sh/) 1.32.0 | audit of the workflows, the composite actions and `dependabot.yml` in `.github` (see "The workflow audit") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
@@ -22,6 +23,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ```
 invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
+invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/domain.py
@@ -30,7 +32,7 @@ tests/uv-dev --group mutation cosmic-ray --version   # --group NAME adds a group
 
 You need `uv` on `PATH` (for example from Homebrew or
 `https://docs.astral.sh/uv/getting-started/installation/`). The first run
-downloads ruff and ty; later runs start at once. `--locked` makes uv stop
+downloads ruff, ty and zizmor; later runs start at once. `--locked` makes uv stop
 with an error when `uv.lock` does not match `pyproject.toml`, and uv checks
 the hash of every package against the lock.
 
@@ -171,6 +173,50 @@ repository:
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import` and `possibly-unresolved-reference`. A rule may
   be added there only at `"error"`.
+
+## The workflow audit (zizmor)
+
+`invowk cmd test workflows` (part of `invowk cmd check`, so of CI's fast
+gates) runs `zizmor --offline --strict-collection --config .github/zizmor.yml
+.github`. zizmor
+reads the workflows, the composite actions and `.github/dependabot.yml` and
+reports what an attacker could use: a token left in `.git/config` where an
+artifact could carry it (`artipacked`), a script that writes
+`GITHUB_ENV`/`GITHUB_PATH` from data it did not make (`github-env`), a
+template expanded into a shell script, an action not pinned by its full
+SHA, permissions wider than the job needs, Dependabot taking a release the
+day it is published (`dependabot-cooldown`), and more
+(`https://docs.zizmor.sh/audits/`). `--offline`: no token and no network,
+so the audits that ask the hosting service (such as impostor commits) do
+not run. Any finding fails the task, whatever its severity.
+`--strict-collection`: a file zizmor cannot parse fails the task (without
+it zizmor skips that file with a warning and reports no finding for it).
+
+What the audit asked for when it was turned on:
+
+- every `actions/checkout` sets `persist-credentials: false`. No step
+  after a checkout uses git with the job's token (the jobs that need a
+  token, for the image registry or a release, pass it to that step), and
+  several jobs upload files from the checkout;
+- `.github/dependabot.yml` waits 7 days before proposing a new action
+  version (`cooldown: default-days: 7`).
+
+**Exceptions** live in `.github/zizmor.yml` only, as `ignore` lists of
+`FILE` (every finding of that audit in that file) or `FILE:LINE` (one
+finding), by the file's base name. Each list starts with a comment that
+says why. A line entry moves with its file: when a change above it shifts
+the line, the audit fails and names the new line; move the entry. Today:
+the `GITHUB_PATH` write of `setup-invowk` (it checks the binary against
+its pinned SHA-256 first), the style finding `self-repository` (`./...`
+for local actions) and `superfluous-actions` on the release step.
+`tests/test_workflow_audit.py` (a unit test) fails when an ignore list has
+no reason, when an audit is disabled (`disable: true`, which also hides it
+from zizmor's count of ignored findings), on an inline `zizmor: ignore`
+comment in `.github`, and when `check` stops running the task, the task
+drops `--offline`, the config or `--strict-collection`, or it gives zizmor
+an option that leaves findings out (`--min-severity`,
+`--min-confidence`, `--persona`, `--collect`). `tests/uv-dev zizmor
+--offline --no-ignores .github` shows what the exceptions hide.
 
 ## Mutation testing (optional)
 

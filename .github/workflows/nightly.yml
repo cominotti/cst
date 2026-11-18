@@ -30,6 +30,10 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The token stays out of .git/config: nothing after the checkout uses git
+          # with it (zizmor's artipacked audit).
+          persist-credentials: false
 
       # Same reason as in ci.yml: the checkout belongs to root, the gates run as ci.
       - name: Let the ci user's git read the checkout
@@ -73,6 +77,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk

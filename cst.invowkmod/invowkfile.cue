@@ -14,7 +14,7 @@ cmds: [
 		// The one entry point for people, agents and CI (fast-gates and nightly run it).
 		name:        "check"
 		category:    "check"
-		description: "Run every fast gate: invowk validate and audit, test lint, test pylint, test types, test unit (the docs gate is in the unit suite)"
+		description: "Run every fast gate: invowk validate and audit, test lint, test pylint, test types, test workflows, test unit (the docs gate is in the unit suite)"
 		depends_on: {
 			tools: [
 				{alternatives: ["invowk"]},
@@ -34,6 +34,7 @@ cmds: [
 				invowk cmd test lint
 				invowk cmd test pylint
 				invowk cmd test types
+				invowk cmd test workflows
 				invowk cmd test unit
 				"""}
 		}]
@@ -217,6 +218,19 @@ cmds: [
 				tests/uv-dev ty check
 				tests/uv-dev ruff check --select ANN
 				"""}
+		}]
+	},
+	{
+		name:        "test workflows"
+		category:    "test"
+		description: "Run zizmor offline on the workflows, the actions and dependabot.yml of .github, with the exceptions in .github/zizmor.yml (a file it cannot read fails), through uv (tests/uv-dev)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "tests/uv-dev zizmor --offline --strict-collection --config .github/zizmor.yml .github"}
 		}]
 	},
 	{

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MPL-2.0
+# The exceptions of the workflow audit (`invowk cmd test workflows`, zizmor).
+# Each ignore list names the findings it keeps out of the audit and starts
+# with the reason. An entry is `FILE` (every finding of that audit in the
+# file) or `FILE:LINE` (one finding); zizmor takes the base name of the file.
+# A line entry moves with the file: when a change above it shifts the line,
+# the audit fails and names the new line. tests/test_workflow_audit.py fails
+# on an ignore list without a reason and on `disable` (which would switch an
+# audit off everywhere). See docs/dev-tools.md, "The workflow audit".
+rules:
+  github-env:
+    ignore:
+      # .github/actions/setup-invowk/action.yml, the `run:` of "Expose invowk
+      # on PATH and verify": it writes GITHUB_PATH on purpose, also after a
+      # cache restore. It copies only the invowk file into a new folder,
+      # checks the copy against the pinned SHA-256 before anything runs it,
+      # and puts only that folder on PATH.
+      - action.yml:201
+  self-repository:
+    ignore:
+      # Style only: zizmor proposes the newer `$/...` form for the local
+      # actions and the reusable workflow. `./...` is the form every runner
+      # version reads, and a change could only be tried on the hosted runners.
+      - ci.yml
+      - e2e-images.yml
+      - nightly.yml
+      - release.yml
+  superfluous-actions:
+    ignore:
+      # The publishing step of release.yml: replacing the pinned release
+      # action by a `gh release` script changes how a release is published,
+      # which only a tag push can test.
+      - release.yml:150

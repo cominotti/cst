@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
-# Developer tools for this repository only: the ruff linter and the ty type
-# checker (and, in their own group, the cosmic-ray mutation tester). CST
+# Developer tools for this repository only: the ruff linter, the ty type
+# checker and the zizmor workflow audit (and, in their own group, the
+# cosmic-ray mutation tester). CST
 # itself is not a Python package and installs nothing from here: its helpers
 # run on the system's /usr/bin/python3 with the standard library only.
 # See docs/dev-tools.md for the pinned versions, where the tools' virtual
@@ -15,7 +16,7 @@ version = "0"
 requires-python = ">=3.15"
 
 [dependency-groups]
-dev = ["ruff==0.17.5", "ty==0.0.104"]
+dev = ["ruff==0.17.5", "ty==0.0.104", "zizmor==1.32.0"]
 mutation = ["cosmic-ray==8.9.0"]
 
 [tool.uv]
@@ -361,6 +362,7 @@ include = [
     "tests/test_typing_budget.py",
     "tests/test_unit_contract.py",
     "tests/test_uv_dev.py",
+    "tests/test_workflow_audit.py",
     "tests/unit_files.py",
     "toolchains/__init__.py",
     "toolchains/adapters/__init__.py",
