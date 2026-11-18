@@ -14,7 +14,9 @@ from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
 from vm.adapters import NAME
+from vm.adapters.timer import TimerFiles
 from vm.domain import VmPaths, VmSettings
+from vm.ports import TimerPort
 
 
 def vm_env() -> Mapping[str, str]:
@@ -66,3 +68,8 @@ def vm_settings(env: Mapping[str, str] | None = None) -> VmSettings:
         snapshot_timeout=int(e.get("CST_VM_SNAPSHOT_TIMEOUT") or 600),
         snapshot_settle=int(e.get("CST_VM_SNAPSHOT_SETTLE") or 600),
     )
+
+
+def timer_port(cfg: VmSettings, entry_file: str) -> TimerPort:
+    """The weekly timer's files and systemd on this machine (entry_file: the running cst-vm)."""
+    return TimerFiles(cfg, entry_file)

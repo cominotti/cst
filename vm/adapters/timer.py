@@ -2,7 +2,7 @@
 """The weekly NAS backup timer's files: the program copy and the two units, through the installer
 and the install record, and whether each is CST's, current, missing or masked."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import functools
 import os
 
@@ -12,8 +12,19 @@ from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
-from vm.adapters import TIMER_COMPONENT
-from vm.domain import SERVICE, TIMER, UNIT_MARKER, VmPaths, VmSettings, is_cst_vm_program, render_service, render_timer
+from cst_core.domain.errors import Refused
+from vm.adapters import TIMER_COMPONENT, systemctl
+from vm.domain import (
+    SERVICE,
+    TIMER,
+    UNIT_MARKER,
+    TimerStep,
+    VmPaths,
+    VmSettings,
+    is_cst_vm_program,
+    render_service,
+    render_timer,
+)
 
 
 def is_ours(sbin_copy: str, path: str, data: bytes) -> bool:
@@ -55,10 +66,14 @@ def timer_installer(entry_file: str) -> InstallService:
 
 
 def install_timer_files(
-    paths: VmPaths, files: Mapping[str, tuple[bytes, int]], states: Mapping[str, UnitFileState], entry_file: str
+    paths: VmPaths,
+    files: Mapping[str, tuple[bytes, int]],
+    states: Mapping[str, UnitFileState],
+    entry_file: str,
+    report: Callable[[TimerStep], None],
 ) -> None:
-    """Write (through the installer) each of backup-timer's files that is not current, and say so.
-    Its own refusals (a foreign or masked file) come first, in cmd_timer."""
+    """Write (through the installer) each of backup-timer's files that is not current, and report it.
+    Its own refusals (a foreign or masked file) come first, in vm.application.timer_on."""
     svc = timer_installer(entry_file)
     as_root = os.geteuid() == 0
     program_entry = manifest_by_src()["vm/cst-vm"]
@@ -75,7 +90,7 @@ def install_timer_files(
             mode=mode,
         )
         if svc.put(place, text, as_root=as_root):
-            print(f"  {'installed' if states[p] == 'missing' else 'updated'}: {p}")
+            report(TimerStep("installed" if states[p] == "missing" else "updated", p))
 
 
 def timer_record_done(paths: VmPaths, entry_file: str) -> None:
@@ -105,3 +120,57 @@ def timer_file_states(
     if is_masked_unit(instance_timer):
         states[instance_timer] = "masked"
     return states
+
+
+class TimerFiles:
+    """TimerPort on this machine: the files of timer_files (built once, from entry_file, the running
+    cst-vm), written through the installer, and systemctl (vm.adapters.systemctl's answers)."""
+
+    def __init__(self, cfg: VmSettings, entry_file: str) -> None:
+        self.cfg = cfg
+        self.entry_file = entry_file
+        self._files: dict[str, tuple[bytes, int]] | None = None
+
+    def files(self) -> dict[str, tuple[bytes, int]]:
+        if self._files is None:
+            self._files = timer_files(self.cfg, self.entry_file)
+        return self._files
+
+    def file_states(self, instance_timer: str) -> dict[str, UnitFileState]:
+        return timer_file_states(self.cfg.paths, self.files(), instance_timer)
+
+    def install(self, states: Mapping[str, UnitFileState], report: Callable[[TimerStep], None]) -> None:
+        install_timer_files(self.cfg.paths, self.files(), states, self.entry_file, report)
+
+    def mark_complete(self) -> None:
+        timer_record_done(self.cfg.paths, self.entry_file)
+
+    def remove(self, path: str) -> None:
+        os.unlink(path)
+
+    def forget(self, removed: Sequence[str]) -> None:
+        forget_timer_files(self.cfg.paths, self.entry_file, removed)
+
+    def timers_on(self) -> list[str]:
+        return wants_links(self.cfg.paths.unit_dir)
+
+    def turn_on(self, unit: str) -> None:
+        for args in (("daemon-reload",), ("enable", "--now", unit)):
+            rc, _, err = systemctl(*args)
+            if rc != 0:
+                raise Refused(f"systemctl {' '.join(args)}: {err or f'exit {rc}'}")
+
+    def turn_off(self, unit: str) -> str:
+        rc, _, err = systemctl("disable", "--now", unit)
+        return f"systemctl disable --now {unit}: {err or f'exit {rc}'}" if rc != 0 else ""
+
+    def forget_last_run(self, unit: str) -> None:
+        systemctl("clean", "--what=state", unit)
+
+    def reload(self) -> None:
+        systemctl("daemon-reload")
+
+    def schedule(self, unit: str) -> tuple[str, str]:
+        rc, nxt, _ = systemctl("show", "-p", "NextElapseUSecRealtime", "--value", unit)
+        rc2, last, _ = systemctl("show", "-p", "Result", "--value", unit.replace(".timer", ".service"))
+        return (nxt if rc == 0 else ""), (last if rc2 == 0 else "")

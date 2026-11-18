@@ -14,6 +14,7 @@ from typing import Final, Literal, TypedDict
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 
@@ -170,6 +171,30 @@ class NasRepo(TypedDict):
     host: str
     repo: str
     env: dict[str, str]
+
+
+type TimerStepKind = Literal["installed", "updated", "off", "left", "removed"]
+
+
+@dataclass(frozen=True, slots=True)
+class TimerStep:
+    """What backup-timer on or off did, as it happens: a file installed or updated, the timer turned
+    off (path: its unit), a masked file left as it is, a file removed."""
+
+    kind: TimerStepKind
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class TimerStatus:
+    """backup-timer status of one VM: its timer unit, whether it is on, the state of each file
+    backup-timer on writes, and, when on, systemd's next run and last result ("" when unknown)."""
+
+    unit: str
+    on: bool
+    files: dict[str, UnitFileState]
+    next_run: str
+    last_result: str
 
 
 type ImageScope = Literal["system", "user"]

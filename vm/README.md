@@ -1039,6 +1039,10 @@ The Python code inside `vm/` (standard library only at run time):
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
   `CST_VM_*`, which move each path for the tests only, and the snapshot and
   merge timeouts). `cst doctor` builds the same settings for its VM checks.
+- `vm/application.py`: the use cases that change the machine in several
+  steps, typed against the ports of `vm/ports.py`: `backup-timer on` and
+  `off` (`TimerPort`: the timer's files through the installer, and systemd;
+  its adapter is `vm/adapters/timer.py`'s `TimerFiles`).
 - `vm/cli/`: the commands, one module per command group: `backup.py` (the
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in

@@ -36,12 +36,13 @@ from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.files import UnitFileState
 from cst_core.ports import CommandResult, DecodeErrors, OutputMode, StdinMode
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
-from vm import wiring as vm_wiring
+from vm import application as vm_application, wiring as vm_wiring
 from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
@@ -1737,6 +1738,123 @@ class PackageTest(unittest.TestCase):
         self.assertTrue(vm_domain.is_cst_vm_program(build_python_zipapp(REPO, "vm/cst-vm")))
         self.assertFalse(vm_domain.is_cst_vm_program(b"#!/usr/bin/python3 -I\nprint(1)\n"))
         self.assertFalse(vm_domain.is_cst_vm_program(b'#!/bin/sh\n"""cst-vm:'))
+
+
+class FakeTimers:
+    """A TimerPort over a dict of file states and a list of timers on: what was asked, in order."""
+
+    def __init__(self, states: dict[str, UnitFileState], on: list[str], fail: str = "") -> None:
+        self.states, self.on, self.fail = states, on, fail
+        self.done: list[str] = []
+
+    def file_states(self, instance_timer: str) -> dict[str, UnitFileState]:
+        return dict(self.states)
+
+    def install(self, states: Mapping[str, UnitFileState], report: Callable[[vm_domain.TimerStep], None]) -> None:
+        for p, st in states.items():
+            if st != "ok":
+                self.done.append(f"write {p}")
+                report(vm_domain.TimerStep("installed" if st == "missing" else "updated", p))
+
+    def mark_complete(self) -> None:
+        self.done.append("complete")
+
+    def remove(self, path: str) -> None:
+        self.done.append(f"remove {path}")
+
+    def forget(self, removed: Sequence[str]) -> None:
+        self.done.append(f"forget {' '.join(removed)}")
+
+    def timers_on(self) -> list[str]:
+        return list(self.on)
+
+    def turn_on(self, unit: str) -> None:
+        if self.fail == "on":
+            raise Refused("systemctl enable --now: failed")
+        self.done.append(f"on {unit}")
+        self.on.append(unit)
+
+    def turn_off(self, unit: str) -> str:
+        if self.fail == "off":
+            return "systemctl disable --now: denied"
+        self.done.append(f"off {unit}")
+        self.on.remove(unit) if unit in self.on else None
+        return ""
+
+    def forget_last_run(self, unit: str) -> None:
+        self.done.append(f"clean {unit}")
+
+    def reload(self) -> None:
+        self.done.append("reload")
+
+    def schedule(self, unit: str) -> tuple[str, str]:
+        return "Sat", "success"
+
+
+class TimerUseCaseTest(unittest.TestCase):
+    """vm.application's backup-timer on, off and status over a fake TimerPort."""
+
+    unit = "cst-vm-backup@win.timer"
+
+    def test_on_installs_turns_on_then_records(self) -> None:
+        timers = FakeTimers({"/p": "missing", "/u": "change", "/t": "ok"}, [])
+        steps: list[vm_domain.TimerStep] = []
+        vm_application.timer_on(timers, "win", "/own", lambda: None, steps.append)
+        self.assertEqual(timers.done, ["write /p", "write /u", f"on {self.unit}", "complete"])
+        self.assertEqual([(s.kind, s.path) for s in steps], [("installed", "/p"), ("updated", "/u")])
+
+    def test_on_refuses_before_any_change(self) -> None:
+        def no_nas() -> None:
+            raise Refused("the NAS backup is not set up")
+
+        cases: list[tuple[dict[str, UnitFileState], Callable[[], None], str]] = [
+            ({"/p": "conflict"}, lambda: None, "not CST's files"),
+            ({"/p": "ok", "/own": "masked"}, lambda: None, "nothing was changed"),
+            ({"/p": "missing"}, no_nas, "not set up"),
+        ]
+        for states, ready, words in cases:
+            timers = FakeTimers(states, [])
+            with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
+                vm_application.timer_on(timers, "win", "/own", ready, lambda s: None)
+            self.assertEqual(timers.done, [])
+
+    def test_a_failed_start_leaves_the_record_pending(self) -> None:
+        timers = FakeTimers({"/p": "missing"}, [], fail="on")
+        with self.assertRaises(Refused):
+            vm_application.timer_on(timers, "win", "/own", lambda: None, lambda s: None)
+        self.assertEqual(timers.done, ["write /p"])
+
+    def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
+        timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
+        steps: list[vm_domain.TimerStep] = []
+        self.assertEqual(vm_application.timer_off(timers, "win", "/own", steps.append), [])
+        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p", "reload"])
+        self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
+
+    def test_off_keeps_the_files_for_another_vm(self) -> None:
+        other = "cst-vm-backup@other.timer"
+        timers = FakeTimers({"/p": "ok"}, [self.unit, other])
+        self.assertEqual(vm_application.timer_off(timers, "win", "/own", lambda s: None), [other])
+        self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}"])
+
+    def test_off_refuses_when_the_timer_stays_on(self) -> None:
+        timers = FakeTimers({"/p": "ok"}, [self.unit], fail="off")
+        with self.assertRaisesRegex(Refused, "denied"):
+            vm_application.timer_off(timers, "win", "/own", lambda s: None)
+        self.assertEqual(timers.done, [])
+        timers = FakeTimers({"/p": "ok"}, [], fail="off")  # off already: the failure does not matter
+        vm_application.timer_off(timers, "win", "/own", lambda s: None)
+        self.assertIn("remove /p", timers.done)
+
+    def test_status(self) -> None:
+        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, [self.unit]), "win", "/own")
+        self.assertEqual(
+            (st.unit, st.on, st.files, st.next_run, st.last_result), (self.unit, True, {"/p": "ok"}, "Sat", "success")
+        )
+        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, []), "win", "/own")
+        self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
+        with self.assertRaises(Refused):
+            vm_application.timer_status(FakeTimers({}, []), "bad name", "/own")
 
 
 class DetachedTest(unittest.TestCase):
