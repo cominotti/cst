@@ -599,7 +599,7 @@ def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
             "retention runs again next time"
         )
         return
-    gone = len(re.findall(r"^remove \d+ snapshots?:", so, re.M))
+    gone = len(re.findall(r"^remove \d+ snapshots?:", so, re.MULTILINE))
     p.out.say(
         f"  retention: {weekly} weekly + {monthly} monthly kept, and those tagged {KEEP_TAG}"
         f"{'; older ones forgotten' if gone else ''} (space is freed by the /home NAS job's weekly prune)"
