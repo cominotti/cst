@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import os
 import socket
 import sys
+import tempfile
 from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT
@@ -121,6 +122,16 @@ class VmCommands:
             *args, timeout=timeout, start_new_session=self._detached if detach is None else detach
         )
         return _triple(r, "virsh", timeout)
+
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define of text, through a temporary file (removed after)."""
+        fd, tmp = tempfile.mkstemp(prefix="cst-vm-tune.", suffix=".xml")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            return self.virsh(("define", tmp), 60, detach=None)
+        finally:
+            os.unlink(tmp)
 
 
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()

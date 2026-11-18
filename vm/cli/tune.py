@@ -70,7 +70,7 @@ def cmd_tune(
         return 0
     saved = application.apply_tune(
         virsh,
-        wiring.definition_store(cfg, virsh) if store is None else store,
+        wiring.definition_store(cfg) if store is None else store,
         wiring.ask if confirm is None else confirm,
         lambda: utc_now(cfg.now)[1],
         plan,

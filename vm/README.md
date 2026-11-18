@@ -1048,9 +1048,9 @@ The Python code inside `vm/` (standard library only at run time):
   `off` (`TimerFilesPort`: the timer's files through the installer and the
   links that say which timer is on, its adapter `vm/adapters/timer.py`'s
   `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,
-  then apply: `VmCommandsPort`, virsh as `vm.adapters.VmCommands` runs it,
-  and `DefinitionStorePort`, the definition kept before tune and `virsh
-  define` from a text, `vm/adapters/backup.py`'s `DefinitionFiles`).
+  then apply: `VmCommandsPort`, libvirt as `vm.adapters.VmCommands` reaches it:
+  virsh, and `virsh define` of a text; and `DefinitionStorePort`, the copy of
+  the definition kept before tune, `vm/adapters/backup.py`'s `DefinitionFiles`).
 - `vm/cli/`: the commands, one module per command group: `backup.py` (the
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in

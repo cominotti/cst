@@ -46,15 +46,15 @@ class VmCommandsPort(Protocol):
         """(exit status, stdout, stderr) of virsh ARGS."""
         ...
 
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define of a definition given as its text: (exit status, stdout, stderr)."""
+        ...
+
 
 class DefinitionStorePort(Protocol):
-    """VM definitions as files: the copy kept before tune changes a definition, and a definition
-    given to libvirt from its text."""
+    """The copies of a VM definition kept before tune changes it (files; libvirt itself is
+    VmCommandsPort)."""
 
     def save(self, vm: str, stamp: str, text: str) -> str:
         """Keep text (it holds --security-info secrets) as VM's definition before tune; its path."""
-        ...
-
-    def define(self, text: str) -> tuple[int, str, str]:
-        """virsh define of text: (exit status, stdout, stderr)."""
         ...

@@ -90,9 +90,9 @@ def vm_commands() -> VmCommandsPort:
     return COMMANDS_OF_VM
 
 
-def definition_store(cfg: VmSettings, commands: VmCommandsPort) -> DefinitionStorePort:
-    """The definitions tune keeps under the backup folder, and virsh define over commands."""
-    return DefinitionFiles(cfg.paths.backup_dir, commands)
+def definition_store(cfg: VmSettings) -> DefinitionStorePort:
+    """The definitions tune keeps under the backup folder."""
+    return DefinitionFiles(cfg.paths.backup_dir)
 
 
 def ask(question: str) -> bool:

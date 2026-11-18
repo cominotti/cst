@@ -184,7 +184,7 @@ def apply_tune(
     if not confirm(f"\nDefine {vm} with these changes (effective at its next start)?"):
         return None
     saved = store.save(vm, stamp(), secret)
-    rc, _, err = store.define(s_after)
+    rc, _, err = commands.define(s_after)
     if rc != 0:
         raise Refused(
             f"virsh define: {first_line(err) or f'exit {rc}'} (nothing changed; "

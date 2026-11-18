@@ -72,6 +72,13 @@ class FakeCommands:
     def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
         return self.fake(*args, timeout=timeout, detach=detach)
 
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define FILE of the fake, with text in a temporary file (as VmCommands.define)."""
+        with tempfile.NamedTemporaryFile("w", prefix="cst-vm-test-", suffix=".xml") as f:
+            f.write(text)
+            f.flush()
+            return self.fake("define", f.name, timeout=60, detach=None)
+
 
 class _NoCommands:
     """A runner that refuses every command: a test that reaches the real virsh fails."""
