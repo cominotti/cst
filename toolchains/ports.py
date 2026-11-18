@@ -187,3 +187,12 @@ class UserUnitsPort(Protocol):
         """PATH of the user manager (what the timer's service runs with), or None when it
         cannot be read."""
         ...
+
+
+class ToolchainsLockPort(Protocol):
+    """One run at a time: the hourly prune, a manual prune apply, auto on and auto off."""
+
+    def run(self, fn: Callable[[], int], *, busy_refused: bool = False) -> int:
+        """FN() while this run holds the lock. When another run holds it: nothing done, exit 0
+        (and a line), or Refused with BUSY_REFUSED (what was asked did not happen)."""
+        ...

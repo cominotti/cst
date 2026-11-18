@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The files CST writes in the home folder: auto on's copies and units and the
 sccache wrapper (through the installer and its record), the settings files
-it appends to or rewrites, and the run summaries of the targets.
+it appends to or rewrites, the run summaries of the targets and the run lock.
 """
 
 from __future__ import annotations
@@ -203,28 +203,36 @@ class RunSummaries:
         write_state(self.home, tid, record, self.out)
 
 
-def run_locked(home: str, fn: Callable[[], int], out: RunOutputPort, *, busy_refused: bool = False) -> int:
-    """One run at a time (the timer and a manual apply, auto on/off): an exclusive
-    flock on ~/.local/state/cst/toolchains.lock (0600). When another run holds the
-    lock: nothing done, exit 0 (a prune that finds another prune running), or
-    Refused with busy_refused (auto on/off: what was asked did not happen)."""
-    path = os.path.join(home, STATE_DIR_REL, "toolchains.lock")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-    try:
+class ToolchainsLock:
+    """ToolchainsLockPort: one run at a time (the timer and a manual apply, auto on/off), an
+    exclusive flock on ~/.local/state/cst/toolchains.lock (0600) in HOME; OUT says when
+    another run holds it."""
+
+    def __init__(self, home: str, out: RunOutputPort) -> None:
+        self.home = home
+        self.out = out
+
+    def run(self, fn: Callable[[], int], *, busy_refused: bool = False) -> int:
+        """FN() under the lock. When another run holds the lock: nothing done, exit 0 (a
+        prune that finds another prune running), or Refused with busy_refused (auto
+        on/off: what was asked did not happen)."""
+        path = os.path.join(self.home, STATE_DIR_REL, "toolchains.lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            if busy_refused:
-                raise Refused(
-                    "another run is in progress (the hourly prune, or another auto on/off): nothing done; "
-                    f"run this again once it has finished (journalctl --user -u {SERVICE} shows the prune)"
-                ) from None
-            out.say("another run is in progress: nothing done", 5)
-            return 0
-        return fn()
-    finally:
-        os.close(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                if busy_refused:
+                    raise Refused(
+                        "another run is in progress (the hourly prune, or another auto on/off): nothing done; "
+                        f"run this again once it has finished (journalctl --user -u {SERVICE} shows the prune)"
+                    ) from None
+                self.out.say("another run is in progress: nothing done", 5)
+                return 0
+            return fn()
+        finally:
+            os.close(fd)
 
 
 def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> OwnedState:

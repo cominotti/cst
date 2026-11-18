@@ -19,7 +19,7 @@ from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.runtime import program_argv
 from toolchains.adapters.build_tree import CargoBuildTree
-from toolchains.adapters.home_files import RunSummaries, load_settings
+from toolchains.adapters.home_files import RunSummaries, ToolchainsLock, load_settings
 from toolchains.adapters.processes import cargo_procs
 from toolchains.adapters.program import RunOutput, home_folder, in_container, journal_stdout
 from toolchains.adapters.units import UserUnits
@@ -36,14 +36,14 @@ if TYPE_CHECKING:
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
     from toolchains.domain.prune import Settings
-    from toolchains.ports import BuildTreePort, RunOutputPort, UserUnitsPort, UvPort
+    from toolchains.ports import BuildTreePort, RunOutputPort, ToolchainsLockPort, UserUnitsPort, UvPort
 
 
 @dataclasses.dataclass(frozen=True)
 class Session:
     """What every command runs with: the home it works on, the run's "now", how
     hints name the program, the running program's entry point (its files are next
-    to it), the run's bounds, and the adapters."""
+    to it), the run's bounds, and the adapters (the run lock among them)."""
 
     home: str
     now: float
@@ -52,6 +52,7 @@ class Session:
     limits: Limits
     out: RunOutputPort
     units: UserUnitsPort
+    lock: ToolchainsLockPort
     machine: TargetPorts
 
 
@@ -106,7 +107,7 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
     units = UserUnits(out, systemctl_program()) if p.units is None else p.units(out)
-    return Session(home, now, prog, entry_file, limits, out, units, machine)
+    return Session(home, now, prog, entry_file, limits, out, units, ToolchainsLock(home, out), machine)
 
 
 def settings(s: Session) -> Settings:

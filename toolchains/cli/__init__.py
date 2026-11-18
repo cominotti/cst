@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from cst_core.domain.errors import Refused, Usage
 from cst_core.ports import WriteFailed
 from toolchains import wiring
-from toolchains.adapters.home_files import run_locked
 from toolchains.adapters.program import output_mode, real_user_is_root
 from toolchains.cli import auto, config, prune, status
 from toolchains.domain.common import NAME, USAGE, ConfigError, parse_args
@@ -51,10 +50,10 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
         if cmd == "prune" and action == "plan":
             return prune.cmd_prune(s, "plan", a["targets"])
         if cmd == "prune":
-            return run_locked(s.home, lambda: prune.cmd_prune(s, "apply", a["targets"]), s.out)
+            return s.lock.run(lambda: prune.cmd_prune(s, "apply", a["targets"]))
         if action == "on":
-            return run_locked(s.home, lambda: auto.cmd_auto_on(s, unless_off=a["unless_off"]), s.out, busy_refused=True)
-        return run_locked(s.home, lambda: auto.cmd_auto_off(s), s.out, busy_refused=True)
+            return s.lock.run(lambda: auto.cmd_auto_on(s, unless_off=a["unless_off"]), busy_refused=True)
+        return s.lock.run(lambda: auto.cmd_auto_off(s), busy_refused=True)
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
