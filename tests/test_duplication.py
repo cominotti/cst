@@ -305,7 +305,7 @@ class DuplicationRatchetTest(unittest.TestCase):
     def test_type2_skips_data_rows_and_type1_keeps_them(self) -> None:
         rows = {p: "X = (\n" + "".join(f'    "{p}{i}",\n' for i in range(9)) + ")\n" for p in ("a", "b")}
         self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in rows.items()}, 8).duplicated, 0)
-        same = {p: rows["a"] for p in ("a", "b")}
+        same = dict.fromkeys(("a", "b"), rows["a"])
         self.assertEqual(clones({p: normalized_python(s, type2=False) for p, s in same.items()}, 8).cross_file, 20)
         self.assertEqual(normalized_python('f("a", 1)\n', type2=True), ["N ( S , 0 )"])
 

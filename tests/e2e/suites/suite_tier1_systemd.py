@@ -339,9 +339,9 @@ def stall_monitor_e2e_unit(
     renamed to it, so that a test running the real daemon keeps out of the real folders. Every other
     line stays, Type=notify, WatchdogSec= and the RuntimeDirectory= options included."""
     out: list[str] = []
-    seen = {
-        k: 0 for k in ("ExecStart=", "Nice=", "Type=notify", "TimeoutStartSec=", "LogsDirectory=", "RuntimeDirectory=")
-    }
+    seen = dict.fromkeys(
+        ("ExecStart=", "Nice=", "Type=notify", "TimeoutStartSec=", "LogsDirectory=", "RuntimeDirectory="), 0
+    )
     for line in shipped.splitlines():
         key = next((k for k in seen if line == k or (k.endswith("=") and line.startswith(k))), None)
         if key is not None:
