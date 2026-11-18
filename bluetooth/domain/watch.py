@@ -8,7 +8,7 @@ from collections.abc import Iterable, Sequence
 import re
 from typing import Final, TypedDict
 
-from bluetooth.domain import PactlCard, PwObject, PwProps, node_rate
+from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, PwObject, PwProps, node_rate
 
 
 # ---- the LDAC rate watcher (bt-ldac-watch): what it sees and what it decides ---------------
@@ -65,7 +65,7 @@ def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
         info = o.get("info") or {}
         p = info.get("props") or {}
         kind = str(o.get("type", ""))
-        if kind.endswith("Device") and p.get("device.name") == "bluez_card." + dev:
+        if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             snap["card"] = serial(p)
             prof = (info.get("params") or {}).get("Profile") or []
             if prof and isinstance(prof[0], dict):
@@ -73,11 +73,11 @@ def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
         if not kind.endswith("Node"):
             continue
         name = str(p.get("node.name", ""))
-        if name.startswith("bluez_output." + dev) and p.get("api.bluez5.codec"):
+        if name.startswith("bluez_output." + dev) and p.get(CODEC_KEY):
             snap["out"] = serial(p)
-            snap["codec"] = p["api.bluez5.codec"]
+            snap["codec"] = p[CODEC_KEY]
             snap["rate"] = node_rate(info)
-        elif name.startswith(("bluez_input." + dev, "bluez_input." + mac)):
+        elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + mac)):
             inputs.append(serial(p))
             if info.get("state") == "running":
                 snap["mic"] = True
@@ -224,7 +224,7 @@ def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | No
     description, else by PipeWire's usual names. The bounce profile is SBC,
     else another available A2DP codec (SBC-XQ, AAC, ...); None when the card
     or a profile is missing."""
-    card = next((c for c in cards if c.get("name") == "bluez_card." + dev), None)
+    card = next((c for c in cards if c.get("name") == CARD_PREFIX + dev), None)
     if card is None:
         return None, None, None
     by_codec: dict[str, str] = {}

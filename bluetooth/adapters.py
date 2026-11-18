@@ -157,8 +157,8 @@ def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
     return r.returncode, r.stdout
 
 
-class Live:
-    """The real system: pw-dump and pactl (a LiveAudioPort)."""
+class Live(LiveAudioPort):
+    """The real system: pw-dump and pactl."""
 
     def __init__(self, dev: str) -> None:
         self.dev = dev
@@ -436,6 +436,9 @@ def run_watcher(dev: str, rate: int, *, dry_run: bool) -> int:
     os.environ.setdefault("LC_ALL", "C")  # pactl's event lines in English
     try:
         Watcher(dev, rate, dry_run).run()
-    except KeyboardInterrupt, SystemExit:
+    except KeyboardInterrupt:
         log(6, "stopped")
+    except SystemExit:  # Stop's exit, status 0
+        log(6, "stopped")
+        raise
     return 0

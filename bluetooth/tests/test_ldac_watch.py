@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -169,6 +170,15 @@ class ParseTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(r.returncode, 2)
+        for stdin in ("garbage", ""):  # not JSON: exit 3, nothing printed
+            r = subprocess.run(
+                [sys.executable, "-I", WATCH, "--device", MAC, "--snapshot"],
+                check=False,
+                input=stdin,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (3, "", ""), stdin)
 
     def test_decide(self) -> None:
         def d(
@@ -213,7 +223,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(p(DEV, cards(lang_names=True)), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         # No SBC: another A2DP codec does the same job.
         self.assertEqual(p(DEV, cards(sbc=False))[2], "a2dp-sink-aac")
-        self.assertEqual(p(DEV, cards(sbc=False, lang_names=True))[2], None)
+        self.assertIsNone(p(DEV, cards(sbc=False, lang_names=True))[2])
         c = cards()
         c[1]["profiles"]["a2dp-sink-sbc"]["available"] = False
         self.assertEqual(p(DEV, c)[2], "a2dp-sink-aac")
@@ -602,6 +612,30 @@ class ListenTest(unittest.TestCase):
         ):
             watcher.listen(types.SimpleNamespace(stdout=f))
         self.assertEqual(len(looks), 2)
+
+
+class StopTest(unittest.TestCase):
+    """The real program: a stop signal outside a profile switch ends it at once, exit status 0,
+    with "stopped" as its last line."""
+
+    def test_sigterm_while_waiting_for_pactl(self) -> None:
+        empty = tempfile.mkdtemp(prefix="bt-test-")  # PATH without pactl: the loop waits to retry
+        self.addCleanup(shutil.rmtree, empty)
+        p = subprocess.Popen(
+            [sys.executable, "-I", WATCH, "--device", MAC],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"PATH": empty},
+        )
+        assert p.stdout is not None
+        first = p.stdout.readline()
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=30)
+        self.assertIn("watching bluez_card.0A_1B_2C_3D_4E_5F", first)
+        self.assertEqual((p.returncode, err), (0, ""))
+        self.assertEqual((first + out).splitlines()[-1], "<6>stopped")
 
 
 class UnitTest(unittest.TestCase):

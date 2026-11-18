@@ -71,7 +71,9 @@ def split_lines(text: str) -> tuple[list[str], str, bool]:
 
 def join_lines(lines: Sequence[str], nl: str, final: bool = True) -> str:
     """Rejoin lines with `nl`, keeping trailing newline iff `final`."""
-    return nl.join(lines) + (nl if final else "") if lines else ""
+    if not lines:
+        return ""
+    return nl.join(lines) + (nl if final else "")
 
 
 def general_ranges(lines: Sequence[str]) -> list[tuple[int, int]]:
@@ -126,7 +128,7 @@ def current_values(text: str) -> dict[str, str | None]:
     """{key: value of the line that counts, or None} for KEYS in [General]."""
     lines = split_lines(text)[0]
     ranges = general_ranges(lines)
-    out: dict[str, str | None] = {k: None for k in KEYS}
+    out: dict[str, str | None] = dict.fromkeys(KEYS)
     for key in KEYS:
         active, _ = key_lines(lines, ranges, key)
         if active:
@@ -362,7 +364,7 @@ def roles_state(value: str | None) -> str:
     not set: PipeWire's own default, which has the LE Audio roles)."""
     if value is None:
         return "default"
-    roles = re.findall(r"[A-Za-z0-9_]+", value)
+    roles = re.findall(r"\w+", value, flags=re.ASCII)
     return "le" if any(r.startswith("bap_") for r in roles) else "classic"
 
 
@@ -380,7 +382,7 @@ def settings_problems(text: str) -> tuple[SettingsProblem, ...]:
     return parse_shell_assignments(text, bash_sourced=False).problems
 
 
-_LINE_KEY: Final = re.compile(r"\s*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_LINE_KEY: Final = re.compile(r"\s*(?:export[ \t]+)?([A-Za-z_](?a:\w*))\s*=")  # (?a:): \w in ASCII only
 
 
 def line_key(line: str) -> str | None:
@@ -430,7 +432,7 @@ def settings_set(text: str | None, key: str, value: str) -> tuple[str, bool]:
 
 def merged_settings(texts: Iterable[str]) -> dict[str, str]:
     """Merge settings texts in priority order (later entries win)."""
-    out = {k: "" for k in SETTING_KEYS}
+    out = dict.fromkeys(SETTING_KEYS, "")
     for t in texts:
         out.update(parse_settings(t))
     return out
@@ -448,6 +450,11 @@ def settings_report(files: Sequence[tuple[str, str]]) -> tuple[str, str]:
 
 
 # ---- live state (parsed from the output of busctl, pactl and pw-dump) ----------------------
+# PipeWire's names of the headset's card and its input nodes (the prefix, then DEV), and the
+# property of an output node that names its codec.
+CARD_PREFIX: Final = "bluez_card."
+INPUT_PREFIX: Final = "bluez_input."
+CODEC_KEY: Final = "api.bluez5.codec"
 # The parts of their JSON the rules read. total=False: the tools give more keys and may leave one
 # out. Nothing checks these shapes at run time; the functions keep their own defaults and
 # isinstance tests where a part can be missing or of another type.
@@ -566,11 +573,11 @@ def card_state(
 ) -> tuple[str, bool, bool] | None:
     """(active profile, a2dp-sink offered, headset mic in use), or None when
     the headset has no card in PipeWire."""
-    card = next((c for c in cards if c.get("name") == "bluez_card." + dev), None)
+    card = next((c for c in cards if c.get("name") == CARD_PREFIX + dev), None)
     if card is None:
         return None
     a2dp = bool(card.get("profiles", {}).get("a2dp-sink", {}).get("available", False))
-    bt_src = {s.get("index") for s in srcs if str(s.get("name", "")).startswith("bluez_input." + dev)}
+    bt_src = {s.get("index") for s in srcs if str(s.get("name", "")).startswith(INPUT_PREFIX + dev)}
     mic = any(o.get("source") in bt_src for o in outs)
     return str(card.get("active_profile") or ""), a2dp, mic
 
@@ -591,17 +598,13 @@ def pw_state(
         p = info.get("props") or {}
         params = info.get("params") or {}
         kind = str(o.get("type", ""))
-        if kind.endswith("Device") and p.get("device.name") == "bluez_card." + dev:
+        if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             found = True
             prof = " ".join(str(pr.get("name", "?")) for pr in params.get("Profile", []) or [])
             raw_rule = p.get("bluez5.a2dp.ldac.quality")
             rule = None if raw_rule is None else str(raw_rule)
-        if (
-            kind.endswith("Node")
-            and str(p.get("node.name", "")).startswith("bluez_output." + dev)
-            and p.get("api.bluez5.codec")
-        ):
-            codec = str(p["api.bluez5.codec"])
+        if kind.endswith("Node") and str(p.get("node.name", "")).startswith("bluez_output." + dev) and p.get(CODEC_KEY):
+            codec = str(p[CODEC_KEY])
             rate = node_rate(info)
             for pr in params.get("Props", []) or []:
                 if "quality" in pr:
