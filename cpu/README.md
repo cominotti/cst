@@ -802,7 +802,11 @@ if [[ -e /run/cpu-setup/game.state ]]; then echo "a game runs"; fi
 
 Key on existence only. The contents of `game.state` (and of
 `game.intended`) are internal to `cpu-game-profile` and may change in any
-version. To be covered all the time, not only during games, run such work in
+version. `game.intended` (what `on` set, for the drift repair) names its
+format on its first line (`cst-game-intended 1`; a file without it, from an
+older version, is format 0 and is read as before). A copy that finds a newer
+format there leaves the drift alone: `tick` says so in the journal,
+`state` and `cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 

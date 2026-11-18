@@ -39,7 +39,9 @@ from cpu.game.domain import (
     expand_cpus,
     first_cpu,
     has_record_part,
+    intended_header,
     intended_props,
+    newer_intended,
     off_records,
     on_text,
     record_line,
@@ -367,9 +369,10 @@ class GameProfile:
         if not s.target_user:
             self.log(3, f"TARGET_USER not set in {p.conf}")
             return 1
-        for f in (p.state, p.intended):
-            with open(f, "w", encoding="utf-8"):
-                pass
+        with open(p.state, "w", encoding="utf-8"):
+            pass
+        with open(p.intended, "w", encoding="utf-8") as fh:
+            fh.write(intended_header())
         self.setp(
             "sys",
             "machine.slice",
@@ -450,10 +453,9 @@ class GameProfile:
             else:
                 self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
 
-    def drift(self) -> list[Drift]:
-        """The settings in game.intended that no longer hold (one systemctl show per unit)."""
-        text = read_text(self.paths.intended) or ""
-        if not text or not drift_readable(text):
+    def drift(self, text: str) -> list[Drift]:
+        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
+        if not drift_readable(text):
             return []
         recs = records(text)
         now: dict[tuple[str, str], dict[str, str]] = {}
@@ -469,8 +471,14 @@ class GameProfile:
 
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
-        a second record to game.state and make 'off' restore the profile's own value."""
-        for d in self.drift():
+        a second record to game.state and make 'off' restore the profile's own value. A game.intended
+        of a newer CST is not read (its records may mean something else): said in the journal."""
+        text = read_text(self.paths.intended) or ""
+        newer = newer_intended(self.paths.intended, text)
+        if newer is not None:
+            self.log(4, f"drift not repaired: {newer}")
+            return
+        for d in self.drift(text):
             r = d.record
             if d.is_cgroup_file:
                 ok = _write_line(r[1], r[2])
@@ -529,8 +537,12 @@ class GameProfile:
     def drift_report(self) -> list[str]:
         """The drift part of 'state': each setting that no longer holds, or that none drifted."""
         p = self.paths
-        drifts = self.drift() if os.path.exists(p.intended) else None
-        return drift_lines(drifts, manual=os.path.exists(p.manual))
+        if not os.path.exists(p.intended):
+            return drift_lines(None, manual=os.path.exists(p.manual))
+        text = read_text(p.intended) or ""
+        newer = newer_intended(p.intended, text)
+        drifts = [] if newer is not None else self.drift(text)
+        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer)
 
     def _slice_line(self, unit: str) -> None:
         cpus, weight, io = (self.prop("sys", unit, n) for n in ("AllowedCPUs", "CPUWeight", "IOWeight"))

@@ -27,7 +27,7 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
-from cst_core.domain.contracts import state_format, version_of
+from cst_core.domain.contracts import first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
@@ -1310,6 +1310,24 @@ class StateContractsTest(unittest.TestCase):
                 self.assertTrue(f.writers and f.readers)
                 for rel in f.writers + f.readers:
                     self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, rel)), rel)
+
+    def test_first_line_version(self) -> None:
+        self.assertEqual(first_line_version("cst-game-intended 1\nprop a\n", "cst-game-intended"), 1)
+        self.assertEqual(first_line_version("cst-game-intended 12", "cst-game-intended"), 12)
+        for text in ("", "prop sys a b c d\n", "cst-alert 1\n", "cst-game-intendedx 1\n"):
+            with self.subTest(text=text):
+                self.assertEqual(first_line_version(text, "cst-game-intended"), 0)
+        for text in (
+            "cst-game-intended\n",
+            "cst-game-intended x\n",
+            "cst-game-intended -1\n",
+            "cst-game-intended 1 2\n",
+            "cst-game-intended \u00b2\n",  # a digit for str.isdigit, not for int()
+            "cst-game-intended \u0661\n",  # an Arabic-Indic one: int() reads it, the format does not
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(first_line_version(text, "cst-game-intended"))
+        self.assertEqual(state_format("game-intended").version, 1)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(

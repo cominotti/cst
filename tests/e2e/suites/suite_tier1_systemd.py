@@ -3160,6 +3160,8 @@ EOF
                 touch /run/cpu-setup/manual
                 $first on
                 [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+                # This version's game.intended names its format; the bash copy skips that line.
+                if [[ $first == pygp ]]; then [[ "$(head -n1 /run/cpu-setup/game.intended)" == "cst-game-intended 1" ]]; fi
                 n1=$(wc -l </run/cpu-setup/game.state)
                 $second tick
                 [[ "$(wc -l </run/cpu-setup/game.state)" == "$n1" ]] || {{ echo "$second tick added records" >&2; exit 1; }}

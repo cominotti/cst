@@ -19,7 +19,7 @@ import posixpath
 import re
 from typing import Final, Literal
 
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import first_line_version, state_format
 from cst_core.domain.text import file_lines, printf_q, printf_q_words
 
 type Manager = Literal["sys", "usr"]
@@ -36,6 +36,9 @@ KNOWN_SLICES: Final = frozenset({"app.slice", "session.slice", "user.slice"})
 STEAM_SCOPES: Final = "app-flatpak-com.valvesoftware.Steam-*"
 DOCKER_SCOPES: Final = "docker-*.scope"
 USAGE: Final = "usage: game-profile on|off|tick|state"
+# game.intended's first line names its format (cst_core.domain.contracts): "cst-game-intended 1".
+INTENDED_MAGIC: Final = "cst-game-intended"
+INTENDED_FORMAT: Final = state_format("game-intended")
 
 
 def _in(folder: str, name: str) -> str:
@@ -175,6 +178,20 @@ def show_values(stdout: str) -> dict[str, str]:
 def record_line(*fields: str) -> str:
     """One record: its fields as printf %q writes them, a blank between, and a newline."""
     return " ".join(printf_q(f) for f in fields) + "\n"
+
+
+def intended_header() -> str:
+    """The first line of a game.intended this version writes."""
+    return record_line(INTENDED_MAGIC, str(INTENDED_FORMAT.version))
+
+
+def newer_intended(path: str, text: str) -> str | None:
+    """Why game.intended cannot be compared (a format newer than this version reads, or a first line
+    that names no version), None when it can."""
+    found = first_line_version(text, INTENDED_MAGIC)
+    if found is None:
+        return f"{path}: its first line names no format version"
+    return INTENDED_FORMAT.newer_text(path, found) if found > INTENDED_FORMAT.version else None
 
 
 def records(text: str) -> list[Record]:
@@ -324,8 +341,11 @@ def again_cmd(*, manual: bool) -> str:
     return "cst cpu game off && cst cpu game on" if manual else "sudo systemctl restart cpu-game.service"
 
 
-def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool) -> list[str]:
-    """The drift part of 'state' (drifts None: no game.intended, switched on by an older version)."""
+def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None) -> list[str]:
+    """The drift part of 'state' (drifts None: no game.intended, switched on by an older version; newer:
+    why game.intended cannot be compared)."""
+    if newer is not None:
+        return [f"  drift: not checked ({newer})"]
     if drifts is None:
         return [
             "  drift: not checked (switched on by an older version, which kept no record of its values;",

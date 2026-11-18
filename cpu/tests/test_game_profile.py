@@ -560,6 +560,42 @@ class GameProfileDriftTest(GameProfileCase):
         self.assertTrue(out.endswith("  drift: none (every setting the profile made still holds)\n"), out)
 
 
+class IntendedFormatTest(GameProfileCase):
+    """game.intended names its format on its first line; a newer one is left alone."""
+
+    def test_on_writes_the_format_line_first(self) -> None:
+        self.run_profile("on")
+        first, _, rest = self.read(self.intended).partition("\n")
+        self.assertEqual(first, "cst-game-intended 1")
+        self.assertTrue(rest.startswith("prop sys machine.slice AllowedCPUs 12-23 "), rest)
+        self.assertEqual(records(first), [("cst-game-intended", "1")])
+        # Drift is compared below it as before.
+        self.write(self.manual, "")
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime machine.slice CPUWeight=10"])
+        self.assertIn("drift: machine.slice CPUWeight was '50'", out)
+
+    def test_a_newer_format_is_neither_repaired_nor_compared(self) -> None:
+        self.write(self.state, "prop sys machine.slice CPUWeight new -\n")
+        self.write(self.intended, "cst-game-intended 2\nprop sys machine.slice CPUWeight 10 10\n")
+        self.write(self.manual, "")
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+        out, actions = self.run_profile("tick")
+        why = f"{self.intended} is format 2 of the game-intended (this CST reads format 1 and older): written by a newer CST"
+        self.assertEqual(out, f"<4>game-profile: drift not repaired: {why}\n")
+        self.assertEqual([a for a in actions if " show -p " in a or "set-property" in a], [])
+        report, _ = self.drift_report()
+        self.assertEqual(report, f"  drift: not checked ({why})\n")
+        self.write(self.intended, "cst-game-intended x\nprop sys machine.slice CPUWeight 10 10\n")
+        report, _ = self.drift_report()
+        self.assertEqual(report, f"  drift: not checked ({self.intended}: its first line names no format version)\n")
+        # off still undoes everything: it reads game.state only.
+        _, actions = self.run_profile("off")
+        self.assertIn(f"{SYS} daemon-reload", actions)
+        self.assertFalse(os.path.exists(self.intended))
+
+
 class GameProfileEscapesTest(GameProfileCase):
     """The boxes of the user manager that sit next to the game without a rule
     of their own (top-level slices, systemd-run jobs in app.slice): idle while
