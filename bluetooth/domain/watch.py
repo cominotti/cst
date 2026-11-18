@@ -4,11 +4,11 @@ headset in pw-dump, the pactl events and card profiles that matter, and the
 one-attempt-per-connection rule (Tracker). No I/O.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 import re
-from typing import Any, Final
+from typing import Final, TypedDict
 
-from bluetooth.domain import node_rate
+from bluetooth.domain import PactlCard, PwObject, PwProps, node_rate
 
 
 # ---- the LDAC rate watcher (bt-ldac-watch): what it sees and what it decides ---------------
@@ -20,7 +20,19 @@ RELAPSE: Final[float] = 300.0  # wrong rate again this soon after a fix: the fix
 MAX_TRIES: Final[int] = 2  # attempts per connection, whatever happens
 
 
-def serial(props: Mapping[str, Any]) -> int | None:
+class Snapshot(TypedDict):
+    """What the watcher sees of the headset in pw-dump (see snapshot)."""
+
+    card: int | None
+    profile: str | None
+    out: int | None
+    codec: str | None
+    rate: int | None
+    inputs: list[int | None]
+    mic: bool
+
+
+def serial(props: PwProps) -> int | None:
     """Parse PipeWire `object.serial` into an int, or None if unavailable."""
     s = props.get("object.serial")
     if s is None:
@@ -31,14 +43,14 @@ def serial(props: Mapping[str, Any]) -> int | None:
         return None
 
 
-def snapshot(dev: str, objs: Iterable[Any]) -> dict[str, Any]:
+def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
     """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
     dict: card (object serial, None = not in PipeWire), profile (active card
     profile), out (output node serial), codec, rate, mic (the headset's input
     node is running). Missing parts are None."""
     mac = dev.replace("_", ":")
     inputs: list[int | None] = []
-    snap: dict[str, Any] = {
+    snap: Snapshot = {
         "card": None,
         "profile": None,
         "out": None,
@@ -72,7 +84,7 @@ def snapshot(dev: str, objs: Iterable[Any]) -> dict[str, Any]:
     return snap
 
 
-def decide(snap: Mapping[str, Any] | None, rate: int) -> tuple[str, str]:
+def decide(snap: Snapshot | None, rate: int) -> tuple[str, str]:
     """(what, why) for one snapshot: what is "none" (nothing wrong),
     "skip" (wrong rate, but not now) or "act" (wrong rate, may be fixed)."""
     if snap is None or snap["card"] is None:
@@ -129,7 +141,7 @@ class Tracker:
         self.fixed = None
         self.since = None
 
-    def observe(self, snap: Mapping[str, Any] | None, now: float) -> tuple[str, str | float]:
+    def observe(self, snap: Snapshot | None, now: float) -> tuple[str, str | float]:
         """Evaluate a PipeWire snapshot at monotonic timestamp `now`."""
         card: int | None = snap["card"] if snap else None
         out: int | None = snap["out"] if snap else None
@@ -174,7 +186,7 @@ class Tracker:
         self.last = now
         self.since = None
 
-    def own_node(self, snap: Mapping[str, Any] | None) -> None:
+    def own_node(self, snap: Snapshot | None) -> None:
         """After our own bounce: its new output node is not a reason to try again."""
         if snap and snap["card"] == self.card:
             self.out = snap["out"]
@@ -206,7 +218,7 @@ def relevant(line: str, known: set[int]) -> bool:
 A2DP_DESC: Final[re.Pattern[str]] = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
 
 
-def profiles(dev: str, cards: Sequence[Mapping[str, Any]]) -> tuple[str | None, str | None, str | None]:
+def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | None, str | None]:
     """(card's active profile, LDAC profile, profile to bounce through) from
     `pactl -f json list cards`. Found by the codec in each profile's
     description, else by PipeWire's usual names. The bounce profile is SBC,

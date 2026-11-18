@@ -6,7 +6,7 @@ bluetooth/bt-ldac-watch only hands its arguments to main().
 """
 
 import argparse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 import json
 import os
 import re
@@ -16,11 +16,11 @@ import subprocess
 import sys
 import time
 from types import FrameType
-from typing import IO, Any, Final, Protocol
+from typing import IO, Final, Protocol
 
 from bluetooth.adapters import Live
 from bluetooth.domain import device_id
-from bluetooth.domain.watch import decide, profiles, relevant, snapshot, Tracker
+from bluetooth.domain.watch import decide, profiles, relevant, Snapshot, snapshot, Tracker
 from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.journal import log
 
@@ -49,7 +49,7 @@ def wait_until[T](test: Callable[[], T], seconds: float, step: float = 0.5) -> T
         time.sleep(step)
 
 
-def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, str, dict[str, Any] | None]:
+def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, str, Snapshot | None]:
     """LDAC -> ALT -> LDAC. (ok, message, last snapshot)."""
     if not live.set_profile(alt):
         return False, f"pactl could not switch to {alt}", live.snap()
@@ -84,7 +84,7 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
                 live.snap(),
             )
 
-    def ldac_back() -> dict[str, Any] | None:
+    def ldac_back() -> Snapshot | None:
         s = live.snap()
         return s if s and s["codec"] == "ldac" and s["rate"] else None
 
@@ -142,7 +142,7 @@ class Watcher:
             text = why if isinstance(why, str) else f"{why:.0f} s"
             log(level, f"{what}: {text}")
 
-    def remember(self, snap: Mapping[str, Any] | None) -> None:
+    def remember(self, snap: Snapshot | None) -> None:
         """Remember known PipeWire object serials for event filtering."""
         self.known = set()
         if snap:

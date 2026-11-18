@@ -7,17 +7,17 @@ import ctypes
 import json
 import os
 import sys
-from typing import Any
 
 from bluetooth.domain import (
     LE_SECTION,
+    PactlCard,
     RESTART_UNITS,
     classify_other_fragments,
     parse_pending,
     render_pending,
     still_pending,
 )
-from bluetooth.domain.watch import snapshot
+from bluetooth.domain.watch import Snapshot, snapshot
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.ports import CommandRunnerPort
@@ -154,7 +154,7 @@ class Live:
     def __init__(self, dev: str) -> None:
         self.dev = dev
 
-    def snap(self) -> dict[str, Any] | None:
+    def snap(self) -> Snapshot | None:
         """Query `pw-dump` and return this device's parsed snapshot, or None."""
         rc, out = run(["pw-dump"], timeout=10)
         if rc != 0:
@@ -164,7 +164,7 @@ class Live:
         except ValueError:
             return None
 
-    def cards(self) -> list[dict[str, Any]] | None:
+    def cards(self) -> list[PactlCard] | None:
         """Query `pactl -f json list cards`, or return None on failure."""
         rc, out = run(["pactl", "-f", "json", "list", "cards"])
         if rc != 0:

@@ -18,14 +18,14 @@ import subprocess
 import sys
 import tempfile
 import types
-from typing import Any
 import unittest
 from unittest import mock
 
 sys.dont_write_bytecode = True
 
 from bluetooth import ldac_watch
-from bluetooth.domain import watch as bt_watch
+from bluetooth.domain import PactlCard, PactlProfile, PwObject, PwParams, watch as bt_watch
+from bluetooth.domain.watch import Snapshot
 from bluetooth.tests.test_bluetooth import MAC, WATCH, HelperModule, load_helper, shell_functions
 
 DEV = "0A_1B_2C_3D_4E_5F"
@@ -49,10 +49,10 @@ def pw_dump(
     out: int = 600,
     mic_state: str = "suspended",
     suspended: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[PwObject]:
     """A shortened pw-dump of the headset as found on sophia: the card, the
     A2DP output node and WirePlumber's headset source (named with ':')."""
-    out_params: dict[str, Any] = {
+    out_params: PwParams = {
         "EnumFormat": [{"mediaType": "audio", "format": {"default": "F32LE"}, "rate": rate, "channels": 2}],
         "Format": [] if suspended else [{"mediaType": "audio", "format": "F32LE", "rate": rate, "channels": 2}],
         "Props": [{"volume": 1.0}, {"quality": -1}],
@@ -98,9 +98,9 @@ def pw_dump(
     ]
 
 
-def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False) -> list[dict[str, Any]]:
+def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False) -> list[PactlCard]:
     """pactl -f json list cards, the headset's card (profile names as PipeWire's)."""
-    profs: dict[str, dict[str, Any]] = {
+    profs: dict[str, PactlProfile] = {
         "off": {"description": "Off", "available": True},
         "a2dp-sink-sbc_xq": {"description": "High Fidelity Playback (A2DP Sink, codec SBC-XQ)", "available": True},
         "a2dp-sink-aac": {"description": "High Fidelity Playback (A2DP Sink, codec AAC)", "available": True},
@@ -233,21 +233,19 @@ class TrackerTest(unittest.TestCase):
         out: int = 600,
         mic_state: str = "suspended",
         suspended: bool = False,
-    ) -> dict[str, Any]:
-        return dict(
-            bt_watch.snapshot(
-                DEV,
-                pw_dump(
-                    rate=rate,
-                    codec=codec,
-                    profile=profile,
-                    card=card,
-                    out=out,
-                    mic_state=mic_state,
-                    suspended=suspended,
-                ),
-            )
-        )
+    ) -> Snapshot:
+        return bt_watch.snapshot(
+            DEV,
+            pw_dump(
+                rate=rate,
+                codec=codec,
+                profile=profile,
+                card=card,
+                out=out,
+                mic_state=mic_state,
+                suspended=suspended,
+            ),
+        ).copy()
 
     def test_settle_then_act_once(self) -> None:
         s = self.snap()
@@ -383,17 +381,17 @@ class FakeLive:
         self.back_rate = back_rate
         self.fail = set(fail)
         self.calls: list[str] = []
-        self.snap_saved: Callable[[], dict[str, Any] | None] | None = None
-        self._snap_fn: Callable[[], dict[str, Any] | None] | None = None
+        self.snap_saved: Callable[[], Snapshot | None] | None = None
+        self._snap_fn: Callable[[], Snapshot | None] | None = None
         self._set_profile_fn: Callable[[str], bool] | None = None
 
-    def snap(self) -> dict[str, Any] | None:
+    def snap(self) -> Snapshot | None:
         if self._snap_fn is not None:
             return self._snap_fn()
         codec = "ldac" if self.active == "a2dp-sink" else "sbc"
         return bt_watch.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
 
-    def cards(self) -> list[dict[str, Any]]:
+    def cards(self) -> list[PactlCard]:
         return cards(active=self.active)
 
     def set_profile(self, prof: str) -> bool:
@@ -496,7 +494,7 @@ class BounceTest(unittest.TestCase):
     def test_microphone_in_use_during_the_bounce(self) -> None:
         live = FakeLive()
 
-        def snap_mic() -> dict[str, Any]:
+        def snap_mic() -> Snapshot:
             live._snap_fn = None
             s = live.snap()
             live._snap_fn = snap_mic

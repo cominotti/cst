@@ -8,10 +8,11 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 import json
 import posixpath
 import re
-from typing import Any, Final
+from typing import Final, TypedDict
 
 from cst_core.domain.files import effective_lines
 from cst_core.domain.text import SettingsProblem, parse_shell_assignments
+from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
 # (connected isochronous streams, LC3). Naming only this UUID, rather than
@@ -447,7 +448,108 @@ def settings_report(files: Sequence[tuple[str, str]]) -> tuple[str, str]:
 
 
 # ---- live state (parsed from the output of busctl, pactl and pw-dump) ----------------------
-def adapter_path(objects: Mapping[str, Any]) -> str | None:
+# The parts of their JSON the rules read. total=False: the tools give more keys and may leave one
+# out. Nothing checks these shapes at run time; the functions keep their own defaults and
+# isinstance tests where a part can be missing or of another type.
+PwProps = TypedDict(
+    "PwProps",
+    {
+        "object.serial": int | str,
+        "device.name": str,
+        "node.name": str,
+        "api.bluez5.codec": str,
+        "api.bluez5.profile": str,
+        "bluez5.a2dp.ldac.quality": str,
+    },
+    total=False,
+)
+
+
+class PwFormat(TypedDict, total=False):
+    """One entry of a node's Format or EnumFormat param."""
+
+    mediaType: str
+    format: Json  # a name, or {"default": name} in EnumFormat
+    rate: int
+    channels: int
+
+
+class PwProfileParam(TypedDict, total=False):
+    """One entry of a device's Profile param."""
+
+    index: int
+    name: str
+
+
+class PwPropsParam(TypedDict, total=False):
+    """One entry of a node's Props param (LDAC's quality: a number, or a word)."""
+
+    volume: float
+    quality: int | str
+
+
+class PwParams(TypedDict, total=False):
+    """The params of a pw-dump object that the rules read."""
+
+    Profile: list[PwProfileParam]
+    Props: list[PwPropsParam]
+    Format: list[PwFormat]
+    EnumFormat: list[PwFormat]
+
+
+class PwInfo(TypedDict, total=False):
+    """The info of a pw-dump object."""
+
+    state: str
+    props: PwProps
+    params: PwParams
+
+
+class PwObject(TypedDict, total=False):
+    """One object of `pw-dump`."""
+
+    id: int
+    type: str
+    info: PwInfo
+
+
+class PactlProfile(TypedDict, total=False):
+    """One profile of a card in `pactl -f json list cards`."""
+
+    description: str
+    available: bool
+
+
+class PactlCard(TypedDict, total=False):
+    """One card of `pactl -f json list cards`."""
+
+    name: str
+    index: int
+    active_profile: str
+    profiles: dict[str, PactlProfile]
+
+
+class PactlSource(TypedDict, total=False):
+    """One source of `pactl -f json list short sources`."""
+
+    index: int
+    name: str
+
+
+class PactlSourceOutput(TypedDict, total=False):
+    """One source output of `pactl -f json list source-outputs`."""
+
+    source: int
+
+
+class BusctlObjects(TypedDict, total=False):
+    """`busctl -j call ... GetManagedObjects`: data holds one map of object path -> interfaces."""
+
+    type: str
+    data: list[dict[str, dict[str, Json]]]
+
+
+def adapter_path(objects: BusctlObjects) -> str | None:
     """The first object path with org.bluez.Adapter1, or None."""
     data = objects.get("data") or [{}]
     for path, ifaces in sorted(data[0].items()):
@@ -458,9 +560,9 @@ def adapter_path(objects: Mapping[str, Any]) -> str | None:
 
 def card_state(
     dev: str,
-    cards: Sequence[Mapping[str, Any]],
-    srcs: Sequence[Mapping[str, Any]],
-    outs: Sequence[Mapping[str, Any]],
+    cards: Sequence[PactlCard],
+    srcs: Sequence[PactlSource],
+    outs: Sequence[PactlSourceOutput],
 ) -> tuple[str, bool, bool] | None:
     """(active profile, a2dp-sink offered, headset mic in use), or None when
     the headset has no card in PipeWire."""
@@ -474,7 +576,7 @@ def card_state(
 
 
 def pw_state(
-    dev: str, objs: Sequence[Mapping[str, Any]]
+    dev: str, objs: Sequence[PwObject]
 ) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
     """(profiles, rule quality, node codec, node quality, node rate) of the headset, or
     None when it is not in PipeWire. Missing parts are None."""
@@ -510,7 +612,7 @@ def pw_state(
     return prof or None, rule, codec, quality, None if rate is None else str(rate)
 
 
-def node_rate(info: Mapping[str, Any]) -> int | None:
+def node_rate(info: PwInfo) -> int | None:
     """The node's negotiated Format rate, else the rate its EnumFormat offers
     (a suspended node has an empty Format)."""
     params = info.get("params") or {}
