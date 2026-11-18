@@ -2484,6 +2484,14 @@ clock guards still apply.
   by the hourly run, the conversions, `prune` and `purge`.
 - Exit codes: 0 ok, 1 error, 2 wrong usage, 3 another run holds the lock,
   4 a safety rule blocked a creation or deletion.
+- For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` reads
+  and writes every file below that folder instead of `/` (`snapshots.conf`,
+  the convert plan and flags, `/var/lib/btrfs-snapshot`, the locks, the pin
+  file, `/proc`) and runs `btrfs-snapshot-core` and `btrfs-notify` from
+  there; commands still come from `PATH`. The unit tests run the whole
+  program on a fake machine this way. It is not a setting: the shipped units
+  pass no environment (a unit test checks that they have no `Environment=`,
+  `EnvironmentFile=` or `PassEnvironment=`).
 
 ---
 

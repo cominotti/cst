@@ -1026,15 +1026,14 @@ class SharedRepositoryTest(Nas):
 
 class ConstantsTest(unittest.TestCase):
     def test_nas_default_paths_match_btrfs_snapshot(self) -> None:
-        # The defaults themselves: btrfs-snapshot cannot run unprivileged (its
-        # settings, password and lock are root paths), so this one check still
-        # reads its assignments. It goes when btrfs-snapshot is converted to
-        # Python and imports these values.
+        # The defaults themselves, as its assignments spell them (a path below
+        # the test seam's "${R}", empty outside the tests). It goes when
+        # btrfs-snapshot is converted to Python and imports these values.
         with open(SNAPSHOT_RUNTIME) as f:
             text = f.read()
 
         def shell(name: str) -> str:
-            m_re = re.search(rf"^{name}=(\S+)", text, re.M)
+            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.M)
             assert m_re is not None
             return m_re.group(1)
 

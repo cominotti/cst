@@ -232,5 +232,22 @@ class SnapStatusCachesTest(unittest.TestCase):
         self.assertIn("(u@nas:22)", on[0])
 
 
+class ShippedUnitsTest(unittest.TestCase):
+    def test_no_unit_hands_the_test_seam_or_any_setting_to_btrfs_snapshot(self) -> None:
+        # CST_SNAPSHOT_ROOT moves every path of a root program into a test folder: the units
+        # that run btrfs-snapshot pass it no environment at all.
+        for name in ("btrfs-snapshot.service", "btrfs-snapshot-nas.service", "btrfs-subvol-convert.service"):
+            with open(os.path.join(BTRFS, "units", name), encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln and not ln.startswith(("#", "["))]
+            with self.subTest(name):
+                self.assertIn("ExecStart=/usr/local/sbin/btrfs-snapshot ", "\n".join(lines))
+                found = {ln.partition("=")[0].strip() for ln in lines} & {
+                    "Environment",
+                    "EnvironmentFile",
+                    "PassEnvironment",
+                }
+                self.assertEqual(found, set())
+
+
 if __name__ == "__main__":
     unittest.main()

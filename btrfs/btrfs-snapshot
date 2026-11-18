@@ -50,6 +50,10 @@
 #
 # Settings: /etc/btrfs-setup/snapshots.conf. State: /var/lib/btrfs-snapshot.
 #
+# CST_SNAPSHOT_ROOT (tests only): a folder every file path is read and written
+# under (/etc, /var, /run, /usr and /proc), instead of /. Commands still come
+# from PATH; the settings (HOME_MOUNT, TOP, ...) are what snapshots.conf says.
+#
 # Locking: hourly, convert, convert-boot, prune and purge hold /run/btrfs-snapshot.lock
 # (flock, fd 9) for their whole run and call btrfs-snapshot-core with --no-lock
 # (its default lock is that same file: a second open file description from the
@@ -59,19 +63,20 @@
 
 set -Euo pipefail
 
-CONF=/etc/btrfs-setup/snapshots.conf
-PLAN=/etc/btrfs-setup/convert-plan
-STATE=/var/lib/btrfs-snapshot
-CORE=/usr/local/sbin/btrfs-snapshot-core
-NOTIFY=/usr/local/sbin/btrfs-notify
-LOCK=/run/btrfs-snapshot.lock
-RUN_DIR=/run/btrfs-snapshot
+R="${CST_SNAPSHOT_ROOT:-}"
+CONF="${R}/etc/btrfs-setup/snapshots.conf"
+PLAN="${R}/etc/btrfs-setup/convert-plan"
+STATE="${R}/var/lib/btrfs-snapshot"
+CORE="${R}/usr/local/sbin/btrfs-snapshot-core"
+NOTIFY="${R}/usr/local/sbin/btrfs-notify"
+LOCK="${R}/run/btrfs-snapshot.lock"
+RUN_DIR="${R}/run/btrfs-snapshot"
 PIN_FILE="${RUN_DIR}/pinned"        # read by btrfs-snapshot-core: never deleted while listed
 NAS_MNT="${RUN_DIR}/nas"            # stable paths restic reads (same path = restic's parent match)
-NAS_LOCK=/run/btrfs-snapshot-nas.lock
+NAS_LOCK="${R}/run/btrfs-snapshot-nas.lock"
 NAS_SSH_ALIAS=btrfs-setup-nas       # managed Host block in /root/.ssh/config (snapshots nas setup)
-RESTIC_PASSWORD=/etc/btrfs-setup/restic-password
-RESTIC_CACHE=/var/cache/btrfs-snapshot-restic
+RESTIC_PASSWORD="${R}/etc/btrfs-setup/restic-password"
+RESTIC_CACHE="${R}/var/cache/btrfs-snapshot-restic"
 GIB=$((1024 ** 3))
 
 # Defaults; snapshots.conf overrides.
@@ -97,9 +102,9 @@ SNAPSHOT_CACHES_SKIP=".local/share/containers"
 SKIP_AT_OR_BELOW_GIB=250
 RESUME_ABOVE_GIB=270
 EMERGENCY_AT_OR_BELOW_GIB=150
-BOOT_FLAG=/etc/btrfs-setup/convert-at-boot
-BULK_FLAG=/etc/btrfs-setup/bulk-at-boot   # btrfs-bulk: items still to move into ~/Bulk at boot
-BULK_STATE=/var/lib/btrfs-bulk            # btrfs-bulk: journal-<id>.json = a move not finished
+BOOT_FLAG="${R}/etc/btrfs-setup/convert-at-boot"
+BULK_FLAG="${R}/etc/btrfs-setup/bulk-at-boot"   # btrfs-bulk: items still to move into ~/Bulk at boot
+BULK_STATE="${R}/var/lib/btrfs-bulk"            # btrfs-bulk: journal-<id>.json = a move not finished
 DROP_INLINE=1              # convert-boot defers deleting old trees to the hourly run
 NAS_ENABLED=0
 NAS_HOST=""
@@ -159,10 +164,10 @@ collect_open_paths() {
     # One find reads every link (no readlink fork per fd); -P does not follow
     # the cwd/root/exe start points, -type l skips the fd directories themselves.
     OPEN_PATHS="$( {
-        find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null |
+        find "${R}"/proc/[0-9]*/cwd "${R}"/proc/[0-9]*/root "${R}"/proc/[0-9]*/exe "${R}"/proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null |
             sed -e 's/ (deleted)$//'
         if [[ "${1:-}" == maps ]]; then
-            cat /proc/[0-9]*/maps 2>/dev/null | awk '$6 ~ /^\// {print $6}' | sed -e 's/ (deleted)$//'
+            cat "${R}"/proc/[0-9]*/maps 2>/dev/null | awk '$6 ~ /^\// {print $6}' | sed -e 's/ (deleted)$//'
         fi
         mount_sources
     } | sed '/^$/d' | sort -u)"
@@ -173,13 +178,13 @@ collect_open_paths() {
 # processes' /proc links (/src/...) never show under /var/home.
 mount_sources() {
     local dev pid
-    dev="$(awk -v m="${HOME_MOUNT}" '$5 == m {print $3; exit}' /proc/self/mountinfo)"
+    dev="$(awk -v m="${HOME_MOUNT}" '$5 == m {print $3; exit}' "${R}/proc/self/mountinfo")"
     [[ -n "${dev}" ]] || return 0
     # One process per mount namespace.
-    find /proc/[0-9]*/ns/mnt -maxdepth 0 -printf '%l %h\n' 2>/dev/null | sort -u -k1,1 |
+    find "${R}"/proc/[0-9]*/ns/mnt -maxdepth 0 -printf '%l %h\n' 2>/dev/null | sort -u -k1,1 |
         while read -r _ pid; do
-            pid="${pid#/proc/}"; pid="${pid%/ns}"
-            cat "/proc/${pid}/mountinfo" 2>/dev/null
+            pid="${pid#"${R}"/proc/}"; pid="${pid%/ns}"
+            cat "${R}/proc/${pid}/mountinfo" 2>/dev/null
         done |
         D="${dev}" S="/${HOME_SUBVOL}" M="${HOME_MOUNT}" awk '
             BEGIN {d = ENVIRON["D"]; s = ENVIRON["S"]; m = ENVIRON["M"]}
@@ -197,7 +202,7 @@ in_use() {   # path: true if anything is open at or below it (batch snapshot)
 in_use_now() {
     local pat
     pat="$(printf '%s' "$1" | sed 's/[][*?\\]/\\&/g')"
-    [[ -n "$(find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd -maxdepth 1 \
+    [[ -n "$(find "${R}"/proc/[0-9]*/cwd "${R}"/proc/[0-9]*/root "${R}"/proc/[0-9]*/exe "${R}"/proc/[0-9]*/fd -maxdepth 1 \
         \( -lname "${pat}" -o -lname "${pat}/*" \) -print -quit 2>/dev/null)" ]] && return 0
     OPEN_PATHS="$(mount_sources)" in_use "$1"
 }
