@@ -25,11 +25,16 @@ from btrfs.snapshot_runtime.domain import (
     settings_problem_line,
     sources,
 )
+from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+
+
+# The byte-transparent reader (bash's $(cat ...) and read -r kept every byte).
+_FILES = LocalFileSystemAdapter()
 
 
 class Stopped(Exception):
@@ -253,20 +258,13 @@ class SnapshotRun:
     @staticmethod
     def read(path: str) -> str | None:
         """$(cat PATH 2>/dev/null) without the trailing newlines: None when it cannot be read."""
-        try:
-            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
-                return f.read().rstrip("\n")
-        except OSError:
-            return None
+        text = _FILES.read_text(path)
+        return None if text is None else text.rstrip("\n")
 
     @staticmethod
     def read_raw(path: str) -> str:
-        """The whole text of PATH ("" when it cannot be read)."""
-        try:
-            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
-                return f.read()
-        except OSError:
-            return ""
+        """The whole text of PATH, byte-transparent ("" when it cannot be read)."""
+        return _FILES.read_text(path) or ""
 
     @staticmethod
     def non_empty(path: str) -> bool:
