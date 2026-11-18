@@ -127,7 +127,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 129,
     "btrfs/bulk/cli.py": 89,
-    "btrfs/chrome_cache/cli.py": 125,
+    "btrfs/chrome_cache/cli.py": 83,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/snapshot/cli.py": 147,
@@ -184,7 +184,6 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "bluetooth unlayered": 29,
-    "btrfs/chrome_cache cli": 7,
     "btrfs/stall_monitord cli": 1,
     "btrfs/stall_monitord unlayered": 50,
     "btrfs/stall_report cli": 1,
