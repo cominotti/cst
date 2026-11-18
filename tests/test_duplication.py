@@ -13,7 +13,9 @@ Where the hexagonal conversion left them (main before it, same method):
 - python type 2, W=8: 1.04 % (main: 0.85 %; 1.37 % before the /proc walk and
   the flag and config-state checks of toolchains were merged; the rest is
   the shape of thin adapters, ports' implementations and property lists, see
-  the PR);
+  the PR); 0.57 % (from 0.83 %) once record fields and plain `__init__`
+  bodies were left out of type 2 (2026-11; the `__init__` rule moved
+  nothing: no such body was in a duplicated window);
 - shell, W=5: 0.47 % (main: 1.28 %);
 - same-name definitions: only the names in ALLOWED_SAME_NAMES, each with its
   reason (main: 43 names, none allowed).
@@ -25,7 +27,9 @@ import unittest
 
 from tests.code_graph import production_python
 from tests.duplication import (
+    BARRIER,
     clones,
+    declared_lines,
     normalized_python,
     normalized_shell,
     python_clones,
@@ -33,7 +37,6 @@ from tests.duplication import (
     shell_clones,
     shell_function_names,
     shell_same_name_definitions,
-    without_protocol_bodies,
 )
 from tests.budgets import is_test_file
 from tests.repo_files import REPO
@@ -44,8 +47,8 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 CEILINGS: Final[dict[str, float]] = {
     "python type-1 W=8 duplicated %": 0.08,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.87,
-    "shell W=5 duplicated %": 0.46,
+    "python type-2 W=8 duplicated %": 0.57,
+    "shell W=5 duplicated %": 0.45,
     "same-name definitions in >1 file": 0,
 }
 
@@ -115,9 +118,10 @@ def _shell_files() -> list[str]:
     return [rel for rel in shell_files() if not is_test_file(rel)]
 
 
-def without_declared_copies(source: str) -> str:
-    """The source without the code that is the same everywhere by design (see tests/duplication.py)."""
-    return without_protocol_bodies(without_bootstrap(source))
+def measured_lines(source: str, *, type2: bool) -> list[str]:
+    """What the measure reads of one source: the bootstrap removed, the declared lines as barriers."""
+    text = without_bootstrap(source)
+    return normalized_python(text, type2=type2, skip=declared_lines(text, records=type2))
 
 
 def same_names_defined() -> set[str]:
@@ -133,8 +137,8 @@ def shell_same_names_defined() -> set[str]:
 def measure() -> dict[str, float]:
     """The current value of every metric in CEILINGS."""
     prod = production_python()
-    t1 = python_clones(REPO, prod, 8, type2=False, prepare=without_declared_copies)
-    t2 = python_clones(REPO, prod, 8, type2=True, prepare=without_declared_copies)
+    t1 = python_clones(REPO, prod, 8, type2=False, prepare=without_bootstrap)
+    t2 = python_clones(REPO, prod, 8, type2=True, prepare=without_bootstrap)
     sh = shell_clones(REPO, _shell_files(), 5)
     names = same_name_definitions(REPO, prod, ALLOWED_SAME_NAMES)
     return {
@@ -204,12 +208,56 @@ class DuplicationRatchetTest(unittest.TestCase):
         files = {"port": port, "impl": impl, "e1": entry, "e2": entry}
         raw = clones({p: normalized_python(s, type2=False) for p, s in files.items()}, 8)
         self.assertEqual(set(raw.per_file), {"port", "impl", "e1", "e2"})
-        kept = clones({p: normalized_python(without_declared_copies(s), type2=False) for p, s in files.items()}, 8)
+        kept = clones({p: measured_lines(s, type2=False) for p, s in files.items()}, 8)
         self.assertEqual(kept.duplicated, 0)
         # The adapter's own code still counts: a copied body is still found.
         body = "".join(f"        x{i} = f({i})\n" for i in range(8))
-        two = {p: without_declared_copies(f"class {p}:\n    def g(self):\n{body}") for p in ("B", "C")}
-        self.assertEqual(clones({p: normalized_python(s, type2=False) for p, s in two.items()}, 8).cross_file, 18)
+        two = {p: measured_lines(f"class {p}:\n    def g(self):\n{body}", type2=False) for p in ("B", "C")}
+        self.assertEqual(clones(two, 8).cross_file, 18)
+
+    def test_type2_leaves_out_record_fields_and_plain_inits_and_type1_keeps_them(self) -> None:
+        fields = "".join(f"    f{i}: int\n" for i in range(9))
+        records = {
+            "dc": f"from dataclasses import dataclass\n\n@dataclass(frozen=True, slots=True)\nclass A:\n{fields}",
+            "td": f"from typing import TypedDict\n\nclass B(TypedDict):\n{fields.replace('f', 'g')}",
+            "nt": f"import typing\n\nclass C(typing.NamedTuple):\n{fields.replace('f', 'h')}",
+        }
+        defaults = "from dataclasses import dataclass, field\n\n@dataclass\nclass D:\n    a: int = 0\n    b: list[int] = field(\n        default_factory=list\n    )\n    C = 1\n"
+        self.assertEqual(
+            declared_lines(defaults, records=True), {5, 6, 7, 8}, "fields with defaults, not a plain assignment"
+        )
+        self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in records.items()}, 8).cross_file, 27)
+        kept = {p: measured_lines(s, type2=True) for p, s in records.items()}
+        self.assertEqual(clones(kept, 8).duplicated, 0)
+        self.assertEqual(sum(len(v) - v.count(BARRIER) for v in kept.values()), 7, "fields are no code lines")
+        # Type 1 still finds a field list copied word for word.
+        same = {p: measured_lines(records["dc"].replace("class A", f"class {p}"), type2=False) for p in ("X", "Y")}
+        self.assertEqual(clones(same, 8).cross_file, 18)
+
+        # An __init__ that only stores its parameters is a declaration; one that computes is code.
+        def init(cls: str, op: str) -> str:
+            args = ", ".join(f"a{i}" for i in range(8))
+            body = "".join(f"        self.a{i} = {op.format(i)}\n" for i in range(8))
+            return f"class {cls}:\n    def __init__(self, {args}):\n{body}"
+
+        plain = {p: measured_lines(init(p, "a{}"), type2=True) for p in ("P", "Q")}
+        self.assertEqual(clones(plain, 8).duplicated, 0)
+        computed = {p: measured_lines(init(p, "a{} + 1"), type2=True) for p in ("P", "Q")}
+        self.assertEqual(clones(computed, 8).cross_file, 20)
+        self.assertEqual(declared_lines(records["dc"], records=False), set())
+
+    def test_a_left_out_block_does_not_join_the_lines_around_it(self) -> None:
+        fields = "".join(f"    f{i}: int\n" for i in range(9))
+        code = "    def m(self):\n" + "".join(f"        x{i} = self.f{i} + {i}\n" for i in range(5))
+        files = {
+            "a": f"@dataclass\nclass A:\n{fields}{code}",
+            "b": f"@dataclass\nclass B:\n{code}",
+        }
+        # Deleting a's fields would make its class line and method read as b's eight lines.
+        self.assertEqual(clones({p: measured_lines(s, type2=True) for p, s in files.items()}, 8).duplicated, 0)
+        self.assertIn(BARRIER, measured_lines(files["a"], type2=True))
+        deleted = {p: [x for x in measured_lines(s, type2=True) if x != BARRIER] for p, s in files.items()}
+        self.assertEqual(clones(deleted, 8).cross_file, 16)
 
     def test_type2_skips_data_rows_and_type1_keeps_them(self) -> None:
         rows = {p: "X = (\n" + "".join(f'    "{p}{i}",\n' for i in range(9)) + ")\n" for p in ("a", "b")}
