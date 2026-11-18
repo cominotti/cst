@@ -7,7 +7,8 @@ from typing import TextIO
 
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.ports import CommandFailed, WriteFailed
-from swap.application import MissingDesiredFileError, SwapApplicationService
+from swap.application.apply import SwapApplicationService
+from swap.application.reports import MissingDesiredFileError
 from swap.domain import (
     PAGE,
     ApplyEvent,

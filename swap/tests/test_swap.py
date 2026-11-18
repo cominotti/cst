@@ -29,7 +29,8 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult, UnitName
-from swap.application import MissingDesiredFileError, SwapApplicationService, SwapEnvironment
+from swap.application.apply import SwapApplicationService
+from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
 from swap import wiring as swap_wiring
