@@ -270,13 +270,12 @@ def cpu_owner_line(root: ET.Element, names: Sequence[str], cst: str) -> str:
     missing = [n for n in names if n not in off]
     pins = {c for p in root.findall("cputune/vcpupin") if (c := p.get("cpuset")) is not None}
     pin = f"vCPUs pinned to {', '.join(sorted(pins))}" if pins else "vCPUs not pinned"
-    feat = (
-        f"NOT disabled: {' '.join(missing)}"
-        if mode == "host-passthrough" and missing
-        else "CET/MBEC disabled"
-        if mode == "host-passthrough" and names
-        else f"cpu mode {mode}"
-    )
+    if mode == "host-passthrough" and missing:
+        feat = f"NOT disabled: {' '.join(missing)}"
+    elif mode == "host-passthrough" and names:
+        feat = "CET/MBEC disabled"
+    else:
+        feat = f"cpu mode {mode}"
     return f"CPU (owned by {cst} cpu vm-pin, not by tune): {feat}; {pin}; check: {cst} cpu vm-pin plan"
 
 

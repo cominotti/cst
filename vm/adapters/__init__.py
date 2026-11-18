@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The vm module's reach into the host: virsh, rpm, rpm-ostree, systemctl and
-restic, and the settings files. vm.adapters.backup has the backups' files
+"""The vm module's reach into the host: virsh, rpm, rpm-ostree and restic (vm.adapters.restic), and
+the settings files (systemctl: cst_core's SystemctlAdapter, with fault_words). vm.adapters.backup has the backups' files
 and the run of a backup, vm.adapters.timer the weekly timer's files,
 vm.adapters.images the VM image folders.
 
@@ -12,10 +12,10 @@ from contextlib import contextmanager
 import os
 import socket
 import sys
-from typing import Any
+import tempfile
 
 from cpu.domain import CPU_DISABLE_DEFAULT
-from cst_core.adapters.runner import SubprocessCommandRunner, c_locale
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import (
     read_text,
@@ -122,6 +122,22 @@ class VmCommands:
         )
         return _triple(r, "virsh", timeout)
 
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define of text, through a temporary file (removed after)."""
+        fd, tmp = tempfile.mkstemp(prefix="cst-vm-tune.", suffix=".xml")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            return self.virsh(("define", tmp), 60, detach=None)
+        finally:
+            os.unlink(tmp)
+
+    def package_versions(self) -> dict[str, str]:
+        return package_versions()
+
+    def booted_deployment(self) -> dict[str, Json] | None:
+        return booted_deployment()
+
 
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
@@ -151,6 +167,11 @@ def run_on_terminal(cmd: Sequence[str]) -> int:
 def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
     """virsh -c URI ARGS through VmCommands' virsh adapter, with run()'s answers."""
     return COMMANDS_OF_VM.virsh(args, timeout, detach=detach)
+
+
+def effective_root() -> bool:
+    """This process runs as root (its effective uid is 0)."""
+    return os.geteuid() == 0
 
 
 def read_conf(path: str, *, nas_conf: str, bash_sourced: bool = False) -> dict[str, str]:
@@ -254,39 +275,6 @@ def booted_deployment() -> dict[str, Json] | None:
     return {"version": d.get("version"), "checksum": d.get("checksum"), "timestamp": d.get("timestamp")}
 
 
-def restic(nas: Mapping[str, Any], *args: str, timeout: int = 1800) -> tuple[int, str, str]:
-    return run(["restic", *args], timeout=timeout, extra_env=nas["env"])
-
-
-def restic_env(extra: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a restic run that streams its output (restic backup --json): this
-    process's, in the C locale, with extra (the repository's variables) on top."""
-    return {**c_locale(os.environ), **extra}
-
-
-def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str]:
-    """({target: source}, problem) from virsh domblklist --details."""
-    rc, so, err = virsh("domblklist", vm, "--details", *(["--inactive"] if inactive else []))
-    if rc != 0:
-        return None, first_line(err) or f"exit {rc}"
-    out: dict[str, str] = {}
-    for ln in so.splitlines():
-        parts = ln.split(None, 3)
-        if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
-            out[parts[2]] = parts[3].strip()
-    return out, ""
-
-
-def domain_state_or_none(vm: str) -> str | None:
-    rc, so, _ = virsh("domstate", vm)
-    return first_line(so) if rc == 0 else None
-
-
-def systemctl(*args: str) -> tuple[int, str, str]:
-    rc, so, err = run(["systemctl", *args], timeout=120)
-    return rc, so.strip(), first_line(err)
-
-
 def nas_settings(cfg: VmSettings) -> NasRepo:
     """{host, env, repo} for restic, from the /home NAS backup's settings.
     Refused when that backup is not set up: its setup creates the
@@ -316,6 +304,32 @@ def nas_settings(cfg: VmSettings) -> NasRepo:
             "RESTIC_CACHE_DIR": cfg.paths.restic_cache,
         },
     }
+
+
+class VmConfFiles:
+    """SettingsPort on this machine: the settings files of cfg's paths, read at each call."""
+
+    def __init__(self, cfg: VmSettings) -> None:
+        self.cfg = cfg
+
+    def number(self, key: str) -> int:
+        return conf_number(self.cfg.paths, key)
+
+    def nas_repo(self) -> NasRepo:
+        return nas_settings(self.cfg)
+
+    def nas_set_up(self) -> bool:
+        conf = read_conf(self.cfg.paths.nas_conf, nas_conf=self.cfg.paths.nas_conf, bash_sourced=True)
+        return conf.get("NAS_ENABLED") == "1" and bool(conf.get("NAS_PATH"))
+
+    def knobs(self) -> dict[str, bool]:
+        return knobs(self.cfg.paths)
+
+    def cpu_disable(self) -> list[str]:
+        return cpu_disable_list(self.cfg.paths)
+
+    def default_vm(self) -> str:
+        return default_vm(self.cfg.paths)
 
 
 def knobs(paths: VmPaths) -> dict[str, bool]:

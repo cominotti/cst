@@ -33,18 +33,26 @@ import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
 
-from cst_core.adapters import nocow as inode_attrs
+from cst_core.adapters import SystemctlAdapter, nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
-from cst_core.ports import CommandResult, DecodeErrors, OutputMode, StdinMode
+from cst_core.domain.values import Json
+from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
 from vm import application as vm_application, wiring as vm_wiring
-from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
+from vm.application import backup as vm_application_backup
+from vm.cli import (
+    backup as vm_cli_backup,
+    nocow as vm_cli_nocow,
+    status as vm_cli_status,
+    timer as vm_cli_timer,
+    tune as vm_cli_tune,
+)
 
 sys.dont_write_bytecode = True
 
@@ -72,6 +80,22 @@ class FakeCommands:
     def virsh(self, args: Sequence[str], timeout: int, *, detach: bool | None) -> tuple[int, str, str]:
         return self.fake(*args, timeout=timeout, detach=detach)
 
+    def define(self, text: str) -> tuple[int, str, str]:
+        """virsh define FILE of the fake, with text in a temporary file (as VmCommands.define)."""
+        with tempfile.NamedTemporaryFile("w", prefix="cst-vm-test-", suffix=".xml") as f:
+            f.write(text)
+            f.flush()
+            return self.fake("define", f.name, timeout=60, detach=None)
+
+    def package_versions(self) -> dict[str, str]:
+        raise AssertionError("tune reads no package version")
+
+    def detached(self) -> AbstractContextManager[None]:
+        raise AssertionError("tune runs nothing detached")
+
+    def booted_deployment(self) -> dict[str, Json] | None:
+        raise AssertionError("tune reads no deployment")
+
 
 class _NoCommands:
     """A runner that refuses every command: a test that reaches the real virsh fails."""
@@ -84,10 +108,12 @@ class _NoCommands:
 
 
 def no_real_commands() -> AbstractContextManager[object]:
-    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) raises instead of running anything."""
+    """Within it, vm's own runner (COMMANDS_OF_VM, RUNNER) and the timer's systemctl
+    (wiring.systemd, a runner of its own) raise instead of running anything."""
     stack = ExitStack()
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", _NoCommands()))
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", _NoCommands()))
+    stack.enter_context(mock.patch.object(vm_wiring, "systemd", return_value=SystemctlAdapter(_NoCommands())))
     return stack
 
 
@@ -1207,7 +1233,7 @@ class NocowTest(unittest.TestCase):
     def dirs(self) -> dict[str, vm_domain.ImageProbe]:
         return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs(self.cfg)}
 
-    def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
+    def out(self, fn: Callable[..., int | None], *args: object) -> tuple[int | None, str]:
         buf = io.StringIO()
         with mock.patch("sys.stdout", buf):
             rc = fn(self.cfg, *args)
@@ -1447,7 +1473,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox")
+            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)
@@ -1493,7 +1519,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
-        vm_cli_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
+        vm_adapters_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
         self.assertTrue(vm_adapters_images.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
@@ -1708,7 +1734,7 @@ class PackageTest(unittest.TestCase):
         with (
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-            mock.patch.object(vm_adapters, "restore_default_signals", lambda: helped.append(True)),
+            mock.patch.object(vm_adapters, "restore_default_signals", side_effect=lambda: helped.append(True)),
         ):
             self.assertEqual(vm_cli.main(["help"], doc="DOC", entry_file=TOOL), 0)
         self.assertEqual((out.getvalue(), helped), ("DOC\n", [True]))
@@ -1721,7 +1747,7 @@ class PackageTest(unittest.TestCase):
             patch_vm("read_index", lambda cfg: []),
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-            mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
+            mock.patch.object(vm_adapters, "restore_default_signals", side_effect=lambda: restored.append(True)),
         ):
             self.assertEqual(vm_cli.main(["list", "win"], doc="DOC", entry_file=TOOL), 0)
         self.assertIn("no VM backups of win", out.getvalue())
@@ -1808,10 +1834,10 @@ class PackageTest(unittest.TestCase):
 
 
 class FakeTimers:
-    """A TimerPort over a dict of file states and a list of timers on: what was asked, in order."""
+    """A TimerFilesPort over a dict of file states and a list of timers on: what was asked, in order."""
 
-    def __init__(self, states: dict[str, UnitFileState], on: list[str], fail: str = "") -> None:
-        self.states, self.on, self.fail = states, on, fail
+    def __init__(self, states: dict[str, UnitFileState], on: list[str]) -> None:
+        self.states, self.on = states, on
         self.done: list[str] = []
 
     def file_states(self, unit: str) -> dict[str, UnitFileState]:
@@ -1835,39 +1861,66 @@ class FakeTimers:
     def timers_on(self) -> list[str]:
         return list(self.on)
 
-    def turn_on(self, unit: str) -> None:
+
+class FakeSystemd:
+    """A SystemdPort for the timer use cases: what they ask goes to timers.done (one order for both),
+    enable and disable change timers.on; fail: "on", "off" or "reload" fails that step."""
+
+    def __init__(self, timers: FakeTimers, fail: str = "") -> None:
+        self.timers, self.fail = timers, fail
+
+    def daemon_reload(self) -> None:
+        if self.fail == "reload":
+            raise CommandFailed(["systemctl", "daemon-reload"], 1, "", "Access denied\n")
+        self.timers.done.append("reload")
+
+    def enable(self, unit: str, *, now: bool = False) -> CommandResult:
         if self.fail == "on":
-            raise Refused("systemctl enable --now: failed")
-        self.done.append(f"on {unit}")
-        self.on.append(unit)
+            return CommandResult(1, "", "failed\n")
+        self.timers.done.append(f"on {unit}")
+        self.timers.on.append(unit)
+        return CommandResult(0, "", "")
 
-    def turn_off(self, unit: str) -> str:
+    def disable(self, unit: str, *, now: bool = False) -> CommandResult:
         if self.fail == "off":
-            return "systemctl disable --now: denied"
-        self.done.append(f"off {unit}")
-        self.on.remove(unit) if unit in self.on else None
-        return ""
+            return CommandResult(1, "", "denied\n")
+        self.timers.done.append(f"off {unit}")
+        if unit in self.timers.on:
+            self.timers.on.remove(unit)
+        return CommandResult(0, "", "")
 
-    def forget_last_run(self, unit: str) -> None:
-        self.done.append(f"clean {unit}")
+    def clean(self, unit: str, *, what: str) -> CommandResult:
+        self.timers.done.append(f"clean {unit}")
+        return CommandResult(0, "", "")
 
-    def reload(self) -> None:
-        self.done.append("reload")
+    def show(self, unit: str, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+        if on_host:
+            raise AssertionError(f"the timer's status reads the local systemd: {unit}")
+        return {p: {"NextElapseUSecRealtime": "Sat", "Result": "success"}[p] for p in props}
 
-    def schedule(self, unit: str) -> tuple[str, str]:
-        return "Sat", "success"
+    def start(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def stop(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def restart(self, unit: str) -> CommandResult:
+        raise AssertionError(unit)
+
+    def escape_path(self, path: str, *, suffix: str) -> UnitName:
+        raise AssertionError(path)
 
 
 class TimerUseCaseTest(unittest.TestCase):
-    """vm.application's backup-timer on, off and status over a fake TimerPort."""
+    """vm.application's backup-timer on, off and status over a fake TimerFilesPort and SystemdPort."""
 
     unit = "cst-vm-backup@win.timer"
 
     def test_on_installs_turns_on_then_records(self) -> None:
         timers = FakeTimers({"/p": "missing", "/u": "change", "/t": "ok"}, [])
         steps: list[vm_domain.TimerStep] = []
-        vm_application.timer_on(timers, "win", lambda: None, steps.append)
-        self.assertEqual(timers.done, ["write /p", "write /u", f"on {self.unit}", "complete"])
+        vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, steps.append)
+        self.assertEqual(timers.done, ["write /p", "write /u", "reload", f"on {self.unit}", "complete"])
         self.assertEqual([(s.kind, s.path) for s in steps], [("installed", "/p"), ("updated", "/u")])
 
     def test_on_refuses_before_any_change(self) -> None:
@@ -1881,47 +1934,85 @@ class TimerUseCaseTest(unittest.TestCase):
         ]
         for states, ready, words in cases:
             timers = FakeTimers(states, [])
+            systemd = FakeSystemd(timers)
             with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
-                vm_application.timer_on(timers, "win", ready, lambda s: None)
+                vm_application.timer_on(timers, systemd, "win", ready, lambda s: None)
             self.assertEqual(timers.done, [])
 
     def test_a_failed_start_leaves_the_record_pending(self) -> None:
-        timers = FakeTimers({"/p": "missing"}, [], fail="on")
-        with self.assertRaises(Refused):
-            vm_application.timer_on(timers, "win", lambda: None, lambda s: None)
-        self.assertEqual(timers.done, ["write /p"])
+        for fail, words, done in (
+            ("on", f"^systemctl enable --now {self.unit}: failed$", ["write /p", "reload"]),
+            ("reload", "^systemctl daemon-reload: Access denied$", ["write /p"]),
+        ):
+            timers = FakeTimers({"/p": "missing"}, [])
+            systemd = FakeSystemd(timers, fail)
+            with self.subTest(fail=fail), self.assertRaisesRegex(Refused, words):
+                vm_application.timer_on(timers, systemd, "win", lambda: None, lambda s: None)
+            self.assertEqual(timers.done, done)
 
     def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
         timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
         steps: list[vm_domain.TimerStep] = []
-        self.assertEqual(vm_application.timer_off(timers, "win", steps.append), [])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", steps.append), [])
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p", "reload"])
         self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
+        # The last daemon-reload is best effort: its failure leaves the files removed.
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers, "reload"), "win", lambda s: None), [])
 
     def test_off_keeps_the_files_for_another_vm(self) -> None:
         other = "cst-vm-backup@other.timer"
         timers = FakeTimers({"/p": "ok"}, [self.unit, other])
-        self.assertEqual(vm_application.timer_off(timers, "win", lambda s: None), [other])
+        self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", lambda s: None), [other])
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}"])
 
     def test_off_refuses_when_the_timer_stays_on(self) -> None:
-        timers = FakeTimers({"/p": "ok"}, [self.unit], fail="off")
-        with self.assertRaisesRegex(Refused, "denied"):
-            vm_application.timer_off(timers, "win", lambda s: None)
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        systemd = FakeSystemd(timers, "off")
+        with self.assertRaisesRegex(Refused, f"^systemctl disable --now {self.unit}: denied$"):
+            vm_application.timer_off(timers, systemd, "win", lambda s: None)
         self.assertEqual(timers.done, [])
-        timers = FakeTimers({"/p": "ok"}, [], fail="off")  # off already: the failure does not matter
-        vm_application.timer_off(timers, "win", lambda s: None)
+        timers = FakeTimers({"/p": "ok"}, [])  # off already: the failure does not matter
+        vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
         self.assertIn("remove /p", timers.done)
 
     def test_status(self) -> None:
-        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, [self.unit]), "win")
+        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual(
             (st.unit, st.on, st.files, st.next_run, st.last_result), (self.unit, True, {"/p": "ok"}, "Sat", "success")
         )
-        st = vm_application.timer_status(FakeTimers({"/p": "ok"}, []), "win")
+        timers = FakeTimers({"/p": "ok"}, [])
+        st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
+        timers = FakeTimers({}, [])
+        systemd = FakeSystemd(timers)
         with self.assertRaises(Refused):
-            vm_application.timer_status(FakeTimers({}, []), "bad name")
+            vm_application.timer_status(timers, systemd, "bad name")
+
+
+class NoRealCommandsTest(unittest.TestCase):
+    """no_real_commands() also stops systemctl: the timer's systemd (wiring.systemd) is built over a
+    runner of its own, not over COMMANDS_OF_VM."""
+
+    def test_backup_timer_status_reaches_no_systemctl(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-vm-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        marker = os.path.join(tmp, "systemctl-ran")
+        stub = os.path.join(tmp, "systemctl")
+        with open(stub, "w") as f:
+            f.write(f"#!/bin/sh\ntouch '{marker}'\n")
+        os.chmod(stub, 0o755)
+        timers = FakeTimers({"/p": "ok"}, ["cst-vm-backup@win.timer"])
+        cfg = vm_wiring.vm_settings({"CST_VM_INDEX": os.path.join(tmp, "vm-backups.json")})
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '/usr/bin')}"}),
+            mock.patch("sys.stdout", io.StringIO()),
+            no_real_commands(),
+            self.assertRaisesRegex(AssertionError, "a test ran a real command"),
+        ):
+            vm_cli_timer.cmd_timer(cfg, "status", "win", TOOL, timers=timers)
+        self.assertFalse(os.path.exists(marker), "the stub systemctl ran")
 
 
 class PatchVmTest(unittest.TestCase):
@@ -1932,7 +2023,7 @@ class PatchVmTest(unittest.TestCase):
             return (0, "shut off\n", "") if a[0] == "domstate" else (0, "win\n", "")
 
         with no_real_commands(), patch_vm("virsh", _virsh), self.assertRaisesRegex(Refused, "managed save"):
-            vm_cli_backup.check_shut_off("win")
+            vm_application_backup.check_shut_off(vm_wiring.vm_commands(), "win")
 
 
 class DetachedTest(unittest.TestCase):
