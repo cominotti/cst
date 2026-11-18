@@ -67,12 +67,34 @@ snap_toolchains_prog() {
     esac
 }
 
+# The user's runtime folder (/run/user/UID); tests point SNAP_USER_RUN elsewhere.
+SNAP_USER_RUN=/run/user
+
+snap_user_runtime() {
+    local uid
+    uid="$(id -u "${target_user}" 2>/dev/null)" || return 1
+    echo "${SNAP_USER_RUN}/${uid}"
+}
+
+# runuser to the user with the session variables of that user, so that
+# systemctl --user reaches the user's own manager. sudo can hand root its own
+# XDG_RUNTIME_DIR (/run/user/0) and bus, and runuser keeps them: systemctl
+# --user then fails ("Operation not permitted"). Both are dropped first, then
+# set to the user's folder and bus when they exist.
+snap_as_user() {   # cmd...
+    local run session=()
+    run="$(snap_user_runtime)" || run=""
+    [[ -n "${run}" && -d "${run}" ]] && session+=("XDG_RUNTIME_DIR=${run}")
+    [[ -S "${run}/bus" ]] && session+=("DBUS_SESSION_BUS_ADDRESS=unix:path=${run}/bus")
+    runuser -u "${target_user}" -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "${session[@]}" "$@"
+}
+
 # toolchains/cst-toolchains as the user, never as root: `config apply` (cargo
 # build-dir, uv link-mode), `auto on --unless-off` (the hourly pruning).
 snap_toolchains() {   # args...
     local home
     home="$(snap_home)" || return 1
-    runuser -u "${target_user}" -- env CST_PROG="$(snap_toolchains_prog)" python3 -I -B "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
+    snap_as_user env CST_PROG="$(snap_toolchains_prog)" python3 -I -B "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
 }
 
 # The `config plan` lines for the setup preview, indented, without its
@@ -86,7 +108,7 @@ snap_toolchains_config_preview() {
 snap_chrome() {   # action
     local home
     home="$(snap_home)" || return 1
-    runuser -u "${target_user}" -- python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
+    snap_as_user python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
 }
 
 snap_home() {
@@ -399,7 +421,7 @@ snap_start_anyway() {   # yes
 
 # User-owned configs, written as the user; existing settings are never changed.
 snap_user_configs() {   # home
-    local home="$1" tc
+    local home="$1" tc run why=""
     tc="$(snap_toolchains_prog)"
     # cargo build-dir and uv link-mode (the toolchains module writes them).
     # --no-lean-debuginfo: setup never turns on the opt-in lean debug info
@@ -412,8 +434,16 @@ snap_user_configs() {   # home
     # can come after the timer was turned on, or on the "left off" path
     # (a failed cleanup of what the earlier cargo-gc left): the NOTE only
     # says that something went wrong.
-    snap_toolchains auto on --unless-off ||
-        echo "NOTE: ${tc} auto on --unless-off reported a problem (see above); once it is fixed, run it again" >&2
+    # With no user manager running (its private socket, which systemctl --user
+    # reaches first, is missing), the NOTE says so: the component stays pending.
+    if ! snap_toolchains auto on --unless-off; then
+        if run="$(snap_user_runtime)" && [[ ! -S "${run}/systemd/private" ]]; then
+            why=": ${target_user}'s user manager is not running (no ${run}/systemd/private: no login session"
+            why+=" of ${target_user} now), so toolchains:auto stays pending (cst doctor says so); run it again"
+            why+=" once ${target_user} is logged in"
+        fi
+        echo "NOTE: ${tc} auto on --unless-off reported a problem (see above)${why:-; once it is fixed, run it again}" >&2
+    fi
     # Chrome's HTTP cache out of /home snapshots (only if its Flatpak is installed).
     snap_chrome apply || echo "NOTE: Chrome's chrome-flags.conf was left as it is (see above)" >&2
 }

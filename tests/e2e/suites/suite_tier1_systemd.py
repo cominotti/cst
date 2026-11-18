@@ -2261,6 +2261,50 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
+        """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
+        the way `snapshots setup` runs them, with what sudo can hand root (its own
+        XDG_RUNTIME_DIR and bus, which runuser keeps): `toolchains auto on --unless-off`
+        reaches tester's real user manager, the timer is enabled and active, and tester's
+        install record says toolchains:auto is done. The same variables make systemctl
+        --user fail when nothing replaces them (checked first, else the test proves
+        nothing). Afterwards the earlier state is put back."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_81 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            H=/home/tester
+            off=$H/.config/cst/toolchains-auto.off
+            was_off=0; [[ -e "$off" ]] && was_off=1
+            rm -f "$off"
+            as_tester() { runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
+                XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }
+            restore() {
+                as_tester /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true
+                (( was_off )) || rm -f "$off"
+            }
+            trap restore EXIT
+            export XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+            if runuser -u tester -- systemctl --user show-environment >/dev/null 2>&1; then
+                echo "root's variables still reach tester's manager: the test would prove nothing" >&2
+                exit 1
+            fi
+            [[ -S /run/user/1000/systemd/private ]]
+            out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
+                . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+            sed 's/^/test_81: /' <<<"$out" >&2
+            if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
+            grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
+            as_tester systemctl --user is-enabled cst-toolchains-prune.timer
+            as_tester systemctl --user is-active cst-toolchains-prune.timer
+            python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["components"].get("toolchains:auto") != "done")' \
+                "$H/.local/state/cst/installed.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;

@@ -18,9 +18,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+from typing import TypedDict
 import unittest
 
 sys.dont_write_bytecode = True
@@ -1164,6 +1166,129 @@ class ScrubLimitTest(unittest.TestCase):
             timer = f.read().splitlines()
         self.assertIn("Persistent=true", timer)
         self.assertIn("RandomizedDelaySec=15min", timer)
+
+
+# A toolchains or chrome-cache program as setup runs it: prints what reached it (the session
+# variables, CST_PROG, the arguments) as JSON; exits with FAKE_RC.
+FAKE_USER_TOOL = """import json, os, sys
+keys = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "CST_PROG")
+with open(os.environ["TOOL_LOG"], "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], **{k: os.environ.get(k) for k in keys}}) + "\\n")
+sys.exit(int(os.environ.get("FAKE_RC", "0")))
+"""
+
+
+class SeenCall(TypedDict):
+    """One call of FAKE_USER_TOOL."""
+
+    argv: list[str]
+    XDG_RUNTIME_DIR: str | None
+    DBUS_SESSION_BUS_ADDRESS: str | None
+    CST_PROG: str | None
+
+
+class UserStepsTest(unittest.TestCase):
+    """setup's steps as the user (snap_toolchains, snap_chrome, snap_user_configs) run through
+    runuser with that user's session variables, whatever root's environment holds. runuser is
+    a function that logs and runs the command as the current user; the programs are a fake
+    that records what reached it; the user's runtime folder is in the test's folder."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-user-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_dir = os.path.join(self.tmp, "run", str(os.getuid()))
+        self.tool = os.path.join(self.tmp, "fake-tool")
+        with open(self.tool, "w") as f:
+            f.write(FAKE_USER_TOOL)
+        self.tool_log = os.path.join(self.tmp, "tool.log")
+
+    def socket_at(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        s = socket.socket(socket.AF_UNIX)
+        self.addCleanup(s.close)
+        s.bind(path)
+
+    def run_bash(self, body: str, fake_rc: int = 0) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                f"SRC={BTRFS}; PROG='cst btrfs'",
+                '. "$SRC/setup-snapshots.bash"',
+                'SNAP_USER_RUN="$T/run"; target_user="$(id -un)"; TOOLCHAINS_TOOL="$TOOL"; CHROME_TOOL="$TOOL"',
+                'snap_home() { echo "$T/home"; }',
+                'runuser() { echo "runuser $*" >>"$T/runuser.log"; shift 3; "$@"; }',
+                body,
+            ]
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "T": self.tmp,
+            "TOOL": self.tool,
+            "TOOL_LOG": self.tool_log,
+            "FAKE_RC": str(fake_rc),
+            "HOME": self.tmp,
+            # What sudo can hand root: its own runtime folder and bus.
+            "XDG_RUNTIME_DIR": "/run/user/0",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus",
+        }
+        return subprocess.run(
+            ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
+        )
+
+    def seen(self) -> list[SeenCall]:
+        with open(self.tool_log) as f:
+            return [json.loads(line) for line in f]
+
+    def test_the_users_runtime_folder_and_bus_replace_roots(self) -> None:
+        self.socket_at(os.path.join(self.run_dir, "bus"))
+        r = self.run_bash("snap_toolchains auto on --unless-off\nsnap_chrome apply")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        session = {"XDG_RUNTIME_DIR": self.run_dir, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.run_dir}/bus"}
+        home = os.path.join(self.tmp, "home")
+        self.assertEqual(
+            self.seen(),
+            [
+                {"argv": ["auto", "on", "--unless-off", "--home", home], "CST_PROG": "cst toolchains", **session},
+                {"argv": ["apply", "--home", home], "CST_PROG": None, **session},
+            ],
+        )
+
+    def test_a_runtime_folder_without_a_bus_sets_only_xdg_runtime_dir(self) -> None:
+        os.makedirs(self.run_dir)
+        self.assertEqual(self.run_bash("snap_toolchains config plan").returncode, 0)
+        got = self.seen()[0]
+        self.assertEqual((got["XDG_RUNTIME_DIR"], got["DBUS_SESSION_BUS_ADDRESS"]), (self.run_dir, None))
+
+    def test_no_runtime_folder_drops_both_variables(self) -> None:
+        self.assertEqual(self.run_bash("snap_toolchains config plan").returncode, 0)
+        got = self.seen()[0]
+        self.assertEqual((got["XDG_RUNTIME_DIR"], got["DBUS_SESSION_BUS_ADDRESS"]), (None, None))
+
+    def user_configs(self, fake_rc: int) -> subprocess.CompletedProcess[str]:
+        r = self.run_bash('snap_user_configs "$T/home"', fake_rc=fake_rc)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            [s["argv"][:2] for s in self.seen()], [["config", "apply"], ["auto", "on"], ["apply", "--home"]]
+        )
+        return r
+
+    def test_auto_on_without_a_running_user_manager_says_why(self) -> None:
+        os.makedirs(self.run_dir)
+        err = self.user_configs(1).stderr
+        self.assertIn("NOTE: cst toolchains auto on --unless-off reported a problem (see above): ", err)
+        self.assertIn(f"user manager is not running (no {self.run_dir}/systemd/private: no login session", err)
+        self.assertIn("so toolchains:auto stays pending (cst doctor says so); run it again once", err)
+        self.assertNotIn("was not turned on", err)
+
+    def test_auto_on_failing_with_a_running_manager_keeps_the_general_note(self) -> None:
+        self.socket_at(os.path.join(self.run_dir, "systemd", "private"))
+        err = self.user_configs(1).stderr
+        self.assertIn("cst toolchains auto on --unless-off reported a problem (see above); once it is fixed", err)
+        self.assertNotIn("user manager is not running", err)
+
+    def test_auto_on_that_works_prints_no_note(self) -> None:
+        self.socket_at(os.path.join(self.run_dir, "systemd", "private"))
+        self.assertEqual(self.user_configs(0).stderr, "")
 
 
 if __name__ == "__main__":

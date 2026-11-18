@@ -1380,7 +1380,12 @@ cargo and uv settings, is the job of the **`toolchains` module**, not of
 `snapshots setup` calls it, as your user: `cst toolchains config apply` (the
 two settings) and `cst toolchains auto on --unless-off` (the hourly timer
 `cst-toolchains-prune.timer`, unless you turned it off with
-`cst toolchains auto off`).
+`cst toolchains auto off`). Both run with your session's variables (your
+`XDG_RUNTIME_DIR` and user bus, never the ones sudo gave root), so the timer
+goes to your own user manager. If that manager is not running (no login
+session of yours at that moment), `auto on` cannot reach it and setup says
+why: `cst doctor` then shows `toolchains:auto` as installed only in part until
+`cst toolchains auto on` runs again while you are logged in.
 
 ```
 cst toolchains status        # sizes, policy, last prune, the timer, the settings
