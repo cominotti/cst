@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import posixpath
 import re
 import shlex
@@ -62,6 +63,25 @@ _MAPPER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _BY_PARTUUID: Final[str] = "/dev/disk/by-partuuid/"
 _SETTING_KEYS: Final[tuple[str, ...]] = ("SWAP_PARTUUID", "SWAP_SIZE_BYTES", "SWAP_NAME")
 _SWAP_MARKERS: Final[tuple[str, ...]] = (SWAP_MARKER, *SWAP_OLD_MARKERS)
+
+
+class SwapCommand(StrEnum):
+    """The commands of `cst swap` (help also answers to -h and --help: parse_swap_command)."""
+
+    PLAN = "plan"
+    STATUS = "status"
+    APPLY = "apply"
+    HELP = "help"
+
+
+_HELP_ALIASES: Final[tuple[str, ...]] = ("-h", "--help")
+
+
+def parse_swap_command(word: str) -> SwapCommand | None:
+    """The command a word on the command line names, or None for an unknown one."""
+    if word in _HELP_ALIASES:
+        return SwapCommand.HELP
+    return next((command for command in SwapCommand if command.value == word), None)
 
 
 def partuuid_path(partuuid: str) -> str:
@@ -198,6 +218,16 @@ def marked_fstab_name(text: str) -> str | None:
     return None
 
 
+class SwapSpecState(StrEnum):
+    """Where the partition plan, status and apply work with comes from (SpecResolution.state)."""
+
+    OK = "ok"
+    WRITE = "write"
+    UNKNOWN = "unknown"
+    UNSET = "unset"
+    BAD = "bad"
+
+
 @dataclass(frozen=True, slots=True)
 class SpecResolution:
     """Which partition plan, status and apply work with, and why.
@@ -208,7 +238,7 @@ class SpecResolution:
     """
 
     spec: SwapHardwareSpec | None
-    state: Literal["ok", "write", "unknown", "unset", "bad"]
+    state: SwapSpecState
     note: str = ""
 
 
@@ -510,11 +540,23 @@ class ConfigSectionReport:
     runtime_items: tuple[PlanItem, ...]
 
 
+class SettingState(StrEnum):
+    """The state column of a live setting against its desired value (the words plan and status print)."""
+
+    OK = "ok"
+    DIFF = "DIFF"
+    EXP = "exp"
+    OVER = "over"
+    MISSING = "MISSING"
+    BAD = "BAD"
+    INACTIVE = "-"
+
+
 @dataclass(frozen=True, slots=True)
 class SettingCheckRow:
     """Single row comparing a live setting against its desired value."""
 
-    state: str
+    state: SettingState
     label: str
     live: str
     want: str
@@ -534,12 +576,12 @@ class SettingsReport:
     @property
     def has_diff(self) -> bool:
         """Return True if any inspected setting differs from desired."""
-        return any(row.state == "DIFF" for row in self.rows)
+        return any(row.state == SettingState.DIFF for row in self.rows)
 
     @property
     def has_exp(self) -> bool:
         """Return True if a transient CPU experiment override is active."""
-        return any(row.state == "exp" for row in self.rows)
+        return any(row.state == SettingState.EXP for row in self.rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,12 +593,20 @@ class DebugCounterRow:
     help_text: str
 
 
+class ZswapDebugStatus(StrEnum):
+    """Whether the zswap debug counters could be read (DebugSectionReport.status)."""
+
+    OK = "ok"
+    PERMISSION_DENIED = "permission_denied"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True, slots=True)
 class DebugSectionReport:
     """Snapshot of zswap debugfs visibility and counter rows."""
 
     debug_dir: str
-    status: Literal["ok", "permission_denied", "unavailable"]
+    status: ZswapDebugStatus
     hint: str
     rows: tuple[DebugCounterRow, ...] = ()
 
@@ -613,12 +663,22 @@ def killed_text(prog: str, argv: Sequence[str], returncode: int) -> str:
     return f"{prog}: {shlex.join(argv) or 'a command'} was killed by signal {-returncode}"
 
 
+class ApplyEventKind(StrEnum):
+    """What an apply event is: a section title, a line, a command's own output, a warning or an error."""
+
+    SECTION = "section"
+    LINE = "line"
+    RAW = "raw"
+    WARN = "warn"
+    ERROR = "error"
+
+
 @dataclass(frozen=True, slots=True)
 class ApplyEvent:
     """One output/warning/error event emitted during `apply`."""
 
     stream: Literal["out", "err"]
-    kind: Literal["section", "line", "raw", "warn", "error"]
+    kind: ApplyEventKind
     text: str
 
 

@@ -5,7 +5,7 @@ from collections.abc import Callable
 import posixpath
 
 from cst_core.application.install import Placement
-from cst_core.domain.files import MarkedLineSpec
+from cst_core.domain.files import MarkedLineSpec, OwnedState
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
 from swap.application.reports import (
@@ -18,8 +18,10 @@ from swap.application.reports import (
 from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
+    ApplyEventKind,
     SwapApplyResult,
     SwapHardwareSpec,
+    SwapSpecState,
     can_evict_zram,
     crypto_has_algorithm,
     find_swap_used_kib,
@@ -50,11 +52,11 @@ def _show_output(res: CommandResult, events: list[ApplyEvent], prog: str) -> Non
     """What a command printed, passed on as it is (bash let it reach the terminal),
     then, for a command a signal killed, the line that says so (bash's "Terminated")."""
     if res.stdout:
-        events.append(ApplyEvent("out", "raw", res.stdout))
+        events.append(ApplyEvent("out", ApplyEventKind.RAW, res.stdout))
     if res.stderr:
-        events.append(ApplyEvent("err", "raw", res.stderr))
+        events.append(ApplyEvent("err", ApplyEventKind.RAW, res.stderr))
     if res.returncode < 0:
-        events.append(ApplyEvent("err", "error", killed_text(prog, res.argv, res.returncode)))
+        events.append(ApplyEvent("err", ApplyEventKind.ERROR, killed_text(prog, res.argv, res.returncode)))
 
 
 class SwapApplicationService(SwapReports):
@@ -64,7 +66,7 @@ class SwapApplicationService(SwapReports):
         env = self._env
 
         def fail(msg: str) -> None:
-            events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {msg}"))
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{env.prog}: ERROR: {msg}"))
 
         if not self._fs.is_dir(env.zswap_params_dir):
             fail(f"zswap is not built into this kernel (no {env.zswap_params_dir}).")
@@ -108,21 +110,21 @@ class SwapApplicationService(SwapReports):
         """Apply one marked line (name: the swap device's). Returns (ok, line_changed, line_written)."""
         prog = self._env.prog
         st = self._inspect_marked(path, line_spec)
-        if st == "ok":
-            events.append(ApplyEvent("out", "line", f"unchanged: {path} ({name} entry)"))
+        if st == OwnedState.OK:
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {path} ({name} entry)"))
             return True, False, False
-        if st == "conflict":
+        if st == OwnedState.CONFLICT:
             events.append(
                 ApplyEvent(
                     "err",
-                    "error",
+                    ApplyEventKind.ERROR,
                     f"{prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
                     "remove it by hand, then run apply again.",
                 )
             )
             return False, False, False
-        if st not in ("adopt", "duplicate", "missing", "change"):
-            events.append(ApplyEvent("err", "error", f"{prog}: ERROR: {path}: {st}"))
+        if st not in (OwnedState.ADOPT, OwnedState.DUPLICATE, OwnedState.MISSING, OwnedState.CHANGE):
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {path}: {st}"))
             return False, False, False
 
         if not self._fs.exists(path):
@@ -131,19 +133,23 @@ class SwapApplicationService(SwapReports):
         existing = self._fs.read_text(path, "") or ""
         self._fs.write_atomic(path, line_spec.render_updated(existing), mode)
 
-        if st == "adopt":
-            events.append(
-                ApplyEvent("out", "line", f"adopted:   {path} ({name} entry: marker renewed, entry unchanged)")
-            )
-            return True, False, True
-        if st == "duplicate":
+        if st == OwnedState.ADOPT:
             events.append(
                 ApplyEvent(
-                    "out", "line", f"deduped:   {path} ({name} entry was there twice: one kept, entry unchanged)"
+                    "out", ApplyEventKind.LINE, f"adopted:   {path} ({name} entry: marker renewed, entry unchanged)"
                 )
             )
             return True, False, True
-        events.append(ApplyEvent("out", "line", f"written:   {path} ({name} entry)"))
+        if st == OwnedState.DUPLICATE:
+            events.append(
+                ApplyEvent(
+                    "out",
+                    ApplyEventKind.LINE,
+                    f"deduped:   {path} ({name} entry was there twice: one kept, entry unchanged)",
+                )
+            )
+            return True, False, True
+        events.append(ApplyEvent("out", ApplyEventKind.LINE, f"written:   {path} ({name} entry)"))
         return True, True, True
 
     def _placement(self, entry: InstallEntry, path: str) -> Placement:
@@ -165,23 +171,25 @@ class SwapApplicationService(SwapReports):
         st = self._inspect_file(src, dest)
         place = self._placement(entry, dest)
         if not self._installer.put(place, self._desired_text(src).encode("utf-8"), as_root=self._env.as_root):
-            events.append(ApplyEvent("out", "line", f"unchanged: {dest}"))
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {dest}"))
             return False
-        if st == "adopt":
-            events.append(ApplyEvent("out", "line", f"adopted:   {dest} (comments renewed, settings unchanged)"))
+        if st == OwnedState.ADOPT:
+            events.append(
+                ApplyEvent("out", ApplyEventKind.LINE, f"adopted:   {dest} (comments renewed, settings unchanged)")
+            )
         else:
-            events.append(ApplyEvent("out", "line", f"written:   {dest}"))
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"written:   {dest}"))
         return True
 
     def _write_settings(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> None:
         """/etc/cst/swap.conf from what an older CST set up (resolve_spec's "write")."""
         origin = f"from the {spec.name} line an older CST wrote in /etc/crypttab and the partition's size then"
         self._fs.write_atomic(self._env.settings_path, render_swap_settings(spec, origin), 0o644)
-        events.append(ApplyEvent("out", "section", "== settings"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== settings"))
         events.append(
             ApplyEvent(
                 "out",
-                "line",
+                ApplyEventKind.LINE,
                 f"written:   {self._env.settings_path} (SWAP_PARTUUID={spec.partuuid},"
                 f" SWAP_SIZE_BYTES={spec.expected_size_bytes}: {origin})",
             )
@@ -197,7 +205,9 @@ class SwapApplicationService(SwapReports):
             return False
         for line in self._installer.remove([self._placement(OLD_DROPIN_ENTRY, self._env.old_slice_dropin)]):
             events.append(
-                ApplyEvent("out", "line", f"{line} (the old name of {posixpath.basename(DROPIN_ENTRY.dest)})")
+                ApplyEvent(
+                    "out", ApplyEventKind.LINE, f"{line} (the old name of {posixpath.basename(DROPIN_ENTRY.dest)})"
+                )
             )
         return True
 
@@ -232,7 +242,7 @@ class SwapApplicationService(SwapReports):
         spec = res.spec
         if spec is None:
             note = self._settings_item(res, "plan").note
-            events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {env.settings_path}: {note}."))
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{env.prog}: ERROR: {env.settings_path}: {note}."))
             return self._stopped(1, events)
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
@@ -240,30 +250,30 @@ class SwapApplicationService(SwapReports):
         c_spec = spec.crypttab_spec()
         f_spec = spec.fstab_spec()
         # Every refusal comes before the first write: the settings file too.
-        if self._inspect_marked(env.crypttab, c_spec) == "conflict":
+        if self._inspect_marked(env.crypttab, c_spec) == OwnedState.CONFLICT:
             events.append(
                 ApplyEvent(
                     "err",
-                    "error",
+                    ApplyEventKind.ERROR,
                     f"{env.prog}: ERROR: {env.crypttab} has an unmarked entry for {spec.name}: "
                     "remove it by hand, then run apply again.",
                 )
             )
             return self._stopped(1, events)
-        if self._inspect_marked(env.fstab, f_spec) == "conflict":
+        if self._inspect_marked(env.fstab, f_spec) == OwnedState.CONFLICT:
             events.append(
                 ApplyEvent(
                     "err",
-                    "error",
+                    ApplyEventKind.ERROR,
                     f"{env.prog}: ERROR: {env.fstab} has an unmarked entry for {spec.mapper_path}: "
                     "remove it by hand, then run apply again.",
                 )
             )
             return self._stopped(1, events)
-        if res.state == "write":
+        if res.state == SwapSpecState.WRITE:
             self._write_settings(spec, events)
 
-        events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, f"== {spec.name}: crypttab and fstab"))
         ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events, name=spec.name)
         if not ok_c:
             return self._stopped(1, events)
@@ -285,7 +295,9 @@ class SwapApplicationService(SwapReports):
                 if swap0_used == 0:
                     events.append(
                         ApplyEvent(
-                            "out", "line", f"{spec.mapper_path}: entry changed and the device is empty: re-activating"
+                            "out",
+                            ApplyEventKind.LINE,
+                            f"{spec.mapper_path}: entry changed and the device is empty: re-activating",
                         )
                     )
                     sd = self._systemd
@@ -298,41 +310,49 @@ class SwapApplicationService(SwapReports):
                     events.append(
                         ApplyEvent(
                             "err",
-                            "warn",
+                            ApplyEventKind.WARN,
                             f"WARNING: {spec.mapper_path}: entry changed but {swap0_used // 1024} MiB are in use; "
                             "the live device keeps the old options until reboot.",
                         )
                     )
             else:
-                events.append(ApplyEvent("out", "line", f"{spec.mapper_path} is active as swap."))
+                events.append(ApplyEvent("out", ApplyEventKind.LINE, f"{spec.mapper_path} is active as swap."))
         else:
             events.append(
-                ApplyEvent("out", "line", f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)")
+                ApplyEvent(
+                    "out", ApplyEventKind.LINE, f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)"
+                )
             )
             rc = self._run_units(((self._systemd.start, crypt_unit), (self._systemd.start, swap_unit)), events)
             if rc != 0:
                 return self._stopped(rc, events)
 
-        events.append(ApplyEvent("out", "section", "== zswap"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== zswap"))
         self._apply_managed_file(TMPFILES_ENTRY, env.src_tmpfiles, env.tmpfiles_conf, events)
         for name, val in parse_tmpfiles_params(tmpfiles_text):
             param_path = posixpath.join(env.zswap_params_dir, name)
             if not self._fs.exists(param_path):
                 # MISSING in plan: tmpfiles skips it at boot, and sysfs cannot create it.
-                events.append(ApplyEvent("out", "line", f"skipped:   zswap {name} (this kernel has no such parameter)"))
+                events.append(
+                    ApplyEvent(
+                        "out", ApplyEventKind.LINE, f"skipped:   zswap {name} (this kernel has no such parameter)"
+                    )
+                )
                 continue
             live = self._read_first(param_path, "")
             if not same_param(live, val):
                 self._fs.write_text_direct(param_path, f"{val}\n")
-                events.append(ApplyEvent("out", "line", f"set:       zswap {name} = {val} (was {live})"))
+                events.append(ApplyEvent("out", ApplyEventKind.LINE, f"set:       zswap {name} = {val} (was {live})"))
 
-        events.append(ApplyEvent("out", "section", "== zram"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== zram"))
         if self._zram_masked():
-            events.append(ApplyEvent("out", "line", f"unchanged: {env.zram_conf} (masked)"))
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {env.zram_conf} (masked)"))
         else:
             self._fs.force_symlink("/dev/null", env.zram_conf)
             events.append(
-                ApplyEvent("out", "line", f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)")
+                ApplyEvent(
+                    "out", ApplyEventKind.LINE, f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)"
+                )
             )
             self._systemd.daemon_reload()
 
@@ -342,19 +362,19 @@ class SwapApplicationService(SwapReports):
             meminfo = parse_meminfo(self._fs.read_text(posixpath.join(env.proc_dir, "meminfo"), "") or "")
             avail_kib = meminfo.get("MemAvailable", 0) // 1024
             if can_evict_zram(zram_used, avail_kib):
-                events.append(ApplyEvent("out", "line", "zram0: swapping off"))
+                events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: swapping off"))
                 swapoff = self._systemd.stop(UnitName("dev-zram0.swap"))
                 _show_output(swapoff, events, self._env.prog)
                 if swapoff.returncode == 0:
                     # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
                     self._systemd.stop(UnitName("systemd-zram-setup@zram0.service"))
                     self._system.reset_zram0()
-                    events.append(ApplyEvent("out", "line", "zram0: removed"))
+                    events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: removed"))
                 else:
                     events.append(
                         ApplyEvent(
                             "err",
-                            "warn",
+                            ApplyEventKind.WARN,
                             "WARNING: swapoff of zram0 failed; it is disabled in the config and gone after a reboot.",
                         )
                     )
@@ -362,26 +382,32 @@ class SwapApplicationService(SwapReports):
                 events.append(
                     ApplyEvent(
                         "err",
-                        "warn",
+                        ApplyEventKind.WARN,
                         "WARNING: not enough free RAM to swap off zram0 now; it is gone after a reboot "
                         "(or run apply again under lower pressure).",
                     )
                 )
 
-        events.append(ApplyEvent("out", "section", "== sysctl"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== sysctl"))
         if self._fs.exists(env.old_sysctl_conf):
             self._fs.remove_file(env.old_sysctl_conf)
-            events.append(ApplyEvent("out", "line", f"removed:   {env.old_sysctl_conf} (legacy)"))
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"removed:   {env.old_sysctl_conf} (legacy)"))
         self._apply_managed_file(SYSCTL_ENTRY, env.src_sysctl, env.sysctl_conf, events)
         exp_name, exp_key = WSF_EXPERIMENT
         if self._fs.exists(posixpath.join(env.cpu_run_dir, "exp-" + exp_name)):
             live_wsf = self._read_first(posixpath.join(env.proc_dir, "sys", "vm", "watermark_scale_factor"), "?")
             events.append(
-                ApplyEvent("out", "line", f"kept:      {exp_key} = {live_wsf} (the cpu experiment {exp_name} is on;")
+                ApplyEvent(
+                    "out",
+                    ApplyEventKind.LINE,
+                    f"kept:      {exp_key} = {live_wsf} (the cpu experiment {exp_name} is on;",
+                )
             )
             events.append(
                 ApplyEvent(
-                    "out", "line", "           after 'cst cpu experiment off wsf-300', run apply again, or reboot)"
+                    "out",
+                    ApplyEventKind.LINE,
+                    "           after 'cst cpu experiment off wsf-300', run apply again, or reboot)",
                 )
             )
             sysctl = self._system.apply_sysctl_file(env.sysctl_conf, exclude_key=exp_key)
@@ -391,7 +417,7 @@ class SwapApplicationService(SwapReports):
         if sysctl.returncode != 0:
             return self._stopped(sysctl.returncode, events)
 
-        events.append(ApplyEvent("out", "section", "== machine.slice"))
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== machine.slice"))
         written = self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events)
         if self._remove_old_dropin(events) or written:
             self._systemd.daemon_reload()

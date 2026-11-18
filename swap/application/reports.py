@@ -19,11 +19,14 @@ from swap.domain import (
     DebugCounterRow,
     DebugSectionReport,
     SettingCheckRow,
+    SettingState,
     SettingsReport,
     SwapDeviceRow,
     SwapHardwareSpec,
     SwapPlanReport,
+    SwapSpecState,
     SwapStatusReport,
+    ZswapDebugStatus,
     can_evict_zram,
     cgroup_row,
     describe_state,
@@ -238,44 +241,50 @@ class SwapReports:
         if text is not None:
             settings = parse_swap_settings(text)
             if settings.problems:
-                return SpecResolution(None, "bad", "; ".join(settings.problems))
-            return SpecResolution(settings.spec, "unset" if settings.spec is None else "ok")
+                return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
+            return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
         if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
             name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
-            return SpecResolution(None, "unset") if name is None else SpecResolution(None, "unknown", name)
+            return (
+                SpecResolution(None, SwapSpecState.UNSET)
+                if name is None
+                else SpecResolution(None, SwapSpecState.UNKNOWN, name)
+            )
         entry = marked_crypttab_entry(self._fs.read_text(env.crypttab, "") or "")
         if entry is None:
-            return SpecResolution(None, "unset")
+            return SpecResolution(None, SwapSpecState.UNSET)
         name, partuuid = entry
         part = self._partition_size_sysfs(partuuid_path(partuuid))
         if part is None:
             return SpecResolution(
-                None, "unset", f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here"
+                None,
+                SwapSpecState.UNSET,
+                f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here",
             )
-        return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), "write", name)
+        return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), SwapSpecState.WRITE, name)
 
     def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
         """The row of /etc/cst/swap.conf in plan and status."""
         env = self._env
         target = _short_etc_path(env.etc_dir, env.settings_path)
         spec = res.spec
-        if res.state == "ok" and spec is not None:
+        if res.state == SwapSpecState.OK and spec is not None:
             return PlanItem("ok", target, f"partition {spec.partuuid}, {spec.expected_size_bytes} bytes")
-        if res.state == "write" and spec is not None:
+        if res.state == SwapSpecState.WRITE and spec is not None:
             return PlanItem(
                 "write",
                 target,
                 f"from the {spec.name} line an older CST wrote in crypttab: partition {spec.partuuid},"
                 f" {spec.expected_size_bytes} bytes (its size now)",
             )
-        if res.state == "unknown":
+        if res.state == SwapSpecState.UNKNOWN:
             return PlanItem(
                 "?",
                 target,
                 f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
                 f" which needs root to read: on the host, {env.prog} {verb} --root",
             )
-        if res.state == "bad":
+        if res.state == SwapSpecState.BAD:
             return PlanItem("REFUSE", target, f"{res.note}: apply stops")
         why = f" ({res.note})" if res.note else ""
         return PlanItem(
@@ -314,7 +323,10 @@ class SwapReports:
                 state_note(f_state, spec.name, env.prog, verb),
             )
         )
-        tier_change = c_state in ("missing", "change") or f_state in ("missing", "change")
+        tier_change = c_state in (OwnedState.MISSING, OwnedState.CHANGE) or f_state in (
+            OwnedState.MISSING,
+            OwnedState.CHANGE,
+        )
         return file_items, tier_change
 
     def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
@@ -454,21 +466,27 @@ class SwapReports:
         """Compare live zswap, sysctl, and MemoryLow settings against swap/ desired values."""
         rows: list[SettingCheckRow] = []
         if not params:
-            rows.append(SettingCheckRow("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", ""))
+            rows.append(SettingCheckRow(SettingState.BAD, "zswap", "not in this kernel (no /sys/module/zswap)", ""))
         for name, want in parse_tmpfiles_params(self._desired_text(self._env.src_tmpfiles)):
             live = params.get(name)
             if live is not None:
-                rows.append(SettingCheckRow("ok" if same_param(live, want) else "DIFF", f"zswap {name}", live, want))
+                rows.append(
+                    SettingCheckRow(
+                        SettingState.OK if same_param(live, want) else SettingState.DIFF, f"zswap {name}", live, want
+                    )
+                )
             elif params:
                 # tmpfiles' w skips a file that is not there, without a word (renamed or removed by a kernel).
-                rows.append(SettingCheckRow("MISSING", f"zswap {name}", "this kernel has no such parameter", want))
+                rows.append(
+                    SettingCheckRow(SettingState.MISSING, f"zswap {name}", "this kernel has no such parameter", want)
+                )
         exp_name, exp_key = WSF_EXPERIMENT
         exp_on = self._fs.exists(posixpath.join(self._env.cpu_run_dir, "exp-" + exp_name))
         for key, want in parse_sysctl(self._desired_text(self._env.src_sysctl)):
             live = self._read_first(posixpath.join(self._env.proc_dir, "sys", key.replace(".", "/")), "?")
-            state = "ok" if live == want else "DIFF"
-            if state == "DIFF" and key == exp_key and exp_on:
-                state = "exp"
+            state = SettingState.OK if live == want else SettingState.DIFF
+            if state == SettingState.DIFF and key == exp_key and exp_on:
+                state = SettingState.EXP
             rows.append(SettingCheckRow(state, key, live, want))
         row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
         rows.append(row)
@@ -484,23 +502,27 @@ class SwapReports:
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
-            return SettingCheckRow("over", "machine.slice MemoryLow", human_size(effective), human(want_low)), source
+            return SettingCheckRow(
+                SettingState.OVER, "machine.slice MemoryLow", human_size(effective), human(want_low)
+            ), source
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
         if live_low is None:
             return SettingCheckRow(
-                "-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+                SettingState.INACTIVE, "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
             ), ""
         ok = live_low.isdigit() and int(live_low) == want_low
         live = human(int(live_low)) if live_low.isdigit() else live_low
-        return SettingCheckRow("ok" if ok else "DIFF", "machine.slice memory.low", live, human(want_low)), ""
+        return SettingCheckRow(
+            SettingState.OK if ok else SettingState.DIFF, "machine.slice memory.low", live, human(want_low)
+        ), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
         try:
             names = self._fs.list_dir(self._env.zswap_debug_dir)
         except PermissionError:
-            return DebugSectionReport(self._env.zswap_debug_dir, "permission_denied", hint)
+            return DebugSectionReport(self._env.zswap_debug_dir, ZswapDebugStatus.PERMISSION_DENIED, hint)
         except OSError:
-            return DebugSectionReport(self._env.zswap_debug_dir, "unavailable", hint)
+            return DebugSectionReport(self._env.zswap_debug_dir, ZswapDebugStatus.UNAVAILABLE, hint)
         from swap.domain import DEBUG_HELP
 
         rows: list[DebugCounterRow] = []
@@ -509,7 +531,7 @@ class SwapReports:
             if name == "pool_total_size" and val.isdigit():
                 val = f"{val} ({human(int(val))})"
             rows.append(DebugCounterRow(name, val, DEBUG_HELP.get(name, "")))
-        return DebugSectionReport(self._env.zswap_debug_dir, "ok", hint, tuple(rows))
+        return DebugSectionReport(self._env.zswap_debug_dir, ZswapDebugStatus.OK, hint, tuple(rows))
 
     def _build_devices(self) -> tuple[SwapDeviceRow, ...]:
         swaps_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "swaps"), "") or ""

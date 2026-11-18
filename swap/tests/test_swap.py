@@ -396,17 +396,21 @@ class StatusMathTest(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                SettingCheckRow("ok", "zswap compressor", "zstd", "zstd"),
-                SettingCheckRow("ok", "zswap max_pool_percent", "20", "20"),
-                SettingCheckRow("MISSING", "zswap shrinker_enabled", "this kernel has no such parameter", "1"),
-                SettingCheckRow("ok", "zswap enabled", "Y", "1"),
+                SettingCheckRow(D.SettingState.OK, "zswap compressor", "zstd", "zstd"),
+                SettingCheckRow(D.SettingState.OK, "zswap max_pool_percent", "20", "20"),
+                SettingCheckRow(
+                    D.SettingState.MISSING, "zswap shrinker_enabled", "this kernel has no such parameter", "1"
+                ),
+                SettingCheckRow(D.SettingState.OK, "zswap enabled", "Y", "1"),
             ],
         )
         self.assertIn("MISSING zswap shrinker_enabled       this kernel has no such parameter   (desired 1)", text)
 
     def test_no_zswap_at_all_is_one_bad_row(self) -> None:
         rows, _ = self.zswap_rows({})
-        self.assertEqual(rows, [SettingCheckRow("BAD", "zswap", "not in this kernel (no /sys/module/zswap)", "")])
+        self.assertEqual(
+            rows, [SettingCheckRow(D.SettingState.BAD, "zswap", "not in this kernel (no /sys/module/zswap)", "")]
+        )
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
         rows, text = self.settings_output("300", exp_on=True)
@@ -986,7 +990,7 @@ class SwapApplicationTest(_SwapScratch):
         system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
         service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
         out, err = io.StringIO(), io.StringIO()
-        self.assertEqual(run_command("apply", service, hint="", out=out, err=err), 1)
+        self.assertEqual(run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err), 1)
         self.assertIn("cst swap: ERROR: ", err.getvalue())
         self.assertIn("written by a newer CST", err.getvalue())
         with open(record) as f:
@@ -1585,7 +1589,7 @@ class MemoryLowOverrideTest(_SwapScratch):
         with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
             f.write(f"{value}\n")
 
-    def _run(self, cmd: str, shown: Mapping[str, str]) -> tuple[int, str, str]:
+    def _run(self, cmd: D.SwapCommand, shown: Mapping[str, str]) -> tuple[int, str, str]:
         fs = self._fs(mapper_present=True)
         service = SwapApplicationService(
             self.env,
@@ -1606,7 +1610,7 @@ class MemoryLowOverrideTest(_SwapScratch):
             f"  over: {self.RUNTIME} sets machine.slice's MemoryLow; systemd applies it after CST's"
             " 10-swap-memory-low.conf (drop-ins in file-name order, the last one wins). apply leaves it."
         )
-        for cmd in ("status", "plan", "apply"):
+        for cmd in (D.SwapCommand.STATUS, D.SwapCommand.PLAN, D.SwapCommand.APPLY):
             with self.subTest(cmd=cmd):
                 rc, out, err = self._run(cmd, shown)
                 self.assertEqual(rc, 0, out + err)
@@ -1616,13 +1620,16 @@ class MemoryLowOverrideTest(_SwapScratch):
                 self.assertNotIn("machine.slice memory.low", out)
                 self.assertNotIn("systemctl", out)  # no undo command named
         self.assertIn(
-            "over = MemoryLow set by a drop-in systemd applies after CST's, left alone;", self._run("plan", shown)[1]
+            "over = MemoryLow set by a drop-in systemd applies after CST's, left alone;",
+            self._run(D.SwapCommand.PLAN, shown)[1],
         )
 
     def test_a_foreign_50_memory_low_conf_is_an_over_row(self) -> None:
         self._host_file(self.FOREIGN, "[Slice]\nMemoryLow=8G\n")
         self._cgroup_low(8 * 2**30)
-        rc, out, _err = self._run("status", {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"})
+        rc, out, _err = self._run(
+            D.SwapCommand.STATUS, {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"}
+        )
         self.assertEqual(rc, 0)
         self.assertIn("  over  machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
@@ -1630,18 +1637,18 @@ class MemoryLowOverrideTest(_SwapScratch):
     def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
         self._cgroup_low(2**30)
         shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
-        rc, out, _err = self._run("status", shown)
+        rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
         self.assertEqual(rc, 0)
         self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertNotIn("over", out.replace("over = ", ""))
-        rc, out, err = self._run("apply", shown)
+        rc, out, err = self._run(D.SwapCommand.APPLY, shown)
         self.assertEqual(rc, 1)
         self.assertIn("one or more settings did not apply as expected", err)
 
     def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
         self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
         self._cgroup_low(2**30)
-        rc, out, _err = self._run("status", {})
+        rc, out, _err = self._run(D.SwapCommand.STATUS, {})
         self.assertEqual(rc, 0)
         self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
 
@@ -1757,7 +1764,7 @@ class SwapApplyOutputTest(_SwapScratch):
 
     def _apply(self, service: SwapApplicationService) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        rc = run_command("apply", service, hint="", out=out, err=err)
+        rc = run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err)
         return rc, out.getvalue(), err.getvalue()
 
     def test_each_step_is_printed_before_the_next_one_runs(self) -> None:
@@ -1771,7 +1778,7 @@ class SwapApplyOutputTest(_SwapScratch):
             on_call=lambda verb, unit: seen.setdefault(f"{verb} {unit}", out.getvalue()),
         )
         service, _ = self._service(systemd=systemd, fs=fs)
-        self.assertEqual(run_command("apply", service, hint="", out=out, err=err), 0, err.getvalue())
+        self.assertEqual(run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err), 0, err.getvalue())
         before_start = seen["start systemd-cryptsetup@swap0.service"]
         self.assertIn("== swap0: crypttab and fstab", before_start)
         self.assertIn("/dev/mapper/swap0: activating", before_start)
@@ -1967,7 +1974,7 @@ class SwapApplyOutputTest(_SwapScratch):
         with open(self.env.fstab, "wb") as f:
             f.write(b"# caf\xe9 comment\nUUID=x / btrfs defaults 0 0\n")
         plan = io.StringIO()
-        self.assertEqual(run_command("plan", self._service()[0], hint="", out=plan, err=io.StringIO()), 0)
+        self.assertEqual(run_command(D.SwapCommand.PLAN, self._service()[0], hint="", out=plan, err=io.StringIO()), 0)
         self.assertIn("fstab: /dev/mapper/swap0 line", plan.getvalue())
         rc, _out, err = self._apply(self._service()[0])
         self.assertEqual(rc, 0, err)
