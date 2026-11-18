@@ -917,9 +917,9 @@ class BaselineDropinTest(unittest.TestCase):
             "50-MemoryLow.conf",
             "50-MemoryZSwapWriteback.conf",
         ]
-        self.assertEqual(sorted([*overrides, DROPIN_NAME], key=os.fsencode)[0], DROPIN_NAME)
+        self.assertEqual(min([*overrides, DROPIN_NAME], key=os.fsencode), DROPIN_NAME)
         # The old name sorted after them (upper case before lower case): the bug.
-        self.assertEqual(sorted([*overrides, OLD_DROPIN_NAME], key=os.fsencode)[-1], OLD_DROPIN_NAME)
+        self.assertEqual(max([*overrides, OLD_DROPIN_NAME], key=os.fsencode), OLD_DROPIN_NAME)
         # The user drop-ins get the same name.
         self.assertEqual(toolbox_dropin("/home/u"), "/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf")
         self.assertEqual(
