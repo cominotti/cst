@@ -4,9 +4,9 @@ the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
 import json
 
-from bluetooth.domain import ISO_UUID, LDAC_UNIT, pw_state
+from bluetooth.domain import ISO_UUID, LDAC_UNIT, RolesState, parse_roles_state, pw_state
 from bluetooth.setup.application.survey import Survey
-from bluetooth.setup.domain import preferred_bearer
+from bluetooth.setup.domain import BapState, LeState, WpState, preferred_bearer
 
 
 class Checks(Survey):
@@ -29,33 +29,33 @@ class Checks(Survey):
             self.check_warn(label, "could not be read (libwireplumber-0.5 not found on the host)")
             return
         st, _, val = r.split("\n", 1)[0].partition("|")
-        key = f"{self.c.le_audio}:{st}"
-        if key == "off:classic":
-            self.check_ok(label, f"{val} (no LE Audio roles)")
-        elif key == "off:le":
-            self.check_bad(
-                label,
-                f"{val}: LE Audio roles in it although LE Audio is off; another WirePlumber file adds them (see the files above)",
-            )
-        elif key == "off:default":
-            if self.le_off_active():
+        match self.c.le_audio, parse_roles_state(st):
+            case "off", RolesState.CLASSIC:
+                self.check_ok(label, f"{val} (no LE Audio roles)")
+            case "off", RolesState.LE:
                 self.check_bad(
                     label,
-                    "not set: WirePlumber does not use the CST file, so PipeWire's defaults (with LE Audio) apply",
+                    f"{val}: LE Audio roles in it although LE Audio is off; another WirePlumber file adds them (see the files above)",
                 )
-            else:
-                self.item(
-                    "note",
+            case "off", RolesState.DEFAULT:
+                if self.le_off_active():
+                    self.check_bad(
+                        label,
+                        "not set: WirePlumber does not use the CST file, so PipeWire's defaults (with LE Audio) apply",
+                    )
+                else:
+                    self.item(
+                        "note",
+                        label,
+                        f"not set yet (PipeWire's defaults, with LE Audio): {self.c.prog} apply writes the CST file",
+                    )
+            case "on", RolesState.CLASSIC:
+                self.check_warn(
                     label,
-                    f"not set yet (PipeWire's defaults, with LE Audio): {self.c.prog} apply writes the CST file",
+                    f"{val}: no LE Audio roles although LE Audio is on (a WirePlumber file other than CST's sets them)",
                 )
-        elif key == "on:classic":
-            self.check_warn(
-                label,
-                f"{val}: no LE Audio roles although LE Audio is on (a WirePlumber file other than CST's sets them)",
-            )
-        else:
-            self.check_ok(label, f"{val or 'not set: the PipeWire defaults'} (LE Audio roles included)")
+            case _:
+                self.check_ok(label, f"{val or 'not set: the PipeWire defaults'} (LE Audio roles included)")
 
     def verify(self) -> None:
         """The live checks: services, LE Audio, the adapter, the BAP endpoint, the bearer, the headset."""
@@ -98,7 +98,7 @@ class Checks(Survey):
         prog, frm = self.c.prog, self.c.le_from
         self.section("LE Audio")
         if self.c.le_audio == "off":
-            if self.le_state in ("ok", "adopt"):
+            if self.le_state in (LeState.OK, LeState.ADOPT):
                 self.check_ok("LE Audio", f"off ({frm}; PipeWire offers only classic profiles)")
             else:
                 self.check_warn(
@@ -146,25 +146,29 @@ class Checks(Survey):
         label = "PipeWire BAP LC3 endpoint"
         unknown = "not confirmed (no bluetoothd or WirePlumber found)"
         if self.c.le_audio == "off":
-            if bap == "registered":
-                if self.le_off_active():
-                    self.check_warn(
-                        label, "still registered: LE Audio off takes effect after systemctl --user restart wireplumber"
-                    )
-                else:
-                    self.check_warn(label, f"still registered: LE Audio off takes effect after {prog} apply")
-            elif bap in ("unregistered", "no-record"):
-                self.check_ok(label, "not registered (as wanted with LE Audio off)")
-            else:
+            match bap:
+                case BapState.REGISTERED:
+                    if self.le_off_active():
+                        self.check_warn(
+                            label,
+                            "still registered: LE Audio off takes effect after systemctl --user restart wireplumber",
+                        )
+                    else:
+                        self.check_warn(label, f"still registered: LE Audio off takes effect after {prog} apply")
+                case BapState.UNREGISTERED | BapState.NO_RECORD:
+                    self.check_ok(label, "not registered (as wanted with LE Audio off)")
+                case _:
+                    self.check_warn(label, unknown)
+            return
+        match bap:
+            case BapState.REGISTERED:
+                self.check_ok(label, "registered by your WirePlumber with the running bluetoothd")
+            case BapState.NO_RECORD:
+                self.check_warn(label, "not confirmed: the journal no longer has your WirePlumber's registration")
+            case BapState.UNREGISTERED:
+                self.check_warn(label, "your WirePlumber removed it (journalctl -u bluetooth | grep BAPSink)")
+            case _:
                 self.check_warn(label, unknown)
-        elif bap == "registered":
-            self.check_ok(label, "registered by your WirePlumber with the running bluetoothd")
-        elif bap == "no-record":
-            self.check_warn(label, "not confirmed: the journal no longer has your WirePlumber's registration")
-        elif bap == "unregistered":
-            self.check_warn(label, "your WirePlumber removed it (journalctl -u bluetooth | grep BAPSink)")
-        else:
-            self.check_warn(label, unknown)
 
     def headset_check(self) -> None:
         unit, rate = LDAC_UNIT, self.c.ldac_rate
@@ -258,10 +262,10 @@ class Checks(Survey):
             or self.lw_change
             or self.le_change
             or self.device_save
-            or self.wp_state not in ("ok", "adopt", "none")
-            or self.le_state == "conflict"
+            or self.wp_state not in (WpState.OK, WpState.ADOPT, WpState.NONE)
+            or self.le_state == LeState.CONFLICT
         ):
             self.out(f"Some files or services differ from what apply sets up: {self.c.prog} plan\n")
-        elif "adopt" in (self.wp_state, self.le_state):
+        elif self.wp_state == WpState.ADOPT or self.le_state == LeState.ADOPT:
             self.out(f"The WirePlumber rule has older comments: {self.c.prog} apply renews them (no restart).\n")
         return 0

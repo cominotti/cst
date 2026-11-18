@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import types
+from typing import override
 import unittest
 from unittest import mock
 
@@ -110,6 +111,7 @@ def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False)
 
 
 class ParseTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.h: HelperModule = load_helper()
 
@@ -221,6 +223,7 @@ class ParseTest(unittest.TestCase):
 
 
 class TrackerTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.t = bt_watch.Tracker(48000, settle=5, cooldown=600)
 
@@ -410,6 +413,7 @@ class FakeLive:
 
 
 class BounceTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         # No waiting: sleeps do nothing, the wait limits are zero.
         clock = types.SimpleNamespace(t=0.0)
@@ -633,6 +637,7 @@ class StopTest(unittest.TestCase):
 
 
 class UnitTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.h = load_helper()
 

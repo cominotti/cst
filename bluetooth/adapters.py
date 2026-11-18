@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from types import FrameType
-from typing import IO, Final, Protocol
+from typing import IO, Final, Protocol, override
 
 from bluetooth.domain import (
     CARD_PREFIX,
@@ -26,7 +26,7 @@ from bluetooth.domain import (
     render_pending,
     still_pending,
 )
-from bluetooth.domain.watch import Snapshot, Tracker, profiles, relevant, snapshot
+from bluetooth.domain.watch import Snapshot, Tracker, WatchVerdict, profiles, relevant, snapshot
 from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
@@ -181,6 +181,7 @@ class Live(LiveAudioPort):
     def __init__(self, dev: str) -> None:
         self.dev = dev
 
+    @override
     def snap(self) -> Snapshot | None:
         """Query `pw-dump` and return this device's parsed snapshot, or None."""
         rc, out = run(["pw-dump"], timeout=10)
@@ -191,6 +192,7 @@ class Live(LiveAudioPort):
         except ValueError:
             return None
 
+    @override
     def cards(self) -> list[PactlCard] | None:
         """Query `pactl -f json list cards`, or return None on failure."""
         rc, out = run(["pactl", "-f", "json", "list", "cards"])
@@ -202,6 +204,7 @@ class Live(LiveAudioPort):
             return None
         return data if isinstance(data, list) else None
 
+    @override
     def set_profile(self, prof: str) -> bool:
         """Switch `bluez_card.<dev>` to profile `prof` via `pactl`."""
         return run(["pactl", "set-card-profile", CARD_PREFIX + self.dev, prof])[0] == 0
@@ -321,7 +324,10 @@ class Watcher:
     def say(self, what: str, why: str | float, level: int = 6) -> None:
         """Logs a verdict only when it differs from the last one (no line
         every fallback look)."""
-        key: tuple[str, str | float | None] = (what, why if what not in ("wait", "cooldown") else None)
+        key: tuple[str, str | float | None] = (
+            what,
+            why if what not in (WatchVerdict.WAIT, WatchVerdict.COOLDOWN) else None,
+        )
         if key != self.said:
             self.said = key
             text = why if isinstance(why, str) else f"{why:.0f} s"
@@ -338,20 +344,22 @@ class Watcher:
         snap = self.live.snap()
         if snap is None:
             # pw-dump failed (PipeWire restarting): not a disconnection.
-            self.say("none", "pw-dump gave no answer")
+            self.say(WatchVerdict.NONE, "pw-dump gave no answer")
             return None
         self.remember(snap)
         what, why = self.tracker.observe(snap, time.monotonic())
-        if what in ("wait", "cooldown") and not isinstance(why, str):
+        if what in (WatchVerdict.WAIT, WatchVerdict.COOLDOWN) and not isinstance(why, str):
             self.say(what, why)
             return float(why)
-        if what != "act":
-            self.say(what, why, 4 if what == "done" else 6)
+        if what != WatchVerdict.ACT:
+            self.say(what, why, 4 if what == WatchVerdict.DONE else 6)
             return None
         cards = self.live.cards()
         active, ldac, alt = profiles(self.dev, cards or [])
         if cards is None or ldac is None or active != ldac:
-            self.say("skip", f"{why}, but the LDAC profile is not the active one (active {active}, LDAC {ldac})")
+            self.say(
+                WatchVerdict.SKIP, f"{why}, but the LDAC profile is not the active one (active {active}, LDAC {ldac})"
+            )
             return None
         if alt is None:
             self.tracker.attempted(time.monotonic())

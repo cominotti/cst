@@ -224,7 +224,7 @@ class SetupCase(unittest.TestCase):
         for i, c in enumerate(calls):
             if c.startswith(first):
                 return list(calls[i + 1 :])
-        self.fail(f"no call {first!r} in {calls}")
+        return self.fail(f"no call {first!r} in {calls}")
 
     def order(self, calls: Sequence[str], *wanted: str) -> None:
         """The calls that are one of wanted (or it and more words) come first in that order."""

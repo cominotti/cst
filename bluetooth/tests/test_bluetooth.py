@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import types
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -130,8 +130,7 @@ class HelperModule(Protocol):
 
 def load(path: str = HELPER, name: str = "bt_helper") -> types.ModuleType:
     """Load an extensionless helper script as a Python module."""
-    mod = load_script(path, name)
-    return mod
+    return load_script(path, name)
 
 
 def load_helper() -> HelperModule:
@@ -155,6 +154,7 @@ def general(text: str) -> list[str]:
 
 
 class MainConfTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -347,6 +347,7 @@ class MainConfTest(unittest.TestCase):
 
 
 class WirePlumberTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -374,6 +375,7 @@ class WirePlumberTest(unittest.TestCase):
 
 
 class SettingsTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -450,6 +452,7 @@ class SettingsTest(unittest.TestCase):
 
 
 class LiveParsingTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -529,6 +532,7 @@ class LiveParsingTest(unittest.TestCase):
 
 
 class LeAudioRenderTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 
@@ -553,7 +557,16 @@ class LeAudioRenderTest(unittest.TestCase):
 
     def test_classic_roles_are_pipewire_defaults_without_le(self) -> None:
         # PipeWire 1.6.11 (man pipewire-props): the default bluez5.roles.
-        default = "a2dp_sink a2dp_source bap_sink bap_source bap_bcast_sink bap_bcast_source hfp_hf hfp_ag".split()
+        default = [
+            "a2dp_sink",
+            "a2dp_source",
+            "bap_sink",
+            "bap_source",
+            "bap_bcast_sink",
+            "bap_bcast_source",
+            "hfp_hf",
+            "hfp_ag",
+        ]
         self.assertEqual(list(self.m.CLASSIC_ROLES), [r for r in default if not r.startswith("bap_")])
 
     def test_state(self) -> None:
@@ -579,6 +592,7 @@ class LeAudioEffectTest(unittest.TestCase):
     """What WirePlumber makes of the files: roles, other fragments, the
     settings line that `le-audio on|off` writes."""
 
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
         self.tmp = tempfile.mkdtemp(prefix="bt-test-")
@@ -747,6 +761,7 @@ JOURNAL = """\
 
 
 class WatcherFailureTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = load_helper()
 

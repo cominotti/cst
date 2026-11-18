@@ -88,7 +88,7 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
         unset=["XDG_CONFIG_HOME", "CST_BT_ROOT", "CST_BT_CONTAINER", "CST_BT_LIBWP"],
         then=[*handed, self_script, *opts.args],
     )
-    replace(argv)
+    return replace(argv)
 
 
 def replace(argv: Sequence[str]) -> NoReturn:

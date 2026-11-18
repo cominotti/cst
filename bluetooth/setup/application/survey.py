@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 import json
 import re
+from typing import Literal
 
 from bluetooth.domain import (
     ISO_UUID,
@@ -32,11 +33,16 @@ from bluetooth.domain import (
 )
 from bluetooth.ports import BluetoothHostPort
 from bluetooth.setup.domain import (
+    BapState,
+    BearerState,
+    BluetoothCommand,
     Config,
     Exit,
+    LeState,
     Options,
     Paths,
     OLD_WP_MARKER,
+    WpState,
     bap_state,
     bearer_matches,
     item,
@@ -51,6 +57,7 @@ from bluetooth.setup.domain import (
 )
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
+from cst_core.domain.files import OwnedState
 from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode
 
 
@@ -159,14 +166,14 @@ class Survey:
         self.fails = 0
         self.warns = 0
         self.mc_changed = False
-        self.wp_state = ""
+        self.wp_state: WpState | Literal[""] = ""  # "": not read yet
         self.legacy = False
-        self.le_state = ""
+        self.le_state: LeState | Literal[""] = ""
         self.le_change = False
-        self.bearer_state = "none"
+        self.bearer_state = BearerState.NONE
         self.lw_want = False
-        self.lw_unit_st = ""
-        self.lw_prog_st = ""
+        self.lw_unit_st: OwnedState | Literal[""] = ""
+        self.lw_prog_st: OwnedState | Literal[""] = ""
         self.lw_enabled = ""
         self.lw_active = ""
         self.lw_change = False
@@ -320,15 +327,15 @@ class Survey:
             path = None
         return path or "", r.returncode == 0 and path is not None
 
-    def bap_endpoint_state(self) -> str:
+    def bap_endpoint_state(self) -> BapState:
         """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state)."""
         inv = self.quiet(["systemctl", "show", "-p", "InvocationID", "--value", "bluetooth"], host=True)
         wp_pid = self.quiet(["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"], host=True)
         if not inv or not re.fullmatch(r"[1-9][0-9]*", wp_pid):
-            return "unknown"
+            return BapState.UNKNOWN
         senders = senders_of(self.quiet(["busctl", "--system", "list", "--no-legend", "--unique"], host=True), wp_pid)
         if not senders:
-            return "unknown"
+            return BapState.UNKNOWN
         journal = self.run(
             ["journalctl", f"_SYSTEMD_INVOCATION_ID={inv}", "--no-pager", "-o", "cat"], host=True, output="stdout"
         ).stdout
@@ -359,13 +366,13 @@ class Survey:
             cmd = ["timeout", str(self.m.bt_timeout), *cmd]
         return self.quiet(cmd, host=True)
 
-    def file_state(self, path: str, rendered: str, *, unit: bool = False) -> str:
+    def file_state(self, path: str, rendered: str, *, unit: bool = False) -> OwnedState:
         """bt-helper's state of a file apply writes: a link judged by what it points to; what is
         there but not a readable plain file is a conflict. A file it cannot decode stops the
         run (STATE="$(file_state ...)" under set -e)."""
         f = self.m.files
         if f.exists(path) and not (f.is_file(path) and f.is_readable(path)):
-            return "conflict"
+            return OwnedState.CONFLICT
         try:
             text = self.m.host.read_or_none(path)
         except (OSError, ValueError) as e:
@@ -391,25 +398,27 @@ class Survey:
         self.mc_changed = changed
         # No headset: no rule.
         self.wp_state = (
-            self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality)) if self.headset else "none"
+            WpState(self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality)))
+            if self.headset
+            else WpState.NONE
         )
         # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
         self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
         self.le_plan()
-        self.bearer_state = "none"
+        self.bearer_state = BearerState.NONE
         if self.c.bearer and not self.headset:
-            self.bearer_state = "noheadset"
+            self.bearer_state = BearerState.NOHEADSET
         elif self.c.bearer:
             if not f.which("bluetoothctl") and not self.m.container:
-                self.bearer_state = "unknown"
+                self.bearer_state = BearerState.UNKNOWN
             else:
                 info = self.bt_info()
                 if "Paired: yes" not in info:
-                    self.bearer_state = "unpaired"
+                    self.bearer_state = BearerState.UNPAIRED
                 elif bearer_matches(info, self.c.bearer):
-                    self.bearer_state = "ok"
+                    self.bearer_state = BearerState.OK
                 else:
-                    self.bearer_state = "set"
+                    self.bearer_state = BearerState.SET
         self.lw_plan()
         self.owed = self.restart_state("show") or ""
         owed = self.owed.split("\n")
@@ -419,7 +428,11 @@ class Survey:
         self.bt_restart = self.mc_changed or self.o.force or self.bt_owed
         # A bluetoothd restart takes WirePlumber's endpoints with it; a comment-only renewal restarts nothing.
         self.wp_restart = (
-            self.bt_restart or self.wp_owed or self.legacy or self.le_change or self.wp_state in ("missing", "change")
+            self.bt_restart
+            or self.wp_owed
+            or self.legacy
+            or self.le_change
+            or self.wp_state in (WpState.MISSING, WpState.CHANGE)
         )
 
     def le_plan(self) -> None:
@@ -427,15 +440,15 @@ class Survey:
         f, le = self.m.files, self.p.le_conf
         self.le_change = False
         if self.c.le_audio == "off":
-            self.le_state = self.file_state(le, render_le_off())
-            self.le_change = self.le_state in ("missing", "change")
+            self.le_state = LeState(self.file_state(le, render_le_off()))
+            self.le_change = self.le_state in (LeState.MISSING, LeState.CHANGE)
         elif not f.exists(le):
-            self.le_state = "absent"
+            self.le_state = LeState.ABSENT
         elif f.contains(le, MARKER, quiet=True):
-            self.le_state = "remove"
+            self.le_state = LeState.REMOVE
             self.le_change = True
         else:
-            self.le_state = "conflict"
+            self.le_state = LeState.CONFLICT
 
     def lw_plan(self) -> None:
         """The LDAC rate watcher: its files, whether it is enabled and active, whether apply changes it."""
@@ -445,19 +458,19 @@ class Survey:
             self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
         if not f.exists(self.p.lw_prog):
-            self.lw_prog_st = "missing"
+            self.lw_prog_st = OwnedState.MISSING
         elif self.installer("check", "--home", self.p.home, "bluetooth/bt-ldac-watch").returncode == 0:
-            self.lw_prog_st = "ok"
+            self.lw_prog_st = OwnedState.OK
         elif f.contains(self.p.lw_prog, MARKER, quiet=False):
-            self.lw_prog_st = "change"
+            self.lw_prog_st = OwnedState.CHANGE
         else:
-            self.lw_prog_st = "conflict"
+            self.lw_prog_st = OwnedState.CONFLICT
         self.lw_enabled = self.quiet(["systemctl", "--user", "is-enabled", LDAC_UNIT], host=True)
         self.lw_active = self.quiet(["systemctl", "--user", "is-active", LDAC_UNIT], host=True)
         if self.lw_want:
             done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == (
-                "ok",
-                "ok",
+                OwnedState.OK,
+                OwnedState.OK,
                 "enabled",
                 "active",
             )
@@ -471,7 +484,8 @@ class Survey:
         return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
-        return self.lw_unit_st in ("ok", "change") or self.lw_prog_st in ("ok", "change")
+        ours = (OwnedState.OK, OwnedState.CHANGE)
+        return self.lw_unit_st in ours or self.lw_prog_st in ours
 
     def lw_unit_label(self) -> str:
         return f"systemd/user/{LDAC_UNIT}"
@@ -583,9 +597,9 @@ class Survey:
                 self.item("skip", "LDAC rate watcher", f"off: {why}")
             else:
                 self.item("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)")
-            if self.lw_unit_st == "conflict":
+            if self.lw_unit_st == OwnedState.CONFLICT:
                 self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
-            if self.lw_prog_st == "conflict":
+            if self.lw_prog_st == OwnedState.CONFLICT:
                 self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
             return
         if self.user_sets("LDAC_RATE"):
@@ -599,7 +613,7 @@ class Survey:
                 "",
                 f"CST keeps it off until it is checked again on PipeWire 1.6.11; to turn it off: remove LDAC_RATE from that file, then {self.c.prog} apply",
             )
-        if self.o.cmd == "plan" and self.lw_last_failure():
+        if self.o.cmd == BluetoothCommand.PLAN and self.lw_last_failure():
             self.item("warn", "LDAC rate watcher", self.lw_failure_text())
         unit_rows = {
             "ok": ("ok", f"up to date (LDAC to {rate} Hz)"),
@@ -620,7 +634,7 @@ class Survey:
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
         if self.lw_enabled == "enabled" and self.lw_active == "active":
-            if self.lw_unit_st == "ok" and self.lw_prog_st == "ok":
+            if self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
                 self.item("ok", svc, "enabled, active")
             else:
                 self.item("restart", svc, "apply restarts it with the new files")
@@ -700,13 +714,13 @@ class Survey:
         if self.mc_changed:
             self.section("main.conf, as apply would write it")
             self.diff(self.p.main_conf, new_path=self.tmp)
-        if self.wp_state == "change":
+        if self.wp_state == WpState.CHANGE:
             self.section(f"{wp_label(self.wp_conf)}, as apply would write it")
             self.diff(self.wp_conf, render_wp(self.c.device, self.c.quality))
-        if self.c.le_audio == "off" and self.le_state == "change":
+        if self.c.le_audio == "off" and self.le_state == LeState.CHANGE:
             self.section(f"{wp_label(self.p.le_conf)}, as apply would write it")
             self.diff(self.p.le_conf, render_le_off())
-        if self.lw_want and self.lw_unit_st == "change":
+        if self.lw_want and self.lw_unit_st == OwnedState.CHANGE:
             self.section(f"{self.lw_unit_label()}, as apply would write it")
             self.diff(self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate))
         self.out("\n")
@@ -718,9 +732,9 @@ class Survey:
             or self.lw_change
             or self.le_change
             or self.device_save
-            or self.wp_state not in ("ok", "none")
-            or self.bearer_state == "set"
-            or self.le_state == "adopt"
+            or self.wp_state not in (WpState.OK, WpState.NONE)
+            or self.bearer_state == BearerState.SET
+            or self.le_state == LeState.ADOPT
         ):
             self.out(f"Apply with: {self.c.prog} apply\n")
             return 10
