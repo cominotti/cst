@@ -194,11 +194,22 @@ def newer_intended(path: str, text: str) -> str | None:
     return INTENDED_FORMAT.newer_text(path, found) if found > INTENDED_FORMAT.version else None
 
 
+def _cut_short(text: str, lines: Sequence[str], number: int) -> bool:
+    """Line number (1-based) of a file is its last line, and has no newline at its end: a record cut
+    short. Every writer (this one, bash's printf) ends a record with a newline and writes it before
+    the change it describes, so the change of such a line was never made, and a value cut short
+    (an old value "1" of "100") must not be undone."""
+    return number == len(lines) and not text.endswith("\n")
+
+
 def records(text: str) -> list[Record]:
     """The records of game.state or game.intended in file order; a line bash could not read as
-    plain words is left out."""
+    plain words, and a last line cut short (no newline at its end), are left out."""
     out: list[Record] = []
-    for line in file_lines(text):
+    lines = file_lines(text)
+    for number, line in enumerate(lines, 1):
+        if _cut_short(text, lines, number):
+            continue
         words = printf_q_words(line)
         if words is not None:
             out.append(tuple(words))
@@ -208,14 +219,16 @@ def records(text: str) -> list[Record]:
 def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     """The lines (number, text) of game.state, or of game.intended (intended), that hold no record the
     profile can use: bash could not read them as plain words (an unclosed quote), or they have fewer
-    fields than their kind needs (a record cut short). Blank lines are none. records() leaves such a
-    line out; bash's eval stopped 'off' there instead (exit 1, game.state kept)."""
+    fields than their kind needs, or are the last line with no newline at its end (a record cut
+    short). Blank lines are none. records() leaves such a line out; bash's eval stopped 'off' there
+    instead (exit 1, game.state kept), and undid a last line cut short with its cut value."""
     out: list[tuple[int, str]] = []
-    for number, line in enumerate(file_lines(text), 1):
+    lines = file_lines(text)
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         words = printf_q_words(line)
-        if words is None:
+        if words is None or _cut_short(text, lines, number):
             out.append((number, line))
             continue
         kind = words[0] if words else ""

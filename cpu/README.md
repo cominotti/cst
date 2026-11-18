@@ -711,7 +711,11 @@ record 'off' can read, skipped: TEXT`) and skipped; `off` undoes every other
 record. `cst cpu game state` names such lines of `game.state` and
 `game.intended` (`unreadable: PATH line N (skipped)`); the drift check
 compares the records around them. (The bash version stopped `off` at such a
-line, with exit 1 and `game.state` left in place.)
+line, with exit 1 and `game.state` left in place.) The last line of the file
+with no newline at its end is such a line, also when its fields look whole:
+`on` writes each record before the change it describes, so that change was
+never made, and its value may be cut short (`1` of `100`), which `off` must
+not set.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.

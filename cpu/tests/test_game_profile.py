@@ -567,7 +567,7 @@ class IntendedFormatTest(GameProfileCase):
         first, _, rest = self.read(self.intended).partition("\n")
         self.assertEqual(first, "cst-game-intended 1")
         self.assertTrue(rest.startswith("prop sys machine.slice AllowedCPUs 12-23 "), rest)
-        self.assertEqual(records(first), [("cst-game-intended", "1")])
+        self.assertEqual(records(first + "\n"), [("cst-game-intended", "1")])
         # Drift is compared below it as before.
         self.write(self.manual, "")
         self.set_now("sys", "machine.slice", CPUWeight="50")
@@ -619,6 +619,26 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertIn("<5>game-profile: off: previous CPU", out)
         self.assertFalse(os.path.exists(self.state))
         self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))  # the rest undone
+
+    def test_a_last_line_cut_short_is_named_and_never_undone(self) -> None:
+        # 'on' writes each record before the change it describes: a last line with no newline at its
+        # end was being written when 'on' died, so its change was never made, and its value may be cut
+        # short (an old IOWeight "1" of "100"). 'off' names it and leaves the property alone.
+        self.run_profile("on")
+        with open(self.state, "a") as f:
+            f.write("prop sys machine.slice IOWeight existed 1")
+        n = len(self.read(self.state).split("\n"))
+        out, actions = self.run_profile("off")
+        self.assertIn(
+            f"<4>game-profile: {self.state} line {n}: no record 'off' can read, skipped:"
+            " prop sys machine.slice IOWeight existed 1\n",
+            out,
+        )
+        self.assertEqual([a for a in actions if "IOWeight=" in a], [])
+        self.assertFalse(os.path.exists(self.state))
+        # The same line with its newline is a record, undone as before.
+        self.assertEqual(records("epp 0 performance\nepp 1 balance"), [("epp", "0", "performance")])
+        self.assertEqual(records("epp 0 performance\nepp 1 balance\n")[1], ("epp", "1", "balance"))
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")
