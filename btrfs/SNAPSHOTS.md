@@ -1863,7 +1863,19 @@ to 0644 (everyone may read it).
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
 `K=$'a\tb'`). `cst doctor`, `cst vm` and the health check read those lines as bash does, so
-nothing needs to be done. The next command that writes the file (`setup`
+nothing needs to be done.
+
+`btrfs-snapshot` reads the file as data too: it applies only the lines that
+are plain assignments of its own settings (the keys of section 5 and 16 and
+the NAS keys), in the forms above, and a `# comment` after a value; an
+`export` in front is dropped. A line that is anything else (a command, a
+value with `$`, a backtick or a blank outside quotes) is never run: it gets
+a warning on stderr (`... snapshots.conf line N: TEXT: REASON; ignored`, in
+the journal of the unit) and the snapshot runs without it. A line for a key
+that is not one of its settings (`SCRUB_LIMIT`, set by `cst btrfs`) is left
+to its own reader. Before, bash sourced the whole file as root, so every line
+ran. Its rules are those of `cst doctor`'s reader; a unit test checks the
+two on one corpus of lines. The next command that writes the file (`setup`
 lists it in its plan) puts them in quotes, with the same values. Your other
 lines stay as they are, and in any other CST settings file a backslash outside
 single quotes is still a problem.
@@ -2492,8 +2504,8 @@ clock guards still apply.
   by the hourly run, the conversions, `prune` and `purge`.
 - Exit codes: 0 ok, 1 error, 2 wrong usage, 3 another run holds the lock,
   4 a safety rule blocked a creation or deletion.
-- For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` reads
-  and writes every file below that folder instead of `/` (`snapshots.conf`,
+- For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` run as a
+  user reads and writes every file below that folder instead of `/` (`snapshots.conf`,
   the convert plan and flags, `/var/lib/btrfs-snapshot`, the locks, the pin
   file, `/proc`) and runs `btrfs-snapshot-core` and `btrfs-notify` from
   there; commands still come from `PATH`. The unit tests run the whole
@@ -2510,12 +2522,11 @@ clock guards still apply.
     no `Environment=`, `EnvironmentFile=` or `PassEnvironment=`). What root
     itself puts into systemd's own environment (`systemctl set-environment`)
     still reaches them; CST never does that.
-  Never run `/usr/local/sbin/btrfs-snapshot` as root with the variable set:
-  it is not a sandbox. Only the files listed above move; `TOP`, `HOME_MOUNT`
-  and the other settings still name real paths, and `btrfs`, `cp`, `rm` and
-  `mount` from `PATH` act on them. Its lock is then that folder's, not
-  `/run/btrfs-snapshot.lock`, so it does not wait for the real hourly run or
-  btrfs-bulk.
+  And a run as root ignores the variable altogether (tier 1 test_108 checks
+  it as real root): whatever hands it on, a root run reads the real settings,
+  state and lock. Before, a root run with the variable set moved them, while
+  `TOP`, `HOME_MOUNT` and `btrfs`, `cp`, `rm` and `mount` still acted on
+  the real paths, and did not wait for the real hourly run or btrfs-bulk.
 
 ---
 

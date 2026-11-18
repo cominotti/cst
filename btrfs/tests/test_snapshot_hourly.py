@@ -14,10 +14,12 @@ Run with: invowk cmd test module btrfs.tests.test_snapshot_hourly
 import json
 import os
 import shutil
+import subprocess
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import GIB, USAGE, RuntimeTest, log
+from btrfs.tests.snapshot_fakes import GIB, SCRIPT, USAGE, RuntimeTest, log
+from tests.test_module_routing import userns_root
 
 HOME_POLICY = "72h 7d 4w 3m"
 WS_POLICY = "48h 7d"
@@ -57,6 +59,31 @@ class CommandLineTest(Base):
         r = self.run_prog("configure", "extra")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertEqual(self.calls_but_hostname(), [])
+
+    def test_as_root_the_test_seam_is_ignored(self) -> None:
+        # CST_SNAPSHOT_ROOT moves every file of the program: a run as root never obeys it. In a user
+        # namespace where this user is root, it reads the real /etc and /var/lib (only reads; the
+        # state folder cannot be created there) and stops at the usage error; the scratch root stays
+        # untouched. Before, a root run with the variable set read its settings, state and lock there.
+        if not userns_root():
+            self.skipTest("needs an unprivileged user namespace (unshare -r); tier 1 test_108 runs it as root")
+        unshare = shutil.which("unshare", path="/usr/bin:/bin") or "unshare"
+        r = subprocess.run(
+            [unshare, "-r", "bash", SCRIPT, "bogus"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.env,
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertTrue(r.stderr.endswith(USAGE), r.stderr)
+        self.assertFalse(os.path.exists(self.state))
+        # As this user, the same run uses the seam.
+        self.assertEqual(self.run_prog("bogus").returncode, 2)
+        self.assertTrue(os.path.isdir(self.state))
 
     def test_every_command_creates_the_state_folder_first(self) -> None:
         shutil.rmtree(self.state, ignore_errors=True)
@@ -111,12 +138,40 @@ class SettingsTest(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.core_calls()[0][-2:], ["--caches-skip", "home=u v/.local/share/containers"])
 
-    def test_the_settings_file_is_sourced_by_bash(self) -> None:
-        # Not parsed: bash runs it, as root. A line that is a command runs.
+    def test_the_settings_file_is_read_as_data_never_run(self) -> None:
+        # Only plain assignments of its settings are applied (as cst_core's parse_snapshots_conf
+        # reads them; test_snapshot_settings.py checks the two agree on a corpus). A line that is a
+        # command, or a value bash would expand, gets a warning on stderr and is ignored; a key that
+        # is no setting (STATE) never moves anything; "export" in front is dropped. Before, bash
+        # sourced the file as root: every line ran.
         marker = os.path.join(self.tmp, "ran")
-        self.conf(f"touch {marker}\n")
-        self.run_prog("configure")
-        self.assertTrue(os.path.exists(marker))
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        self.conf(
+            f"touch {marker}\nHOME_PRESERVE='24h 2d'  # kept\nNAS_PATH=$(touch {marker})\n"
+            f"STATE='{elsewhere}'\nexport WS_PRESERVE='12h'\nSCRUB_LIMIT='100M'\n"
+        )
+        r = self.run_prog("list")
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stderr)),
+            (
+                0,
+                [
+                    log(4, f"{conf} line 4: touch {marker}: not a KEY=VALUE line; ignored"),
+                    log(
+                        4,
+                        f"{conf} line 6: NAS_PATH=$(touch {marker}): $, ` or \\ outside single quotes: bash would "
+                        "expand it (use single quotes); ignored",
+                    ),
+                ],
+            ),
+        )
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(elsewhere))
+        call = self.core_calls()[0]
+        self.assertEqual(call[call.index("--state-dir") + 1], self.state)
+        self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:24h 2d"])
+        self.assertEqual(self.call_envs("btrfs-snapshot-core"), [{}])
 
     def test_without_a_settings_file_it_is_not_set_up(self) -> None:
         os.remove(self.path("etc/btrfs-setup/snapshots.conf"))

@@ -4540,6 +4540,47 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_108_btrfs_snapshot_as_root_ignores_its_test_seam_and_runs_no_settings_line(self) -> None:
+        """btrfs/btrfs-snapshot as install writes it, run as real root: CST_SNAPSHOT_ROOT (the test seam
+        of its unit tests) is ignored, so the state folder is the real /var/lib/btrfs-snapshot and
+        nothing appears below the seam's folder; snapshots.conf is read as data, so a line that is a
+        command does not run (a warning on stderr names it) while a plain setting still applies. The
+        unit test of the seam runs under unshare -r, which CI's container does not allow."""
+        d = "/var/tmp/e2e-snapshot-seam"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"rm -rf {d} /var/lib/btrfs-snapshot; if [ -e {d}.conf ]; then mv -f {d}.conf {conf}; else rm -f {conf}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+d={d} conf={conf}
+rm -rf "$d" /var/lib/btrfs-snapshot
+install -d -m 0755 "$d" "$d/seam" /etc/btrfs-setup
+[ -e "$conf" ] && cp -a "$conf" "$d.conf"
+/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py payload btrfs/btrfs-snapshot >"$d/btrfs-snapshot"
+chmod 0755 "$d/btrfs-snapshot"
+printf '%s\n' "HOME_DIR='/home/tester'" "touch $d/ran" 'NAS_PATH=$(touch '"$d"'/ran)' "PLAN_X='y'" >"$conf"
+rc=0; CST_SNAPSHOT_ROOT="$d/seam" "$d/btrfs-snapshot" planned-left >"$d/out" 2>"$d/err" || rc=$?
+[ "$rc" = 0 ]
+[ ! -s "$d/out" ]
+[ ! -e "$d/ran" ]
+[ -d /var/lib/btrfs-snapshot ]
+[ -z "$(find "$d/seam" -mindepth 1 -print -quit)" ]
+grep -qxF "<4>btrfs-snapshot: $conf line 2: touch $d/ran: not a KEY=VALUE line; ignored" "$d/err"
+grep -qF "$conf line 3: " "$d/err"
+[ "$(grep -c "^<4>btrfs-snapshot: $conf line " "$d/err")" = 2 ]
+rc=0; CST_SNAPSHOT_ROOT="$d/seam" "$d/btrfs-snapshot" bogus 2>/dev/null || rc=$?
+[ "$rc" = 2 ]
+[ -z "$(find "$d/seam" -mindepth 1 -print -quit)" ]
+echo test_108-ok
+""",
+        ).stdout
+        self.assertIn("test_108-ok", out)
+
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and
         cst-pending-alerts as install writes them (zipapps from installer.py payload). The health

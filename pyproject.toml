@@ -220,6 +220,7 @@ include = [
     "btrfs/tests/test_snapshot_hourly.py",
     "btrfs/tests/test_snapshot_nas.py",
     "btrfs/tests/test_snapshot_runtime.py",
+    "btrfs/tests/test_snapshot_settings.py",
     "btrfs/tests/test_stall_monitord.py",
     "btrfs/tests/test_stall_report.py",
     "cpu/__init__.py",

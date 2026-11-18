@@ -53,6 +53,14 @@
 # CST_SNAPSHOT_ROOT (tests only): a folder every file path is read and written
 # under (/etc, /var, /run, /usr and /proc), instead of /. Commands still come
 # from PATH; the settings (HOME_MOUNT, TOP, ...) are what snapshots.conf says.
+# Ignored when the program runs as root.
+#
+# snapshots.conf is read as data: only its lines that are plain assignments of
+# one of the settings below (the shapes cst_core's parse_snapshots_conf
+# accepts: KEY='...', KEY="...", KEY=word, an older CST's printf %q forms, a
+# trailing # comment) are applied, without an "export" in front. Every other
+# line gets a warning on stderr and is ignored; a line for another key is left
+# alone.
 #
 # Locking: hourly, convert, convert-boot, prune and purge hold /run/btrfs-snapshot.lock
 # (flock, fd 9) for their whole run and call btrfs-snapshot-core with --no-lock
@@ -64,6 +72,7 @@
 set -Euo pipefail
 
 R="${CST_SNAPSHOT_ROOT:-}"
+(( EUID == 0 )) && R=""     # the test seam never moves a run as root
 CONF="${R}/etc/btrfs-setup/snapshots.conf"
 PLAN="${R}/etc/btrfs-setup/convert-plan"
 STATE="${R}/var/lib/btrfs-snapshot"
@@ -120,9 +129,135 @@ NAS_KEEP_MONTHLY=12
 NAS_PRUNE_EVERY_DAYS=7
 NAS_CHECK_EVERY_DAYS=30
 NAS_CHECK_SUBSET=5%
+# The keys snapshots.conf may set: the defaults above. Any other key (STATE=,
+# CORE=, PATH=, a setting of another program) is no setting of this program.
+SETTINGS=" HOME_DIR HOME_MOUNT HOME_SUBVOL TOP SNAP_DIR_NAME HOME_PRESERVE WS_PRESERVE EMERGENCY_PRESERVE"
+SETTINGS+=" SNAPSHOT_EXCLUDE_CACHES SNAPSHOT_CACHES_SKIP SKIP_AT_OR_BELOW_GIB RESUME_ABOVE_GIB"
+SETTINGS+=" EMERGENCY_AT_OR_BELOW_GIB NAS_ENABLED NAS_HOST NAS_PORT NAS_USER NAS_PATH NAS_RESTIC_HOST"
+SETTINGS+=" NAS_STALE_DAYS NAS_TIMEOUT NAS_KEEP_DAILY NAS_KEEP_WEEKLY NAS_KEEP_MONTHLY NAS_PRUNE_EVERY_DAYS"
+SETTINGS+=" NAS_CHECK_EVERY_DAYS NAS_CHECK_SUBSET "
+# What printf %q writes (an older CST's snapshots.conf): an escaped word, or $'...'.
+CONF_Q_WORD='^([^[:space:]'\''"\$`;&|<>()]|\\.)+$'
+CONF_Q_ANSI='^\$'\''([^'\''\]|\\([abeEfnrtv\'\''"?]|[0-7]{1,3}|x[0-9A-Fa-f]{1,2}))*'\''$'
+
+# conf_comment_after TEXT: true if TEXT (what follows a value) is empty, or blanks and a # comment.
+conf_comment_after() {
+    local t="${1#"${1%%[!$' \t']*}"}"
+    [[ -z "${t}" || ( "${t}" != "$1" && "${t}" == \#* ) ]]
+}
+
+# conf_line LINE: what a line of snapshots.conf is, by the rules of cst_core's
+# parse_snapshots_conf (a filter: bash then reads the value itself). 0: an
+# assignment (CONF_KEY, and CONF_ASSIGN: the line without "export"); 1: a
+# problem (CONF_WHY); 2: blank or a comment.
+conf_line() {
+    local line="$1" s value exported=0
+    CONF_KEY="" CONF_ASSIGN="" CONF_WHY=""
+    s="${line#"${line%%[!$' \t']*}"}"
+    [[ -z "${s}" || "${s}" == \#* ]] && return 2
+    if [[ "${line}" == *$'\r'* ]]; then
+        CONF_WHY="a carriage return (Windows line end): bash keeps it in the value"
+    else
+        if [[ "${s}" == export[$' \t']* ]]; then
+            s="${s:6}"
+            s="${s#"${s%%[!$' \t']*}"}"
+            exported=1
+        fi
+        if conf_assignment "${s}" "${exported}"; then
+            CONF_ASSIGN="${s}"
+            return 0
+        fi
+    fi
+    # An older CST's printf %q line (KEY=a\ b, KEY=$'a\tb'): bash reads those as plain values too.
+    if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+        value="${BASH_REMATCH[2]}"
+        if [[ "${value}" == *\\* ]] && { [[ "${value}" =~ ${CONF_Q_ANSI} ]] ||
+            { [[ "${value}" =~ ${CONF_Q_WORD} ]] && [[ "${value}" != '~'* && "${value}" != *':~'* ]]; }; }; then
+            [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]
+            CONF_KEY="${BASH_REMATCH[1]}" CONF_ASSIGN="${line}" CONF_WHY=""
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# conf_assignment TEXT EXPORTED: true for KEY=VALUE (TEXT: the line without its
+# leading blanks and "export") as parse_shell_assignments accepts it, with
+# CONF_KEY set; else false with CONF_WHY.
+conf_assignment() {
+    local rest raw quote inner after word
+    [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]] || { CONF_WHY="not a KEY=VALUE line"; return 1; }
+    CONF_KEY="${BASH_REMATCH[1]}"
+    rest="${BASH_REMATCH[2]}"
+    if [[ "${rest}" != =* ]]; then
+        rest="${rest#"${rest%%[!$' \t']*}"}"
+        if [[ "${rest}" == =* ]]; then
+            CONF_WHY="blanks around =: bash runs it as a command and sets nothing"
+        else
+            CONF_WHY="not a KEY=VALUE line"
+        fi
+        return 1
+    fi
+    raw="${rest:1}"
+    if [[ "${raw:0:1}" == [$' \t'] ]]; then
+        conf_comment_after "${raw}" && return 0
+        CONF_WHY="blanks around =: bash runs it as a command and sets nothing"
+        return 1
+    fi
+    if [[ "${raw:0:1}" == [\'\"] ]]; then
+        quote="${raw:0:1}"
+        inner="${raw:1}"
+        [[ "${inner}" == *"${quote}"* ]] || { CONF_WHY="no closing ${quote}"; return 1; }
+        after="${inner#*"${quote}"}"
+        inner="${inner%%"${quote}"*}"
+        if [[ "${quote}" == '"' && "${inner}" == *[\$\`\\]* ]]; then
+            CONF_WHY='$, ` or \ inside double quotes: bash would expand it (use single quotes)'
+            return 1
+        fi
+        conf_comment_after "${after}" && return 0
+        CONF_WHY="text after the closing quote (only a # comment may follow)"
+        return 1
+    fi
+    word="${raw%%[$' \t']*}"
+    after="${raw:${#word}}"
+    if [[ "${word}" != *[\$\`\\]* ]] && ! conf_comment_after "${after}"; then
+        CONF_WHY="a blank in an unquoted value: bash runs the rest as a command (quote the value)"
+    elif [[ "${word}" == *[\$\`\\]* ]]; then
+        CONF_WHY='$, ` or \ outside single quotes: bash would expand it (use single quotes)'
+    elif [[ "${word}" == *[\'\"]* ]]; then
+        CONF_WHY="a quote inside an unquoted value (quote the whole value)"
+    elif [[ "${word}" == *[\;\&\|\<\>\(\)]* ]]; then
+        CONF_WHY="shell syntax (; & | < > ( )) in an unquoted value (quote the value)"
+    elif [[ "${word}" == '~'* || "${word}" == *':~'* ]]; then
+        CONF_WHY="an unquoted ~ that bash would expand to a home folder (quote the value)"
+    elif (( $2 )) && [[ "${word}" == *'{'* ]]; then
+        CONF_WHY="a { in an unquoted value after export: bash brace-expands it (quote the value)"
+    else
+        return 0
+    fi
+    return 1
+}
+
+# read_settings FILE: apply the settings of FILE (see the top of this file).
+read_settings() {
+    local line n=0 rc text
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        n=$((n + 1))
+        conf_line "${line}"; rc=$?
+        if (( rc == 0 )); then
+            # Only a plain assignment gets here: eval gives the value as bash reads it and runs nothing.
+            [[ "${SETTINGS}" == *" ${CONF_KEY} "* ]] && eval "${CONF_ASSIGN}"
+        elif (( rc == 1 )); then
+            text="${line#"${line%%[![:space:]]*}"}"
+            text="${text%"${text##*[![:space:]]}"}"
+            echo "<4>btrfs-snapshot: $1 line ${n}: ${text}: ${CONF_WHY}; ignored" >&2
+        fi
+    done <"$1"
+    return 0
+}
+
 env_home="${HOME_DIR}"
-# shellcheck source=/dev/null
-[[ -r "${CONF}" ]] && . "${CONF}"
+[[ -r "${CONF}" ]] && read_settings "${CONF}"
 [[ -n "${env_home}" ]] && HOME_DIR="${env_home}"   # explicit environment wins (dry runs)
 SNAPDIR="${TOP}/${SNAP_DIR_NAME}"
 [[ -n "${NAS_RESTIC_HOST}" ]] || NAS_RESTIC_HOST="$(hostname -s)"
