@@ -543,8 +543,7 @@ class SwapReports:
     def _cgroups(self) -> list[tuple[str, str]]:
         cg = self._env.cgroup_dir
         out = [("(whole system)", cg)]
-        for name in ("system.slice", "machine.slice", "builds.slice"):
-            out.append((name, posixpath.join(cg, name)))
+        out.extend((name, posixpath.join(cg, name)) for name in ("system.slice", "machine.slice", "builds.slice"))
         base = posixpath.join(cg, "user.slice")
         try:
             users = [d for d in self._fs.list_dir(base) if re.fullmatch(r"user-\d+\.slice", d)]
