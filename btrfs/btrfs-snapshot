@@ -505,6 +505,16 @@ convert_boot() {
     local attempts
     [[ -e "${BOOT_FLAG}" ]] || return 0
     attempts="$(cat "${STATE}/boot-attempts" 2>/dev/null || echo 0)"
+    # Anything but a number counts as no attempt yet (and is rewritten below), so the
+    # counting and the give-up after two boots still work. 10#: 08 is 8, not octal.
+    if [[ -z "${attempts}" ]]; then
+        attempts=0
+    elif [[ "${attempts}" =~ ^[0-9]{1,9}$ ]]; then
+        attempts=$(( 10#${attempts} ))
+    else
+        log 4 "convert-boot: ${STATE}/boot-attempts holds '${attempts:0:40}', not a number; counted as 0"
+        attempts=0
+    fi
     if (( attempts >= 2 )); then
         rm -f "${BOOT_FLAG}" "${STATE}/boot-attempts"
         alert boot critical "Subvolume conversion at boot gave up" \

@@ -414,17 +414,44 @@ class ConvertBootTest(Base):
         self.assertEqual(self.run_prog("convert-boot").returncode, 0)
         self.assertEqual(self.read_state("boot-attempts"), "1\n")
 
-    def test_an_attempts_file_that_is_not_a_number_fails_every_boot(self) -> None:
-        # Bug (phase 1 list): bash reads the word as a variable name (unbound under set -u):
-        # the unit fails at every boot, never counts, never gives up, and the flag stays.
+    def test_an_attempts_file_that_is_not_a_number_counts_as_none(self) -> None:
+        # Counted as 0 with a journal line and rewritten, so the counting and the give-up after
+        # two boots work again. Before, bash read the word as a variable name (unbound under
+        # set -u): the unit failed at every boot, never counted and never gave up.
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.write(BOOT_FLAG, "")
+        self.busy(ws)
+        for text, shown in (("x\n", "x"), ("1 2\n", "1 2"), ("-1\n", "-1"), ("1e9\n", "1e9")):
+            with self.subTest(text):
+                self.write(self.state_file("boot-attempts"), text)
+                r = self.run_prog("convert-boot")
+                self.assertEqual((r.returncode, r.stderr), (0, ""))
+                self.assertEqual(
+                    self.lines(r.stdout)[:2],
+                    [
+                        log(4, f"convert-boot: {self.state}/boot-attempts holds '{shown}', not a number; counted as 0"),
+                        BOOT_FIRST,
+                    ],
+                )
+                self.assertEqual(self.read_state("boot-attempts"), "1\n")
+        # The count goes on from there: one more boot, then the give-up.
+        self.assertEqual(self.run_prog("convert-boot").returncode, 0)
+        self.assertEqual(self.read_state("boot-attempts"), "2\n")
+        r = self.run_prog("convert-boot")
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.stdout.startswith(log(4, "Subvolume conversion at boot gave up: ")), r.stdout)
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+
+    def test_a_count_with_leading_zeros_is_decimal(self) -> None:
         self.plan(f"copy {self.tree('Workspace')}")
         self.write(BOOT_FLAG, "")
-        self.write(self.state_file("boot-attempts"), "x\n")
+        self.write(self.state_file("boot-attempts"), "08\n")
         r = self.run_prog("convert-boot")
-        self.assertEqual((r.returncode, r.stdout), (1, ""))
-        self.assertIn("x: unbound variable", r.stderr)
-        self.assertEqual(self.read_state("boot-attempts"), "x\n")
-        self.assertTrue(os.path.exists(self.path(BOOT_FLAG)))
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        # 8 attempts: the give-up, without bash's "value too great for base".
+        self.assertTrue(r.stdout.startswith(log(4, "Subvolume conversion at boot gave up: ")), r.stdout)
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
 
 
 class ConvertOneTest(Base):

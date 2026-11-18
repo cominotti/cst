@@ -2155,6 +2155,9 @@ cannot be swapped safely. For them:
   nothing of your session is running. It may take some minutes (time limit
   45 minutes). Its messages are also shown on the boot console.
 - After two boots with folders still left, it gives up and removes the flag.
+  It counts the boots in `/var/lib/btrfs-snapshot/boot-attempts`; a file
+  there that does not hold a number counts as no boot yet (the journal says
+  so) and is rewritten, so the counting and the give-up go on.
   The message `Subvolume conversion at boot gave up` is written to the
   journal (`journalctl -u btrfs-subvol-convert`) and the boot console.
   Nobody is logged in yet at that moment, so the desktop alert is kept and
