@@ -371,9 +371,8 @@ def _literal_vocabularies(tree: ast.Module) -> Iterator[tuple[ast.expr, str]]:
                 yield node, f"Literal of {len(words)} strings ({', '.join(map(repr, words))}): declare a StrEnum"
 
 
-def file_hits(source: str, rel: str, vocabulary: Mapping[str, str]) -> list[Hit]:
+def file_hits(tree: ast.Module, rel: str, vocabulary: Mapping[str, str]) -> list[Hit]:
     """The hits of every rule in one production module; vocabulary: its package's and cst_core's enum values."""
-    tree = ast.parse(source, filename=rel)
     scopes = {id(node): scope or "<module>" for node, scope in scoped(tree)}
     found: list[tuple[str, ast.AST, int, str]] = []
     for node in ast.walk(tree):
@@ -389,19 +388,17 @@ def file_hits(source: str, rel: str, vocabulary: Mapping[str, str]) -> list[Hit]
 def scan(root: str, rels: Sequence[str]) -> list[Hit]:
     """Every hit in the files rels (relative to root), the exempt ones included."""
     trees: dict[str, ast.Module] = {}
-    sources: dict[str, str] = {}
     for rel in rels:
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
-            sources[rel] = fh.read()
-        trees[rel] = ast.parse(sources[rel], filename=rel)
+            trees[rel] = ast.parse(fh.read(), filename=rel)
     vocab: dict[str, dict[str, str]] = {}
     for rel, tree in trees.items():
         for word, member in enum_values(tree).items():
             vocab.setdefault(package_of(rel), {}).setdefault(word, member)
     core = vocab.get(CORE_PACKAGE, {})
     hits: list[Hit] = []
-    for rel, source in sources.items():
-        hits += file_hits(source, rel, {**core, **vocab.get(package_of(rel), {})})
+    for rel, tree in trees.items():
+        hits += file_hits(tree, rel, {**core, **vocab.get(package_of(rel), {})})
     return hits
 
 
