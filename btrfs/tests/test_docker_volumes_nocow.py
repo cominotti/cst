@@ -48,6 +48,7 @@ import unittest
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType, SimpleNamespace
+from typing import override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_volumes_nocow.py): the checkout root holds the tests package.
@@ -416,6 +417,7 @@ class Commands:
 
 
 class Base(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-nocow-test-")
         self.addCleanup(tmp.cleanup)
@@ -642,7 +644,7 @@ class StatusTest(Base):
 
     def test_volumes_folder_without_nocow(self) -> None:
         self.volume("done", nocow=True)
-        rc, out = self.call(self.cli.status)
+        _rc, out = self.call(self.cli.status)
         self.assertEqual(out, f"{self.vols}: new volumes copy-on-write; 1 of 1 volume(s) fully NOCOW\n")
 
 
@@ -650,6 +652,7 @@ class NotVolumeDataTest(Base):
     """What the helper must neither count nor change: a _data that is a
     symlink, and a filesystem mounted below a volume."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -675,7 +678,7 @@ class NotVolumeDataTest(Base):
         mnt = self.fill(os.path.join(self.vols, "done", "_data", "mnt"))  # copy-on-write data
         before = tree(mnt)
         # Seen as part of the volume, the folder holds copy-on-write data.
-        rc, out = self.call(self.cli.status)
+        _rc, out = self.call(self.cli.status)
         self.assertIn("0 of 1 volume(s) fully NOCOW\n  1 with copy-on-write data (2 MiB)", out)
         real_lstat = os.lstat
 
@@ -768,6 +771,7 @@ class MainTest(Base):
 class MissingProgramTest(Base):
     """A program the helper runs is missing: it stops as when subprocess.run raised."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -816,6 +820,7 @@ class MissingProgramTest(Base):
 
 
 class MigrateTest(Base):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)  # what install's mark left
@@ -917,7 +922,7 @@ class MigrateTest(Base):
             real_fsync(fd)
 
         with mock.patch.object(os, "fsync", fsync):
-            rc, out = self.call(self.cli.migrate)
+            _rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         folder = os.path.dirname(self.flag)
         self.assertEqual(synced[:3], [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
@@ -936,7 +941,7 @@ class MigrateTest(Base):
             raise OSError(5, "Input/output error")
 
         with mock.patch.object(os, "fsync", fsync):
-            rc, out = self.call(self.cli.migrate)
+            _rc, out = self.call(self.cli.migrate)
         self.assertEqual(
             out,
             f"<3>{TAG}: cannot schedule the migration ([Errno 5] Input/output error); "
@@ -1069,7 +1074,7 @@ class MigrateTest(Base):
     def test_labels_kept(self) -> None:
         top = self.labelled_volume()
         schedule(self)
-        rc, out = self.call(self.cli.migrate)
+        _rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assertEqual(self.fs.label_of(top), self.CONTAINER + b"\0")
         for p, _ in entries(top):
@@ -1127,7 +1132,7 @@ class MigrateTest(Base):
         schedule(self)
         # The copy's README reads back with a NUL, the original's without.
         self.fs.cp = self.fs.copy_then(lambda dst: self.fs.label(os.path.join(dst, "README"), self.CONTAINER + b"\0"))
-        rc, out = self.call(self.cli.migrate)
+        _rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
         self.assert_all_nocow(top)
 
@@ -1194,7 +1199,7 @@ class MigrateTest(Base):
         self.volume("cow")
         schedule(self)
         self.fs.btrfs_out = ""
-        rc, out = self.call(self.cli.migrate)
+        _rc, out = self.call(self.cli.migrate)
         self.assertIn(f"<4>{TAG}: cow: not enough free space for a 2 MiB copy; skipped\n", out)
         self.assertEqual(self.fs.commands("cp"), [])
 
@@ -1294,6 +1299,7 @@ class PostponeBase(Base):
     interrupted copy (recover() would remove it): what a postponed boot must
     leave as it is."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -1385,6 +1391,7 @@ class DockerdTest(PostponeBase):
     Docker's, which keeps our /); pointing at another folder, one in a
     container."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         # Another mount namespace (a container): its own /var/lib/docker.
@@ -1711,7 +1718,7 @@ class PostponedRecordTest(PostponeBase):
         self.assertEqual(read_attempts(self), "1")
         self.assertEqual(self.fs.commands(self.notify), [])
         # status shows it.
-        rc, out = self.call(self.cli.status)
+        _rc, out = self.call(self.cli.status)
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
         self.assertIn(
             "  1 with copy-on-write data (2 MiB), migration at the next boot\n"
@@ -1720,7 +1727,7 @@ class PostponedRecordTest(PostponeBase):
         )
         # A boot that is not held back removes the record.
         self.fs.docker_state = "inactive"
-        rc, out = self.boot("b4", 4000)
+        _rc, out = self.boot("b4", 4000)
         self.assert_migrated(out)
         self.assertIsNone(self.record())
         self.assertNotIn("postponed", self.call(self.cli.status)[1])
@@ -1743,7 +1750,7 @@ class PostponedRecordTest(PostponeBase):
         os.makedirs(os.path.dirname(self.postponed), exist_ok=True)
         with open(self.postponed, "w") as f:
             f.write('{"reason": "Docker is running", "boots": 4, "first": 1, "last": 2, "boot_id": "old"}\n')
-        rc, out = self.boot("b1", 1000)
+        _rc, out = self.boot("b1", 1000)
         self.assertEqual(out, f"<4>{TAG}: Docker is running: migration left for the next boot\n")
         self.assertIsNone(self.record())
 
@@ -1791,6 +1798,7 @@ class PostponedRecordTest(PostponeBase):
 class RecoverTest(Base):
     """A crash at each step of migrate_one(), then the next boot."""
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.fs.set(self.vols, True)
@@ -1847,7 +1855,7 @@ class RecoverTest(Base):
         old = os.path.join(self.vol, names[0])
         self.assertEqual(ino(old), self.ino)
         # recover() alone: the original back under its name, the copy gone.
-        rc, out = self.call(self.cli.recover)
+        _rc, out = self.call(self.cli.recover)
         self.assertEqual(out, f"<4>{TAG}: cow: restored the original after an interrupted migration\n")
         self.assertEqual(ino(self.top), self.ino)
         self.assertEqual(tree(self.top), self.before)
@@ -1896,7 +1904,7 @@ class RecoverTest(Base):
         # _data there: every old copy and the new one go.
         for x in ("_data.cow-old-1700000000", "_data.cow-old-1700000100", "_data.nocow-new"):
             os.makedirs(os.path.join(self.vol, x, "sub"))
-        rc, out = self.call(self.cli.recover)
+        _rc, out = self.call(self.cli.recover)
         self.assertEqual(out, "")  # removed without a log line
         self.assert_no_leftovers("cow")
         self.assertEqual(ino(self.top), self.ino)

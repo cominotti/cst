@@ -24,6 +24,7 @@ import time
 import unittest
 import zipfile
 from datetime import UTC, datetime
+from typing import override
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_gc_program.py): the checkout root holds cst_core.
 CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -327,20 +328,21 @@ held back: 1 image(s) (protected registry: cleanup-now only)
 
 
 class StatusTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.since = OLD + 30 * DAY
         self.p.recorded(self.since, {sha("8"): self.p.now - DAY}, self.p.now)
 
     def expected_plan(self) -> str:
-        since = datetime.fromtimestamp(self.since).strftime("%F")
+        since = datetime.fromtimestamp(self.since, UTC).astimezone().strftime("%F")
         return PLAN_RECORDER_OK.format(old=days_ago(OLD), seen_a=since, since=since)
 
     def test_status_with_the_recorder_running(self) -> None:
         rc, out, err = self.p.run("status")
         self.assertEqual((rc, err), (0, ""))
-        since = datetime.fromtimestamp(self.since)
-        removal = datetime.fromtimestamp(self.since + 14 * DAY).strftime("%F")
+        since = datetime.fromtimestamp(self.since, UTC).astimezone()
+        removal = datetime.fromtimestamp(self.since + 14 * DAY, UTC).astimezone().strftime("%F")
         self.assertEqual(
             out,
             f"protected registries: {PROTECTED} (DOCKER_GC_PROTECT in {self.p.conf})\n"
@@ -385,7 +387,7 @@ class StatusTest(unittest.TestCase):
         with open(os.path.join(self.p.state, "last-run.json"), "w") as f:
             json.dump({"at": OLD, "containers": 1, "volumes": 2, "images": 3, "image_bytes": 4_500_000, "failed": 1}, f)
         _, out, _ = self.p.run("status")
-        at = datetime.fromtimestamp(OLD).strftime("%F %T")
+        at = datetime.fromtimestamp(OLD, UTC).astimezone().strftime("%F %T")
         self.assertIn(f"\nlast run {at}: 1 container(s), 2 volume(s), 3 image(s) (4.5 MB), failures 1\n", out)
         with open(os.path.join(self.p.state, "last-run.json"), "w") as f:
             f.write('{"at": 1}')
@@ -495,6 +497,7 @@ class ContainerTest(unittest.TestCase):
     """Inside a toolbox or container the settings file and the installed program are the container's
     (missing), while docker is the host's engine: no command that talks to docker runs there."""
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
@@ -544,6 +547,7 @@ class SettingsUpgradeTest(unittest.TestCase):
     `settings --write` (what `cst btrfs docker-gc enable` runs before it installs) keeps them in the
     file. The program as a process, the installed docker-gc a zipapp as main installed it."""
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
@@ -637,6 +641,7 @@ class RecordTest(unittest.TestCase):
         "not json",
     )
 
+    @override
     def setUp(self) -> None:
         self.p = Program(self)
         st = self.p.docker()

@@ -4,7 +4,8 @@ whether a dockerd uses them, the helper's state files, SELinux labels, the journ
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
+import contextlib
 import errno
 import json
 import os
@@ -16,8 +17,11 @@ from btrfs.docker_volumes_nocow.domain import (
     NEW_SUFFIX,
     OLD_MARK,
     NocowPaths,
+    PostponedRecord,
+    StoredPostponed,
     TreeScan,
     daemon_args,
+    is_stored_postponed,
     service_wait_reason,
 )
 from cst_core.adapters.files import CounterFile, write_atomic
@@ -278,36 +282,32 @@ class NocowStateFiles:
         except OSError:
             return ""
 
-    def read_postponed(self) -> dict[str, object] | None:
+    def read_postponed(self) -> StoredPostponed | None:
         try:
             with open(self.paths.postponed) as f:
                 rec = json.load(f)
         except OSError, ValueError:
             return None
-        return {str(k): v for k, v in rec.items()} if isinstance(rec, dict) else None
+        return rec if is_stored_postponed(rec) else None
 
-    def write_postponed(self, record: Mapping[str, object]) -> None:
+    def write_postponed(self, record: PostponedRecord) -> None:
         os.makedirs(os.path.dirname(self.paths.postponed), exist_ok=True)
         # 0644: cst doctor reads it as the user. Durable (file and folder fsynced): a
         # boot counter, like the attempts counter; a reset must not lose a boot.
         write_atomic(self.paths.postponed, json.dumps(dict(record)) + "\n", mode=0o644, relabel=False)
 
     def clear_postponed(self) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):  # nothing postponed
             os.remove(self.paths.postponed)
-        except FileNotFoundError:
-            pass  # nothing postponed
 
 
 def is_dockerd(proc: str) -> bool:
     """The process in /proc/PID is a dockerd (its name or its program file)."""
     with open(os.path.join(proc, "comm"), "rb") as f:
         names = {f.read().strip()}
-    try:
+    with contextlib.suppress(OSError):  # a kernel thread, or a process that just ended
         # As bytes: a program file name need not be valid UTF-8.
         names.add(os.path.basename(os.readlink(os.fsencode(os.path.join(proc, "exe"))).removesuffix(b" (deleted)")))
-    except OSError:
-        pass  # a kernel thread, or a process that just ended
     return b"dockerd" in names
 
 

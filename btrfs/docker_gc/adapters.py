@@ -4,7 +4,7 @@ systemctl and /proc/uptime, the terminal and the journal."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict
 import json
 import os
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import TypedDict, TypeIs
 import zipfile
 import zlib
 
@@ -37,6 +38,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
+from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
@@ -46,9 +48,38 @@ EVENTS_ARGV = ("docker", "events", "--format", "{{json .}}", "--filter", "type=c
 
 
 # ---- docker's JSON, read without trusting its shape ---------------------------------
+class InspectedObject(TypedDict, total=False):
+    """One object of `docker container|volume|image inspect`: the keys docker-gc reads. Their
+    values are not trusted (object): each reader checks the one it uses."""
+
+    Id: object
+    Name: object
+    Image: object
+    Created: object
+    Config: object
+    State: object
+    HostConfig: object
+    Mounts: object
+    Labels: object
+    RepoTags: object
+    RepoDigests: object
+    Size: object
+    Metadata: object
+
+
 def _obj(value: object) -> dict[str, object]:
     """value when it is a JSON object, else an empty one (Docker's null)."""
     return value if isinstance(value, dict) else {}
+
+
+def _is_inspected(value: object) -> TypeIs[InspectedObject]:
+    """A JSON object is an InspectedObject: none of its keys is required, any value is accepted."""
+    return isinstance(value, dict)
+
+
+def _inspected(value: object) -> InspectedObject:
+    """value when it is a JSON object, else an empty one (as _obj)."""
+    return value if _is_inspected(value) else {}
 
 
 def _str(value: object) -> str:
@@ -67,7 +98,7 @@ def _time(value: object) -> float:
     return ts(value if isinstance(value, str) else None)
 
 
-def container_of(o: Mapping[str, object]) -> Container:
+def container_of(o: InspectedObject) -> Container:
     """A Container from one object of `docker container inspect`."""
     config, state = _obj(o.get("Config")), _obj(o.get("State"))
     policy = _obj(_obj(o.get("HostConfig")).get("RestartPolicy"))
@@ -89,11 +120,11 @@ def container_of(o: Mapping[str, object]) -> Container:
     )
 
 
-def volume_of(o: Mapping[str, object]) -> Volume:
+def volume_of(o: InspectedObject) -> Volume:
     return Volume(name=_str(o.get("Name")), anonymous="com.docker.volume.anonymous" in _obj(o.get("Labels")))
 
 
-def image_of(o: Mapping[str, object]) -> Image:
+def image_of(o: InspectedObject) -> Image:
     size = _num(o.get("Size")) or 0
     return Image(
         id=_str(o.get("Id")),
@@ -128,7 +159,7 @@ class DockerCli:
     def __init__(self, runner: CommandRunnerPort) -> None:
         self._runner = runner
 
-    def run(self, *args: str, timeout: int = 600, check: bool = True) -> CommandResult:
+    def run(self, *args: str, timeout: int = 10 * MINUTE, check: bool = True) -> CommandResult:
         """docker ARGS. No answer within timeout, or a failure with check: RuntimeError.
         A docker that cannot be started raises (as subprocess.run did)."""
         r = self._runner.run(["docker", *args], timeout=timeout, stdin="inherit")
@@ -140,19 +171,19 @@ class DockerCli:
             raise RuntimeError(f"docker {' '.join(args[:2])}: {r.stderr.strip()[:300]}")
         return r
 
-    def inspect_all(self, kind: str, list_args: Sequence[str]) -> list[dict[str, object]]:
+    def inspect_all(self, kind: str, list_args: Sequence[str]) -> list[InspectedObject]:
         """Inspect every object listed. Objects that vanished in between are
         dropped; any other gap aborts (a container missing from the result would
         leave its image unprotected)."""
         ids = sorted(set(self.run(*list_args).stdout.split()))
-        out: list[dict[str, object]] = []
+        out: list[InspectedObject] = []
         for i in range(0, len(ids), 100):
             r = self.run(kind, "inspect", *ids[i : i + 100], check=False)
             try:
                 found = json.loads(r.stdout or "[]")
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"{kind} inspect: unreadable output ({e})") from e
-            out.extend(_obj(o) for o in (found if isinstance(found, list) else []))
+            out.extend(_inspected(o) for o in (found if isinstance(found, list) else []))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got
         if missing and missing & set(self.run(*list_args).stdout.split()):
@@ -161,7 +192,7 @@ class DockerCli:
 
     def is_up(self) -> bool:
         try:
-            r = self.run("info", "--format", "{{.ID}}", check=False, timeout=60)
+            r = self.run("info", "--format", "{{.ID}}", check=False, timeout=MINUTE)
         except FileNotFoundError:
             return False  # docker is not installed
         if r.returncode == 0:
@@ -274,9 +305,13 @@ class GcStateFiles:
             images, since = st.get("images"), _num(st.get("since"))
             heartbeat = _num(st.get("heartbeat", 0))
             # a value that is not a time: not a state docker-gc wrote
-            if isinstance(images, dict) and since is not None and heartbeat is not None:
-                if all(_num(v) is not None for v in images.values()):
-                    return GcState(since=since, images=images, heartbeat=heartbeat)
+            if (
+                isinstance(images, dict)
+                and since is not None
+                and heartbeat is not None
+                and all(_num(v) is not None for v in images.values())
+            ):
+                return GcState(since=since, images=images, heartbeat=heartbeat)
         return GcState(since=time.time(), images={}, heartbeat=0)
 
     def save_state(self, state: GcState) -> None:

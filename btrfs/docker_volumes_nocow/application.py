@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from btrfs.docker_volumes_nocow.domain import (
     GAVE_UP,
     GIVE_UP_AFTER,
     MARGIN,
     NEW_SUFFIX,
     OLD_MARK,
+    NocowCommand,
     NocowPaths,
     PendingVolume,
     copy_check_failed,
@@ -21,9 +20,6 @@ from btrfs.docker_volumes_nocow.domain import (
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
 from cst_core.ports import ClockPort
-
-type NocowCommand = Literal["status", "mark", "migrate", "unmark"]
-COMMANDS: tuple[NocowCommand, ...] = ("status", "mark", "migrate", "unmark")
 
 
 class DockerVolumesNocow:
@@ -44,17 +40,18 @@ class DockerVolumesNocow:
         """Run one command; its exit status. An OSError (e.g. a data-root that is not on
         btrfs) is one journal line; exit 0 for the boot's migrate and for unmark, else 2."""
         try:
-            if command == "mark":
-                return 1 if self.mark() else 0
-            if command == "migrate":
-                self.migrate()
-            elif command == "unmark":
-                self.unmark()
-            else:
-                self.status()
+            match command:
+                case NocowCommand.MARK:
+                    return 1 if self.mark() else 0
+                case NocowCommand.MIGRATE:
+                    self.migrate()
+                case NocowCommand.UNMARK:
+                    self.unmark()
+                case _:
+                    self.status()
         except OSError as e:
             self.out.log(3, f"{self.paths.volumes}: {e}")
-            return 0 if command in ("migrate", "unmark") else 2
+            return 0 if command in (NocowCommand.MIGRATE, NocowCommand.UNMARK) else 2
         return 0
 
     # ---- what the volumes hold -------------------------------------------

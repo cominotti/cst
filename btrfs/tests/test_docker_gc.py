@@ -27,6 +27,7 @@ import time
 import unittest
 import zipfile
 from collections.abc import Mapping
+from typing import override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_docker_gc.py): the checkout root holds the tests package.
@@ -45,6 +46,7 @@ from btrfs.docker_gc.domain import (
     Container,
     DockerEvent,
     EventsEnd,
+    GcCommand,
     GcPaths,
     GcPlan,
     GcSettings,
@@ -425,17 +427,18 @@ class DomainTest(unittest.TestCase):
 
 
 class ApplicationTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture()
 
     def test_a_docker_error_is_logged_and_exits_1(self) -> None:
         self.f.docker.error = RuntimeError("docker info: no answer in 60s")
-        self.assertEqual(self.f.gc.execute("run", dry=True), 1)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN, dry=True), 1)
         self.assertEqual(self.f.console.lines, ["<3>docker info: no answer in 60s"])
 
     def test_status_without_records_and_without_docker(self) -> None:
         self.f.docker.up = False
-        self.assertEqual(self.f.gc.execute("status"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.STATUS), 0)
         self.assertEqual(
             self.f.console.lines,
             [
@@ -463,34 +466,34 @@ class ApplicationTest(unittest.TestCase):
         # without looking, and the next run wrote over the newer summary.
         self.f.host.up_for = 60.0
         self.f.state.summary_error = NewerState("last-run.json is format 2")
-        self.assertEqual(self.f.gc.execute("run", dry=False), NEWER_STATE_EXIT)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN, dry=False), NEWER_STATE_EXIT)
         self.f.state.summary_error = None
         self.f.state.state_error = NewerState("last-used.json is format 2")
-        self.assertEqual(self.f.gc.execute("run", dry=False), NEWER_STATE_EXIT)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN, dry=False), NEWER_STATE_EXIT)
 
     def test_a_second_run_while_the_lock_is_held_exits_0(self) -> None:
         self.f.state.lock_free = False
         for dry in (False, True):
             self.f.console.lines.clear()
-            self.assertEqual(self.f.gc.execute("run", dry=dry), 0)
+            self.assertEqual(self.f.gc.execute(GcCommand.RUN, dry=dry), 0)
             self.assertEqual(self.f.console.lines, ["<5>another docker-gc run is active; skipped"])
         self.f.console.lines.clear()
-        self.assertEqual(self.f.gc.execute("cleanup-now"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.CLEANUP_NOW), 0)
         self.assertEqual(self.f.console.lines, ["<5>another docker-gc run is active; skipped"])
 
     def test_a_run_just_after_boot_is_skipped_but_a_dry_run_is_not(self) -> None:
         self.f.host.up_for = 599
-        self.assertEqual(self.f.gc.execute("run"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN), 0)
         self.assertEqual(self.f.console.lines, ["<5>booted less than 10 minutes ago; skipped this time"])
         self.f.console.lines.clear()
-        self.assertEqual(self.f.gc.execute("run", dry=True), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN, dry=True), 0)
         self.assertEqual(self.f.console.lines[-1], "(dry run: nothing removed)")
 
     def test_a_run_saves_its_summary(self) -> None:
         self.f.docker.listed_images = [Image("sha256:a", tags=("alpine:old",), size=7)]
         self.f.state.state = GcState(since=NOW - 30 * DAY, images={}, heartbeat=NOW)
         self.f.docker.ids["alpine:old"] = "sha256:a"
-        self.assertEqual(self.f.gc.execute("run"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN), 0)
         self.assertEqual(self.f.state.summary, RunSummary(NOW, 0, 0, 1, 7, 0, {"Images": "1GB"}, {"Images": "1GB"}))
         self.assertEqual(self.f.docker.calls[-2:], [("rm image", "alpine:old"), ("prune", "336")])
 
@@ -520,7 +523,7 @@ class ApplicationTest(unittest.TestCase):
         ]
         self.f.docker.ids = {"a:1": "sha256:a", "registry.example.com/x:1": "sha256:d"}
         self.f.console.answers = [True, False]
-        self.assertEqual(self.f.gc.execute("cleanup-now"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.CLEANUP_NOW), 0)
         removed = [c[1] for c in self.f.docker.calls if c[0] == "rm image"]
         self.assertEqual(removed, ["a:1"])
         asks = [line for line in self.f.console.lines if line.startswith("ASK")]
@@ -531,19 +534,20 @@ class ApplicationTest(unittest.TestCase):
 
     def test_cleanup_now_needs_a_terminal_and_stops_at_no(self) -> None:
         self.f.console.tty = False
-        self.assertEqual(self.f.gc.execute("cleanup-now"), 1)
+        self.assertEqual(self.f.gc.execute(GcCommand.CLEANUP_NOW), 1)
         self.assertEqual(self.f.console.lines, ["ERR cleanup-now asks for confirmation: run it in a terminal."])
         self.f.console.tty = True
         self.f.console.lines.clear()
-        self.assertEqual(self.f.gc.execute("cleanup-now"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.CLEANUP_NOW), 0)
         self.assertEqual(self.f.console.lines[-1], "Nothing to remove.")
         self.f.docker.listed_volumes = [Volume("v", anonymous=True)]
-        self.assertEqual(self.f.gc.execute("cleanup-now"), 0)
+        self.assertEqual(self.f.gc.execute(GcCommand.CLEANUP_NOW), 0)
         self.assertEqual(self.f.console.lines[-1], "Nothing removed.")
         self.assertNotIn(("rm volume", "v"), self.f.docker.calls)
 
 
 class RecordTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture(GcSettings(flush_seconds=7))
 
@@ -556,7 +560,7 @@ class RecordTest(unittest.TestCase):
         ):
             with self.subTest(end=end):
                 self.f.docker.end = end
-                self.assertEqual(self.f.gc.execute("record"), want)
+                self.assertEqual(self.f.gc.execute(GcCommand.RECORD), want)
         self.assertIn(("events", "7"), self.f.docker.calls)
 
     def test_uses_are_recorded_and_saved(self) -> None:
@@ -571,7 +575,7 @@ class RecordTest(unittest.TestCase):
             DockerEvent("image", "pull", actor_id=full_id),
             DockerEvent("container", "create", image_attr="gone:1"),
         ]
-        self.f.gc.execute("record")
+        self.f.gc.execute(GcCommand.RECORD)
         first, last = self.f.state.saved[0], self.f.state.saved[-1]
         self.assertEqual(dict(first.images), {"sha256:c": NOW, "sha256:o": NOW - DAY})
         self.assertEqual(first.heartbeat, NOW)
@@ -583,7 +587,7 @@ class RecordTest(unittest.TestCase):
     def test_a_recorder_down_for_a_while_restarts_the_clock(self) -> None:
         self.f.state.state = GcState(since=0, images={"sha256:x": 5}, heartbeat=NOW - 1000)
         self.f.host.up_for = 3600  # Docker kept running: the heartbeat stopped after the boot
-        self.f.gc.execute("record")
+        self.f.gc.execute(GcCommand.RECORD)
         self.assertEqual(self.f.state.saved[0].since, NOW)
         self.assertEqual(dict(self.f.state.saved[0].images), {"sha256:x": 5})
         self.assertEqual(self.f.console.lines[0], "<5>recorder was down for a while: image clock restarted")
@@ -591,7 +595,7 @@ class RecordTest(unittest.TestCase):
         self.f = Fixture()
         self.f.state.state = GcState(since=0, images={}, heartbeat=NOW - 1000)
         self.f.host.up_for = 100
-        self.f.gc.execute("record")
+        self.f.gc.execute(GcCommand.RECORD)
         self.assertEqual(self.f.state.saved[0].since, 0)
 
     def test_tick_saves_what_changed_and_the_heartbeat(self) -> None:
@@ -624,6 +628,7 @@ class RecordTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.f = Fixture()
         self.f.docker.up = False
@@ -747,35 +752,35 @@ class SettingsDomainTest(unittest.TestCase):
 class SettingsUseCaseTest(unittest.TestCase):
     def test_settings_writes_the_file_only_when_missing(self) -> None:
         f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
-        self.assertEqual(f.gc.execute("settings"), 10)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS), 10)
         self.assertEqual(f.config.written, [])
         self.assertEqual(
             f.console.lines[-1], "would write: /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=old.example:5000)"
         )
-        self.assertEqual(f.gc.execute("settings", write=True), 0)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 0)
         self.assertEqual(f.config.written, [gc_domain.render_settings_file(("old.example:5000",))])
         self.assertEqual(f.console.lines[-1], "written:   /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=old.example:5000)")
-        self.assertEqual(f.gc.execute("settings", write=True), 0)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 0)
         self.assertEqual(len(f.config.written), 1, "a second --write wrote again")
         self.assertEqual(f.console.lines[-2:], [
             "protected registries: old.example:5000 (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf)",
             "unchanged: /etc/cst/docker-gc.conf",
         ])  # fmt: skip
-        self.assertEqual(f.gc.execute("settings"), 0)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS), 0)
 
     def test_the_installed_program_is_read_only_while_the_file_is_missing(self) -> None:
         # With the file there, the installed program does not count: a damaged one cannot stop a run.
         f = Fixture(config=FakeConfig("DOCKER_GC_PROTECT=\n", installed=("print(1)\n",)))
-        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.gc.execute(GcCommand.STATUS), 0)
         self.assertEqual(f.config.installed_reads, 0)
         f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
-        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.gc.execute(GcCommand.STATUS), 0)
         self.assertEqual(f.config.installed_reads, 1)
 
     def test_a_failed_write_is_one_line_and_exit_1(self) -> None:
         f = Fixture(config=FakeConfig(None))
         f.config.fail_write = PermissionError(13, "Permission denied")
-        self.assertEqual(f.gc.execute("settings", write=True), 1)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 1)
         self.assertEqual(f.console.lines[-1], "ERR cannot write /etc/cst/docker-gc.conf: Permission denied")
 
     def test_without_the_file_the_installed_programs_registry_stays_protected(self) -> None:
@@ -786,13 +791,13 @@ class SettingsUseCaseTest(unittest.TestCase):
         f.docker.listed_images = [Image("sha256:d", tags=("old.example:5000/x:1",), size=1)]
         f.docker.ids = {"old.example:5000/x:1": "sha256:d"}
         f.console.answers = [True, False]
-        self.assertEqual(f.gc.execute("cleanup-now"), 0)
+        self.assertEqual(f.gc.execute(GcCommand.CLEANUP_NOW), 0)
         self.assertEqual([c for c in f.docker.calls if c[0] == "rm image"], [])
         self.assertIn("[protected registry]", "\n".join(f.console.lines))
 
     def test_settings_it_cannot_read_stop_every_command_but_the_recorder(self) -> None:
         for config in (FakeConfig("DOCKER_GC_PROTCT=x\n"), FakeConfig(None, installed=("print(1)\n",))):
-            for command in ("status", "run", "cleanup-now", "settings"):
+            for command in (GcCommand.STATUS, GcCommand.RUN, GcCommand.CLEANUP_NOW, GcCommand.SETTINGS):
                 f = Fixture(config=config)
                 f.state.state = GcState(since=NOW - 30 * DAY)
                 f.docker.listed_volumes = [Volume("v", anonymous=True)]
@@ -800,11 +805,12 @@ class SettingsUseCaseTest(unittest.TestCase):
                 self.assertTrue(f.console.lines and all(ln.startswith("<3>") for ln in f.console.lines))
                 self.assertEqual(f.docker.calls, [], "it reached docker")
         f = Fixture(config=FakeConfig("DOCKER_GC_PROTCT=x\n"))
-        f.gc.execute("record")
+        f.gc.execute(GcCommand.RECORD)
         self.assertEqual(f.config.reads, 0, "the recorder read the settings")
 
 
 class SettingsFileTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="docker-gc-settings-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -880,13 +886,13 @@ class ContainerRefusalTest(unittest.TestCase):
 
     def test_each_command_refuses_and_names_the_host_command(self) -> None:
         for (cmd, dry, write), on_host in (
-            (("run", False, False), "cst btrfs docker-gc run"),
-            (("run", True, False), "cst btrfs docker-gc run --dry-run"),
-            (("cleanup-now", False, False), "cst btrfs docker-gc cleanup-now"),
-            (("status", False, False), "cst btrfs docker-gc status"),
-            (("record", False, False), "sudo /usr/local/sbin/docker-gc record"),
-            (("settings", False, True), "sudo /usr/local/sbin/docker-gc settings --write"),
-            (("settings", False, False), "sudo /usr/local/sbin/docker-gc settings"),
+            ((GcCommand.RUN, False, False), "cst btrfs docker-gc run"),
+            ((GcCommand.RUN, True, False), "cst btrfs docker-gc run --dry-run"),
+            ((GcCommand.CLEANUP_NOW, False, False), "cst btrfs docker-gc cleanup-now"),
+            ((GcCommand.STATUS, False, False), "cst btrfs docker-gc status"),
+            ((GcCommand.RECORD, False, False), "sudo /usr/local/sbin/docker-gc record"),
+            ((GcCommand.SETTINGS, False, True), "sudo /usr/local/sbin/docker-gc settings --write"),
+            ((GcCommand.SETTINGS, False, False), "sudo /usr/local/sbin/docker-gc settings"),
         ):
             f = Fixture(config=FakeConfig(text=None, installed=None))
             f.gc.in_container = True
@@ -903,13 +909,15 @@ class ContainerRefusalTest(unittest.TestCase):
     def test_settings_runs_when_both_files_are_named(self) -> None:
         f = Fixture(config=FakeConfig(text=None, installed=None))
         f.gc.in_container, f.gc.named_files = True, True
-        self.assertEqual(f.gc.execute("settings", write=True), 0, f.console.lines)
+        self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 0, f.console.lines)
         self.assertIsNotNone(f.config.text)
         f.gc.named_files = False
-        self.assertEqual(f.gc.execute("run"), 1)
+        self.assertEqual(f.gc.execute(GcCommand.RUN), 1)
         f = Fixture()
         f.gc.in_container, f.gc.named_files = True, True
-        self.assertEqual(f.gc.execute("status"), 1, "a command that talks to docker refuses with the files named too")
+        self.assertEqual(
+            f.gc.execute(GcCommand.STATUS), 1, "a command that talks to docker refuses with the files named too"
+        )
         self.assertEqual(f.docker.calls, [])
 
     def test_the_wiring_tells_the_container(self) -> None:
@@ -925,6 +933,7 @@ class ContainerRefusalTest(unittest.TestCase):
 
 
 class StateFilesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="docker-gc-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1079,6 +1088,7 @@ class StateFilesTest(unittest.TestCase):
 class RecorderActiveTest(unittest.TestCase):
     """recorder_active: systemctl is-active with no stdin and a time limit."""
 
+    @override
     def setUp(self) -> None:
         self.host = gc_adapters.GcHost(SubprocessCommandRunner())
 
@@ -1170,14 +1180,14 @@ class EntryTest(unittest.TestCase):
 class DockerCommandTest(unittest.TestCase):
     """DockerCli.run: a docker that does not answer stops the run with one line; one that is missing raises."""
 
+    @override
     def setUp(self) -> None:
         self.docker = gc_adapters.DockerCli(SubprocessCommandRunner())
 
     def test_no_answer_and_missing(self) -> None:
         hang = subprocess.TimeoutExpired(["docker"], 30)
-        with mock.patch.object(subprocess, "run", side_effect=hang):
-            with self.assertRaises(RuntimeError) as stop:
-                self.docker.run("image", "ls", "-q", timeout=30)
+        with mock.patch.object(subprocess, "run", side_effect=hang), self.assertRaises(RuntimeError) as stop:
+            self.docker.run("image", "ls", "-q", timeout=30)
         self.assertEqual(str(stop.exception), "docker image ls: no answer in 30s")
         self.assertIsInstance(stop.exception.__cause__, subprocess.TimeoutExpired)
         missing = FileNotFoundError(2, "No such file or directory", "docker")

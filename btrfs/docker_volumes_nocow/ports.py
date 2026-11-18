@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from typing import Protocol
 
-from btrfs.docker_volumes_nocow.domain import TreeScan
+from btrfs.docker_volumes_nocow.domain import PostponedRecord, StoredPostponed, TreeScan
 from cst_core.ports import CommandResult
 
 
@@ -92,9 +92,9 @@ class NocowStatePort(Protocol):
         """The kernel's boot id ("" when unknown)."""
         ...
 
-    def read_postponed(self) -> Mapping[str, object] | None: ...
+    def read_postponed(self) -> StoredPostponed | None: ...
 
-    def write_postponed(self, record: Mapping[str, object]) -> None: ...
+    def write_postponed(self, record: PostponedRecord) -> None: ...
 
     def clear_postponed(self) -> None: ...
 

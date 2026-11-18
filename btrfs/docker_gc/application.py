@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Literal
 
 from btrfs.docker_gc.domain import (
     BAD_SETTINGS_EXIT,
@@ -14,6 +13,7 @@ from btrfs.docker_gc.domain import (
     NOT_RECORDED,
     UnknownProtection,
     DockerEvent,
+    GcCommand,
     GcPaths,
     GcPlan,
     GcSettings,
@@ -37,13 +37,11 @@ from btrfs.docker_gc.domain import (
     run_log_line,
 )
 from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSettingsPort, GcStatePort
+from cst_core.domain.values import MINUTE
 from cst_core.ports import ClockPort
 
-type GcCommand = Literal["record", "run", "cleanup-now", "status", "settings"]
-COMMANDS: tuple[GcCommand, ...] = ("record", "run", "cleanup-now", "status", "settings")
-
 RESOLVE_TIMEOUT = 30  # seconds for the image inspect behind one event
-RESOLVED_FOR = 60  # seconds a reference -> ID answer is reused
+RESOLVED_FOR = MINUTE  # seconds a reference -> ID answer is reused
 RESOLVED_MAX = 2000  # answers kept before the cache starts over
 
 
@@ -169,17 +167,18 @@ class DockerGc:
                 self.console.error(refused)
                 return 1
         try:
-            if command == "record":
+            if command == GcCommand.RECORD:
                 return self.record()
             self.read_protection()
-            if command == "settings":
-                return self.settings_file(write=write)
-            if command == "cleanup-now":
-                return self.cleanup_now()
-            if command == "run":
-                self.run(dry=dry)
-            else:
-                self.status()
+            match command:
+                case GcCommand.SETTINGS:
+                    return self.settings_file(write=write)
+                case GcCommand.CLEANUP_NOW:
+                    return self.cleanup_now()
+                case GcCommand.RUN:
+                    self.run(dry=dry)
+                case _:
+                    self.status()
         except NewerState as e:
             self.console.log(3, str(e))
             return NEWER_STATE_EXIT
@@ -235,10 +234,10 @@ class DockerGc:
         recorder state), and each tag still pointing at this very image. Why it was kept, or ""."""
         if img.id in {c.image_id for c in self.docker.containers()}:
             return "now used by a container"
-        if self.state.load_state().images.get(img.id, 0) > plan_at - 60:
+        if self.state.load_state().images.get(img.id, 0) > plan_at - MINUTE:
             return "used meanwhile"
         for t in img.tags:
-            if self.docker.image_id(t, timeout=600) != img.id:
+            if self.docker.image_id(t, timeout=10 * MINUTE) != img.id:
                 continue  # re-pulled or retagged meanwhile: that tag is not ours
             r = self.docker.remove_image(t)
             if r.returncode != 0:
