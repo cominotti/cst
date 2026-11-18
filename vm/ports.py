@@ -7,7 +7,7 @@ from typing import Protocol
 
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.values import Json
-from vm.domain import NasRepo, TimerStep
+from vm.domain import ImageProbe, NasRepo, TimerStep
 from vm.domain.backup import Fingerprint, IndexEntry, ResticSummary
 
 # One NAS backup per VM at a time: the lock of the VM named, held while the block runs (Refused
@@ -157,6 +157,11 @@ class BackupStorePort(Protocol):
         """Remove a file this run made and libvirt never used, as far as it goes."""
         ...
 
+    def describe(self, entry: IndexEntry) -> str:
+        """One line for a backup of the index (list, status): a local copy whose folder is gone
+        says so."""
+        ...
+
     def read_index(self) -> list[IndexEntry]:
         """The backups in the index ([] when there is none); Refused for one of a newer cst vm."""
         ...
@@ -176,6 +181,22 @@ class SettingsPort(Protocol):
 
     def nas_repo(self) -> NasRepo:
         """The restic repository of the /home NAS backup; Refused when that backup is not set up."""
+        ...
+
+    def nas_set_up(self) -> bool:
+        """snapshots.conf says the /home NAS backup is set up (NAS_ENABLED=1 and NAS_PATH)."""
+        ...
+
+    def knobs(self) -> dict[str, bool]:
+        """{knob: on} of vm.conf (a missing file or knob is on)."""
+        ...
+
+    def cpu_disable(self) -> list[str]:
+        """The CPU features vm-pin keeps disabled (cpu-setup.conf's VM_CPU_DISABLE, else its default)."""
+        ...
+
+    def default_vm(self) -> str:
+        """The VM a command names when none is given (cpu-setup.conf's VM_NAME, else the default)."""
         ...
 
 
@@ -206,4 +227,20 @@ class SignalsPort(Protocol):
 
     def ignored(self) -> AbstractContextManager[None]:
         """While it lasts, the stops are ignored (the merge back); the handlers before it after."""
+        ...
+
+
+class ImagesPort(Protocol):
+    """The VM image folders (libvirt's and the user's): what they look like, and their NOCOW mark."""
+
+    def folders(self) -> list[ImageProbe]:
+        """Every known folder, probed."""
+        ...
+
+    def needs_mark(self, folder: ImageProbe) -> bool:
+        """nocow apply would act on it."""
+        ...
+
+    def mark(self, folder: ImageProbe, say: Callable[[str], None]) -> str:
+        """Set the mark (say shows each sudo command first); an error text, or ""."""
         ...

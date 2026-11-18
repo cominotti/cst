@@ -164,3 +164,19 @@ def mark_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
     except OSError as e:
         return f"{d.path}: {e.strerror}"
     return "" if flag_state(readable_inode_flags(d.path)) else f"{d.path}: the mark did not stick"
+
+
+class ImageFolders:
+    """ImagesPort on this machine: image_dirs of cfg, probe_dir, needs_mark and mark_dir."""
+
+    def __init__(self, cfg: VmSettings) -> None:
+        self.cfg = cfg
+
+    def folders(self) -> list[ImageProbe]:
+        return [probe_dir(d) for d in image_dirs(self.cfg)]
+
+    def needs_mark(self, folder: ImageProbe) -> bool:
+        return needs_mark(folder)
+
+    def mark(self, folder: ImageProbe, say: Callable[[str], None]) -> str:
+        return mark_dir(folder, say)

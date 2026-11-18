@@ -1033,19 +1033,24 @@ The Python code inside `vm/` (standard library only at run time):
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
   files, and `fault_words`, cst-vm's words for a command that is missing or does not
   answer (systemctl runs through cst_core's `SystemctlAdapter` with them, in the C
-  locale, 120 s at most). `backup.py`: the
+  locale, 120 s at most); `VmCommands` (libvirt, the packages, the deployment) and
+  `VmConfFiles` (the settings) are the ports' adapters there. `backup.py`: the
   backup index, fingerprints and sizes, the stop signals, the per-VM lock and
-  the alert. `restic.py`: restic (`Restic`: a command, and `restic backup
+  the alert; `BackupFiles`, `StopSignals` and `TerminalLines` are the ports'
+  adapters there. `restic.py`: restic (`Restic`: a command, and `restic backup
   --json` with its progress), generic: it takes the repository's variables at
   each call and names no VM, so the /home NAS backup can use it as it is.
   `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
   and the image folders (`probe_dir`), and setting the mark (`mark_dir`; the
-  system folder through `sudo` when not root). `nocow apply` has no
+  system folder through `sudo` when not root); `ImageFolders` is their port's adapter. `nocow apply` has no
   application layer: it marks folders one by one, nothing to roll back.
 - `vm/wiring.py`: the composition root: the environment of one run becomes a
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
   `CST_VM_*`, which move each path for the tests only, and the snapshot and
   merge timeouts). `cst doctor` builds the same settings for its VM checks.
+  It also builds the ports over the adapters (`local_backup`, `nas_backup`,
+  `timer_port`, `systemd`, `settings_port`, `images`, ...): vm is in
+  `HEXAGONAL_PACKAGES`, so only `wiring.py` and `vm/adapters/` import an adapter.
 - `vm/application/`: the use cases that change the machine in several
   steps, typed against the ports of `vm/ports.py`. `backup.py`: the local
   backup (`backup_local`) and the checks every backup makes first, over
@@ -1067,7 +1072,9 @@ The Python code inside `vm/` (standard library only at run time):
 - `vm/cli/`: the commands, one module per command group: `backup.py` (the
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
-  `__init__.py`.
+  `__init__.py`. They parse, take their ports from `vm/wiring.py`, run a use
+  case (or read the ports, for list, status and nocow) and print: no I/O of
+  their own.
 
 `cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`,
 `vm.adapters` (knobs) and `vm.adapters.images` (the image folder probe) from

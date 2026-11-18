@@ -318,6 +318,19 @@ class VmConfFiles:
     def nas_repo(self) -> NasRepo:
         return nas_settings(self.cfg)
 
+    def nas_set_up(self) -> bool:
+        conf = read_conf(self.cfg.paths.nas_conf, nas_conf=self.cfg.paths.nas_conf, bash_sourced=True)
+        return conf.get("NAS_ENABLED") == "1" and bool(conf.get("NAS_PATH"))
+
+    def knobs(self) -> dict[str, bool]:
+        return knobs(self.cfg.paths)
+
+    def cpu_disable(self) -> list[str]:
+        return cpu_disable_list(self.cfg.paths)
+
+    def default_vm(self) -> str:
+        return default_vm(self.cfg.paths)
+
 
 def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""

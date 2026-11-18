@@ -2,8 +2,9 @@
 """The `cst vm` command line (the program behind vm/cst-vm): backup, the NAS
 backup and its weekly timer, list, status, tune, nocow.
 
-A driving adapter: argv in, the rules of vm.domain applied to what
-vm.adapters reads from the host, the answer printed. One module per
+A driving adapter: argv in, the ports vm.wiring builds handed to the use
+cases of vm.application (or read directly, for list and status), the
+answer printed. One module per
 command group (vm.cli.backup, nas, timer, status, tune, nocow); main is here.
 """
 
@@ -15,8 +16,6 @@ from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.text import first_line
 from cst_core.ports import WriteFailed
 from vm import wiring
-from vm.adapters import default_vm, prepare_command
-from vm.adapters.backup import notify, safe_output
 from vm.cli import backup, nas, nocow, status, timer, tune
 from vm.domain import VmSettings, parse_args
 from vm.domain.backup import Stop
@@ -41,7 +40,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
         return 2
     cmd, vm = a.cmd, a.vm
     try:
-        prepare_command(cfg.paths, cmd, a.sub, a.nas, vm)
+        wiring.prepare(cfg, a)
         if cmd == "help":
             print(doc)
             return 0
@@ -49,9 +48,9 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
             return status.cmd_list(cfg, vm)
         if cmd == "nocow":
             return nocow.cmd_nocow_plan(cfg, a.root) if a.sub == "plan" else nocow.cmd_nocow_apply(cfg)
-        vm = vm or default_vm(cfg.paths)
+        vm = vm or wiring.settings_port(cfg).default_vm()
         if cmd == "status":
-            return status.cmd_status(cfg, vm)
+            return status.cmd_status(cfg, vm, entry_file)
         if cmd == "tune":
             return tune.cmd_tune(cfg, vm, a.sub == "apply", a.guest_virtio)
         if cmd == "backup-timer":
@@ -59,15 +58,14 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
             return 0
         if cmd != "backup":
             assert_never(cmd)  # every command is handled above
-        safe_output()  # a closed terminal or pipe never cuts a backup or its cleanup short
+        wiring.safe_terminal()  # a closed terminal or pipe never cuts a backup or its cleanup short
         return nas.cmd_backup_nas(cfg, vm, a.keep, not a.no_quiesce) if a.nas else backup.cmd_backup(cfg, vm, a.full)
     except (Refused, Stop, WriteFailed) as e:
         print(f"{cfg.prog}: {e}", file=sys.stderr)
         if cmd == "backup" and a.nas and cfg.under_systemd and "DISK NOT MERGED" not in str(e):
             # Started by systemd (the weekly timer): nobody reads the terminal.
-            notify(
+            wiring.failure_alert(
                 cfg,
-                "normal",
                 f"Weekly VM backup of {vm} to the NAS failed",
                 f"{first_line(str(e))[:300]} See: journalctl -u cst-vm-backup@{vm}.service",
             )

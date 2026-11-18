@@ -4,14 +4,12 @@ is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, i
 
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-import datetime
 import json
 import os
 import shutil
 import signal
 import struct
 import sys
-import time
 from types import FrameType
 from typing import TextIO
 
@@ -25,12 +23,6 @@ from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
 from vm.domain.backup import Fingerprint, IndexEntry, Stop
-
-
-def utc_now(override: str | None = None) -> tuple[float, str]:
-    """(seconds, its UTC stamp) of now, or of override (settings.now: CST_VM_NOW, tests)."""
-    now = float(override or time.time())
-    return now, datetime.datetime.fromtimestamp(now, datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def qcow2_backing_file(path: str) -> bool:
@@ -235,6 +227,9 @@ class BackupFiles(LocalFileSystemAdapter):
             os.unlink(path)
         except OSError:
             pass
+
+    def describe(self, entry: IndexEntry) -> str:
+        return describe_entry(entry)
 
     def read_index(self) -> list[IndexEntry]:
         return read_index(self.cfg)

@@ -1465,7 +1465,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox")
+            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)

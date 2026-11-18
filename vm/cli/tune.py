@@ -2,14 +2,12 @@
 """`cst vm tune plan|apply [VM] [--guest-has-virtio]`: the recommended virtual hardware."""
 
 from collections.abc import Callable
-import os
 import shlex
 import sys
 
 from cst_core.domain.errors import Refused
 from vm import application, wiring
-from vm.adapters import cpu_disable_list, knobs
-from vm.adapters.backup import utc_now
+from vm.application.backup import backup_time
 from vm.domain import KNOBS, URI, VmSettings
 from vm.domain.tune import WINDOWS_STEPS, cpu_owner_line
 from vm.ports import DefinitionStorePort, VmCommandsPort
@@ -26,10 +24,11 @@ def cmd_tune(
     confirm: Callable[[str], bool] | None = None,
 ) -> int:
     """tune plan or apply; commands, store and confirm: a test's, else this machine's (wiring)."""
-    if apply and os.geteuid() != 0 and not cfg.nonroot_ok:
+    if apply and not wiring.running_as_root() and not cfg.nonroot_ok:
         raise Refused(f"tune apply needs root: run it as `{cfg.prog} tune apply` (it calls sudo by itself)")
     virsh = wiring.vm_commands() if commands is None else commands
-    kn = knobs(cfg.paths)
+    conf = wiring.settings_port(cfg)
+    kn = conf.knobs()
     plan = application.plan_tune(virsh, vm, kn, guest_virtio=guest_virtio)
     label = {"windows": "Windows", "linux": "Linux", "unknown": "not known"}[plan.kind]
     print(f"{vm}: {plan.state}; guest: {label} ({plan.why})")
@@ -42,7 +41,7 @@ def cmd_tune(
         print(f"  held back: {h}")
     for n in plan.notes:
         print(f"  note: {n}")
-    print(f"  {cpu_owner_line(plan.root, cpu_disable_list(cfg.paths), cfg.cst)}")
+    print(f"  {cpu_owner_line(plan.root, conf.cpu_disable(), cfg.cst)}")
     if plan.kind == "linux" and plan.changes and any("bus" in c or "network card" in c for c in plan.changes):
         print(
             "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
@@ -72,7 +71,7 @@ def cmd_tune(
         virsh,
         wiring.definition_store(cfg) if store is None else store,
         wiring.ask if confirm is None else confirm,
-        lambda: utc_now(cfg.now)[1],
+        lambda: backup_time(cfg, wiring.clock())[1],
         plan,
     )
     if saved is None:

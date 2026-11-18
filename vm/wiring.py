@@ -13,19 +13,23 @@ from cst_core.adapters.notify import PENDING_ALERTS
 from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.adapters import SystemClockAdapter, SystemctlAdapter, terminal
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
+from cst_core.adapters.terminal import confirm
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import SystemdPort
-from vm.adapters import COMMANDS_OF_VM, NAME, VmConfFiles, effective_root, fault_words, run
-from vm.adapters.backup import BackupFiles, DefinitionFiles, StopSignals, TerminalLines, VmLock, notify
+from cst_core.ports import ClockPort
+from vm.adapters import COMMANDS_OF_VM, NAME, VmConfFiles, effective_root, fault_words, prepare_command, run
+from vm.adapters.backup import BackupFiles, DefinitionFiles, StopSignals, TerminalLines, VmLock, notify, safe_output
+from vm.adapters.images import ImageFolders
 from vm.adapters.restic import Restic
 from vm.adapters.timer import TimerFiles
 from vm.application.backup import LocalBackup
 from vm.application.nas import NasBackup
-from vm.domain import VmPaths, VmSettings
+from vm.domain import VmArgs, VmPaths, VmSettings
 from vm.ports import (
     BackupStorePort,
     DefinitionStorePort,
+    ImagesPort,
     ProgressPort,
     ResticPort,
     SettingsPort,
@@ -126,7 +130,7 @@ def local_backup(cfg: VmSettings) -> LocalBackup:
     return LocalBackup(
         commands=vm_commands(),
         store=backup_store(cfg),
-        clock=SystemClockAdapter(),
+        clock=clock(),
         out=progress(),
         root=effective_root(),
     )
@@ -147,7 +151,7 @@ def nas_backup(cfg: VmSettings) -> NasBackup:
         signals=StopSignals(),
         lock=lambda vm: VmLock(vm, cfg.paths.run_dir),
         alert=lambda title, body: notify(cfg, "critical", title, body),
-        clock=SystemClockAdapter(),
+        clock=clock(),
         out=progress(),
         root=effective_root(),
     )
@@ -158,6 +162,33 @@ def running_as_root() -> bool:
     return effective_root()
 
 
+def images(cfg: VmSettings) -> ImagesPort:
+    """The VM image folders on this machine (cfg's paths, the user's home)."""
+    return ImageFolders(cfg)
+
+
+def clock() -> ClockPort:
+    """This machine's clock."""
+    return SystemClockAdapter()
+
+
+def prepare(cfg: VmSettings, a: VmArgs) -> None:
+    """Before a command runs: the problem lines of the settings files it reads (refused for a
+    command that changes the machine) and SIGPIPE for the ones that only read
+    (vm.adapters.prepare_command)."""
+    prepare_command(cfg.paths, a.cmd, a.sub, a.nas, a.vm)
+
+
+def safe_terminal() -> None:
+    """From here on a closed terminal or pipe never cuts a backup or its cleanup short."""
+    safe_output()
+
+
+def failure_alert(cfg: VmSettings, title: str, body: str) -> None:
+    """A desktop alert (normal urgency) for a weekly run that failed: nobody reads its terminal."""
+    notify(cfg, "normal", title, body)
+
+
 def ask(question: str) -> bool:
     """The question on the terminal (Refused without one)."""
-    return terminal.confirm(question)
+    return confirm(question)

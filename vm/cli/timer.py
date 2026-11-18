@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst vm backup-timer on|off|status [VM]`: the weekly NAS backup's units and program copy."""
 
-import os
-
 from cst_core.domain.errors import Refused
 from vm import application, wiring
-from vm.adapters import nas_settings, read_conf
-from vm.adapters.backup import describe_entry, read_index
 from vm.domain import ON_CALENDAR, TimerStep, VmSettings, instance, timer_file_words
 from vm.ports import TimerFilesPort
 
@@ -14,7 +10,7 @@ from vm.ports import TimerFilesPort
 def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: TimerFilesPort | None = None) -> None:
     """backup-timer SUB VM; timers: a test's, else this machine's (wiring.timer_port)."""
     unit = instance(vm)
-    if sub != "status" and os.geteuid() != 0 and not cfg.nonroot_ok:
+    if sub != "status" and not wiring.running_as_root() and not cfg.nonroot_ok:
         raise Refused(f"backup-timer {sub} needs root: run it as `{cfg.prog} backup-timer {sub}` (it calls sudo)")
     port, sysd = (wiring.timer_port(cfg, entry_file) if timers is None else timers), wiring.systemd()
     if sub == "status":
@@ -27,14 +23,14 @@ def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: Timer
             print(f"  next run: {st.next_run}")
         if st.last_result:
             print(f"  last run of the service: {st.last_result}")
-        nas = [e for e in read_index(cfg) if e["vm"] == vm and e.get("mode") == "nas"]
-        print(f"  last NAS backup: {describe_entry(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
-        conf = read_conf(cfg.paths.nas_conf, nas_conf=cfg.paths.nas_conf, bash_sourced=True)
-        if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
+        store = wiring.backup_store(cfg)
+        nas = [e for e in store.read_index() if e["vm"] == vm and e.get("mode") == "nas"]
+        print(f"  last NAS backup: {store.describe(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
+        if not wiring.settings_port(cfg).nas_set_up():
             print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")
         return
     if sub == "on":
-        application.timer_on(port, sysd, vm, lambda: nas_settings(cfg), show_step)
+        application.timer_on(port, sysd, vm, wiring.settings_port(cfg).nas_repo, show_step)
         print(
             f"On: {unit} ({ON_CALENDAR}, then {cfg.cst} vm backup {vm} --nas). Run one now with: "
             f"sudo systemctl start {unit.replace('.timer', '.service')}"
