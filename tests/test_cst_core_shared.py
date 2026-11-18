@@ -56,7 +56,8 @@ from cst_core.domain.text import (
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from tests.probes import assert_replaced_durably, recorded_fsyncs
-from toolchains import domain as tc_domain
+from toolchains.domain import auto as tcd_auto
+from toolchains.domain import common as tcd_common
 from vm import domain as vm_domain
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -140,10 +141,10 @@ class DomainTest(unittest.TestCase):
             "[Install]\nWantedBy=timers.target\n"
         )
         header = [
-            f"{tc_domain.MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
+            f"{tcd_common.MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
         ]
         self.assertEqual(render_timer(header, "CST: prune old toolchain caches, hourly", "hourly", "10min"), before)
-        self.assertEqual(tc_domain.render_timer(), before)
+        self.assertEqual(tcd_auto.render_timer(), before)
 
     def test_render_timer_matches_the_vm_backup_timer(self) -> None:
         # vm renders its timer with render_timer; the bytes stay those of the

@@ -31,7 +31,8 @@ if REPO not in sys.path:
 from bluetooth.domain import LDAC_UNIT, render_unit as bt_render_unit
 from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, EXPECTED_SERVICE, EXPECTED_TIMER
 from cst_core.domain.install import INSTALL_MANIFEST, manifest_by_src, render_template
-from toolchains import domain as tc_domain
+from toolchains.domain import auto as tcd_auto
+from toolchains.domain import common as tcd_common
 from vm import domain as vm_domain
 
 type Scope = Literal["system", "user"]
@@ -75,8 +76,8 @@ def generated_units() -> list[UnitText]:
     return [
         UnitText(vm_domain.SERVICE, vm_domain.render_service(vm_program, "300min"), "system", "vm/cst-vm"),
         UnitText(vm_domain.TIMER, vm_domain.render_timer(), "system", "vm/cst-vm"),
-        UnitText(tc_domain.SERVICE, tc_domain.render_service(), "user", "toolchains/cst-toolchains"),
-        UnitText(tc_domain.TIMER, tc_domain.render_timer(), "user", "toolchains/cst-toolchains"),
+        UnitText(tcd_common.SERVICE, tcd_auto.render_service(), "user", "toolchains/cst-toolchains"),
+        UnitText(tcd_common.TIMER, tcd_auto.render_timer(), "user", "toolchains/cst-toolchains"),
         UnitText(LDAC_UNIT, bt_render_unit("0A:1B:2C:3D:4E:5F", 48000), "user", "bluetooth/bt-helper"),
         UnitText("btrfs-last-resort@.timer", EXPECTED_TIMER, "system", "btrfs/btrfs-degraded-boot-setup.sh"),
         UnitText("btrfs-last-resort@.service", EXPECTED_SERVICE, "system", "btrfs/btrfs-degraded-boot-setup.sh"),

@@ -1325,7 +1325,8 @@ class StateContractsTest(unittest.TestCase):
         from btrfs.bulk.domain import BulkPaths
         from btrfs.docker_volumes_nocow.domain import NocowPaths
         from doctor.domain import GAME_PROFILE_HOST, HEALTH_CHECK_HOST, NOTIFY_HOST
-        from toolchains.domain import DEFAULTS_REL, PROG_REL, WRAPPER_REL
+        from toolchains.domain.common import DEFAULTS_REL, PROG_REL
+        from toolchains.domain.config import WRAPPER_REL
 
         dest = {e.src: e.dest for e in INSTALL_MANIFEST}
         notify = dest["btrfs/btrfs-notify"]

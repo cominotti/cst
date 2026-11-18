@@ -104,6 +104,13 @@ and sampler passed in, and the apply prompt is cst_core's `confirm`.
 - `presenter.py`: only when there are two or more output formats (text and
   `--json`).
 
+`toolchains` is on its way to the full profile: `prune` renames folders away
+and an interrupted run leaves leftovers the next one deletes, and the
+program re-runs itself on the host from a toolbox, so it has
+`application/` (the prune use case), `ports.py` and `wiring.py`. Its `auto`,
+`config` and `status` commands still do their I/O in `cli/`; it joins
+`HEXAGONAL_PACKAGES` once they are use cases too.
+
 **What the gates check in each profile.**
 
 - Every package: no I/O in a `domain` module (also in `application`),

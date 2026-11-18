@@ -31,9 +31,24 @@ sys.dont_write_bytecode = True
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
-from toolchains import adapters as tc_adapters, cli as tc_cli, domain as tc_domain
+from toolchains.domain import auto as tcd_auto
+from toolchains.domain import build as tcd_build
+from toolchains.domain import common as tcd_common
+from toolchains.domain import prune as tcd_prune
+from toolchains import cli as tc_cli, wiring as tc_wiring
+from toolchains.adapters import home_files as tc_home_files
+from toolchains.cli import prune as tc_prune
+from toolchains.cli import auto as tc_auto
+from toolchains.cli import config as tc_config
+from toolchains.cli import status as tc_status
+from toolchains.adapters import program as tc_program
+from toolchains.adapters import build_tree as tc_build_tree
+from toolchains.adapters import cargo as tc_cargo
+from toolchains.adapters import rustup as tc_rustup
+from toolchains.adapters import sccache as tc_sccache
+from toolchains.adapters import units as tc_units
 from tests.probes import bytes_program
-from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, ToolchainsModule, load
+from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, quiet_signals
 
 TOOLCHAINS = os.path.dirname(TOOL)
 REPO = os.path.dirname(TOOLCHAINS)
@@ -111,10 +126,7 @@ class Scratch(unittest.TestCase):
                     os.environ[k] = v
 
         self.addCleanup(restore)
-        self.m: ToolchainsModule = load()
-        self.addCleanup(self.m.restore)
-        self.m.JOURNAL = False
-        self.m.cargo_procs = lambda uid=None: []
+        quiet_signals(self)
 
     # The user manager refusing a call (or not answering: the same exit 1
     # from systemctl). The stub records every call, and fails the ones that
@@ -144,10 +156,17 @@ class Scratch(unittest.TestCase):
         except FileNotFoundError:
             return []
 
+    def parts(self) -> tc_wiring.Parts:
+        """The real adapters (systemctl: the stub of CST_TOOLCHAINS_SYSTEMCTL), but no cargo process."""
+        return tc_wiring.Parts(procs=list, journal=False)
+
+    def session(self) -> tc_wiring.Session:
+        return tc_wiring.session(self.home, TOOL, self.parts())
+
     def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
+            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL, parts=self.parts())
         return rc, out.getvalue() + err.getvalue()
 
     def write(self, rel: str, text: str) -> str:
@@ -167,7 +186,7 @@ class Scratch(unittest.TestCase):
 
 class CliTest(Scratch):
     def test_parse(self) -> None:
-        p = self.m.parse_args
+        p = tcd_common.parse_args
         self.assertEqual(p([])["cmd"], "help")
         self.assertEqual(p(["--help"])["cmd"], "help")
         a = p(["prune", "plan", "rust", "rust:build", "--home", "/h"])
@@ -194,7 +213,7 @@ class CliTest(Scratch):
             ["prune", "apply", "--home="],
             ["auto", "on", "--home", ""],
         ):
-            with self.assertRaises(self.m.Usage, msg=bad):
+            with self.assertRaises(Usage, msg=bad):
                 p(bad)
 
     def test_empty_home_never_means_the_real_home(self) -> None:
@@ -202,7 +221,7 @@ class CliTest(Scratch):
         for args in (["prune", "apply", "--home="], ["auto", "off", "--home="], ["config", "apply", "--home", ""]):
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                rc = self.m.main(args, HELP, TOOL)
+                rc = tc_cli.main(args, HELP, TOOL, parts=self.parts())
             self.assertEqual(rc, 2, args)
             self.assertIn("--home needs a folder", err.getvalue())
         self.assertEqual(self.calls(), [])
@@ -219,7 +238,7 @@ class CliTest(Scratch):
 
 class SelectTest(Scratch):
     def sel(self, *names: str) -> list[tuple[str, bool]]:
-        return [(c.ID, named) for c, named in self.m.select_targets(list(names), self.m.Settings(self.home))]
+        return tcd_prune.select_targets(list(names), tc_home_files.load_settings(self.home, TOOL).enabled)
 
     def test_selection(self) -> None:
         self.assertEqual(self.sel(), [("rust:build", False), ("python:uv", False)])
@@ -234,8 +253,25 @@ class SelectTest(Scratch):
             ("foo", "unknown target"),
             ("rust:foo", "unknown target"),
         ):
-            with self.assertRaisesRegex(self.m.Usage, msg, msg=name):
+            with self.assertRaisesRegex(Usage, msg, msg=name):
                 self.sel(name)
+
+    def test_an_id_of_no_target_fails_loudly(self) -> None:
+        # A target added to SPECS but not to these is never taken for python:uv.
+        settings = tc_home_files.load_settings(self.home, TOOL)
+        for tid in ("go:build", ""):
+            with self.subTest(tid=tid):
+                with self.assertRaises(KeyError):
+                    tc_wiring.target(self.session(), settings, tid)
+                with self.assertRaises(KeyError):
+                    settings.policy_text(tid)
+                with self.assertRaises(KeyError):
+                    tcd_prune.last_run_text(tid, {"time": NOW, "removed": 1, "freed": 0})
+        self.assertIn("uv cache prune", settings.policy_text("python:uv"))
+        self.assertIn(
+            "removed 1 file(s)", tcd_prune.last_run_text("python:uv", {"time": NOW, "removed": 1, "freed": 0})
+        )
+        self.assertIn("MAX_IDLE", settings.policy_text("rust:build"))
 
     def test_disabled_target(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_ENABLED=no\nPYTHON_UV_ENABLED=no\n")
@@ -255,9 +291,9 @@ class DefaultsTest(Scratch):
     def test_defaults_file_is_complete_and_marked(self) -> None:
         with open(DEFAULTS) as f:
             text = f.read()
-        self.assertIn(self.m.MARKER, text)
-        raw = self.m.parse_conf(text, self.m.known_keys())
-        self.assertEqual(set(raw), self.m.known_keys())
+        self.assertIn(tcd_common.MARKER, text)
+        raw = tcd_common.parse_conf(text, tcd_prune.known_keys())
+        self.assertEqual(set(raw), tcd_prune.known_keys())
         self.assertEqual(
             raw,
             {
@@ -279,13 +315,20 @@ class DefaultsTest(Scratch):
     def test_every_target_is_documented(self) -> None:
         with open(os.path.join(TOOLCHAINS, "README.md")) as f:
             readme = f.read()
-        for tid in list(self.m.TARGETS) + list(self.m.PLANNED):
+        for tid in list(tcd_prune.SPECS) + list(tcd_prune.PLANNED):
             self.assertIn(f"`{tid}`", readme, tid)
 
+    def test_an_empty_entry_file_is_refused(self) -> None:
+        # The old Program.folder() refused an unset entry file; '' would name the cwd's parent.
+        with self.assertRaisesRegex(RuntimeError, "entry_file is empty"):
+            tc_program.program_folder("")
+        with self.assertRaisesRegex(RuntimeError, "entry_file is empty"):
+            tc_home_files.load_settings(self.home, "")
+
     def test_missing_defaults_stop_the_run(self) -> None:
-        self.m.defaults_path = lambda: os.path.join(self.tmp, "nope.conf")
-        with self.assertRaisesRegex(self.m.ConfigError, "missing"):
-            self.m.Settings(self.home)
+        # A program with no toolchains.conf next to it.
+        with self.assertRaisesRegex(tcd_common.ConfigError, "missing"):
+            tc_home_files.load_settings(self.home, os.path.join(self.tmp, "nope", "cst-toolchains"))
 
 
 class ConfigTest(Scratch):
@@ -304,7 +347,7 @@ class ConfigTest(Scratch):
         self.assertIn(f"kept:      {self.home}/.config/uv/uv.toml (link-mode already set)", out)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         # The line written is the one prune accepts.
-        self.assertEqual(self.m.resolve_root(self.home), None)
+        self.assertIsNone(tc_build_tree.resolve_root(self.home, "cst toolchains"))
         rc, out = self.run_main("status")
         self.assertIn("build-dir = CST's line", out)
 
@@ -500,7 +543,7 @@ class AutoTest(Scratch):
         with open(DEFAULTS) as f:
             self.assertEqual(self.read(".local/lib/cst/toolchains.conf"), f.read())
         with open(os.path.join(self.home, ".local/lib/cst/cst-toolchains"), "rb") as f:
-            self.assertIn(self.m.MARKER.encode(), f.read())
+            self.assertIn(tcd_common.MARKER.encode(), f.read())
         self.assertEqual(self.calls(), ["--user daemon-reload", "--user enable --now cst-toolchains-prune.timer"])
         # The installed copy runs with its own defaults file (as the timer does).
         r = subprocess.run(
@@ -853,7 +896,7 @@ class AutoTest(Scratch):
         """run_main, with stdout and stderr apart: warnings and errors go to stderr."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.m.main([*args, "--home", self.home], HELP, TOOL)
+            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL, parts=self.parts())
         return rc, out.getvalue(), err.getvalue()
 
     def raw_calls(self) -> list[str]:
@@ -920,7 +963,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-cst-toolchains")
         os.rename(prog, kept)
         os.symlink(kept, prog)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "ok")
+        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
@@ -928,7 +971,7 @@ class AutoTest(Scratch):
         old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
         with open(kept, "w") as f:
             f.write(old)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
@@ -943,7 +986,7 @@ class AutoTest(Scratch):
         timer = os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")
         os.makedirs(os.path.dirname(timer))
         os.symlink("/dev/null", timer)
-        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "masked")
+        self.assertEqual(tc_auto.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "masked")
         rc, out, err = self.run_split("auto", "on")
         self.assertEqual(rc, 1, out + err)
         self.assertIn(
@@ -975,7 +1018,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-timer")
         os.rename(timer, kept)
         os.symlink(kept, timer)
-        self.assertEqual(tc_cli.unit_states(self.home)["cst-toolchains-prune.timer"], "ok")
+        self.assertEqual(tc_auto.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertTrue(os.path.islink(timer))
@@ -995,8 +1038,8 @@ class AutoTest(Scratch):
         prog = self.write(".local/lib/cst/cst-toolchains", old)
         status = io.StringIO()
         with contextlib.redirect_stdout(status):
-            tc_cli.cmd_status(self.home, NOW, False)
-        self.assertEqual(tc_cli.unit_states(self.home)[".local/lib/cst/cst-toolchains"], "change")
+            tc_status.cmd_status(self.session(), False)
+        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
@@ -1120,7 +1163,7 @@ class AutoTest(Scratch):
             self.assertEqual(self.calls(), [], args)
 
     def test_auto_off_removes_the_state_file_of_every_target(self) -> None:
-        states = [self.m.state_path(self.home, tid) for tid in self.m.TARGETS]
+        states = [tc_home_files.state_path(self.home, tid) for tid in tcd_prune.SPECS]
         self.assertEqual(len(states), 2)
         for path in states:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1262,57 +1305,57 @@ class PackageLayersTest(Scratch):
     toolchains.cli (what the program's main() runs)."""
 
     def test_domain_parses_and_decides(self) -> None:
-        a = tc_domain.parse_args(["status", "--brief"])
+        a = tcd_common.parse_args(["status", "--brief"])
         self.assertEqual((a["cmd"], a["brief"]), ("status", True))
         with self.assertRaises(Usage):
-            tc_domain.parse_args(["prune", "bogus"])
-        old = tc_domain.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
+            tcd_common.parse_args(["prune", "bogus"])
+        old = tcd_build.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
         old.size, old.activity = 100, NOW - 1e6
-        new = tc_domain.Folder("/tmp/build", "cc", "dddddddddddddd")
+        new = tcd_build.Folder("/tmp/build", "cc", "dddddddddddddd")
         new.size, new.activity = 100, NOW - 60
-        pol = {"max_idle": 3600 * 48, "max_total": 150 * (1 << 30), "min_keep": 7200}
+        pol = tcd_build.RustPolicy(max_idle=3600 * 48, max_total=150 * (1 << 30), min_keep=7200)
         self.assertEqual(
-            [(f.key, action) for f, action, _ in tc_domain.decide([new, old], pol, NOW, {})],
+            [(f.key, action) for f, action, _ in tcd_build.decide([new, old], pol, NOW, {})],
             [("aa/bbbbbbbbbbbbbb", "delete"), ("cc/dddddddddddddd", "keep")],
         )
 
     def test_cli_commands_run_on_the_scratch_home(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_cli.cmd_config(self.home, "apply"), 0)
+            self.assertEqual(tc_config.cmd_config(self.session(), "apply"), 0)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_cli.cmd_status(self.home, NOW, True), 0)
-            self.assertEqual(tc_cli.cmd_prune(self.home, NOW, "plan", []), 0)
-            self.assertEqual(tc_cli.cmd_config(self.home, "plan"), 0)
-            self.assertEqual(tc_cli.cmd_auto_on(self.home, NOW), 0)
-            self.assertEqual(tc_cli.cmd_auto_off(self.home, NOW), 0)
+            tc_status.cmd_status(self.session(), True)  # it raises on a problem, else returns nothing
+            self.assertEqual(tc_prune.cmd_prune(self.session(), "plan", []), 0)
+            self.assertEqual(tc_config.cmd_config(self.session(), "plan"), 0)
+            self.assertEqual(tc_auto.cmd_auto_on(self.session()), 0)
+            self.assertEqual(tc_auto.cmd_auto_off(self.session()), 0)
 
     def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
-            self.assertEqual(tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
-        self.assertIsNone(tc_adapters.manager_path())
+            self.assertEqual(tc_units.systemctl("is-active", "cst-toolchains-prune.timer"), "active")
+        self.assertIsNone(self.session().units.manager_path())
         with self.failing("is-active"), self.assertRaises(Refused):
-            tc_adapters.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
+            tc_units.systemctl("is-active", "cst-toolchains-prune.timer", check=True)
 
 
 class ParseSizeTest(unittest.TestCase):
     """MAX_TOTAL and friends: a number with its unit, or 0/off for no cap."""
 
     def test_units_multiply(self) -> None:
-        self.assertEqual(tc_domain.parse_size("150G"), 150 << 30)
-        self.assertEqual(tc_domain.parse_size(" 1.5k "), 1536)
-        self.assertEqual(tc_domain.parse_size("2TiB"), 2 << 40)
-        self.assertEqual(tc_domain.parse_size("3mb"), 3 << 20)
+        self.assertEqual(tcd_common.parse_size("150G"), 150 << 30)
+        self.assertEqual(tcd_common.parse_size(" 1.5k "), 1536)
+        self.assertEqual(tcd_common.parse_size("2TiB"), 2 << 40)
+        self.assertEqual(tcd_common.parse_size("3mb"), 3 << 20)
 
     def test_no_cap_is_zero(self) -> None:
         for text in ("0", "0.0", "off", "none", "no", "OFF"):
-            self.assertEqual(tc_domain.parse_size(text), 0, text)
+            self.assertEqual(tcd_common.parse_size(text), 0, text)
 
     def test_a_bare_number_is_refused(self) -> None:
         for text in ("150", "1x", "", "G"):
-            with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
-                tc_domain.parse_size(text)
+            with self.subTest(text=text), self.assertRaises(tcd_common.ConfigError):
+                tcd_common.parse_size(text)
 
 
 class ClosedPipeTest(Scratch):
@@ -1343,13 +1386,13 @@ class ClosedPipeTest(Scratch):
         restored: list[tuple[str, str | None]] = []
         for cmd, action in (("help", None), ("status", None), ("prune", "plan"), ("config", "plan")):
             with mock.patch.object(
-                tc_adapters, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
+                tc_program, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
             ):
-                tc_adapters.output_mode(cmd, action)
+                tc_program.output_mode(cmd, action)
         self.assertEqual(restored, [("help", None), ("status", None), ("prune", "plan"), ("config", "plan")])
-        with mock.patch.object(tc_adapters, "restore_default_signals", side_effect=AssertionError("restored")):
+        with mock.patch.object(tc_program, "restore_default_signals", side_effect=AssertionError("restored")):
             for cmd, action in (("prune", "apply"), ("config", "apply"), ("auto", "on"), ("auto", "off")):
-                tc_adapters.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
+                tc_program.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
 class CommandFaultTextTest(unittest.TestCase):
@@ -1358,27 +1401,27 @@ class CommandFaultTextTest(unittest.TestCase):
     def test_texts(self) -> None:
         missing = "/nonexistent/cst-cargo"
         self.assertEqual(
-            tc_adapters.ask_cargo([missing, "metadata"], {"PATH": "/usr/bin:/bin"}, "/"),
+            tc_cargo.ask_cargo([missing, "metadata"], {"PATH": "/usr/bin:/bin"}, "/"),
             (None, f"cargo metadata: [Errno 2] No such file or directory: '{missing}'"),
         )
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": "/nonexistent/cst-systemctl"}):
-            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "")
+            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "")
             with self.assertRaises(Refused) as stop:
-                tc_adapters.systemctl("start", "x.service", check=True)
+                tc_units.systemctl("start", "x.service", check=True)
         self.assertEqual(
             str(stop.exception),
             "systemctl --user start x.service: [Errno 2] No such file or directory: '/nonexistent/cst-systemctl'",
         )
         tmp = tempfile.mkdtemp(prefix="cst-tc-fault-")
         self.addCleanup(shutil.rmtree, tmp)
-        with mock.patch.object(tc_adapters.shutil, "which", return_value="/nonexistent/cst-rustup"):
-            self.assertEqual(tc_adapters.rustup_default(tmp, os.path.join(tmp, "rustup")), "")
+        with mock.patch.object(shutil, "which", return_value="/nonexistent/cst-rustup"):
+            self.assertEqual(tc_rustup.rustup_default(tmp, os.path.join(tmp, "rustup")), "")
         with (
-            mock.patch.object(tc_cli.shutil, "which", return_value="/nonexistent/cst-sccache"),
-            mock.patch.object(tc_cli, "sccache_sockets", return_value=[os.path.join(tmp, "cst-sccache-abc.sock")]),
-            mock.patch.object(tc_cli, "socket_answers", return_value=True),
+            mock.patch.object(shutil, "which", return_value="/nonexistent/cst-sccache"),
+            mock.patch.object(tc_sccache, "sccache_sockets", return_value=[os.path.join(tmp, "cst-sccache-abc.sock")]),
+            mock.patch.object(tc_sccache, "socket_answers", return_value=True),
         ):
-            self.assertIn("sccache server abc: no answer", tc_cli.sccache_status_lines(tmp))
+            self.assertIn("sccache server abc: no answer", tc_sccache.sccache_status_lines(tmp))
 
 
 class NotUtf8OutputTest(unittest.TestCase):
@@ -1395,19 +1438,19 @@ class NotUtf8OutputTest(unittest.TestCase):
     def test_replaced(self) -> None:
         env = {"PATH": "/usr/bin:/bin"}
         cargo = self.stub("cargo", b'{"build_directory": "/t/\xff"}')
-        self.assertEqual(tc_adapters.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
-        self.assertEqual(tc_adapters.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
+        self.assertEqual(tc_cargo.ask_cargo([cargo, "metadata"], env, self.tmp), ("/t/\ufffd", None))
+        self.assertEqual(tc_program.run_idle(["printf", "\\377abc"], self.tmp, env, 10).stdout, "\ufffdabc")
         self.stub("rm", b"rm: \xff\n")
         with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}:/usr/bin:/bin"}):
-            self.assertEqual(tc_adapters.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
+            self.assertEqual(tc_build_tree.remove_tree(os.path.join(self.tmp, "gone")), (True, "rm: \ufffd"))
         rustup = self.stub("rustup", b"stable\xff (default)\n")
-        with mock.patch.object(tc_adapters.shutil, "which", return_value=rustup):
-            self.assertEqual(tc_adapters.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
+        with mock.patch.object(shutil, "which", return_value=rustup):
+            self.assertEqual(tc_rustup.rustup_default(self.tmp, os.path.join(self.tmp, "rh")), "stable\ufffd")
         sccache = self.stub("sccache", b"Compile requests  7\nCache location  /t/\xff\n")
-        self.assertEqual(tc_adapters.sccache_stats(sccache, env).get("Compile requests"), "7")
+        self.assertEqual(tc_sccache.sccache_stats(sccache, env).get("Compile requests"), "7")
         systemctl = self.stub("systemctl", b"enabled\xff\n")
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
-            self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
+            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
 
 
 class SessionEnvTest(unittest.TestCase):
@@ -1427,7 +1470,7 @@ class SessionEnvTest(unittest.TestCase):
 
     def seen(self, **env: str) -> str:
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
-            return tc_adapters.systemctl("show-environment")
+            return tc_units.systemctl("show-environment")
 
     def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
         other = f"/run/user/{self.uid + 1}"
@@ -1442,7 +1485,7 @@ class SessionEnvTest(unittest.TestCase):
         def xdg_bus(
             env: dict[str, str], owner: int | None, *, own_exists: bool = True
         ) -> tuple[str | None, str | None]:
-            out = tc_domain.own_session_env(env, 1000, owner, own_exists=own_exists)
+            out = tcd_auto.own_session_env(env, 1000, owner, own_exists=own_exists)
             return out.get("XDG_RUNTIME_DIR"), out.get("DBUS_SESSION_BUS_ADDRESS")
 
         own, own_bus = "/run/user/1000", "unix:path=/run/user/1000/bus"
