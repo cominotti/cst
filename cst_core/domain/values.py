@@ -51,7 +51,7 @@ def format_bytes_human(n: int | None) -> str:
 
 
 def format_bytes_gib_mib(
-    n: int | float,
+    n: float,
     *,
     gib_threshold: float = 2**30,
     mib_decimals: int = 0,
