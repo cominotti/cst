@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Set as AbstractSet
+import contextlib
 import glob
 import os
 import queue
@@ -64,10 +65,8 @@ def read_kv(path: str) -> dict[str, int]:
         for line in text.splitlines():
             parts = line.split()
             if len(parts) >= 2:
-                try:
+                with contextlib.suppress(ValueError):
                     out[parts[0]] = int(parts[1])
-                except ValueError:
-                    pass
     return out
 
 
