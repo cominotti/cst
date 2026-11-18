@@ -1819,7 +1819,7 @@ After `snapshots setup`:
 | `/etc/btrfs-setup/bulk-at-boot` | flag, only while busy `~/Bulk` items wait for the boot (one item name per line) |
 | `/etc/btrfs-setup/bulk-keep` | items you keep in /home on purpose (`bulk keep ID`; one id per line, `#` starts a comment); only if you used it |
 | `/var/lib/btrfs-bulk/` | journal of a move in progress (`journal-<item>.json`, or `journal-steam-<appid>.json` for a Steam game; normally absent), `boot-attempts` |
-| `/var/lib/btrfs-snapshot/` | state: `last-ok`, `core-last-run`, `core-unfinished` (snapshots still writable: normally absent or empty), `core-writable` (writable entries named like snapshots, for `cst doctor`: normally absent), `drop-pending`, `skipped`, `paused`, `emergency`, `alerted-*`, `nas-*` |
+| `/var/lib/btrfs-snapshot/` | state: `last-ok`, `core-last-run`, `core-unfinished` (snapshots still writable: normally absent or empty), `core-writable` (writable entries named like snapshots, for `cst doctor`: normally absent), `drop-pending`, `skipped`, `paused`, `emergency`, `alerted-*`, `nas-*`, `boot-attempts` (boots of a pending boot conversion) |
 | your home | the nested subvolumes of [section 3](#3-which-folders-are-left-out-of-home-snapshots-and-why); `~/Bulk` with `CACHEDIR.TAG` and its folders; the usual paths of section 3 now symlinks into it; `~/.cache/uv` deleted; old cargo `target/` folders deleted |
 | `~/.local/share/flatpak/overrides/ai.lmstudio.lm-studio`, `.../com.valvesoftware.Steam` | the `--filesystem` permission for `~/Bulk/models` and `~/Bulk/steam` (only if the app is installed) |
 | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/config/libraryfolders.vdf`, `.../steamapps/libraryfolders.vdf` | after `bulk steam apply`: `~/Bulk/steam` added as a library, the moved games listed under it; the old versions next to them as `libraryfolders.vdf.cst-bak-<date>` (five kept) |
@@ -2000,8 +2000,9 @@ No command removes these:
   long as the snapshot programs are installed;
 - the state folder `/var/lib/btrfs-snapshot/` (including `core-last-run`;
   `--purge` first finishes a snapshot left writable, so that it is deleted
-  too, and removes `core-unfinished` and `core-writable`) and the empty
-  mount point folder `/var/mnt/btrfs-top`;
+  too, and removes `core-unfinished` and `core-writable` after its
+  deletions; when it cannot read the core's list, it deletes nothing and
+  keeps both) and the empty mount point folder `/var/mnt/btrfs-top`;
 - for the NAS backup: the restic repository on the NAS,
   `/etc/btrfs-setup/restic-password`, the SSH key
   `/etc/btrfs-setup/ssh/id_ed25519` (+ `.pub`), the `# BEGIN btrfs-setup.sh
