@@ -333,14 +333,14 @@ class StatusTest(unittest.TestCase):
         self.p.recorded(self.since, {sha("8"): self.p.now - DAY}, self.p.now)
 
     def expected_plan(self) -> str:
-        since = datetime.fromtimestamp(self.since).strftime("%F")
+        since = datetime.fromtimestamp(self.since, UTC).astimezone().strftime("%F")
         return PLAN_RECORDER_OK.format(old=days_ago(OLD), seen_a=since, since=since)
 
     def test_status_with_the_recorder_running(self) -> None:
         rc, out, err = self.p.run("status")
         self.assertEqual((rc, err), (0, ""))
-        since = datetime.fromtimestamp(self.since)
-        removal = datetime.fromtimestamp(self.since + 14 * DAY).strftime("%F")
+        since = datetime.fromtimestamp(self.since, UTC).astimezone()
+        removal = datetime.fromtimestamp(self.since + 14 * DAY, UTC).astimezone().strftime("%F")
         self.assertEqual(
             out,
             f"protected registries: {PROTECTED} (DOCKER_GC_PROTECT in {self.p.conf})\n"
@@ -385,7 +385,7 @@ class StatusTest(unittest.TestCase):
         with open(os.path.join(self.p.state, "last-run.json"), "w") as f:
             json.dump({"at": OLD, "containers": 1, "volumes": 2, "images": 3, "image_bytes": 4_500_000, "failed": 1}, f)
         _, out, _ = self.p.run("status")
-        at = datetime.fromtimestamp(OLD).strftime("%F %T")
+        at = datetime.fromtimestamp(OLD, UTC).astimezone().strftime("%F %T")
         self.assertIn(f"\nlast run {at}: 1 container(s), 2 volume(s), 3 image(s) (4.5 MB), failures 1\n", out)
         with open(os.path.join(self.p.state, "last-run.json"), "w") as f:
             f.write('{"at": 1}')
