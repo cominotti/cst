@@ -30,7 +30,7 @@ from tests.repo_files import repo_files
 # mixed-version tests run next to the current program.
 SHELL_TEST_SCRIPTS: Final[frozenset[str]] = frozenset(
     {
-        "tests/fixtures/legacy/btrfs-health-check@cebf28c",
+        "tests/fixtures/legacy/btrfs-health-check@d4d8c91+seam",
         "tests/fixtures/legacy/cst-pending-alerts@d4d8c91",
         "tests/e2e/scripts/entrypoint-host-sim.sh",
         "tests/e2e/scripts/setup-dind.sh",

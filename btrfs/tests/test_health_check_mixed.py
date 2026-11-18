@@ -5,8 +5,8 @@ The unit runs the installed copy every hour; after a git pull and
 cst btrfs install the next run is a new version, and a downgrade is the
 reverse. Both read and write /var/lib/btrfs-health-check (the reclaim error
 counts, the kernel log cursor) and the degraded-boot markers. These tests
-alternate the last bash version (tests/fixtures/legacy/btrfs-health-check@cebf28c,
-the bash of commit cebf28c with its CST_HEALTH_ROOT test seam) and this
+alternate the last bash version (tests/fixtures/legacy/btrfs-health-check@d4d8c91+seam,
+main's d4d8c91 bash with the CST_HEALTH_ROOT test seam) and this
 checkout's program on the same test root, in both orders.
 
 Run with: invowk cmd test module btrfs.tests.test_health_check_mixed
@@ -26,7 +26,7 @@ from btrfs.tests import test_health_check as base
 sys.dont_write_bytecode = True
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LEGACY: Final = os.path.join(REPO, "tests", "fixtures", "legacy", "btrfs-health-check@cebf28c")
+LEGACY: Final = os.path.join(REPO, "tests", "fixtures", "legacy", "btrfs-health-check@d4d8c91+seam")
 OLD: Final[list[str]] = ["bash", LEGACY]
 NEW: Final[list[str]] = list(base.RUN)
 
