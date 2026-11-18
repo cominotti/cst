@@ -47,6 +47,25 @@
 # (the list above) keep the caller's TMPDIR. A server started by an older copy
 # of this wrapper keeps its TMPDIR until it stops (after 10 minutes without
 # work, or `sccache --stop-server` with the same SCCACHE_SERVER_UDS).
+#
+# The server in a scope of its own. A server the sccache client starts stays in
+# the cgroup of the compile that started it, and runs every later compile of
+# the environment there: in a temporary scope with a memory cap, the shared
+# server and every build that uses it share that cap (an OOM kill, reclaim, the
+# memory counted against that build) until the server stops. So when the
+# wrapper picked the socket itself (above) and the server's scope is missing,
+# it starts the server first, under the user manager, in
+# cst-sccache-<toolbox name or host>.scope: in the inner user.slice inside a
+# toolbox (next to the toolboxes, with their CPUs and weight), in app.slice on
+# the host. A lock file next to the socket makes parallel compiles start one
+# server; the socket is removed first, so "the scope's folder and the socket
+# exist" means a server has started there. Each compile checks that with shell
+# builtins only (the folder comes from /proc/self/cgroup); only a missing
+# server costs flock and systemd-run. Without a user manager above the compile
+# (an ssh session, docker exec), without the user manager's socket
+# ($XDG_RUNTIME_DIR/systemd/private, what systemd-run --user connects to),
+# systemd-run or flock, with your own SCCACHE_SERVER_UDS or port, or when the
+# start fails, the client starts the server as before.
 
 cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE (config apply writes the setting here)
 workspace=yes # cst: RUST_SCCACHE_WORKSPACE (config apply writes the setting here)
@@ -85,7 +104,9 @@ if [ "${CARGO_INCREMENTAL:-}" = 1 ] || [ "${CARGO_BUILD_INCREMENTAL:-}" = 1 ]; t
     unset CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL
 fi
 
+own_address=no
 if [ -z "${SCCACHE_SERVER_UDS:-}" ] && [ -z "${SCCACHE_SERVER_PORT:-}" ]; then
+    own_address=yes
     env_id=host
     containerenv="${CST_SCCACHE_CONTAINERENV:-/run/.containerenv}"
     if [ -f "$containerenv" ]; then
@@ -118,4 +139,51 @@ fi
 
 # A server this client starts must not keep the caller's TMPDIR (see the top).
 export TMPDIR=/tmp
+
+# The server in its own scope (see the top). Builtins only, up to the cold start.
+if [ "$own_address" = yes ]; then
+    cgroup=
+    proc_cgroup="${CST_SCCACHE_PROC_CGROUP:-/proc/self/cgroup}"
+    if [ -r "$proc_cgroup" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                0::/*)
+                    cgroup="${line#0::}"
+                    break
+                    ;;
+            esac
+        done <"$proc_cgroup"
+    fi
+    # /user.slice/user-1000.slice/user@1000.service/<anything>: the folder of
+    # the user manager is everything up to its user@<uid>.service segment.
+    above="${cgroup%%/user@*}"
+    manager="${cgroup#"$above"/}"
+    manager="${manager%%/*}"
+    uid="${manager#user@}"
+    uid="${uid%.service}"
+    case "$manager:$uid" in
+        user@*.service:*[!0-9]* | *:) ;;
+        user@*.service:*)
+            slice=user.slice
+            [ "$env_id" = host ] && slice=app.slice
+            scope="cst-sccache-${env_id}.scope"
+            manager_dir="${CST_SCCACHE_CGROUP_FS:-/sys/fs/cgroup}${above}/${manager}"
+            scope_dir="${manager_dir}/${slice}/${scope}"
+            if [ -d "$manager_dir" ] && { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; } &&
+                [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/systemd/private" ] &&
+                command -v systemd-run >/dev/null 2>&1 && command -v flock >/dev/null 2>&1; then
+                # The lock is held until --start-server returns (the server
+                # listens); the server never gets its descriptor (9>&-).
+                {
+                    if flock -w 15 9 && { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; }; then
+                        rm -f "$SCCACHE_SERVER_UDS"
+                        systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
+                            --description="CST: the shared sccache server ($env_id)" \
+                            sccache --start-server 9>&-
+                    fi
+                } 9>>"${SCCACHE_SERVER_UDS}.lock" </dev/null >/dev/null 2>&1
+            fi
+            ;;
+    esac
+fi
 exec sccache "$@"
