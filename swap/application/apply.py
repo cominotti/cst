@@ -188,6 +188,9 @@ class SwapApplicationService(SwapReports):
         """Remove the drop-in under its old name (and its line in the install record) when CST wrote it.
         True when it was removed."""
         if not self.old_dropin_is_ours():
+            # Gone, or someone else's now: CST no longer installs that name, so its record line goes
+            # (doctor would ask for an apply that never puts it back); the file is left alone.
+            self._installer.forget(self._env.install_record, [OLD_DROPIN_DEST])
             return False
         old = Placement(
             path=self._env.old_slice_dropin,

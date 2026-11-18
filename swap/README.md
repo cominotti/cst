@@ -170,7 +170,8 @@ Until 2026-11 the file was `50-memory-low.conf`, which sorts after
 over a value set at run time. `plan` shows that old file as `remove`, and
 `apply` deletes it and its line in the install record, but only when CST
 (or `apply-swap-config.sh`) wrote it: a file of that name with no
-"Managed by" comment of theirs is left alone. While a game
+"Managed by" comment of theirs is left alone,
+and only its line in the install record goes (as when the file is gone). While a game
 runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.

@@ -1042,6 +1042,36 @@ class SwapApplicationTest(_SwapScratch):
         with open(old, encoding="utf-8") as f:
             self.assertEqual(f.read(), foreign)
 
+    def test_the_old_record_line_goes_also_when_the_file_is_gone_or_not_cst_s(self) -> None:
+        old_dest = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
+        foreign = "[Slice]\nMemoryLow=8G\n"
+        for case in ("gone", "foreign"):
+            with self.subTest(case=case):
+                record = os.path.join(self.tmp, f"var/lib/cst/{case}.json")
+                env = dataclasses.replace(self.env, install_record=record)
+                old = self._old_dropin_install(record, MAIN_DROPIN)
+                if case == "gone":
+                    os.remove(old)
+                else:
+                    with open(old, "w", encoding="utf-8") as f:
+                        f.write(foreign)
+                rc, out, err, _ = self._apply_once(env, mapper_present=False)
+                self.assertEqual(rc, 0, err)
+                self.assertNotIn("removed:", out)
+                with open(record, encoding="utf-8") as f:
+                    files = json.load(f)["files"]
+                self.assertNotIn(old_dest, files)
+                self.assertIn("/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf", files)
+                if case == "foreign":
+                    with open(old, encoding="utf-8") as f:
+                        self.assertEqual(f.read(), foreign)
+                with open(record, "rb") as f:
+                    first = f.read()
+                rc, _out, err, _ = self._apply_once(env, mapper_present=True)
+                self.assertEqual(rc, 0, err)
+                with open(record, "rb") as f:
+                    self.assertEqual(f.read(), first, "a second apply changed the record")
+
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
         os.makedirs(os.path.join(self.env.etc_dir, "sysctl.d"), exist_ok=True)
