@@ -143,7 +143,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
-    "toolchains/cli/": 734,
+    "toolchains/cli/": 202,
     "vm/cli/": 281,
 }
 
@@ -186,7 +186,7 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 1,
-    "toolchains cli": 6,
+    "toolchains cli": 4,
     "vm cli": 61,
 }
 

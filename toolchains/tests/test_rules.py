@@ -53,7 +53,7 @@ from toolchains.adapters import cargo as tc_cargo
 from toolchains.adapters import sccache as tc_sccache
 from toolchains.domain import prune as tcd_prune
 from toolchains.adapters import build_tree as tc_build_tree
-from toolchains.cli import config as tc_config
+from toolchains import wiring as tc_wiring
 from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import processes as tc_processes
 from cst_core.ports import CommandResult
@@ -1082,11 +1082,11 @@ class SccacheConfigTest(RulesBase):
         # Only the sccache step (config apply would add build-dir's [build] first).
         self.write_cargo_config("[net]\noffline = true\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, True), 0)
         self.assertIn("\n\n# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes", self.cfg())
         self.assertEqual(self.data()["build"], {"rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, False), 0)
         self.assertEqual(self.cfg(), "[net]\noffline = true\n")
 
     def test_removal_of_csts_own_build_table_beside_a_subtable(self) -> None:
@@ -1095,19 +1095,19 @@ class SccacheConfigTest(RulesBase):
         original = "[build.foo]\nbar = 1\n"
         self.write_cargo_config(original)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, True), 0)
         self.assertEqual(self.data()["build"], {"foo": {"bar": 1}, "rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, False), 0)
         self.assertEqual(self.cfg(), original)
         self.assertNotIn("Added by", self.cfg())
 
     def test_removal_keeps_a_build_table_with_other_keys(self) -> None:
         self.write_cargo_config("[build]\njobs = 2\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, True), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
+            self.assertEqual(tc_wiring.tool_config(self.session()).sccache_apply(None, False), 0)
         self.assertEqual(self.cfg(), "[build]\njobs = 2\n")
 
     def test_removal_leaves_a_changed_line_alone(self) -> None:
@@ -1135,7 +1135,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.cfg(), before)
 
     def test_missing_wrapper_source_blocks_the_line(self) -> None:
-        p = mock.patch.object(tc_config, "wrapper_text", lambda values, entry_file: None)
+        p = mock.patch.object(tc_home_files, "wrapper_text", lambda values, entry_file: None)
         p.start()
         self.addCleanup(p.stop)
         before = self.cfg()
@@ -1146,13 +1146,13 @@ class SccacheConfigTest(RulesBase):
     def test_wrapper_source_without_a_setting_line_is_not_installed(self) -> None:
         # Each setting must have its line in the source; a source without one
         # counts as missing, so no wrapper (and no rustc-wrapper line) is written.
-        real_read, source = tc_config.read_text, tc_config.read_text(WRAPPER)
+        real_read, source = tc_home_files.read_text, tc_home_files.read_text(WRAPPER)
         assert source is not None
         for line in (r"cache_size=\S+ # cst: RUST_SCCACHE_CACHE_SIZE", r"workspace=\S+ # cst: RUST_SCCACHE_WORKSPACE"):
             broken, n = re.subn(rf"(?m)^{line}.*\n", "", source)
             self.assertEqual(n, 1, line)
             p = mock.patch.object(
-                tc_config,
+                tc_home_files,
                 "read_text",
                 lambda path, text=broken: (
                     text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path)
@@ -1160,7 +1160,7 @@ class SccacheConfigTest(RulesBase):
             )
             p.start()
             self.addCleanup(p.stop)
-            self.assertIsNone(tc_config.wrapper_text(tcd_config.WrapperValues(), TOOL), line)
+            self.assertIsNone(tc_home_files.wrapper_text(tcd_config.WrapperValues(), TOOL), line)
             before = self.cfg()
             rc, _out = self.run_main("config", "apply", "--sccache")
             self.assertEqual(rc, 1, _out)

@@ -46,7 +46,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
             return 0
         assert action is not None
         if cmd == "config":
-            return config.cmd_config(s, action, a["lean"], a["sccache"])
+            return config.cmd_config(s, action, lean=a["lean"], sccache=a["sccache"])
         if cmd == "prune" and action == "plan":
             return prune.cmd_prune(s, "plan", a["targets"])
         if cmd == "prune":

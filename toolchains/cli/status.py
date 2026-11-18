@@ -19,7 +19,6 @@ from toolchains.adapters.cargo import claimed_folders
 from toolchains.adapters.program import where_text
 from toolchains.adapters.rustup import named_in, pinned_channel, rustup_default, rustup_home
 from toolchains.adapters.sccache import sccache_status_lines
-from toolchains.cli.config import config_lines
 from toolchains.domain.prune import PLANNED, SPECS, Limits, Settings, last_run_text
 
 if TYPE_CHECKING:
@@ -149,7 +148,7 @@ def cmd_status(s: Session, brief: bool) -> None:
     for line in toolchain_lines(home, s.limits):
         say(f"  {line}")
     say(f"== toolchain settings ({s.prog} config)")
-    for st, shown, note in config_lines(s, "status", settings):
+    for st, shown, note in wiring.tool_config(s).lines("status", settings):
         say(f"  {st:<8} {shown:<24} {note}")
     for line in sccache_status_lines(home):
         say(f"  {line}")

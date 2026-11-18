@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import stat
+import tomllib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.files import owned_file_state_at, read_bytes, unit_file_state_at, write_atomic
+from cst_core.adapters.files import owned_file_state_at, read_bytes, read_text, unit_file_state_at, write_atomic
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
@@ -45,7 +46,15 @@ from toolchains.domain.common import (
     TIMER,
     UNIT_DIR_REL,
 )
-from toolchains.domain.config import WRAPPER_REL
+from toolchains.domain.build import expected_template
+from toolchains.domain.config import (
+    CARGO_CFG_REL,
+    SCCACHE_SIZE_LINE,
+    SCCACHE_WORKSPACE_LINE,
+    WRAPPER_NAME,
+    WrapperValues,
+    wrapper_path,
+)
 from toolchains.domain.prune import RunRecord, Settings, checked_settings, parse_defaults
 
 
@@ -282,10 +291,6 @@ def read_cfg(path: str) -> str | None:
         return None
 
 
-def wrapper_path(home: str) -> str:
-    return os.path.join(home, WRAPPER_REL)
-
-
 def write_cfg(path: str, text: str) -> str:
     """Replace a config file's text (atomic, same mode). '' or the error."""
     real = os.path.realpath(path)
@@ -352,6 +357,39 @@ def stale_files(home: str) -> list[tuple[str, bool]]:
     return out
 
 
+def cargo_build_dir_is_csts(home: str) -> bool:
+    try:
+        with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
+            build = tomllib.load(f).get("build")
+    except OSError, tomllib.TOMLDecodeError:
+        return False
+    return isinstance(build, dict) and build.get("build-dir") == expected_template(home)
+
+
+def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
+    """The wrapper as installed (the settings written in), or None when its
+    source is not next to this program (the timer's copy has none)."""
+    text = read_text(os.path.join(program_folder(entry_file), WRAPPER_NAME))
+    if text is None:
+        return None
+    text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", text, count=1)
+    text, m = SCCACHE_WORKSPACE_LINE.subn(f"workspace={'yes' if values.workspace else 'no'}", text, count=1)
+    return text if n == m == 1 else None
+
+
+def wrapper_state(home: str, text: str) -> str:
+    """ok | change | missing | conflict (not CST's; a symlink counts by what it points to)."""
+    path = wrapper_path(home)
+    st = file_state(path, text)
+    if st == "ok":
+        try:
+            if stat.S_IMODE(os.stat(path).st_mode) != 0o755:
+                st = "change"
+        except OSError:
+            st = "change"
+    return st
+
+
 class HomeFiles:
     """HomeFilesPort: the files CST keeps in HOME for the running program (ENTRY_FILE: its
     entry point; its copies and defaults are read next to it)."""
@@ -404,3 +442,24 @@ class HomeFiles:
 
     def old_conf_present(self) -> bool:
         return os.path.lexists(os.path.join(self.home, OLD_CONF_REL))
+
+    def read_settings(self, path: str) -> str | None:
+        return read_cfg(path)
+
+    def append(self, path: str, text: str) -> str:
+        return append_text(path, text)
+
+    def rewrite(self, path: str, text: str) -> str:
+        return write_cfg(path, text)
+
+    def build_dir_is_csts(self) -> bool:
+        return cargo_build_dir_is_csts(self.home)
+
+    def wrapper_text(self, values: WrapperValues) -> str | None:
+        return wrapper_text(values, self.entry_file)
+
+    def wrapper_state(self, text: str) -> str:
+        return wrapper_state(self.home, text)
+
+    def put_wrapper(self, path: str, text: str, values: Mapping[str, str]) -> bool:
+        return put_wrapper(self.home, path, text, values, self.entry_file)

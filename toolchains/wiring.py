@@ -25,6 +25,7 @@ from toolchains.adapters.program import RunOutput, home_folder, in_container, jo
 from toolchains.adapters.units import UserUnits
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
+from toolchains.application.config import ToolConfig
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
@@ -148,3 +149,8 @@ def auto_timer(s: Session) -> AutoTimer:
         lambda: settings(s),
         lambda checked, tid: target(s, checked, tid),
     )
+
+
+def tool_config(s: Session) -> ToolConfig:
+    """config plan and apply over the session's adapters."""
+    return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s))

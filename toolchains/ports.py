@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from cst_core.domain.files import UnitFileState
     from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import CargoCache, Folder, Workspaces
+    from toolchains.domain.config import WrapperValues
     from toolchains.domain.prune import RunRecord
 
 # (folders, leftovers of an interrupted run, other entries with why they are left alone)
@@ -264,4 +265,37 @@ class HomeFilesPort(Protocol):
 
     def old_conf_present(self) -> bool:
         """The settings file of the earlier `cst btrfs cargo-gc` is there (no longer read)."""
+        ...
+
+    def read_settings(self, path: str) -> str | None:
+        """The text of a tool's settings file (bytes that are not UTF-8 replaced); '' when it
+        is missing; None when it cannot be read."""
+        ...
+
+    def append(self, path: str, text: str) -> str:
+        """Append TEXT to the settings file PATH (made if missing; a newline first when it
+        does not end in one). '' or the error."""
+        ...
+
+    def rewrite(self, path: str, text: str) -> str:
+        """Replace the settings file's text (atomic, same mode; a link is followed). '' or
+        the error."""
+        ...
+
+    def build_dir_is_csts(self) -> bool:
+        """build-dir in the user's cargo config is the line CST writes."""
+        ...
+
+    def wrapper_text(self, values: WrapperValues) -> str | None:
+        """The sccache wrapper as installed with VALUES written in, or None when its
+        source is not next to this program (the timer's copy has none)."""
+        ...
+
+    def wrapper_state(self, text: str) -> str:
+        """ok | change | missing | conflict of the installed wrapper against TEXT."""
+        ...
+
+    def put_wrapper(self, path: str, text: str, values: Mapping[str, str]) -> bool:
+        """The wrapper through the installer, listed with VALUES, its component marked done;
+        True when written (WriteFailed when it cannot be written)."""
         ...
