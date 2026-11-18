@@ -41,32 +41,90 @@ class CoreExit(IntEnum):
 
 
 class GuardError(StrEnum):
-    """A space-guard setting that is no integer, as bash arithmetic under set -u treats it: a word
-    that starts like a name (abc: an unset variable, the run stops), or anything else that is no
-    number (08, 2.5, 250GiB: an error line, and the comparison is false)."""
+    """A numeric setting bash arithmetic could not read under set -u: a name (abc: an unset
+    variable, the run stops), or anything else (08, 2.5, 250GiB, 1/0: an error line, and the
+    comparison is false)."""
 
     BAD_NUMBER = "bad-number"
     NOT_A_NUMBER = "not-a-number"
 
 
+class _Arith:
+    """The part of bash arithmetic a setting can hold: integer constants (decimal, a leading 0
+    octal, 0x hexadecimal), unary + and -, * / %, + -, parentheses, blanks. A name is an unset
+    variable (NOT_A_NUMBER); anything else, or a division by 0, is an error (BAD_NUMBER)."""
+
+    def __init__(self, text: str) -> None:
+        self.tokens = re.findall(r"\s*([0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)
+        self.pos = 0
+
+    def peek(self) -> str:
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else ""
+
+    def take(self) -> str:
+        tok = self.peek()
+        self.pos += 1
+        return tok
+
+    def expr(self) -> int:
+        n = self.term()
+        while self.peek() in ("+", "-"):
+            op = self.take()
+            m = self.term()
+            n = n + m if op == "+" else n - m
+        return n
+
+    def term(self) -> int:
+        n = self.unary()
+        while self.peek() in ("*", "/", "%"):
+            op = self.take()
+            m = self.unary()
+            if op == "*":
+                n *= m
+            elif m == 0:
+                raise ValueError("division by 0")
+            else:
+                q = abs(n) // abs(m) * (1 if (n >= 0) == (m > 0) else -1)
+                n = q if op == "/" else n - q * m
+        return n
+
+    def unary(self) -> int:
+        if self.peek() in ("+", "-"):
+            return -self.unary() if self.take() == "-" else self.unary()
+        return self.atom()
+
+    def atom(self) -> int:
+        tok = self.take()
+        if tok == "(":
+            n = self.expr()
+            if self.take() != ")":
+                raise ValueError("missing )")
+            return n
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok):
+            raise LookupError(tok)
+        if re.fullmatch(r"0[xX][0-9a-fA-F]*", tok):
+            return int(tok[2:] or "0", 16)
+        n = bash_int(tok)
+        if n is None:
+            raise ValueError(tok)
+        return n
+
+
 def guard_number(text: str) -> int | GuardError:
-    """A space-guard setting (GiB) as (( free <= SETTING * GIB )) reads it: blanks around it, empty
-    as 0, a sign, a decimal, a leading 0 octal, 0x hexadecimal."""
-    t = text.strip(" \t\n")
-    if not t:
+    """A numeric setting as bash arithmetic (( ... SETTING ... )) read it under set -u (_Arith):
+    empty is 0."""
+    if not text.strip(" \t\n"):
         return 0
-    m = re.fullmatch(r"([+-]?)(0[xX][0-9a-fA-F]+|[0-9]+)", t)
-    if m is None:
-        return GuardError.NOT_A_NUMBER if re.match(r"[A-Za-z_]", t) else GuardError.BAD_NUMBER
-    digits = m.group(2)
-    if digits[:2] in ("0x", "0X"):
-        n = int(digits, 16)
-    else:
-        found = bash_int(digits)
-        if found is None:
-            return GuardError.BAD_NUMBER
-        n = found
-    return -n if m.group(1) == "-" else n
+    parser = _Arith(text)
+    try:
+        n = parser.expr()
+        if parser.peek():
+            raise ValueError(parser.peek())
+    except LookupError:
+        return GuardError.NOT_A_NUMBER
+    except ValueError:
+        return GuardError.BAD_NUMBER
+    return n
 
 
 class Urgency(StrEnum):

@@ -456,6 +456,37 @@ class HourlyTest(Base):
         self.assertEqual(self.calls_but_hostname(), [])
 
 
+class ClosedStdoutTest(Base):
+    """systemd runs the service with SIGPIPE ignored: when stdout is gone (journald restarted), a
+    line that cannot be written fails with EPIPE and is dropped without a word, and the run goes on
+    (bash's echo and printf did so): the snapshot is still taken and last-ok written."""
+
+    def test_hourly_goes_on_without_its_stdout(self) -> None:
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n<6>btrfs-snapshot: summary\n"})
+        self.write(self.state_file("alerted-paused"), "")
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            r = subprocess.run(
+                ["bash", SCRIPT, "hourly"],
+                stdout=write_end,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=self.env,
+                cwd=self.tmp,
+                stdin=subprocess.DEVNULL,
+                restore_signals=False,  # SIGPIPE stays ignored, as this runner has it
+                timeout=120,
+                check=False,
+            )
+        finally:
+            os.close(write_end)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertEqual(r.stderr, "")
+
+
 class LockLifetimeTest(Base):
     """The lock of a run (fd 9 on /run/btrfs-snapshot.lock) is inherited by everything the run
     starts: when the run itself is killed, a child still working (here btrfs-snapshot-core, in the

@@ -79,7 +79,7 @@ class CoreRun:
 
         def relay(line: str) -> None:
             lines.append(line)
-            print(line, flush=True)
+            m.say(line)
 
         res = m.run([*m.core_common(cmd), *args], output="stdout-show-stderr", on_line=relay)
         self.rc = m.rc(res)

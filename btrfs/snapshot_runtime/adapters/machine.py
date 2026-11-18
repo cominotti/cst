@@ -4,7 +4,7 @@ is not root (the test seam), the settings of snapshots.conf read as data, the co
 journal lines, and btrfs-snapshot-core's command lines with the common arguments.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Buffer, Callable, Mapping, Sequence
 import contextlib
 import io
 import os
@@ -297,8 +297,28 @@ class SnapshotRun:
             os.close(fd)
 
 
+class _StdoutFd(io.RawIOBase):
+    """fd 1 for this program's own lines: a write that fails (stdout closed while SIGPIPE is
+    ignored, as systemd runs a service) is dropped without a word and the run goes on, as bash's
+    echo and printf did; nothing is kept for a later retry or for the exit."""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b: Buffer, /) -> int:
+        data = bytes(b)
+        try:
+            return os.write(1, data)
+        except OSError:
+            return len(data)
+
+
 def keep_bytes_on_output() -> None:
-    """A setting or path that is not UTF-8 goes out as the bytes it was, as bash wrote it."""
-    for stream in (sys.stdout, sys.stderr):
-        if isinstance(stream, io.TextIOWrapper):
-            stream.reconfigure(errors="surrogateescape")
+    """Our stdout and stderr as bash's: a setting or path that is not UTF-8 goes out as the bytes it
+    was, and a failed write of a line does not stop the run (_StdoutFd)."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    sys.stdout = io.TextIOWrapper(
+        io.BufferedWriter(_StdoutFd()), encoding=encoding, errors="surrogateescape", line_buffering=True
+    )
+    if isinstance(sys.stderr, io.TextIOWrapper):
+        sys.stderr.reconfigure(errors="surrogateescape")
