@@ -104,7 +104,6 @@ include = [
     "bluetooth/cli.py",
     "bluetooth/domain/__init__.py",
     "bluetooth/domain/watch.py",
-    "bluetooth/ldac_watch.py",
     "bluetooth/ports.py",
     "bluetooth/tests/__init__.py",
     "bluetooth/tests/test_bluetooth.py",

@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The `bt-helper` command line: argv to the bluetooth.domain rules, printed.
+"""The command lines of bt-helper and bt-ldac-watch.
 
-A driving adapter: it reads files and the system through BluetoothHostPort
+main (bt-helper): argv to the bluetooth.domain rules, printed. A driving
+adapter: it reads files and the system through BluetoothHostPort
 (bluetooth.adapters in production, fakes in tests) and writes the answers
 to the given streams, in the formats bluetooth-setup.sh parses.
+
+ldac_watch (bt-ldac-watch): its options, then the snapshot it prints or
+the watcher's loop in bluetooth.adapters. Light profile: each main is the
+composition root (docs/architecture.md, "Package profile").
 """
 
+import argparse
 from collections.abc import Sequence
 import json
+import re
 import sys
 from typing import Final, TextIO
 
@@ -17,6 +24,7 @@ from bluetooth.domain import (
     adapter_path,
     card_state,
     current_values,
+    device_id,
     edit_general,
     lw_failure,
     pw_state,
@@ -32,6 +40,8 @@ from bluetooth.domain import (
     unit_state,
     wp_state,
 )
+from bluetooth.adapters import run_watcher, stdin_snapshot
+from bluetooth.domain.watch import decide
 from bluetooth.ports import BluetoothHostPort
 
 _ARITY: Final[dict[str, int]] = {
@@ -165,3 +175,25 @@ def main(
         return 4
     print("|".join(x or d for x, d in zip(pw_st, ("?", "?", "-", "-", "-"), strict=False)), file=out)
     return 0
+
+
+def ldac_watch(argv: Sequence[str], doc: str = "") -> int:
+    """The command line of `bt-ldac-watch` (DOC: its help, the program's docstring)."""
+    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=doc.split("\n\n")[0])
+    ap.add_argument("--device", required=True)
+    ap.add_argument("--rate", type=int, default=48000)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--snapshot", action="store_true")
+    a = ap.parse_args(argv)
+    if not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", a.device):
+        ap.error(f"--device must be a MAC address like AA:BB:CC:DD:EE:FF (got {a.device!r})")
+    dev = device_id(a.device)
+    if a.snapshot:
+        snap = stdin_snapshot(dev)
+        if snap is None:
+            return 3
+        print(json.dumps(snap, sort_keys=True))
+        what, why = decide(snap, a.rate)
+        print(f"{what}: {why}")
+        return 0
+    return run_watcher(dev, a.rate, dry_run=a.dry_run)

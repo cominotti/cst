@@ -70,6 +70,15 @@ package has the light profile unless a layer of the full one pays for itself.
 - Tests fake cst_core's `CommandRunnerPort` or `FileSystemPort`, or the
   adapter functions, instead of a port of the package's own.
 
+`bluetooth` follows it too: `cli.py` holds the command lines of `bt-helper`
+and `bt-ldac-watch`, with no I/O of its own; the watcher's loop (`pactl
+subscribe`, the profile bounce, the stop signal) is in `bluetooth/adapters.py`;
+the rules in `bluetooth/domain/`, split by program (`__init__.py` for
+`bt-helper`, `watch.py` for the watcher), with the JSON of `pw-dump`, `pactl`
+and `busctl` as `TypedDict`s. Its `ports.py` predates the profile: `cli.main`
+and the watcher are typed against `BluetoothHostPort` and `LiveAudioPort`,
+which the tests fake.
+
 `cpu` follows it too: its `cli.py` does no I/O of its own. The
 recording loop of `cpu-watch watch`, vm-pin's virsh calls and saved
 definition are in `cpu/adapters.py`; the rules and records in

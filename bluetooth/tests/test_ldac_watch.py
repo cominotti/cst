@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from bluetooth import ldac_watch
+from bluetooth import adapters as bt_adapters
 from bluetooth.domain import PactlCard, PactlProfile, PwObject, PwParams, watch as bt_watch
 from bluetooth.domain.watch import Snapshot
 from bluetooth.tests.test_bluetooth import MAC, WATCH, HelperModule, load_helper, shell_functions
@@ -420,12 +420,12 @@ class BounceTest(unittest.TestCase):
             ("SBC_HOLD", 0),
             ("log", lambda level, msg: self.lines.append((level, msg))),
         ):
-            patcher = mock.patch.object(ldac_watch, name, value)
+            patcher = mock.patch.object(bt_adapters, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def watcher(self, live: FakeLive, dry: bool = False) -> ldac_watch.Watcher:
-        w = ldac_watch.Watcher(DEV, 48000, dry_run=dry)
+    def watcher(self, live: FakeLive, dry: bool = False) -> bt_adapters.Watcher:
+        w = bt_adapters.Watcher(DEV, 48000, dry_run=dry)
         w.live = live
         w.tracker = bt_watch.Tracker(48000, settle=0, cooldown=600)
         return w
@@ -529,21 +529,21 @@ class BounceTest(unittest.TestCase):
 
         def set_profile(prof: str) -> bool:
             if prof == "a2dp-sink-sbc":
-                ldac_watch.Stop.handler(15, None)  # SIGTERM while switching
+                bt_adapters.Stop.handler(15, None)  # SIGTERM while switching
             return live._real_set_profile(prof)
 
         live._set_profile_fn = set_profile
         w = self.watcher(live)
-        self.addCleanup(setattr, ldac_watch.Stop, "asked", False)
+        self.addCleanup(setattr, bt_adapters.Stop, "asked", False)
         with self.assertRaises(SystemExit):
             w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
         self.assertEqual(live.active, "a2dp-sink")
         self.assertTrue(any("stop asked during the profile switch" in m for _, m in self.lines))
         # Outside a bounce, a stop is immediate.
-        ldac_watch.Stop.asked = False
+        bt_adapters.Stop.asked = False
         with self.assertRaises(SystemExit):
-            ldac_watch.Stop.handler(15, None)
+            bt_adapters.Stop.handler(15, None)
 
     def test_no_pw_dump_is_not_a_disconnection(self) -> None:
         live = FakeLive(back_rate=96000)
@@ -562,8 +562,8 @@ class ListenTest(unittest.TestCase):
     when it is not the first line of a read), back on end of file."""
 
     def test_events_from_a_pipe(self) -> None:
-        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
-        watcher = ldac_watch.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(bt_adapters, "DEBOUNCE", 0))
+        watcher = bt_adapters.Watcher(DEV, 48000)
         looks: list[int] = []
         watcher.known = {600}
         with mock.patch.object(watcher, "look", side_effect=lambda: looks.append(1)):
@@ -583,8 +583,8 @@ class ListenTest(unittest.TestCase):
             self.assertEqual(len(looks), 1)  # nothing relevant: only the start
 
     def test_relevant_burst_triggers_a_look(self) -> None:
-        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
-        watcher = ldac_watch.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(bt_adapters, "DEBOUNCE", 0))
+        watcher = bt_adapters.Watcher(DEV, 48000)
         looks: list[int] = []
         r, wfd = os.pipe()
 
