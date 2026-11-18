@@ -3,10 +3,10 @@
 
 The deployments are rpm-ostree's JSON objects as they come (many keys of
 many types), read with .get where they are used. The bash copies of this
-query (btrfs-setup.sh, btrfs/setup-snapshots.bash, btrfs/btrfs-health-check,
+query (btrfs-setup.sh, btrfs/setup-snapshots.bash,
 btrfs/btrfs-degraded-boot-setup.sh) stay until those scripts are Python.
-doctor asks query_status, and so does vm's booted_deployment (vm/adapters/__init__.py),
-which records None for any failure.
+doctor asks query_status, and so do vm's booted_deployment (vm/adapters/__init__.py),
+which records None for any failure, and btrfs-health-check (btrfs/health_check/adapters.py).
 """
 
 from collections.abc import Callable

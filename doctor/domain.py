@@ -12,6 +12,7 @@ import shlex
 from typing import Any, NewType, Self
 import xml.etree.ElementTree as ET
 
+from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Usage
@@ -79,7 +80,8 @@ ALERTING_UNITS = tuple(
 )
 # Those whose programs send through cst_core's notify adapter, which keeps an alert btrfs-notify cannot take.
 KEEPING_UNITS = frozenset({"btrfs-bulk-boot.service", "docker-volumes-nocow.service"})
-UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
+# GiB: the health check's own levels, when neither the installed copy nor the checkout's can be read.
+UNALLOC_DEFAULTS = (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of
 # raid1 (2 devices), raid1c3 (3) or raid1c4 (4); single and dup only exist
@@ -391,9 +393,10 @@ def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
 
 
 def parse_unalloc_thresholds_text(text: str) -> tuple[int, int] | None:
-    """Extract (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB) from btrfs-health-check source."""
-    w = re.search(r"^UNALLOC_MIN_GIB=(\d+)\b", text, re.M)
-    c = re.search(r"^UNALLOC_CRIT_GIB=(\d+)\b", text, re.M)
+    """Extract (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB) from btrfs-health-check's source: the bash version's
+    `NAME=50` lines, or the Python version's `NAME: Final = 50` (btrfs/health_check/domain.py)."""
+    w = re.search(r"^UNALLOC_MIN_GIB(?:=|: Final = )(\d+)\b", text, re.M)
+    c = re.search(r"^UNALLOC_CRIT_GIB(?:=|: Final = )(\d+)\b", text, re.M)
     if w and c:
         return int(w.group(1)), int(c.group(1))
     return None
@@ -424,7 +427,8 @@ def per_device_allocated(profiles: Mapping[str, Mapping[str, int]], ndev: int) -
 def read_intended(text: str) -> list[tuple[str, ...]]:
     """Records of game.intended (fields written with bash printf %q):
     ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
-    A line that does not parse, or of another kind, is skipped."""
+    A line that does not parse, or of another kind (the format line
+    "cst-game-intended 1"), is skipped."""
     out: list[tuple[str, ...]] = []
     for line in text.splitlines():
         try:

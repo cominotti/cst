@@ -304,7 +304,20 @@ them). Keep to plain `KEY=value` lines: quote a value with blanks in single
 quotes. A line bash would read differently, or that it would run as a
 command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
 sets nothing for `vm-pin`: `plan` and `status` print it with its line
-number, `apply` refuses to start, and `cst doctor` warns.
+number, `apply` refuses to start, and `cst doctor` warns. The game profile
+then does not switch on (`cpu-game.service` fails when GameMode or `cst cpu
+game on` starts it, its journal names the line; the by-hand mark `cst cpu game
+on` made is dropped, so a profile a later game switches on is switched off
+when that game ends). The watchdog does not start
+it while a game runs, and with the profile already on its `tick` changes
+nothing (it still switches the profile off when the game ends); it names
+the line in the journal once per boot (again when the lines change, when it
+goes from "not switched on" to "changes nothing", and after a tick found the
+file fixed; its mark is `/run/cpu-setup/settings-warned`, a file only root
+can write there, replaced and never followed), and its unit does not fail. `off`
+still undoes everything (for the user `on` acted for, the uid of its
+`user@UID.service` record in `game.state`, also when `TARGET_USER` sets
+nothing or names another user now), and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
@@ -696,6 +709,17 @@ so if `on` stops halfway, `off` can still undo what was done.
 
 A box that is gone by then (a `systemd-run` job that ended) is no problem:
 its override file is deleted if it is still there, and nothing else is done.
+A line of `game.state` that holds no record (cut short when `on` died while
+writing it, an unclosed quote) is named in the journal (`<4>... line N: no
+record 'off' can read, skipped: TEXT`) and skipped; `off` undoes every other
+record. `cst cpu game state` names such lines of `game.state` and
+`game.intended` (`unreadable: PATH line N (skipped)`); the drift check
+compares the records around them. (The bash version stopped `off` at such a
+line, with exit 1 and `game.state` left in place.) The last line of the file
+with no newline at its end is such a line, also when its fields look whole:
+`on` writes each record before the change it describes, so that change was
+never made, and its value may be cut short (`1` of `100`), which `off` must
+not set.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
@@ -802,7 +826,11 @@ if [[ -e /run/cpu-setup/game.state ]]; then echo "a game runs"; fi
 
 Key on existence only. The contents of `game.state` (and of
 `game.intended`) are internal to `cpu-game-profile` and may change in any
-version. To be covered all the time, not only during games, run such work in
+version. `game.intended` (what `on` set, for the drift repair) names its
+format on its first line (`cst-game-intended 1`; a file without it, from an
+older version, is format 0 and is read as before). A copy that finds a newer
+format there leaves the drift alone: `tick` says so in the journal,
+`state` and `cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 

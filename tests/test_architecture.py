@@ -130,6 +130,8 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/chrome_cache/cli.py": 80,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
+    "btrfs/health_check/cli.py": 32,
+    "btrfs/pending_alerts/cli.py": 80,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 152,

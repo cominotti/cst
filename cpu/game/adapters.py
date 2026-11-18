@@ -8,6 +8,7 @@ state; cpu.game.domain decides what the records and the answers say.
 
 from collections.abc import Callable, Sequence
 import contextlib
+import dataclasses
 import glob
 import locale
 import os
@@ -18,7 +19,7 @@ from typing import TextIO
 from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.text import parse_shell_assignments, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort
 from cpu.game.domain import (
     DOCKER_SCOPES,
@@ -29,26 +30,29 @@ from cpu.game.domain import (
     GamePaths,
     GameSettings,
     Manager,
+    Record,
     cpuset_in,
     ctl_file,
     drift_lines,
     drifted,
     dropin_text,
     escaped_unit,
-    drift_readable,
+    escapes_in_state,
     expand_cpus,
     first_cpu,
     has_record_part,
+    intended_header,
     intended_props,
-    off_records,
+    newer_intended,
     on_text,
     record_line,
     records,
     repaired_text,
+    unreadable_lines,
     game_settings,
     show_values,
+    state_uid,
     shown,
-    state_escapes,
     transient_unit,
     vm_io_weight,
 )
@@ -62,11 +66,20 @@ def collate_as_bash() -> None:
         locale.setlocale(locale.LC_COLLATE, "")
 
 
-def read_settings(conf: str) -> GameSettings:
-    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults).
-    The lines bash would not read as plain assignments set nothing."""
+def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]:
+    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults), and its
+    problem lines: lines bash would not read as plain assignments, which set nothing."""
     text = read_text(conf)
-    return game_settings({} if text is None else parse_shell_assignments(text).values)
+    if text is None:
+        return game_settings({}), ()
+    parsed = parse_shell_assignments(text)
+    return game_settings(parsed.values), parsed.problems
+
+
+def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
+    """The game profile over paths.conf's settings (and its problem lines)."""
+    settings, problems = read_settings(paths.conf)
+    return GameProfile(paths, settings, runner, problems=problems)
 
 
 def user_id(user: str) -> str:
@@ -75,6 +88,14 @@ def user_id(user: str) -> str:
         return str(pwd.getpwnam(user).pw_uid)
     except KeyError:
         print(f"id: '{user}': no such user", file=sys.stderr, flush=True)
+        return ""
+
+
+def user_name(uid: str) -> str:
+    """The name of the user with that uid, "" for none."""
+    try:
+        return pwd.getpwuid(int(uid)).pw_name
+    except KeyError, ValueError, OverflowError:
         return ""
 
 
@@ -110,12 +131,16 @@ class GameProfile:
         runner: CommandRunnerPort,
         *,
         uid_of: Callable[[str], str] = user_id,
+        name_of: Callable[[str], str] = user_name,
+        problems: Sequence[SettingsProblem] = (),
         out: TextIO | None = None,
     ) -> None:
         self.paths = paths
         self.s = settings
+        self.problems = tuple(problems)
         self._runner = runner
         self._uid_of = uid_of
+        self._name_of = name_of
         self._out = out
 
     # ---- output ----------------------------------------------------------------------
@@ -364,12 +389,21 @@ class GameProfile:
         if os.path.exists(p.state):
             self.log(6, "already on")
             return 0
+        if self.problems or not s.target_user:
+            # Not switched on: a by-hand mark ('cst cpu game on' makes it first) would keep a profile a
+            # later game switches on from being switched off when that game ends.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(p.manual)
+        if self.problems:
+            self.refuse("not switched on")
+            return 1
         if not s.target_user:
             self.log(3, f"TARGET_USER not set in {p.conf}")
             return 1
-        for f in (p.state, p.intended):
-            with open(f, "w", encoding="utf-8"):
-                pass
+        with open(p.state, "w", encoding="utf-8"):
+            pass
+        with open(p.intended, "w", encoding="utf-8") as fh:
+            fh.write(intended_header())
         self.setp(
             "sys",
             "machine.slice",
@@ -413,13 +447,14 @@ class GameProfile:
             self.remove_leftover_dropins()
             return 0
         reload = {"sys": self.remove_game_dropins(), "usr": False}
+        text = self._state_text()
+        for number, line in unreadable_lines(text, intended=False):
+            self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
+        recs = records(text)
+        self._user_from_state(recs)
         # Newest first, so a property touched twice ends at its oldest value.
-        recs, stopped = off_records(self._state_text())
-        for rec in recs:
+        for rec in reversed(recs):
             self._undo(rec, reload)
-        if stopped is not None:  # as bash's set -u ended it: no reload, game.state kept
-            print(f"{p.state} line {stopped}: no record 'off' can read", file=sys.stderr, flush=True)
-            return 1
         if reload["sys"]:
             self.ctl("sys", "daemon-reload")
         if reload["usr"]:
@@ -429,6 +464,20 @@ class GameProfile:
                 os.unlink(f)
         self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
         return 0
+
+    def _user_from_state(self, recs: Sequence[Record]) -> None:
+        """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
+        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now."""
+        uid = state_uid(recs)
+        target = self.s.target_user
+        if uid is None or (target and self._uid_of(target) == uid):
+            return
+        name = self._name_of(uid)
+        if name:
+            conf = self.paths.conf
+            why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
+            self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
+            self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
         """Undo one record of game.state."""
@@ -450,11 +499,8 @@ class GameProfile:
             else:
                 self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
 
-    def drift(self) -> list[Drift]:
-        """The settings in game.intended that no longer hold (one systemctl show per unit)."""
-        text = read_text(self.paths.intended) or ""
-        if not text or not drift_readable(text):
-            return []
+    def drift(self, text: str) -> list[Drift]:
+        """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
         recs = records(text)
         now: dict[tuple[str, str], dict[str, str]] = {}
         for (mgr, unit), props in intended_props(recs).items():
@@ -469,8 +515,13 @@ class GameProfile:
 
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
-        a second record to game.state and make 'off' restore the profile's own value."""
-        for d in self.drift():
+        a second record to game.state and make 'off' restore the profile's own value. A game.intended
+        of a newer CST is not read (its records may mean something else): said in the journal."""
+        text, newer = self._intended()
+        if newer is not None:
+            self.log(4, f"drift not repaired: {newer}")
+            return
+        for d in self.drift(text):
             r = d.record
             if d.is_cgroup_file:
                 ok = _write_line(r[1], r[2])
@@ -482,12 +533,18 @@ class GameProfile:
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
         p = self.paths
+        if not self.problems:  # fixed: a line that breaks again is said again
+            with contextlib.suppress(OSError):
+                os.unlink(p.settings_warned)
         if not os.path.exists(p.state):
             self.remove_leftover_dropins()
             if not self.gamemode_client():
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(p.suppress)
             elif not os.path.exists(p.suppress):
+                if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
+                    self.warn_once("GameMode client running, profile not switched on")
+                    return 0
                 self.log(5, "GameMode client running but profile off: switching on")
                 self.ctl("sys", "start", "--no-block", "cpu-game.service")
             return 0
@@ -495,11 +552,40 @@ class GameProfile:
             self.log(5, "no GameMode client left: switching off")
             self.ctl("sys", "stop", "--no-block", "cpu-game.service")
             return 0
+        if self.problems:
+            self.warn_once("tick changes nothing")
+            return 0
         self.pin_docker()  # containers started meanwhile
         self.protect_steam()  # the game's own scope, started after 'on'
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
+
+    def _problem_lines(self) -> list[str]:
+        """The settings file's problem lines, one message each (none when it has none)."""
+        return describe_problems(self.paths.conf, self.problems).split("\n") if self.problems else []
+
+    def _log_problems(self, prio: int, what: str, suffix: str = "") -> None:
+        """The problem lines in the journal, then what the profile did not do."""
+        for line in self._problem_lines():
+            self.log(prio, line)
+        self.log(prio, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works{suffix})")
+
+    def refuse(self, what: str) -> None:
+        """The settings file's problem lines in the journal, and what the profile did not do."""
+        self._log_problems(3, what)
+
+    def warn_once(self, what: str) -> None:
+        """The watchdog's word on the settings file's problem lines: logged at the first tick that meets
+        them (and again when they or the word change, or after a tick found the file fixed), then quiet
+        until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
+        said = "\n".join([what, *self._problem_lines()])  # another word on the same lines is said too
+        mark = self.paths.settings_warned
+        if read_text(mark) == said:
+            return
+        self._log_problems(4, what, "; said once per boot")
+        with contextlib.suppress(OSError):
+            write_atomic(mark, said, mode=0o644, durable=False, relabel=False)
 
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
@@ -508,6 +594,10 @@ class GameProfile:
         on = os.path.exists(p.state)
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
+        for line in self._problem_lines():
+            self.say(
+                f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+            )
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line("builds.slice")
@@ -518,7 +608,15 @@ class GameProfile:
             effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
             self.say(f"  toolboxes       cpus effective={effective}")
             if on:
-                self.say(f"  other boxes     idle: {state_escapes(self._state_text())}")
+                self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
+        if on:
+            intended_text, newer = self._intended()
+            files = [(p.state, self._state_text(), False)]
+            if newer is None:  # a newer format's lines are not judged
+                files.append((p.intended, intended_text, True))
+            for path, text, intended in files:
+                for number, line in unreadable_lines(text, intended=intended):
+                    self.say(f"  unreadable: {path} line {number} (skipped): {line}")
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
@@ -529,8 +627,16 @@ class GameProfile:
     def drift_report(self) -> list[str]:
         """The drift part of 'state': each setting that no longer holds, or that none drifted."""
         p = self.paths
-        drifts = self.drift() if os.path.exists(p.intended) else None
-        return drift_lines(drifts, manual=os.path.exists(p.manual))
+        if not os.path.exists(p.intended):
+            return drift_lines(None, manual=os.path.exists(p.manual))
+        text, newer = self._intended()
+        drifts = self.drift(text) if newer is None else None
+        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer)
+
+    def _intended(self) -> tuple[str, str | None]:
+        """game.intended's text, and why it cannot be compared (None: it can)."""
+        text = read_text(self.paths.intended) or ""
+        return text, newer_intended(self.paths.intended, text)
 
     def _slice_line(self, unit: str) -> None:
         cpus, weight, io = (self.prop("sys", unit, n) for n in ("AllowedCPUs", "CPUWeight", "IOWeight"))
