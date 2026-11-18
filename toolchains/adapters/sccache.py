@@ -44,32 +44,32 @@ def sccache_sockets(home: str) -> list[str]:
     return out
 
 
-def socket_answers(path: str) -> bool:
+UCRED = struct.Struct("3i")  # struct ucred: pid, uid, gid
+
+
+def peer_pid(path: str) -> int | None:
+    """The PID (SO_PEERCRED) of the process that listens on the unix socket
+    PATH, 0 when the kernel cannot name it here; None when nobody answers."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(1)
     try:
         s.connect(path)
-        return True
+        return UCRED.unpack(s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, UCRED.size))[0]
     except OSError:
-        return False
+        return None
     finally:
         s.close()
+
+
+def socket_answers(path: str) -> bool:
+    return peer_pid(path) is not None
 
 
 def server_cgroup(path: str) -> str | None:
     """The /proc/PID/cgroup text of the process that listens on the unix
     socket PATH (its PID from SO_PEERCRED); None when that is not known."""
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(1)
-    creds = struct.Struct("3i")  # struct ucred: pid, uid, gid
-    try:
-        s.connect(path)
-        pid = creds.unpack(s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, creds.size))[0]
-    except OSError:
-        return None
-    finally:
-        s.close()
-    return read_text(f"/proc/{pid}/cgroup") if pid > 0 else None
+    pid = peer_pid(path)
+    return read_text(f"/proc/{pid}/cgroup") if pid else None
 
 
 def sccache_status_lines(home: str) -> list[str]:
