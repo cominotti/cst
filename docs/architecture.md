@@ -44,10 +44,8 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `cst_core` and btrfs's bulk, docker-gc, docker-volumes-nocow and
-snapshot have the full profile (vm is on its way there: it has its `wiring.py`,
-`ports.py` and `application.py`, and the local and NAS backups still run in
-`vm/cli/`); in the other packages `cli.py` orchestrates the commands and some
+doctor, `cst_core`, vm and btrfs's bulk, docker-gc, docker-volumes-nocow and
+snapshot have the full profile; in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
 each `cli.py`: new logic goes into `domain` (pure),
@@ -200,7 +198,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, `bluetooth/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, vm, `bluetooth/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other

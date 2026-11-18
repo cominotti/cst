@@ -23,7 +23,7 @@ from bluetooth.domain import (
 )
 from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed
-from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, matches_a_line
+from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, changes_machine, matches_a_line
 from cst_core.domain.errors import Refused, shell_exit_status
 
 SPACE = r"[ \t\n\r\f\v]"
@@ -52,7 +52,11 @@ class Change(Checks):
         try:
             return commands.get(self.o.cmd, self.le_audio)()
         except BrokenPipeError:
-            raise  # a closed stdout ends the run as SIGPIPE ended the shell (wiring.run_guarded)
+            if not changes_machine(self.o):
+                raise  # a command that only reads ends by SIGPIPE (wiring.run_guarded)
+            self.m.console.out_closed()
+            self.err(f"{prog}: stopped: its output was closed.{self.undo_hint() if changing else ''}\n")
+            return 1
         except Refused as e:
             self.err(f"{prog}: ERROR: {e}\n")
             return 1
@@ -495,12 +499,30 @@ class Change(Checks):
                 )
         return wp, le
 
+    # ---- the user's settings ----------------------------------------------------------------
+    def save_setting(self, key: str, value: str) -> None:
+        """KEY=VALUE in the user's settings file: through a link, atomically, the other lines kept
+        (the file and its folder made when missing)."""
+        f = self.m.files
+        label = self.tilde(self.p.user_settings)
+        f.make_dirs(os.path.dirname(self.p.user_settings))
+        target = f.realpath(self.p.user_settings)
+        try:
+            new, changed = settings_set(self.m.host.read_or_none(target), key, value)
+        except (OSError, ValueError) as e:
+            self.err(f"bt-helper: {e}\n")
+            raise self.die(f"could not update {label} (rc=1)") from e
+        if changed:
+            f.write_through(target, new)
+            self.out(f"written:   {label}: {key}={value}\n")
+        else:
+            self.out(f"unchanged: {label} already has {key}={value}\n")
+
     # ---- le-audio --------------------------------------------------------------------------
     def le_audio(self) -> int | ReRun:
         """le-audio on|off: LE_AUDIO in the user's settings (through a link, atomically, the other
         lines kept), then apply runs (ReRun). Without on/off: the setting and the CST file's state."""
-        c, f = self.c, self.m.files
-        label = self.tilde(self.p.user_settings)
+        c = self.c
         if not self.o.le_set:
             self.le_plan()
             self.out(f"LE Audio in PipeWire: {c.le_audio} ({c.le_from})\n")
@@ -509,18 +531,7 @@ class Change(Checks):
                 f"Turn it on: {self.le_on_hint}\n" if c.le_audio == "off" else f"Turn it off: {self.le_off_hint}\n"
             )
             return 0
-        f.make_dirs(os.path.dirname(self.p.user_settings))
-        target = f.realpath(self.p.user_settings)
-        try:
-            new, changed = settings_set(self.m.host.read_or_none(target), "LE_AUDIO", self.o.le_set)
-        except (OSError, ValueError) as e:
-            self.err(f"bt-helper: {e}\n")
-            raise self.die(f"could not update {label} (rc=1)") from e
-        if changed:
-            f.write_through(target, new)
-            self.out(f"written:   {label}: LE_AUDIO={self.o.le_set}\n")
-        else:
-            self.out(f"unchanged: {label} already has LE_AUDIO={self.o.le_set}\n")
+        self.save_setting("LE_AUDIO", self.o.le_set)
         args = ("apply", *(["--yes"] if self.o.yes else []), *(["--no-restart"] if self.o.no_restart else []))
         self.out(f"Now: {c.prog} {' '.join(args)}\n")
         return ReRun(args)

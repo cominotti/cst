@@ -40,6 +40,9 @@ class Console:
     def err(self, text: str) -> None:
         self.stderr += text
 
+    def out_closed(self) -> None:
+        self.stdout += "<closed>"
+
     def ask(self, prompt: str) -> str | None:
         return None
 

@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 import ctypes
-from dataclasses import replace
 import os
 import pwd
 import shlex
@@ -80,12 +79,12 @@ def probe_dir(d: ImageDir, readable: Callable[[str], str] = lambda p: p) -> Imag
         return here
     btrfs = is_btrfs(rp)
     if btrfs is False:
-        return replace(here, btrfs=False)
+        return ImageProbe(d.scope, d.path, d.what, present=True, btrfs=False)
     nocow = flag_state(readable_inode_flags(rp))
     try:
         entries = sorted(os.scandir(rp), key=lambda e: e.name)
     except OSError:
-        return replace(here, btrfs=btrfs, nocow=nocow)
+        return ImageProbe(d.scope, d.path, d.what, present=True, btrfs=btrfs, nocow=nocow)
     images: list[ImageInfo] = []
     leftovers: list[str] = []
     for e in entries:
@@ -109,7 +108,9 @@ def probe_dir(d: ImageDir, readable: Callable[[str], str] = lambda p: p) -> Imag
                 nocow=flag_state(readable_inode_flags(os.path.join(rp, e.name))),
             )
         )
-    return replace(here, btrfs=btrfs, nocow=nocow, listed=True, images=images, leftovers=leftovers)
+    return ImageProbe(
+        d.scope, d.path, d.what, present=True, btrfs=btrfs, nocow=nocow, listed=True, images=images, leftovers=leftovers
+    )
 
 
 def needs_mark(d: ImageProbe) -> bool:
@@ -164,3 +165,20 @@ def mark_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
     except OSError as e:
         return f"{d.path}: {e.strerror}"
     return "" if flag_state(readable_inode_flags(d.path)) else f"{d.path}: the mark did not stick"
+
+
+class ImageFolders:
+    """The VM image folders of cfg on this machine (image_dirs, probe_dir), and their mark
+    (needs_mark, mark_dir), for vm/cli through vm.wiring.images."""
+
+    def __init__(self, cfg: VmSettings) -> None:
+        self.cfg = cfg
+
+    def folders(self) -> list[ImageProbe]:
+        return [probe_dir(d) for d in image_dirs(self.cfg)]
+
+    def needs_mark(self, folder: ImageProbe) -> bool:
+        return needs_mark(folder)
+
+    def mark(self, folder: ImageProbe, say: Callable[[str], None]) -> str:
+        return mark_dir(folder, say)
