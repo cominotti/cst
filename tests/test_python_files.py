@@ -19,8 +19,9 @@ never be linted. This test derives the Python files from the repository
   which is an edit of this file that review can see;
 - nothing else takes a file or a diagnostic out of ty's check: no ty.toml
   (ty would read it instead of pyproject.toml), no [tool.ty] setting other
-  than src.include, terminal.error-on-warning (which must be true) and
-  rules raised to "error" (rules.<name> = "error"; "warn" or "ignore"
+  than src.include, terminal.error-on-warning (which must be true),
+  environment.python-platform (which must be "linux") and rules raised to
+  "error" (rules.<name> = "error"; "warn" or "ignore"
   fails), and no ignore comment in a ty-gated file;
 - [tool.ruff] required-version is "==" and the version of the ruff pin of
   the dev group, so a ruff other than the pinned one refuses to run on this
@@ -54,7 +55,9 @@ IGNORE_COMMENT = re.compile(r"#\s*(?:ty|type)\s*:\s*ignore\b")
 # The [tool.ty] settings the gate allows, as "table.key". Any other one could
 # take files or diagnostics out of ty's check (src.exclude, overrides, a rule
 # set to "ignore", analysis.allowed-unresolved-imports, ...).
-TY_SETTINGS = frozenset({"src.include", "terminal.error-on-warning"})
+TY_SETTINGS = frozenset({"environment.python-platform", "src.include", "terminal.error-on-warning"})
+# The allowed settings that may hold one value only.
+TY_VALUES: dict[str, object] = {"environment.python-platform": "linux"}
 
 # The Python files ty is not yet clean on. Every other Python file is in the ty
 # gate ([tool.ty.src] include). This set only shrinks: when ty becomes clean on
@@ -228,6 +231,14 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
             "diagnostics out of ty's check; allow it in TY_SETTINGS of tests/test_python_files.py "
             "only once it is known not to"
         )
+    for name, want in sorted(TY_VALUES.items()):
+        table, key = name.split(".", 1)
+        section = ty.get(table, {})
+        if isinstance(section, dict) and key in section and section[key] != want:
+            out.append(
+                f"[tool.ty] {name} = {section[key]!r}: only {want!r} is allowed (CST runs on Linux only; "
+                "another platform changes what ty checks)"
+            )
     if ty.get("terminal", {}).get("error-on-warning") is not True:
         out.append("[tool.ty.terminal] error-on-warning must be true, or a ty warning no longer fails the gate")
     return out
@@ -406,6 +417,21 @@ class PythonFilesTest(unittest.TestCase):
                         "tests/test_python_files.py only once it is known not to"
                     ],
                 )
+        # The platform may only be Linux, the one CST runs on.
+        self.assertEqual(ty_setting_problems(conf(environment={"python-platform": "linux"}), ["a.py"]), [])
+        for platform in ("all", "darwin", "win32"):
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    ty_setting_problems(conf(environment={"python-platform": platform}), ["a.py"]),
+                    [
+                        f"[tool.ty] environment.python-platform = {platform!r}: only 'linux' is allowed "
+                        "(CST runs on Linux only; another platform changes what ty checks)"
+                    ],
+                )
+        # Another environment setting is still refused.
+        self.assertEqual(
+            len(ty_setting_problems(conf(environment={"python-platform": "linux", "root": ["x"]}), ["a.py"])), 1
+        )
         # A rule may be raised to "error", never lowered.
         self.assertEqual(ty_setting_problems(conf(rules={"division-by-zero": "error"}), ["a.py"]), [])
         for level in ("warn", "ignore", "info"):

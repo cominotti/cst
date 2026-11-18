@@ -182,11 +182,18 @@ repository:
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`
   exists at the top of the repository (ty would read it instead of
   `pyproject.toml`), when `[tool.ty]` sets anything but `src.include`,
-  `terminal.error-on-warning` and rules raised to `"error"` (such as
+  `terminal.error-on-warning`, `environment.python-platform` (only
+  `"linux"`) and rules raised to `"error"` (such as
   `src.exclude`, `overrides`, a rule set to `"warn"` or `"ignore"`, or
   `analysis.allowed-unresolved-imports`), when `error-on-warning` is not
   `true`, and when a ty-gated file has a `ty: ignore` or `type: ignore`
   comment.
+- **`[tool.ty.environment] python-platform = "linux"`**: ty checks the code
+  for Linux, wherever ty runs. Its default is the platform it runs on, and
+  with every platform (`--python-platform all`) it reports a few hundred
+  calls that exist only on Linux or Unix (`os.geteuid`, `os.killpg`). CST
+  runs on Linux only. (`python-version` needs no setting: ty takes it from
+  `requires-python`.)
 - **`[tool.ty.rules]`** raises rules that are warnings or off by default to
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import` and `possibly-unresolved-reference`. A rule may

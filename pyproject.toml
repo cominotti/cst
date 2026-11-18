@@ -98,6 +98,12 @@ omit = ["tests/*", "*/tests/*"]
 
 # ---- ty ---------------------------------------------------------------------
 
+[tool.ty.environment]
+# CST runs on Linux only. ty's default is the platform it runs on, so the
+# same code could pass here and fail elsewhere (os.geteuid, os.killpg "may
+# be missing"). tests/test_python_files.py accepts only "linux".
+python-platform = "linux"
+
 [tool.ty.terminal]
 error-on-warning = true
 
