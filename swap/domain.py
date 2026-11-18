@@ -4,6 +4,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import contextlib
 import posixpath
 import re
 import shlex
@@ -293,10 +294,8 @@ def parse_kv(text: str) -> dict[str, int]:
     for line in text.splitlines():
         parts = line.split()
         if len(parts) >= 2:
-            try:
+            with contextlib.suppress(ValueError):
                 out[parts[0]] = int(parts[1])
-            except ValueError:
-                pass
     return out
 
 

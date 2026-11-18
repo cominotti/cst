@@ -103,7 +103,7 @@ PURE_NAMES: Final[dict[str, frozenset[str]]] = {
     "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),
     "time": frozenset({"gmtime", "localtime", "strftime", "struct_time"}),
     "io": frozenset({"StringIO"}),
-    "contextlib": frozenset({"AbstractContextManager"}),
+    "contextlib": frozenset({"AbstractContextManager", "suppress"}),
     "datetime": frozenset({"UTC", "date", "datetime", "timedelta", "timezone", "tzinfo"}),
     "datetime.datetime": frozenset({"fromisoformat", "fromtimestamp", "strptime"}),
 }
@@ -935,6 +935,22 @@ class ArchitectureGateTest(unittest.TestCase):
                 self.assertEqual(direct_io_problems(src, "pkg/application.py"), [])
         # Adapters may do I/O.
         self.assertEqual(architecture_problems(bad[0], "pkg/adapters.py", "domain")[:0], [])
+
+    def test_contextlib_suppress_is_pure_and_the_other_contextlib_names_are_not(self) -> None:
+        good = (
+            "import contextlib\ndef f(s):\n    with contextlib.suppress(ValueError):\n        return int(s)\n",
+            "from contextlib import suppress\ndef f(s):\n    with suppress(ValueError):\n        return int(s)\n",
+        )
+        for src in good:
+            with self.subTest(src=src):
+                self.assertEqual(direct_io_problems(src, "pkg/domain.py"), [])
+        bad = (
+            "import contextlib\nimport io\ndef f():\n    with contextlib.redirect_stdout(io.StringIO()):\n        pass\n",
+            "from contextlib import chdir\n",
+        )
+        for src in bad:
+            with self.subTest(src=src):
+                self.assertTrue(direct_io_problems(src, "pkg/domain.py"))
 
     def test_every_package_module_is_reached_from_an_entry_point(self) -> None:
         files = [rel for rel in production_python() if module_of(rel) is not None]
