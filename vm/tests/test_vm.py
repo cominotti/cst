@@ -113,7 +113,7 @@ def no_real_commands() -> AbstractContextManager[object]:
     stack = ExitStack()
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "runner", _NoCommands()))
     stack.enter_context(mock.patch.object(vm_adapters.COMMANDS_OF_VM, "virsh_adapter", _NoCommands()))
-    stack.enter_context(mock.patch.object(vm_wiring, "systemd", lambda: SystemctlAdapter(_NoCommands())))
+    stack.enter_context(mock.patch.object(vm_wiring, "systemd", return_value=SystemctlAdapter(_NoCommands())))
     return stack
 
 
