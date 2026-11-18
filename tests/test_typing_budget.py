@@ -41,7 +41,7 @@ ANY_BUDGETS: Final[dict[str, int]] = {
     "doctor domain": 1,
     "tests tests": 6,
     "toolchains tests": 1,
-    "vm adapters": 6,
+    "vm adapters": 5,
     "vm cli": 12,
     "vm tests": 5,
 }
