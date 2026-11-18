@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from toolchains.domain import TOOL_FILES_MAX, TOOL_FILE_MAX, toolchain_pattern
+from toolchains.domain.build import TOOL_FILES_MAX, TOOL_FILE_MAX, toolchain_pattern
 from toolchains.adapters.program import RUNNER
 
 

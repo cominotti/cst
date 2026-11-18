@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 from cst_core.domain.errors import Refused
-from toolchains.domain import (
+from toolchains.domain.build import (
     FUTURE_SLACK,
     Folder,
     HASH_LEAF,
@@ -27,8 +27,8 @@ from toolchains.domain import (
     TRASH_NAME,
     classify,
     expected_template,
-    tilde,
 )
+from toolchains.domain.common import tilde
 from toolchains.adapters.program import PROG, RUNNER
 
 

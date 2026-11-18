@@ -8,16 +8,10 @@ from __future__ import annotations
 import os
 import tomllib
 
-from toolchains.domain import (
-    ConfigError,
-    PLANNED,
-    TOOL_FILES_MAX,
-    WORKSPACE_REL,
-    gib,
-    label,
-    short_toolchain,
-    tilde,
-)
+from toolchains.domain.auto import label
+from toolchains.domain.build import TOOL_FILES_MAX, WORKSPACE_REL, short_toolchain
+from toolchains.domain.common import ConfigError, gib, tilde
+from toolchains.domain.prune import PLANNED
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.home_files import old_conf_note, read_state
 from toolchains.adapters.program import PROG, say, where_text

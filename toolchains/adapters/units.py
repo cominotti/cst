@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 
 from cst_core.adapters.runner import on_host_argv
 from cst_core.domain.errors import Refused
-from toolchains.domain import NAME, own_session_env
+from toolchains.domain.auto import own_session_env
+from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER, in_container, say
 
 

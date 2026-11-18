@@ -17,7 +17,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from toolchains.domain import (
+from toolchains.domain.build import (
     CACHE_TAG,
     CARGO_ENV,
     CMD_TIMEOUT,

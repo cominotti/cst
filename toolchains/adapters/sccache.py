@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-from toolchains.domain import SCCACHE_DIR_REL, SCCACHE_STATS, gib
+from toolchains.domain.common import gib
+from toolchains.domain.config import SCCACHE_DIR_REL, SCCACHE_STATS
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.program import RUNNER, where_text
 

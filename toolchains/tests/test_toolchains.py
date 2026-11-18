@@ -31,7 +31,9 @@ sys.dont_write_bytecode = True
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
-from toolchains import domain as tc_domain
+from toolchains.domain import auto as tcd_auto
+from toolchains.domain import build as tcd_build
+from toolchains.domain import common as tcd_common
 from toolchains.cli import prune as tc_prune
 from toolchains.cli import auto as tc_auto
 from toolchains.cli import config as tc_config
@@ -1272,17 +1274,17 @@ class PackageLayersTest(Scratch):
     toolchains.cli (what the program's main() runs)."""
 
     def test_domain_parses_and_decides(self) -> None:
-        a = tc_domain.parse_args(["status", "--brief"])
+        a = tcd_common.parse_args(["status", "--brief"])
         self.assertEqual((a["cmd"], a["brief"]), ("status", True))
         with self.assertRaises(Usage):
-            tc_domain.parse_args(["prune", "bogus"])
-        old = tc_domain.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
+            tcd_common.parse_args(["prune", "bogus"])
+        old = tcd_build.Folder("/tmp/build", "aa", "bbbbbbbbbbbbbb")
         old.size, old.activity = 100, NOW - 1e6
-        new = tc_domain.Folder("/tmp/build", "cc", "dddddddddddddd")
+        new = tcd_build.Folder("/tmp/build", "cc", "dddddddddddddd")
         new.size, new.activity = 100, NOW - 60
         pol = {"max_idle": 3600 * 48, "max_total": 150 * (1 << 30), "min_keep": 7200}
         self.assertEqual(
-            [(f.key, action) for f, action, _ in tc_domain.decide([new, old], pol, NOW, {})],
+            [(f.key, action) for f, action, _ in tcd_build.decide([new, old], pol, NOW, {})],
             [("aa/bbbbbbbbbbbbbb", "delete"), ("cc/dddddddddddddd", "keep")],
         )
 
@@ -1310,19 +1312,19 @@ class ParseSizeTest(unittest.TestCase):
     """MAX_TOTAL and friends: a number with its unit, or 0/off for no cap."""
 
     def test_units_multiply(self) -> None:
-        self.assertEqual(tc_domain.parse_size("150G"), 150 << 30)
-        self.assertEqual(tc_domain.parse_size(" 1.5k "), 1536)
-        self.assertEqual(tc_domain.parse_size("2TiB"), 2 << 40)
-        self.assertEqual(tc_domain.parse_size("3mb"), 3 << 20)
+        self.assertEqual(tcd_common.parse_size("150G"), 150 << 30)
+        self.assertEqual(tcd_common.parse_size(" 1.5k "), 1536)
+        self.assertEqual(tcd_common.parse_size("2TiB"), 2 << 40)
+        self.assertEqual(tcd_common.parse_size("3mb"), 3 << 20)
 
     def test_no_cap_is_zero(self) -> None:
         for text in ("0", "0.0", "off", "none", "no", "OFF"):
-            self.assertEqual(tc_domain.parse_size(text), 0, text)
+            self.assertEqual(tcd_common.parse_size(text), 0, text)
 
     def test_a_bare_number_is_refused(self) -> None:
         for text in ("150", "1x", "", "G"):
-            with self.subTest(text=text), self.assertRaises(tc_domain.ConfigError):
-                tc_domain.parse_size(text)
+            with self.subTest(text=text), self.assertRaises(tcd_common.ConfigError):
+                tcd_common.parse_size(text)
 
 
 class ClosedPipeTest(Scratch):
@@ -1452,7 +1454,7 @@ class SessionEnvTest(unittest.TestCase):
         def xdg_bus(
             env: dict[str, str], owner: int | None, *, own_exists: bool = True
         ) -> tuple[str | None, str | None]:
-            out = tc_domain.own_session_env(env, 1000, owner, own_exists=own_exists)
+            out = tcd_auto.own_session_env(env, 1000, owner, own_exists=own_exists)
             return out.get("XDG_RUNTIME_DIR"), out.get("DBUS_SESSION_BUS_ADDRESS")
 
         own, own_bus = "/run/user/1000", "unix:path=/run/user/1000/bus"

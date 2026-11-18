@@ -11,7 +11,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-from toolchains.domain import CARGO_COMM, CARGO_ENV, RUST_TOOLS, TRASH_PREFIX, prefixes
+from toolchains.domain.build import CARGO_COMM, CARGO_ENV, RUST_TOOLS, TRASH_PREFIX, prefixes
 
 
 PROC = "/proc"

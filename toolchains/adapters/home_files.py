@@ -19,7 +19,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.install import INSTALL_MANIFEST, expand_dest, manifest_by_src
-from toolchains.domain import (
+from toolchains.domain.common import (
     CONF_REL,
     MARKER,
     OFF_REL,
@@ -28,8 +28,8 @@ from toolchains.domain import (
     STATE_DIR_REL,
     TIMER,
     UNIT_DIR_REL,
-    WRAPPER_REL,
 )
+from toolchains.domain.config import WRAPPER_REL
 from toolchains.adapters.program import Program, say
 
 

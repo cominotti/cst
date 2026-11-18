@@ -14,7 +14,8 @@ from cst_core.adapters.runtime import install_payload
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import masked_refusal
-from toolchains.domain import (
+from toolchains.domain.auto import label, render_service, render_timer
+from toolchains.domain.common import (
     CONF_REL,
     ConfigError,
     DEFAULTS_REL,
@@ -31,9 +32,6 @@ from toolchains.domain import (
     TIMER,
     UNIT_DIR_REL,
     WANTS_REL,
-    label,
-    render_service,
-    render_timer,
     tilde,
 )
 from toolchains.adapters.home_files import (

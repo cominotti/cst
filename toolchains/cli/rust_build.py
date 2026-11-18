@@ -14,34 +14,35 @@ from typing import Any, cast
 from collections.abc import Callable, Mapping, Sequence
 
 from cst_core.domain.errors import Refused
-from toolchains.domain import (
-    ConfigError,
+from toolchains.domain.build import (
     ENUM_BUDGET,
     Folder,
     Incomplete,
     MIN_KEEP_FLOOR,
-    RM_MARGIN,
     ROOT_REL,
-    RUN_BUDGET,
     TRASH_PREFIX,
     WORKSPACE_REL,
     Workspaces,
     after_total,
-    ago,
     decide,
-    gib,
     merge_users,
+    prefixes,
+    unknown_text,
+    users_text,
+)
+from toolchains.domain.common import (
+    ConfigError,
+    ago,
+    gib,
     parse_bool,
     parse_duration,
     parse_off_or_duration,
     parse_size,
-    prefixes,
     span,
     tilde,
-    unknown_text,
-    users_text,
     when,
 )
+from toolchains.domain.prune import RM_MARGIN, RUN_BUDGET
 from toolchains.adapters.build_tree import measure, release, remove_tree, resolve_root, scan, take_locks
 from toolchains.adapters.cargo import (
     ask_cargo,

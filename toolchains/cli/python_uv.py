@@ -12,21 +12,9 @@ from typing import Any
 from collections.abc import Mapping, Sequence
 
 from cst_core.domain.errors import Refused
-from toolchains.domain import (
-    RUN_BUDGET,
-    UV_CACHE_REL,
-    UV_LOCK_TIMED_OUT,
-    UV_LOCK_WAIT,
-    UV_REMOVED,
-    UV_TIMEOUT,
-    UV_UNITS,
-    ago,
-    gib,
-    parse_off_or_duration,
-    span,
-    tilde,
-    when,
-)
+from toolchains.domain.common import ago, gib, parse_off_or_duration, span, tilde, when
+from toolchains.domain.prune import RUN_BUDGET
+from toolchains.domain.uv import UV_CACHE_REL, UV_LOCK_TIMED_OUT, UV_LOCK_WAIT, UV_REMOVED, UV_TIMEOUT, UV_UNITS
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.home_files import read_state, write_state
 from toolchains.adapters.program import run_idle, say

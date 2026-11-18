@@ -13,22 +13,19 @@ import tomllib
 
 from cst_core.adapters.files import read_text
 from cst_core.ports import WriteFailed
-from toolchains.domain import (
+from toolchains.domain.build import HASH_VAR, ROOT_REL, expected_template
+from toolchains.domain.common import CONF_REL, ConfigError, NAME, parses_as, plain, tilde
+from toolchains.domain.config import (
     ANY_HEADER,
     BUILD_HEADER,
     CARGO_CFG_REL,
     CARGO_HAS_BUILD,
     CARGO_HAS_BUILD_DIR,
-    CONF_REL,
-    ConfigError,
-    HASH_VAR,
     KEY_LINE,
     LEAN_HEAD,
     LEAN_KEYS,
     LEAN_REBUILD,
     LeanState,
-    NAME,
-    ROOT_REL,
     SCCACHE_HEAD,
     SCCACHE_REBUILD,
     SCCACHE_SIZE_LINE,
@@ -44,11 +41,7 @@ from toolchains.domain import (
     WrapperValues,
     cargo_text,
     dig,
-    expected_template,
-    parses_as,
-    plain,
     same_debug,
-    tilde,
 )
 from toolchains.adapters.home_files import append_text, file_state, put_wrapper, read_cfg, wrapper_path, write_cfg
 from toolchains.adapters.program import PROG, Program, say

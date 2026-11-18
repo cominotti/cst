@@ -35,7 +35,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from tests.package_view import PackageView
-from toolchains import cli as tc_cli, domain as tc_domain
+from toolchains import cli as tc_cli
 from toolchains.cli import prune as tc_prune
 from toolchains.cli import auto as tc_auto
 from toolchains.cli import config as tc_config
@@ -43,6 +43,12 @@ from toolchains.cli import status as tc_status
 from toolchains.cli import rust_build as tc_rust_build
 from toolchains.cli import python_uv as tc_python_uv
 from toolchains.cli import targets as tc_targets
+from toolchains.domain import auto as tcd_auto
+from toolchains.domain import build as tcd_build
+from toolchains.domain import common as tcd_common
+from toolchains.domain import config as tcd_config
+from toolchains.domain import prune as tcd_prune
+from toolchains.domain import uv as tcd_uv
 from toolchains.adapters import program as tc_program
 from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import build_tree as tc_build_tree
@@ -197,7 +203,12 @@ def load() -> ToolchainsModule:
         tc_rustup,
         tc_sccache,
         tc_units,
-        tc_domain,
+        tcd_auto,
+        tcd_build,
+        tcd_common,
+        tcd_config,
+        tcd_prune,
+        tcd_uv,
     )
     # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
     view.restore_default_signals = lambda: None

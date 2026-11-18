@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.ports import CommandRunnerPort
-from toolchains.domain import tilde
+from toolchains.domain.common import tilde
 
 
 # How hints name the frontend ("cst toolchains" through cst).

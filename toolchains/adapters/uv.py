@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-from toolchains.domain import UV_LOCK_TIMED_OUT, UV_LOCK_WAIT
+from toolchains.domain.uv import UV_LOCK_TIMED_OUT, UV_LOCK_WAIT
 
 
 def uv_env() -> dict[str, str]:

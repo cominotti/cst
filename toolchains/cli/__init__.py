@@ -17,7 +17,7 @@ from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.runtime import program_argv
 from cst_core.domain.errors import Refused, Usage
 from cst_core.ports import WriteFailed
-from toolchains.domain import ConfigError, NAME, SERVICE, STATE_DIR_REL, USAGE, parse_args
+from toolchains.domain.common import ConfigError, NAME, SERVICE, STATE_DIR_REL, USAGE, parse_args
 from toolchains.adapters.program import PROG, Program, in_container, output_mode, run_context, say
 from toolchains.cli import auto, config, prune, status
 

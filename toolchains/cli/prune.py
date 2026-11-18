@@ -12,17 +12,8 @@ from typing import Any
 from collections.abc import Sequence
 
 from cst_core.domain.errors import Refused, Usage
-from toolchains.domain import (
-    CONF_REL,
-    ConfigError,
-    DEFAULTS_NAME,
-    OPTIONS,
-    PLANNED,
-    RUN_BUDGET,
-    parse_bool,
-    parse_conf,
-    tilde,
-)
+from toolchains.domain.common import CONF_REL, ConfigError, DEFAULTS_NAME, OPTIONS, parse_bool, parse_conf, tilde
+from toolchains.domain.prune import PLANNED, RUN_BUDGET
 from toolchains.adapters.program import Program, say, where_text
 from toolchains.cli.python_uv import PythonUv
 from toolchains.cli.rust_build import RustBuild

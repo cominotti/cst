@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: MPL-2.0
+"""The user units `auto on` writes (rendered through cst_core), and the
+environment systemctl --user gets to reach this user's own manager; no I/O."""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+from cst_core.domain.units import render_timer as unit_timer, render_unit_file
+from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, UNIT_DIR_REL
+
+
+UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
+
+
+def render_service() -> str:
+    return render_unit_file(
+        [
+            UNIT_HEADER,
+            "# Prunes the toolchain caches enabled in ~/.config/cst/toolchains.conf",
+            "# (cargo's build folders in ~/.cache/cargo-build, ...). Why and how:",
+            "# toolchains/README.md in CST.",
+        ],
+        [
+            (
+                "Unit",
+                [
+                    "Description=CST: prune old toolchain caches (cst toolchains)",
+                    f"ConditionPathExists=%h/{PROG_REL}",
+                    f"ConditionPathExists=%h/{DEFAULTS_REL}",
+                ],
+            ),
+            (
+                "Service",
+                [
+                    "Type=oneshot",
+                    f"ExecStart=/usr/bin/python3 -I %h/{PROG_REL} prune apply",
+                    "SyslogIdentifier=cst-toolchains",
+                    "Nice=19",
+                    "IOSchedulingClass=idle",
+                    "TimeoutStartSec=30min",
+                    "NoNewPrivileges=yes",
+                ],
+            ),
+        ],
+    )
+
+
+def render_timer() -> str:
+    return unit_timer([UNIT_HEADER], "CST: prune old toolchain caches, hourly", "hourly", "10min")
+
+
+def label(key: str) -> str:
+    return f"~/{key}" if "/" in key else f"~/{UNIT_DIR_REL}/{key}"
+
+
+def own_session_env(env: Mapping[str, str], uid: int, owner: int | None, *, own_exists: bool) -> dict[str, str]:
+    """The environment systemctl --user gets: env with this user's XDG_RUNTIME_DIR (owner: the
+    owner of env's folder, None when it does not exist). None handed down (root through runuser):
+    /run/user/UID when it exists. Another uid's (owned by it, or /run/user/N with another N, as
+    sudo and runuser pass on root's /run/user/0): /run/user/UID, and a bus inside it, UID's bus."""
+    out, own, xdg = dict(env), f"/run/user/{uid}", env.get("XDG_RUNTIME_DIR", "")
+    if not xdg:
+        if own_exists:
+            out["XDG_RUNTIME_DIR"] = own
+        return out
+    named = re.fullmatch(r"/run/user/([0-9]+)/?", xdg, re.ASCII)
+    if (owner is not None and owner != uid) or (named is not None and int(named.group(1)) != uid):
+        out["XDG_RUNTIME_DIR"] = own
+        if f"={xdg.rstrip('/')}/" in env.get("DBUS_SESSION_BUS_ADDRESS", ""):
+            out["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={own}/bus"
+    return out
