@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:45
-    timeout-minutes: 10
+    timeout-minutes: 20  # the unit suite takes 6-9 min on a hosted runner; 10 cancelled a green run (#84)
     steps:
       - name: Install Fedora 45 fast-gate tools and create non-root CI user
         run: |
