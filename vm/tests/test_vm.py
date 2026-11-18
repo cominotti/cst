@@ -1258,6 +1258,11 @@ class NocowTest(unittest.TestCase):
         )
         self.assertIn(f"done: {self.system}", out)
         self.assertIn("existing images stay as they are", out)
+        # An existing folder whose mark this user cannot read: set again, and said so.
+        self.assertIn(
+            f"  mark +C: {self.system} (sudo) (its mark is not readable as your user: set again, harmless)",
+            out.splitlines(),
+        )
 
     def test_apply_creates_a_missing_system_folder_like_libvirt(self) -> None:
         os.rmdir(self.system)
@@ -1295,6 +1300,9 @@ class NocowTest(unittest.TestCase):
                 ["sudo", "--", "chattr", "+C", self.system],
             ],
         )
+        # A folder about to be created has no mark to read: the line says it is created with it, nothing more.
+        self.assertIn(f"  create (root:root 0711) and mark +C: {self.system} (sudo)", out.splitlines())
+        self.assertNotIn("not readable", out)
 
     def test_a_symlinked_folder_is_never_created_or_marked(self) -> None:
         real = os.path.join(self.tmp, "elsewhere")
