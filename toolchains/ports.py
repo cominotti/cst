@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from cst_core.domain.values import Json
     from cst_core.ports import CommandResult
+    from cst_core.domain.files import UnitFileState
     from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import CargoCache, Folder, Workspaces
     from toolchains.domain.prune import RunRecord
@@ -137,6 +138,10 @@ class RunStatePort(Protocol):
         """Saved; a failure is said, not raised (the run itself went through)."""
         ...
 
+    def forget(self, tid: str) -> None:
+        """The summary is removed (auto off); one that cannot be removed is left."""
+        ...
+
 
 class RunOutputPort(Protocol):
     """The lines a command says (with the journal's priority under systemd)."""
@@ -195,4 +200,68 @@ class ToolchainsLockPort(Protocol):
     def run(self, fn: Callable[[], int], *, busy_refused: bool = False) -> int:
         """FN() while this run holds the lock. When another run holds it: nothing done, exit 0
         (and a line), or Refused with BUSY_REFUSED (what was asked did not happen)."""
+        ...
+
+
+class HomeFilesPort(Protocol):
+    """The files CST keeps in the user's home: what auto on installs (the program's copy,
+    its defaults and the two user units, listed in the user's install record), the file
+    auto off leaves, and what the earlier `cst btrfs cargo-gc` left. PATH arguments are
+    absolute paths in the home."""
+
+    def auto_copies(self) -> dict[str, bytes]:
+        """{path relative to the home: bytes} of the copies the timer runs; ConfigError
+        when the defaults next to this program are missing."""
+        ...
+
+    def auto_states(self) -> dict[str, UnitFileState]:
+        """The state of each copy (by its relative path) and unit (by its name)."""
+        ...
+
+    def timer_missing(self) -> bool:
+        """No timer file of auto on is there (a link to nothing counts as none)."""
+        ...
+
+    def stale_files(self) -> list[tuple[str, bool]]:
+        """[(path, ours)] of what the earlier `cst btrfs cargo-gc` left."""
+        ...
+
+    def put_auto_copy(self, rel: str, data: bytes) -> bool:
+        """Written through the installer (and listed) unless current; True when written."""
+        ...
+
+    def put_auto_unit(self, name: str, text: str) -> bool:
+        """Written through the installer (and listed) unless current; True when written."""
+        ...
+
+    def auto_done(self) -> None:
+        """The user's install record says auto on finished."""
+        ...
+
+    def forget_auto_files(self) -> None:
+        """The copies and units leave the user's install record (auto off removed them)."""
+        ...
+
+    def turned_off(self) -> bool:
+        """The file auto off leaves is there."""
+        ...
+
+    def mark_off(self) -> None:
+        """Write the file auto off leaves."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Remove the file (or link) PATH; OSError when that fails."""
+        ...
+
+    def dangling_link(self, path: str) -> bool:
+        """PATH is a symbolic link to nothing."""
+        ...
+
+    def remove_if_empty(self, path: str) -> None:
+        """Remove the folder PATH when it is empty; otherwise leave it."""
+        ...
+
+    def old_conf_present(self) -> bool:
+        """The settings file of the earlier `cst btrfs cargo-gc` is there (no longer read)."""
         ...

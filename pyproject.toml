@@ -369,6 +369,7 @@ include = [
     "toolchains/adapters/units.py",
     "toolchains/adapters/uv.py",
     "toolchains/application/__init__.py",
+    "toolchains/application/auto.py",
     "toolchains/application/prune.py",
     "toolchains/application/python_uv.py",
     "toolchains/application/rust_build.py",

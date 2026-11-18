@@ -17,20 +17,29 @@ if TYPE_CHECKING:
 
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
+from cst_core.adapters.files import owned_file_state_at, read_bytes, unit_file_state_at, write_atomic
 from cst_core.adapters.install import program_installer
+from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.install import INSTALL_MANIFEST, expand_dest, manifest_by_src
 from cst_core.domain.values import Json
 from toolchains.adapters.program import program_folder
+from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
 from toolchains.domain.common import (
     CONF_REL,
+    ConfigError,
     DEFAULTS_NAME,
+    DEFAULTS_REL,
     MARKER,
     OFF_REL,
     OLD_CONF_REL,
+    OLD_DATA,
+    OLD_FILES,
+    OLD_MARKER,
+    OLD_UNITS,
+    PROG_REL,
     SERVICE,
     STATE_DIR_REL,
     TIMER,
@@ -202,6 +211,12 @@ class RunSummaries:
     def write(self, tid: str, record: RunRecord) -> None:
         write_state(self.home, tid, record, self.out)
 
+    def forget(self, tid: str) -> None:
+        try:
+            os.unlink(state_path(self.home, tid))
+        except OSError:
+            pass
+
 
 class ToolchainsLock:
     """ToolchainsLockPort: one run at a time (the timer and a manual apply, auto on/off), an
@@ -250,16 +265,6 @@ def timer_unit_state(path: str, wanted: str) -> UnitFileState:
     `systemctl --user mask` left a link to /dev/null there (see
     cst_core.adapters.files.unit_file_state_at)."""
     return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner="user")
-
-
-def old_conf_note(home: str, out: RunOutputPort) -> None:
-    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
-        out.say(
-            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
-            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
-            4,
-            err=True,
-        )
 
 
 def turned_off(home: str) -> bool:
@@ -311,3 +316,91 @@ def append_text(path: str, text: str) -> str:
     except OSError as e:
         return str(e.strerror or e)
     return ""
+
+
+def copies(entry_file: str) -> dict[str, bytes]:
+    """{installed path (relative to home): bytes}: this program as `install`
+    writes it (a zipapp) and its defaults, as the timer runs them."""
+    defaults = read_bytes(defaults_path(entry_file))
+    if defaults is None:
+        raise ConfigError(f"the defaults file {defaults_path(entry_file)} is missing")
+    return {PROG_REL: install_payload("toolchains/cst-toolchains", entry_file), DEFAULTS_REL: defaults}
+
+
+def unit_states(home: str, entry_file: str) -> dict[str, UnitFileState]:
+    out: dict[str, UnitFileState] = {
+        rel: file_state(os.path.join(home, rel), text) for rel, text in copies(entry_file).items()
+    }
+    for name, render in AUTO_UNITS.items():
+        out[name] = timer_unit_state(os.path.join(home, UNIT_DIR_REL, name), render())
+    return out
+
+
+def stale_files(home: str) -> list[tuple[str, bool]]:
+    """[(path, ours)] of what `cst btrfs cargo-gc enable|disable` left
+    (the first version of this cleanup)."""
+    out: list[tuple[str, bool]] = []
+    for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
+        path = os.path.join(home, rel)
+        st = file_state(path, None, OLD_MARKER)
+        if st != "missing":
+            out.append((path, st == "change"))
+    for rel in OLD_DATA:
+        path = os.path.join(home, rel)
+        if os.path.lexists(path):
+            out.append((path, not os.path.islink(path)))
+    return out
+
+
+class HomeFiles:
+    """HomeFilesPort: the files CST keeps in HOME for the running program (ENTRY_FILE: its
+    entry point; its copies and defaults are read next to it)."""
+
+    def __init__(self, home: str, entry_file: str) -> None:
+        self.home = home
+        self.entry_file = entry_file
+
+    def auto_copies(self) -> dict[str, bytes]:
+        return copies(self.entry_file)
+
+    def auto_states(self) -> dict[str, UnitFileState]:
+        return unit_states(self.home, self.entry_file)
+
+    def timer_missing(self) -> bool:
+        return file_state(os.path.join(self.home, UNIT_DIR_REL, TIMER), render_timer()) == "missing"
+
+    def stale_files(self) -> list[tuple[str, bool]]:
+        return stale_files(self.home)
+
+    def put_auto_copy(self, rel: str, data: bytes) -> bool:
+        return put_auto_copy(self.home, rel, data, self.entry_file)
+
+    def put_auto_unit(self, name: str, text: str) -> bool:
+        return put_auto_unit(self.home, name, text, self.entry_file)
+
+    def auto_done(self) -> None:
+        record_done(self.home, AUTO_COMPONENT, self.entry_file)
+
+    def forget_auto_files(self) -> None:
+        forget_auto_files(self.home, self.entry_file)
+
+    def turned_off(self) -> bool:
+        return turned_off(self.home)
+
+    def mark_off(self) -> None:
+        write_atomic(os.path.join(self.home, OFF_REL), OFF_TEXT, mode=0o644)
+
+    def remove(self, path: str) -> None:
+        os.unlink(path)
+
+    def dangling_link(self, path: str) -> bool:
+        return os.path.islink(path) and not os.path.exists(path)
+
+    def remove_if_empty(self, path: str) -> None:
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+    def old_conf_present(self) -> bool:
+        return os.path.lexists(os.path.join(self.home, OLD_CONF_REL))

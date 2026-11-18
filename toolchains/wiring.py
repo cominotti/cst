@@ -19,11 +19,12 @@ from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.runtime import program_argv
 from toolchains.adapters.build_tree import CargoBuildTree
-from toolchains.adapters.home_files import RunSummaries, ToolchainsLock, load_settings
+from toolchains.adapters.home_files import HomeFiles, RunSummaries, ToolchainsLock, load_settings
 from toolchains.adapters.processes import cargo_procs
 from toolchains.adapters.program import RunOutput, home_folder, in_container, journal_stdout
 from toolchains.adapters.units import UserUnits
 from toolchains.adapters.uv import UvTool
+from toolchains.application.auto import AutoTimer
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
@@ -36,7 +37,14 @@ if TYPE_CHECKING:
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
     from toolchains.domain.prune import Settings
-    from toolchains.ports import BuildTreePort, RunOutputPort, ToolchainsLockPort, UserUnitsPort, UvPort
+    from toolchains.ports import (
+        BuildTreePort,
+        HomeFilesPort,
+        RunOutputPort,
+        ToolchainsLockPort,
+        UserUnitsPort,
+        UvPort,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -53,6 +61,7 @@ class Session:
     out: RunOutputPort
     units: UserUnitsPort
     lock: ToolchainsLockPort
+    files: HomeFilesPort
     machine: TargetPorts
 
 
@@ -107,7 +116,8 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
     units = UserUnits(out, systemctl_program()) if p.units is None else p.units(out)
-    return Session(home, now, prog, entry_file, limits, out, units, ToolchainsLock(home, out), machine)
+    lock = ToolchainsLock(home, out)
+    return Session(home, now, prog, entry_file, limits, out, units, lock, HomeFiles(home, entry_file), machine)
 
 
 def settings(s: Session) -> Settings:
@@ -124,3 +134,17 @@ def target(s: Session, checked: Settings | None, tid: str) -> Target:
     if tid == PYTHON_UV.id:
         return PythonUv(s.home, s.now, checked.uv if checked else None, s.machine, s.limits)
     raise KeyError(tid)
+
+
+def auto_timer(s: Session) -> AutoTimer:
+    """auto on and auto off over the session's adapters."""
+    return AutoTimer(
+        s.home,
+        s.prog,
+        s.files,
+        s.units,
+        s.machine.state,
+        s.out,
+        lambda: settings(s),
+        lambda checked, tid: target(s, checked, tid),
+    )

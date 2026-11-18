@@ -16,11 +16,9 @@ from typing import TYPE_CHECKING
 from toolchains import wiring
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.cargo import claimed_folders
-from toolchains.adapters.home_files import old_conf_note
 from toolchains.adapters.program import where_text
 from toolchains.adapters.rustup import named_in, pinned_channel, rustup_default, rustup_home
 from toolchains.adapters.sccache import sccache_status_lines
-from toolchains.cli.auto import stale_files, timer_text, unit_states
 from toolchains.cli.config import config_lines
 from toolchains.domain.prune import PLANNED, SPECS, Limits, Settings, last_run_text
 
@@ -116,7 +114,8 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
 
 def cmd_status(s: Session, brief: bool) -> None:
     home, say = s.home, s.out.say
-    say(f"auto: {timer_text(s)}")
+    timer = wiring.auto_timer(s)
+    say(f"auto: {timer.timer_text()}")
     settings: Settings | None
     try:
         settings = wiring.settings(s)
@@ -154,11 +153,11 @@ def cmd_status(s: Session, brief: bool) -> None:
         say(f"  {st:<8} {shown:<24} {note}")
     for line in sccache_status_lines(home):
         say(f"  {line}")
-    st = unit_states(home, s.entry_file)
+    st = s.files.auto_states()
     say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
-    for path, ours in stale_files(home):
+    for path, ours in s.files.stale_files():
         say(
             f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"
             + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)")
         )
-    old_conf_note(home, s.out)
+    timer.old_conf_note()

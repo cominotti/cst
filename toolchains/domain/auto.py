@@ -9,10 +9,10 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
-from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, UNIT_DIR_REL
+from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL
 
 
 UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
@@ -53,6 +53,17 @@ def render_service() -> str:
 
 def render_timer() -> str:
     return unit_timer([UNIT_HEADER], "CST: prune old toolchain caches, hourly", "hourly", "10min")
+
+
+# The user units of auto on: {name: its text}.
+AUTO_UNITS: dict[str, Callable[[], str]] = {SERVICE: render_service, TIMER: render_timer}
+
+# The file auto off leaves (OFF_REL): while it exists, snapshots setup does not turn the timer on.
+OFF_TEXT = (
+    f"{MARKER}: written by `cst toolchains auto off`.\n"
+    "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
+    "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n"
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

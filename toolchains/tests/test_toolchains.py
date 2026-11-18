@@ -963,7 +963,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-cst-toolchains")
         os.rename(prog, kept)
         os.symlink(kept, prog)
-        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "ok")
+        self.assertEqual(tc_home_files.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("unchanged: ~/.local/lib/cst/cst-toolchains", out)
@@ -971,7 +971,7 @@ class AutoTest(Scratch):
         old = '#!/usr/bin/python3 -I\n"""cst-toolchains: old copy"""\nMARKER = "# managed-by: toolchains-setup.sh (CST)"\n'
         with open(kept, "w") as f:
             f.write(old)
-        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
+        self.assertEqual(tc_home_files.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
@@ -986,7 +986,7 @@ class AutoTest(Scratch):
         timer = os.path.join(self.home, ".config/systemd/user/cst-toolchains-prune.timer")
         os.makedirs(os.path.dirname(timer))
         os.symlink("/dev/null", timer)
-        self.assertEqual(tc_auto.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "masked")
+        self.assertEqual(tc_home_files.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "masked")
         rc, out, err = self.run_split("auto", "on")
         self.assertEqual(rc, 1, out + err)
         self.assertIn(
@@ -1018,7 +1018,7 @@ class AutoTest(Scratch):
         kept = os.path.join(self.home, "dotfiles-timer")
         os.rename(timer, kept)
         os.symlink(kept, timer)
-        self.assertEqual(tc_auto.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "ok")
+        self.assertEqual(tc_home_files.unit_states(self.home, TOOL)["cst-toolchains-prune.timer"], "ok")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertTrue(os.path.islink(timer))
@@ -1039,7 +1039,7 @@ class AutoTest(Scratch):
         status = io.StringIO()
         with contextlib.redirect_stdout(status):
             tc_status.cmd_status(self.session(), False)
-        self.assertEqual(tc_auto.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
+        self.assertEqual(tc_home_files.unit_states(self.home, TOOL)[".local/lib/cst/cst-toolchains"], "change")
         rc, out = self.run_main("auto", "on")
         self.assertEqual(rc, 0, out)
         self.assertIn("written:   ~/.local/lib/cst/cst-toolchains", out)
