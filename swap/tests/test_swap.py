@@ -1343,6 +1343,19 @@ class SwapSettingsFileTest(unittest.TestCase):
                 self.assertEqual(len(s.problems), 1, s.problems)
                 self.assertIn(want, s.problems[0])
 
+    def test_a_key_that_is_not_a_setting_is_a_problem(self) -> None:
+        good = "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=8192\n"
+        for text, key in (
+            (good + "SWAP_NAM=swap1\n", "SWAP_NAM"),  # a typo: not swap0 without a word
+            ("SWAP_PARTUID=0a1b2c3d-02\n", "SWAP_PARTUID"),  # not "not configured"
+        ):
+            with self.subTest(text=text):
+                s = D.parse_swap_settings(text)
+                self.assertIsNone(s.spec)
+                self.assertEqual(
+                    s.problems, (f"{key}: not a setting of this file (SWAP_PARTUUID, SWAP_SIZE_BYTES, SWAP_NAME)",)
+                )
+
     def test_render_reads_back(self) -> None:
         text = D.render_swap_settings(TEST_SPEC, "from somewhere")
         self.assertIn("# Written by cst swap apply from somewhere.", text)

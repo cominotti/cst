@@ -59,6 +59,7 @@ _PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 # A dm-crypt mapper name that is also safe in a crypttab line, an fstab line and a unit name.
 _MAPPER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _BY_PARTUUID: Final[str] = "/dev/disk/by-partuuid/"
+_SETTING_KEYS: Final[tuple[str, ...]] = ("SWAP_PARTUUID", "SWAP_SIZE_BYTES", "SWAP_NAME")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +127,9 @@ def parse_swap_settings(text: str) -> SwapSettings:
     parsed = parse_shell_assignments(text, bash_sourced=False)
     problems = [str(p) for p in parsed.problems]
     values = parsed.values
+    problems += [
+        f"{key}: not a setting of this file ({', '.join(_SETTING_KEYS)})" for key in values if key not in _SETTING_KEYS
+    ]
     partuuid = values.get("SWAP_PARTUUID", "")
     name = values.get("SWAP_NAME", DEFAULT_SWAP_NAME)
     size = values.get("SWAP_SIZE_BYTES", "")
