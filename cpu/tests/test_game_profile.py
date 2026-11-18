@@ -24,7 +24,7 @@ import unittest.mock
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import GameProfile, load_profile, read_settings
+from cpu.game.adapters import GameProfile, load_profile, read_settings, user_name
 from cpu.game.domain import GamePaths, GameSettings, ctl_file, escapes_in_state, expand_cpus, records, game_settings
 from cst_core.domain.contracts import state_format
 from cst_core.ports import CommandResult
@@ -645,6 +645,58 @@ class UnreadableRecordTest(GameProfileCase):
             f.write("prop sys machine.slice\n")
         out, _ = self.run_profile("tick")
         self.assertNotIn("unreadable", out)
+
+
+class OffWithoutTargetUserTest(GameProfileCase):
+    """'off' with no TARGET_USER (its line became one that sets nothing, `TARGET_USER="$(id -un 1000)"`,
+    or it is gone) after 'on' ran for a user: the user manager's side is undone for the user game.state
+    names (its user@UID.service record), not for an empty name."""
+
+    def off_without_user(self, conf: str, name_of: dict[str, str]) -> tuple[int, str]:
+        self.write(self.paths.conf, conf)
+        settings, problems = read_settings(self.paths.conf)
+        self.assertEqual(settings.target_user, "")
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            settings,
+            self.systemd,
+            uid_of=lambda u: UID if u == USER else "",
+            name_of=lambda uid: name_of.get(uid, ""),
+            problems=problems,
+            out=out,
+        )
+        self.systemd.actions = []
+        return p.off(), out.getvalue()
+
+    def test_off_undoes_the_user_side_for_the_user_on_acted_for(self) -> None:
+        self.run_profile("on")
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.assertTrue(os.path.exists(user_override))
+        rc, out = self.off_without_user('TARGET_USER="$(id -un 1000)"\n', {UID: USER})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("systemctl --user -M @ daemon-reload", self.systemd.actions)
+        self.assertIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertFalse(os.path.exists(user_override))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertIn(
+            f"<5>game-profile: TARGET_USER not set in {self.paths.conf}: undoing for {USER} (uid {UID}), the user"
+            " 'on' acted for\n",
+            out,
+        )
+
+    def test_the_user_name_of_a_uid(self) -> None:
+        import pwd
+
+        self.assertEqual(user_name(str(os.getuid())), pwd.getpwuid(os.getuid()).pw_name)
+        self.assertEqual((user_name("x"), user_name("99999999999999999999")), ("", ""))
+
+    def test_without_such_a_record_or_user_off_works_as_before(self) -> None:
+        self.run_profile("on")
+        rc, out = self.off_without_user("BUILD_CPUS='0'\n", {})  # no such user any more
+        self.assertEqual(rc, 0)
+        self.assertNotIn("TARGET_USER not set", out)
+        self.assertFalse(os.path.exists(self.state))
 
 
 class SettingsProblemTest(GameProfileCase):

@@ -8,6 +8,7 @@ state; cpu.game.domain decides what the records and the answers say.
 
 from collections.abc import Callable, Sequence
 import contextlib
+import dataclasses
 import glob
 import locale
 import os
@@ -29,6 +30,7 @@ from cpu.game.domain import (
     GamePaths,
     GameSettings,
     Manager,
+    Record,
     cpuset_in,
     ctl_file,
     drift_lines,
@@ -49,6 +51,7 @@ from cpu.game.domain import (
     unreadable_lines,
     game_settings,
     show_values,
+    state_uid,
     shown,
     transient_unit,
     vm_io_weight,
@@ -88,6 +91,14 @@ def user_id(user: str) -> str:
         return ""
 
 
+def user_name(uid: str) -> str:
+    """The name of the user with that uid, "" for none."""
+    try:
+        return pwd.getpwuid(int(uid)).pw_name
+    except KeyError, ValueError, OverflowError:
+        return ""
+
+
 def read_stripped(path: str) -> str | None:
     """A file's text without its last newlines (a shell's $(cat FILE)), None when it cannot be read."""
     text = read_text(path)
@@ -120,6 +131,7 @@ class GameProfile:
         runner: CommandRunnerPort,
         *,
         uid_of: Callable[[str], str] = user_id,
+        name_of: Callable[[str], str] = user_name,
         problems: Sequence[SettingsProblem] = (),
         out: TextIO | None = None,
     ) -> None:
@@ -128,6 +140,7 @@ class GameProfile:
         self.problems = tuple(problems)
         self._runner = runner
         self._uid_of = uid_of
+        self._name_of = name_of
         self._out = out
 
     # ---- output ----------------------------------------------------------------------
@@ -432,8 +445,11 @@ class GameProfile:
         text = self._state_text()
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
+        recs = records(text)
+        if not self.s.target_user:
+            self._user_from_state(recs)
         # Newest first, so a property touched twice ends at its oldest value.
-        for rec in reversed(records(text)):
+        for rec in reversed(recs):
             self._undo(rec, reload)
         if reload["sys"]:
             self.ctl("sys", "daemon-reload")
@@ -444,6 +460,17 @@ class GameProfile:
                 os.unlink(f)
         self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
         return 0
+
+    def _user_from_state(self, recs: Sequence[Record]) -> None:
+        """With no TARGET_USER (its line sets nothing, or is gone), 'off' undoes the user manager's side
+        for the user 'on' acted for, whose uid game.state names."""
+        uid = state_uid(recs)
+        name = self._name_of(uid) if uid is not None else ""
+        if name:
+            self.log(
+                5, f"TARGET_USER not set in {self.paths.conf}: undoing for {name} (uid {uid}), the user 'on' acted for"
+            )
+            self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
         """Undo one record of game.state."""

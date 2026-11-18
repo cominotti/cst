@@ -228,6 +228,17 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     return out
 
 
+def state_uid(recs: Sequence[Record]) -> str | None:
+    """The uid of the user 'on' acted for, from game.state: 'on' always records MemoryLow of the system
+    manager's user@UID.service (its memory chain). None when no such record is there."""
+    for r in recs:
+        if len(r) >= 3 and r[0] == "prop" and r[1] == "sys":
+            m = re.fullmatch(r"user@([0-9]+)\.service", r[2])
+            if m:
+                return m.group(1)
+    return None
+
+
 def has_record_part(text: str, part: str) -> bool:
     """A line of the file holds part (bash: grep -F on the file)."""
     return any(part in line for line in file_lines(text))
