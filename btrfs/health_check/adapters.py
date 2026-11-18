@@ -365,8 +365,10 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
             complete_n = bash_int(complete)
             if complete_n is None:
                 complete_n = now()
-                _append(marker, f"complete_since={complete_n}\n")
-            at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(complete_n))
+                complete = str(complete_n)
+                _append(marker, f"complete_since={complete}\n")
+            # date(1), as in bash: a value it cannot show leaves the time out (its error goes to the journal).
+            at = m.out(["date", "-d", f"@{complete}", "+%F %T"], "pass")
             state = f"all devices present since {at}, waiting for a clean scrub started after that"
             scrub = parse_scrub(m.out(["btrfs", "scrub", "status", mnt]))
             started = m.epoch(scrub.started) or 0

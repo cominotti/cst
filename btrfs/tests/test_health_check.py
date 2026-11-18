@@ -633,6 +633,26 @@ class HealthCheckTest(unittest.TestCase):
         )
         self.assertTrue(os.path.exists(marker))
 
+    def test_degraded_marker_with_a_time_date_cannot_show(self) -> None:
+        # A damaged complete_since= that date(1) cannot show: the time is left out (date printed nothing
+        # and said why on stderr), the marker stays as it is, and the checks after it still run.
+        since = self.now - 5 * 86400
+        text = f"since={since}\nsince_human=x\ncomplete_since=99999999999999999999\n"
+        marker = self.write(f"var/lib/btrfs-degraded-boot/degraded-{UUID}", text)
+        self.write("proc/mdstat", "md0 : active raid1 sda1[0]\n      1000 blocks [2/1] [U_]\n")
+        r = self.run_check()
+        state = "all devices present since , waiting for a clean scrub started after that"
+        problems = [
+            self.marker_problem(UUID, "x", state),
+            "md RAID degraded: md0 : active raid1 sda1[0] 1000 blocks [2/1] [U_] ",
+        ]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(self.alerts(), [["-u", "critical", "-a", TAG, TITLE, "2 problem(s):\n" + "\n".join(problems)]])
+        self.assertTrue(r.stderr.endswith("".join(f"<2>{TAG}: {p}\n" for p in problems)), r.stderr)
+        self.assertIn("date: ", r.stderr)
+        with open(marker, encoding="utf-8") as f:
+            self.assertEqual(f.read(), text)
+
     # ---- the kernel log -----------------------------------------------------------------------------------------
 
     def test_kernel_messages(self) -> None:
