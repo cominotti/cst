@@ -728,6 +728,16 @@ class TimedReaderTest(unittest.TestCase):
             self.assertIsNone(reader.read("bad"))
         self.assertEqual(reader.read("b"), "text of b")
 
+    def test_a_read_still_waiting_never_holds_the_daemon_s_exit(self) -> None:
+        # A stop or a watchdog restart during a stall must not wait for the stalled program's lock: the
+        # thread left waiting is a daemon thread, which the interpreter does not join at exit.
+        reader = md_proc.TimedReader(0.1, self.read)
+        with self.assertRaises(TimeoutError):
+            reader.read("slow")
+        waiting = [t for t in threading.enumerate() if t.name == "timed-reader" and t.is_alive()]
+        self.assertEqual(len(waiting), 1)
+        self.assertTrue(waiting[0].daemon)
+
     def test_a_thread_that_cannot_start_is_a_read_not_made(self) -> None:
         reader = md_proc.TimedReader(5.0, self.read)
         with (
