@@ -16,6 +16,7 @@ from btrfs.stall_monitord.domain import (
     FsTopo,
 )
 from cst_core.adapters.journal import log as journal_log
+from cst_core.domain.values import DAY
 
 CGROUP_ROOT = "/sys/fs/cgroup"
 
@@ -307,7 +308,7 @@ class Writer(threading.Thread):
                 self.housekeeping()
 
     def housekeeping(self) -> None:
-        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - KEEP_DAYS * 86400))
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - KEEP_DAYS * DAY))
         for path in glob.glob(os.path.join(self.log_dir, "stall-*.jsonl*")):
             if os.path.basename(path)[6:16] < cutoff:
                 try:

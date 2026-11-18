@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import NamedTuple, NotRequired
 from typing import TypedDict
 import re
@@ -255,6 +256,17 @@ TIMED_WAIT_FRAME = re.compile(
 
 HUNG_TASK = "hung task"  # the reason of an episode a hung task opened
 
+
+class StallRecordTag(StrEnum):
+    """The kind of a stall log record, its "t" key: the daemon writes it, btrfs-stall-report reads it."""
+
+    META = "meta"
+    SAMPLE = "s"
+    EPISODE = "ep"
+    EVENT = "ev"
+    ALERT = "al"
+
+
 # One D-state task as the sampling sees it: (pid, tid, comm, frames, wchan, wait kind).
 type DTask = tuple[str, str, str, list[str], str | None, str]
 
@@ -468,7 +480,7 @@ class Episode:
                 }
             )
         return {
-            "t": "ep",
+            "t": StallRecordTag.EPISODE,
             "ts": round(self.start, 3),
             "start": round(self.start, 3),
             "end": round(self.end, 3),
