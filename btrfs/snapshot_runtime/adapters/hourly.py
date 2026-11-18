@@ -213,12 +213,12 @@ def hourly(m: SnapshotRun, args: Sequence[str]) -> int:
         m.log(3, f"{m.front} convert-planned failed (rc={rc}); no snapshot this hour")
         return 1
     try:
-        return guarded(m)
+        return after_conversions(m)
     except RunStopped:
         return 1
 
 
-def guarded(m: SnapshotRun) -> int:
+def after_conversions(m: SnapshotRun) -> int:
     """hourly after the conversions: the space guard, the waits, the snapshot."""
     s = m.settings
     free = free_bytes(m)

@@ -38,7 +38,7 @@ from btrfs.snapshot_runtime.domain import (
     GuardError,
     ResticExit,
     Urgency,
-    backup_time,
+    restic_time,
     duration_s,
     features_type,
     guard_number,
@@ -284,7 +284,7 @@ class Nas:
         if self.repo_id and m.read(done) == f"{entry} {self.repo_id}":
             m.log(6, f"NAS: {entry} is already in the repository")
             return True
-        when = backup_time(name, entry)
+        when = restic_time(name, entry)
         left = self.time_left()
         timeout = m.settings["NAS_TIMEOUT"]
         if left <= MIN_LEFT_S:

@@ -410,7 +410,7 @@ def repo_id(out: str) -> str:
     return "" if m is None else m.group(1)
 
 
-def backup_time(name: str, entry: str) -> str:
+def restic_time(name: str, entry: str) -> str:
     """restic --time of a snapshot NAME.YYYYMMDDTHHMM[_N]: its time from the name."""
     ts = entry.removeprefix(f"{name}.").split("_", 1)[0]
     return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:00"
