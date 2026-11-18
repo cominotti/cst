@@ -215,6 +215,8 @@ include = [
     "btrfs/tests/test_health_check_mixed.py",
     "btrfs/tests/test_pending_alerts.py",
     "btrfs/tests/test_pending_alerts_mixed.py",
+    "btrfs/tests/snapshot_fakes.py",
+    "btrfs/tests/test_snapshot_hourly.py",
     "btrfs/tests/test_snapshot_runtime.py",
     "btrfs/tests/test_stall_monitord.py",
     "btrfs/tests/test_stall_report.py",
