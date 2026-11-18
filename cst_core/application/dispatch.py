@@ -86,7 +86,11 @@ class CstDispatcher:
         env = dict(self._port.environ())
         user = env.get("SUDO_USER", "")
         if self._port.euid() == 0 and user and user != "root":
-            uid, home = self._port.user_passwd(user)
+            try:
+                uid, home = self._port.user_passwd(user)
+            except KeyError:
+                _say(self._stderr, f"{self._cst_name}: ERROR: SUDO_USER={user}: no such user")
+                return 1
             then = [f"CST_PROG={self._cst_name} doctor", "python3", "-I", "-B", doctor, *args]
             return self._port.run_passthrough(step_down_argv(user, uid, home, unset=("XDG_STATE_HOME",), then=then))
         env["CST_PROG"] = f"{self._cst_name} doctor"

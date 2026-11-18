@@ -542,6 +542,15 @@ class CstDispatcherTest(unittest.TestCase):
         self.assertEqual(dispatcher.dispatch(["vm", "status"]), 1)
         self.assertIn("cst: the 'vm' module is not in this copy (/repo/vm-setup.sh is missing)", err.getvalue())
 
+    def test_doctor_as_root_with_a_sudo_user_that_is_gone_says_so(self) -> None:
+        # A SUDO_USER no longer in passwd (deleted, or a directory user while the directory is down):
+        # one error line, as the module routing gives, not a KeyError traceback.
+        port = _FakeDispatchPort(files={"/repo/doctor/cst-doctor"}, uid=0, env={"CST_NAME": "cst", "SUDO_USER": "gone"})
+        dispatcher, _, err = self._dispatcher(port)
+        self.assertEqual(dispatcher.dispatch(["doctor"]), 1)
+        self.assertEqual(err.getvalue(), "cst: ERROR: SUDO_USER=gone: no such user\n")
+        self.assertEqual(port.calls, [])
+
     def test_doctor_as_user_and_via_sudo_user(self) -> None:
         doc = "/repo/doctor/cst-doctor"
         user_port = _FakeDispatchPort(files={doc}, uid=1000, env={"CST_NAME": "cst"})
