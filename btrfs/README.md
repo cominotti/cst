@@ -492,6 +492,17 @@ logged in to the desktop** at that moment. When a service starts it, the alert
 text is also written to the journal. When you start it from a terminal (as
 `test-alert` does), that text goes to the terminal instead.
 
+**When `btrfs-notify` is missing or fails.** The Python programs (`btrfs-bulk`,
+`docker-volumes-nocow`, `cst vm`'s backups) send their alerts through one
+`cst_core` adapter. When `btrfs-notify` is not installed, does not answer
+within 60 s, or could neither show nor keep the alert, the adapter writes a
+journal line ("alert not delivered (...)") and keeps the alert itself in
+`/var/lib/cst-alerts/pending/`, in the same format and under the same lock as
+`btrfs-notify`. `cst doctor` then lists it as an alert you have not seen yet,
+and also warns that the installed units alert through a missing `btrfs-notify`
+(fix: `cst btrfs install`). So, for example, `btrfs-bulk-boot`'s refusal of a
+bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
+
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
 which sends it. That folder survives a restart of the monitor, also an automatic

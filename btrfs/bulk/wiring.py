@@ -34,6 +34,7 @@ def bulk_paths(environ: Mapping[str, str], *, root: bool) -> BulkPaths:
         etc=environ.get("BTRFS_BULK_ETC", base.etc),
         state=environ.get("BTRFS_BULK_STATE", base.state),
         lock=environ.get("BTRFS_BULK_LOCK", base.lock),
+        alerts=environ.get("BTRFS_BULK_ALERTS", base.alerts),
     )
 
 

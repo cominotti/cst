@@ -19,7 +19,7 @@ import struct
 import sys
 import time
 from types import FrameType
-from typing import Any, Literal, TextIO
+from typing import Any, TextIO
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters import SubprocessCommandRunner, SubprocessVirshAdapter, nocow as inode_attrs
@@ -33,6 +33,7 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import program_installer
+from cst_core.adapters.notify import NOTIFY_PROGRAM, PENDING_ALERTS, Notifier, Urgency
 from cst_core.adapters.runtime import install_payload, restore_default_signals
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.contracts import state_format
@@ -102,7 +103,10 @@ NAS_STAGE = os.environ.get("CST_VM_NAS_STAGE") or "/var/lib/cst/vm-nas"
 
 RUN_DIR = os.environ.get("CST_VM_RUN_DIR") or "/run/cst-vm"  # per-VM lock (holds the pid)
 
-NOTIFY = os.environ.get("CST_VM_NOTIFY") or manifest_by_src()["btrfs/btrfs-notify"].dest
+NOTIFY = os.environ.get("CST_VM_NOTIFY") or NOTIFY_PROGRAM
+
+# Where an alert btrfs-notify could not take is kept for cst doctor and the next login.
+ALERTS = os.environ.get("CST_VM_ALERTS") or PENDING_ALERTS  # override: tests
 
 # The merge back (every blockcommit of a run together; it copies the guest's
 # writes of the backup's duration). The timer's TimeoutStopSec leaves room
@@ -474,11 +478,13 @@ def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str
     return out, ""
 
 
-def notify(urgency: Literal["low", "normal", "critical"], title: str, body: str) -> None:
+def notify(urgency: Urgency, title: str, body: str) -> None:
     """A CST desktop alert (btrfs-notify keeps it for the next login when no
-    session shows it). Sent first, then printed (best effort)."""
-    if os.access(NOTIFY, os.X_OK):
-        run([NOTIFY, "-u", urgency, "-a", NAME, title, body], timeout=60, detach=True)
+    session shows it; without btrfs-notify, cst_core keeps it there and says
+    so). Sent first, then printed."""
+    Notifier(RUNNER, NOTIFY, ALERTS, log=lambda _prio, msg: print(f"{PROG}: {msg}", file=sys.stderr)).send(
+        urgency, NAME, title, body
+    )
     print(f"{title}: {body}", file=sys.stderr)
 
 

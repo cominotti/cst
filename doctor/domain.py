@@ -63,6 +63,18 @@ RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
 HEALTH_CHECK_HOST = HostPath(manifest_by_src()["btrfs/btrfs-health-check"].dest)
 # btrfs-notify, which a VM backup that fails alerts through (its manifest dest).
 NOTIFY_HOST = HostPath(manifest_by_src()["btrfs/btrfs-notify"].dest)
+# The installed units whose programs alert through it (the VM backup timers have their own check).
+ALERTING_UNITS = tuple(
+    HostPath(manifest_by_src()[f"btrfs/units/{name}"].dest)
+    for name in (
+        "btrfs-bulk-boot.service",
+        "btrfs-health-check.service",
+        "btrfs-snapshot.service",
+        "btrfs-snapshot-nas.service",
+        "btrfs-stall-alert.service",
+        "docker-volumes-nocow.service",
+    )
+)
 UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of

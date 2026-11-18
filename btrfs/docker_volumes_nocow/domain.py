@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import time
 
+from cst_core.domain.contracts import state_format
 from cst_core.domain.install import manifest_by_src
 
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
@@ -31,6 +32,8 @@ class NocowPaths:
     # status and by `cst doctor`, removed at the first boot that is not held back.
     postponed: str = "/var/lib/docker-volumes-nocow/postponed"
     notify: str = manifest_by_src()["btrfs/btrfs-notify"].dest
+    # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
+    alerts: str = state_format("alert-spool").folder
     proc: str = "/proc"  # where running dockerd processes are looked for
 
 

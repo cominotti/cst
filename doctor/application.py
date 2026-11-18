@@ -21,6 +21,7 @@ from doctor.domain import (
     ALERT_MAX_FILE,
     ALERT_NAME,
     ALERT_PENDING,
+    ALERTING_UNITS,
     BTRFS_SYSFS,
     CET_ISSUE,
     CPU_CONF,
@@ -425,6 +426,27 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
         )
     if not unseen and not seen_n:
         yield Result(OK, "no pending alerts")
+
+
+def notify_runs(host: DoctorHostPort) -> bool:
+    """btrfs-notify is installed and executable."""
+    notify = host.path(NOTIFY_HOST)
+    return host.isfile(notify) and bool(host.stat(notify).st_mode & 0o111)
+
+
+@check("alerts")
+def check_alert_program(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN when installed units alert through btrfs-notify but it is missing: their alerts then reach only
+    the journal and the pending alerts folder (cst_core keeps them there, check_pending_alerts shows them)."""
+    units = [os.path.basename(u) for u in ALERTING_UNITS if host.exists(host.path(u))]
+    if not units or notify_runs(host):
+        return
+    yield Result(
+        WARN,
+        f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, "
+        "only the journal and this check (pending alerts)",
+        refresh(host, "btrfs:alerts"),
+    )
 
 
 @check("alerts")
@@ -1581,8 +1603,7 @@ def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
         timers = sorted(n for n in host.listdir(host.path(VM_TIMER_WANTS)) if n.startswith("cst-vm-backup@"))
     except OSError:
         return
-    notify = host.path(NOTIFY_HOST)
-    if not timers or (host.isfile(notify) and host.stat(notify).st_mode & 0o111):
+    if not timers or notify_runs(host):
         return
     yield Result(
         WARN,

@@ -2257,6 +2257,24 @@ class InstallAreaTest(Scratch):
         self.install("btrfs:alerts")
         self.assertEqual(list(doc_app.check_vm_backup_alerts(self.host)), [])
 
+    def test_units_that_alert_without_btrfs_notify_warn(self) -> None:
+        # A refusal of btrfs-bulk-boot (a bad bulk.conf line) alerts through btrfs-notify; without it the
+        # alert reached nobody. Now it is kept for this doctor, which also says why no desktop shows it.
+        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+        self.install("btrfs:snapshots")
+        res = list(doc_app.check_alert_program(self.host))
+        self.assertEqual(len(res), 1, res)
+        self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
+        self.assertTrue(
+            res[0].message.startswith(
+                "btrfs-bulk-boot.service, btrfs-snapshot.service, btrfs-snapshot-nas.service alert through "
+                "/usr/local/sbin/btrfs-notify, which is missing"
+            ),
+            res[0].message,
+        )
+        self.install("btrfs:alerts")
+        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+
     def test_unit_exec_paths(self) -> None:
         text = (
             "[Service]\nExecStartPre=-/usr/sbin/btrfs x\nExecStart=/usr/bin/python3 -I /usr/local/sbin/a run\n"

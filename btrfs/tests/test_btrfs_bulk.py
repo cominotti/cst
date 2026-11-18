@@ -88,6 +88,7 @@ class BulkBase(unittest.TestCase):
             state=os.path.join(self.tmp, "state"),
             lock=os.path.join(self.tmp, "lock"),
             notify=os.path.join(self.tmp, "no-notify"),
+            alerts=os.path.join(self.tmp, "alerts", "pending"),
         )
         self.machine = Primitives()
         self.wiring = Wiring(TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine)
@@ -533,6 +534,28 @@ class BulkTest(BulkBase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "plan"], TOOL, wiring=root), 1)
         self.assertEqual(sent, [])
+
+    def test_the_boot_refusal_reaches_cst_doctor_without_btrfs_notify(self) -> None:
+        # btrfs-notify missing (cst btrfs uninstall left snapshots in place, say): the alert of the
+        # refusal went nowhere. Now it is kept in the pending alerts folder that cst doctor reads.
+        root = self.root_wiring()
+        with open(self.paths.conf, "w") as f:
+            f.write("BULK_USER=$USER\n")
+        out = io.StringIO()
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
+        [name] = os.listdir(self.paths.alerts)
+        kept = os.path.join(self.paths.alerts, name)
+        with open(kept) as f:
+            text = f.read()
+        self.assertIn("\nurgency=critical\napp=btrfs-bulk\n", text)
+        self.assertIn("\ntitle=~/Bulk: nothing moved at boot\n\n", text)
+        self.assertIn(f"{self.paths.conf} line 1: BULK_USER=$USER", text)
+        self.assertIn(
+            f"<3>btrfs-bulk: alert not delivered ({self.paths.notify} is not installed): "
+            f"~/Bulk: nothing moved at boot; kept in {kept} (cst doctor shows it)\n",
+            out.getvalue(),
+        )
 
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
         # The counter was written with open("w") and no fsync before the moves; a hang

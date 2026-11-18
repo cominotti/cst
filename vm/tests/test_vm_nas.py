@@ -285,6 +285,7 @@ class Nas(unittest.TestCase):
             "CST_VM_NAS_STAGE": self.stage,
             "CST_VM_RUN_DIR": os.path.join(self.tmp, "run"),
             "CST_VM_NOTIFY": os.path.join(self.bin, "notify"),
+            "CST_VM_ALERTS": os.path.join(self.tmp, "alerts", "pending"),
             "CST_VM_CONF": os.path.join(self.tmp, "vm.conf"),
             "CST_VM_UNIT_DIR": self.units,
             "UNIT_DIR": self.units,

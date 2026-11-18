@@ -203,6 +203,9 @@ class Scratch(unittest.TestCase):
             "CST_VM_SWTPM_DIR": self.swtpm,
             "CST_PROG": "cst vm",
             "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),
+            # Never the host's btrfs-notify or its pending alerts folder.
+            "CST_VM_NOTIFY": os.path.join(self.tmp, "no-btrfs-notify"),
+            "CST_VM_ALERTS": os.path.join(self.tmp, "alerts", "pending"),
         }
 
     def state(self, s: str) -> None:

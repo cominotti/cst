@@ -17,6 +17,8 @@ import subprocess
 import time
 
 from btrfs.bulk.adapters.machine import HomeTree, kind, log
+from cst_core.adapters import SubprocessCommandRunner
+from cst_core.adapters.notify import Notifier
 from btrfs.bulk.domain import BIG, PROC, RUN_USER, STEAM_APP, BulkPaths, Ctx
 
 
@@ -214,11 +216,13 @@ class Host:
 
     def alert(self, title: str, body: str) -> None:
         log(f"<4>btrfs-bulk: {title}: {body}")
-        notify = self.paths.notify
-        if os.access(notify, os.X_OK):
-            subprocess.run(
-                [notify, "-u", "critical", "-a", "btrfs-bulk", title, body], check=False, capture_output=True
-            )
+        notifier = Notifier(
+            SubprocessCommandRunner(),
+            self.paths.notify,
+            self.paths.alerts,
+            log=lambda p, m: log(f"<{p}>btrfs-bulk: {m}"),
+        )
+        notifier.send("critical", "btrfs-bulk", title, body)
 
     def now(self) -> float:
         return time.monotonic()

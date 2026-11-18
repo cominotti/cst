@@ -197,6 +197,7 @@ include = [
     "cst_core/adapters/install.py",
     "cst_core/adapters/journal.py",
     "cst_core/adapters/locks.py",
+    "cst_core/adapters/notify.py",
     "cst_core/adapters/nocow.py",
     "cst_core/adapters/runtime.py",
     "cst_core/adapters/terminal.py",
