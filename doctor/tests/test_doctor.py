@@ -931,6 +931,11 @@ class BtrfsTest(Scratch):
         deflated[start : start + 8] = b"\xff" * 8
         name_at = 46  # where the name starts in a central directory entry
         cases = {
+            # Readable, but not stored as CST stores its files: refused before any decompressor runs (lzma,
+            # bzip2 and zstd raise their own error types on damaged data).
+            "deflated, intact": zipapp(
+                {member: b"UNALLOC_MIN_GIB: Final = 70\nUNALLOC_CRIT_GIB: Final = 9\n" * 50}, zipfile.ZIP_DEFLATED
+            ),
             "deflate data damaged": bytes(deflated),
             "compression method 99": patched({8: 99}, {10: 99}),
             "encrypted": patched({6: 0x01}, {8: 0x01}),
