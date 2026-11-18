@@ -1905,7 +1905,10 @@ many entries were left. If btrfs-snapshot-core's list of the snapshots cannot
 be read (not its JSON), nothing is deleted: `disable --purge` says
 `WARNING: deleting the snapshots failed`, and
 `/var/lib/btrfs-snapshot/core-unfinished` and `core-writable` stay, since
-they still describe the snapshots.
+they still describe the snapshots. The same when `snapshots.conf` names no
+`HOME_DIR` (setup never finished, or the line was removed): without it no
+snapshot can be told apart as CST's, so nothing is deleted and the command
+fails (`purge: not set up (no HOME_DIR in ...)`).
 
 ### Undo one Bulk link
 

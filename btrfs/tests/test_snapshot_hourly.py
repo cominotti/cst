@@ -818,10 +818,22 @@ class PurgeTest(Base):
         r = self.run_prog("purge")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "No snapshot directory: nothing to delete.\n", ""))
         self.assertEqual(self.core_calls(), [])
+
+    def test_not_set_up_deletes_nothing_and_fails(self) -> None:
+        # No HOME_DIR: nothing can be told apart as ours. Exit 1 with a journal line, as for a list
+        # that cannot be read, so disable --purge does not report success. Before: "No snapshot
+        # directory: nothing to delete." and exit 0, with the snapshots still there.
+        self.make("home.20261101T0000")
         self.conf(HOME_DIR="")
-        os.makedirs(self.snapdir)
         r = self.run_prog("purge")
-        self.assertEqual((r.returncode, r.stdout), (0, "No snapshot directory: nothing to delete.\n"))
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr),
+            (1, [log(3, f"purge: not set up (no HOME_DIR in {conf}); nothing deleted")], ""),
+        )
+        self.assertEqual(self.core_calls(), [])
+        self.assertEqual(self.calls("btrfs"), [])
+        self.assertEqual(os.listdir(self.snapdir), ["home.20261101T0000"])
 
     def test_deletes_in_batches_of_ten_and_keeps_the_pinned_one(self) -> None:
         names = [f"home.202611{d:02d}T0000" for d in range(1, 13)]

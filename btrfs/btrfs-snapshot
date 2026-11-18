@@ -981,7 +981,10 @@ list_caches() {
 purge() {
     local out listed p n_left
     local -a paths=() batch=()
-    [[ -n "${HOME_DIR}" && -d "${SNAPDIR}" ]] || { echo "No snapshot directory: nothing to delete."; return 0; }
+    # No HOME_DIR: the sources are unknown, so nothing can be told apart as ours. A failure, as for
+    # a list that cannot be read, so disable --purge does not report success.
+    [[ -n "${HOME_DIR}" ]] || { log 3 "purge: not set up (no HOME_DIR in ${CONF}); nothing deleted"; return 1; }
+    [[ -d "${SNAPDIR}" ]] || { echo "No snapshot directory: nothing to delete."; return 0; }
     # The policy does not matter here: only the ownership check of `list` is used.
     core_sources 1h 1h
     if [[ -s "${STATE}/core-unfinished" ]]; then
