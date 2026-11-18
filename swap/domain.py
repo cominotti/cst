@@ -323,8 +323,8 @@ def parse_tmpfiles_params(text: str) -> list[tuple[str, str]]:
 def parse_sysctl(text: str) -> list[tuple[str, str]]:
     """sysctl.d file -> [(key, value)]."""
     out: list[tuple[str, str]] = []
-    for line in text.splitlines():
-        line = line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line or line[0] in "#;":
             continue
         key, sep, val = line.partition("=")
