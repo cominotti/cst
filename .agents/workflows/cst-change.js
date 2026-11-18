@@ -59,25 +59,32 @@ const LENSES = {
 }
 const MD = /\.md$/
 // Paths that are no part of what CST installs or runs: they never ask for tier 1 or the command lens.
-const REPO_ONLY = /^(\.agents|\.claude|\.github|docs)\/|^(\.claude|pyproject\.toml|uv\.lock|LICENSE|\.gitignore)$/
+const REPO_ONLY = /^(\.agents|\.claude|\.github|docs|cst\.invowkmod)\/|^(\.claude|pyproject\.toml|uv\.lock|LICENSE|\.gitignore|\.git-blame-ignore-revs)$/
 const UNIT_TEST = /(^|\/)tests\//
 const E2E = /^tests\/e2e\//
 const BASH = /\.(sh|bash)$/
+// A file name without a dot: an extensionless program (btrfs/btrfs-snapshot is bash, btrfs/docker-gc is Python).
+// The paths do not say which, so such a file counts as both: a lens too many costs one reviewer, a lens too few
+// a missed checklist.
+const EXTLESS = /(^|\/)[^./]+$/
 const INSTALL = /^cst_core\/(domain|application|adapters)\/install\.py$/
 
 // Which checklist lenses review a change, and whether tier 1 must run, from the paths it touches
 // (git diff --name-status --no-renames). Pure: tested below at every start.
 function pickLenses(kind, changed) {
+  if (!changed.length) throw new Error('nothing changed beyond the base')
   for (const p of changed) if (!/^[AMDT]$/.test(p.status)) throw new Error('changed path status not in A/M/D/T: ' + JSON.stringify(p))
   const code = changed.filter((p) => !MD.test(p.path))
   const machine = code.filter((p) => !REPO_ONLY.test(p.path) && (!UNIT_TEST.test(p.path) || E2E.test(p.path)))
-  if (kind === 'docs' && (machine.length || code.some((p) => /\.py$/.test(p.path)))) throw new Error('kind "docs" but code CST runs changed: ' + code.map((p) => p.path).join(', '))
+  const python = (p) => /\.py$/.test(p.path) || (EXTLESS.test(p.path) && !REPO_ONLY.test(p.path))
+  const bashSource = (p) => p.status !== 'A' && (BASH.test(p.path) || (EXTLESS.test(p.path) && !UNIT_TEST.test(p.path) && !REPO_ONLY.test(p.path)))
+  if (kind === 'docs' && (machine.length || code.some(python))) throw new Error('kind "docs" but code CST runs changed: ' + code.map((p) => p.path).join(', '))
   const lenses = new Set()
   if (kind === 'refactor') lenses.add('parity')
   if (kind === 'behaviour' && machine.some((p) => !E2E.test(p.path))) lenses.add('command')
   if (code.some((p) => p.status === 'A' && /^[a-z_]+\/[a-z0-9-]+$/.test(p.path) && !UNIT_TEST.test(p.path)) || code.some((p) => INSTALL.test(p.path))) lenses.add('helper')
-  if (code.some((p) => BASH.test(p.path) && p.status !== 'A') && code.some((p) => p.status === 'A' && /\.py$/.test(p.path))) lenses.add('port')
-  if (code.some((p) => /\.py$/.test(p.path) && !UNIT_TEST.test(p.path) && !REPO_ONLY.test(p.path))) lenses.add('primitives')
+  if (code.some(bashSource) && code.some((p) => p.status === 'A' && /\.py$/.test(p.path))) lenses.add('port')
+  if (code.some((p) => python(p) && !UNIT_TEST.test(p.path) && !REPO_ONLY.test(p.path))) lenses.add('primitives')
   return { lenses: [...lenses].sort(), tier1: kind !== 'docs' && machine.length > 0 }
 }
 
@@ -103,6 +110,12 @@ function selftest() {
   eq(pickLenses('docs', [M('.agents/workflows/cst-change.js', 'A'), M('.claude/workflows', 'A'), M('AGENTS.md')]), { lenses: [], tier1: false }, 'agent tooling')
   eq(pickLenses('behaviour', [M('.github/workflows/ci.yml'), M('pyproject.toml'), M('uv.lock'), M('tests/test_python_files.py')]), { lenses: [], tier1: false }, 'CI and gate config')
   throws(() => pickLenses('docs', [M('tests/test_x.py')]), 'docs that changes Python')
+  throws(() => pickLenses('behaviour', []), 'an empty change')
+  eq(pickLenses('refactor', [M('btrfs/btrfs-snapshot'), M('btrfs/snapshot/cli.py', 'A')]), { lenses: ['parity', 'port', 'primitives'], tier1: true }, 'a port of an extensionless bash script')
+  eq(pickLenses('behaviour', [M('btrfs/docker-gc')]), { lenses: ['command', 'primitives'], tier1: true }, 'an extensionless Python program')
+  throws(() => pickLenses('docs', [M('tests/mutation/cst-mutation')]), 'docs that changes an extensionless Python test tool')
+  eq(pickLenses('docs', [M('cst.invowkmod/invowkfile.cue'), M('.git-blame-ignore-revs')]), { lenses: [], tier1: false }, 'invowk tasks and blame config')
+  eq(pickLenses('behaviour', [M('cst.invowkmod/invowkfile.cue')]), { lenses: [], tier1: false }, 'an invowk task')
   eq([reviewCounts('code-review', { findings: [], skill_findings_read: false }), reviewCounts('code-review', { findings: [] }), reviewCounts('code-review', null)], [false, false, false], 'code-review findings not read')
   eq([reviewCounts('code-review', { findings: [], skill_findings_read: true }), reviewCounts('port', { findings: [] })], [true, true], 'reviews that count')
   return 'ok'
