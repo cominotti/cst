@@ -543,7 +543,16 @@ class AlertsTest(Scratch):
         os.utime(p, (NOW - age, NOW - age))
         return p
 
+    def reader(self) -> None:
+        """cst-pending-alerts installed, as btrfs:alerts installs it."""
+        p = os.path.join(self.root, "usr", "local", "bin", "cst-pending-alerts")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(p, 0o755)
+
     def test_unseen_alerts(self) -> None:
+        self.reader()
         self.alert("a" * 32 + ".alert", "critical", "btrfs: device missing")
         self.alert("b" * 32 + ".alert")
         self.alert("c" * 32 + ".alert", age=8 * 86400)  # too old
@@ -555,6 +564,18 @@ class AlertsTest(Scratch):
         self.assertIn("WARN   alert you have not seen yet (normal", r.stdout)
         self.assertEqual(r.stdout.count("alert you have not seen yet"), 2)
         self.assertIn("fix: cst-pending-alerts --list\n", r.stdout)
+
+    def test_an_unseen_alert_without_its_reader_names_the_install(self) -> None:
+        # Kept by cst_core when btrfs-notify is missing: then cst-pending-alerts (same component) is
+        # missing too, and "shown at your next login, fix: cst-pending-alerts --list" was false.
+        self.alert("a" * 32 + ".alert", "critical", "~/Bulk: nothing moved at boot")
+        r = self.run_tool()
+        self.assertIn(
+            "ERROR  alert you have not seen yet (critical, Thu 05 Nov 16:33): ~/Bulk: nothing moved at boot (no login "
+            "shows it while /usr/local/bin/cst-pending-alerts is missing: the fix installs it)\n"
+            "         fix: cst btrfs install\n",
+            r.stdout,
+        )
 
     def test_seen_alert_is_info(self) -> None:
         p = self.alert("d" * 32 + ".alert")

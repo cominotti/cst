@@ -63,6 +63,7 @@ RECLAIM_CONF = HostPath("/etc/tmpfiles.d/btrfs-automatic-reclaim.conf")
 HEALTH_CHECK_HOST = HostPath(manifest_by_src()["btrfs/btrfs-health-check"].dest)
 # btrfs-notify, which a VM backup that fails alerts through (its manifest dest).
 NOTIFY_HOST = HostPath(manifest_by_src()["btrfs/btrfs-notify"].dest)
+PENDING_READER_HOST = HostPath(manifest_by_src()["btrfs/cst-pending-alerts"].dest)  # shows them at a login
 # The installed units whose programs alert through it (the VM backup timers have their own check).
 ALERTING_UNITS = tuple(
     HostPath(manifest_by_src()[f"btrfs/units/{name}"].dest)

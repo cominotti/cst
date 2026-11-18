@@ -36,6 +36,7 @@ from doctor.domain import (
     HEALTH_CHECK_HOST,
     INFO,
     NOTIFY_HOST,
+    PENDING_READER_HOST,
     MIRROR_COPIES,
     NOCOW_POSTPONED,
     NOCOW_WARN_BOOTS,
@@ -412,13 +413,18 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
             seen_n += 1
         else:
             unseen.append(a)
+    reader = runs(host, PENDING_READER_HOST)
     for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
         when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
         yield Result(
             ERROR if urgency == "critical" else WARN,
-            f"alert you have not seen yet ({urgency}, {when}): {title} (shown at your next login; "
-            f"the fix shows it now, as does {host.cst} btrfs status)",
-            "cst-pending-alerts --list",
+            f"alert you have not seen yet ({urgency}, {when}): {title} ("
+            + (
+                f"shown at your next login; the fix shows it now, as does {host.cst} btrfs status)"
+                if reader
+                else f"no login shows it while {PENDING_READER_HOST} is missing: the fix installs it)"
+            ),
+            "cst-pending-alerts --list" if reader else refresh(host, "btrfs:alerts"),
         )
     if seen_n:
         yield Result(
@@ -429,10 +435,10 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, "no pending alerts")
 
 
-def notify_runs(host: DoctorHostPort) -> bool:
-    """btrfs-notify is installed and executable."""
-    notify = host.path(NOTIFY_HOST)
-    return host.isfile(notify) and bool(host.stat(notify).st_mode & 0o111)
+def runs(host: DoctorHostPort, program: HostPath) -> bool:
+    """program is installed and executable."""
+    view = host.path(program)
+    return host.isfile(view) and bool(host.stat(view).st_mode & 0o111)
 
 
 @check("alerts")
@@ -440,12 +446,12 @@ def check_alert_program(host: DoctorHostPort) -> Iterator[Result]:
     """WARN when installed units alert through btrfs-notify but it is missing: their alerts then reach only
     the journal and the pending alerts folder (cst_core keeps them there, check_pending_alerts shows them)."""
     units = [os.path.basename(u) for u in ALERTING_UNITS if host.exists(host.path(u))]
-    if not units or notify_runs(host):
+    if not units or runs(host, NOTIFY_HOST):
         return
     yield Result(
         WARN,
         f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, "
-        "only the journal and this check (pending alerts)",
+        "only the journal (btrfs-bulk-boot's and docker-volumes-nocow's also the pending alerts above)",
         refresh(host, "btrfs:alerts"),
     )
 
@@ -1631,7 +1637,7 @@ def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
         timers = sorted(n for n in host.listdir(host.path(VM_TIMER_WANTS)) if n.startswith("cst-vm-backup@"))
     except OSError:
         return
-    if not timers or notify_runs(host):
+    if not timers or runs(host, NOTIFY_HOST):
         return
     yield Result(
         WARN,
