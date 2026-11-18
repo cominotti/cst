@@ -59,9 +59,6 @@ class BluetoothCommand(StrEnum):
     LE_AUDIO = "le-audio"
 
 
-COMMANDS: Final = tuple(c.value for c in BluetoothCommand)
-
-
 class WpState(StrEnum):
     """The headset's LDAC rule in the plan: bt-helper's state of the file (OwnedState's words), or none (no headset)."""
 
@@ -147,9 +144,9 @@ def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | 
     words = (word0, *rest)
     if word0 in HELP_WORDS:
         return Exit(0, out=usage)
-    if word0 not in COMMANDS:
+    cmd = next((c for c in BluetoothCommand if c == word0), None)
+    if cmd is None:
         return Exit(2, err=f"Unknown command: {word0}\n{usage}")
-    cmd = BluetoothCommand(word0)
     le_set = ""
     if cmd == BluetoothCommand.LE_AUDIO and rest and not rest[0].startswith("--"):
         le_set = rest.pop(0)
