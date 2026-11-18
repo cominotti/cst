@@ -361,15 +361,15 @@ def stall_monitor_e2e_unit(
     return "\n".join(out) + "\n"
 
 
-# main's btrfs-stall-monitord (8251bb6): old_tree DIR makes a copy of the checkout with the files of
+# main's btrfs-stall-monitord (1c43979): old_tree DIR makes a copy of the checkout with the files of
 # tests/fixtures/legacy put back in their places (tests/e2e/README.md, Mixed-version tests).
 STALL_OLD_TREE = r"""
 fx=/opt/cst-rw/tests/fixtures/legacy
 old_tree() {
     rm -rf "$1" && cp -a /opt/cst-rw "$1"
-    cp "$fx/btrfs-stall_monitord-adapters-monitor.py@8251bb6" "$1/btrfs/stall_monitord/adapters/monitor.py"
-    cp "$fx/btrfs-stall_monitord-cli.py@8251bb6" "$1/btrfs/stall_monitord/cli.py"
-    cp "$fx/btrfs-units-btrfs-stall-monitor.service@8251bb6" "$1/btrfs/units/btrfs-stall-monitor.service"
+    cp "$fx/btrfs-stall_monitord-adapters-monitor.py@1c43979" "$1/btrfs/stall_monitord/adapters/monitor.py"
+    cp "$fx/btrfs-stall_monitord-cli.py@1c43979" "$1/btrfs/stall_monitord/cli.py"
+    cp "$fx/btrfs-units-btrfs-stall-monitor.service@1c43979" "$1/btrfs/units/btrfs-stall-monitor.service"
 }
 """
 
@@ -2565,7 +2565,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         with Nice=-5 dropped and folders of its own (stall_monitor_e2e_unit), and three main processes:
         (1) a stand-in that says READY=1 after 4 s (NOTIFY_STUB): `start --no-block` leaves the unit
         activating until then, and it is active only 4 s after the process started; (2) main's daemon
-        (8251bb6, from tests/fixtures/legacy; it never says READY=1) starts and logs its start line, but
+        (1c43979, from tests/fixtures/legacy; it never says READY=1) starts and logs its start line, but
         the unit never becomes active: start fails at TimeoutStartSec= (5 s here). That is why an install
         writes the program before the unit (test_106). (3) This checkout's daemon, as the installer builds
         it: start returns once it says READY=1, the unit is active, and its WATCHDOG=1 pings move
@@ -2691,14 +2691,15 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         self.assertIn("E2E-OK", out)
 
     def test_106_stall_monitor_upgrade_installs_the_program_before_the_unit(self) -> None:
-        """The upgrade from main (8251bb6: tests/fixtures/legacy put back in a copy of the checkout)
+        """The upgrade from main (1c43979: tests/fixtures/legacy put back in a copy of the checkout)
         with the real installers on the container's /, btrfs-stall-monitord and its unit only, and a
         drop-in with Nice=0 (no CAP_SYS_NICE here), TimeoutStartSec=30s (the shipped 5 min only slows a failure
         down here) and a log folder of its own: (1) main's install, old daemon and old unit, runs as
         Type=simple; (2) this checkout's install writes the program before the unit (its output), so
         no start can meet the new unit with the old daemon (test_104 shows that one never becomes
         active); after the daemon-reload, the old process keeps running, unwatched (systemd keeps the
-        watchdog a process started with, none here; 3 s later it is still there), until the restart that
+        watchdog a process started with, none here: with a drop-in of WatchdogSec=2s in that step, it is
+        still there 6 s later), until the restart that
         btrfs-setup.sh install does next, and after it the new daemon is active as Type=notify with its
         pings, never restarted; (3) a second install writes nothing; (4) the new daemon under main's unit
         (what an install leaves when the unit's verify refuses it, after the program) also runs, as
@@ -2756,12 +2757,18 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             p="$(line_of "written:   {prog}" "$out")"; n="$(line_of "written:   {path}" "$out")"
             [[ -n "$p" && -n "$n" && "$p" -lt "$n" ]]
             grep -qx 'TimeoutStartSec=5min' $path
+            # WatchdogSec=2s for this step only (the shipped 2 min could not fire within the test): had the
+            # reload armed it on the old process, which never pings, systemd would kill it within 2 s.
+            printf '[Service]\nWatchdogSec=2s\n' >$dropin/e2e-watchdog.conf
             systemctl daemon-reload
             [[ "$(show TimeoutStartUSec)" == 30s ]]
-            [[ "$(show ActiveState) $(show MainPID)" == "active $pid" ]]
-            # systemd keeps the watchdog the old process started with (none): no timeout comes later either.
-            sleep 3
+            # systemd keeps the watchdog the old process started with (none: WatchdogUSec 0), and no
+            # timeout comes later either (6 s: three such periods).
+            [[ "$(show ActiveState) $(show MainPID) $(show WatchdogUSec)" == "active $pid 0" ]]
+            sleep 6
             [[ "$(show ActiveState) $(show MainPID) $(show NRestarts) $(show Result)" == "active $pid 0 success" ]]
+            rm $dropin/e2e-watchdog.conf
+            systemctl daemon-reload
             before="$(starts)"
             systemctl restart $u
             started_since "$before"
@@ -2776,7 +2783,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
 
             # 4. The new daemon under main's unit (a unit the verify refused stays the old one).
-            cp "$fx/btrfs-units-btrfs-stall-monitor.service@8251bb6" $path
+            cp "$fx/btrfs-units-btrfs-stall-monitor.service@1c43979" $path
             systemctl daemon-reload
             before="$(starts)"
             systemctl restart $u
