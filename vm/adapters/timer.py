@@ -136,8 +136,8 @@ class TimerFiles:
             self._files = timer_files(self.cfg, self.entry_file)
         return self._files
 
-    def file_states(self, instance_timer: str) -> dict[str, UnitFileState]:
-        return timer_file_states(self.cfg.paths, self.files(), instance_timer)
+    def file_states(self, unit: str) -> dict[str, UnitFileState]:
+        return timer_file_states(self.cfg.paths, self.files(), os.path.join(self.cfg.paths.unit_dir, unit))
 
     def install(self, states: Mapping[str, UnitFileState], report: Callable[[TimerStep], None]) -> None:
         install_timer_files(self.cfg.paths, self.files(), states, self.entry_file, report)

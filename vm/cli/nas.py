@@ -16,7 +16,7 @@ from typing import Any
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
-from vm import application
+from vm import application, wiring
 from vm.adapters import (
     COMMANDS_OF_VM,
     blklist,
@@ -291,7 +291,7 @@ def cmd_backup_nas(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool) ->
     if "," in vm or not vm.strip():
         raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
     nas = nas_settings(cfg)
-    state = application.domain_state(COMMANDS_OF_VM, vm)
+    state = application.domain_state(wiring.vm_commands(), vm)
     if state not in ("running", "shut off"):
         raise Refused(
             f"{vm} is {state or 'in an unknown state'}: the NAS backup reads a running VM (through a "

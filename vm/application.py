@@ -20,10 +20,10 @@ from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
 from vm.ports import DefinitionStorePort, TimerPort, VmCommandsPort
 
 
-def timer_status(timers: TimerPort, vm: str, instance_timer: str) -> TimerStatus:
-    """backup-timer status of vm (instance_timer: the path of its own unit, see file_states)."""
+def timer_status(timers: TimerPort, vm: str) -> TimerStatus:
+    """backup-timer status of vm."""
     unit = instance(vm)
-    files = timers.file_states(instance_timer)
+    files = timers.file_states(unit)
     on = unit in timers.timers_on()
     next_run, last_result = timers.schedule(unit) if on else ("", "")
     return TimerStatus(unit, on, files, next_run, last_result)
@@ -38,7 +38,6 @@ def _refuse_foreign(states: Mapping[str, UnitFileState]) -> None:
 def timer_on(
     timers: TimerPort,
     vm: str,
-    instance_timer: str,
     nas_ready: Callable[[], object],
     report: Callable[[TimerStep], None],
 ) -> str:
@@ -46,7 +45,7 @@ def timer_on(
     Refused, before any change, for a file that is not CST's, a masked one, or a NAS backup that is
     not set up (nas_ready raises)."""
     unit = instance(vm)
-    states = timers.file_states(instance_timer)
+    states = timers.file_states(unit)
     _refuse_foreign(states)
     if why := masked_refusal([p for p, st in states.items() if st == "masked"], user=False):
         raise Refused(why + "; nothing was changed")
@@ -57,11 +56,11 @@ def timer_on(
     return unit
 
 
-def timer_off(timers: TimerPort, vm: str, instance_timer: str, report: Callable[[TimerStep], None]) -> list[str]:
+def timer_off(timers: TimerPort, vm: str, report: Callable[[TimerStep], None]) -> list[str]:
     """Turn vm's timer off; when no VM's timer is on any more, remove the files (a masked one is
     left) and forget them in the record. The timers still on (then nothing is removed)."""
     unit = instance(vm)
-    states = timers.file_states(instance_timer)
+    states = timers.file_states(unit)
     _refuse_foreign(states)
     why = timers.turn_off(unit)
     if why and unit in timers.timers_on():
@@ -119,21 +118,21 @@ def plan_tune(commands: VmCommandsPort, vm: str, kn: Mapping[str, bool], *, gues
 def tune_blocked(commands: VmCommandsPort, plan: TunePlan) -> str:
     """Why the plan may not be applied now ("" when it may): a guest not known to be Linux gets the
     bus and network card changes only while shut off, and not from a managed save."""
-    bus_change = any(" bus " in c or "network card" in c for c in plan.changes)
     vm, state = plan.vm, plan.state
-    msaved = plan.kind != "linux" and bus_change and state == "shut off" and has_managed_save(commands, vm)
-    if not (plan.kind != "linux" and bus_change and (state != "shut off" or msaved)):
+    if plan.kind == "linux" or not any(" bus " in c or "network card" in c for c in plan.changes):
         return ""
-    if msaved:
+    if state != "shut off":
+        return (
+            f"{vm} is {state}: for a guest that is not known to be Linux, the bus and network card "
+            f"changes are applied only with the VM shut off (shut Windows down first)"
+        )
+    if has_managed_save(commands, vm):
         return (
             f"{vm} was saved (managed save), not shut down: start it and shut Windows down fully "
             f"(`shutdown /s /t 0`), then apply; or drop the saved memory: "
             f"virsh -c {URI} managedsave-remove {vm}"
         )
-    return (
-        f"{vm} is {state}: for a guest that is not known to be Linux, the bus and network card "
-        f"changes are applied only with the VM shut off (shut Windows down first)"
-    )
+    return ""
 
 
 def apply_tune(

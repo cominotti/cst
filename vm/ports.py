@@ -13,9 +13,9 @@ class TimerPort(Protocol):
     copy and the two template units, through the installer, listed in the install record) and
     systemd's side of one VM's timer unit. Errors that stop a use case are Refused."""
 
-    def file_states(self, instance_timer: str) -> dict[str, UnitFileState]:
-        """{path: state} of each file backup-timer on writes; instance_timer (the VM's own unit,
-        which `systemctl mask` of that VM creates) is added only when it is masked."""
+    def file_states(self, unit: str) -> dict[str, UnitFileState]:
+        """{path: state} of each file backup-timer on writes; the VM's own timer unit (which
+        `systemctl mask` of that VM creates) is added only when it is masked."""
         ...
 
     def install(self, states: Mapping[str, UnitFileState], report: Callable[[TimerStep], None]) -> None:
