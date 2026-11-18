@@ -25,7 +25,7 @@ from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import lc_ctype_handover, restore_lc_ctype, undo_python_start
+from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
 from cst_core.domain.contracts import first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
@@ -652,6 +652,18 @@ class LocalCstDispatchAdapterTest(unittest.TestCase):
                 undo_python_start()
                 self.assertEqual(os.environ.get("LC_CTYPE"), after)
                 self.assertNotIn("CST_LC_CTYPE", os.environ)
+
+    def test_beside_program_is_in_the_folder_it_was_run_from_unresolved(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-beside-")
+        self.addCleanup(shutil.rmtree, tmp)
+        real = os.path.join(tmp, "real")
+        os.mkdir(real)
+        link = os.path.join(tmp, "link")
+        os.symlink(real, link)
+        self.assertEqual(beside_program("front", f"{link}/prog"), f"{link}/front")
+        self.assertEqual(beside_program("front", "/usr/local/sbin/prog"), "/usr/local/sbin/front")
+        self.assertEqual(beside_program("front", "prog"), os.path.join(os.getcwd(), "front"))
+        self.assertEqual(beside_program("front", ""), "")
 
     def test_restore_lc_ctype_leaves_the_signals_alone(self) -> None:
         # The LC_CTYPE part only: a program with cleanup keeps SIGPIPE ignored.

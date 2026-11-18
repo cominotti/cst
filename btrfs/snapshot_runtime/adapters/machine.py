@@ -31,6 +31,7 @@ from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import PENDING_ALERTS, Notifier, Urgency as NotifyUrgency
+from cst_core.adapters.runtime import beside_program
 from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
@@ -74,9 +75,9 @@ class SnapshotRun:
         self.bulk_journals = f"{glob.escape(self.bulk_state)}/{_BULK_JOURNAL.file_name}"
         self.runner = runner
         # The bash front and engine (btrfs/btrfs-snapshot), in this program's folder (installed, in
-        # a checkout or a copy alike), as the front finds this one.
-        # The path the front ran this program by (not resolved: as bash names itself in its errors).
-        self.front = os.path.join(os.path.dirname(os.path.abspath(main_file)), "btrfs-snapshot") if main_file else ""
+        # a checkout or a copy alike), as the front finds this one, by the path the front ran this
+        # program by (not resolved: as bash names itself in its errors).
+        self.front = beside_program("btrfs-snapshot", main_file)
         # The descriptors every command gets (the run's locks: fd 9 and 8 of the bash).
         self.fds: tuple[int, ...] = ()
         # A trapped signal (see trap_stop): asked for, and whether a command is running now.
