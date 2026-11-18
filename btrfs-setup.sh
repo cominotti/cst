@@ -129,11 +129,18 @@
 #                          anonymous volumes (never named ones), images unused
 #                          14+ days (use recorded from docker events, so the
 #                          first timed removal is 14 days after enabling) and
-#                          build cache unused 14+ days.
+#                          build cache unused 14+ days. Images of the registries
+#                          in DOCKER_GC_PROTECT (/etc/cst/docker-gc.conf, none
+#                          by default) are never removed by a run. enable writes
+#                          that file first when it is missing, with what the
+#                          installed docker-gc protects (an older one had a
+#                          registry built in); status shows the list.
 #   docker-gc status | run [--dry-run] | disable [--purge]
 #                          disable stops it and keeps its files; --purge also
 #                          removes its program, its three units and its
-#                          recorded state (/var/lib/docker-gc).
+#                          recorded state (/var/lib/docker-gc), and keeps its
+#                          settings (/etc/cst/docker-gc.conf; when it is missing,
+#                          it first writes it, as enable does).
 #   docker-gc cleanup-now  one-off: lists every unused image not seen in use
 #                          and removes it all after one confirmation.
 #   report [args]          (user) btrfs-stall-report: was storage the
@@ -732,17 +739,23 @@ crypt_perf() {
 # ---- uninstall -------------------------------------------------------------------
 # ---- docker-gc: weekly, conservative Docker cleanup (explicit opt-in) ---------------------
 DOCKER_GC_STATE=/var/lib/docker-gc
+# Its settings (the protected registries; docker-gc's GcPaths) and the installed program.
+DOCKER_GC_CONF=/etc/cst/docker-gc.conf
+DOCKER_GC_BIN=/usr/local/sbin/docker-gc
 # docker_gc_files: the program and the unit files of btrfs:docker-gc, as installed (from the manifest).
 docker_gc_files() {
     cst_installed_dests --component btrfs:docker-gc
 }
 docker_gc() {
-    local action="${1:-status}" bin=/usr/local/sbin/docker-gc timer f purge=0 shown=0
+    local action="${1:-status}" bin="${DOCKER_GC_BIN}" timer f purge=0 shown=0
     local -a files units
     [[ $# -gt 0 ]] && shift
     case "${action}" in
         enable)
             check_component_syntax btrfs:docker-gc
+            # Before the new program replaces the installed one: while the settings file is
+            # missing, what the installed docker-gc protects is read from it and kept there.
+            DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${bin}" python3 -I -B "${SRC}/docker-gc" settings --write
             cst_install --component btrfs:docker-gc
             systemctl daemon-reload
             systemctl enable docker-gc-recorder.service docker-gc.timer
@@ -762,6 +775,12 @@ docker_gc() {
                 *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
             esac
             (( $# <= 1 )) || { echo "docker-gc disable: unknown argument '${2}' (only --purge)" >&2; exit 2; }
+            # Before anything changes: a purge removes the installed docker-gc, and with it the
+            # registries an older one has built in. While the settings file is missing they are
+            # written there first (as enable does); one it cannot read stops the purge (exit 78).
+            if (( purge )) && [[ ! -e "${DOCKER_GC_CONF}" && -e "${bin}" ]]; then
+                DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${bin}" python3 -I -B "${SRC}/docker-gc" settings --write
+            fi
             # The installer lists the units (a failure would leave the timer enabled behind a "disabled").
             mapfile -t units < <(cst_component_units btrfs:docker-gc)
             (( ${#units[@]} )) || { echo "docker-gc disable: cannot list its units" >&2; exit 1; }
@@ -779,6 +798,7 @@ docker_gc() {
             fi
             systemctl daemon-reload
             systemctl reset-failed "${units[@]}" 2>/dev/null || true
+            [[ ! -e "${DOCKER_GC_CONF}" ]] || echo "kept:      ${DOCKER_GC_CONF} (the settings: which registries are protected)"
             echo "docker-gc removed: program, units and recorded state ('${PROG} docker-gc enable' installs it again)."
             ;;
         status)

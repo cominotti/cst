@@ -4,6 +4,7 @@ ephemeral, what a run removes (the plan) and the lines that show it."""
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -11,6 +12,7 @@ import os
 import re
 
 from cst_core.domain.contracts import StateFormat, state_format, version_of
+from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
@@ -115,8 +117,9 @@ class GcSettings:
     keep_container_days: int = 7
     keep_image_days: int = 14
     keep_build_cache_days: int = 14
-    # Registry prefixes ("host/") whose images only cleanup-now removes.
-    protected: tuple[str, ...] = ("registry.example.com/",)
+    # Registry prefixes ("host/") whose images only cleanup-now removes: DOCKER_GC_PROTECT in the
+    # settings file (resolve_protection); none by default.
+    protected: tuple[str, ...] = ()
     # How often the recorder writes what it saw (seconds).
     flush_seconds: int = 30
 
@@ -130,6 +133,10 @@ class GcPaths:
     # places the sandboxed unit may write. Shared with runs outside it (cleanup-now,
     # run --dry-run), which make the folder; a tmpfs, so they leave no file in the state folder.
     run_dir: str = "/run/docker-gc"
+    # The settings file (SETTINGS_KEYS), and the installed program (the manifest's dest of
+    # btrfs/docker-gc): while the settings file is missing, what it protects counts.
+    settings_file: str = "/etc/cst/docker-gc.conf"
+    installed: str = "/usr/local/sbin/docker-gc"
 
     @property
     def last_used(self) -> str:
@@ -147,6 +154,152 @@ class GcPaths:
 def protected_registries(value: str) -> tuple[str, ...]:
     """DOCKER_GC_PROTECT (comma-separated registries) as the prefixes a reference starts with."""
     return tuple(r.strip() + "/" for r in value.split(",") if r.strip())
+
+
+# ---- the settings file: which registries are protected ------------------------------
+# The exit status of a command that cannot tell which registries are protected (a settings file
+# it cannot read, or no file and an installed docker-gc it does not know): it removes nothing.
+# 78: EX_CONFIG of sysexits.h.
+BAD_SETTINGS_EXIT = 78
+SETTINGS_KEYS = ("DOCKER_GC_PROTECT",)
+# A registry as an image reference starts with it: a host (a name or an address, a port), and
+# optionally the first parts of a repository path ("ghcr.io/team").
+# The path parts follow the reference grammar of the distribution spec: lower-case letters and digits,
+# separated by ".", "_", "__" or a run of "-".
+REGISTRY_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"
+)
+
+
+class UnknownProtection(RuntimeError):
+    """docker-gc cannot tell which registries are protected: it removes nothing, and says why."""
+
+
+@dataclass(frozen=True, slots=True)
+class Protection:
+    """The protected registries ("host" or "host/path", without the trailing "/"), where they come
+    from, and what the settings file gets when it is missing (None: it is there)."""
+
+    registries: tuple[str, ...]
+    source: str
+    to_write: tuple[str, ...] | None = None
+
+    @property
+    def prefixes(self) -> tuple[str, ...]:
+        """As GcSettings.protected holds them."""
+        return protected_registries(",".join(self.registries))
+
+
+def registries_of(value: str) -> tuple[str, ...]:
+    """DOCKER_GC_PROTECT's registries, blanks and empty items dropped, in order."""
+    return tuple(r.strip().removesuffix("/") for r in value.split(",") if r.strip())
+
+
+def parse_settings_file(path: str, text: str) -> tuple[str, ...]:
+    """The protected registries of the settings file at path (its text). Strict: a line that is not
+    an assignment, an unknown key or a value that is not a list of registries raises UnknownProtection
+    with every such line; nothing is guessed. No DOCKER_GC_PROTECT line: none protected."""
+    parsed = parse_shell_assignments(text, bash_sourced=False)
+    problems = [f"{path} {p}" for p in parsed.problems]
+    for a in parsed.entries:
+        if a.key not in SETTINGS_KEYS:
+            problems.append(f"{path} line {a.line}: {a.key}: unknown setting (known: {', '.join(SETTINGS_KEYS)})")
+        elif bad := [r for r in registries_of(a.value) if not REGISTRY_RE.fullmatch(r)]:
+            problems.append(f"{path} line {a.line}: {a.key}: not a registry: {', '.join(bad)}")
+    if problems:
+        raise UnknownProtection("\n".join(problems) + f"\nnothing is removed until {path} is fixed")
+    return registries_of(parsed.values.get("DOCKER_GC_PROTECT", ""))
+
+
+def render_settings_file(registries: Sequence[str]) -> str:
+    """The settings file as docker-gc writes it when it is missing (`docker-gc settings --write`)."""
+    return (
+        "# docker-gc settings (CST): KEY=VALUE lines, '#' starts a comment. Read by docker-gc\n"
+        "# (/usr/local/sbin/docker-gc and `cst btrfs docker-gc`); a line it cannot read stops its runs\n"
+        '# and cleanups (they remove nothing) until it is fixed. btrfs/README.md in CST: "docker-gc".\n'
+        "#\n"
+        "# DOCKER_GC_PROTECT: registries, comma-separated (registry.example.com,ghcr.io/team), whose\n"
+        "# images a weekly run never removes; cleanup-now removes them only after a second question.\n"
+        "# Empty: no registry is protected (images in use or used lately are kept anyway).\n"
+        f"DOCKER_GC_PROTECT={','.join(registries)}\n"
+    )
+
+
+def _literal(node: ast.expr | None) -> object:
+    try:
+        return None if node is None else ast.literal_eval(node)
+    except ValueError, TypeError:  # TypeError: an unhashable item of a set or dict literal
+        return None
+
+
+def builtin_protected(sources: Sequence[str]) -> tuple[str, ...] | None:
+    """The registries a docker-gc protects with no DOCKER_GC_PROTECT anywhere, read from its Python
+    sources without running them: the default of GcSettings.protected (CST from 2026-11-16), else
+    the default of a `.get("DOCKER_GC_PROTECT", "...")` (the older ones). None: neither is there
+    (not a docker-gc CST wrote, or a source that does not parse or evaluate)."""
+    env_default: tuple[str, ...] | None = None
+    for source in sources:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError, ValueError, MemoryError:  # MemoryError: the parser's nesting limit
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "GcSettings":
+                for item in node.body:
+                    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        value = _literal(item.value) if item.target.id == "protected" else None
+                        if isinstance(value, tuple) and all(isinstance(v, str) for v in value):
+                            return registries_of(",".join(value))
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and len(node.args) == 2
+                and _literal(node.args[0]) == "DOCKER_GC_PROTECT"
+                and isinstance(default := _literal(node.args[1]), str)
+            ):
+                env_default = registries_of(default)
+    return env_default
+
+
+def resolve_protection(
+    paths: GcPaths, *, env: str | None, file_text: str | None, installed: Sequence[str] | None
+) -> Protection:
+    """Which registries are protected. DOCKER_GC_PROTECT in the environment (tests, a drop-in of the
+    unit) wins; else the settings file (file_text; None: missing); while it is missing, what the
+    installed docker-gc protects (installed: its sources; None: no program installed): an older one
+    had a registry built in, and the file keeps it once `docker-gc settings --write` writes it.
+    Raises UnknownProtection for a file it cannot read, and for a missing file with an installed
+    program that has no list of its own (this docker-gc, which reads the file, or one it does not
+    know): never "none" by mistake."""
+    path, prog = paths.settings_file, paths.installed
+    if file_text is not None:
+        base = Protection(parse_settings_file(path, file_text), f"DOCKER_GC_PROTECT in {path}")
+    elif installed is None:
+        base = Protection((), f"no {path}, and no docker-gc installed", to_write=())
+    elif not (built_in := builtin_protected(installed)):
+        # Fail closed. Only an older docker-gc has a list of its own, never an empty one; this one
+        # (an empty default) reads it from the file, so the file being gone is no "none".
+        what = "reads them from that file" if built_in == () else "does not show which registries it protects"
+        raise UnknownProtection(
+            f"{path} is missing, and the installed {prog} {what}: write {path} with "
+            f"DOCKER_GC_PROTECT=<registries, comma-separated> (DOCKER_GC_PROTECT= for none); "
+            "nothing is removed until then"
+        )
+    else:
+        base = Protection(
+            built_in,
+            f"built into the installed {prog}, while {path} is missing ('cst btrfs docker-gc enable' writes them there)",
+            to_write=built_in,
+        )
+    if env is None:
+        return base
+    return Protection(registries_of(env), "DOCKER_GC_PROTECT in the environment", to_write=base.to_write)
+
+
+def protection_line(p: Protection) -> str:
+    """The first line of status and `docker-gc settings`."""
+    return f"protected registries: {', '.join(p.registries) or 'none'} ({p.source})"
 
 
 @dataclass(frozen=True, slots=True)

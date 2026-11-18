@@ -16,14 +16,18 @@ Installed by `cst btrfs docker-gc enable` (CST) as
         compose/k3d/kind/devcontainer label and no restart policy;
       * anonymous volumes no container references (named volumes: never);
       * images no remaining container references and not used for
-        KEEP_IMAGE_DAYS; never images of PROTECTED registries (private:
-        re-pulling needs the tunnel, and a build's FROM image leaves no
-        event), and none at all unless the recorder is running;
+        KEEP_IMAGE_DAYS; never images of protected registries
+        (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf: ones that are hard
+        to pull from again; a build's FROM image leaves no event), and none
+        at all unless the recorder is running;
       * build cache unused for KEEP_BUILD_CACHE_DAYS.
   docker-gc cleanup-now  one-off, interactive: everything unused that was not
                         seen in use in the window, listed in full; protected
                         images only after a second, separate confirmation.
   docker-gc status      what a run would remove now, and the tracking state.
+  docker-gc settings [--write]  the protected registries and where they come
+                        from; while the settings file is missing, --write
+                        writes it with what the installed docker-gc protects.
 """
 
 import os.path as _cst_path

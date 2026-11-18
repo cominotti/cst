@@ -13,8 +13,11 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
+import zlib
 
 from btrfs.docker_gc.domain import (
+    UnknownProtection,
     Container,
     DockerEvent,
     EventsEnd,
@@ -30,7 +33,7 @@ from btrfs.docker_gc.domain import (
     ts,
 )
 from btrfs.docker_gc.ports import EventSink
-from cst_core.adapters.files import write_atomic
+from cst_core.adapters.files import read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
@@ -313,6 +316,48 @@ class GcStateFiles:
             return False
         self._lock_fd = fd
         return True
+
+
+# The members of an installed docker-gc zipapp that may hold its built-in protected registries:
+# GcSettings in the domain (CST from 2026-11-16), PROTECTED in the adapters before.
+INSTALLED_SOURCES = ("btrfs/docker_gc/domain.py", "btrfs/docker_gc/adapters.py")
+
+
+class GcSettingsFile:
+    """GcSettingsPort over GcPaths.settings_file and the program at GcPaths.installed."""
+
+    def __init__(self, paths: GcPaths) -> None:
+        self.paths = paths
+
+    def read_settings(self) -> str | None:
+        try:
+            with open(self.paths.settings_file, "rb") as f:
+                data = f.read()
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise UnknownProtection(f"cannot read {self.paths.settings_file}: {e.strerror}; nothing is removed") from e
+        return data.decode("utf-8", "replace")
+
+    def installed_sources(self) -> tuple[str, ...] | None:
+        """A zipapp (what CST installs): its INSTALLED_SOURCES; a plain script (before the zipapps):
+        the script itself. Unreadable or damaged: no sources (resolve_protection then refuses)."""
+        path = self.paths.installed
+        if not os.path.lexists(path):
+            return None
+        try:
+            if not zipfile.is_zipfile(path):
+                text = read_text(path)
+                return () if text is None else (text,)
+            with zipfile.ZipFile(path) as z:
+                names = set(z.namelist())
+                return tuple(z.read(n).decode("utf-8", "replace") for n in INSTALLED_SOURCES if n in names)
+        # A damaged member: zlib.error, EOFError; an encrypted or unsupported one: RuntimeError.
+        except OSError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error:
+            return ()
+
+    def write_settings(self, text: str) -> None:
+        write_atomic(self.paths.settings_file, text, mode=0o644, owner="root")
 
 
 def gc_log(prio: int, msg: str) -> None:

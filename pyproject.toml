@@ -255,6 +255,7 @@ include = [
     "cst_core/domain/ostree.py",
     "cst_core/domain/plan.py",
     "cst_core/domain/record.py",
+    "cst_core/domain/settings_steps.py",
     "cst_core/domain/text.py",
     "cst_core/domain/units.py",
     "cst_core/domain/values.py",

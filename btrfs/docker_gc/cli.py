@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""docker-gc's command line: record, run [--dry-run], cleanup-now, status (the default)."""
+"""docker-gc's command line: record, run [--dry-run], cleanup-now, status (the default), settings [--write]."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from btrfs.docker_gc import wiring
 from btrfs.docker_gc.application import COMMANDS, DockerGc
 
-USAGE = "usage: docker-gc record|run [--dry-run]|cleanup-now|status"
+USAGE = "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]"
 
 
 def run_cli(
@@ -21,14 +21,14 @@ def run_cli(
     """Run docker-gc with argv (default: this process's); its exit status."""
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else "status"
-    dry = "--dry-run" in args[1:]
-    if cmd == "status" or (cmd == "run" and dry):
-        # status and a dry run only read: `| head` ends them quietly
+    dry, write = "--dry-run" in args[1:], "--write" in args[1:]
+    if (cmd in ("status", "settings") and not write) or (cmd == "run" and dry):
+        # status, settings and a dry run only read: `| head` ends them quietly
         (wiring.quiet_sigpipe if restore_signals is None else restore_signals)()
     gc = wiring.build_docker_gc() if service is None else service
     for known in COMMANDS:
         if cmd == known:
-            return gc.execute(known, dry=dry)
+            return gc.execute(known, dry=dry, write=write)
     print(USAGE, file=sys.stderr)
     return 2
 

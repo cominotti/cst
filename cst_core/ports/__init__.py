@@ -347,6 +347,15 @@ class UnitVerifierPort(Protocol):
         ...
 
 
+class SettingsStepPort(Protocol):
+    """Runs a manifest program's SettingsStep (cst_core.domain.settings_steps) from the checkout."""
+
+    def run(self, src: str, args: Sequence[str], env: Mapping[str, str]) -> CommandResult:
+        """The checkout's src with args, env added to its environment (the step's two variables: the
+        installed copy and the settings file, both as the install sees them, staged under --root)."""
+        ...
+
+
 class InstallRecordPort(Protocol):
     """The install record files (cst_core.domain.record): read, and changed under a lock."""
 

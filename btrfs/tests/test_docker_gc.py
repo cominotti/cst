@@ -19,11 +19,13 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from collections.abc import Mapping
 from unittest import mock
 
@@ -56,6 +58,7 @@ from btrfs.docker_gc.domain import (
 )
 from btrfs.docker_gc.ports import EventSink
 from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.domain.install import manifest_by_src
 from cst_core.ports import CommandResult
 from tests.probes import bytes_program
 
@@ -252,15 +255,48 @@ class FakeClock:
         self.at += seconds
 
 
+class FakeConfig:
+    """GcSettingsPort: the settings file's text (None: missing), the installed program's sources
+    (None: none installed), what was written."""
+
+    def __init__(self, text: str | None = "DOCKER_GC_PROTECT=\n", installed: tuple[str, ...] | None = None) -> None:
+        self.text = text
+        self.installed = installed
+        self.written: list[str] = []
+        self.reads = 0
+        self.installed_reads = 0
+        self.fail_write: OSError | None = None
+
+    def read_settings(self) -> str | None:
+        self.reads += 1
+        return self.text
+
+    def installed_sources(self) -> tuple[str, ...] | None:
+        self.installed_reads += 1
+        return self.installed
+
+    def write_settings(self, text: str) -> None:
+        if self.fail_write is not None:
+            raise self.fail_write
+        self.written.append(text)
+        self.text = text
+
+
+PATHS = GcPaths("/state", "/run/gc", "/etc/cst/docker-gc.conf", "/usr/local/sbin/docker-gc")
+# An invented registry, protected by the settings file of the tests that need one.
+REGISTRY = "registry.example.com"
+
+
 class Fixture:
     """A DockerGc over fakes, for one test."""
 
-    def __init__(self, settings: GcSettings | None = None) -> None:
+    def __init__(self, settings: GcSettings | None = None, config: FakeConfig | None = None) -> None:
         self.docker = FakeDocker()
         self.state = FakeState()
         self.host = FakeHost()
         self.console = FakeConsole()
         self.clock = FakeClock()
+        self.config = config or FakeConfig()
         self.gc = DockerGc(
             settings or GcSettings(),
             docker=self.docker,
@@ -268,6 +304,8 @@ class Fixture:
             host=self.host,
             console=self.console,
             clock=self.clock,
+            config=self.config,
+            paths=PATHS,
         )
 
 
@@ -333,7 +371,7 @@ class DomainTest(unittest.TestCase):
             state=GcState(since=NOW - 20 * DAY, images={"sha256:e": NOW - 2 * DAY}),
             recorder_ok=recorder_ok,
         )
-        return gc_domain.plan_gc(inputs, GcSettings(), now=NOW, timed=timed)
+        return gc_domain.plan_gc(inputs, GcSettings(protected=("registry.example.com/",)), now=NOW, timed=timed)
 
     def test_the_weekly_plan(self) -> None:
         p = self.plan(timed=True)
@@ -350,7 +388,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual([(i.id, i.protected) for i in p.images], [("sha256:a", False), ("sha256:d", True)])
         self.assertEqual(p.held, 0)
 
-    def test_plan_lines_list_images_by_size_and_mark_the_private_ones(self) -> None:
+    def test_plan_lines_list_images_by_size_and_mark_the_protected_ones(self) -> None:
         plan = GcPlan(
             containers=(),
             volumes=(),
@@ -401,6 +439,7 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(
             self.f.console.lines,
             [
+                "protected registries: none (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf)",
                 "image use not recorded yet (recorder not started)",
                 "last run: never",
                 "docker is not running; nothing to do",
@@ -473,6 +512,7 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(self.f.docker.calls[-1], ("rm image", "sha256:a"))
 
     def test_cleanup_now_asks_twice_for_protected_images(self) -> None:
+        self.f = Fixture(config=FakeConfig(f"DOCKER_GC_PROTECT={REGISTRY}\n"))
         self.f.state.state = GcState(since=NOW - 30 * DAY)
         self.f.docker.listed_images = [
             Image("sha256:a", tags=("a:1",), size=1),
@@ -486,6 +526,7 @@ class ApplicationTest(unittest.TestCase):
         asks = [line for line in self.f.console.lines if line.startswith("ASK")]
         self.assertEqual(len(asks), 2)
         self.assertIn("1 image(s) above (the [protected registry] ones are asked next)?", asks[0])
+        self.assertIn("Also remove the 1 image(s) marked [protected registry]? Pulling them again needs", asks[1])
         self.assertEqual(self.f.console.lines[-1], "Done; failures: 0. Now: {'Images': '1GB'}")
 
     def test_cleanup_now_needs_a_terminal_and_stops_at_no(self) -> None:
@@ -595,7 +636,10 @@ class CliTest(unittest.TestCase):
         return rc, err.getvalue()
 
     def test_unknown_command_is_a_usage_error(self) -> None:
-        self.assertEqual(self.run_cli("bogus"), (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status\n"))
+        self.assertEqual(
+            self.run_cli("bogus"),
+            (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]\n"),
+        )
         self.assertEqual(self.f.console.lines, [])
 
     def test_only_status_and_a_dry_run_get_sigpipe_back(self) -> None:
@@ -605,10 +649,205 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.restored, ["x"])
         self.assertEqual(self.run_cli()[0], 0)  # no command: status
         self.assertEqual(self.run_cli("run", "--dry-run")[0], 0)
-        self.assertEqual(self.restored, ["x", "x", "x"])
-        for argv in (("run",), ("cleanup-now",), ("bogus",)):
+        self.assertEqual(self.run_cli("settings")[0], 0)
+        self.assertEqual(self.restored, ["x", "x", "x", "x"])
+        for argv in (("run",), ("cleanup-now",), ("bogus",), ("settings", "--write")):
             self.run_cli(*argv)
-        self.assertEqual(self.restored, ["x", "x", "x"], "run and cleanup-now must keep Python's handling")
+        self.assertEqual(self.restored, ["x"] * 4, "run, cleanup-now and settings --write must keep Python's handling")
+
+
+# main's (654bbda) btrfs/docker_gc/domain.py, its built-in registry replaced by REGISTRY (tests/fixtures/legacy).
+LEGACY_DOMAIN = os.path.join(_CHECKOUT, "tests", "fixtures", "legacy", "btrfs-docker_gc-domain.py@654bbda")
+# How the docker-gc of CST up to 2026-11-15 (the plain script; then btrfs/docker_gc/adapters.py) wrote its
+# built-in registry, an invented one here.
+OLD_PROTECTED_LINE = (
+    'PROTECTED = tuple(r.strip() + "/" for r in\n'
+    '                  os.environ.get("DOCKER_GC_PROTECT", "old.example:5000").split(",") if r.strip())\n'
+)
+
+
+class SettingsDomainTest(unittest.TestCase):
+    def test_the_settings_file_is_read_strictly(self) -> None:
+        read = gc_domain.parse_settings_file
+        self.assertEqual(read("/f", "# mine\nDOCKER_GC_PROTECT=a.example, ghcr.io/team/ ,h:5000\n"), (
+            "a.example", "ghcr.io/team", "h:5000"))  # fmt: skip
+        self.assertEqual(read("/f", "DOCKER_GC_PROTECT=\n"), ())
+        # The path separators of the distribution spec's reference grammar: ".", "_", "__", a run of "-".
+        self.assertEqual(read("/f", "DOCKER_GC_PROTECT=ghcr.io/my__team,ghcr.io/my--org,h/a.b_c-d\n"), (
+            "ghcr.io/my__team", "ghcr.io/my--org", "h/a.b_c-d"))  # fmt: skip
+        self.assertEqual(read("/f", "# nothing set\n"), ())
+        for text, why in (
+            ("DOCKER_GC_PROTCT=a.example\n", "/f line 1: DOCKER_GC_PROTCT: unknown setting"),
+            ("DOCKER_GC_PROTECT=a.example\nnot a line\n", "/f line 2: not a line:"),
+            ("DOCKER_GC_PROTECT=a.example,bad host\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: bad host"),
+            ("DOCKER_GC_PROTECT=ghcr.io/a___b\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: ghcr.io/a___b"),
+            ("DOCKER_GC_PROTECT=ghcr.io/team-\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: ghcr.io/team-"),
+            ("DOCKER_GC_PROTECT=$REG\n", "/f line 1:"),
+        ):
+            with self.assertRaises(gc_domain.UnknownProtection, msg=text) as cm:
+                read("/f", text)
+            self.assertIn(why, str(cm.exception))
+            self.assertTrue(str(cm.exception).endswith("nothing is removed until /f is fixed"))
+
+    def test_the_file_it_writes_reads_back(self) -> None:
+        for regs in ((), (REGISTRY,), ("a.example", "ghcr.io/team")):
+            self.assertEqual(gc_domain.parse_settings_file("/f", gc_domain.render_settings_file(regs)), regs)
+
+    def test_the_built_in_registry_of_an_installed_docker_gc(self) -> None:
+        with open(LEGACY_DOMAIN) as f:
+            legacy = f.read()
+        self.assertEqual(gc_domain.builtin_protected([legacy]), (REGISTRY,))  # main's GcSettings
+        self.assertEqual(gc_domain.builtin_protected(["import os\n" + OLD_PROTECTED_LINE]), ("old.example:5000",))
+        with open(gc_domain.__file__) as f:
+            self.assertEqual(gc_domain.builtin_protected([f.read()]), ())  # this CST: none built in
+        self.assertIsNone(gc_domain.builtin_protected(["print('not docker-gc')\n"]))
+        self.assertIsNone(gc_domain.builtin_protected(["def broken(:\n", "x = 1\n"]))
+        self.assertIsNone(gc_domain.builtin_protected([]))
+
+    def test_a_source_it_cannot_evaluate_shows_no_list(self) -> None:
+        # literal_eval raises TypeError on an unhashable set item, the parser MemoryError on a nesting
+        # too deep: no list (so a refusal, exit 78), never a traceback; the other sources still count.
+        unhashable = 'x.get({[]}, "a")\n'
+        self.assertIsNone(gc_domain.builtin_protected([unhashable]))
+        self.assertIsNone(gc_domain.builtin_protected(["-" * 200_000 + "1\n"]))
+        self.assertEqual(
+            gc_domain.builtin_protected([unhashable, "import os\n" + OLD_PROTECTED_LINE]), ("old.example:5000",)
+        )
+        with self.assertRaises(gc_domain.UnknownProtection):
+            gc_domain.resolve_protection(PATHS, env=None, file_text=None, installed=(unhashable,))
+
+    def test_where_the_protected_registries_come_from(self) -> None:
+        resolve = gc_domain.resolve_protection
+        p = resolve(PATHS, env=None, file_text=f"DOCKER_GC_PROTECT={REGISTRY}\n", installed=("x",))
+        self.assertEqual((p.registries, p.to_write, p.prefixes), ((REGISTRY,), None, (REGISTRY + "/",)))
+        self.assertEqual(p.source, "DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf")
+        p = resolve(PATHS, env=None, file_text=None, installed=None)
+        self.assertEqual((p.registries, p.to_write), ((), ()))
+        p = resolve(PATHS, env=None, file_text=None, installed=("import os\n" + OLD_PROTECTED_LINE,))
+        self.assertEqual((p.registries, p.to_write), (("old.example:5000",), ("old.example:5000",)))
+        self.assertIn("built into the installed /usr/local/sbin/docker-gc", p.source)
+        for unknown in ((), ("print(1)\n",)):
+            with self.assertRaises(gc_domain.UnknownProtection) as cm:
+                resolve(PATHS, env=None, file_text=None, installed=unknown)
+            self.assertIn("/etc/cst/docker-gc.conf is missing, and the installed", str(cm.exception))
+        # This docker-gc has no registry of its own (it reads the file): with the file gone that is no
+        # "none" (the next run would remove what was protected), but a refusal.
+        with open(gc_domain.__file__) as f:
+            this_one = f.read()
+        with self.assertRaises(gc_domain.UnknownProtection) as cm:
+            resolve(PATHS, env=None, file_text=None, installed=(this_one,))
+        self.assertIn("/usr/local/sbin/docker-gc reads them from that file: write", str(cm.exception))
+        self.assertIn("(DOCKER_GC_PROTECT= for none)", str(cm.exception))
+        p = resolve(PATHS, env="e.example", file_text=None, installed=None)
+        self.assertEqual(
+            (p.registries, p.to_write, p.source), (("e.example",), (), "DOCKER_GC_PROTECT in the environment")
+        )
+
+
+class SettingsUseCaseTest(unittest.TestCase):
+    def test_settings_writes_the_file_only_when_missing(self) -> None:
+        f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
+        self.assertEqual(f.gc.execute("settings"), 10)
+        self.assertEqual(f.config.written, [])
+        self.assertEqual(
+            f.console.lines[-1], "would write: /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=old.example:5000)"
+        )
+        self.assertEqual(f.gc.execute("settings", write=True), 0)
+        self.assertEqual(f.config.written, [gc_domain.render_settings_file(("old.example:5000",))])
+        self.assertEqual(f.console.lines[-1], "written:   /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=old.example:5000)")
+        self.assertEqual(f.gc.execute("settings", write=True), 0)
+        self.assertEqual(len(f.config.written), 1, "a second --write wrote again")
+        self.assertEqual(f.console.lines[-2:], [
+            "protected registries: old.example:5000 (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf)",
+            "unchanged: /etc/cst/docker-gc.conf",
+        ])  # fmt: skip
+        self.assertEqual(f.gc.execute("settings"), 0)
+
+    def test_the_installed_program_is_read_only_while_the_file_is_missing(self) -> None:
+        # With the file there, the installed program does not count: a damaged one cannot stop a run.
+        f = Fixture(config=FakeConfig("DOCKER_GC_PROTECT=\n", installed=("print(1)\n",)))
+        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.config.installed_reads, 0)
+        f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
+        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.config.installed_reads, 1)
+
+    def test_a_failed_write_is_one_line_and_exit_1(self) -> None:
+        f = Fixture(config=FakeConfig(None))
+        f.config.fail_write = PermissionError(13, "Permission denied")
+        self.assertEqual(f.gc.execute("settings", write=True), 1)
+        self.assertEqual(f.console.lines[-1], "ERR cannot write /etc/cst/docker-gc.conf: Permission denied")
+
+    def test_without_the_file_the_installed_programs_registry_stays_protected(self) -> None:
+        # Between pulling this CST and the next `enable`: this checkout's cleanup-now still asks apart
+        # for the images of the registry the installed docker-gc protects.
+        f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
+        f.state.state = GcState(since=NOW - 30 * DAY)
+        f.docker.listed_images = [Image("sha256:d", tags=("old.example:5000/x:1",), size=1)]
+        f.docker.ids = {"old.example:5000/x:1": "sha256:d"}
+        f.console.answers = [True, False]
+        self.assertEqual(f.gc.execute("cleanup-now"), 0)
+        self.assertEqual([c for c in f.docker.calls if c[0] == "rm image"], [])
+        self.assertIn("[protected registry]", "\n".join(f.console.lines))
+
+    def test_settings_it_cannot_read_stop_every_command_but_the_recorder(self) -> None:
+        for config in (FakeConfig("DOCKER_GC_PROTCT=x\n"), FakeConfig(None, installed=("print(1)\n",))):
+            for command in ("status", "run", "cleanup-now", "settings"):
+                f = Fixture(config=config)
+                f.state.state = GcState(since=NOW - 30 * DAY)
+                f.docker.listed_volumes = [Volume("v", anonymous=True)]
+                self.assertEqual(f.gc.execute(command), gc_domain.BAD_SETTINGS_EXIT, command)
+                self.assertTrue(f.console.lines and all(ln.startswith("<3>") for ln in f.console.lines))
+                self.assertEqual(f.docker.calls, [], "it reached docker")
+        f = Fixture(config=FakeConfig("DOCKER_GC_PROTCT=x\n"))
+        f.gc.execute("record")
+        self.assertEqual(f.config.reads, 0, "the recorder read the settings")
+
+
+class SettingsFileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="docker-gc-settings-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.paths = GcPaths(
+            self.tmp, self.tmp, os.path.join(self.tmp, "etc", "cst", "docker-gc.conf"), os.path.join(self.tmp, "prog")
+        )
+        self.files = gc_adapters.GcSettingsFile(self.paths)
+
+    def test_the_file_missing_written_and_unreadable(self) -> None:
+        self.assertIsNone(self.files.read_settings())
+        self.files.write_settings("DOCKER_GC_PROTECT=\n")
+        self.assertEqual(self.files.read_settings(), "DOCKER_GC_PROTECT=\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.paths.settings_file).st_mode), 0o644)
+        os.remove(self.paths.settings_file)
+        os.mkdir(self.paths.settings_file)  # something there that cannot be read as a file
+        with self.assertRaises(gc_domain.UnknownProtection):
+            self.files.read_settings()
+
+    def test_the_sources_of_the_installed_program(self) -> None:
+        self.assertIsNone(self.files.installed_sources())
+        with open(LEGACY_DOMAIN) as f:
+            legacy = f.read()
+        with zipfile.ZipFile(self.paths.installed, "w") as z:  # a zipapp as CST installs it
+            z.writestr("__main__.py", "")
+            z.writestr("btrfs/docker_gc/domain.py", legacy)
+            z.writestr("btrfs/docker_gc/cli.py", "x = 1\n")
+        self.assertEqual(self.files.installed_sources(), (legacy,))
+        with open(self.paths.installed, "w") as f:  # the plain script of an older CST
+            f.write(OLD_PROTECTED_LINE)
+        self.assertEqual(self.files.installed_sources(), (OLD_PROTECTED_LINE,))
+        os.remove(self.paths.installed)
+        os.symlink(os.path.join(self.tmp, "nowhere"), self.paths.installed)  # there, but unreadable
+        self.assertEqual(self.files.installed_sources(), ())
+        os.remove(self.paths.installed)
+        # A zipapp whose member is damaged (its deflate data overwritten): no sources, never a traceback.
+        with zipfile.ZipFile(self.paths.installed, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("btrfs/docker_gc/domain.py", legacy)
+            start = z.getinfo("btrfs/docker_gc/domain.py").header_offset
+        with open(self.paths.installed, "r+b") as f:
+            f.seek(start + 30 + len("btrfs/docker_gc/domain.py"))
+            f.write(b"\xff" * 64)
+        self.assertTrue(zipfile.is_zipfile(self.paths.installed))
+        self.assertEqual(self.files.installed_sources(), ())
 
 
 class WiringTest(unittest.TestCase):
@@ -617,11 +856,23 @@ class WiringTest(unittest.TestCase):
         got = gc_wiring.settings_from(
             {"KEEP_IMAGE_DAYS": "3", "DOCKER_GC_PROTECT": "a.example,b.example", "DOCKER_GC_FLUSH": "5"}
         )
-        self.assertEqual((got.keep_image_days, got.protected, got.flush_seconds), (3, ("a.example/", "b.example/"), 5))
+        # DOCKER_GC_PROTECT is read with the settings file, at the command (resolve_protection).
+        self.assertEqual((got.keep_image_days, got.protected, got.flush_seconds), (3, (), 5))
         with self.assertRaises(ValueError):
             gc_wiring.settings_from({"KEEP_CONTAINER_DAYS": "x"})
-        self.assertEqual(gc_wiring.paths_from({}), GcPaths("/var/lib/docker-gc", "/run/docker-gc"))
+        self.assertEqual(
+            gc_wiring.paths_from({}),
+            GcPaths("/var/lib/docker-gc", "/run/docker-gc", "/etc/cst/docker-gc.conf", "/usr/local/sbin/docker-gc"),
+        )
         self.assertEqual(gc_wiring.paths_from({"DOCKER_GC_STATE": "/s", "DOCKER_GC_RUNTIME": "/r"}).lock, "/r/run.lock")
+        env = {"DOCKER_GC_CONF": "/c", "DOCKER_GC_INSTALLED": "/i", "DOCKER_GC_PROTECT": "a.example"}
+        p = gc_wiring.paths_from(env)
+        self.assertEqual((p.settings_file, p.installed), ("/c", "/i"))
+        gc = gc_wiring.build_docker_gc(env)
+        self.assertEqual((gc.protect_env, gc.paths), ("a.example", p))
+
+    def test_the_installed_program_is_the_manifests(self) -> None:
+        self.assertEqual(GcPaths().installed, manifest_by_src()["btrfs/docker-gc"].dest)
 
 
 class StateFilesTest(unittest.TestCase):
@@ -811,7 +1062,10 @@ class EntryTest(unittest.TestCase):
             check=False,
             cwd="/",
         )
-        self.assertEqual((r.returncode, r.stderr), (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status\n"))
+        self.assertEqual(
+            (r.returncode, r.stderr),
+            (2, "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]\n"),
+        )
 
     def test_status_and_a_dry_run_into_a_closed_pipe_stop_quietly(self) -> None:
         # "cst btrfs docker-gc status | head -1" ended in "Exception ignored ...
@@ -820,7 +1074,14 @@ class EntryTest(unittest.TestCase):
             with open(os.path.join(tmp, "docker"), "w") as f:
                 f.write("#!/bin/sh\nexit 1\n")
             os.chmod(os.path.join(tmp, "docker"), 0o755)
-            env = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": tmp}
+            env = {
+                "PATH": f"{tmp}:/usr/bin:/bin",
+                "HOME": tmp,
+                "DOCKER_GC_STATE": tmp,
+                # Never the machine's settings file or installed docker-gc.
+                "DOCKER_GC_CONF": os.path.join(tmp, "docker-gc.conf"),
+                "DOCKER_GC_INSTALLED": os.path.join(tmp, "no-docker-gc"),
+            }
             for args in (("status",), ("run", "--dry-run")):
                 r, w = os.pipe()
                 os.close(r)

@@ -94,7 +94,12 @@ def install_service() -> InstallService | None:
     """The installer's use case over this machine's files, building payloads from this
     checkout (None: it runs from no checkout). Its modules are imported here, so cst and the
     router do not load them."""
-    from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, SystemdUnitVerifier
+    from cst_core.adapters.install import (
+        CheckoutSettingsStep,
+        JsonInstallRecord,
+        LocalInstallTarget,
+        SystemdUnitVerifier,
+    )
     from cst_core.adapters.runtime import checkout_commit
     from cst_core.adapters.zipapp import entry_payload
     from cst_core.application.install import InstallService
@@ -108,4 +113,7 @@ def install_service() -> InstallService | None:
         record=JsonInstallRecord(),
         commit=checkout_commit(root),
         verifier=SystemdUnitVerifier(),
+        # A program whose installed copy may hold a setting its file lacks (SETTINGS_STEPS) writes the
+        # file from it before it is replaced or removed, on the interpreter this installer runs on.
+        steps=CheckoutSettingsStep(root, sys.executable),
     )
