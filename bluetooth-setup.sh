@@ -287,7 +287,7 @@ BACKUP=""
 trap 'rm -f "${TMP}"' EXIT
 # Only for the commands that change something (revert --check exits 10 on purpose).
 if [[ "${cmd}" == apply || ( "${cmd}" == revert && ${CHECK} -eq 0 ) ]]; then
-    trap 'echo "${PROG}: stopped at line ${LINENO}. Backup of main.conf: ${BACKUP:-none taken}. Undo: ${PROG} revert" >&2' ERR
+    trap 'echo "${PROG}: stopped: a command failed (exit $?). Backup of main.conf: ${BACKUP:-none taken}. Undo: ${PROG} revert" >&2' ERR
 fi
 
 # ---- output ------------------------------------------------------------------------

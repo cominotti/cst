@@ -11,7 +11,7 @@ Run from the repository root:
 
 import unittest
 
-from bluetooth.tests.setup_fakes import ISO, Machine
+from bluetooth.tests.setup_fakes import ISO, SETUP, Machine
 
 GENERAL = "[General]\n#Experimental = false\n"
 
@@ -41,6 +41,34 @@ class SeamTest(unittest.TestCase):
         with open(m.main_conf, encoding="utf-8") as f:
             self.assertEqual(f.read(), GENERAL)
         self.assertNotIn(ISO, GENERAL)
+
+
+class StoppedTest(unittest.TestCase):
+    """apply and revert stop at the first command that fails, name its exit status and how to undo."""
+
+    def test_a_failed_command_stops_apply_with_its_exit_status(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, GENERAL)
+        m.services()
+        m.put("fail-sudo-cp", "3")
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, 3, r.text)
+        self.assertTrue(
+            r.stderr.endswith(
+                f"{SETUP}: stopped: a command failed (exit 3). Backup of main.conf: none taken. Undo: {SETUP} revert\n"
+            ),
+            r.stderr,
+        )
+        m.flag("fail-sudo-cp", on=False)
+        m.put("fail-sudo-install", "4")
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, 4, r.text)
+        self.assertRegex(
+            r.stderr,
+            r"stopped: a command failed \(exit 4\)\. Backup of main\.conf: \S+/main\.conf\.bak-\d{8}-\d{6}\. Undo: ",
+        )
+        with open(m.main_conf, encoding="utf-8") as f:
+            self.assertEqual(f.read(), GENERAL)
 
 
 if __name__ == "__main__":
