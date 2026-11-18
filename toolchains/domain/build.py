@@ -245,11 +245,12 @@ TOOL_FILE_NAMES = frozenset(
 TOOL_FILE_SUFFIXES = (".mk", ".just", ".sh", ".bash")
 # Read too, from a worktree's top (walk_dirs skips hidden folders): CI jobs
 # and cargo aliases. {folder: suffixes}
+YAML = (".yml", ".yaml")
 TOOL_FILE_DIRS = {
-    ".github/workflows": (".yml", ".yaml"),
+    ".github/workflows": YAML,
     ".cargo": ("config", "config.toml"),
-    ".circleci": (".yml", ".yaml"),
-    ".buildkite": (".yml", ".yaml"),
+    ".circleci": YAML,
+    ".buildkite": YAML,
 }
 TOOL_FILE_TOP = (".gitlab-ci.yml",)
 TOOL_FILE_MAX = MIB  # bytes read of one file

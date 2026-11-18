@@ -19,6 +19,9 @@ from toolchains.domain.build import HASH_VAR, ROOT_REL
 
 # Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
 # comments, same rules): a setting already there is never changed.
+# The words of the plan and status lines that name what CST could not do.
+CANNOT_READ = "cannot be read"
+BY_HAND = "BY HAND"
 CARGO_CFG_REL = ".cargo/config.toml"
 UV_CFG_REL = ".config/uv/uv.toml"
 WS = r"[^\S\n]"  # a blank that is not a line break (grep's [[:space:]] within a line)
@@ -112,7 +115,9 @@ BUILD_HEADER = re.compile(rf"^{WS}*\[{WS}*build{WS}*\]{WS}*(?:#.*)?$", re.M)
 KEY_LINE = re.compile(rf"^{WS}*[A-Za-z0-9_.\"'-]+{WS}*=", re.M)
 ANY_HEADER = re.compile(rf"^{WS}*\[", re.M)
 SCCACHE_STATS = re.compile(
-    r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S.*?)\s*$", re.M
+    # The value: from its first to its last non-blank (no lazy .*? before \s*: that backtracks).
+    r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S(?:.*\S)?)[^\S\n]*$",
+    re.M,
 )
 
 

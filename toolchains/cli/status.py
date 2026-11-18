@@ -114,7 +114,7 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
     return out
 
 
-def cmd_status(s: Session, brief: bool) -> int:
+def cmd_status(s: Session, brief: bool) -> None:
     home, say = s.home, s.out.say
     say(f"auto: {timer_text(s)}")
     settings: Settings | None
@@ -141,7 +141,7 @@ def cmd_status(s: Session, brief: bool) -> int:
         for line in t.status_lines():
             say(f"  {line}")
     if brief:
-        return 0
+        return
     say("== not implemented yet (nothing pruned there by CST):")
     for tid, (where, how) in PLANNED.items():
         shown = ", ".join(s.out.where(os.path.join(home, p.strip()[2:])) for p in where.split(","))
@@ -162,4 +162,3 @@ def cmd_status(s: Session, brief: bool) -> int:
             + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)")
         )
     old_conf_note(home, s.out)
-    return 0

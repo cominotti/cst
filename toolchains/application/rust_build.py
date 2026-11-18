@@ -85,12 +85,12 @@ class RustBuild(BaseTarget[RustPolicy]):
             )
         return out
 
-    def plan(self) -> int:
+    def plan(self) -> None:
         home, now, pol = self.home, self.now, self.required_policy()
         root, folders, trash, others = self.gather()
         if root is None:
             self.machine.out.say(f"  ~/{ROOT_REL} does not exist yet: nothing to do")
-            return 0
+            return
         self.machine.out.say(f"  root: {tilde(root, home)}/XX/YYYYYYYYYYYYYY (cargo build-dir)")
         self.machine.out.say(
             f"  total: {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
@@ -130,7 +130,6 @@ class RustBuild(BaseTarget[RustPolicy]):
             )
         if unknown and (gone or trims):
             self.machine.out.say(f"  note: {unknown_text(unknown)}; apply deletes nothing while it runs")
-        return 0
 
     def apply(self) -> int:
         now, pol = self.now, self.required_policy()

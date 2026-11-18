@@ -323,7 +323,7 @@ class ConfigTest(Scratch):
         self.assertIn(f"kept:      {self.home}/.config/uv/uv.toml (link-mode already set)", out)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         # The line written is the one prune accepts.
-        self.assertEqual(tc_build_tree.resolve_root(self.home, "cst toolchains"), None)
+        self.assertIsNone(tc_build_tree.resolve_root(self.home, "cst toolchains"))
         rc, out = self.run_main("status")
         self.assertIn("build-dir = CST's line", out)
 
@@ -1301,7 +1301,7 @@ class PackageLayersTest(Scratch):
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_status.cmd_status(self.session(), True), 0)
+            tc_status.cmd_status(self.session(), True)  # it raises on a problem, else returns nothing
             self.assertEqual(tc_prune.cmd_prune(self.session(), "plan", []), 0)
             self.assertEqual(tc_config.cmd_config(self.session(), "plan"), 0)
             self.assertEqual(tc_auto.cmd_auto_on(self.session()), 0)

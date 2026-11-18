@@ -43,7 +43,8 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
     cmd, action = a["cmd"], a["action"]
     try:
         if cmd == "status":
-            return status.cmd_status(s, a["brief"])
+            status.cmd_status(s, a["brief"])
+            return 0
         assert action is not None
         if cmd == "config":
             return config.cmd_config(s, action, a["lean"], a["sccache"])

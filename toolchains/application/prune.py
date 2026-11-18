@@ -54,7 +54,9 @@ class Target(Protocol):
         """Raise Refused when it would refuse to run."""
         ...
 
-    def plan(self) -> int: ...
+    def plan(self) -> int | None:
+        """The exit status (None: 0, a plan that cannot fail)."""
+        ...
 
     def apply(self) -> int:
         """The exit status; the run's summary is saved."""
@@ -135,7 +137,7 @@ def prune(
         elif off:
             t.tsay(off.strip(" ()"), 5)
         try:
-            r = t.plan() if action == "plan" else t.apply()
+            r = (t.plan() or 0) if action == "plan" else t.apply()
         except Refused as e:
             if action == "plan":
                 out.say(f"  refused: {e}")

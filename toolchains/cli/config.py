@@ -17,6 +17,8 @@ from cst_core.ports import WriteFailed
 from toolchains.domain.build import HASH_VAR, ROOT_REL, expected_template
 from toolchains.domain.common import CONF_REL, ConfigError, NAME, parses_as, plain, tilde
 from toolchains.domain.config import (
+    BY_HAND,
+    CANNOT_READ,
     ANY_HEADER,
     BUILD_HEADER,
     CARGO_CFG_REL,
@@ -92,7 +94,7 @@ def lean_state(home: str) -> LeanState:
     st: LeanState = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
     text = read_cfg(path)
     if text is None:
-        st["error"] = "cannot be read"
+        st["error"] = CANNOT_READ
         return st
     try:
         data = tomllib.loads(text)
@@ -179,7 +181,7 @@ def lean_lines(s: Session, verb: str, settings: Settings | None, lean: bool | No
         )
     else:
         out.append(
-            ("BY HAND", shown, f"lean debug info ({why}): the file already has these tables: add yourself: {what}")
+            (BY_HAND, shown, f"lean debug info ({why}): the file already has these tables: add yourself: {what}")
         )
     return out
 
@@ -258,7 +260,7 @@ def sccache_state(home: str) -> SccacheState:
     st: SccacheState = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
     text = read_cfg(path)
     if text is None:
-        st["error"] = "cannot be read"
+        st["error"] = CANNOT_READ
         return st
     try:
         data = plain(tomllib.loads(text))
@@ -387,7 +389,7 @@ def sccache_lines(s: Session, verb: str, settings: Settings | None, flag: bool |
                 ]
             return [
                 (
-                    "BY HAND",
+                    BY_HAND,
                     shown,
                     f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
                 )
@@ -423,7 +425,7 @@ def sccache_lines(s: Session, verb: str, settings: Settings | None, flag: bool |
     else:
         out.append(
             (
-                "BY HAND",
+                BY_HAND,
                 shown,
                 f"sccache ({why}): CST cannot add the key safely here: put "
                 f'rustc-wrapper = "{wrapper_path(home)}" into [build] yourself',
@@ -540,7 +542,7 @@ def config_lines(
             elif st == "by-hand":
                 out.append(
                     (
-                        "BY HAND",
+                        BY_HAND,
                         shown,
                         f'has a [build] table: add build-dir = "{home}/{ROOT_REL}/{HASH_VAR}" there yourself',
                     )
@@ -555,12 +557,12 @@ def config_lines(
                     )
                 )
             else:
-                out.append(("?", shown, "cannot be read"))
+                out.append(("?", shown, CANNOT_READ))
         else:
             if st == "set":
                 out.append(("ok", shown, "link-mode already set"))
             elif st == "by-hand":
-                out.append(("BY HAND", shown, 'has tables: add link-mode = "clone" at its top yourself'))
+                out.append((BY_HAND, shown, 'has tables: add link-mode = "clone" at its top yourself'))
             elif st == "write":
                 out.append(
                     (
@@ -571,7 +573,7 @@ def config_lines(
                     )
                 )
             else:
-                out.append(("?", shown, "cannot be read"))
+                out.append(("?", shown, CANNOT_READ))
     out += lean_lines(s, verb, settings, lean)
     out += sccache_lines(s, verb, settings, sccache)
     return out
