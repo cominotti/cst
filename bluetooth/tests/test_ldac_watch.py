@@ -14,17 +14,20 @@ from dataclasses import dataclass
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import types
-from typing import Any
 import unittest
 from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from bluetooth import domain as bt_domain, ldac_watch
+from bluetooth import adapters as bt_adapters
+from bluetooth.domain import PactlCard, PactlProfile, PwObject, PwParams, watch as bt_watch
+from bluetooth.domain.watch import Snapshot
 from bluetooth.tests.test_bluetooth import MAC, WATCH, HelperModule, load_helper, shell_functions
 
 DEV = "0A_1B_2C_3D_4E_5F"
@@ -48,10 +51,10 @@ def pw_dump(
     out: int = 600,
     mic_state: str = "suspended",
     suspended: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[PwObject]:
     """A shortened pw-dump of the headset as found on sophia: the card, the
     A2DP output node and WirePlumber's headset source (named with ':')."""
-    out_params: dict[str, Any] = {
+    out_params: PwParams = {
         "EnumFormat": [{"mediaType": "audio", "format": {"default": "F32LE"}, "rate": rate, "channels": 2}],
         "Format": [] if suspended else [{"mediaType": "audio", "format": "F32LE", "rate": rate, "channels": 2}],
         "Props": [{"volume": 1.0}, {"quality": -1}],
@@ -97,9 +100,9 @@ def pw_dump(
     ]
 
 
-def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False) -> list[dict[str, Any]]:
+def cards(active: str = "a2dp-sink", sbc: bool = True, lang_names: bool = False) -> list[PactlCard]:
     """pactl -f json list cards, the headset's card (profile names as PipeWire's)."""
-    profs: dict[str, dict[str, Any]] = {
+    profs: dict[str, PactlProfile] = {
         "off": {"description": "Off", "available": True},
         "a2dp-sink-sbc_xq": {"description": "High Fidelity Playback (A2DP Sink, codec SBC-XQ)", "available": True},
         "a2dp-sink-aac": {"description": "High Fidelity Playback (A2DP Sink, codec AAC)", "available": True},
@@ -122,7 +125,7 @@ class ParseTest(unittest.TestCase):
         self.h: HelperModule = load_helper()
 
     def test_snapshot(self) -> None:
-        s = bt_domain.snapshot(DEV, pw_dump())
+        s = bt_watch.snapshot(DEV, pw_dump())
         self.assertEqual(
             s,
             {
@@ -135,20 +138,20 @@ class ParseTest(unittest.TestCase):
                 "mic": False,
             },
         )
-        self.assertTrue(bt_domain.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
-        self.assertIsNone(bt_domain.snapshot("00_00", pw_dump())["card"])
+        self.assertTrue(bt_watch.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
+        self.assertIsNone(bt_watch.snapshot("00_00", pw_dump())["card"])
 
     def test_suspended_node_rate_from_enumformat(self) -> None:
-        self.assertEqual(bt_domain.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
+        self.assertEqual(bt_watch.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
         objs = pw_dump()
         objs[1]["info"]["params"] = {}
-        self.assertIsNone(bt_domain.snapshot(DEV, objs)["rate"])
+        self.assertIsNone(bt_watch.snapshot(DEV, objs)["rate"])
 
     def test_helper_reads_the_same_rate(self) -> None:
         for objs in (pw_dump(), pw_dump(rate=48000, suspended=True)):
             pw = self.h.pw_state(DEV, objs)
             assert pw is not None
-            self.assertEqual(pw[4], str(bt_domain.snapshot(DEV, objs)["rate"]))
+            self.assertEqual(pw[4], str(bt_watch.snapshot(DEV, objs)["rate"]))
 
     def test_snapshot_cli(self) -> None:
         r = subprocess.run(
@@ -168,6 +171,15 @@ class ParseTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(r.returncode, 2)
+        for stdin in ("garbage", ""):  # not JSON: exit 3, nothing printed
+            r = subprocess.run(
+                [sys.executable, "-I", WATCH, "--device", MAC, "--snapshot"],
+                check=False,
+                input=stdin,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (3, "", ""), stdin)
 
     def test_decide(self) -> None:
         def d(
@@ -176,8 +188,8 @@ class ParseTest(unittest.TestCase):
             profile: str = "a2dp-sink",
             mic_state: str = "suspended",
         ) -> str:
-            return bt_domain.decide(
-                bt_domain.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
+            return bt_watch.decide(
+                bt_watch.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
                 48000,
             )[0]
 
@@ -187,14 +199,14 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(d(codec="sbc", rate=44100), "none")
         self.assertEqual(d(mic_state="running"), "skip")
         self.assertEqual(d(profile="headset-head-unit"), "skip")
-        self.assertEqual(bt_domain.decide(bt_domain.snapshot("00_00", pw_dump()), 48000)[0], "none")
-        self.assertEqual(bt_domain.decide(None, 48000)[0], "none")
+        self.assertEqual(bt_watch.decide(bt_watch.snapshot("00_00", pw_dump()), 48000)[0], "none")
+        self.assertEqual(bt_watch.decide(None, 48000)[0], "none")
         # The reason names the codec in use.
-        sbc = bt_domain.snapshot(DEV, pw_dump(rate=44100, codec="sbc"))
-        self.assertEqual(bt_domain.decide(sbc, 48000), ("none", "codec sbc"))
+        sbc = bt_watch.snapshot(DEV, pw_dump(rate=44100, codec="sbc"))
+        self.assertEqual(bt_watch.decide(sbc, 48000), ("none", "codec sbc"))
 
     def test_relevant_events(self) -> None:
-        rel = bt_domain.relevant
+        rel = bt_watch.relevant
         known = {500, 600, 601}
         self.assertTrue(rel("Event 'new' on card #900\n", known))
         self.assertTrue(rel("Event 'remove' on sink #12\n", known))
@@ -207,12 +219,12 @@ class ParseTest(unittest.TestCase):
         self.assertFalse(rel("garbage\n", known))
 
     def test_profiles(self) -> None:
-        p = bt_domain.profiles
+        p = bt_watch.profiles
         self.assertEqual(p(DEV, cards()), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         self.assertEqual(p(DEV, cards(lang_names=True)), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         # No SBC: another A2DP codec does the same job.
         self.assertEqual(p(DEV, cards(sbc=False))[2], "a2dp-sink-aac")
-        self.assertEqual(p(DEV, cards(sbc=False, lang_names=True))[2], None)
+        self.assertIsNone(p(DEV, cards(sbc=False, lang_names=True))[2])
         c = cards()
         c[1]["profiles"]["a2dp-sink-sbc"]["available"] = False
         self.assertEqual(p(DEV, c)[2], "a2dp-sink-aac")
@@ -221,7 +233,7 @@ class ParseTest(unittest.TestCase):
 
 class TrackerTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.t = bt_domain.Tracker(48000, settle=5, cooldown=600)
+        self.t = bt_watch.Tracker(48000, settle=5, cooldown=600)
 
     def snap(
         self,
@@ -232,21 +244,19 @@ class TrackerTest(unittest.TestCase):
         out: int = 600,
         mic_state: str = "suspended",
         suspended: bool = False,
-    ) -> dict[str, Any]:
-        return dict(
-            bt_domain.snapshot(
-                DEV,
-                pw_dump(
-                    rate=rate,
-                    codec=codec,
-                    profile=profile,
-                    card=card,
-                    out=out,
-                    mic_state=mic_state,
-                    suspended=suspended,
-                ),
-            )
-        )
+    ) -> Snapshot:
+        return bt_watch.snapshot(
+            DEV,
+            pw_dump(
+                rate=rate,
+                codec=codec,
+                profile=profile,
+                card=card,
+                out=out,
+                mic_state=mic_state,
+                suspended=suspended,
+            ),
+        ).copy()
 
     def test_settle_then_act_once(self) -> None:
         s = self.snap()
@@ -341,7 +351,7 @@ class TrackerTest(unittest.TestCase):
         self.t.own_node(self.snap(out=700, rate=48000))
         self.t.result(True)
         objs = [o for o in pw_dump() if "bluez_output" not in str(o)]
-        self.assertEqual(self.t.observe(bt_domain.snapshot(DEV, objs), 10)[0], "none")
+        self.assertEqual(self.t.observe(bt_watch.snapshot(DEV, objs), 10)[0], "none")
         self.assertEqual(self.t.observe(self.snap(out=710), 12)[0], "done")
         self.assertEqual(self.t.observe(self.snap(out=710), 1000)[0], "done")
 
@@ -382,17 +392,17 @@ class FakeLive:
         self.back_rate = back_rate
         self.fail = set(fail)
         self.calls: list[str] = []
-        self.snap_saved: Callable[[], dict[str, Any] | None] | None = None
-        self._snap_fn: Callable[[], dict[str, Any] | None] | None = None
+        self.snap_saved: Callable[[], Snapshot | None] | None = None
+        self._snap_fn: Callable[[], Snapshot | None] | None = None
         self._set_profile_fn: Callable[[str], bool] | None = None
 
-    def snap(self) -> dict[str, Any] | None:
+    def snap(self) -> Snapshot | None:
         if self._snap_fn is not None:
             return self._snap_fn()
         codec = "ldac" if self.active == "a2dp-sink" else "sbc"
-        return bt_domain.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
+        return bt_watch.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
 
-    def cards(self) -> list[dict[str, Any]]:
+    def cards(self) -> list[PactlCard]:
         return cards(active=self.active)
 
     def set_profile(self, prof: str) -> bool:
@@ -421,14 +431,14 @@ class BounceTest(unittest.TestCase):
             ("SBC_HOLD", 0),
             ("log", lambda level, msg: self.lines.append((level, msg))),
         ):
-            patcher = mock.patch.object(ldac_watch, name, value)
+            patcher = mock.patch.object(bt_adapters, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def watcher(self, live: FakeLive, dry: bool = False) -> ldac_watch.Watcher:
-        w = ldac_watch.Watcher(DEV, 48000, dry_run=dry)
+    def watcher(self, live: FakeLive, dry: bool = False) -> bt_adapters.Watcher:
+        w = bt_adapters.Watcher(DEV, 48000, dry_run=dry)
         w.live = live
-        w.tracker = bt_domain.Tracker(48000, settle=0, cooldown=600)
+        w.tracker = bt_watch.Tracker(48000, settle=0, cooldown=600)
         return w
 
     def test_bounce_fixes_the_rate(self) -> None:
@@ -495,7 +505,7 @@ class BounceTest(unittest.TestCase):
     def test_microphone_in_use_during_the_bounce(self) -> None:
         live = FakeLive()
 
-        def snap_mic() -> dict[str, Any]:
+        def snap_mic() -> Snapshot:
             live._snap_fn = None
             s = live.snap()
             live._snap_fn = snap_mic
@@ -530,21 +540,21 @@ class BounceTest(unittest.TestCase):
 
         def set_profile(prof: str) -> bool:
             if prof == "a2dp-sink-sbc":
-                ldac_watch.Stop.handler(15, None)  # SIGTERM while switching
+                bt_adapters.Stop.handler(15, None)  # SIGTERM while switching
             return live._real_set_profile(prof)
 
         live._set_profile_fn = set_profile
         w = self.watcher(live)
-        self.addCleanup(setattr, ldac_watch.Stop, "asked", False)
+        self.addCleanup(setattr, bt_adapters.Stop, "asked", False)
         with self.assertRaises(SystemExit):
             w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc", "a2dp-sink"])
         self.assertEqual(live.active, "a2dp-sink")
         self.assertTrue(any("stop asked during the profile switch" in m for _, m in self.lines))
         # Outside a bounce, a stop is immediate.
-        ldac_watch.Stop.asked = False
+        bt_adapters.Stop.asked = False
         with self.assertRaises(SystemExit):
-            ldac_watch.Stop.handler(15, None)
+            bt_adapters.Stop.handler(15, None)
 
     def test_no_pw_dump_is_not_a_disconnection(self) -> None:
         live = FakeLive(back_rate=96000)
@@ -563,8 +573,8 @@ class ListenTest(unittest.TestCase):
     when it is not the first line of a read), back on end of file."""
 
     def test_events_from_a_pipe(self) -> None:
-        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
-        watcher = ldac_watch.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(bt_adapters, "DEBOUNCE", 0))
+        watcher = bt_adapters.Watcher(DEV, 48000)
         looks: list[int] = []
         watcher.known = {600}
         with mock.patch.object(watcher, "look", side_effect=lambda: looks.append(1)):
@@ -584,8 +594,8 @@ class ListenTest(unittest.TestCase):
             self.assertEqual(len(looks), 1)  # nothing relevant: only the start
 
     def test_relevant_burst_triggers_a_look(self) -> None:
-        self.enterContext(mock.patch.object(ldac_watch, "DEBOUNCE", 0))
-        watcher = ldac_watch.Watcher(DEV, 48000)
+        self.enterContext(mock.patch.object(bt_adapters, "DEBOUNCE", 0))
+        watcher = bt_adapters.Watcher(DEV, 48000)
         looks: list[int] = []
         r, wfd = os.pipe()
 
@@ -603,6 +613,34 @@ class ListenTest(unittest.TestCase):
         ):
             watcher.listen(types.SimpleNamespace(stdout=f))
         self.assertEqual(len(looks), 2)
+
+
+class StopTest(unittest.TestCase):
+    """The real program: a stop signal outside a profile switch ends it at once, exit status 0,
+    with "stopped" as its last line."""
+
+    def test_sigterm_while_waiting_for_pactl(self) -> None:
+        empty = tempfile.mkdtemp(prefix="bt-test-")  # PATH without pactl: the loop waits to retry
+        self.addCleanup(shutil.rmtree, empty)
+        p = subprocess.Popen(
+            [sys.executable, "-I", WATCH, "--device", MAC],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"PATH": empty},
+        )
+        self.addCleanup(p.kill)  # a program that hangs is killed: the test fails, the run goes on
+        guard = threading.Timer(30, p.kill)  # also one that never prints its first line
+        guard.start()
+        self.addCleanup(guard.cancel)
+        assert p.stdout is not None
+        first = p.stdout.readline()
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=30)
+        self.assertIn("watching bluez_card.0A_1B_2C_3D_4E_5F", first)
+        self.assertEqual((p.returncode, err), (0, ""))
+        self.assertEqual((first + out).splitlines()[-1], "<6>stopped")
 
 
 class UnitTest(unittest.TestCase):

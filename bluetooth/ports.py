@@ -2,7 +2,10 @@
 """Ports (interfaces) for the `bluetooth` bounded context."""
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Protocol
+
+from bluetooth.domain import PactlCard
+from bluetooth.domain.watch import Snapshot
 
 
 class BluetoothHostPort(Protocol):
@@ -42,11 +45,11 @@ class LiveAudioPort(Protocol):
 
     dev: str
 
-    def snap(self) -> dict[str, Any] | None:
+    def snap(self) -> Snapshot | None:
         """Return the current PipeWire snapshot of the headset, or None."""
         ...
 
-    def cards(self) -> list[dict[str, Any]] | None:
+    def cards(self) -> list[PactlCard] | None:
         """Return PulseAudio/PipeWire card descriptors, or None."""
         ...
 

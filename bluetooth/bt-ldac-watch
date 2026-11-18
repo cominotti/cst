@@ -40,12 +40,12 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 
 import sys
 
-from bluetooth import ldac_watch
+from bluetooth import cli
 
 
 def main() -> int:
     """Run the watcher with this program's arguments."""
-    return ldac_watch.main(sys.argv[1:], doc=__doc__ or "")
+    return cli.ldac_watch(sys.argv[1:], doc=__doc__ or "")
 
 
 if __name__ == "__main__":
