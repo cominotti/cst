@@ -11,7 +11,7 @@ import signal
 import struct
 import sys
 from types import FrameType
-from typing import TextIO
+from typing import Self, TextIO
 
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
@@ -253,7 +253,7 @@ class signals_held:
     stop never kills `virsh snapshot-create-as` while libvirt goes on making
     the snapshot: the run then always knows what the VM runs on."""
 
-    def __enter__(self) -> signals_held:
+    def __enter__(self) -> Self:
         self.old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         return self
 
@@ -355,7 +355,7 @@ class VmLock:
         self.path = os.path.join(run_dir, f"nas-{vm}.lock")
         self.fd: int | None = None
 
-    def __enter__(self) -> VmLock:
+    def __enter__(self) -> Self:
         # 0755 and 0644 exactly, whatever the umask (sudo keeps a user's 077): cst doctor reads the pid.
         ensure_dir(self.run_dir, 0o755)
         fd = take_lock(self.path, wait=False, mode=0o644, nofollow=False)
