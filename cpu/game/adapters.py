@@ -207,10 +207,20 @@ class GameProfile:
         return [line.split()[0] for line in res.stdout.split("\n") if line.split()]
 
     # ---- the state files --------------------------------------------------------------------
-    def _append(self, path: str, *fields: str) -> None:
-        """One record at the end of path, on disk before the change it describes is made."""
-        with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:
-            fh.write(record_line(*fields))
+    def _append(self, path: str, *fields: str) -> bool:
+        """One record at the end of path, on disk before the change it describes is made. False when it
+        cannot be written (a full /run): said on stderr, as bash's failed redirection said it."""
+        try:
+            with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:
+                fh.write(record_line(*fields))
+        except OSError as e:
+            print(f"{path}: {e.strerror or e}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def _unrecorded(self, what: str) -> None:
+        """A change not made because its record could not be written: 'off' could not undo it."""
+        self.log(4, f"{what}: not done, its record could not be written to {self.paths.state}")
 
     def _state_text(self) -> str:
         return read_text(self.paths.state) or ""
@@ -221,9 +231,12 @@ class GameProfile:
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
-                self._append(self.paths.state, "prop", mgr, unit, p, "existed", self.prop(mgr, unit, p))
+                rec = ("prop", mgr, unit, p, "existed", self.prop(mgr, unit, p))
             else:
-                self._append(self.paths.state, "prop", mgr, unit, p, "new", "-")
+                rec = ("prop", mgr, unit, p, "new", "-")
+            if not self._append(self.paths.state, *rec):
+                self._unrecorded(f"{unit}: {' '.join(settings)}")
+                return
         if self.ctl(mgr, "set-property", "--runtime", unit, *settings) != 0:
             self.log(4, f"{unit}: could not set {' '.join(settings)}")
             return
@@ -317,7 +330,9 @@ class GameProfile:
         old = read_stripped(f) or ""
         if old == self.s.build_cpus:
             return
-        self._append(self.paths.state, "cgw", f, old)
+        if not self._append(self.paths.state, "cgw", f, old):
+            self._unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
+            return
         if _write_line(f, self.s.build_cpus):
             self._append(self.paths.intended, "cgw", f, self.s.build_cpus, read_stripped(f) or "")
         else:
@@ -400,10 +415,17 @@ class GameProfile:
         if not s.target_user:
             self.log(3, f"TARGET_USER not set in {p.conf}")
             return 1
-        with open(p.state, "w", encoding="utf-8"):
-            pass
-        with open(p.intended, "w", encoding="utf-8") as fh:
-            fh.write(intended_header())
+        try:
+            with open(p.state, "w", encoding="utf-8"):
+                pass
+        except OSError as e:
+            self.log(3, f"not switched on: could not write {p.state}: {e.strerror or e}")
+            return 1
+        try:
+            with open(p.intended, "w", encoding="utf-8") as fh:
+                fh.write(intended_header())
+        except OSError as e:  # no drift repair then; the profile itself still works
+            print(f"{p.intended}: {e.strerror or e}", file=sys.stderr, flush=True)
         self.setp(
             "sys",
             "machine.slice",
@@ -432,7 +454,9 @@ class GameProfile:
             f = p.epp(cpu)
             if not os.access(f, os.W_OK):
                 continue
-            self._append(p.state, "epp", cpu, read_stripped(f) or "")
+            if not self._append(p.state, "epp", cpu, read_stripped(f) or ""):
+                self._unrecorded(f"cpu{cpu}: EPP performance")
+                continue
             _write_line(f, "performance")
         self.log(5, on_text(s))
         return 0

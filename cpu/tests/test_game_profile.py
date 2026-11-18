@@ -11,6 +11,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Sequence
+import contextlib
+import errno
 import fnmatch
 import io
 import os
@@ -20,6 +22,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+from typing import IO
 
 sys.dont_write_bytecode = True
 
@@ -1239,6 +1242,64 @@ class GameProfileCliTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
         self.assertEqual((r.returncode, r.stdout, r.stderr), (2, "", "usage: game-profile on|off|tick|state\n"))
+
+
+class FullRunFolderTest(GameProfileCase):
+    """/run full (ENOSPC) while 'on' writes game.state: a change whose record cannot be written is not
+    made (off could not undo it), and 'on' still ends with exit 0, so cpu-game.service stays active and
+    its 'off' (ExecStop) runs later. A traceback there left the oneshot unit failed: its ExecStop never
+    ran, and the watchdog's and 'game off''s stop did nothing, so the profile stayed on until reboot."""
+
+    def full_after(self, records: int, *, mode: str = "a") -> contextlib.AbstractContextManager[object]:
+        """The game profile's own writes of game.state in mode fail with ENOSPC after records of them."""
+        real = open
+        written = {"n": 0}
+
+        def fake_open(
+            path: str, flags: str = "r", *, encoding: str | None = None, errors: str | None = None
+        ) -> IO[str]:
+            if path == self.state and flags == mode:
+                written["n"] += 1
+                if written["n"] > records:
+                    raise OSError(errno.ENOSPC, "No space left on device", path)
+            return real(path, flags, encoding=encoding, errors=errors)
+
+        return unittest.mock.patch("cpu.game.adapters.open", fake_open, create=True)
+
+    def test_on_skips_what_it_cannot_record_and_still_succeeds_then_off_undoes_the_rest(self) -> None:
+        self.systemd.actions = []
+        p, out = self.profile()
+        err = io.StringIO()
+        with self.full_after(3), contextlib.redirect_stderr(err):  # machine.slice's three records fit
+            self.assertEqual(p.locked("on"), 0)
+        log = out.getvalue()
+        self.assertIn(
+            f"<4>game-profile: user.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n",
+            log,
+        )
+        self.assertIn("<5>game-profile: on: ", log)
+        self.assertIn(f"{self.state}: No space left on device\n", err.getvalue())
+        sets = self.sets(self.systemd.actions)
+        self.assertEqual(
+            sets[0], f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10"
+        )
+        self.assertFalse([a for a in sets if " user.slice " in a])  # never changed without its record
+        self.assertEqual(self.now("usr", "user.slice", "CPUWeight"), "30")
+        self.assertTrue(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
+        # What 'on' recorded, 'off' undoes.
+        out, _ = self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_on_that_cannot_create_game_state_changes_nothing(self) -> None:
+        self.systemd.actions = []
+        p, out = self.profile()
+        with self.full_after(0, mode="w"):
+            self.assertEqual(p.locked("on"), 1)
+        self.assertIn(
+            f"<3>game-profile: not switched on: could not write {self.state}: No space left on device\n", out.getvalue()
+        )
+        self.assertEqual(self.sets(self.systemd.actions), [])
 
 
 if __name__ == "__main__":

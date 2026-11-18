@@ -687,7 +687,12 @@ In short: `off` puts every setting back exactly as it was before `on`, even if
 **Details (for experts).** Before each change, `on` writes a line to
 `/run/cpu-setup/game.state`: which property, and whether a runtime override
 already existed (with its old value). It writes the line *before* the change,
-so if `on` stops halfway, `off` can still undo what was done.
+so if `on` stops halfway, `off` can still undo what was done. When the line
+cannot be written (`/run` full), `on` leaves that change out and logs
+`<unit>: <settings>: not done, its record could not be written to
+/run/cpu-setup/game.state`; it carries on with the rest and still exits 0,
+so `cpu-game.service` stays active and its `off` (the unit's ExecStop) runs
+when the game ends. (A failed oneshot unit never runs its ExecStop.)
 
 `off` reads the file from the newest line to the oldest:
 

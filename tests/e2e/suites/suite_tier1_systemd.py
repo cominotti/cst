@@ -4059,6 +4059,65 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_107_cpu_game_profile_on_with_a_full_run_folder_leaves_the_unit_active(self) -> None:
+        """'on' with /run/cpu-setup full (a tmpfs mounted over it, filled to its last page): the
+        records cannot be written, so 'on' changes nothing it could not undo, logs why and exits 0.
+        cpu-game.service (the shipped unit, its programs pointed at this checkout) is then active,
+        not failed, so the watchdog's tick, with no GameMode client left, stops it and its
+        ExecStop ('off') runs: game.state is gone and machine.slice's weight is as it was. Before,
+        'on' ended in a traceback, the oneshot unit stayed failed, its ExecStop never ran, and
+        game.state kept the profile "on" until a reboot."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl stop cpu-game.service 2>/dev/null || true
+            systemctl reset-failed cpu-game.service 2>/dev/null || true
+            umount /run/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup /run/systemd/system/cpu-game.service
+            systemctl daemon-reload
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-107-conf.bak ]]; then mv /tmp/e2e-107-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-107-conf.bak
+            install -d /etc/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp="/usr/bin/python3 -I -B /opt/cst-rw/cpu/game-profile"
+            unit=/run/systemd/system/cpu-game.service
+            sed "s|/usr/local/sbin/cpu-game-profile|$gp|" /opt/cst-rw/cpu/units/cpu-game.service >"$unit"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$unit" ]]
+            base=$(systemctl show -P CPUWeight machine.slice)
+            # /run/cpu-setup: one page of tmpfs, already used up.
+            install -d -m 0755 /run/cpu-setup
+            mount -t tmpfs -o size=4k,mode=0755 tmpfs /run/cpu-setup
+            head -c 4096 /dev/zero >/run/cpu-setup/filler
+            if head -c 1 /dev/zero >>/run/cpu-setup/filler 2>/dev/null; then echo "the tmpfs is not full" >&2; exit 1; fi
+            systemctl start cpu-game.service
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == active ]]                 || { systemctl status cpu-game.service >&2 || true; exit 1; }
+            log=$(journalctl -u cpu-game.service -b --no-pager -o cat)
+            grep -q 'not done, its record could not be written to /run/cpu-setup/game.state' <<<"$log"                 || { echo "$log" >&2; exit 1; }
+            if grep -q Traceback <<<"$log"; then echo "$log" >&2; exit 1; fi
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]   # nothing changed unrecorded
+            test -e /run/cpu-setup/game.state
+            # The watchdog, no GameMode client: it stops the unit, whose ExecStop switches the profile off.
+            grep -q 'no GameMode client left: switching off' <<<"$($gp tick)"
+            for _ in $(seq 100); do [[ -e /run/cpu-setup/game.state ]] || break; sleep 0.1; done
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            [[ "$(systemctl show -P Result cpu-game.service)" == success ]]
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_86_cpu_game_profile_refuses_a_settings_line_bash_would_run(self) -> None:
         """With a line in cpu-setup.conf that bash would expand (`BUILD_CPUS=$(nproc)`), the real
         game profile does not switch on: exit 1, the line in its output, no game.state, machine.slice's
