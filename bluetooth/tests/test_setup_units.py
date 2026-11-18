@@ -208,6 +208,8 @@ class StepDownTest(unittest.TestCase):
             "-u",
             "CST_BT_CONTAINER",
             "-u",
+            "CST_BT_LIBWP",
+            "-u",
             "SUDO_USER",
             *session,
         ]
