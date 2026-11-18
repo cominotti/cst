@@ -628,8 +628,8 @@ def unit_exec_paths(text: str, home: str) -> list[str]:
         key, sep, value = line.strip().partition("=")
         if not sep or key.strip() not in _EXEC_COMMANDS:
             continue
-        for word in value.split():
-            word = word.lstrip("-@:+!|")
+        for raw in value.split():
+            word = raw.lstrip("-@:+!|")
             if word.startswith("%h/") and home:
                 word = home.rstrip("/") + word[2:]
             if word.startswith(roots) and word not in out:
