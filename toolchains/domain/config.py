@@ -121,6 +121,28 @@ SCCACHE_STATS = re.compile(
 )
 
 
+def server_place(env_id: str, cgroup_text: str | None, sock: str) -> str:
+    """Where the running sccache server of ENV_ID is, as `status` shows it.
+
+    CGROUP_TEXT is its /proc/PID/cgroup (None: not known). The wrapper starts
+    the server in cst-sccache-<env>.scope; one anywhere else (started by an
+    older wrapper, or by the client in a compile's own scope) runs every
+    compile of that environment under that cgroup's limits, so it is a WARN.
+    """
+    scope = f"cst-sccache-{env_id}.scope"
+    path = next((ln[3:] for ln in (cgroup_text or "").splitlines() if ln.startswith("0::")), "")
+    if not path:
+        return f"sccache server {env_id}: cgroup unknown (its process could not be read)"
+    shown = re.sub(r"^.*?/user@\d+\.service/", "", path)
+    if path.rsplit("/", 1)[-1] == scope:
+        return f"sccache server {env_id}: in its own scope ({shown})"
+    return (
+        f"sccache server {env_id}: WARN: runs in {shown}, not in {scope}: it and every compile through it "
+        "share that cgroup's limits until it stops (the wrapper of `cst toolchains config apply` starts "
+        f"the next one in its scope; to stop this one: SCCACHE_SERVER_UDS={sock} sccache --stop-server)"
+    )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class WrapperValues:
     """The settings `config apply` writes into the installed wrapper."""

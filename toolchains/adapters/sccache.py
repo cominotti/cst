@@ -6,13 +6,15 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import struct
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 from toolchains.domain.common import gib
-from toolchains.domain.config import SCCACHE_DIR_REL, SCCACHE_STATS
+from cst_core.adapters.files import read_text
+from toolchains.domain.config import SCCACHE_DIR_REL, SCCACHE_STATS, server_place
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.program import RUNNER, where_text
 
@@ -54,9 +56,26 @@ def socket_answers(path: str) -> bool:
         s.close()
 
 
+def server_cgroup(path: str) -> str | None:
+    """The /proc/PID/cgroup text of the process that listens on the unix
+    socket PATH (its PID from SO_PEERCRED); None when that is not known."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1)
+    creds = struct.Struct("3i")  # struct ucred: pid, uid, gid
+    try:
+        s.connect(path)
+        pid = creds.unpack(s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, creds.size))[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return read_text(f"/proc/{pid}/cgroup") if pid > 0 else None
+
+
 def sccache_status_lines(home: str) -> list[str]:
-    """The cache's size and, with sccache on this PATH, one line of stats
-    per running server (status runs on the host: its PATH)."""
+    """The cache's size; per running server, with sccache on this PATH one
+    line of stats (status runs on the host: its PATH), and always where it
+    runs (a WARN outside its own scope)."""
     cache = os.path.join(home, SCCACHE_DIR_REL)
     out: list[str] = []
     if os.path.isdir(cache):
@@ -73,26 +92,32 @@ def sccache_status_lines(home: str) -> list[str]:
         c = os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "sccache")
         exe = c if os.access(c, os.X_OK) else ""
     socks = [p for p in sccache_sockets(home) if socket_answers(p)]
-    if not exe:
-        if socks:
-            out.append(f"sccache servers running: {len(socks)} (no sccache on the host's PATH to ask them)")
-        return out
-    if not socks:
+    if not exe and socks:
+        out.append(f"sccache servers running: {len(socks)} (no sccache on the host's PATH to ask them)")
+    if exe and not socks:
         out.append("sccache: no server running (each environment starts its own on its first build)")
     for sock in socks:
         env_id = os.path.basename(sock)[len("cst-sccache-") : -len(".sock")]
-        env = {k: v for k, v in os.environ.items() if not k.startswith("SCCACHE_")}
-        # TMPDIR=/tmp as in rustc-wrapper: if the server stops right after the
-        # socket check, this client call starts a new one, which keeps its TMPDIR.
-        env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1", TMPDIR="/tmp")
-        stats = sccache_stats(exe, env)
-        if not stats:
-            out.append(f"sccache server {env_id}: no answer")
-            continue
-        shown = ", ".join(
-            f"{k.lower()} {stats[k]}"
-            for k in ("Compile requests", "Cache hits", "Cache misses", "Cache size", "Max cache size")
-            if k in stats
-        )
-        out.append(f"sccache server {env_id}: {shown}")
+        if exe:
+            out.append(server_stats_line(exe, env_id, sock))
+        out.append(server_place(env_id, server_cgroup(sock), sock))
     return out
+
+
+def server_stats_line(exe: str, env_id: str, sock: str) -> str:
+    """One line of the numbers of the server on SOCK, asked with EXE."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SCCACHE_")}
+    # TMPDIR=/tmp as in rustc-wrapper, in case a sccache version starts a
+    # server for this question when the server stopped right after the socket
+    # check (0.17.0 does not: with no server, --show-stats starts none and
+    # prints the numbers of the cache folder).
+    env.update(SCCACHE_SERVER_UDS=sock, NO_COLOR="1", TMPDIR="/tmp")
+    stats = sccache_stats(exe, env)
+    if not stats:
+        return f"sccache server {env_id}: no answer"
+    shown = ", ".join(
+        f"{k.lower()} {stats[k]}"
+        for k in ("Compile requests", "Cache hits", "Cache misses", "Cache size", "Max cache size")
+        if k in stats
+    )
+    return f"sccache server {env_id}: {shown}"

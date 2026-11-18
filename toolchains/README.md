@@ -327,8 +327,10 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   build` for a build that needs its own `TMPDIR`) keep yours. Build scripts
   and tests keep yours as well: cargo runs them itself, only their compiles
   go through the wrapper. `cst toolchains status` asks each running server
-  for its numbers with `TMPDIR=/tmp` too: if that server stops right after
-  the socket check, the question starts a new one.
+  for its numbers with `TMPDIR=/tmp` too, in case a sccache version starts
+  a server for that question when the server stopped right after the socket
+  check. sccache 0.17.0 does not: with no server, `--show-stats` starts
+  none and prints the numbers of the cache folder (measured).
   The fix reaches the machine with `cst toolchains config apply`, which
   copies the new wrapper (`config plan` shows it as outdated until then). A
   server that is already running keeps the `TMPDIR` it started with until it
@@ -501,7 +503,14 @@ Things to know:
 - **`status`** shows the item (`off`, `on`, `ok`, `write`), the size of
   `~/.cache/sccache` and, when sccache is on the host's PATH (`status` runs
   on the host), one line of statistics per running server: compile
-  requests, hits, misses, cache size.
+  requests, hits, misses, cache size. For each running server (with or
+  without sccache on the host's PATH) it also shows where the server runs:
+  `sccache server <env>: in its own scope (user.slice/cst-sccache-<env>.scope)`,
+  or a `WARN` line with its cgroup when it runs anywhere else (started by an
+  older wrapper, or by the client inside a compile's capped scope), with the
+  command that stops it. It finds the server's process through the socket
+  (the peer's PID, `SO_PEERCRED`) and reads `/proc/<pid>/cgroup`;
+  `cgroup unknown` when that cannot be read.
 - **`RUST_SCCACHE=no` does not remove it**; `config` shows it as `on`. To
   turn it off: `cst toolchains config apply --no-sccache`. That removes only
   CST's own line (and its comment, and a `[build]` table CST added only for

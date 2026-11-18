@@ -50,6 +50,7 @@ from toolchains.domain import config as tcd_config
 from toolchains.domain import uv as tcd_uv
 from toolchains.adapters import uv as tc_uv
 from toolchains.adapters import cargo as tc_cargo
+from toolchains.adapters import sccache as tc_sccache
 from toolchains.domain import prune as tcd_prune
 from toolchains.adapters import build_tree as tc_build_tree
 from toolchains.cli import config as tc_config
@@ -1287,10 +1288,12 @@ class SccacheConfigTest(RulesBase):
         _rc, out = self.run_main("status")
         self.assertIn("sccache: no server running", out)
 
-    def test_status_asks_each_running_server(self) -> None:
+    def listening_server(self, env_id: str) -> str:
+        """A socket that answers, in a runtime folder of its own, as the
+        server of ENV_ID listens on it (this test process is its peer)."""
         run = tempfile.mkdtemp(prefix="cs")
         self.addCleanup(shutil.rmtree, run)
-        sock_path = os.path.join(run, "cst-sccache-devbox.sock")
+        sock_path = os.path.join(run, f"cst-sccache-{env_id}.sock")
         if len(sock_path) > 100:
             self.skipTest("temporary folder too long for a unix socket")
         os.environ["XDG_RUNTIME_DIR"] = run
@@ -1298,6 +1301,11 @@ class SccacheConfigTest(RulesBase):
         srv.bind(sock_path)
         srv.listen(4)
         self.addCleanup(srv.close)
+        return sock_path
+
+    def test_status_asks_each_running_server(self) -> None:
+        sock_path = self.listening_server("devbox")
+        run = os.path.dirname(sock_path)
         # A stale socket of another environment: nobody listens, not asked.
         stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         stale.bind(os.path.join(run, "cst-sccache-host.sock"))
@@ -1310,8 +1318,9 @@ class SccacheConfigTest(RulesBase):
             "Cache hits (Rust)                    7\\nCache misses                         5\\n"
             'Cache size                       1 GiB\\nMax cache size                  25 GiB\\n"\n',
         )
-        # If the server stops between the socket check and --show-stats, that
-        # client call starts a new one: it must not get the caller's TMPDIR.
+        # In case a sccache version starts a server for --show-stats when the
+        # server stopped right after the socket check (0.17.0 does not), it
+        # must not get the caller's TMPDIR.
         os.environ["TMPDIR"] = os.path.join(self.tmp, "private-tmp")
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
@@ -1323,6 +1332,56 @@ class SccacheConfigTest(RulesBase):
         self.assertNotIn("server host", out)
         with open(log) as f:
             self.assertEqual(f.read(), f"{sock_path} /tmp --show-stats\n")
+
+    def test_status_shows_where_each_server_runs(self) -> None:
+        # A server outside its scope (here: this test process, the peer of the
+        # socket) is a WARN with its cgroup; in cst-sccache-<env>.scope it is
+        # not. Also without sccache on the host's PATH (it lives in the toolbox).
+        sock_path = self.listening_server("devbox")
+        with open("/proc/self/cgroup") as f:
+            own = next(ln[3:] for ln in f.read().splitlines() if ln.startswith("0::"))
+        own = re.sub(r"^.*?/user@\d+\.service/", "", own)
+        os.environ["PATH"] = self.bin
+        self.assertIsNone(shutil.which("sccache"))
+        rc, out = self.run_main("status")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("sccache servers running: 1 (no sccache on the host's PATH to ask them)", out)
+        self.assertIn(
+            f"sccache server devbox: WARN: runs in {own}, not in cst-sccache-devbox.scope: it and every compile "
+            "through it share that cgroup's limits until it stops",
+            out,
+        )
+        self.assertIn(f"to stop this one: SCCACHE_SERVER_UDS={sock_path} sccache --stop-server)", out)
+        scoped = "0::/user.slice/user-1000.slice/user@1000.service/user.slice/cst-sccache-devbox.scope\n"
+        with mock.patch.object(tc_sccache, "server_cgroup", return_value=scoped):
+            _rc, out = self.run_main("status")
+        self.assertIn("sccache server devbox: in its own scope (user.slice/cst-sccache-devbox.scope)", out)
+        self.assertNotIn("WARN", out)
+
+    def test_server_place(self) -> None:
+        sock = "/run/user/1000/cst-sccache-h.sock"
+        place = tcd_config.server_place
+        capped = "0::/user.slice/user-1000.slice/user@1000.service/user.slice/user-x.slice/x-cap-1.scope\n"
+        self.assertEqual(
+            place("h", "1:name=systemd:/\n" + capped, sock),
+            "sccache server h: WARN: runs in user.slice/user-x.slice/x-cap-1.scope, not in cst-sccache-h.scope: "
+            "it and every compile through it share that cgroup's limits until it stops (the wrapper of "
+            "`cst toolchains config apply` starts the next one in its scope; to stop this one: "
+            f"SCCACHE_SERVER_UDS={sock} sccache --stop-server)",
+        )
+        host = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/cst-sccache-host.scope"
+        self.assertEqual(
+            place("host", host, sock), "sccache server host: in its own scope (app.slice/cst-sccache-host.scope)"
+        )
+        # The scope of another environment is not its own; outside a user manager the whole path.
+        self.assertIn(
+            "WARN: runs in app.slice/cst-sccache-host.scope, not in cst-sccache-h.scope", place("h", host, sock)
+        )
+        self.assertIn("WARN: runs in /system.slice/x.service, not in", place("h", "0::/system.slice/x.service", sock))
+        for unknown in (None, "", "1:name=systemd:/\n"):
+            self.assertEqual(
+                place("h", unknown, sock), "sccache server h: cgroup unknown (its process could not be read)"
+            )
 
 
 def stat_mode(st: os.stat_result) -> int:
