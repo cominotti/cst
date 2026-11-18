@@ -1299,7 +1299,7 @@ class SccacheConfigTest(RulesBase):
         os.environ["XDG_RUNTIME_DIR"] = run
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(sock_path)
-        srv.listen(4)
+        srv.listen(64)  # never accepted: each status run leaves its connects in the backlog
         self.addCleanup(srv.close)
         return sock_path
 
@@ -1334,50 +1334,202 @@ class SccacheConfigTest(RulesBase):
             self.assertEqual(f.read(), f"{sock_path} /tmp --show-stats\n")
 
     def test_status_shows_where_each_server_runs(self) -> None:
-        # A server outside its scope (here: this test process, the peer of the
-        # socket) is a WARN with its cgroup; in cst-sccache-<env>.scope it is
-        # not. Also without sccache on the host's PATH (it lives in the toolbox).
+        # The real lookup: the peer of the socket is this test process, read
+        # through SO_PEERCRED and its real /proc/<pid>/cgroup. Also without
+        # sccache on the host's PATH (it lives in the toolbox).
         sock_path = self.listening_server("devbox")
+        run = os.path.dirname(sock_path)
         with open("/proc/self/cgroup") as f:
-            own = next(ln[3:] for ln in f.read().splitlines() if ln.startswith("0::"))
-        own = re.sub(r"^.*?/user@\d+\.service/", "", own)
+            leaf = f.read().strip().rsplit("/", 1)[-1]
         os.environ["PATH"] = self.bin
         self.assertIsNone(shutil.which("sccache"))
         rc, out = self.run_main("status")
         self.assertEqual(rc, 0, out)
         self.assertIn("sccache servers running: 1 (no sccache on the host's PATH to ask them)", out)
-        self.assertIn(
-            f"sccache server devbox: WARN: runs in {own}, not in cst-sccache-devbox.scope: it and every compile "
-            "through it share that cgroup's limits until it stops",
-            out,
+        place = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("sccache server devbox: ")]
+        self.assertEqual(len(place), 1, out)
+        self.assertIn("runs in ", place[0])
+        self.assertIn(leaf, place[0])
+
+        def status_line(cgroup: str) -> str:
+            with mock.patch.object(tc_sccache, "server_cgroup", return_value=cgroup):
+                _rc, text = self.run_main("status")
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("sccache server devbox: ")]
+            self.assertEqual(len(lines), 1, text)
+            return lines[0]
+
+        manager = "0::/user.slice/user-1000.slice/user@1000.service/"
+        capped = manager + "user.slice/lushtext-cap-1.scope\n"
+        # A server the wrapper's fallback started: no user manager socket next
+        # to the socket, so the wrapper never uses a scope here. Why, no WARN.
+        private = os.path.join(run, "systemd", "private")
+        self.assertEqual(
+            status_line(capped),
+            "sccache server devbox: runs in user.slice/lushtext-cap-1.scope (the wrapper could not use a scope "
+            f"here: no user manager socket at {private})",
         )
-        self.assertIn(f"to stop this one: SCCACHE_SERVER_UDS={sock_path} sccache --stop-server)", out)
-        scoped = "0::/user.slice/user-1000.slice/user@1000.service/user.slice/cst-sccache-devbox.scope\n"
-        with mock.patch.object(tc_sccache, "server_cgroup", return_value=scoped):
-            _rc, out = self.run_main("status")
-        self.assertIn("sccache server devbox: in its own scope (user.slice/cst-sccache-devbox.scope)", out)
-        self.assertNotIn("WARN", out)
+        # From here on, the PATH of the peer (this test process) is not the subject.
+        programs = mock.patch.object(tc_sccache, "missing_programs", return_value=())
+        programs.start()
+        self.addCleanup(programs.stop)
+        os.makedirs(os.path.dirname(private))
+        bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bus.bind(private)
+        self.addCleanup(bus.close)
+        # With the manager's socket: the wrapper could have used the scope.
+        self.assertEqual(
+            status_line(capped),
+            "sccache server devbox: WARN: runs in user.slice/lushtext-cap-1.scope, not in cst-sccache-devbox.scope: "
+            "it and every compile through it share that cgroup's limits until it stops (the wrapper of "
+            "`cst toolchains config apply` starts the next one in its scope where systemd-run and flock are "
+            f"installed; to stop this one, wherever sccache is installed: SCCACHE_SERVER_UDS={sock_path} "
+            "sccache --stop-server)",
+        )
+        # The wrapper had no systemd-run on the PATH the server started with.
+        with mock.patch.object(tc_sccache, "missing_programs", return_value=("systemd-run",)):
+            self.assertEqual(
+                status_line(capped),
+                "sccache server devbox: runs in user.slice/lushtext-cap-1.scope (the wrapper could not use a scope "
+                "here: no systemd-run on the PATH it started with)",
+            )
+        # Its last start failed (the wrapper's marker): no stop command.
+        with open(sock_path + ".failed", "w") as f:
+            f.write("1234\n")
+        self.assertEqual(
+            status_line(capped),
+            "sccache server devbox: WARN: runs in user.slice/lushtext-cap-1.scope, not in cst-sccache-devbox.scope: "
+            "it and every compile through it share that cgroup's limits until it stops (the wrapper's last start "
+            f"of its scope failed, see {sock_path}.failed; it tries again 10 minutes after that)",
+        )
+        # In its own scope: the line of before, whatever the marker says.
+        self.assertEqual(
+            status_line(manager + "user.slice/cst-sccache-devbox.scope\n"),
+            "sccache server devbox: in its own scope (user.slice/cst-sccache-devbox.scope)",
+        )
+
+    def test_scope_facts(self) -> None:
+        home = os.path.join(self.tmp, "h")
+        run = os.path.join(home, ".cache", "sccache", "run")
+        os.makedirs(run)
+        sock = os.path.join(run, "cst-sccache-host.sock")
+        self.assertEqual(
+            tc_sccache.scope_facts(sock, home, None),
+            tcd_config.ScopeFacts(run_dir_fallback=True, manager_socket=os.path.join(run, "systemd", "private")),
+        )
+        # A plain file where the manager's socket would be is not one; an
+        # empty marker is a start that worked.
+        xdg = os.path.join(self.tmp, "x")
+        os.makedirs(os.path.join(xdg, "systemd"))
+        with open(os.path.join(xdg, "systemd", "private"), "w"):
+            pass
+        sock = os.path.join(xdg, "cst-sccache-host.sock")
+        with open(sock + ".failed", "w"):
+            pass
+        self.assertEqual(
+            tc_sccache.scope_facts(sock, home, None),
+            tcd_config.ScopeFacts(manager_socket=os.path.join(xdg, "systemd", "private")),
+        )
+
+    def test_missing_programs(self) -> None:
+        # A fake /proc: the server's environment and its own root.
+        proc = os.path.join(self.tmp, "proc")
+        root = os.path.join(proc, "42", "root")
+        os.makedirs(os.path.join(root, "usr", "bin"))
+        os.makedirs(os.path.join(root, "rel"))
+        environ = os.path.join(proc, "42", "environ")
+        with open(environ, "wb") as f:
+            f.write(b"HOME=/h\0PATH=/usr/bin:/opt/b:rel\0LANG=C\0")
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ("systemd-run", "flock"))
+        self.exe(os.path.join(root, "usr", "bin", "systemd-run"), "")
+        # A PATH entry that is not absolute is not searched.
+        self.exe(os.path.join(root, "rel", "flock"), "")
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ("flock",))
+        # A link counts as there, even one whose target resolves elsewhere
+        # (an absolute target would resolve in this process's root).
+        os.makedirs(os.path.join(root, "opt", "b"))
+        os.symlink("/nonexistent/flock", os.path.join(root, "opt", "b", "flock"))
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ())
+        # Nothing readable, no PATH, no root (another user namespace): no claim.
+        os.remove(os.path.join(root, "usr", "bin", "systemd-run"))
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ("systemd-run",))
+        self.assertEqual(tc_sccache.missing_programs(None, proc), ())
+        self.assertEqual(tc_sccache.missing_programs(7, proc), ())
+        with open(environ, "wb") as f:
+            f.write(b"HOME=/h\0")
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ())
+        with open(environ, "wb") as f:
+            f.write(b"PATH=/usr/bin\0")
+        shutil.rmtree(root)
+        self.assertEqual(tc_sccache.missing_programs(42, proc), ())
 
     def test_server_place(self) -> None:
         sock = "/run/user/1000/cst-sccache-h.sock"
         place = tcd_config.server_place
+        facts = tcd_config.ScopeFacts
         capped = "0::/user.slice/user-1000.slice/user@1000.service/user.slice/user-x.slice/x-cap-1.scope\n"
+        warn = (
+            "sccache server h: WARN: runs in user.slice/user-x.slice/x-cap-1.scope, not in cst-sccache-h.scope: "
+            "it and every compile through it share that cgroup's limits until it stops ("
+        )
         self.assertEqual(
             place("h", "1:name=systemd:/\n" + capped, sock),
-            "sccache server h: WARN: runs in user.slice/user-x.slice/x-cap-1.scope, not in cst-sccache-h.scope: "
-            "it and every compile through it share that cgroup's limits until it stops (the wrapper of "
-            "`cst toolchains config apply` starts the next one in its scope; to stop this one: "
+            warn + "the wrapper of `cst toolchains config apply` starts the next one in its scope where "
+            "systemd-run and flock are installed; to stop this one, wherever sccache is installed: "
             f"SCCACHE_SERVER_UDS={sock} sccache --stop-server)",
+        )
+        self.assertEqual(
+            place("h", capped, sock, facts(start_failed=True)),
+            warn + f"the wrapper's last start of its scope failed, see {sock}.failed; it tries again 10 minutes "
+            "after that)",
+        )
+        # A path the shell would split is quoted in the commands to copy.
+        odd = "/home/a b/.cache/sccache/run/cst-sccache-h.sock"
+        self.assertIn(
+            "SCCACHE_SERVER_UDS='/home/a b/.cache/sccache/run/cst-sccache-h.sock' sccache", place("h", capped, odd)
+        )
+        self.assertIn(
+            "see '/home/a b/.cache/sccache/run/cst-sccache-h.sock.failed';",
+            place("h", capped, odd, facts(start_failed=True)),
         )
         host = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/cst-sccache-host.scope"
         self.assertEqual(
             place("host", host, sock), "sccache server host: in its own scope (app.slice/cst-sccache-host.scope)"
         )
-        # The scope of another environment is not its own; outside a user manager the whole path.
+        # In its own scope the facts change nothing.
+        self.assertEqual(
+            place("host", host, sock, facts(run_dir_fallback=True, manager_socket="/x", start_failed=True)),
+            "sccache server host: in its own scope (app.slice/cst-sccache-host.scope)",
+        )
+        # The scope of another environment is not its own.
         self.assertIn(
             "WARN: runs in app.slice/cst-sccache-host.scope, not in cst-sccache-h.scope", place("h", host, sock)
         )
-        self.assertIn("WARN: runs in /system.slice/x.service, not in", place("h", "0::/system.slice/x.service", sock))
+        # Where the wrapper cannot use a scope: why, no WARN, no stop command.
+        why = (
+            "sccache server h: runs in user.slice/user-x.slice/x-cap-1.scope (the wrapper could not use a scope here: "
+        )
+        self.assertEqual(
+            place("h", capped, sock, facts(manager_socket="/run/user/1000/systemd/private")),
+            why + "no user manager socket at /run/user/1000/systemd/private)",
+        )
+        self.assertEqual(
+            place("h", capped, sock, facts(missing_programs=("systemd-run", "flock"), start_failed=True)),
+            why + "no systemd-run and no flock on the PATH it started with)",
+        )
+        self.assertEqual(
+            place("h", capped, sock, facts(manager_socket="/x", missing_programs=("flock",))),
+            why + "no user manager socket at /x)",
+        )
+        self.assertEqual(
+            place("h", capped, sock, facts(run_dir_fallback=True, manager_socket="/x", start_failed=True)),
+            why + "no usable $XDG_RUNTIME_DIR, so its socket is in ~/.cache/sccache/run)",
+        )
+        for outside in ("0::/system.slice/x.service", "0::/user.slice/user-1000.slice/session-3.scope"):
+            self.assertEqual(
+                place("h", outside, sock, facts(start_failed=True)),
+                f"sccache server h: runs in {outside[3:]} (the wrapper could not use a scope here: the compile "
+                "that started it ran outside the user manager (an ssh session, docker exec))",
+            )
         for unknown in (None, "", "1:name=systemd:/\n"):
             self.assertEqual(
                 place("h", unknown, sock), "sccache server h: cgroup unknown (its process could not be read)"

@@ -505,10 +505,27 @@ Things to know:
   on the host), one line of statistics per running server: compile
   requests, hits, misses, cache size. For each running server (with or
   without sccache on the host's PATH) it also shows where the server runs:
-  `sccache server <env>: in its own scope (user.slice/cst-sccache-<env>.scope)`,
-  or a `WARN` line with its cgroup when it runs anywhere else (started by an
-  older wrapper, or by the client inside a compile's capped scope), with the
-  command that stops it. It finds the server's process through the socket
+  `sccache server <env>: in its own scope (user.slice/cst-sccache-<env>.scope)`
+  (`app.slice/cst-sccache-host.scope` for the host's server), or a `WARN` line
+  with its cgroup when it runs anywhere else (started by an older wrapper, or
+  by the client inside a compile's capped scope), with the command that stops
+  it (run it where sccache is installed: in the toolbox for a toolbox's
+  server). Where the wrapper cannot use a scope, the line has no `WARN` and
+  says why (`the wrapper could not use a scope here: ...`): no user manager
+  above the server's cgroup (an ssh session, docker exec), its socket in
+  `~/.cache/sccache/run` (no usable `$XDG_RUNTIME_DIR`), no user manager
+  socket (`systemd/private`) next to its socket, or no `systemd-run` or
+  `flock` on the PATH the server started with (the compile's: read from
+  `/proc/<pid>/environ` and looked up in `/proc/<pid>/root`, so a toolbox's
+  server is checked against the toolbox's files). Stopping that server would
+  change nothing: the next one starts the same way. After a failed start of
+  the scope (`<socket>.failed` not empty) the `WARN` names that file instead
+  of the stop command: the wrapper tries again 10 minutes after the failure.
+  When that process cannot be read (from inside another toolbox: another
+  user namespace), nothing is claimed and the line stays a `WARN`. The first compile after
+  `config apply` replaces a misplaced server (the wrapper removes its socket
+  and starts one in the scope); the old one runs on, out of sight of
+  `status`, until it stops by itself. It finds the server's process through the socket
   (the peer's PID, `SO_PEERCRED`) and reads `/proc/<pid>/cgroup`;
   `cgroup unknown` when that cannot be read.
 - **`RUST_SCCACHE=no` does not remove it**; `config` shows it as `on`. To
