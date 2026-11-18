@@ -23,6 +23,7 @@ from cst_core.domain.values import Json
 from toolchains.domain.build import (
     CACHE_TAG,
     CARGO_ENV,
+    CARGO_MANIFEST,
     CRATE_DEPTH,
     CargoCache,
     CargoProc,
@@ -242,8 +243,8 @@ def find_manifests(wt: str, deadline: float) -> tuple[list[str], list[str], list
     for d, names in walk_dirs(wt, CRATE_DEPTH, deadline, stop=other_repo):
         if other_repo(d, names):
             continue
-        if "Cargo.toml" in names:
-            manifests.append(os.path.join(d, "Cargo.toml"))
+        if CARGO_MANIFEST in names:
+            manifests.append(os.path.join(d, CARGO_MANIFEST))
         pins += [os.path.join(d, n) for n in PIN_NAMES if n in names]
         tools += [os.path.join(d, n) for n in sorted(names) if is_tool_file(n)]
     tools += [os.path.join(wt, n) for n in TOOL_FILE_TOP if os.path.isfile(os.path.join(wt, n))]
@@ -380,7 +381,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
                         covered.add(os.path.normpath(mp))
                 wr = data.get("workspace_root")
                 if isinstance(wr, str):
-                    covered.add(os.path.join(os.path.normpath(wr), "Cargo.toml"))
+                    covered.add(os.path.join(os.path.normpath(wr), CARGO_MANIFEST))
                 bd = data.get("build_directory")
                 if not isinstance(bd, str) or not bd:
                     continue  # a cargo without build-dir support: not in this root

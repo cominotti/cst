@@ -7,8 +7,11 @@ the values written into it, the server statistics).
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
 import re
 import shlex
+import tomllib
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
@@ -16,6 +19,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.install import manifest_by_src
 from toolchains.domain.build import HASH_VAR, ROOT_REL
+from toolchains.domain.common import parses_as, plain
 
 
 # The words of the plan and status lines that name what CST could not do.
@@ -93,6 +97,49 @@ def same_debug(value: object, want: object) -> bool:
     return value == want
 
 
+def lean_state(path: str, text: str | None) -> LeanState:
+    """{path, add: [(label, block)], have: [label], conflicts: [text],
+    append: text or '' (when appending is safe), error: ''} of cargo's config PATH
+    with TEXT (None: it cannot be read)."""
+    st: LeanState = {"path": path, "add": [], "have": [], "conflicts": [], "append": "", "error": ""}
+    if text is None:
+        st["error"] = CANNOT_READ
+        return st
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        st["error"] = f"is not valid TOML ({e})"
+        return st
+    for label_, tpath, want, block in LEAN_KEYS:
+        table = dig(data, tpath)
+        if isinstance(table, dict) and "debug" in table:
+            if same_debug(table["debug"], want):
+                st["have"].append(label_)
+            else:
+                st["conflicts"].append(f"[{label_}] debug = {json.dumps(table['debug'])} is yours: left as it is")
+        else:
+            st["add"].append((label_, block))
+    if st["add"]:
+        extra = LEAN_HEAD + "\n".join(b for _, b in st["add"])
+        new = text + ("" if not text or text.endswith("\n") else "\n") + extra
+        # Appended tables must not clash with the file's (TOML forbids a
+        # table twice): parse the result and compare.
+        try:
+            nd = tomllib.loads(new)
+        except tomllib.TOMLDecodeError:
+            nd = None
+        expect = json.loads(json.dumps(data))
+        for label_, tpath, want, _ in LEAN_KEYS:
+            if any(label_ == a for a, _ in st["add"]):
+                d = expect
+                for k in tpath:
+                    d = d.setdefault(k, {})
+                d["debug"] = want
+        if nd is not None and json.loads(json.dumps(nd)) == expect:
+            st["append"] = extra
+    return st
+
+
 # The opt-in sccache item. Off unless RUST_SCCACHE=yes (or config apply
 # --sccache): a small wrapper (toolchains/rustc-wrapper, copied to
 # ~/.local/libexec/cst/) named as rustc-wrapper in [build] of
@@ -102,6 +149,12 @@ def same_debug(value: object, want: object) -> bool:
 WRAPPER_NAME = "rustc-wrapper"
 WRAPPER_REL = manifest_by_src()["toolchains/rustc-wrapper"].dest.removeprefix("~/")
 SCCACHE_DIR_REL = ".cache/sccache"
+
+
+def wrapper_path(home: str) -> str:
+    return os.path.join(home, WRAPPER_REL)
+
+
 SCCACHE_DEFAULT_SIZE = "25G"
 SCCACHE_HEAD = (
     "# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes: rustc goes through sccache (~/.cache/sccache)."
@@ -202,3 +255,84 @@ class SccacheState(TypedDict):
     ours: bool
     add: str
     remove: str
+
+
+def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
+    """{path, error, value (build.rustc-wrapper now, or None), ours, add,
+    remove}: add / remove are the whole new file text, '' when CST cannot
+    make that change safely (each candidate is parsed again and must equal
+    the file with only that one key added or removed). PATH: cargo's config, TEXT its
+    text (None: it cannot be read), WANT the wrapper's path."""
+    st: SccacheState = {"path": path, "error": "", "value": None, "ours": False, "add": "", "remove": ""}
+    if text is None:
+        st["error"] = CANNOT_READ
+        return st
+    try:
+        data = plain(tomllib.loads(text))
+    except tomllib.TOMLDecodeError as e:
+        st["error"] = f"is not valid TOML ({e})"
+        return st
+    build = data.get("build")
+    if build is not None and not isinstance(build, dict):
+        return st  # build = 1: no add, no remove
+    value = (build or {}).get("rustc-wrapper")
+    st["value"], st["ours"] = value, value == want
+    keyline = f"rustc-wrapper = {json.dumps(want)}"
+    if value is None:
+        expect = plain(data)
+        table = expect.setdefault("build", {})
+        if isinstance(table, dict):  # always: build is a table or absent here
+            table["rustc-wrapper"] = want
+        headers = list(BUILD_HEADER.finditer(text))
+        cands: list[str] = []
+        if len(headers) == 1:
+            h = headers[0]
+            nxt = ANY_HEADER.search(text, h.end())
+            section_end = nxt.start() if nxt else len(text)
+            keys = list(KEY_LINE.finditer(text, h.end(), section_end))
+            # After the table's last key (the build-dir line CST writes),
+            # else right after the header.
+            spots = ([text.find("\n", keys[-1].start())] if keys else []) + [h.end()]
+            for pos in spots:
+                if pos < 0:
+                    pos = len(text)
+                rest = text[pos:]
+                cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest if rest else "\n"))
+        elif not headers:
+            sep = "" if not text or text.endswith("\n") else "\n"
+            cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
+        st["add"] = next((c for c in cands if parses_as(c, expect)), "")
+    elif st["ours"]:
+        lines = text.splitlines(keepends=True)
+        pat = re.compile(rf"{WS}*rustc-wrapper{WS}*={WS}*{re.escape(json.dumps(want))}{WS}*(?:#.*)?\n?\Z")
+        idx = [i for i, ln in enumerate(lines) if pat.match(ln)]
+        if len(idx) == 1:
+            i = idx[0]
+            drop = {i}
+            if i > 0 and lines[i - 1].startswith(SCCACHE_HEAD[:48]):
+                drop.add(i - 1)
+            # CST's own appended block (a [build] header whose own section
+            # holds only this key; [build.x] subtables may follow): all of it.
+            after: list[str] = []
+            for ln in lines[i + 1 :]:
+                if ANY_HEADER.match(ln):
+                    break
+                after.append(ln)
+            if (
+                i > 1
+                and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))
+                and lines[i - 2].startswith(SCCACHE_HEAD[:48])
+                and not any(KEY_LINE.match(ln) for ln in after)
+            ):
+                drop |= {i - 1, i - 2}
+                if i > 2 and not lines[i - 3].strip():
+                    drop.add(i - 3)
+            new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
+            expect = plain(data)
+            table = expect["build"]
+            if isinstance(table, dict):  # always: the line CST wrote is in [build]
+                del table["rustc-wrapper"]
+            alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
+            if parses_as(new, expect) or parses_as(new, alt):
+                st["remove"] = new
+    return st

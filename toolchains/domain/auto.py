@@ -4,14 +4,15 @@ environment systemctl --user gets to reach this user's own manager; no I/O."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
-from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, UNIT_DIR_REL
+from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL
 
 
 UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
@@ -54,6 +55,27 @@ def render_timer() -> str:
     return unit_timer([UNIT_HEADER], "CST: prune old toolchain caches, hourly", "hourly", "10min")
 
 
+# The user units of auto on: {name: its text}.
+AUTO_UNITS: dict[str, Callable[[], str]] = {SERVICE: render_service, TIMER: render_timer}
+
+# The file auto off leaves (OFF_REL): while it exists, snapshots setup does not turn the timer on.
+OFF_TEXT = (
+    f"{MARKER}: written by `cst toolchains auto off`.\n"
+    "# While this file exists, `cst btrfs snapshots setup` does not turn the hourly\n"
+    "# pruning of toolchain caches back on. `cst toolchains auto on` removes it.\n"
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TimerFacts:
+    """What the user manager says of a timer: is-enabled, is-active ('' where it gave no
+    answer) and, only while it is active, its next run (show NextElapseUSecRealtime)."""
+
+    enabled: str
+    active: str
+    next_elapse: str = ""
+
+
 def label(key: str) -> str:
     return f"~/{key}" if "/" in key else f"~/{UNIT_DIR_REL}/{key}"
 
@@ -68,7 +90,7 @@ def own_session_env(env: Mapping[str, str], uid: int, owner: int | None, *, own_
         if own_exists:
             out["XDG_RUNTIME_DIR"] = own
         return out
-    named = re.fullmatch(r"/run/user/([0-9]+)/?", xdg, re.ASCII)
+    named = re.fullmatch(r"/run/user/(\d+)/?", xdg, re.ASCII)
     if (owner is not None and owner != uid) or (named is not None and int(named.group(1)) != uid):
         out["XDG_RUNTIME_DIR"] = own
         if f"={xdg.rstrip('/')}/" in env.get("DBUS_SESSION_BUS_ADDRESS", ""):

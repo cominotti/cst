@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 """The composition root of cst-toolchains: what it reads of its environment (the
 program's name in hints, the journal's stream, the fixed "now" of tests, the stop
-of the re-run on the host), its re-run on the host from a toolbox, and the session
-every command runs with: the home, the adapters, and the targets built over them.
+of the re-run on the host, a test's systemctl stub), who runs it, its output mode,
+its re-run on the host from a toolbox, and the session every command runs with: the
+home, the adapters, and the targets and use cases built over them. The only module of
+the package besides the adapters that imports an adapter.
 
 toolchains/cli/ parses argv, asks this module for the session and runs one command.
 """
@@ -18,11 +20,22 @@ from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runner import on_host_argv
 from cst_core.adapters.runtime import program_argv
 from toolchains.adapters.build_tree import CargoBuildTree
-from toolchains.adapters.home_files import RunSummaries, load_settings
+from toolchains.adapters.home_files import HomeFiles, RunSummaries, ToolchainsLock, load_settings
 from toolchains.adapters.processes import cargo_procs
-from toolchains.adapters.program import RunOutput, home_folder, in_container, journal_stdout
+from toolchains.adapters.program import (
+    RunOutput,
+    home_folder,
+    in_container,
+    journal_stdout,
+    output_mode,
+    real_user_is_root,
+)
+from toolchains.adapters.rustup import InstalledTools
 from toolchains.adapters.units import UserUnits
 from toolchains.adapters.uv import UvTool
+from toolchains.application.auto import AutoTimer
+from toolchains.application.config import ToolConfig
+from toolchains.application.status import ToolchainsStatus
 from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
@@ -35,14 +48,20 @@ if TYPE_CHECKING:
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
     from toolchains.domain.prune import Settings
-    from toolchains.ports import BuildTreePort, RunOutputPort, UvPort
+    from toolchains.ports import (
+        BuildTreePort,
+        HomeFilesPort,
+        RunOutputPort,
+        UserUnitsPort,
+        UvPort,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
 class Session:
     """What every command runs with: the home it works on, the run's "now", how
     hints name the program, the running program's entry point (its files are next
-    to it), the run's bounds, and the adapters."""
+    to it), the run's bounds, and the adapters (the run lock among them)."""
 
     home: str
     now: float
@@ -50,7 +69,9 @@ class Session:
     entry_file: str
     limits: Limits
     out: RunOutputPort
-    units: UserUnits
+    units: UserUnitsPort
+    lock: ToolchainsLock
+    files: HomeFilesPort
     machine: TargetPorts
 
 
@@ -59,7 +80,7 @@ class Parts:
     """What a test gives instead of the real thing (None: the real one)."""
 
     limits: Limits | None = None
-    units: Callable[[RunOutputPort], UserUnits] | None = None
+    units: Callable[[RunOutputPort], UserUnitsPort] | None = None
     procs: Callable[[], list[CargoProc]] | None = None
     tree: BuildTreePort | None = None
     uv: UvPort | None = None
@@ -69,6 +90,21 @@ class Parts:
 def prog_name() -> str:
     """How hints name the frontend ("cst toolchains" through cst)."""
     return os.environ.get("CST_PROG") or "cst toolchains"
+
+
+def systemctl_program() -> str | None:
+    """The stub a test runs instead of systemctl (CST_TOOLCHAINS_SYSTEMCTL), or None: the real one."""
+    return os.environ.get("CST_TOOLCHAINS_SYSTEMCTL") or None
+
+
+def set_output_mode(cmd: str, action: str | None) -> None:
+    """SIGPIPE at its default for a command that only reads (see adapters.program.output_mode)."""
+    output_mode(cmd, action)
+
+
+def run_by_root() -> bool:
+    """The real user is root (the program refuses: it works on a user's home)."""
+    return real_user_is_root()
 
 
 def reexec_on_host(argv: Sequence[str], entry_file: str) -> int | None:
@@ -99,8 +135,9 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     procs = cargo_procs if p.procs is None else p.procs
     tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
-    units = (UserUnits if p.units is None else p.units)(out)
-    return Session(home, now, prog, entry_file, limits, out, units, machine)
+    units = UserUnits(out, systemctl_program()) if p.units is None else p.units(out)
+    lock = ToolchainsLock(home, out)
+    return Session(home, now, prog, entry_file, limits, out, units, lock, HomeFiles(home, entry_file), machine)
 
 
 def settings(s: Session) -> Settings:
@@ -117,3 +154,38 @@ def target(s: Session, checked: Settings | None, tid: str) -> Target:
     if tid == PYTHON_UV.id:
         return PythonUv(s.home, s.now, checked.uv if checked else None, s.machine, s.limits)
     raise KeyError(tid)
+
+
+def auto_timer(s: Session) -> AutoTimer:
+    """auto on and auto off over the session's adapters."""
+    return AutoTimer(
+        s.home,
+        s.prog,
+        s.files,
+        s.units,
+        s.machine.state,
+        s.out,
+        lambda: settings(s),
+        lambda checked, tid: target(s, checked, tid),
+    )
+
+
+def tool_config(s: Session) -> ToolConfig:
+    """config plan and apply over the session's adapters."""
+    return ToolConfig(s.home, s.prog, s.files, s.out, lambda: settings(s))
+
+
+def toolchains_status(s: Session) -> ToolchainsStatus:
+    """status over the session's adapters."""
+    return ToolchainsStatus(
+        s.home,
+        s.prog,
+        s.out,
+        s.files,
+        s.machine.state,
+        InstalledTools(s.home, s.limits),
+        auto_timer(s),
+        tool_config(s),
+        lambda: settings(s),
+        lambda checked, tid: target(s, checked, tid),
+    )

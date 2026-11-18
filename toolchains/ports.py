@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The boundaries the prune use case (toolchains/application/) reaches the machine
-through: cargo's build folders and who uses them, uv, the saved run summaries, and the
-lines a run says. cst_core's ClockPort gives the monotonic time; the adapters in
-toolchains/adapters/ implement these.
+"""The boundaries the use cases (toolchains/application/) reach the machine
+through: cargo's build folders and who uses them, uv, the saved run summaries, the
+lines a run says, the user manager, the files CST keeps in the home and the
+reports of what is installed besides the caches. cst_core's ClockPort gives the
+monotonic time; the adapters in toolchains/adapters/ implement these.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ if TYPE_CHECKING:
 
     from cst_core.domain.values import Json
     from cst_core.ports import CommandResult
+    from cst_core.domain.files import UnitFileState
+    from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import CargoCache, Folder, Workspaces
+    from toolchains.domain.config import WrapperValues
     from toolchains.domain.prune import RunRecord
 
 # (folders, leftovers of an interrupted run, other entries with why they are left alone)
@@ -136,6 +140,10 @@ class RunStatePort(Protocol):
         """Saved; a failure is said, not raised (the run itself went through)."""
         ...
 
+    def forget(self, tid: str) -> None:
+        """The summary is removed (auto off); one that cannot be removed is left."""
+        ...
+
 
 class RunOutputPort(Protocol):
     """The lines a command says (with the journal's priority under systemd)."""
@@ -145,4 +153,155 @@ class RunOutputPort(Protocol):
     def where(self, path: str) -> str:
         """PATH as the lines show it: with ~, and where it really is when a link on the way
         leads elsewhere."""
+        ...
+
+
+class UserUnitsPort(Protocol):
+    """The user manager (systemctl --user), as auto on, auto off and status use it. The
+    calls made before files are removed are checked: Refused when the manager refuses or
+    gives no answer, so nothing is removed yet and a second run can finish the job."""
+
+    def active_state(self, name: str) -> str:
+        """What is-active says of NAME ('' when the manager could not be asked)."""
+        ...
+
+    def timer_facts(self, name: str) -> TimerFacts:
+        """What the manager says of the timer NAME (its next run only while it is active)."""
+        ...
+
+    def stop_if_running(self, name: str) -> bool:
+        """Stop NAME unless the manager says it is inactive or failed, both checked;
+        True when it was stopped."""
+        ...
+
+    def disable_timer(self, name: str) -> None:
+        """`disable --now` the timer NAME, checked, then forget its last run."""
+        ...
+
+    def reload(self) -> None:
+        """daemon-reload, checked (Refused)."""
+        ...
+
+    def reload_failed(self) -> bool:
+        """daemon-reload after unit files were removed: True (and an error line) when it failed."""
+        ...
+
+    def enable_now(self, name: str) -> None:
+        """`enable --now` NAME, checked (Refused)."""
+        ...
+
+    def manager_path(self) -> str | None:
+        """PATH of the user manager (what the timer's service runs with), or None when it
+        cannot be read."""
+        ...
+
+
+class HomeFilesPort(Protocol):
+    """The files CST keeps in the user's home: what auto on installs (the program's copy,
+    its defaults and the two user units, listed in the user's install record), the file
+    auto off leaves, what the earlier `cst btrfs cargo-gc` left, and for config the tools'
+    settings files (cargo's config, uv.toml) and the sccache wrapper. PATH arguments are
+    absolute paths in the home."""
+
+    def auto_copies(self) -> dict[str, bytes]:
+        """{path relative to the home: bytes} of the copies the timer runs; ConfigError
+        when the defaults next to this program are missing."""
+        ...
+
+    def auto_states(self) -> dict[str, UnitFileState]:
+        """The state of each copy (by its relative path) and unit (by its name)."""
+        ...
+
+    def timer_missing(self) -> bool:
+        """No timer file of auto on is there (a link to nothing counts as none)."""
+        ...
+
+    def stale_files(self) -> list[tuple[str, bool]]:
+        """[(path, ours)] of what the earlier `cst btrfs cargo-gc` left."""
+        ...
+
+    def put_auto_copy(self, rel: str, data: bytes) -> bool:
+        """Written through the installer (and listed) unless current; True when written."""
+        ...
+
+    def put_auto_unit(self, name: str, text: str) -> bool:
+        """Written through the installer (and listed) unless current; True when written."""
+        ...
+
+    def auto_done(self) -> None:
+        """The user's install record says auto on finished."""
+        ...
+
+    def forget_auto_files(self) -> None:
+        """The copies and units leave the user's install record (auto off removed them)."""
+        ...
+
+    def turned_off(self) -> bool:
+        """The file auto off leaves is there."""
+        ...
+
+    def mark_off(self) -> None:
+        """Write the file auto off leaves."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Remove the file (or link) PATH; OSError when that fails."""
+        ...
+
+    def dangling_link(self, path: str) -> bool:
+        """PATH is a symbolic link to nothing."""
+        ...
+
+    def remove_if_empty(self, path: str) -> None:
+        """Remove the folder PATH when it is empty; otherwise leave it."""
+        ...
+
+    def old_conf_present(self) -> bool:
+        """The settings file of the earlier `cst btrfs cargo-gc` is there (no longer read)."""
+        ...
+
+    def read_settings(self, path: str) -> str | None:
+        """The text of a tool's settings file (bytes that are not UTF-8 replaced); '' when it
+        is missing; None when it cannot be read."""
+        ...
+
+    def append(self, path: str, text: str) -> str:
+        """Append TEXT to the settings file PATH (made if missing; a newline first when it
+        does not end in one). '' or the error."""
+        ...
+
+    def rewrite(self, path: str, text: str) -> str:
+        """Replace the settings file's text (atomic, same mode; a link is followed). '' or
+        the error."""
+        ...
+
+    def build_dir_is_csts(self) -> bool:
+        """build-dir in the user's cargo config is the line CST writes."""
+        ...
+
+    def wrapper_text(self, values: WrapperValues) -> str | None:
+        """The sccache wrapper as installed with VALUES written in, or None when its
+        source is not next to this program (the timer's copy has none)."""
+        ...
+
+    def wrapper_state(self, text: str) -> str:
+        """ok | change | missing | conflict of the installed wrapper against TEXT."""
+        ...
+
+    def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
+        """The wrapper TEXT, at its place in the home, through the installer, listed with VALUES,
+        its component marked done; True when written (WriteFailed when it cannot be written)."""
+        ...
+
+
+class InstalledToolsPort(Protocol):
+    """What status reports of the tools installed besides the caches (read only)."""
+
+    def rust_toolchains(self) -> list[str]:
+        """The installed rustup toolchains, their size, and which files under ~/Workspace pin
+        or name them."""
+        ...
+
+    def sccache(self) -> list[str]:
+        """The sccache cache's size and, per running server, its numbers and where it runs."""
         ...

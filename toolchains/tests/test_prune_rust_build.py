@@ -66,7 +66,8 @@ class FakeUnits(tc_units.UserUnits):
     """The user manager of a test: FAKE answers every systemctl call."""
 
     def __init__(self, out: RunOutputPort, fake: Callable[..., str]) -> None:
-        super().__init__(out)
+        # Never the real user manager, also if a call misses the fake.
+        super().__init__(out, "/nonexistent/systemctl")
         self.fake = fake
 
     def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
@@ -75,7 +76,7 @@ class FakeUnits(tc_units.UserUnits):
 
 def quiet_signals(test: unittest.TestCase) -> None:
     """main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run."""
-    p = mock.patch.object(tc_program, "restore_default_signals", lambda: None)
+    p = mock.patch.object(tc_program, "restore_default_signals", return_value=None)
     p.start()
     test.addCleanup(p.stop)
 
