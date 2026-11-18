@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from types import FrameType
-from typing import IO, Final, Protocol
+from typing import IO, Final, Protocol, override
 
 from bluetooth.domain import (
     CARD_PREFIX,
@@ -181,6 +181,7 @@ class Live(LiveAudioPort):
     def __init__(self, dev: str) -> None:
         self.dev = dev
 
+    @override
     def snap(self) -> Snapshot | None:
         """Query `pw-dump` and return this device's parsed snapshot, or None."""
         rc, out = run(["pw-dump"], timeout=10)
@@ -191,6 +192,7 @@ class Live(LiveAudioPort):
         except ValueError:
             return None
 
+    @override
     def cards(self) -> list[PactlCard] | None:
         """Query `pactl -f json list cards`, or return None on failure."""
         rc, out = run(["pactl", "-f", "json", "list", "cards"])
@@ -202,6 +204,7 @@ class Live(LiveAudioPort):
             return None
         return data if isinstance(data, list) else None
 
+    @override
     def set_profile(self, prof: str) -> bool:
         """Switch `bluez_card.<dev>` to profile `prof` via `pactl`."""
         return run(["pactl", "set-card-profile", CARD_PREFIX + self.dev, prof])[0] == 0
