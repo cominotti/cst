@@ -26,6 +26,13 @@ class ArtifactKind(StrEnum):
     DATA = "data"
 
 
+class GeneratedKind(StrEnum):
+    """The kind an install record lists for a file CST generates (no manifest source): what
+    Placement.kind holds besides an ArtifactKind. Not a manifest kind."""
+
+    TEXT = "text"
+
+
 @dataclass(frozen=True, slots=True)
 class InstallEntry:
     """One repository artifact installed onto a host or user account."""

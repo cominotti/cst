@@ -84,6 +84,7 @@ from cst_core.domain.install import (
     COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
+    GeneratedKind,
     InstallEntry,
     Owner,
     expand_dest,
@@ -190,7 +191,7 @@ def _text_place(dest: str, mode: int, component: str | None, a: argparse.Namespa
         record=record_file(owner, a.home or home, a.root) if recorded else "",
         component=component or "",
         src=None,
-        kind="text",
+        kind=GeneratedKind.TEXT,
         owner=owner,
         mode=mode,
     )

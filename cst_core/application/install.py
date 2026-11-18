@@ -25,6 +25,7 @@ from cst_core.domain.errors import Refused
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import (
     ArtifactKind,
+    GeneratedKind,
     InstallEntry,
     Owner,
     expand_dest,
@@ -79,7 +80,7 @@ class Placement:
     record: str  # the record file that lists it ("": none)
     component: str
     src: str | None  # the manifest source; None for generated text
-    kind: str
+    kind: ArtifactKind | GeneratedKind
     owner: Owner
     mode: int
     values: Mapping[str, str] | None = None

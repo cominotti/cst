@@ -27,7 +27,7 @@ from unittest import mock
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Owner
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner
 from cst_core.domain.record import (
     EMPTY_RECORD,
     ComponentState,
@@ -225,7 +225,14 @@ class InstallServiceRecordTest(unittest.TestCase):
 
     def test_put_and_forget_for_a_module_that_checks_its_files_itself(self) -> None:
         place = Placement(
-            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", Owner.ROOT, 0o644
+            "/t/u.service",
+            "/etc/systemd/system/u.service",
+            self.ROOT,
+            "m:t",
+            None,
+            GeneratedKind.TEXT,
+            Owner.ROOT,
+            0o644,
         )
         self.assertTrue(self.svc.put(place, b"[Unit]\n", as_root=False))
         self.assertFalse(self.svc.put(place, b"[Unit]\n", as_root=False))
@@ -238,7 +245,14 @@ class InstallServiceRecordTest(unittest.TestCase):
         # put writes one file of a module that may have changed other things before it (swap
         # apply edits crypttab first): "nothing was changed" would be wrong there.
         place = Placement(
-            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", Owner.ROOT, 0o644
+            "/t/u.service",
+            "/etc/systemd/system/u.service",
+            self.ROOT,
+            "m:t",
+            None,
+            GeneratedKind.TEXT,
+            Owner.ROOT,
+            0o644,
         )
         self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
         with self.assertRaises(InstallRefused) as cm:

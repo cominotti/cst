@@ -11,7 +11,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import OwnedState, UnitFileState
-from cst_core.domain.install import Owner, manifest_by_src
+from cst_core.domain.install import GeneratedKind, Owner, manifest_by_src
 from vm.adapters import TIMER_COMPONENT
 from vm.domain import (
     SERVICE,
@@ -85,7 +85,7 @@ def install_timer_files(
             record=paths.install_record,
             component=TIMER_COMPONENT,
             src=program_entry.src if program else None,
-            kind=program_entry.kind if program else "text",
+            kind=program_entry.kind if program else GeneratedKind.TEXT,
             owner=Owner.ROOT,
             mode=mode,
         )

@@ -25,7 +25,7 @@ from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
-from cst_core.domain.install import INSTALL_MANIFEST, Owner, expand_dest, manifest_by_src
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner, expand_dest, manifest_by_src
 from toolchains.adapters.program import program_folder
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
 from toolchains.domain.common import (
@@ -80,7 +80,7 @@ def put_home_file(
     *,
     component: str,
     src: str | None,
-    kind: str,
+    kind: ArtifactKind | GeneratedKind,
     entry_file: str,
     values: Mapping[str, str] | None = None,
 ) -> bool:
@@ -119,7 +119,14 @@ def put_auto_unit(home: str, name: str, text: str, entry_file: str) -> bool:
     """One of auto on's user units (generated text); True when written."""
     path = os.path.join(home, UNIT_DIR_REL, name)
     return put_home_file(
-        home, path, text.encode(), 0o644, component=AUTO_COMPONENT, src=None, kind="text", entry_file=entry_file
+        home,
+        path,
+        text.encode(),
+        0o644,
+        component=AUTO_COMPONENT,
+        src=None,
+        kind=GeneratedKind.TEXT,
+        entry_file=entry_file,
     )
 
 
