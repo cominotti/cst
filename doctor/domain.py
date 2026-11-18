@@ -559,7 +559,7 @@ def parse_offered_features_xml(xml_text: str) -> tuple[set[str | None] | None, s
 
 def summary(results: Sequence[tuple[str, Result]]) -> tuple[str, int]:
     """Format the doctor summary line and return (line, exit_code)."""
-    counts = {s: 0 for s in SEVERITY}
+    counts = dict.fromkeys(SEVERITY, 0)
     for _, r in results:
         counts[r.status] += 1
     worst = max((SEVERITY[r.status] for _, r in results), default=0)
