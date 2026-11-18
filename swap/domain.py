@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import posixpath
 import re
 import shlex
 from typing import Final, Literal, TypedDict
@@ -309,6 +310,23 @@ def parse_memory_low(text: str) -> int | None:
     return parse_size(m.group(1)) if m else None
 
 
+def memory_low_override(
+    effective: str, dropins: Sequence[tuple[str, str | None]], cst_dropin: str, want: int | None
+) -> str | None:
+    """The drop-in systemd takes machine.slice's MemoryLow from, when that is not CST's: CST's drop-in
+    is loaded, systemd's value (effective, as `systemctl show` prints it) is not CST's (want), and a
+    later drop-in sets MemoryLow. dropins: (path, text, None when unreadable) as DropInPaths lists them;
+    systemd applies them in file-name order, the last value wins. None: CST's value applies, or CST's
+    drop-in is not loaded yet, or the drop-in that sets it cannot be named (the cgroup is compared then)."""
+    if cst_dropin not in (path for path, _ in dropins) or parse_size(effective) == want:
+        return None
+    source: str | None = None
+    for path, text in sorted(dropins, key=lambda d: posixpath.basename(d[0])):
+        if text is not None and re.search(r"^MemoryLow=\S", text, re.M):
+            source = path
+    return None if source == cst_dropin else source
+
+
 def same_param(live: str, desired: str) -> bool:
     """zswap shows booleans as Y/N; tmpfiles writes 1/0."""
     norm = {"1": "Y", "0": "N", "y": "Y", "n": "N"}
@@ -498,6 +516,9 @@ class SettingsReport:
     rows: tuple[SettingCheckRow, ...]
     exp_name: str
     exp_key: str
+    # The drop-in machine.slice's MemoryLow comes from when it is not CST's ("": CST's): its "over" row.
+    override_source: str = ""
+    cst_dropin: str = ""
 
     @property
     def has_diff(self) -> bool:

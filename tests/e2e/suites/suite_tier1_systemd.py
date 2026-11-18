@@ -276,6 +276,25 @@ slice_facts() {
         /run/systemd/system/machine.slice.d 2>&1 || true
 }
 
+# With a MemoryLow set at run time on machine.slice (set-property --runtime, then a reload): status
+# and apply exit 0 with an "over" row naming the runtime drop-in; apply writes nothing and leaves it.
+check_runtime_over() {
+    local rt=/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf s
+    [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "no runtime MemoryLow"
+    swap_run status
+    [[ $rc == 0 ]] || fail "status with a runtime MemoryLow"
+    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
+    grep -qF "  over: $rt sets machine.slice's MemoryLow" <<<"$out" || fail "status over note"
+    [[ "$out" != *"  DIFF "* ]] || fail "status DIFF with a runtime MemoryLow"
+    s="$(snap)"
+    swap_run apply
+    [[ $rc == 0 ]] || fail "apply with a runtime MemoryLow"
+    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
+    [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "apply with a runtime MemoryLow wrote"
+    [[ "$(snap)" == "$s" ]] || fail "apply with a runtime MemoryLow changed something"
+    [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "apply touched the runtime value"
+}
+
 # Run a command as tester, with the scratch kernel tree and the stand-ins.
 as_user() {
     runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester PATH="$PATH" \
@@ -1035,6 +1054,7 @@ swap_run apply
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 ]]
+check_runtime_over
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]]
@@ -1120,6 +1140,17 @@ doc="$(as_user "$CST" doctor 2>&1 || true)"
 grep -qF "swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0" <<<"$doc" || { out="$doc"; fail "doctor before"; }
 [[ "$(snap)" == "$s0" ]] || fail "the user's plan or doctor changed something"
 
+# A swap0 line written by hand in crypttab: apply refuses before it writes anything, the settings too.
+cp -a /etc/crypttab "$W/crypttab.before"
+echo "swap0 /dev/nvme0n1p5 none luks" >>/etc/crypttab
+s_bad="$(snap)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a hand-written crypttab line"
+grep -qF "/etc/crypttab has an unmarked entry for swap0: remove it by hand" <<<"$err" || fail "refusal message"
+[[ ! -e /etc/cst/swap.conf ]] || fail "a refused apply wrote the settings"
+[[ "$(snap)" == "$s_bad" ]] || fail "a refused apply changed /etc"
+cp -a "$W/crypttab.before" /etc/crypttab
+
 # apply: the settings from the installed state, the drop-in under its new name.
 swap_run apply
 [[ $rc == 0 ]] || fail "apply"
@@ -1149,10 +1180,11 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s1" ]] || fail "second apply changed something"
 
-# Now a MemoryLow set at run time wins the reload.
+# Now a MemoryLow set at run time wins the reload, and status and apply leave it.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 ]]
+check_runtime_over
 echo E2E-OK
 """,
             check=False,

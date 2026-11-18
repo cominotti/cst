@@ -2,6 +2,7 @@
 """Text presentation helpers rendering swap domain reports."""
 
 from collections.abc import Mapping, Sequence
+import posixpath
 import sys
 from typing import TextIO
 
@@ -54,6 +55,12 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
     for row in report.rows:
         extra = "" if row.state == "ok" or not row.want else f"   (desired {row.want})"
         print(f"  {row.state:<5} {row.label:<28} {row.live}{extra}", file=out)
+    if report.override_source:
+        print(
+            f"  over: {report.override_source} sets machine.slice's MemoryLow; systemd applies it after CST's"
+            f" {posixpath.basename(report.cst_dropin)} (drop-ins in file-name order, the last one wins). apply leaves it.",
+            file=out,
+        )
     if report.has_exp:
         print(
             f"  exp: the cpu experiment {report.exp_name} is on and sets {report.exp_key}; apply leaves it alone."
@@ -187,6 +194,7 @@ def render_plan(report: SwapPlanReport, out: TextIO = sys.stdout) -> int:
     """Render dry-run plan output and return 0."""
     print("Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews a comment;", file=out)
     print("dedupe = apply drops a second copy of the same entry; exp = set by a cpu experiment, left alone;", file=out)
+    print("over = MemoryLow set by a drop-in systemd applies after CST's, left alone;", file=out)
     print("write/update/mask/remove/start/restart/swapoff/DIFF = apply would change that;", file=out)
     print("later = needs a reboot; ? = could not be read; REFUSE/CONFLICT = apply stops.", file=out)
     render_config_report(report.config, out)

@@ -111,6 +111,7 @@ ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 # The partition swap manages (swap/domain.py, SETTINGS_REL), and the file an older CST marked a line in.
 SWAP_CONF = HostPath("/etc/cst/swap.conf")
+SWAP_DROPIN = HostPath(_BY_SRC["swap/units/machine.slice.d-10-swap-memory-low.conf"].dest)
 FSTAB = HostPath("/etc/fstab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 

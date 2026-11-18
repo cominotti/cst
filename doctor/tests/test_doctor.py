@@ -1123,6 +1123,60 @@ class SwapSettingsDoctorTest(Scratch):
         )
 
 
+class MachineSliceMemoryLowDoctorTest(Scratch):
+    """check_machine_slice_memory_low: the same answer as cst swap status (an "over" row there)."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    RUN = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+
+    def write(self, host_path: str, text: str) -> None:
+        p = os.path.join(self.root, host_path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
+
+    def show(self, memory_low: str, *dropins: str) -> None:
+        d = os.path.join(self.tmp, "show", "sys")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "machine.slice"), "w") as f:
+            f.write(f"LoadState=loaded\nMemoryLow={memory_low}\nDropInPaths={' '.join(dropins)}\n")
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "machine.slice MemoryLow" in ln]
+
+    def install(self) -> None:
+        with open(os.path.join(REPO, "swap", "units", "machine.slice.d-10-swap-memory-low.conf")) as f:
+            self.write(self.CST, f.read())
+
+    def test_a_drop_in_after_cst_s_is_named(self) -> None:
+        self.install()
+        self.write(self.RUN, "[Slice]\nMemoryLow=1G\n")
+        self.show(str(2**30), self.CST, self.RUN)
+        r = self.run_tool()
+        self.assertEqual(
+            self.lines(r.stdout),
+            [
+                f"  info   machine.slice MemoryLow 1.0 GiB: set by {self.RUN}, which systemd applies after CST's"
+                f" {self.CST} (48.0 GiB); cst swap leaves it"
+            ],
+        )
+        self.assertNotIn("revert", r.stdout)
+        self.assert_read_only()
+
+    def test_ok_with_cst_s_value(self) -> None:
+        self.install()
+        self.show(str(48 * 2**30), self.CST)
+        r = self.run_tool()
+        self.assertEqual(self.lines(r.stdout), [f"  ok     machine.slice MemoryLow 48.0 GiB, from {self.CST}"])
+
+    def test_nothing_without_cst_s_drop_in_or_an_answer(self) -> None:
+        self.show(str(2**30), self.RUN)
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+        self.install()
+        os.remove(os.path.join(self.tmp, "show", "sys", "machine.slice"))
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+
+
 class DockerNocowPostponedTest(Scratch):
     """check_docker_nocow_postponed: the record btrfs/docker-volumes-nocow
     keeps of the boots at which its migration had to wait."""

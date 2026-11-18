@@ -176,6 +176,22 @@ runs, the `cpu` module's game profile gives the game's cgroups
 `MemoryLow=16G` (runtime only); it does not touch `machine.slice`'s memory
 settings. `cst swap status` shows both floors in its `low` column.
 
+**A MemoryLow from another drop-in.** `plan`, `status` and `apply` ask
+systemd (`systemctl show machine.slice`, on the host from a toolbox) which
+`MemoryLow` it applies and from which drop-ins. When CST's drop-in is loaded
+and a drop-in that systemd applies after it sets another value (a
+`systemctl set-property [--runtime] machine.slice MemoryLow=...`, or a
+`50-memory-low.conf` someone else wrote), the row is `over`: it shows
+systemd's value and names that drop-in, and `apply` leaves it (it does not
+fail on it, and writes nothing for it). That is the point of the `10-` name.
+`DIFF` is left for a cgroup whose `memory.low` differs from the value
+systemd reports as CST's. When systemd cannot be asked, the cgroup is
+compared as before. The `cpu` module's game profile sets `AllowedCPUs`,
+`CPUWeight` and `IOWeight` on `machine.slice` at run time, never
+`MemoryLow` (its `zz-cst-game.conf` drop-ins are for the user's slices), so
+it does not make this row `over`. `cst doctor` gives the same answer (an
+`info` line naming the drop-in).
+
 **Not managed here** (done once, by hand): `freePageReporting='on'` on the
 virtio memballoon of the `win11-devbox` VM, which lets the guest hand freed
 memory back to the host.
@@ -226,6 +242,7 @@ The words in the first column of `plan` and `status`:
 | `adopt` | Up to date, but written by an older name of this tool: `apply` only renews the comment (section 5). |
 | `dedupe` | The same `swap0` entry is there twice (for example, the old script ran again): `apply` keeps one (section 5). |
 | `exp` | A `cpu` module experiment set this value on purpose: `apply` leaves it alone ([section 2.4](#24-swappiness-100-and-the-other-settings)). |
+| `over` | `machine.slice`'s `MemoryLow` comes from a drop-in systemd applies after CST's: the row names it, `apply` leaves it ([section 2.5](#25-memorylow48g-for-the-vm)). |
 | `write`, `update`, `mask`, `remove` | `apply` would write, rewrite, mask or delete that file. |
 | `start`, `restart`, `swapoff` | `apply` would activate `swap0`, re-activate it, or swap off `zram0`. |
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |

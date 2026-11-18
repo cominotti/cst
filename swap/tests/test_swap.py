@@ -667,8 +667,10 @@ class _FakeSystemd:
         fail_unit: str | None = None,
         fail_result: CommandResult | None = None,
         on_call: Callable[[str, str], object] | None = None,
+        shown: Mapping[str, str] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.shown = {} if shown is None else dict(shown)  # what `systemctl show machine.slice` says ({}: no answer)
         self._fail_result = CommandResult(1, "", "") if fail_result is None else fail_result
         self._on_call = on_call
         self.daemon_reloads = 0
@@ -720,6 +722,10 @@ class _FakeSystemd:
 
     def restart(self, unit: str) -> CommandResult:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
+
+    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
+        del props
+        return dict(self.shown) if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         cleaned = path.lstrip("/").replace("/", "-")
@@ -1544,6 +1550,122 @@ class SwapSettingsTest(_SwapScratch):
         self.assertNotIn("  REFUSE", plan)
         os.remove(self.env.fstab)
         self.assertIn("REFUSE    cst/swap.conf", self._plan_text(self.env, unreadable={self.env.crypttab}))
+
+
+class MemoryLowOverrideTest(_SwapScratch):
+    """machine.slice's MemoryLow from a drop-in systemd applies after CST's: an "over" row naming it, no
+    DIFF, apply does not fail; DIFF stays for a cgroup that disagrees with the value systemd reports."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    RUNTIME = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+    FOREIGN = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
+
+    def setUp(self) -> None:
+        super().setUp()
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)  # CST's drop-in in place
+        self.assertEqual(rc, 0, err)
+
+    def _host_file(self, host_path: str, text: str) -> None:
+        p = self.env.host_view(host_path)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _cgroup_low(self, value: int) -> None:
+        with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
+            f.write(f"{value}\n")
+
+    def _run(self, cmd: str, shown: Mapping[str, str]) -> tuple[int, str, str]:
+        fs = self._fs(mapper_present=True)
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs, shown=shown),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(cmd, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_runtime_value_is_an_over_row_and_apply_does_not_fail(self) -> None:
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        self._cgroup_low(2**30)
+        shown = {"MemoryLow": str(2**30), "DropInPaths": f"{self.CST} {self.RUNTIME}"}
+        note = (
+            f"  over: {self.RUNTIME} sets machine.slice's MemoryLow; systemd applies it after CST's"
+            " 10-swap-memory-low.conf (drop-ins in file-name order, the last one wins). apply leaves it."
+        )
+        for cmd in ("status", "plan", "apply"):
+            with self.subTest(cmd=cmd):
+                rc, out, err = self._run(cmd, shown)
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn("  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+                self.assertIn(note + "\n", out)
+                self.assertNotIn("  DIFF", out)
+                self.assertNotIn("machine.slice memory.low", out)
+                self.assertNotIn("systemctl", out)  # no undo command named
+        self.assertIn(
+            "over = MemoryLow set by a drop-in systemd applies after CST's, left alone;", self._run("plan", shown)[1]
+        )
+
+    def test_a_foreign_50_memory_low_conf_is_an_over_row(self) -> None:
+        self._host_file(self.FOREIGN, "[Slice]\nMemoryLow=8G\n")
+        self._cgroup_low(8 * 2**30)
+        rc, out, _err = self._run("status", {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"})
+        self.assertEqual(rc, 0)
+        self.assertIn("  over  machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
+
+    def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
+        self._cgroup_low(2**30)
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
+        rc, out, _err = self._run("status", shown)
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertNotIn("over", out.replace("over = ", ""))
+        rc, out, err = self._run("apply", shown)
+        self.assertEqual(rc, 1)
+        self.assertIn("one or more settings did not apply as expected", err)
+
+    def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        self._cgroup_low(2**30)
+        rc, out, _err = self._run("status", {})
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+
+
+class MemoryLowOverrideRuleTest(unittest.TestCase):
+    """memory_low_override: which drop-in systemd takes machine.slice's MemoryLow from, if not CST's."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    CST_TEXT = "[Slice]\nMemoryLow=48G\n"
+    RUN = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+    WANT = 48 * 2**30
+
+    def test_the_last_drop_in_that_sets_it_by_file_name(self) -> None:
+        cpu = "/etc/systemd/system/machine.slice.d/10-cpu-setup.conf"
+        game = "/run/systemd/system.control/machine.slice.d/50-CPUWeight.conf"  # the game profile's: no MemoryLow
+        dropins = [
+            (self.RUN, "[Slice]\nMemoryLow=1G\n"),  # listed first: still applied after 10-
+            (cpu, "[Slice]\nCPUWeight=50\n"),
+            (self.CST, self.CST_TEXT),
+            (game, "[Slice]\nCPUWeight=100\n"),
+        ]
+        self.assertEqual(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT), self.RUN)
+        self.assertIsNone(D.memory_low_override(str(2**30), dropins[1:], self.CST, self.WANT))  # CST's is the last
+        self.assertEqual(D.memory_low_override("infinity", dropins, self.CST, self.WANT), self.RUN)
+
+    def test_none_when_cst_s_value_applies_or_its_drop_in_is_not_loaded(self) -> None:
+        dropins = [(self.CST, self.CST_TEXT), (self.RUN, "[Slice]\nMemoryLow=48G\n")]
+        self.assertIsNone(D.memory_low_override(str(self.WANT), dropins, self.CST, self.WANT))
+        old = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"  # before apply renamed it
+        self.assertIsNone(D.memory_low_override("0", [(old, self.CST_TEXT)], self.CST, self.WANT))
+
+    def test_none_when_the_later_drop_in_cannot_be_read(self) -> None:
+        dropins = [(self.CST, self.CST_TEXT), (self.RUN, None)]
+        self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
 
 
 class _ScriptedRunner:

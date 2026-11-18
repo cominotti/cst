@@ -3,10 +3,19 @@
 
 from collections.abc import Iterator
 
+from doctor.application.cpu import unit_props
 from doctor.application.shared import check, read_text
-from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, WARN, ZSWAP_CONF, ZSWAP_PARAMS, Result
+from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, SWAP_DROPIN, WARN, ZSWAP_CONF, ZSWAP_PARAMS, Result
 from doctor.ports import CheckFn, DoctorHostPort
-from swap.domain import marked_fstab_name, parse_swap_settings, parse_tmpfiles_params
+from swap.domain import (
+    human,
+    marked_fstab_name,
+    memory_low_override,
+    parse_memory_low,
+    parse_size,
+    parse_swap_settings,
+    parse_tmpfiles_params,
+)
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
@@ -80,3 +89,30 @@ def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
             f"swap partition: not configured (no SWAP_PARTUUID in {SWAP_CONF}): cst swap apply refuses"
             " (swap/README.md, section 2.3)",
         )
+
+
+@check(CHECKS, "swap")
+def check_machine_slice_memory_low(host: DoctorHostPort) -> Iterator[Result]:
+    """machine.slice's MemoryLow as systemd applies it, read as `cst swap status` reads it: info when a
+    drop-in after CST's sets it (status shows it as "over", apply leaves it), ok when it is CST's.
+    Nothing when CST's drop-in is not installed or systemd cannot be asked."""
+    want = parse_memory_low(read_text(host, host.path(SWAP_DROPIN), 65536))
+    if want is None:
+        return
+    vals = unit_props(host, ["systemctl"], "machine.slice", ["MemoryLow", "DropInPaths"])
+    if vals is None or not vals.get("MemoryLow"):
+        return
+    effective = vals["MemoryLow"]
+    paths = vals.get("DropInPaths", "").split()
+    dropins = [(p, read_text(host, host.path(HostPath(p)), 65536) or None) for p in paths]
+    source = memory_low_override(effective, dropins, SWAP_DROPIN, want)
+    size = parse_size(effective)
+    if source is not None:
+        live = effective if size is None else human(size)
+        yield Result(
+            INFO,
+            f"machine.slice MemoryLow {live}: set by {source}, which systemd applies after CST's"
+            f" {SWAP_DROPIN} ({human(want)}); cst swap leaves it",
+        )
+    elif SWAP_DROPIN in paths and size == want:
+        yield Result(OK, f"machine.slice MemoryLow {human(want)}, from {SWAP_DROPIN}")

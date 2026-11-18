@@ -10,7 +10,7 @@ from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
-from cst_core.ports import FileSystemPort, SystemdPort
+from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
     WSF_EXPERIMENT,
     CgroupSwapRow,
@@ -34,11 +34,13 @@ from swap.domain import (
     is_cst_dropin,
     marked_crypttab_entry,
     marked_fstab_name,
+    memory_low_override,
     parse_swap_settings,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
     parse_proc_swaps,
+    parse_size,
     parse_sysctl,
     parse_tmpfiles_params,
     psi_value,
@@ -87,6 +89,11 @@ class SwapEnvironment:
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+
+    def host_view(self, host_path: str) -> str:
+        """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
+        root = self.etc_dir.rstrip("/").removesuffix("/etc")
+        return root + host_path
 
     @property
     def settings_path(self) -> str:
@@ -461,23 +468,31 @@ class SwapReports:
             if state == "DIFF" and key == exp_key and exp_on:
                 state = "exp"
             rows.append(SettingCheckRow(state, key, live, want))
-        want_low = parse_memory_low(self._desired_text(self._env.src_dropin))
+        row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
+        rows.append(row)
+        return SettingsReport(
+            rows=tuple(rows), exp_name=exp_name, exp_key=exp_key, override_source=source, cst_dropin=DROPIN_ENTRY.dest
+        )
+
+    def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
+        """machine.slice's floor: "over" (and the drop-in that sets it) when systemd takes MemoryLow from a
+        drop-in after CST's; else the cgroup's memory.low against CST's value (DIFF when it differs)."""
+        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths"))
+        effective = shown.get("MemoryLow", "")
+        dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
+        source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
+        if source is not None:
+            size = parse_size(effective)
+            live = effective if size is None else human(size)
+            return SettingCheckRow("over", "machine.slice MemoryLow", live, human(want_low)), source
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
         if live_low is None:
-            rows.append(
-                SettingCheckRow("-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low))
-            )
-        else:
-            ok = live_low.isdigit() and int(live_low) == want_low
-            rows.append(
-                SettingCheckRow(
-                    "ok" if ok else "DIFF",
-                    "machine.slice memory.low",
-                    human(int(live_low)) if live_low.isdigit() else live_low,
-                    human(want_low),
-                )
-            )
-        return SettingsReport(rows=tuple(rows), exp_name=exp_name, exp_key=exp_key)
+            return SettingCheckRow(
+                "-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+            ), ""
+        ok = live_low.isdigit() and int(live_low) == want_low
+        live = human(int(live_low)) if live_low.isdigit() else live_low
+        return SettingCheckRow("ok" if ok else "DIFF", "machine.slice memory.low", live, human(want_low)), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
         try:
