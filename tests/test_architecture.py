@@ -19,7 +19,7 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow
+  doctor, cst_core, toolchains, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow
   and btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
   size of each one: new logic goes into domain (pure) or adapters (I/O),
   or into an application layer with ports.
@@ -143,7 +143,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cst_core/cli.py": 10,
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
-    "toolchains/cli/": 934,
+    "toolchains/cli/": 71,
     "vm/cli/": 281,
 }
 
@@ -186,7 +186,6 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 # tests/budgets.py). Never above; a missing key is 0.
 IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 1,
-    "toolchains cli": 16,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
@@ -202,6 +201,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
     "swap": "swap/wiring.py",
+    "toolchains": "toolchains/wiring.py",
     "vm": "vm/wiring.py",
 }
 

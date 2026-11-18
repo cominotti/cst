@@ -44,7 +44,7 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `cst_core`, vm and btrfs's bulk, docker-gc, docker-volumes-nocow and
+doctor, `cst_core`, toolchains, vm and btrfs's bulk, docker-gc, docker-volumes-nocow and
 snapshot have the full profile; in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
@@ -122,12 +122,12 @@ uninstall.
 - `presenter.py`: only when there are two or more output formats (text and
   `--json`).
 
-`toolchains` is on its way to the full profile: `prune` renames folders away
-and an interrupted run leaves leftovers the next one deletes, and the
-program re-runs itself on the host from a toolbox, so it has
-`application/` (the prune use case), `ports.py` and `wiring.py`. Its `auto`,
-`config` and `status` commands still do their I/O in `cli/`; it joins
-`HEXAGONAL_PACKAGES` once they are use cases too.
+`toolchains` has the full profile: `prune` renames folders away and an
+interrupted run leaves leftovers the next one deletes, `auto on|off` and
+`config apply` change the machine in steps a second run finishes, and the
+program re-runs itself on the host from a toolbox. So it has `application/`
+(the prune, auto, config and status use cases), `ports.py` and `wiring.py`,
+and `cli/` only parses argv, asks `wiring` for the use case and runs it.
 
 **What the gates check in each profile.**
 
@@ -198,7 +198,7 @@ with fakes (`execute_cli(..., runner=, ctx=, elevate=)`) takes ports; when
 the caller passes none, it asks `wiring` for the real ones.
 
 `tests/test_architecture.py` enforces it for the packages in
-`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, vm, `bluetooth/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
+`HEXAGONAL_PACKAGES` (swap, doctor, cst_core, toolchains, vm, `bluetooth/setup`, `btrfs/bulk`, `btrfs/docker_gc`,
 `btrfs/docker_volumes_nocow` and `btrfs/snapshot` today): their `cli.py` and
 `presenter.py` do no I/O and import no adapter, and only `wiring.py` and
 the adapters import one. `WIRING_ALLOWED` lets a `wiring.py`, and no other

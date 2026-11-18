@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The files CST writes in the home folder: auto on's copies and units and the
 sccache wrapper (through the installer and its record), the settings files
-it appends to or rewrites, and the run summaries of the targets.
+it appends to or rewrites, the run summaries of the targets and the run lock.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import stat
+import tomllib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,26 +18,43 @@ if TYPE_CHECKING:
 
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.files import owned_file_state_at, unit_file_state_at, write_atomic
+from cst_core.adapters.files import owned_file_state_at, read_bytes, read_text, unit_file_state_at, write_atomic
 from cst_core.adapters.install import program_installer
+from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.install import INSTALL_MANIFEST, expand_dest, manifest_by_src
 from cst_core.domain.values import Json
 from toolchains.adapters.program import program_folder
+from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
 from toolchains.domain.common import (
     CONF_REL,
+    ConfigError,
     DEFAULTS_NAME,
+    DEFAULTS_REL,
     MARKER,
     OFF_REL,
     OLD_CONF_REL,
+    OLD_DATA,
+    OLD_FILES,
+    OLD_MARKER,
+    OLD_UNITS,
+    PROG_REL,
     SERVICE,
     STATE_DIR_REL,
     TIMER,
     UNIT_DIR_REL,
 )
-from toolchains.domain.config import WRAPPER_REL
+from toolchains.domain.build import expected_template
+from toolchains.domain.config import (
+    CARGO_CFG_REL,
+    SCCACHE_SIZE_LINE,
+    SCCACHE_WORKSPACE_LINE,
+    WRAPPER_NAME,
+    WrapperValues,
+    wrapper_path,
+)
 from toolchains.domain.prune import RunRecord, Settings, checked_settings, parse_defaults
 
 
@@ -202,29 +220,43 @@ class RunSummaries:
     def write(self, tid: str, record: RunRecord) -> None:
         write_state(self.home, tid, record, self.out)
 
-
-def run_locked(home: str, fn: Callable[[], int], out: RunOutputPort, *, busy_refused: bool = False) -> int:
-    """One run at a time (the timer and a manual apply, auto on/off): an exclusive
-    flock on ~/.local/state/cst/toolchains.lock (0600). When another run holds the
-    lock: nothing done, exit 0 (a prune that finds another prune running), or
-    Refused with busy_refused (auto on/off: what was asked did not happen)."""
-    path = os.path.join(home, STATE_DIR_REL, "toolchains.lock")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-    try:
+    def forget(self, tid: str) -> None:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.unlink(state_path(self.home, tid))
         except OSError:
-            if busy_refused:
-                raise Refused(
-                    "another run is in progress (the hourly prune, or another auto on/off): nothing done; "
-                    f"run this again once it has finished (journalctl --user -u {SERVICE} shows the prune)"
-                ) from None
-            out.say("another run is in progress: nothing done", 5)
-            return 0
-        return fn()
-    finally:
-        os.close(fd)
+            pass
+
+
+class ToolchainsLock:
+    """One run at a time (the timer and a manual apply, auto on/off): an
+    exclusive flock on ~/.local/state/cst/toolchains.lock (0600) in HOME; OUT says when
+    another run holds it."""
+
+    def __init__(self, home: str, out: RunOutputPort) -> None:
+        self.home = home
+        self.out = out
+
+    def run(self, fn: Callable[[], int], *, busy_refused: bool = False) -> int:
+        """FN() under the lock. When another run holds the lock: nothing done, exit 0 (a
+        prune that finds another prune running), or Refused with busy_refused (auto
+        on/off: what was asked did not happen)."""
+        path = os.path.join(self.home, STATE_DIR_REL, "toolchains.lock")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                if busy_refused:
+                    raise Refused(
+                        "another run is in progress (the hourly prune, or another auto on/off): nothing done; "
+                        f"run this again once it has finished (journalctl --user -u {SERVICE} shows the prune)"
+                    ) from None
+                self.out.say("another run is in progress: nothing done", 5)
+                return 0
+            return fn()
+        finally:
+            os.close(fd)
 
 
 def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> OwnedState:
@@ -244,16 +276,6 @@ def timer_unit_state(path: str, wanted: str) -> UnitFileState:
     return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner="user")
 
 
-def old_conf_note(home: str, out: RunOutputPort) -> None:
-    if os.path.lexists(os.path.join(home, OLD_CONF_REL)):
-        out.say(
-            f"note: ~/{OLD_CONF_REL} is no longer read: put its settings into ~/{CONF_REL} "
-            "with the RUST_BUILD_ prefix (e.g. RUST_BUILD_MAX_IDLE=48h), then remove it",
-            4,
-            err=True,
-        )
-
-
 def turned_off(home: str) -> bool:
     return os.path.lexists(os.path.join(home, OFF_REL))
 
@@ -267,10 +289,6 @@ def read_cfg(path: str) -> str | None:
         return ""
     except OSError:
         return None
-
-
-def wrapper_path(home: str) -> str:
-    return os.path.join(home, WRAPPER_REL)
 
 
 def write_cfg(path: str, text: str) -> str:
@@ -303,3 +321,145 @@ def append_text(path: str, text: str) -> str:
     except OSError as e:
         return str(e.strerror or e)
     return ""
+
+
+def copies(entry_file: str) -> dict[str, bytes]:
+    """{installed path (relative to home): bytes}: this program as `install`
+    writes it (a zipapp) and its defaults, as the timer runs them."""
+    defaults = read_bytes(defaults_path(entry_file))
+    if defaults is None:
+        raise ConfigError(f"the defaults file {defaults_path(entry_file)} is missing")
+    return {PROG_REL: install_payload("toolchains/cst-toolchains", entry_file), DEFAULTS_REL: defaults}
+
+
+def unit_states(home: str, entry_file: str) -> dict[str, UnitFileState]:
+    out: dict[str, UnitFileState] = {
+        rel: file_state(os.path.join(home, rel), text) for rel, text in copies(entry_file).items()
+    }
+    for name, render in AUTO_UNITS.items():
+        out[name] = timer_unit_state(os.path.join(home, UNIT_DIR_REL, name), render())
+    return out
+
+
+def stale_files(home: str) -> list[tuple[str, bool]]:
+    """[(path, ours)] of what `cst btrfs cargo-gc enable|disable` left
+    (the first version of this cleanup)."""
+    out: list[tuple[str, bool]] = []
+    for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
+        path = os.path.join(home, rel)
+        st = file_state(path, None, OLD_MARKER)
+        if st != "missing":
+            out.append((path, st == "change"))
+    for rel in OLD_DATA:
+        path = os.path.join(home, rel)
+        if os.path.lexists(path):
+            out.append((path, not os.path.islink(path)))
+    return out
+
+
+def cargo_build_dir_is_csts(home: str) -> bool:
+    try:
+        with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
+            build = tomllib.load(f).get("build")
+    except OSError, tomllib.TOMLDecodeError:
+        return False
+    return isinstance(build, dict) and build.get("build-dir") == expected_template(home)
+
+
+def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
+    """The wrapper as installed (the settings written in), or None when its
+    source is not next to this program (the timer's copy has none)."""
+    text = read_text(os.path.join(program_folder(entry_file), WRAPPER_NAME))
+    if text is None:
+        return None
+    text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", text, count=1)
+    text, m = SCCACHE_WORKSPACE_LINE.subn(f"workspace={'yes' if values.workspace else 'no'}", text, count=1)
+    return text if n == m == 1 else None
+
+
+def wrapper_state(home: str, text: str) -> str:
+    """ok | change | missing | conflict (not CST's; a symlink counts by what it points to)."""
+    path = wrapper_path(home)
+    st = file_state(path, text)
+    if st == "ok":
+        try:
+            if stat.S_IMODE(os.stat(path).st_mode) != 0o755:
+                st = "change"
+        except OSError:
+            st = "change"
+    return st
+
+
+class HomeFiles:
+    """HomeFilesPort: the files CST keeps in HOME for the running program (ENTRY_FILE: its
+    entry point; its copies and defaults are read next to it)."""
+
+    def __init__(self, home: str, entry_file: str) -> None:
+        self.home = home
+        self.entry_file = entry_file
+
+    def auto_copies(self) -> dict[str, bytes]:
+        return copies(self.entry_file)
+
+    def auto_states(self) -> dict[str, UnitFileState]:
+        return unit_states(self.home, self.entry_file)
+
+    def timer_missing(self) -> bool:
+        return file_state(os.path.join(self.home, UNIT_DIR_REL, TIMER), render_timer()) == "missing"
+
+    def stale_files(self) -> list[tuple[str, bool]]:
+        return stale_files(self.home)
+
+    def put_auto_copy(self, rel: str, data: bytes) -> bool:
+        return put_auto_copy(self.home, rel, data, self.entry_file)
+
+    def put_auto_unit(self, name: str, text: str) -> bool:
+        return put_auto_unit(self.home, name, text, self.entry_file)
+
+    def auto_done(self) -> None:
+        record_done(self.home, AUTO_COMPONENT, self.entry_file)
+
+    def forget_auto_files(self) -> None:
+        forget_auto_files(self.home, self.entry_file)
+
+    def turned_off(self) -> bool:
+        return turned_off(self.home)
+
+    def mark_off(self) -> None:
+        write_atomic(os.path.join(self.home, OFF_REL), OFF_TEXT, mode=0o644)
+
+    def remove(self, path: str) -> None:
+        os.unlink(path)
+
+    def dangling_link(self, path: str) -> bool:
+        return os.path.islink(path) and not os.path.exists(path)
+
+    def remove_if_empty(self, path: str) -> None:
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+    def old_conf_present(self) -> bool:
+        return os.path.lexists(os.path.join(self.home, OLD_CONF_REL))
+
+    def read_settings(self, path: str) -> str | None:
+        return read_cfg(path)
+
+    def append(self, path: str, text: str) -> str:
+        return append_text(path, text)
+
+    def rewrite(self, path: str, text: str) -> str:
+        return write_cfg(path, text)
+
+    def build_dir_is_csts(self) -> bool:
+        return cargo_build_dir_is_csts(self.home)
+
+    def wrapper_text(self, values: WrapperValues) -> str | None:
+        return wrapper_text(values, self.entry_file)
+
+    def wrapper_state(self, text: str) -> str:
+        return wrapper_state(self.home, text)
+
+    def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
+        return put_wrapper(self.home, wrapper_path(self.home), text, values, self.entry_file)
