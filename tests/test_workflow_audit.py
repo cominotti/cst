@@ -120,7 +120,7 @@ def config_problems(text: str) -> list[str]:
 _FLOW = "no flow style, anchor, alias or tag here (`{`, `[`, `&`, `*`, `!`): the gate reads block YAML only"
 
 
-_ENTRY = re.compile(r"^(\s*)-\s+([^\s:#]+)(?::(\d+))?(?::\d+)?\s*$")
+_ENTRY = re.compile(r"^(\s*)-\s+([^\s:#\"']+)(?::(\d+))?(?::\d+)?\s*$")
 
 
 def entry_problems(text: str, line_counts: Mapping[str, int]) -> list[str]:
@@ -147,8 +147,14 @@ def entry_problems(text: str, line_counts: Mapping[str, int]) -> list[str]:
                 rule = key.group(2)
             ignore_indent = indent if key.group(2) == "ignore" else None
             continue
+        if ignore_indent is None or indent <= ignore_indent:
+            continue
         entry = _ENTRY.match(line)
-        if entry is None or ignore_indent is None or indent <= ignore_indent:
+        if entry is None:
+            out.append(
+                f"{CONFIG}:{number}: {rule}: write the entry as FILE or FILE:LINE, unquoted and with no "
+                "comment after it, so that this test can check it"
+            )
             continue
         name, at = entry.group(2), entry.group(3)
         files = sorted(p for p in line_counts if os.path.basename(p) == name)
@@ -419,6 +425,15 @@ class WorkflowAuditTest(unittest.TestCase):
                 "fix the finding"
             ],
         )
+        for odd in ('"action.yml:201"', "action.yml:201  # why", "'ci.yml'"):
+            with self.subTest(entry=odd):
+                self.assertEqual(
+                    entry_problems(GOOD_CONFIG.replace("action.yml:201", odd), files),
+                    [
+                        f"{CONFIG}:6: github-env: write the entry as FILE or FILE:LINE, unquoted and with no "
+                        "comment after it, so that this test can check it"
+                    ],
+                )
         self.assertEqual(
             entry_problems(GOOD_CONFIG.replace("action.yml:201", "gone.yml:3"), files),
             [f"{CONFIG}:6: github-env: `gone.yml` is no file of .github; delete the entry"],
