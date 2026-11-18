@@ -164,7 +164,11 @@ BAD_SETTINGS_EXIT = 78
 SETTINGS_KEYS = ("DOCKER_GC_PROTECT",)
 # A registry as an image reference starts with it: a host (a name or an address, a port), and
 # optionally the first parts of a repository path ("ghcr.io/team").
-REGISTRY_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*")
+# The path parts follow the reference grammar of the distribution spec: lower-case letters and digits,
+# separated by ".", "_", "__" or a run of "-".
+REGISTRY_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"
+)
 
 
 class UnknownProtection(RuntimeError):

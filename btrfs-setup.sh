@@ -139,7 +139,8 @@
 #                          disable stops it and keeps its files; --purge also
 #                          removes its program, its three units and its
 #                          recorded state (/var/lib/docker-gc), and keeps its
-#                          settings (/etc/cst/docker-gc.conf).
+#                          settings (/etc/cst/docker-gc.conf; when it is missing,
+#                          it first writes it, as enable does).
 #   docker-gc cleanup-now  one-off: lists every unused image not seen in use
 #                          and removes it all after one confirmation.
 #   report [args]          (user) btrfs-stall-report: was storage the
@@ -774,6 +775,12 @@ docker_gc() {
                 *) echo "docker-gc disable: unknown argument '${1}' (only --purge)" >&2; exit 2 ;;
             esac
             (( $# <= 1 )) || { echo "docker-gc disable: unknown argument '${2}' (only --purge)" >&2; exit 2; }
+            # Before anything changes: a purge removes the installed docker-gc, and with it the
+            # registries an older one has built in. While the settings file is missing they are
+            # written there first (as enable does); one it cannot read stops the purge (exit 78).
+            if (( purge )) && [[ ! -e "${DOCKER_GC_CONF}" && -e "${bin}" ]]; then
+                DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${bin}" python3 -I -B "${SRC}/docker-gc" settings --write
+            fi
             # The installer lists the units (a failure would leave the timer enabled behind a "disabled").
             mapfile -t units < <(cst_component_units btrfs:docker-gc)
             (( ${#units[@]} )) || { echo "docker-gc disable: cannot list its units" >&2; exit 1; }

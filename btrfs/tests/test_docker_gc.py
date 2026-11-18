@@ -264,6 +264,7 @@ class FakeConfig:
         self.installed = installed
         self.written: list[str] = []
         self.reads = 0
+        self.installed_reads = 0
         self.fail_write: OSError | None = None
 
     def read_settings(self) -> str | None:
@@ -271,6 +272,7 @@ class FakeConfig:
         return self.text
 
     def installed_sources(self) -> tuple[str, ...] | None:
+        self.installed_reads += 1
         return self.installed
 
     def write_settings(self, text: str) -> None:
@@ -670,11 +672,16 @@ class SettingsDomainTest(unittest.TestCase):
         self.assertEqual(read("/f", "# mine\nDOCKER_GC_PROTECT=a.example, ghcr.io/team/ ,h:5000\n"), (
             "a.example", "ghcr.io/team", "h:5000"))  # fmt: skip
         self.assertEqual(read("/f", "DOCKER_GC_PROTECT=\n"), ())
+        # The path separators of the distribution spec's reference grammar: ".", "_", "__", a run of "-".
+        self.assertEqual(read("/f", "DOCKER_GC_PROTECT=ghcr.io/my__team,ghcr.io/my--org,h/a.b_c-d\n"), (
+            "ghcr.io/my__team", "ghcr.io/my--org", "h/a.b_c-d"))  # fmt: skip
         self.assertEqual(read("/f", "# nothing set\n"), ())
         for text, why in (
             ("DOCKER_GC_PROTCT=a.example\n", "/f line 1: DOCKER_GC_PROTCT: unknown setting"),
             ("DOCKER_GC_PROTECT=a.example\nnot a line\n", "/f line 2: not a line:"),
             ("DOCKER_GC_PROTECT=a.example,bad host\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: bad host"),
+            ("DOCKER_GC_PROTECT=ghcr.io/a___b\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: ghcr.io/a___b"),
+            ("DOCKER_GC_PROTECT=ghcr.io/team-\n", "/f line 1: DOCKER_GC_PROTECT: not a registry: ghcr.io/team-"),
             ("DOCKER_GC_PROTECT=$REG\n", "/f line 1:"),
         ):
             with self.assertRaises(gc_domain.UnknownProtection, msg=text) as cm:
@@ -735,6 +742,15 @@ class SettingsUseCaseTest(unittest.TestCase):
             "unchanged: /etc/cst/docker-gc.conf",
         ])  # fmt: skip
         self.assertEqual(f.gc.execute("settings"), 0)
+
+    def test_the_installed_program_is_read_only_while_the_file_is_missing(self) -> None:
+        # With the file there, the installed program does not count: a damaged one cannot stop a run.
+        f = Fixture(config=FakeConfig("DOCKER_GC_PROTECT=\n", installed=("print(1)\n",)))
+        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.config.installed_reads, 0)
+        f = Fixture(config=FakeConfig(None, installed=("import os\n" + OLD_PROTECTED_LINE,)))
+        self.assertEqual(f.gc.execute("status"), 0)
+        self.assertEqual(f.config.installed_reads, 1)
 
     def test_a_failed_write_is_one_line_and_exit_1(self) -> None:
         f = Fixture(config=FakeConfig(None))
@@ -801,7 +817,17 @@ class SettingsFileTest(unittest.TestCase):
         self.assertEqual(self.files.installed_sources(), (OLD_PROTECTED_LINE,))
         os.remove(self.paths.installed)
         os.symlink(os.path.join(self.tmp, "nowhere"), self.paths.installed)  # there, but unreadable
-        self.assertEqual(self.files.installed_sources(), ("",))
+        self.assertEqual(self.files.installed_sources(), ())
+        os.remove(self.paths.installed)
+        # A zipapp whose member is damaged (its deflate data overwritten): no sources, never a traceback.
+        with zipfile.ZipFile(self.paths.installed, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("btrfs/docker_gc/domain.py", legacy)
+            start = z.getinfo("btrfs/docker_gc/domain.py").header_offset
+        with open(self.paths.installed, "r+b") as f:
+            f.seek(start + 30 + len("btrfs/docker_gc/domain.py"))
+            f.write(b"\xff" * 64)
+        self.assertTrue(zipfile.is_zipfile(self.paths.installed))
+        self.assertEqual(self.files.installed_sources(), ())
 
 
 class WiringTest(unittest.TestCase):

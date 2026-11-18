@@ -139,12 +139,14 @@ class DockerGc:
         self.protection = Protection((), "not read yet")
 
     def read_protection(self) -> None:
-        """The protected registries (resolve_protection) into the settings; raises UnknownProtection."""
+        """The protected registries (resolve_protection) into the settings; raises UnknownProtection.
+        The installed program is read only while the settings file is missing."""
+        file_text = self.config.read_settings()
         self.protection = resolve_protection(
             self.paths,
             env=self.protect_env,
-            file_text=self.config.read_settings(),
-            installed=self.config.installed_sources(),
+            file_text=file_text,
+            installed=self.config.installed_sources() if file_text is None else None,
         )
         self.settings = replace(self.settings, protected=self.protection.prefixes)
 

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import zipfile
+import zlib
 
 from btrfs.docker_gc.domain import (
     UnknownProtection,
@@ -340,17 +341,19 @@ class GcSettingsFile:
 
     def installed_sources(self) -> tuple[str, ...] | None:
         """A zipapp (what CST installs): its INSTALLED_SOURCES; a plain script (before the zipapps):
-        the script itself. Unreadable: no sources (resolve_protection then refuses)."""
+        the script itself. Unreadable or damaged: no sources (resolve_protection then refuses)."""
         path = self.paths.installed
         if not os.path.lexists(path):
             return None
         try:
             if not zipfile.is_zipfile(path):
-                return (read_text(path, ""),)
+                text = read_text(path)
+                return () if text is None else (text,)
             with zipfile.ZipFile(path) as z:
                 names = set(z.namelist())
                 return tuple(z.read(n).decode("utf-8", "replace") for n in INSTALLED_SOURCES if n in names)
-        except OSError, zipfile.BadZipFile:
+        # A damaged member: zlib.error, EOFError; an encrypted or unsupported one: RuntimeError.
+        except OSError, EOFError, RuntimeError, zipfile.BadZipFile, zlib.error:
             return ()
 
     def write_settings(self, text: str) -> None:

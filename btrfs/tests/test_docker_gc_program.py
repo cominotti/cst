@@ -542,7 +542,7 @@ class SettingsUpgradeTest(unittest.TestCase):
             self.assertEqual(rc, 78, args)
             self.assertIn(f"{self.p.conf} is missing, and the installed {self.p.installed} does not show", out)
         self.assertFalse(os.path.exists(self.p.conf))
-        self.assertFalse([c for c in self.p.calls() if c[:1] != ["info"] and "rm" in c], "it removed something")
+        self.assertEqual(self.p.calls(), [], "it asked docker before it knew what is protected")
 
     def test_a_settings_file_it_cannot_read_stops_every_run(self) -> None:
         with open(self.p.conf, "w") as f:

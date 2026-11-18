@@ -2778,7 +2778,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         nothing; `cst btrfs docker-gc enable` writes the file with it (root, 0644) before it installs
         the new program, whose `settings` then reads it from the file (exit 0); a second `enable`
         leaves the file; `disable --purge` keeps it; `enable` after the purge reads it again and
-        leaves it. No Docker in this container: a stub docker.service (not started) when there is
+        leaves it. Then the upgrade again (main's program, no settings file) and `disable --purge`
+        before any `enable`: the purge writes the file with that registry before it removes the
+        program. No Docker in this container: a stub docker.service (not started) when there is
         none, so the recorder is not started."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
@@ -2816,10 +2818,15 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 systemctl daemon-reload
             fi
 
-            # 1. main's install: its zipapp, with main's domain.py.
-            python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[2], "w"); z.writestr("__main__.py", "raise SystemExit(1)\n"); z.write(sys.argv[1], "btrfs/docker_gc/domain.py"); z.close()' \
-                "/opt/cst-rw/tests/fixtures/legacy/btrfs-docker_gc-domain.py@654bbda" "$bin"
-            chmod 0755 "$bin"
+            # main's install: its zipapp, with main's domain.py.
+            old_install() {
+                python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[2], "w"); z.writestr("__main__.py", "raise SystemExit(1)\n"); z.write(sys.argv[1], "btrfs/docker_gc/domain.py"); z.close()' \
+                    "/opt/cst-rw/tests/fixtures/legacy/btrfs-docker_gc-domain.py@654bbda" "$bin"
+                chmod 0755 "$bin"
+            }
+
+            # 1. main's install.
+            old_install
 
             # 2. The dry run: the registry built into the installed program; nothing written.
             rc=0; out="$(python3 -I -B /opt/cst-rw/btrfs/docker-gc settings)" || rc=$?
@@ -2860,6 +2867,17 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF "unchanged: $conf" <<<"$out"
             grep -qxF "written:   $bin" <<<"$out"
             [[ "$(sum "$conf")" == "$c1" ]]
+
+            # 6. main's install again, no settings file, and a purge before any enable: the purge
+            # writes the registry into the file before it removes the program.
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show "purge" "$out"; exit 1; }
+            rm -f "$conf"
+            old_install
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show "purge before enable" "$out"; exit 1; }
+            show "purge before enable" "$out"
+            grep -qxF "written:   $conf (DOCKER_GC_PROTECT=$reg)" <<<"$out"
+            grep -qxF "kept:      $conf (the settings: which registries are protected)" <<<"$out"
+            [[ ! -e "$bin" && "$(tail -n 1 "$conf")" == "DOCKER_GC_PROTECT=$reg" ]]
             echo E2E-OK
             """,
         ).stdout

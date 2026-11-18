@@ -587,14 +587,19 @@ class ComponentInstallTest(unittest.TestCase):
         r = self.run_bash("docker_gc enable")
         self.assertIn(f"unchanged: {conf}", r.stdout)
 
-    def test_docker_gc_enable_keeps_the_registry_of_the_installed_docker_gc(self) -> None:
-        # The upgrade: main's docker-gc (a zipapp with a registry built in) is installed and there
-        # is no settings file. enable writes that registry into it before the new program replaces it.
+    def stage_legacy_docker_gc(self) -> str:
+        """main's docker-gc (a zipapp with a registry built in), installed, and no settings file."""
         prog = os.path.join(self.stage, "usr/local/sbin/docker-gc")
         os.makedirs(os.path.dirname(prog))
         with zipfile.ZipFile(prog, "w") as z, open(LEGACY_GC_DOMAIN, "rb") as f:
             z.writestr("__main__.py", "")
             z.writestr("btrfs/docker_gc/domain.py", f.read())
+        return prog
+
+    def test_docker_gc_enable_keeps_the_registry_of_the_installed_docker_gc(self) -> None:
+        # The upgrade: enable writes the installed program's registry into the settings file
+        # before the new program replaces it.
+        prog = self.stage_legacy_docker_gc()
         r = self.run_bash("docker_gc enable")
         conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
         self.assertIn(f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", r.stdout)
@@ -606,6 +611,27 @@ class ComponentInstallTest(unittest.TestCase):
         self.assertIn(f"kept:      {conf} (the settings: which registries are protected)", r.stdout)
         self.assertTrue(os.path.exists(conf))
         self.assertFalse(os.path.exists(prog))
+
+    def test_docker_gc_purge_before_enable_keeps_the_registry_of_the_installed_docker_gc(self) -> None:
+        # The upgrade, then `disable --purge` before any enable: the purge takes the installed
+        # program away, so it writes its registry into the settings file first.
+        prog = self.stage_legacy_docker_gc()
+        conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
+        r = self.run_bash("docker_gc disable --purge")
+        self.assertIn(f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", r.stdout)
+        self.assertIn(f"kept:      {conf} (the settings: which registries are protected)", r.stdout)
+        with open(conf) as f:
+            self.assertTrue(f.read().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+        self.assertFalse(os.path.exists(prog))
+        r = self.run_bash("docker_gc enable")
+        self.assertIn(f"unchanged: {conf}", r.stdout)
+        with open(conf) as f:
+            self.assertTrue(f.read().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+
+    def test_docker_gc_purge_with_nothing_installed_writes_no_settings(self) -> None:
+        r = self.run_bash("docker_gc disable --purge")
+        self.assertNotIn("docker-gc.conf", r.stdout)
+        self.assertEqual(self.staged(), [])
 
     def test_a_step_that_fails_after_the_install_leaves_the_component_pending(self) -> None:
         # systemctl enable fails (set -e stops docker_gc there): the files are written and listed,

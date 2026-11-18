@@ -1574,7 +1574,10 @@ recorded state, so `enable` later goes on with the same record of image use.
 the program, the three unit files and `/var/lib/docker-gc`. The recorded
 image use is lost with it, so after a later `enable` the 14 days start again.
 It keeps `/etc/cst/docker-gc.conf` (`kept: ...`): your settings, which a
-later `enable` reads again; remove it by hand if you do not want them. A
+later `enable` reads again; remove it by hand if you do not want them. When
+the file is missing and a docker-gc is installed (an upgrade from an older
+CST, before any `enable`), it first writes the file, as `enable` does (11.4),
+so the registries built into that program are not lost with it. A
 second `disable --purge` changes nothing.
 
 ```
@@ -1601,7 +1604,8 @@ Empty (the default) protects no registry: images in use, or used in the last
 makes every run, `status` and `cleanup-now` stop with exit 78 and one line
 per problem, before they ask Docker anything (nothing is guessed, nothing is
 removed). The recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
-environment (a drop-in of the unit) wins over the file.
+environment (a drop-in of the unit) wins over the file's list (the file is
+still read: a line it cannot read stops it the same way).
 
 **Upgrade from an older CST.** Older versions had one registry built into the
 program and no file. While the file is missing, docker-gc reads the
