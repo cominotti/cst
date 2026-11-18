@@ -11,7 +11,7 @@ from vm.domain import ON_CALENDAR, TimerStep, VmSettings, instance, timer_file_w
 from vm.ports import TimerPort
 
 
-def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: TimerPort | None = None) -> int:
+def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: TimerPort | None = None) -> None:
     """backup-timer SUB VM; timers: a test's, else this machine's (wiring.timer_port)."""
     unit = instance(vm)
     if sub != "status" and os.geteuid() != 0 and not cfg.nonroot_ok:
@@ -33,19 +33,18 @@ def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: Timer
         conf = read_conf(cfg.paths.nas_conf, nas_conf=cfg.paths.nas_conf, bash_sourced=True)
         if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
             print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")
-        return 0
+        return
     if sub == "on":
         application.timer_on(port, vm, own, lambda: nas_settings(cfg), show_step)
         print(
             f"On: {unit} ({ON_CALENDAR}, then {cfg.cst} vm backup {vm} --nas). Run one now with: "
             f"sudo systemctl start {unit.replace('.timer', '.service')}"
         )
-        return 0
+        return
     still = application.timer_off(port, vm, own, show_step)
     if still:
         print(f"  kept the units and {cfg.paths.sbin_copy}: still used by {', '.join(still)}")
     print(f"The backups on the NAS stay (list: {cfg.cst} vm list).")
-    return 0
 
 
 def show_step(step: TimerStep) -> None:

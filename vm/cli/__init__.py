@@ -54,7 +54,8 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
         if cmd == "tune":
             return tune.cmd_tune(cfg, vm, a.sub == "apply", a.guest_virtio)
         if cmd == "backup-timer":
-            return timer.cmd_timer(cfg, a.sub or "status", vm, entry_file)
+            timer.cmd_timer(cfg, a.sub or "status", vm, entry_file)
+            return 0
         if cmd != "backup":
             assert_never(cmd)  # every command is handled above
         safe_output()  # a closed terminal or pipe never cuts a backup or its cleanup short
