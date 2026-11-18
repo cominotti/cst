@@ -78,6 +78,7 @@ INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = parse_manifest(
 # src                                               dest                                                          mode owner kind          runner  component
 # btrfs: Python helpers (self-contained zipapps)
 btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root   btrfs:snapshots
+btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  python-entry  root   btrfs:core
 btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root   btrfs:snapshots
 btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root   btrfs:core
 btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user   btrfs:core
@@ -85,7 +86,6 @@ btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-a
 btrfs/docker-gc                                     /usr/local/sbin/docker-gc                                     755  root  python-entry  root   btrfs:docker-gc
 btrfs/docker-volumes-nocow                          /usr/local/sbin/docker-volumes-nocow                          755  root  python-entry  root   btrfs:core
 # btrfs: standalone shell helpers
-btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  shell         root   btrfs:core
 btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify                                  755  root  shell         root   btrfs:alerts
 btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root   btrfs:snapshots
 # btrfs: systemd units and data

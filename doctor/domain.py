@@ -12,6 +12,7 @@ import shlex
 from typing import Any, NewType, Self
 import xml.etree.ElementTree as ET
 
+from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
 from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Usage
@@ -79,7 +80,8 @@ ALERTING_UNITS = tuple(
 )
 # Those whose programs send through cst_core's notify adapter, which keeps an alert btrfs-notify cannot take.
 KEEPING_UNITS = frozenset({"btrfs-bulk-boot.service", "docker-volumes-nocow.service"})
-UNALLOC_DEFAULTS = (50, 5)  # GiB, as btrfs-health-check (read from it when possible)
+# GiB: the health check's own levels (an installed bash copy's are read when it is there).
+UNALLOC_DEFAULTS = (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Copies of each chunk per profile: a device holds one copy of every chunk of
 # raid1 (2 devices), raid1c3 (3) or raid1c4 (4); single and dup only exist

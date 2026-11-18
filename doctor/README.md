@@ -68,7 +68,7 @@ cst doctor help
 | `install` | Every recorded file as CST installed it | `ok`, with the number of files per record |
 | `vm` | A VM whose disks or network card differ from what `cst vm tune` recommends (SATA/IDE disks instead of virtio-scsi, disk driver without `cache='none' io='native' discard='unmap' detect_zeroes='unmap'`, e1000/e1000e/rtl8139 card; see [section 7](#7-the-vm-checks)) | `info`, naming the first differences and `cst vm tune plan VM`; `ok` when it matches. Never `WARN` |
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
-| `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of the installed `btrfs-health-check`, the one that alerts, else of this checkout's copy; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
+| `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of an installed bash `btrfs-health-check`, the one that alerts, else of this checkout's `btrfs/health_check/domain.py`; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
 | `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks); `info` for one boot, or when the record cannot be read; nothing when there is no record |
 
@@ -271,9 +271,11 @@ recover: [btrfs/README.md, "When btrfs says 'No space left' but df shows free sp
   needs root: sudo btrfs filesystem usage -T /var`; it still warns when even
   the average per disk is below 50 GiB, because then at least one disk is.
   The hourly `btrfs-health-check` (root) always reads the exact numbers.
-- The levels (50 GiB warning, 5 GiB critical) are read from
-  `btrfs/btrfs-health-check` (`UNALLOC_MIN_GIB`, `UNALLOC_CRIT_GIB`), or
-  from the installed copy in `/usr/local/sbin`, so the two always agree.
+- The levels (50 GiB warning, 5 GiB critical) are the health check's own:
+  `UNALLOC_MIN_GIB` and `UNALLOC_CRIT_GIB` in `btrfs/health_check/domain.py`,
+  which doctor imports. While the installed `/usr/local/sbin/btrfs-health-check`
+  is still the bash version (before the next `cst btrfs install`), its levels
+  are read from its text instead, since that copy is the one that alerts.
 - There is no `fix:` for low unallocated space: the way out is several steps
   (free space first, then a careful balance), not one command.
 

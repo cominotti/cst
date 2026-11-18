@@ -41,7 +41,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "btrfs-health-check")
 # How the tests start the program.
-RUN: Final[list[str]] = ["bash", SCRIPT]
+RUN: Final[list[str]] = ["/usr/bin/python3", "-I", "-B", SCRIPT]
 
 UUID = "11111111-2222-3333-4444-555555555555"
 BOOT = "0f0f0f0f-aaaa-bbbb-cccc-000000000001"
@@ -830,6 +830,66 @@ class HealthCheckTest(unittest.TestCase):
         r = self.run_check()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(len(self.alerts()), 1)
+
+
+class MemberDisksTest(unittest.TestCase):
+    """The member disks' part, which a test folder cannot reach through the program (their block devices):
+    the rules it applies to them, as the bash version did (its smart_check and swap_disks)."""
+
+    def test_a_member_disk_keeps_the_label_without_a_role(self) -> None:
+        from btrfs.health_check.domain import smart_problems
+
+        self.assertEqual(
+            smart_problems("nvme0n1", "", FAILING_SMART.replace("12", "1")),
+            [
+                "NVMe nvme0n1: critical_warning=1",
+                "NVMe nvme0n1: media_errors=1",
+                "NVMe nvme0n1: available_spare 5% below threshold 10%",
+            ],
+        )
+        self.assertEqual(smart_problems("nvme0n1", "", HEALTHY_SMART), [])
+
+    def test_the_controller_of_a_namespace(self) -> None:
+        from btrfs.health_check.domain import controller
+
+        self.assertEqual(
+            [controller(d) for d in ("nvme0n1", "nvme12n3", "sda", "nvme1")],
+            ["/dev/nvme0", "/dev/nvme12", "/dev/sda", "/dev/nvme1"],
+        )
+
+    def test_members_and_their_disks(self) -> None:
+        from btrfs.health_check.domain import disks_of, member_paths
+
+        show = (
+            "Label: none  uuid: x\n\tTotal devices 2 FS bytes used 1.00TiB\n"
+            "\tdevid    1 size 1.82TiB used 1.00TiB path /dev/mapper/luks-a\n"
+            "\tdevid    2 size 1.82TiB used 1.00TiB path /dev/mapper/luks-b  \n"
+        )
+        self.assertEqual(member_paths(show), ["/dev/mapper/luks-a", "/dev/mapper/luks-b"])
+        self.assertEqual(disks_of("dm-0 crypt\nnvme0n1p3 part\nnvme0n1 disk\nx disk extra\n"), ["nvme0n1"])
+
+    def test_kernel_lines_of_member_devices_count(self) -> None:
+        from btrfs.health_check.domain import kernel_problem
+
+        klog = (
+            "a: BTRFS error (device dm-0): csum failed\n"
+            "b: I/O error, dev nvme0n1p3, sector 9\n"
+            "c: BTRFS error (device dm-7): other fs\n"
+            "d: I/O error, dev sdb, sector 1\n"
+            "e: I/O error, dev nvme0n1, sector 2\n"
+        )
+        self.assertEqual(
+            kernel_problem(klog, ["dm-0", "nvme0n1"]),
+            "kernel: 3 btrfs/IO error message(s) since last check, e.g.: a: BTRFS error (device dm-0): csum failed | "
+            "b: I/O error, dev nvme0n1p3, sector 9 | e: I/O error, dev nvme0n1, sector 2 | ",
+        )
+        self.assertIsNone(kernel_problem("d: I/O error, dev sdb, sector 1\n", ["dm-0"]))
+
+    def test_mounts_in_the_order_findmnt_lists_them(self) -> None:
+        # bash kept them in awk's hash order (two or more filesystems); the port keeps findmnt's order.
+        from btrfs.health_check.domain import pick_mounts
+
+        self.assertEqual(pick_mounts("u1 /etc\nu1 /var\nu2 /mnt/b\nu2 /mnt/a\nu1 /home\n"), ["/var", "/mnt/b"])
 
 
 if __name__ == "__main__":
