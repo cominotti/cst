@@ -297,10 +297,14 @@ class SnapshotRun:
             os.close(fd)
 
 
-class _StdoutFd(io.RawIOBase):
-    """fd 1 for this program's own lines: a write that fails (stdout closed while SIGPIPE is
-    ignored, as systemd runs a service) is dropped without a word and the run goes on, as bash's
+class _OutputFd(io.RawIOBase):
+    """fd 1 or 2 for this program's own lines: a write that fails (the stream closed while SIGPIPE
+    is ignored, as systemd runs a service) is dropped without a word and the run goes on, as bash's
     echo and printf did; nothing is kept for a later retry or for the exit."""
+
+    def __init__(self, fd: int) -> None:
+        super().__init__()
+        self.fd = fd
 
     def writable(self) -> bool:
         return True
@@ -308,17 +312,20 @@ class _StdoutFd(io.RawIOBase):
     def write(self, b: Buffer, /) -> int:
         data = bytes(b)
         try:
-            return os.write(1, data)
+            return os.write(self.fd, data)
         except OSError:
             return len(data)
 
 
+def _bash_like(fd: int, encoding: str) -> io.TextIOWrapper:
+    return io.TextIOWrapper(
+        io.BufferedWriter(_OutputFd(fd)), encoding=encoding, errors="surrogateescape", line_buffering=True
+    )
+
+
 def keep_bytes_on_output() -> None:
     """Our stdout and stderr as bash's: a setting or path that is not UTF-8 goes out as the bytes it
-    was, and a failed write of a line does not stop the run (_StdoutFd)."""
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    sys.stdout = io.TextIOWrapper(
-        io.BufferedWriter(_StdoutFd()), encoding=encoding, errors="surrogateescape", line_buffering=True
-    )
-    if isinstance(sys.stderr, io.TextIOWrapper):
-        sys.stderr.reconfigure(errors="surrogateescape")
+    was, and a failed write of a line, on either, does not stop the run (_OutputFd). Under systemd
+    both are the one journal stream: they go away together."""
+    sys.stdout = _bash_like(1, getattr(sys.stdout, "encoding", None) or "utf-8")
+    sys.stderr = _bash_like(2, getattr(sys.stderr, "encoding", None) or "utf-8")

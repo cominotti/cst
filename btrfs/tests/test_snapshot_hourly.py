@@ -505,6 +505,16 @@ class ClosedStdoutTest(Base):
         self.assertEqual(self.read_state("drop-pending"), "")
         self.assertTrue(os.path.isdir(other))
 
+    def test_hourly_goes_on_without_its_stdout_and_stderr(self) -> None:
+        # One journal stream under systemd: stdout and stderr go together. A settings line that gets
+        # a warning (on stderr, from the runtime and from the engine step) stopped the runtime.
+        self.conf("NAS_PATH=$(echo x)\n")
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n"})
+        r = self.closed_run(stderr_too=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+
 
 class LockLifetimeTest(Base):
     """The lock of a run (fd 9 on /run/btrfs-snapshot.lock) is inherited by everything the run
