@@ -18,6 +18,7 @@ from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
+from swap.domain import SETTINGS_REL
 
 NAME = "cst-doctor"
 
@@ -112,7 +113,7 @@ _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a 
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 # The partition swap manages (swap/domain.py, SETTINGS_REL), and the file an older CST marked a line in.
-SWAP_CONF = HostPath("/etc/cst/swap.conf")
+SWAP_CONF = HostPath("/etc/" + SETTINGS_REL)
 SWAP_DROPIN = HostPath(_BY_SRC["swap/units/machine.slice.d-10-swap-memory-low.conf"].dest)
 FSTAB = HostPath("/etc/fstab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern

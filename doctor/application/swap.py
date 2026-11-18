@@ -9,6 +9,7 @@ from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, SWAP_DROPIN, WAR
 from doctor.ports import CheckFn, DoctorHostPort
 from swap.domain import (
     human,
+    human_size,
     marked_fstab_name,
     memory_low_override,
     parse_memory_low,
@@ -64,6 +65,11 @@ def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
     """The swap partition in /etc/cst/swap.conf: WARN for each problem (cst swap apply refuses), WARN
     when it is missing where swap is set up (an older CST's marked fstab line: apply writes it; else
     apply refuses), ok when it names a partition. Nothing where swap is not set up."""
+    not_configured = Result(
+        WARN,
+        f"swap partition: not configured (no SWAP_PARTUUID in {SWAP_CONF}): cst swap apply refuses"
+        " (swap/README.md, section 2.3)",
+    )
     text = _settings_text(host, SWAP_CONF)
     if text is not None:
         settings = parse_swap_settings(text)
@@ -72,23 +78,19 @@ def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
         if settings.spec is not None:
             spec = settings.spec
             yield Result(OK, f"swap partition: {spec.partuuid} ({spec.expected_size_bytes} bytes, {SWAP_CONF})")
-            return
-        if settings.problems:
-            return
+        elif not settings.problems:
+            yield not_configured
+        return
     name = marked_fstab_name(_settings_text(host, FSTAB) or "")
-    if text is None and name is not None:
+    if name is not None:
         yield Result(
             WARN,
             f"swap partition: {SWAP_CONF} not written yet; an older CST set up {name}, and"
             " `cst swap apply` writes it from /etc/crypttab",
             f"{host.cst} swap apply",
         )
-    elif text is not None or name is not None or host.exists(host.path(ZSWAP_CONF)):
-        yield Result(
-            WARN,
-            f"swap partition: not configured (no SWAP_PARTUUID in {SWAP_CONF}): cst swap apply refuses"
-            " (swap/README.md, section 2.3)",
-        )
+    elif host.exists(host.path(ZSWAP_CONF)):
+        yield not_configured
 
 
 @check(CHECKS, "swap")
@@ -108,10 +110,9 @@ def check_machine_slice_memory_low(host: DoctorHostPort) -> Iterator[Result]:
     source = memory_low_override(effective, dropins, SWAP_DROPIN, want)
     size = parse_size(effective)
     if source is not None:
-        live = effective if size is None else human(size)
         yield Result(
             INFO,
-            f"machine.slice MemoryLow {live}: set by {source}, which systemd applies after CST's"
+            f"machine.slice MemoryLow {human_size(effective)}: set by {source}, which systemd applies after CST's"
             f" {SWAP_DROPIN} ({human(want)}); cst swap leaves it",
         )
     elif SWAP_DROPIN in paths and size == want:
