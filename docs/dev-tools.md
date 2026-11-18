@@ -139,8 +139,8 @@ repository:
   nor whether a key read with `[]` is `NotRequired`). Nothing switches ANN
   off: `tests/test_python_files.py` fails on a
   `[tool.ruff.lint.per-file-ignores]` (or `extend-per-file-ignores`) entry,
-  or a `[tool.ruff.lint] ignore`/`extend-ignore`, that names an ANN rule or
-  `ALL`, since ruff would then skip those files and still report "All checks
+  or a `[tool.ruff.lint] ignore`/`extend-ignore` (or the older top-level
+  `[tool.ruff]` form of each), that names an ANN rule or `ALL`, since ruff would then skip those files and still report "All checks
   passed". A new file needs no list edit for ANN. (Until 2026-11 a one-line
   `"!{...}" = ["ANN"]` entry named every typed file; every file had joined it,
   and each parallel change conflicted on that one line.)

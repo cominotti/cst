@@ -118,7 +118,9 @@ its rules (in a light package each may read the environment, in a full one
 none does I/O), and `CLI_CEILINGS` caps the folder as a whole
 (`<package>/cli/`): the split moves the `<package>/cli.py` entry to that
 key by hand, at most its old value, and then moving code between the files
-changes nothing.
+changes nothing. Import the group modules by their full name
+(`from vm.cli import net`): the import graph of the gates (`tests/code_graph.py`)
+follows only absolute imports, like the rest of CST.
 
 **Gates and metrics.** Budgets, ceilings and allow-lists fail only when the
 code is above them (the sets that must stay empty, such as `NOT_YET_CLEAN`,

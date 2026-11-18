@@ -20,7 +20,9 @@ never be linted. This test derives the Python files from the repository
 - ruff's annotation rules (ANN, which `invowk cmd test types` runs on every
   Python file) are switched off for no file: no entry of
   [tool.ruff.lint.per-file-ignores] or extend-per-file-ignores, and no
-  [tool.ruff.lint] ignore or extend-ignore, names an ANN rule or ALL.
+  [tool.ruff.lint] ignore or extend-ignore, names an ANN rule or ALL; nor
+  does the older top-level [tool.ruff] form of these settings, which ruff
+  still reads.
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
