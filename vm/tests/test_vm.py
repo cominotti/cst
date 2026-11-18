@@ -38,12 +38,12 @@ from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState, UnitFileState
-from cst_core.domain.values import Json
 from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
+from vm.domain.backup import BootedDeployment
 from vm import application as vm_application, wiring as vm_wiring
 from vm.application import backup as vm_application_backup
 from vm.cli import (
@@ -93,7 +93,7 @@ class FakeCommands:
     def detached(self) -> AbstractContextManager[None]:
         raise AssertionError("tune runs nothing detached")
 
-    def booted_deployment(self) -> dict[str, Json] | None:
+    def booted_deployment(self) -> BootedDeployment | None:
         raise AssertionError("tune reads no deployment")
 
 
@@ -1847,7 +1847,11 @@ class FakeTimers:
         for p, st in states.items():
             if st != "ok":
                 self.done.append(f"write {p}")
-                report(vm_domain.TimerStep("installed" if st == "missing" else "updated", p))
+                report(
+                    vm_domain.TimerStep(
+                        vm_domain.TimerStepKind.INSTALLED if st == "missing" else vm_domain.TimerStepKind.UPDATED, p
+                    )
+                )
 
     def mark_complete(self) -> None:
         self.done.append("complete")
@@ -2013,7 +2017,7 @@ class NoRealCommandsTest(unittest.TestCase):
             no_real_commands(),
             self.assertRaisesRegex(AssertionError, "a test ran a real command"),
         ):
-            vm_cli_timer.cmd_timer(cfg, "status", "win", TOOL, timers=timers)
+            vm_cli_timer.cmd_timer(cfg, vm_domain.VmSub.STATUS, "win", TOOL, timers=timers)
         self.assertFalse(os.path.exists(marker), "the stub systemctl ran")
 
 

@@ -4,6 +4,7 @@ the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). 
 
 import datetime
 import json
+from enum import StrEnum
 from typing import NotRequired, TypedDict
 
 from cst_core.domain.errors import Refused
@@ -16,6 +17,15 @@ MANIFEST_JSON = "manifest.json"
 # What changes when something writes to a file or a folder tree (vm.adapters.backup.fingerprint):
 # only compared, before and after a copy.
 type Fingerprint = tuple[object, ...]
+
+
+class BootedDeployment(TypedDict):
+    """The booted rpm-ostree deployment a backup records (vm.adapters.booted_deployment): each
+    value as rpm-ostree status --json gives it, null when it names none."""
+
+    version: Json
+    checksum: Json
+    timestamp: Json
 
 
 class IndexEntry(TypedDict, total=False):
@@ -33,7 +43,7 @@ class IndexEntry(TypedDict, total=False):
     consistency: str
     keep: str | None
     versions: dict[str, str]
-    deployment: dict[str, Json] | None
+    deployment: BootedDeployment | None
 
 
 class CopiedFile(TypedDict):
@@ -61,7 +71,7 @@ class Manifest(TypedDict):
     tags: NotRequired[list[str]]
     files: list[CopiedFile]
     versions: dict[str, str]
-    deployment: dict[str, Json] | None
+    deployment: BootedDeployment | None
     notes: list[str]
 
 
@@ -74,6 +84,14 @@ class Stop(Exception):
 class Uncertain(Refused):
     """virsh snapshot-create-as did not answer in time and libvirt's result
     stayed unclear: the overlay files are kept, an alert is sent."""
+
+
+class ResticMessage(StrEnum):
+    """The message_type of a line of `restic backup --json` that a backup reads (others are skipped)."""
+
+    SUMMARY = "summary"
+    STATUS = "status"
+    ERROR = "error"
 
 
 class ResticSummary(TypedDict, total=False):

@@ -7,12 +7,14 @@ The hardware `cst vm tune` recommends is in vm.domain.tune.
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 import os.path
 import re
 import shlex
 from typing import Final, Literal, TypedDict
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.dispatch import HELP_WORDS
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
@@ -32,6 +34,8 @@ NOT_INSTALLED = "not installed"
 FULL_MARGIN = (GIB, 0.05)  # free space kept on top of a --full copy: 1 GiB or 5 %, the larger
 
 KNOBS = ("VM_NOCOW", "VM_TUNE_DISK_BUS", "VM_TUNE_DISK_DRIVER", "VM_TUNE_NIC")
+
+KNOB_OFF_WORDS = ("no", "0", "false", "off")  # a knob set to one of these (any case) is off; anything else is yes
 
 USER_IMAGES = (
     (".local/share/libvirt/images", "libvirt qemu:///session: virt-manager, virsh as your user"),
@@ -65,23 +69,36 @@ UNIT_MARKER = "# Managed by cst vm (CST)"
 
 ON_CALENDAR = "Sat *-*-* 04:30:00"
 
-# The commands of cst vm, and the subcommands of those that take one.
-type VmCommand = Literal["help", "backup", "backup-timer", "list", "status", "tune", "nocow"]
-type VmSub = Literal["plan", "apply", "on", "off", "status"]
 
-COMMANDS: Final[dict[str, VmCommand]] = {
-    "backup": "backup",
-    "backup-timer": "backup-timer",
-    "list": "list",
-    "status": "status",
-    "tune": "tune",
-    "nocow": "nocow",
-}
+class VmCommand(StrEnum):
+    """The commands of cst vm."""
+
+    HELP = "help"
+    BACKUP = "backup"
+    BACKUP_TIMER = "backup-timer"
+    LIST = "list"
+    STATUS = "status"
+    TUNE = "tune"
+    NOCOW = "nocow"
+
+
+class VmSub(StrEnum):
+    """The subcommands of the commands that take one."""
+
+    PLAN = "plan"
+    APPLY = "apply"
+    ON = "on"
+    OFF = "off"
+    STATUS = "status"
+
+
+# The words parse_args reads, in the order its messages list them.
+COMMANDS: Final[dict[str, VmCommand]] = {c.value: c for c in VmCommand if c != VmCommand.HELP}
 
 SUBS: Final[dict[VmCommand, dict[str, VmSub]]] = {
-    "tune": {"plan": "plan", "apply": "apply"},
-    "nocow": {"plan": "plan", "apply": "apply"},
-    "backup-timer": {"on": "on", "off": "off", "status": "status"},
+    VmCommand.TUNE: {s.value: s for s in (VmSub.PLAN, VmSub.APPLY)},
+    VmCommand.NOCOW: {s.value: s for s in (VmSub.PLAN, VmSub.APPLY)},
+    VmCommand.BACKUP_TIMER: {s.value: s for s in (VmSub.ON, VmSub.OFF, VmSub.STATUS)},
 }
 
 
@@ -89,7 +106,7 @@ SUBS: Final[dict[VmCommand, dict[str, VmSub]]] = {
 class VmArgs:
     """The command line of cst vm, as parse_args reads it."""
 
-    cmd: VmCommand = "help"
+    cmd: VmCommand = VmCommand.HELP
     sub: VmSub | None = None
     vm: str | None = None
     full: bool = False
@@ -175,7 +192,14 @@ class NasRepo(TypedDict):
     env: dict[str, str]
 
 
-type TimerStepKind = Literal["installed", "updated", "off", "left", "removed"]
+class TimerStepKind(StrEnum):
+    """What one step of backup-timer on or off did (TimerStep)."""
+
+    INSTALLED = "installed"
+    UPDATED = "updated"
+    OFF = "off"
+    LEFT = "left"
+    REMOVED = "removed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +386,16 @@ def agent_state(xml_text: str) -> str:
     return "none"
 
 
-def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
+class VmOverlayKind(StrEnum):
+    """How a disk left on a backup overlay is put back by hand (overlay_kind)."""
+
+    LIVE = "live"
+    DEFINITION = "definition"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
+
+
+def overlay_kind(state: str | None, live_src: str | None, base: str) -> VmOverlayKind:
     """How a disk left on an overlay is put back by hand:
     live: QEMU still runs on the overlay (running, paused, pmsuspended);
     definition: the running VM is back on the image, only its persistent
@@ -371,56 +404,58 @@ def overlay_kind(state: str | None, live_src: str | None, base: str) -> str:
     the overlay holds the guest's last writes;
     unknown: the state could not be read."""
     if state in LIVE_STATES:
-        return "definition" if live_src == base else "live"
+        return VmOverlayKind.DEFINITION if live_src == base else VmOverlayKind.LIVE
     if state in (SHUT_OFF, "crashed"):
-        return "offline"
-    return "unknown"
+        return VmOverlayKind.OFFLINE
+    return VmOverlayKind.UNKNOWN
 
 
-def overlay_recovery(vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, str]) -> list[str]:
+def overlay_recovery(
+    vm: str, items: Iterable[tuple[str, tuple[str, str]]], how: Mapping[str, VmOverlayKind]
+) -> list[str]:
     """The commands that put a disk back on its image by hand."""
     q = shlex.quote
     v = f"sudo virsh -c {URI}"
     lines: list[str] = []
     for t, (base, overlay) in items:
-        kind = how.get(t, "unknown")
-        if kind == "live":
-            lines += [
-                f"# {t}: the VM still runs on {overlay}",
-                f"{v} blockjob {q(vm)} {t} --info     # a commit still running? let it finish",
-                f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
-                "and nothing waits on it",
-                f"{v} blockcommit {q(vm)} {t} --active --pivot --wait --verbose     # only if no block job is listed",
-                f"{v} domblklist {q(vm)} --details     # {t} must show {base}",
-                f"{v} domblklist {q(vm)} --details --inactive     # here too",
-                f"sudo rm {q(overlay)}     # only once both show {base}",
-            ]
-        elif kind == "definition":
-            lines += [
-                f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
-                "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)",
-                f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
-                f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
-                f"sudo rm {q(overlay)}     # only once it shows {base}",
-            ]
-        elif kind == "offline":
-            lines += [
-                f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
-                "offline, then point the definition back",
-                f"sudo qemu-img commit -p {q(overlay)}     # writes its changes into {base}",
-                f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
-                f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
-                f"sudo rm {q(overlay)}",
-            ]
-        else:
-            lines += [
-                f"# {t}: the VM's state or the files could not be read: look first, then follow "
-                'vm/README.md in CST, "If a backup left an overlay"',
-                f"{v} domstate {q(vm)}",
-                f"{v} domblklist {q(vm)} --details",
-                f"{v} domblklist {q(vm)} --details --inactive",
-                f"sudo ls -l --time-style=full-iso {q(base)} {q(overlay)}",
-            ]
+        match how.get(t, VmOverlayKind.UNKNOWN):
+            case VmOverlayKind.LIVE:
+                lines += [
+                    f"# {t}: the VM still runs on {overlay}",
+                    f"{v} blockjob {q(vm)} {t} --info     # a commit still running? let it finish",
+                    f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
+                    "and nothing waits on it",
+                    f"{v} blockcommit {q(vm)} {t} --active --pivot --wait --verbose     # only if no block job is listed",
+                    f"{v} domblklist {q(vm)} --details     # {t} must show {base}",
+                    f"{v} domblklist {q(vm)} --details --inactive     # here too",
+                    f"sudo rm {q(overlay)}     # only once both show {base}",
+                ]
+            case VmOverlayKind.DEFINITION:
+                lines += [
+                    f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
+                    "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)",
+                    f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
+                    f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                    f"sudo rm {q(overlay)}     # only once it shows {base}",
+                ]
+            case VmOverlayKind.OFFLINE:
+                lines += [
+                    f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
+                    "offline, then point the definition back",
+                    f"sudo qemu-img commit -p {q(overlay)}     # writes its changes into {base}",
+                    f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
+                    f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
+                    f"sudo rm {q(overlay)}",
+                ]
+            case _:
+                lines += [
+                    f"# {t}: the VM's state or the files could not be read: look first, then follow "
+                    'vm/README.md in CST, "If a backup left an overlay"',
+                    f"{v} domstate {q(vm)}",
+                    f"{v} domblklist {q(vm)} --details",
+                    f"{v} domblklist {q(vm)} --details --inactive",
+                    f"sudo ls -l --time-style=full-iso {q(base)} {q(overlay)}",
+                ]
     return lines
 
 
@@ -639,7 +674,7 @@ def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
 
 def parse_args(argv: Sequence[str]) -> VmArgs:
     """The command line of cst vm; Usage when it is not one."""
-    if not argv or argv[0] in ("help", "-h", "--help"):
+    if not argv or argv[0] in HELP_WORDS:
         if len(argv) > 1:
             raise Usage("help takes no arguments")
         return VmArgs()
@@ -655,16 +690,16 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
             raise Usage(f"{cmd}: {' or '.join(subs)}")
         rest = rest[1:]
     flags = _FLAGS.get(cmd, ())
-    if cmd == "nocow" and sub != "plan":
+    if cmd == VmCommand.NOCOW and sub != VmSub.PLAN:
         flags = ()
-    takes_vm = cmd != "nocow"
+    takes_vm = cmd != VmCommand.NOCOW
     where = " ".join(filter(None, (cmd, sub)))
     seen: set[str] = set()
     vm: str | None = None
     keep: str | None = None
     while rest:
         x = rest.pop(0)
-        if cmd == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
+        if cmd == VmCommand.BACKUP and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
             if "=" in x:
                 value = x.split("=", 1)[1]
             else:
@@ -701,7 +736,7 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
 
 # The flags each command takes (nocow: --root with plan only).
 _FLAGS: Final[dict[VmCommand, tuple[str, ...]]] = {
-    "backup": ("--full", "--nas", "--no-quiesce"),
-    "tune": ("--guest-has-virtio",),
-    "nocow": ("--root",),
+    VmCommand.BACKUP: ("--full", "--nas", "--no-quiesce"),
+    VmCommand.TUNE: ("--guest-has-virtio",),
+    VmCommand.NOCOW: ("--root",),
 }

@@ -19,6 +19,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
+from cst_core.domain.values import HOUR
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
@@ -134,7 +135,7 @@ def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
         # became 1.05 million extents (the source had 0.6 million), and the guest
         # writing into those holes allocates new extents even on a NOCOW file.
         flags = ["--reflink=never", "--sparse=auto"]
-    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * 3600)
+    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * HOUR)
     if rc != 0:
         raise Refused(
             f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}"

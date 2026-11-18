@@ -6,9 +6,8 @@ from contextlib import AbstractContextManager
 from typing import Protocol
 
 from cst_core.domain.files import UnitFileState
-from cst_core.domain.values import Json
 from vm.domain import NasRepo, TimerStep
-from vm.domain.backup import Fingerprint, IndexEntry, ResticSummary
+from vm.domain.backup import BootedDeployment, Fingerprint, IndexEntry, ResticSummary
 
 # One NAS backup per VM at a time: the lock of the VM named, held while the block runs (Refused
 # when another backup holds it).
@@ -68,7 +67,7 @@ class VmCommandsPort(Protocol):
         terminal cannot reach it); a call's own detach= wins."""
         ...
 
-    def booted_deployment(self) -> dict[str, Json] | None:
+    def booted_deployment(self) -> BootedDeployment | None:
         """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None."""
         ...
 

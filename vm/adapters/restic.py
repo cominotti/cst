@@ -14,8 +14,9 @@ import time
 from typing import Protocol
 
 from cst_core.adapters.runner import c_locale
-from cst_core.domain.values import format_bytes_gib_mib
-from vm.domain.backup import ResticSummary
+from cst_core.domain.errors import ExitStatus
+from cst_core.domain.values import MINUTE, format_bytes_gib_mib
+from vm.domain.backup import ResticMessage, ResticSummary
 
 # (argv, timeout, the variables set on top of this process's) -> (exit status, stdout, stderr).
 type RunCommand = Callable[[Sequence[str], int, Mapping[str, str] | None], tuple[int, str, str]]
@@ -56,7 +57,7 @@ class Restic:
                 ["restic", *args], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, env=restic_env(env)
             )
         except FileNotFoundError:
-            return 127, {}
+            return ExitStatus.NOT_FOUND, {}
         timer = threading.Timer(timeout, p.kill)
         timer.start()
         summary: ResticSummary = {}
@@ -71,20 +72,22 @@ class Restic:
                     continue
                 if not isinstance(msg, dict):
                     continue
-                kind = msg.get("message_type")
-                if kind == "summary":
-                    summary = msg
-                elif kind == "status" and time.monotonic() - shown >= 60:
-                    shown = time.monotonic()
-                    done, total = msg.get("bytes_done") or 0, msg.get("total_bytes") or 0
-                    out.say(
-                        f"  restic: {100 * float(msg.get('percent_done') or 0):.0f} % ({format_bytes_gib_mib(done, mib_decimals=1)} of "
-                        f"{format_bytes_gib_mib(total, mib_decimals=1)} read)",
-                        flush=True,
-                    )
-                elif kind == "error":
-                    err = msg.get("error") or {}
-                    out.warn(f"  restic error: {msg.get('item') or ''} {err.get('message') or err}")
+                match msg.get("message_type"):
+                    case ResticMessage.SUMMARY:
+                        summary = msg
+                    case ResticMessage.STATUS if time.monotonic() - shown >= MINUTE:
+                        shown = time.monotonic()
+                        done, total = msg.get("bytes_done") or 0, msg.get("total_bytes") or 0
+                        out.say(
+                            f"  restic: {100 * float(msg.get('percent_done') or 0):.0f} % ({format_bytes_gib_mib(done, mib_decimals=1)} of "
+                            f"{format_bytes_gib_mib(total, mib_decimals=1)} read)",
+                            flush=True,
+                        )
+                    case ResticMessage.ERROR:
+                        err = msg.get("error") or {}
+                        out.warn(f"  restic error: {msg.get('item') or ''} {err.get('message') or err}")
+                    case _:
+                        pass
             rc = p.wait()
         except BaseException:
             p.terminate()
@@ -97,5 +100,5 @@ class Restic:
         finally:
             timer.cancel()
         if rc == -signal.SIGKILL:
-            rc = 124
+            rc = ExitStatus.TIMED_OUT
         return rc, summary

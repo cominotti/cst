@@ -3,17 +3,17 @@
 
 from cst_core.domain.errors import Refused
 from vm import application, wiring
-from vm.domain import ON_CALENDAR, TimerStep, VmSettings, instance, timer_file_words
+from vm.domain import ON_CALENDAR, TimerStep, TimerStepKind, VmSettings, VmSub, instance, timer_file_words
 from vm.ports import TimerFilesPort
 
 
-def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: TimerFilesPort | None = None) -> None:
+def cmd_timer(cfg: VmSettings, sub: VmSub, vm: str, entry_file: str, timers: TimerFilesPort | None = None) -> None:
     """backup-timer SUB VM; timers: a test's, else this machine's (wiring.timer_port)."""
     unit = instance(vm)
-    if sub != "status" and not wiring.running_as_root() and not cfg.nonroot_ok:
+    if sub != VmSub.STATUS and not wiring.running_as_root() and not cfg.nonroot_ok:
         raise Refused(f"backup-timer {sub} needs root: run it as `{cfg.prog} backup-timer {sub}` (it calls sudo)")
     port, sysd = (wiring.timer_port(cfg, entry_file) if timers is None else timers), wiring.systemd()
-    if sub == "status":
+    if sub == VmSub.STATUS:
         st = application.timer_status(port, sysd, vm)
         print(f"weekly NAS backup of {vm}: {'on' if st.on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
         words = timer_file_words(cfg.prog, vm)
@@ -29,7 +29,7 @@ def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: Timer
         if not wiring.settings_port(cfg).nas_set_up():
             print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")
         return
-    if sub == "on":
+    if sub == VmSub.ON:
         application.timer_on(port, sysd, vm, wiring.settings_port(cfg).nas_repo, show_step)
         print(
             f"On: {unit} ({ON_CALENDAR}, then {cfg.cst} vm backup {vm} --nas). Run one now with: "
@@ -45,9 +45,11 @@ def cmd_timer(cfg: VmSettings, sub: str, vm: str, entry_file: str, timers: Timer
 def show_step(step: TimerStep) -> None:
     """One line for what backup-timer on or off just did."""
     match step.kind:
-        case "installed" | "updated" | "removed":
+        case TimerStepKind.INSTALLED | TimerStepKind.UPDATED | TimerStepKind.REMOVED:
             print(f"  {step.kind}: {step.path}")
-        case "off":
+        case TimerStepKind.OFF:
             print(f"Off: {step.path}")
-        case "left":
+        case TimerStepKind.LEFT:
             print(f"  left as it is: {step.path} (masked with systemctl mask)")
+        case _:
+            pass

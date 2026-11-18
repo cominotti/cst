@@ -13,10 +13,10 @@ import xml.etree.ElementTree as ET
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
-from cst_core.domain.files import UnitFileState
+from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.units import masked_refusal
 from cst_core.ports import CommandFailed, CommandResult, SystemdPort, UnitName
-from vm.domain import SHUT_OFF, URI, TimerStatus, TimerStep, instance
+from vm.domain import SHUT_OFF, URI, TimerStatus, TimerStep, TimerStepKind, instance
 from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
 from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
@@ -53,7 +53,7 @@ def timer_status(timers: TimerFilesPort, systemd: SystemdPort, vm: str) -> Timer
 
 
 def _refuse_foreign(states: Mapping[str, UnitFileState]) -> None:
-    foreign = [p for p, st in states.items() if st == "conflict"]
+    foreign = [p for p, st in states.items() if st == OwnedState.CONFLICT]
     if foreign:
         raise Refused("not CST's files, left as they are: " + ", ".join(foreign))
 
@@ -71,7 +71,7 @@ def timer_on(
     unit = instance(vm)
     states = timers.file_states(unit)
     _refuse_foreign(states)
-    if why := masked_refusal([p for p, st in states.items() if st == "masked"], user=False):
+    if why := masked_refusal([p for p, st in states.items() if st == OwnedState.MASKED], user=False):
         raise Refused(why + "; nothing was changed")
     nas_ready()
     timers.install(states, report)
@@ -97,19 +97,19 @@ def timer_off(timers: TimerFilesPort, systemd: SystemdPort, vm: str, report: Cal
     # Forget the timer's last run (Persistent=: /var/lib/systemd/timers/stamp-UNIT): needs the unit loaded
     # and stopped, so before its files go. Best effort: a failure only leaves that small file behind.
     systemd.clean(UnitName(unit), what="state")
-    report(TimerStep("off", unit))
+    report(TimerStep(TimerStepKind.OFF, unit))
     still = timers.timers_on()
     if still:
         return still
     for p, st in states.items():
-        if st == "masked":
-            report(TimerStep("left", p))
-        elif st != "missing":
+        if st == OwnedState.MASKED:
+            report(TimerStep(TimerStepKind.LEFT, p))
+        elif st != OwnedState.MISSING:
             timers.remove(p)
-            report(TimerStep("removed", p))
+            report(TimerStep(TimerStepKind.REMOVED, p))
     # A file already missing is forgotten too: removed by hand, or by an earlier off that stopped before
     # its forget (a rerun then clears the record).
-    timers.forget([p for p, st in states.items() if st != "masked"])
+    timers.forget([p for p, st in states.items() if st != OwnedState.MASKED])
     _reload(systemd)  # best effort
     return []
 

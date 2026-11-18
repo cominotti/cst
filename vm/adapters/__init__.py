@@ -22,10 +22,9 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.contracts import StateFormatKey, state_format
-from cst_core.domain.errors import Refused
+from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
-from cst_core.domain.values import Json
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
@@ -36,16 +35,20 @@ from cst_core.domain.text import (
 )
 from vm.domain import (
     NAS_SSH_ALIAS,
+    VmCommand,
+    VmSub,
     NasRepo,
     VmSettings,
     VmPaths,
     DEFAULT_VM,
     KNOBS,
+    KNOB_OFF_WORDS,
     NAS_DEFAULTS,
     NOT_INSTALLED,
     URI,
     VIRT_PACKAGES,
 )
+from vm.domain.backup import BootedDeployment
 
 
 NAME = "cst-vm"
@@ -60,10 +63,17 @@ def fault_words(argv: Sequence[str], r: CommandResult, timeout: float | None) ->
     """r with cst-vm's own words for a command that is missing (127) or does not answer (124);
     one that cannot start raises (as subprocess.run did). The runner's words= for systemctl."""
     if r.fault == "missing":
-        return CommandResult(127, "", f"{argv[0]}: not found", argv=r.argv, fault=r.fault, cause=r.cause)
+        return CommandResult(
+            ExitStatus.NOT_FOUND, "", f"{argv[0]}: not found", argv=r.argv, fault=r.fault, cause=r.cause
+        )
     if r.fault == "timeout":
         return CommandResult(
-            124, "", f"{argv[0]}: no answer within {timeout} s", argv=r.argv, fault=r.fault, cause=r.cause
+            ExitStatus.TIMED_OUT,
+            "",
+            f"{argv[0]}: no answer within {timeout} s",
+            argv=r.argv,
+            fault=r.fault,
+            cause=r.cause,
         )
     if r.cause is not None:
         raise r.cause
@@ -135,7 +145,7 @@ class VmCommands:
     def package_versions(self) -> dict[str, str]:
         return package_versions()
 
-    def booted_deployment(self) -> dict[str, Json] | None:
+    def booted_deployment(self) -> BootedDeployment | None:
         return booted_deployment()
 
 
@@ -196,19 +206,19 @@ def settings_file(path: str, *, bash_sourced: bool, nas_conf: str) -> ShellAssig
     return parse_shell_assignments(text, bash_sourced=bash_sourced)
 
 
-def conf_files(paths: VmPaths, cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
+def conf_files(paths: VmPaths, cmd: VmCommand, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
     """[(settings file, bash_sourced)] that a cst-vm command reads; vm: the VM named on the command line."""
     files = [(paths.vm_conf, False)]
     # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
     # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
-    if cmd != "nocow" and not (vm and cmd in ("backup", "backup-timer")):
+    if cmd != VmCommand.NOCOW and not (vm and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)):
         files.append((paths.cpu_conf, True))
-    if nas or cmd == "backup-timer":
+    if nas or cmd == VmCommand.BACKUP_TIMER:
         files.append((paths.nas_conf, True))
     return files
 
 
-def prepare_command(paths: VmPaths, cmd: str, sub: str | None, nas: bool, vm: str | None) -> None:
+def prepare_command(paths: VmPaths, cmd: VmCommand, sub: VmSub | None, nas: bool, vm: str | None) -> None:
     """Before a cst-vm command runs (help: only the SIGPIPE default below). Problem lines of the settings files it
     reads: a command that changes the machine with them (backup, tune/nocow
     apply, backup-timer on) refuses to start, since a default must never
@@ -218,7 +228,7 @@ def prepare_command(paths: VmPaths, cmd: str, sub: str | None, nas: bool, vm: st
     backup-timer status, help) also gets SIGPIPE back at its default, so `| head`
     ends it quietly; commands that change the machine keep Python's handling
     (backup: SafeStream), so a closed pipe never cuts their cleanup short."""
-    if cmd == "help":
+    if cmd == VmCommand.HELP:
         restore_default_signals()
         return
     found = []
@@ -226,8 +236,8 @@ def prepare_command(paths: VmPaths, cmd: str, sub: str | None, nas: bool, vm: st
         problems = settings_file(path, bash_sourced=bash_sourced, nas_conf=paths.nas_conf).problems
         if problems:
             found.append(describe_problems(path, problems))
-    changes = cmd == "backup" or sub in ("apply", "on", "off")
-    if found and changes and sub != "off":
+    changes = cmd == VmCommand.BACKUP or sub in (VmSub.APPLY, VmSub.ON, VmSub.OFF)
+    if found and changes and sub != VmSub.OFF:
         raise Refused("\n".join(found) + "\nFix these lines first; nothing was changed.")
     if found:
         print("\n".join(found), file=sys.stderr)
@@ -264,7 +274,7 @@ def package_versions() -> dict[str, str]:
     return out
 
 
-def booted_deployment() -> dict[str, Json] | None:
+def booted_deployment() -> BootedDeployment | None:
     """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None: rpm-ostree
     failed, its answer is not readable, or it names no booted deployment. The reason
     query_status gives is not kept: the manifest and the index record null, as they always did."""
@@ -335,4 +345,4 @@ class VmConfFiles:
 def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
     conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
-    return {k: conf.get(k, "yes").strip().lower() not in ("no", "0", "false", "off") for k in KNOBS}
+    return {k: conf.get(k, "yes").strip().lower() not in KNOB_OFF_WORDS for k in KNOBS}
