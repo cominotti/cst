@@ -36,11 +36,16 @@ export const meta = {
 //   every command below names the worktree (git -C <worktree>, cd <worktree> && ... in the same call).
 // - The code-review skill runs as a fork in the session's main directory: it reviews the right tree only with an
 //   explicit target (code-review "high <branch>"), reads surrounding files from main, and must never get --fix.
+//   The caller's Skill result carries only the fork's agentId ("Skill execution completed"): the findings are the
+//   input of the fork's last StructuredOutput call, in its transcript (~/.claude/projects/*/*/subagents/
+//   agent-<agentId>.jsonl). The review agent reads them there and says so (skill_findings_read); a review that
+//   could not is a failed review (retried once, then the run stops), never an empty one.
 //   The simplify skill follows the agent's directory (the main checkout), so this script does simplify by hand.
 // - Never send a message to a running workflow agent: it revives a second copy of it. Change the brief instead.
 // - Do not move or edit the main checkout while a run is going: the guard below stops the run when it changes.
 // - Unverified: whether code-review "high <branch>" reviews only <base>..<branch> when the base is not main; the
-//   review agent drops findings on files outside this change's paths. Named lookup through .claude/workflows was
+//   review agent drops findings on files outside this change's paths and, with a base other than main, findings
+//   that come only from the base's own commits. Named lookup through .claude/workflows was
 //   not tried before the first merge (scriptPath was).
 // - Every agent pastes the output of GUARD_CMD for the main checkout before and after; the script stops when an
 //   agent's two readings differ or when one agent's "before" differs from the previous agent's "after".
@@ -76,6 +81,9 @@ function pickLenses(kind, changed) {
   return { lenses: [...lenses].sort(), tier1: kind !== 'docs' && machine.length > 0 }
 }
 
+// A review that counts: the code-review agent must have read the fork's findings. Pure: tested below.
+function reviewCounts(lens, r) { return !!r && (lens !== 'code-review' || r.skill_findings_read === true) }
+
 function selftest() {
   const eq = (a, b, what) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error('selftest ' + what + ': ' + JSON.stringify(a) + ' != ' + JSON.stringify(b)) }
   const throws = (f, what) => { try { f() } catch (e) { return } throw new Error('selftest ' + what + ': did not throw') }
@@ -95,6 +103,8 @@ function selftest() {
   eq(pickLenses('docs', [M('.agents/workflows/cst-change.js', 'A'), M('.claude/workflows', 'A'), M('AGENTS.md')]), { lenses: [], tier1: false }, 'agent tooling')
   eq(pickLenses('behaviour', [M('.github/workflows/ci.yml'), M('pyproject.toml'), M('uv.lock'), M('tests/test_python_files.py')]), { lenses: [], tier1: false }, 'CI and gate config')
   throws(() => pickLenses('docs', [M('tests/test_x.py')]), 'docs that changes Python')
+  eq([reviewCounts('code-review', { findings: [], skill_findings_read: false }), reviewCounts('code-review', { findings: [] }), reviewCounts('code-review', null)], [false, false, false], 'code-review findings not read')
+  eq([reviewCounts('code-review', { findings: [], skill_findings_read: true }), reviewCounts('port', { findings: [] })], [true, true], 'reviews that count')
   return 'ok'
 }
 
@@ -183,11 +193,16 @@ const TIER1 = pick.tier1 && A.tier1 !== 'defer'
 if (pick.tier1 && !TIER1) log('tier 1 deferred to the integration branch')
 log('lenses: ' + (pick.lenses.join(', ') || 'none') + '; tier 1: ' + pick.tier1)
 const FIND = { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] } } }
+const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' $HOME/.claude/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1"
 const reviewPrompt = (lens) => lens === 'code-review'
-  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). It runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + WT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + '. Return each finding with file, line, summary and a concrete failure scenario.'
+  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. Read the findings from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '). Set skill_findings_read true only when you read them there (an empty list read there counts); false otherwise, and then return no findings of your own. The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + WT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + WT + ' diff ' + BASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.'
   : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + WT + ' diff ' + BASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.'
 const labels = ['code-review', ...pick.lenses]
-const runReview = (l) => guarded('review: ' + l, 'Review', reviewPrompt(l), FIND, ['findings'])
+const runReview = async (l) => {
+  const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), l === 'code-review' ? { ...FIND, skill_findings_read: { type: 'boolean' } } : FIND, l === 'code-review' ? ['findings', 'skill_findings_read'] : ['findings'])
+  if (r && !reviewCounts(l, r)) { log('review ' + l + ': the code-review findings were not read'); trail.push({ label: 'review: ' + l, findings_unread: true }); return null }
+  return r
+}
 let reviews = await parallel(labels.map((l) => () => runReview(l)))
 for (let i = 0; i < reviews.length; i++) if (!reviews[i]) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
 const missing = labels.filter((l, i) => !reviews[i])
