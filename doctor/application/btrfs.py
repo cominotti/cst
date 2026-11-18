@@ -401,7 +401,10 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "btrfs")
 def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
-    yield from settings_file_warnings(host, SNAP_CONF, bash_sourced=True)
+    # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line.
+    yield from settings_file_warnings(
+        host, SNAP_CONF, bash_sourced=True, note=" (btrfs-snapshot ignores it too, with a warning in its journal)"
+    )
 
 
 @check(CHECKS, "btrfs")

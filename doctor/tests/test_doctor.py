@@ -2114,10 +2114,11 @@ class VmNasBackupTest(VmTest):
         r = self.run_tool()
         self.assertIn("WARN", r.stdout)
         self.assertIn("/etc/btrfs-setup/snapshots.conf line 3: NAS_HOST = nas: blanks around =", r.stdout)
-        # btrfs-snapshot (bash) still sources snapshots.conf: the warning does not claim the line is ignored.
+        # btrfs-snapshot reads snapshots.conf as data too: the warning says it ignores the line (it
+        # said that bash, which sourced the file, read the line its own way).
         self.assertIn(
             "NAS_HOST = nas: blanks around =: bash runs it as a command and sets nothing. CST's Python "
-            "programs take nothing from the line (bash, which also sources this file",
+            "programs take nothing from the line (btrfs-snapshot ignores it too, with a warning in its journal)",
             r.stdout,
         )
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
