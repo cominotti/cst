@@ -335,7 +335,7 @@ class ChromeCacheTest(unittest.TestCase):
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("managed", False))
         self.assertEqual(self.read(), "--a\n" + old)  # not rewritten for the new name
-        msg, changed, still_set = self.m.off(self.home)
+        _msg, changed, still_set = self.m.off(self.home)
         self.assertEqual((changed, still_set), (True, False))
         self.assertEqual(self.read(), f"--a\n{self.m.OFF_LINE}\n")
 
@@ -346,7 +346,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.assertEqual((state, changed), ("off", False))
 
     def test_off_before_any_apply(self) -> None:
-        msg, changed, still_set = self.m.off(self.home)
+        _msg, changed, still_set = self.m.off(self.home)
         self.assertEqual((changed, still_set), (True, False))
         self.assertEqual(self.read(), self.m.OFF_LINE + "\n")
         self.install()
@@ -513,7 +513,7 @@ class SnapExcludeTest(unittest.TestCase):
             "copy /home/u/Bulk",
         ]
         self.assertEqual(self.stale(current), "")
-        old = current[:3] + ["copy /home/u/.var/app/com.google.Chrome/cache"] + current[3:]
+        old = [*current[:3], "copy /home/u/.var/app/com.google.Chrome/cache", *current[3:]]
         out = self.stale(old)
         self.assertIn("from an older version", out)
         self.assertIn("/home/u/.var/app/com.google.Chrome/cache", out)
