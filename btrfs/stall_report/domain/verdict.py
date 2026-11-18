@@ -227,12 +227,13 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             f"once {pct['io_full_pct']:.1f}%), peak 10 s average {peak['io_some_avg10']:.0f}%."
         )
     if d_stall and mem_dominates:
-        out += mem_lines + [f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
+        out += [*mem_lines, f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
     elif d_stall:
         out += [
             f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
-            f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."
-        ] + mem_lines
+            f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure).",
+            *mem_lines,
+        ]
     else:
         out += mem_lines
     out += open_lines

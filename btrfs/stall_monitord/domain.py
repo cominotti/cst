@@ -5,11 +5,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import NamedTuple, NotRequired
 from typing import TypedDict
 import re
 
 from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.values import MINUTE
 
 # v7: reads /proc and /sys files to the end (zswap counters were 0 before).
 # v8: a "memory" wait kind (reclaim, swap-in, zswap, page faults and mmap calls
@@ -31,19 +33,19 @@ QUIET_IO_SOME_PCT = 5.0
 QUIET_D_TASKS = 1
 QUIET_SECONDS_TO_CLOSE = 10
 HUNG_SECONDS = 30  # continuous D state reported as a hung task
-HUNG_REPEAT = 15 * 60  # s before the same process is reported again
+HUNG_REPEAT = 15 * MINUTE  # s before the same process is reported again
 # A report reads the task's /proc/PID/cmdline in a helper thread (it waits for that
 # program's memory map lock) and gives up after this long, so the loop goes on.
 CMDLINE_WAIT = 0.5
 CMDLINE_SLOW = f"cmdline not read in {CMDLINE_WAIT:g} s"
-MAINT_HUNG_SECONDS = 15 * 60  # continuous D state of btrfs maintenance (fstrim, scrub) that alerts
-BUSY_ALERT_SECONDS = 10 * 60  # in D at every sample this long alerts even while progressing
+MAINT_HUNG_SECONDS = 15 * MINUTE  # continuous D state of btrfs maintenance (fstrim, scrub) that alerts
+BUSY_ALERT_SECONDS = 10 * MINUTE  # in D at every sample this long alerts even while progressing
 MAX_STACK_SNAPSHOTS = 600  # per episode; afterwards only counts are kept
 MAX_EXAMPLE_STACKS = 3  # stored stacks per signature
 FLUSH_EVERY = 10.0  # s between hand-offs to the writer thread
 KEEP_DAYS = 8
 ALERT_COMMIT_MS = 5000
-ALERT_MIN_GAP = 15 * 60  # s between alerts of the same kind
+ALERT_MIN_GAP = 15 * MINUTE  # s between alerts of the same kind
 # The alert hand-off starts btrfs-stall-alert.service from a helper thread and
 # waits at most this long for `systemctl --no-block start` to end once it runs
 # (then kills it and waits for the kill to take effect).
@@ -84,7 +86,8 @@ KMSG_SEVERE = re.compile(
     r"|csum failed|I/O error|nvme\S*: .*(?:timeout|reset|abort)",
     re.IGNORECASE,
 )
-# "BTRFS error (device dm-0 state EA): ..." / "I/O error, dev nvme0n1, sector ..."
+# The device a kernel line names, as in "BTRFS error (device dm-0 state EA): ..."
+# or "I/O error, dev nvme0n1, sector ...".
 KMSG_DEVICE = re.compile(r"\(device ([\w.-]+)[ )]|\bdev ([\w.-]+),")
 GENERIC_FRAME = re.compile(
     r"^(?:__schedule|schedule|schedule_timeout|schedule_timeout_uninterruptible"
@@ -104,7 +107,7 @@ GENERIC_FRAME = re.compile(
 def parse_stack(text: str | None) -> list[str]:
     frames = []
     for line in (text or "").splitlines():
-        # "[<0>] btrfs_commit_transaction+0x7c3/0xb40 [btrfs]"
+        # A line reads like "[<0>] btrfs_commit_transaction+0x7c3/0xb40 [btrfs]".
         part = line.split("] ", 1)[-1].strip()
         if part:
             frames.append(part.split("+", 1)[0].split(" ", 1)[0])
@@ -254,6 +257,17 @@ TIMED_WAIT_FRAME = re.compile(
 
 
 HUNG_TASK = "hung task"  # the reason of an episode a hung task opened
+
+
+class StallRecordTag(StrEnum):
+    """The kind of a stall log record, its "t" key: the daemon writes it, btrfs-stall-report reads it."""
+
+    META = "meta"
+    SAMPLE = "s"
+    EPISODE = "ep"
+    EVENT = "ev"
+    ALERT = "al"
+
 
 # One D-state task as the sampling sees it: (pid, tid, comm, frames, wchan, wait kind).
 type DTask = tuple[str, str, str, list[str], str | None, str]
@@ -468,7 +482,7 @@ class Episode:
                 }
             )
         return {
-            "t": "ep",
+            "t": StallRecordTag.EPISODE,
             "ts": round(self.start, 3),
             "start": round(self.start, 3),
             "end": round(self.end, 3),

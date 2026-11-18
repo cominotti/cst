@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Set as AbstractSet
+import contextlib
 import glob
 import os
 import queue
 import threading
 import time
+from typing import override
 
 from btrfs.stall_monitord.domain import (
     CGROUP_RESCAN,
@@ -16,6 +18,7 @@ from btrfs.stall_monitord.domain import (
     FsTopo,
 )
 from cst_core.adapters.journal import log as journal_log
+from cst_core.domain.values import DAY
 
 CGROUP_ROOT = "/sys/fs/cgroup"
 
@@ -63,10 +66,8 @@ def read_kv(path: str) -> dict[str, int]:
         for line in text.splitlines():
             parts = line.split()
             if len(parts) >= 2:
-                try:
+                with contextlib.suppress(ValueError):
                     out[parts[0]] = int(parts[1])
-                except ValueError:
-                    pass
     return out
 
 
@@ -85,7 +86,7 @@ def parse_psi(path: str) -> list[float | int] | None:
         fields = line.split()
         if not fields or fields[0] not in ("some", "full"):
             continue
-        vals = {k: v for k, v in (f.split("=", 1) for f in fields[1:] if "=" in f)}
+        vals = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
         idx = 0 if fields[0] == "some" else 2
         res[idx] = float(vals.get("avg10", 0))
         res[idx + 1] = int(vals.get("total", 0))
@@ -159,7 +160,7 @@ class Topology:
             if dev.startswith("/dev/"):
                 name = os.path.basename(os.path.realpath(dev))
                 self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
-                for n in [name] + block_parents(name):
+                for n in [name, *block_parents(name)]:
                     self.disks.setdefault(n, "swap")
 
     def scan_cgroups(self, now: float) -> None:
@@ -286,6 +287,7 @@ class Writer(threading.Thread):
         self.q: queue.Queue[list[tuple[float, str]] | None] = queue.Queue(maxsize=64)
         self.last_housekeeping_day: str | None = None
 
+    @override
     def run(self) -> None:
         while True:
             batch = self.q.get()
@@ -307,7 +309,7 @@ class Writer(threading.Thread):
                 self.housekeeping()
 
     def housekeeping(self) -> None:
-        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - KEEP_DAYS * 86400))
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - KEEP_DAYS * DAY))
         for path in glob.glob(os.path.join(self.log_dir, "stall-*.jsonl*")):
             if os.path.basename(path)[6:16] < cutoff:
                 try:

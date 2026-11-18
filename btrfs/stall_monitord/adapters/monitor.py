@@ -33,6 +33,7 @@ from btrfs.stall_monitord.domain import (
     SLICES,
     SPACE_KEYS,
     VERSION,
+    StallRecordTag,
     VMSTAT_KEYS,
     DTask,
     DTaskSince,
@@ -236,7 +237,7 @@ class Monitor:
             if os.path.exists(f"/sys/block/{n}/queue/wbt_lat_usec")
         }
         return {
-            "t": "meta",
+            "t": StallRecordTag.META,
             "ts": round(time.time(), 3),
             "v": VERSION,
             "kernel": self.kernel,
@@ -349,7 +350,7 @@ class Monitor:
             if p is not None:
                 cg[name] = [p[1], p[3], 0, 0, *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0])]
         return {
-            "t": "s",
+            "t": StallRecordTag.SAMPLE,
             "ts": ts,
             "mono": mono,
             "psi": psi,
@@ -442,7 +443,7 @@ class Monitor:
             rep = hung_report(key, self.where(pid, tid, comm), now - first, at)
             self.emit(
                 {
-                    "t": "ev",
+                    "t": StallRecordTag.EVENT,
                     "ts": round(time.time(), 3),
                     "msg": rep.msg,
                     "severe": rep.severe,
@@ -482,7 +483,7 @@ class Monitor:
         msg = io_busy_message(self.where(pid, tid, t["comm"]), busy_s, at)
         self.emit(
             {
-                "t": "ev",
+                "t": StallRecordTag.EVENT,
                 "ts": round(time.time(), 3),
                 "msg": msg,
                 "severe": False,
@@ -549,7 +550,7 @@ class Monitor:
                 continue
             self.emit(
                 {
-                    "t": "ev",
+                    "t": StallRecordTag.EVENT,
                     "ts": round(time.time(), 3),
                     "msg": line.msg[:400],
                     "severe": line.severe,
@@ -567,7 +568,16 @@ class Monitor:
         if now - self.last_alert.get(kind, -1e9) < ALERT_MIN_GAP:
             return
         self.last_alert[kind] = now
-        self.emit({"t": "al", "ts": round(time.time(), 3), "kind": kind, "level": level, "title": title, "body": body})
+        self.emit(
+            {
+                "t": StallRecordTag.ALERT,
+                "ts": round(time.time(), 3),
+                "kind": kind,
+                "level": level,
+                "title": title,
+                "body": body,
+            }
+        )
         log(f"ALERT {title}: {body}", 2 if level == "crit" else 4)
         if not self.run_dir:
             return

@@ -34,7 +34,7 @@ import time
 import types
 import unittest
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, Self, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_stall_monitord.py): the checkout root holds the tests package.
@@ -135,6 +135,7 @@ class ReadBytesTest(unittest.TestCase):
     opened: list[int]
     reads: int
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.tmp = tempfile.mkdtemp(prefix="stall-monitord-test-")
@@ -305,8 +306,8 @@ STACKS = {
         "do_swap_page",
         "__handle_mm_fault",
         "handle_mm_fault",
-    ]
-    + PAGE_FAULT,
+        *PAGE_FAULT,
+    ],
     # A page fault reading from the swap disk: block layer innermost, still memory.
     "swap_in_disk": [
         "__schedule",
@@ -317,8 +318,8 @@ STACKS = {
         "swap_read_folio",
         "do_swap_page",
         "handle_mm_fault",
-    ]
-    + PAGE_FAULT,
+        *PAGE_FAULT,
+    ],
     "throttle_direct_reclaim": [
         "__schedule",
         "schedule",
@@ -336,8 +337,14 @@ STACKS = {
         "irqentry_exit_to_user_mode",
     ],
     # Another thread of the same JVM waiting for the memory map lock.
-    "mmap_lock": ["__schedule", "schedule", "rwsem_down_read_slowpath", "down_read_killable", "lock_mm_and_find_vma"]
-    + PAGE_FAULT,
+    "mmap_lock": [
+        "__schedule",
+        "schedule",
+        "rwsem_down_read_slowpath",
+        "down_read_killable",
+        "lock_mm_and_find_vma",
+        *PAGE_FAULT,
+    ],
     # mmap() waiting for the threads faulting in that VMA (same event).
     "vma_write": [
         "__schedule",
@@ -399,8 +406,8 @@ STACKS = {
         "super_cache_scan",
         "do_shrink_slab",
         "shrink_slab",
-    ]
-    + DIRECT_RECLAIM[2:],
+        *DIRECT_RECLAIM[2:],
+    ],
     "fuse": ["__schedule", "schedule", "request_wait_answer", "fuse_simple_request", "fuse_lookup"],
     "fstrim": [
         "__schedule",
@@ -418,6 +425,7 @@ STACKS = {
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
+    @override
     def setUp(self) -> None:
         self.m = load()
 
@@ -503,7 +511,7 @@ class FakeProc:
             mock.patch.object(m, "parse_psi", _parse_psi),
         ]
 
-    def __enter__(self) -> FakeProc:
+    def __enter__(self) -> Self:
         for p in self.patches:
             p.start()
         return self
@@ -541,6 +549,7 @@ class MemoryKindSamplingTest(unittest.TestCase):
     m: _StallMonitordModule
     mon: _MonitorProto
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.mon = monitor(self.m)
@@ -614,6 +623,7 @@ class EpisodeThresholdsTest(unittest.TestCase):
     m: _StallMonitordModule
     mon: _MonitorProto
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.mon = monitor(self.m)
@@ -651,6 +661,7 @@ class HungKindTest(unittest.TestCase):
     m: _StallMonitordModule
     mon: _MonitorProto
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.mon = monitor(self.m)
@@ -686,6 +697,7 @@ class TimedReaderTest(unittest.TestCase):
     """The helper thread that reads files for the loop (proc.TimedReader): it waits at most its timeout for one
     read, refuses at once while an earlier read is still waiting, and never hands a late answer to the next read."""
 
+    @override
     def setUp(self) -> None:
         self.release = threading.Event()
         self.addCleanup(self.release.set)
@@ -778,6 +790,7 @@ class CmdlineReadTest(unittest.TestCase):
     m: _StallMonitordModule
     mon: _MonitorProto
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.mon = monitor(self.m)
@@ -864,6 +877,7 @@ class _FakeNotifier(ServiceNotifier):
         self.ready_fails = ready_fails  # this many READY=1 sends fail first (systemd's queue full)
         self.monitor: md_monitor.Monitor | None = None
 
+    @override
     def ready(self) -> bool:
         if self.ready_fails:
             self.ready_fails -= 1
@@ -872,6 +886,7 @@ class _FakeNotifier(ServiceNotifier):
         self.events.append("READY=1")
         return True
 
+    @override
     def watchdog(self) -> bool:
         self.events.append("WATCHDOG=1")
         self.pings -= 1
@@ -907,6 +922,7 @@ class NotifyLoopTest(unittest.TestCase):
     WATCHDOG=1 at every pass of the sampling loop. Every /proc and /sys read, the writer thread and the signal
     handlers are fakes."""
 
+    @override
     def setUp(self) -> None:
         self.events: list[str] = []
         topo = types.SimpleNamespace(fs={}, disks=[], top_devs=set(), containers={})
@@ -1102,6 +1118,7 @@ class AlertHandOffTest(unittest.TestCase):
 
     ALERT_ARGV: tuple[str, ...] = ("systemctl", "--no-block", "start", "btrfs-stall-alert.service")
 
+    @override
     def setUp(self) -> None:
         self.run_dir = tempfile.mkdtemp(prefix="cst-stall-alert-")
         self.addCleanup(shutil.rmtree, self.run_dir, True)
@@ -1214,6 +1231,7 @@ class AlertStarterTest(unittest.TestCase):
     """monitor.AlertStarter: one helper thread starts the program, merges the requests made meanwhile, kills a
     program that does not end, and never raises into the loop."""
 
+    @override
     def setUp(self) -> None:
         self.lines: list[str] = []
         patcher = mock.patch.object(md_monitor, "log", lambda msg, _prio=6: self.lines.append(msg))

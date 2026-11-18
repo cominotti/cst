@@ -14,9 +14,11 @@ import sys
 import time
 import zlib
 
+from btrfs.stall_monitord.domain import StallRecordTag
 from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
 from btrfs.stall_report.domain.window import summarise
 from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.values import DAY, MINUTE
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
 
@@ -41,7 +43,7 @@ def report_window(since: str | None, until: str | None) -> tuple[float, float]:
     """(since, until) of the report: --until (default now), --since (default 30 min before now)."""
     now = time.time()
     end = parse_time(until, now)
-    start = parse_time(since, now - 1800)
+    start = parse_time(since, now - 30 * MINUTE)
     if start >= end:
         sys.exit("--since must be before --until")
     return start, end
@@ -54,9 +56,9 @@ def log_dir_exists(log_dir: str) -> bool:
 def load(log_dir: str, since: float, until: float) -> list[Any]:
     # Each line that parses to a JSON object; analyse() picks the records by their "t".
     recs = []
-    first_day = time.strftime("%Y-%m-%d", time.localtime(since - 86400))
+    first_day = time.strftime("%Y-%m-%d", time.localtime(since - DAY))
     # Records buffered across midnight can land in the next day's file.
-    last_day = time.strftime("%Y-%m-%d", time.localtime(until + 86400))
+    last_day = time.strftime("%Y-%m-%d", time.localtime(until + DAY))
     paths = sorted(
         glob.glob(os.path.join(log_dir, "stall-*.jsonl")) + glob.glob(os.path.join(log_dir, "stall-*.jsonl.gz"))
     )
@@ -90,17 +92,19 @@ def analyse(
     samples only, the last key of the result)."""
     recorded = Recorded([], [], [], [], [])
     for r in recs:
-        t = r.get("t")
-        if t == "meta":
-            recorded.metas.append(r)
-        elif t == "s":
-            recorded.samples.append(r)
-        elif t == "ep":
-            recorded.episodes.append(r)
-        elif t == "ev":
-            recorded.events.append(r)
-        elif t == "al":
-            recorded.alerts.append(r)
+        match r.get("t"):
+            case StallRecordTag.META:
+                recorded.metas.append(r)
+            case StallRecordTag.SAMPLE:
+                recorded.samples.append(r)
+            case StallRecordTag.EPISODE:
+                recorded.episodes.append(r)
+            case StallRecordTag.EVENT:
+                recorded.events.append(r)
+            case StallRecordTag.ALERT:
+                recorded.alerts.append(r)
+            case _:
+                pass  # another kind of record: not read
     res, meta = summarise(recorded, since, until, verbose=verbose, now=time.time())
     if with_below and res["samples"] >= 2:
         res["below"] = below_section(since, until)

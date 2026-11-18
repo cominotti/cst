@@ -79,7 +79,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         key=lambda kv: (not kv[0].endswith(".slice"), -(kv[1]["io_some"] + kv[1]["write_bytes"] / 1e3)),
     ):
         is_slice = name.endswith(".slice")
-        if not is_slice and (c["io_some_pct"] < 1 and c["write_bytes"] < 64 * 2**20 or shown >= 6):
+        if not is_slice and ((c["io_some_pct"] < 1 and c["write_bytes"] < 64 * 2**20) or shown >= 6):
             continue
         shown += 0 if is_slice else 1
         label = f"{name} ({names[name]})" if name in names else name

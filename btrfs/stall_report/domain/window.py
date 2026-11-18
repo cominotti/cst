@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's analysis of one window, no I/O: coverage, pressure and peaks, the btrfs, disk, memory and cgroup totals, the categories of the episodes' waits, the corrections for records of older daemons, and an episode still open."""
 
+import itertools
 import math
 
 from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE
@@ -16,14 +17,12 @@ from btrfs.stall_report.domain.records import (
     CgroupTotals,
     DiskTotals,
     Episode,
-    EpisodeRecord,
     FsTotals,
     MetaRecord,
     OpenEpisode,
     Recorded,
     SampleRecord,
     Sig,
-    SigRecord,
 )
 
 
@@ -136,7 +135,7 @@ def summarise(
     pswpout_v7 = 0  # pswpout of the v7+ sample pairs (compared with zswpwb)
     v6_since, v7_since = first_at.get(6), first_at.get(7)
     zswap_ok = False  # some sample pair came from a v7+ daemon (zswap counters usable)
-    for a, b in zip(samples, samples[1:], strict=False):
+    for a, b in itertools.pairwise(samples):
         dt = (b["mono"] - a["mono"]) if "mono" in a and "mono" in b else (b["ts"] - a["ts"])
         if dt <= 0 or dt > GAP_MAX or b["ts"] - a["ts"] > GAP_MAX:
             gaps += 1
@@ -307,19 +306,17 @@ def summarise(
 
     cat_n, other_n = {}, {}
     cap_eps = []  # (start, end, corrected max_d) of episodes of daemons v3-v7 with non-storage waits
-    ep: EpisodeRecord | Episode
-    s: SigRecord | Sig
-    for ep in episodes:
+    for record in episodes:
         sigs: list[Sig] = []
-        for s in ep["sigs"]:
-            cat = classify(s["sig"], s.get("examples", []), list(s.get("comms", {})), s.get("kind"))
+        for rec in record["sigs"]:
+            cat = classify(rec["sig"], rec.get("examples", []), list(rec.get("comms", {})), rec.get("kind"))
             bucket = other_n if cat in NON_STORAGE else cat_n
-            bucket[cat] = bucket.get(cat, 0) + s["n"]
-            s = {**s, "cat": cat, "task_samples": s["n"]}
+            bucket[cat] = bucket.get(cat, 0) + rec["n"]
+            s: Sig = {**rec, "cat": cat, "task_samples": rec["n"]}
             if not verbose:
                 s.pop("examples", None)
             sigs.append(s)
-        ep = {**ep, "sigs": sigs}
+        ep: Episode = {**record, "sigs": sigs}
         if "max_d_all" not in ep:
             # Recorded by daemon v2, whose max_d counted every D-state task
             # (FUSE and idle waits too): estimate the storage ones as the mean
@@ -360,7 +357,8 @@ def summarise(
     res["non_storage_waits"] = other_n
     # v3-v7 samples during an episode with memory or maintenance waits: cap
     # at the episode's estimate (their "d" counted those waits as storage).
-    for ts, d, v5 in old_d:
+    for ts, recorded_d, v5 in old_d:
+        d = recorded_d
         for start, end, max_d in cap_eps:
             if start <= ts <= end:
                 d = min(d, max_d)
