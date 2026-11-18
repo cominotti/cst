@@ -2,6 +2,7 @@
 """cst-pending-alerts' I/O: the pending files (trusted only), the record, the desktop's notifications."""
 
 from collections.abc import Sequence
+import contextlib
 import io
 import locale
 import os
@@ -39,10 +40,8 @@ def pass_bytes_through() -> None:
 
 def use_callers_time_locale() -> None:
     """Dates in the caller's language, as date(1) prints them (C when that locale is missing)."""
-    try:
+    with contextlib.suppress(locale.Error):
         locale.setlocale(locale.LC_TIME, "")
-    except locale.Error:
-        pass
 
 
 def trusted(path: str, owner: str) -> bool:
@@ -72,9 +71,12 @@ def pending_files(s: PendingPaths) -> list[tuple[str, str]]:
             st = e.stat(follow_symlinks=False)
         except OSError:
             continue
-        if e.is_file(follow_symlinks=False) and st.st_size <= MAX_FILE:
-            if now - st.st_mtime_ns < KEEP_DAYS * DAY * 10**9:
-                found.append((st.st_mtime_ns, e.name))
+        if (
+            e.is_file(follow_symlinks=False)
+            and st.st_size <= MAX_FILE
+            and now - st.st_mtime_ns < KEEP_DAYS * DAY * 10**9
+        ):
+            found.append((st.st_mtime_ns, e.name))
     return [(find_mtime(ns), name) for ns, name in sorted(found)[-MAX_FILES:]]
 
 

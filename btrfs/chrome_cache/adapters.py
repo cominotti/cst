@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 from btrfs.chrome_cache.domain import (
@@ -74,10 +75,8 @@ def write_flags(dfd: int, name: str, text: str, old_st: os.stat_result | None) -
     """Atomic replace: a new file next to it, then rename. Refused if the file
     changed since it was read."""
     tmp = f".{name}.cst-new"
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.unlink(tmp, dir_fd=dfd)
-    except FileNotFoundError:
-        pass
     mode = stat.S_IMODE(old_st.st_mode) if old_st else 0o644
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=dfd)
     try:
@@ -100,10 +99,8 @@ def write_flags(dfd: int, name: str, text: str, old_st: os.stat_result | None) -
             raise Refused(f"~/{FLAGS_REL} changed meanwhile (nothing changed; run again)")
         os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
     except BaseException:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp, dir_fd=dfd)
-        except FileNotFoundError:
-            pass
         raise
 
 
@@ -127,10 +124,8 @@ def allocated_bytes(path: str) -> int:
         return 0
     for root, dirs, files in os.walk(path, onerror=lambda e: None):
         for n in dirs + files:
-            try:
+            with contextlib.suppress(OSError):
                 total += os.lstat(os.path.join(root, n)).st_blocks * 512
-            except OSError:
-                pass
     return total
 
 
