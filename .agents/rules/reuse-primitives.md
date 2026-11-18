@@ -37,7 +37,7 @@ one place only.
 | A link at a destination | `cst_core.domain.install.link_read_through`, `cst_core.adapters.files.owned_file_state_at` | Replaced at a root destination, judged by its target in a home. |
 | A unit file CST writes (masked or not) | `cst_core.adapters.files.unit_file_state_at`, `is_masked_unit`; `cst_core.domain.units.masked_refusal` | A link to `/dev/null` is `masked` (`systemctl mask`): refuse, never unmask. |
 | Managed lines and files, safe paths | `cst_core.domain.files`: `MarkedLineSpec`, `owned_file_state`, `inspect_managed_file`, `effective_lines`, `checked_path` | |
-| One run at a time | `cst_core.adapters.locks.take_lock` | A lock file it creates gets exactly its mode; refuses a link. |
+| One run at a time | `cst_core.adapters.locks.take_lock` | A lock file it creates gets exactly its mode; refuses a link; `timeout` (with `wait=True`) gives up after that many seconds. |
 | A journal line | `cst_core.adapters.journal.log` | `<prio>tag: msg`, flushed. |
 | Ask yes or no on the terminal | `cst_core.adapters.terminal.confirm` | Prints the question and ` [y/N] `; a yes is `is_yes`. `Refused` ("apply asks for confirmation: run it in a terminal") when stdin is not a terminal. vm's apply and nocow and cpu's vm-pin apply ask with it. docker-gc's `TerminalConsole.ask` is still a copy of its own (an EOF there is a no; here it raises). |
 | A KEY=VALUE settings file | `cst_core.domain.text.parse_shell_assignments`, `describe_problems` | The one reader: bash's rules for files bash also sources, `bash_sourced=False` for files only Python reads. Problem lines set nothing and carry their line number. `parse_snapshots_conf`: the same for `snapshots.conf` only, which also reads the `printf %q` lines an older CST wrote there. |

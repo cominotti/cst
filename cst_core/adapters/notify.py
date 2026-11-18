@@ -13,6 +13,7 @@ too is the journal line all that is left.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import errno
 import hashlib
 import os
 import posixpath
@@ -28,6 +29,7 @@ from cst_core.ports import CommandRunnerPort
 
 PENDING_ALERTS = state_format("alert-spool").folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
+_LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
 
 type Urgency = Literal["low", "normal", "critical"]
 # sent: btrfs-notify showed or kept it; kept: CST kept it in its place; lost: only the journal has it.
@@ -74,7 +76,10 @@ def _keep_alert(pending: str, urgency: Urgency, app: str, title: str, body: str)
     level, app, title, body = _bounded(urgency, app, title, body)
     alerts = posixpath.dirname(pending)
     ensure_dir(pending, 0o755)
-    fd = take_lock(posixpath.join(alerts, ".lock"), wait=True, mode=0o644)
+    lock = posixpath.join(alerts, ".lock")
+    fd = take_lock(lock, wait=True, mode=0o644, timeout=_LOCK_WAIT)
+    if fd is None:
+        raise OSError(errno.EAGAIN, f"{lock} is still held after {_LOCK_WAIT} s")
     try:
         path = posixpath.join(pending, _pending_name(app, title))
         stamp = int(time.time())
@@ -85,8 +90,7 @@ def _keep_alert(pending: str, urgency: Urgency, app: str, title: str, body: str)
         )
         write_atomic(path, text, mode=0o644, relabel=False)
     finally:
-        if fd is not None:
-            os.close(fd)
+        os.close(fd)
     return path
 
 

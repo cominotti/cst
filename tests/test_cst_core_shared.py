@@ -37,6 +37,7 @@ from cst_core.adapters.files import (
     unit_file_state_at,
 )
 from cst_core.adapters.journal import log
+from cst_core.adapters import notify as core_notify
 from cst_core.adapters.notify import Notifier
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import confirm
@@ -306,6 +307,18 @@ class AdaptersTest(unittest.TestCase):
             take_lock(self.path("link"), wait=False)
         os.close(fd)
         fd2 = take_lock(lock, wait=True)
+        assert fd2 is not None
+        os.close(fd2)
+
+    def test_a_wait_with_a_timeout_gives_up_and_takes_a_freed_lock(self) -> None:
+        lock = self.path("lock")
+        fd = take_lock(lock, wait=False)
+        assert fd is not None
+        start = time.monotonic()
+        self.assertIsNone(take_lock(lock, wait=True, timeout=0.3))
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+        os.close(fd)
+        fd2 = take_lock(lock, wait=True, timeout=0.3)
         assert fd2 is not None
         os.close(fd2)
 
@@ -1338,6 +1351,22 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(prio, 3)
         self.assertTrue(msg.startswith("alert not delivered (/x/btrfs-notify is not installed) and not kept ("), msg)
         self.assertTrue(msg.endswith("): Disk: problem; it is only in this journal"), msg)
+
+    def test_a_spool_lock_held_too_long_leaves_the_alert_in_the_journal_only(self) -> None:
+        # btrfs-notify gives up on this lock after 30 s; at boot nothing may wait for it forever.
+        os.makedirs(self.pending)
+        held = take_lock(os.path.join(os.path.dirname(self.pending), ".lock"), wait=False)
+        assert held is not None
+        self.addCleanup(os.close, held)
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        with mock.patch.object(core_notify, "_LOCK_WAIT", 0.3):
+            start = time.monotonic()
+            outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+        self.assertEqual((outcome, self.kept()), ("lost", []))
+        self.assertIn(
+            "/alerts/.lock is still held after 0.3 s): Disk: problem; it is only in this journal", self.lines[0][1]
+        )
 
     def test_btrfs_notify_and_cst_pending_alerts_read_what_it_keeps(self) -> None:
         """The same alert kept by btrfs-notify (no desktop session) and then by cst_core is one file, merged;
