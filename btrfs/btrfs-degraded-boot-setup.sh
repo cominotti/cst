@@ -81,10 +81,11 @@
 #   cst btrfs degraded-boot --uninstall  remove everything, untrack from initramfs
 #
 # Test seams: OSTREE_BOOTED, STAGED_DEPLOYMENT, STAGED_INITRDS and BOOT_DIR
-# below name the host paths the guards and next_overlay read; their values
-# are the real ones. Like every path setting above the argument dispatch,
-# only btrfs/tests/test_degraded_boot.py changes them, after sourcing that
-# part into a fake root. Nothing reads them from the environment.
+# below name the host paths the guards, next_boot_entry and next_overlay
+# read; their values are the real ones. Like every path setting above the
+# argument dispatch, only btrfs/tests/test_degraded_boot.py changes them,
+# after sourcing that part into a fake root. Nothing reads them from the
+# environment.
 
 set -Eeuo pipefail
 
@@ -99,7 +100,8 @@ TIMER="${UNIT_DIR}/btrfs-last-resort@.timer"
 RECORD_UNIT="btrfs-degraded-boot-record.service"
 FLAG_DIR="/run/btrfs-allow-degraded"
 STATE_DIR="/var/lib/btrfs-degraded-boot"
-# Host paths the guards and next_overlay read (test seams, see the header).
+# Host paths the guards, next_boot_entry and next_overlay read (test seams,
+# see the header).
 OSTREE_BOOTED="/run/ostree-booted"
 STAGED_DEPLOYMENT="/run/ostree/staged-deployment"
 STAGED_INITRDS="/run/ostree/staged-initrds"
@@ -175,9 +177,26 @@ elif what == "summary":
 ' "$1"
 }
 
+# The boot entry (${BOOT_DIR}/loader/entries/*.conf) whose ostree= is the
+# next deployment. Fails, printing nothing, when there is none.
+next_boot_entry() {
+    local next entry opts path
+    next="$(realpath "$(ostree_query next-root)")"
+    for entry in "${BOOT_DIR}"/loader/entries/*.conf; do
+        # No entry at all: the pattern stays as it is (no nullglob); not a file to read.
+        [[ -e "${entry}" ]] || continue
+        opts="$(awk '$1 == "options" {sub(/^options[ \t]+/, ""); print}' "${entry}")"
+        path="$(grep -o 'ostree=[^ ]*' <<<"${opts}" | cut -d= -f2)"
+        [[ -n "${path}" && "$(realpath "${path}" 2>/dev/null)" == "${next}" ]] || continue
+        echo "${entry}"
+        return 0
+    done
+    return 1
+}
+
 # Path of the initramfs-etc overlay the next boot will load, or nothing.
 next_overlay() {
-    local next entry opts path initrds
+    local entry initrds
     if [[ "$(ostree_query next-staged)" == "yes" ]]; then
         python3 - "${STAGED_DEPLOYMENT}" "${STAGED_INITRDS}" <<'PY'
 import re, sys
@@ -189,17 +208,9 @@ if m:
 PY
         return
     fi
-    next="$(realpath "$(ostree_query next-root)")"
-    for entry in "${BOOT_DIR}"/loader/entries/*.conf; do
-        # No entry at all: the pattern stays as it is (no nullglob); not a file to read.
-        [[ -e "${entry}" ]] || continue
-        opts="$(awk '$1 == "options" {sub(/^options[ \t]+/, ""); print}' "${entry}")"
-        path="$(grep -o 'ostree=[^ ]*' <<<"${opts}" | cut -d= -f2)"
-        [[ -n "${path}" && "$(realpath "${path}" 2>/dev/null)" == "${next}" ]] || continue
-        initrds="$(awk '$1 == "initrd" {for (i = 2; i <= NF; i++) print $i}' "${entry}")"
-        grep -m1 'initramfs-overlays' <<<"${initrds}" | sed "s|^|${BOOT_DIR}|"
-        return
-    done
+    entry="$(next_boot_entry)" || return 0
+    initrds="$(awk '$1 == "initrd" {for (i = 2; i <= NF; i++) print $i}' "${entry}")"
+    grep -m1 'initramfs-overlays' <<<"${initrds}" | sed "s|^|${BOOT_DIR}|"
 }
 
 # 0 = the next-boot overlay contains exactly the tracked files with the
