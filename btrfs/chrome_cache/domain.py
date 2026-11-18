@@ -8,9 +8,11 @@ from enum import StrEnum
 from typing import TypedDict
 import shlex
 
+from cst_core.domain.values import GIB, MIB
+
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
-CACHE_SIZE = 512 * 1024 * 1024  # 536870912: mandatory cap (shared tmpfs)
+CACHE_SIZE = 512 * MIB  # 536870912: mandatory cap (shared tmpfs)
 FLAG_DIR = f"--disk-cache-dir={CACHE_DIR}"
 FLAG_SIZE = f"--disk-cache-size={CACHE_SIZE}"
 APP_DIR = f".var/app/{APP}"
@@ -195,7 +197,7 @@ def turn_off(text: str) -> str | None:
 
 
 def size_text(n: int) -> str:
-    return f"{n / 1024**3:.1f} GiB" if n >= 1024**3 // 10 else f"{n >> 20} MiB"
+    return f"{n / GIB:.1f} GiB" if n >= GIB // 10 else f"{n >> 20} MiB"
 
 
 def off_message(text: str, new: str) -> str:

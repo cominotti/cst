@@ -32,6 +32,7 @@ from btrfs.chrome_cache.domain import (
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import MIB
 
 
 def status(home: str) -> int:
@@ -56,7 +57,7 @@ def status(home: str) -> int:
     http, code, profiles = old_cache(home)
     sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
     where = "" if sub else ", in /home snapshots"
-    if state in (ChromeFlagsState.MANAGED, ChromeFlagsState.USER_SAME) and http >= 1024**2:
+    if state in (ChromeFlagsState.MANAGED, ChromeFlagsState.USER_SAME) and http >= MIB:
         print(f"  old on-disk HTTP cache: {size_text(http)} in {profiles} profile(s){where}. Quit Chrome")
         print("                         (all windows), start it again, then delete it (never done automatically):")
         print(f"                         rm -rf ~/{OLD_CACHE_REL}/*/Cache")
