@@ -978,5 +978,17 @@ class MemberDisksTest(unittest.TestCase):
         self.assertEqual(pick_mounts("u1 /etc\nu1 /var\nu2 /mnt/b\nu2 /mnt/a\nu1 /home\n"), ["/var", "/mnt/b"])
 
 
+class ShippedUnitTest(unittest.TestCase):
+    def test_the_unit_passes_no_environment(self) -> None:
+        # CST_HEALTH_ROOT is a test seam of a program run as root: the shipped unit must not hand it, or
+        # any other setting, to the check (the tier 1 test adds its own Environment= to a copy).
+        units = os.path.join(os.path.dirname(HERE), "units")
+        for name in ("btrfs-health-check.service", "btrfs-health-check.timer"):
+            with open(os.path.join(units, name), encoding="utf-8") as f:
+                keys = [line.split("=", 1)[0].strip() for line in f if "=" in line and not line.startswith("#")]
+            with self.subTest(name):
+                self.assertFalse({"Environment", "EnvironmentFile", "PassEnvironment"} & set(keys), keys)
+
+
 if __name__ == "__main__":
     unittest.main()

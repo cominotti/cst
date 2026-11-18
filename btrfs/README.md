@@ -259,6 +259,14 @@ When there are problems it sends **one critical desktop alert** titled
 `Disk health: problems detected`. Its text starts with the number of problems
 (`2 problem(s):`), then one line per problem.
 
+**For tests only: `CST_HEALTH_ROOT`.** With it set, the check reads and writes
+every file under that folder instead of `/` (commands still come from
+`PATH`), so the unit tests and the tier 1 test run it on a fake machine. It
+is not a setting: the shipped `btrfs-health-check.service` passes it no
+environment (a unit test checks that it has no `Environment=`,
+`EnvironmentFile=` or `PassEnvironment=`), and a root shell that sets it on
+purpose gets a check of that folder, not of the machine.
+
 **How often an alert comes back:**
 
 - **State problems repeat every hour** while the problem is still there: a
