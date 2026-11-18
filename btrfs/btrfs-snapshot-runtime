@@ -5,7 +5,8 @@
 The Python side of btrfs-snapshot (CST), installed as
 /usr/local/sbin/btrfs-snapshot-runtime. The bash front,
 /usr/local/sbin/btrfs-snapshot, hands it these commands with their command
-line: list [--json], caches [--json] and configure. Run it through
+line: hourly, nas, list [--json], caches [--json], prune, purge and
+configure (the conversion engine and busy stay in the bash). Run it through
 btrfs-snapshot, not on its own.
 """
 

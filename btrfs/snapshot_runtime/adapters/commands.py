@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The read-only commands of btrfs-snapshot: list, caches and configure."""
+"""The read-only commands of btrfs-snapshot (list, caches and configure), and COMMANDS: every
+command the bash front hands over, hourly, nas, prune and purge too."""
 
 from collections.abc import Callable, Mapping, Sequence
 import sys
