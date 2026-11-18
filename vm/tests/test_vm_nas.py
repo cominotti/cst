@@ -213,7 +213,9 @@ echo "systemctl $*" >>"$STUB_LOG"
 case "$1" in
   enable) mkdir -p "$UNIT_DIR/timers.target.wants" && touch "$UNIT_DIR/timers.target.wants/$3" ;;
   disable) rm -f "$UNIT_DIR/timers.target.wants/$3" ;;
-  show) echo "Sat 2026-11-21 04:41:12 UTC" ;;
+  # Without --value, systemctl shows PROP=VALUE.
+  show) shift; v="Sat 2026-11-21 04:41:12 UTC"; case " $* " in *" -p Result "*) v=success ;; esac
+        case " $* " in *" --value "*) echo "$v" ;; *) echo "$2=$v" ;; esac ;;
   # clean needs the unit loaded: the log says whether the timer's file was still there.
   clean) [ -e "$UNIT_DIR/cst-vm-backup@.timer" ] && echo "  (timer file present)" >>"$STUB_LOG" ;;
 esac
@@ -1058,6 +1060,24 @@ class TimerTest(Nas):
         self.assertIn("written by a newer CST", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertFalse(os.path.exists(self.env["CST_VM_SBIN_COPY"]))
+
+    def test_status_reads_the_timer_properties_where_it_runs(self) -> None:
+        # The two properties through cst_core's show (PROP=VALUE, from the systemd cst-vm runs
+        # under), not `systemctl show --value`.
+        r = self.run_tool("backup-timer", "on", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        open(self.log, "w").close()
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("  next run: Sat 2026-11-21 04:41:12 UTC\n", r.stdout)
+        self.assertIn("  last run of the service: success\n", r.stdout)
+        self.assertEqual(
+            [c for c in self.calls() if c.startswith("systemctl ")],
+            [
+                "systemctl show -p NextElapseUSecRealtime cst-vm-backup@win.timer",
+                "systemctl show -p Result cst-vm-backup@win.service",
+            ],
+        )
 
     def test_on_status_off(self) -> None:
         r = self.run_tool("backup-timer", "status", "win")

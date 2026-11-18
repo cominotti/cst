@@ -27,7 +27,7 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
-from cst_core.domain.contracts import state_format, version_of
+from cst_core.domain.contracts import first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
@@ -56,6 +56,7 @@ class FakeRunner:
 
     def __init__(self, responses: dict[tuple[str, ...], CommandResult] | None = None) -> None:
         self.calls: list[list[str]] = []
+        self.options: list[dict[str, object]] = []
         self.responses = responses or {}
 
     def run(
@@ -70,6 +71,7 @@ class FakeRunner:
     ) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)
+        self.options.append({"timeout": timeout, **_options})
         res = self.responses.get(tuple(cmd), CommandResult(0, "", ""))
         if check and res.returncode != 0:
             raise RuntimeError(f"command failed: {cmd}")
@@ -302,6 +304,62 @@ class AdaptersTest(unittest.TestCase):
         # systemctl's message comes back with its exit status: swap apply shows both.
         self.assertEqual(sysd.stop("dev-zram0.swap"), CommandResult(1, "", "failed"))
         self.assertEqual(sysd.escape_path("/dev/mapper/swap0", suffix="swap"), "dev-mapper-swap0.swap")
+        # By default no limit and the caller's locale (what swap has always run).
+        self.assertEqual({(o["timeout"], o.get("locale_c")) for o in fake.options}, {(None, False), (None, None)})
+
+    def test_systemctl_adapter_enable_disable_clean(self) -> None:
+        unit = UnitName("cst-vm-backup@win.timer")
+        fake = FakeRunner(
+            {
+                ("systemctl", "disable", "--now", unit): CommandResult(1, "", "Access denied"),
+            }
+        )
+        sysd = SystemctlAdapter(fake, timeout=120, locale_c=True)
+        self.assertEqual(sysd.enable(unit, now=True).returncode, 0)
+        self.assertEqual(sysd.enable(unit).returncode, 0)
+        self.assertEqual(sysd.disable(unit, now=True), CommandResult(1, "", "Access denied"))
+        self.assertEqual(sysd.disable(unit).returncode, 0)
+        self.assertEqual(sysd.clean(unit, what="state").returncode, 0)
+        sysd.daemon_reload()
+        self.assertEqual(
+            fake.calls,
+            [
+                ["systemctl", "enable", "--now", unit],
+                ["systemctl", "enable", unit],
+                ["systemctl", "disable", "--now", unit],
+                ["systemctl", "disable", unit],
+                ["systemctl", "clean", "--what=state", unit],
+                ["systemctl", "daemon-reload"],
+            ],
+        )
+        # The options of the adapter reach every systemctl call.
+        self.assertEqual({(o["timeout"], o["locale_c"]) for o in fake.options}, {(120, True)})
+
+    def test_systemctl_adapter_over_the_real_runner(self) -> None:
+        # A stub systemctl first in PATH (nothing reaches the real one): daemon-reload raises
+        # CommandFailed with systemctl's words; a systemctl that is not there reaches the runner's words.
+        tmp = tempfile.mkdtemp(prefix="cst-systemctl-")
+        self.addCleanup(shutil.rmtree, tmp)
+        with open(os.path.join(tmp, "systemctl"), "w") as f:
+            f.write("#!/bin/sh\necho \"LC_ALL=$LC_ALL $*\"\necho 'Access denied' >&2\nexit 1\n")
+        os.chmod(os.path.join(tmp, "systemctl"), 0o755)
+        runner = SubprocessCommandRunner(base_env={"PATH": f"{tmp}:/usr/bin:/bin"})
+        sysd = SystemctlAdapter(runner, timeout=30, locale_c=True)
+        with self.assertRaises(CommandFailed) as cm:
+            sysd.daemon_reload()
+        self.assertEqual((cm.exception.returncode, cm.exception.stderr), (1, "Access denied\n"))
+        self.assertEqual(sysd.enable(UnitName("a.timer")).stdout, "LC_ALL=C enable a.timer\n")
+
+        def words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:
+            return CommandResult(127, "", f"{argv[0]}: not found ({timeout} s)", fault=r.fault)
+
+        empty = os.path.join(tmp, "empty")
+        os.mkdir(empty)
+        gone = SystemctlAdapter(SubprocessCommandRunner(base_env={"PATH": empty}, words=words), timeout=30)
+        self.assertEqual(gone.enable(UnitName("a.timer"), now=True).stderr, "systemctl: not found (30 s)")
+        with self.assertRaises(CommandFailed) as cm:
+            gone.daemon_reload()
+        self.assertEqual(cm.exception.stderr, "systemctl: not found (30 s)")
 
     def test_systemctl_show_reads_properties_on_the_host(self) -> None:
         seen: list[tuple[list[str], dict[str, object]]] = []
@@ -325,6 +383,11 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
         failing = SystemctlAdapter(Recording(CommandResult(1, "", "Failed to connect to bus")))
         self.assertEqual(failing.show(UnitName("machine.slice"), ("MemoryLow",)), {})
+        # A caller that reads the systemd it runs under, with a timeout of its own (vm's timer status).
+        seen.clear()
+        local = SystemctlAdapter(Recording(CommandResult(0, "Result=success\n", "")), timeout=120)
+        self.assertEqual(local.show(UnitName("a.service"), ("Result",), on_host=False), {"Result": "success"})
+        self.assertEqual(seen[0][1], {"check": False, "timeout": 120, "locale_c": True, "on_host": False})
 
     def test_host_execution_context_and_clock(self) -> None:
         host = HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000)
@@ -1310,6 +1373,25 @@ class StateContractsTest(unittest.TestCase):
                 self.assertTrue(f.writers and f.readers)
                 for rel in f.writers + f.readers:
                     self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, rel)), rel)
+
+    def test_first_line_version(self) -> None:
+        self.assertEqual(first_line_version("cst-game-intended 1\nprop a\n", "cst-game-intended"), 1)
+        self.assertEqual(first_line_version("cst-game-intended 12", "cst-game-intended"), 12)
+        for text in ("", "prop sys a b c d\n", "cst-alert 1\n", "cst-game-intendedx 1\n"):
+            with self.subTest(text=text):
+                self.assertEqual(first_line_version(text, "cst-game-intended"), 0)
+        for text in (
+            "cst-game-intended\n",
+            "cst-game-intended x\n",
+            "cst-game-intended -1\n",
+            "cst-game-intended 1 2\n",
+            "cst-game-intended \u00b2\n",  # a digit for str.isdigit, not for int()
+            "cst-game-intended \u0661\n",  # an Arabic-Indic one: int() reads it, the format does not
+            "cst-game-intended " + "9" * 5000 + "\n",  # more digits than int() converts: ValueError
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(first_line_version(text, "cst-game-intended"))
+        self.assertEqual(state_format("game-intended").version, 1)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(

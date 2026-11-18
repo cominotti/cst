@@ -56,16 +56,24 @@ INDEX_FORMAT = state_format("vm-index")
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
 
 
-def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
-    """(rc, stdout, stderr) of r with cst-vm's own words for a command that is
-    missing or does not answer; one that cannot start raises (as subprocess.run did)."""
+def fault_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:
+    """r with cst-vm's own words for a command that is missing (127) or does not answer (124);
+    one that cannot start raises (as subprocess.run did). The runner's words= for systemctl."""
     if r.fault == "missing":
-        return 127, "", f"{name}: not found"
+        return CommandResult(127, "", f"{argv[0]}: not found", argv=r.argv, fault=r.fault, cause=r.cause)
     if r.fault == "timeout":
-        return 124, "", f"{name}: no answer within {timeout} s"
+        return CommandResult(
+            124, "", f"{argv[0]}: no answer within {timeout} s", argv=r.argv, fault=r.fault, cause=r.cause
+        )
     if r.cause is not None:
         raise r.cause
-    return r.returncode, r.stdout, r.stderr
+    return r
+
+
+def _triple(r: CommandResult, name: str, timeout: float) -> tuple[int, str, str]:
+    """(rc, stdout, stderr) of r in cst-vm's own words (fault_words)."""
+    w = fault_words([name], r, timeout)
+    return w.returncode, w.stdout, w.stderr
 
 
 class VmCommands:

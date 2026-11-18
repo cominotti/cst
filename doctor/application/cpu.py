@@ -4,6 +4,7 @@ boxes outside CST's rules."""
 
 from collections.abc import Iterator
 
+from cpu.game.domain import newer_intended
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -58,7 +59,8 @@ def game_again(host: DoctorHostPort) -> str:
 
 @check(CHECKS, "cpu")
 def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
-    yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True)
+    # Read with bash's rules (an older CST's bash copies sourced it), but no bash program of this CST does.
+    yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True, note=" (the game profile does not switch on)")
 
 
 def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
@@ -112,7 +114,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
         return
     try:
         with host.open_text(host.path(GAME_INTENDED)) as f:
-            records = read_intended(f.read(65536))
+            text = f.read(65536)
     except FileNotFoundError:
         yield Result(
             INFO,
@@ -124,6 +126,11 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
     except OSError as e:
         yield Result(INFO, f"game profile: ON; drift not checked ({GAME_INTENDED}: {e.strerror})")
         return
+    newer = newer_intended(GAME_INTENDED, text)
+    if newer is not None:
+        yield Result(INFO, f"game profile: ON; drift not checked ({newer})")
+        return
+    records = read_intended(text)
     managers: dict[str, tuple[list[str] | None, str]] = {"sys": (["systemctl"], "")}
     managers["usr"] = user_manager(host)
     wanted: dict[tuple[str, str], list[str]] = {}

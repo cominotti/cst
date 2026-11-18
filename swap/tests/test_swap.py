@@ -683,6 +683,15 @@ class _FakeSystemd:
     def daemon_reload(self) -> None:
         self.daemon_reloads += 1
 
+    def enable(self, unit: str, *, now: bool = False) -> CommandResult:
+        raise AssertionError(f"swap never enables a unit: {unit}")
+
+    def disable(self, unit: str, *, now: bool = False) -> CommandResult:
+        raise AssertionError(f"swap never disables a unit: {unit}")
+
+    def clean(self, unit: str, *, what: str) -> CommandResult:
+        raise AssertionError(f"swap never cleans a unit: {unit}")
+
     def _set_active(self, device: str, active: bool) -> None:
         lines = []
         if os.path.exists(self._swaps_path):
@@ -723,8 +732,8 @@ class _FakeSystemd:
     def restart(self, unit: str) -> CommandResult:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
-    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
-        del props
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+        del props, on_host
         return dict(self.shown) if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
