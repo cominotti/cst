@@ -19,8 +19,8 @@ Checks every Python file under a `domain`, `ports`, or `application` layer:
   ORPHAN_ALLOWED and ORPHAN_ALLOWED_FILES stay empty.
 - A package's `cli.py` is the outer layer that orchestrates a program's
   commands; in the modules without an application layer (all but swap,
-  doctor, cst_core, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow,
-  btrfs/snapshot and, for some of its commands, vm) it still does I/O directly. CLI_CEILINGS caps the
+  doctor, cst_core, vm, btrfs/bulk, btrfs/docker_gc, btrfs/docker_volumes_nocow
+  and btrfs/snapshot) it still does I/O directly. CLI_CEILINGS caps the
   size of each one: new logic goes into domain (pure) or adapters (I/O),
   or into an application layer with ports.
 - Every package module has one role (`module_role`): domain, ports,
@@ -103,7 +103,8 @@ PURE_NAMES: Final[dict[str, frozenset[str]]] = {
     "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),
     "time": frozenset({"gmtime", "localtime", "strftime", "struct_time"}),
     "io": frozenset({"StringIO"}),
-    "datetime": frozenset({"date", "datetime", "timedelta", "timezone", "tzinfo"}),
+    "contextlib": frozenset({"AbstractContextManager"}),
+    "datetime": frozenset({"UTC", "date", "datetime", "timedelta", "timezone", "tzinfo"}),
     "datetime.datetime": frozenset({"fromisoformat", "fromtimestamp", "strptime"}),
 }
 # Builtins that reach the terminal, files or run code.
@@ -143,7 +144,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
     "toolchains/cli/": 934,
-    "vm/cli/": 1066,
+    "vm/cli/": 281,
 }
 
 
@@ -186,7 +187,6 @@ IO_BUDGETED_ROLES: Final[frozenset[str]] = frozenset({"ports", "presenter", "wir
 IO_BUDGETS: Final[dict[str, int]] = {
     "cst_core entry": 1,
     "toolchains cli": 16,
-    "vm cli": 61,
 }
 
 # Packages whose cli.py and presenter.py do no I/O, and their composition
@@ -202,6 +202,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
     "swap": "swap/wiring.py",
+    "vm": "vm/wiring.py",
 }
 
 

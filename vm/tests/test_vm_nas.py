@@ -768,7 +768,8 @@ class RobustnessTest(Nas):
         self.wait_for("commit-started")
         os.killpg(p.pid, signal.SIGINT)  # again, while virsh merges
         out, err = p.communicate(timeout=60)
-        assert isinstance(out, str) and isinstance(err, str)
+        assert isinstance(out, str)
+        assert isinstance(err, str)
         self.assertEqual(p.returncode, 1, out + err)
         self.assertIn("stopped by signal SIGINT", err)
         self.assertNotIn("DISK NOT MERGED BACK", err)
