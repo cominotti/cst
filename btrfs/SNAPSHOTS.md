@@ -1463,7 +1463,7 @@ the problem lasts. About snapshots:
 
 - `snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'`.
   Not raised while paused, while old trees are being deleted, while a boot
-  conversion is pending, or in the first 20 minutes after boot or resume.
+  conversion or a move into `~/Bulk` waits for the next boot, or in the first 20 minutes after boot or resume.
   What to do: read `journalctl -u btrfs-snapshot` and check
   `systemctl status btrfs-snapshot.timer`.
 - A journal line only (no notification): `no successful NAS backup (restic) for over 8 days`.
@@ -1855,14 +1855,14 @@ After `snapshots nas setup`, in addition:
 `setup`, `nas setup`, `nas disable` and the other commands that set a key
 write its value in single quotes (`NAS_PATH='/volume1/backup'`), or in double
 quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
-file) and CST's Python programs (`cst doctor`, `cst vm`) read these alike.
+file) and CST's Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
 is written only when its content changes; a mode changed by hand goes back
 to 0644 (everyone may read it).
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
-`K=$'a\tb'`). `cst doctor` and `cst vm` read those lines as bash does, so
+`K=$'a\tb'`). `cst doctor`, `cst vm` and the health check read those lines as bash does, so
 nothing needs to be done. The next command that writes the file (`setup`
 lists it in its plan) puts them in quotes, with the same values. Your other
 lines stay as they are, and in any other CST settings file a backslash outside

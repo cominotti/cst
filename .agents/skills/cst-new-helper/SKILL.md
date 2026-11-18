@@ -65,8 +65,11 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
 
 ## Install, tests, docs
 
-- [ ] The module's setup script installs it with `cst_install` or
-      `cst_install_as` and removes it with `cst_installed_dests`. The copy on
+- [ ] The module installs it through the installer: `cst_install` or
+      `cst_install_as` in a bash setup script, `cst_core/installer.py install
+      --component ...` (or the `InstallService` of `program_installer`, as swap, vm and toolchains do) in a Python
+      one; it removes it with the component's destinations
+      (`cst_installed_dests`, or `installer.py remove --component`). The copy on
       the machine changes only when that install runs again.
 - [ ] Unit tests in the module's `tests/`, importing the package and injecting
       fakes: through cst_core's `CommandRunnerPort` / `FileSystemPort` (or

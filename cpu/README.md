@@ -321,7 +321,7 @@ nothing or names another user now), and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
-| `TARGET_USER` | Your user. Needed for everything in your session. | `cpu-setup.sh`, game profile |
+| `TARGET_USER` | Your user. Needed for everything in your session. | `cst cpu` (`cpu/setup`), game profile |
 | `BUILD_CPUS` | Where the VM and Docker go during games; the VM always, after `vm-pin`. | game profile, `vm-pin` |
 | `P_CORES` | Cores that get EPP `performance` during games. | game profile |
 | `VM_WEIGHT` | VM CPU (and I/O, when numeric `1..10000`) weight during games. | game profile |
@@ -333,9 +333,10 @@ nothing or names another user now), and `cst cpu game state` shows the line.
 
 You may edit the values. Rules:
 
-- **No comments on the same line as a value.** Put comments on their own line,
-  starting with `#`. A comment after a value breaks the parsers (for example,
-  `vm-pin` would read `BUILD_CPUS` as `12-23'   # ...`).
+- **No comment on the same line as `TARGET_USER`.** `cst cpu` finds your
+  user only on a line that holds nothing but `TARGET_USER='...'`. The game
+  profile, `vm-pin` and `cst doctor` accept a comment after a value (see
+  above), but a comment on its own line, starting with `#`, is safest.
 - Keep the quotes as shown.
 
 `install` never overwrites this file, and `uninstall` keeps it.

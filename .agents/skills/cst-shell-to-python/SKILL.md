@@ -11,7 +11,7 @@ A conversion is a refactor: it changes no behaviour
 module's README and every caller of the script first: `cst_core/domain/dispatch.py`,
 other scripts that source it, units that run it, E2E tests.
 
-## The precedents: swap, cpu
+## The precedents: swap, cpu, bluetooth, the health check
 
 Commit 8d8fc94 (pull request #27) turned `swap-setup.sh`, `swap/swap-lib.bash`
 and `swap/swap-status` into the `swap/` package. Read it with
@@ -28,7 +28,12 @@ and `swap/swap-status` into the `swap/` package. Read it with
 The cpu port (cpu-setup.sh over `cpu/cpu-setup` and the `cpu.setup`
 package; `cpu/game-profile` as a python-entry zipapp of `cpu.game`) kept
 the installed bash copy working next to the new one: see the checklist's
-last items.
+last items. Then commit 323d5bc (#66: `btrfs-health-check` and
+`cst-pending-alerts`, installed programs that became zipapps of
+`btrfs/health_check` and `btrfs/pending_alerts`) and commit 535aea1 (#67:
+`bluetooth-setup.sh` over `bluetooth/bt-setup` and the `bluetooth.setup`
+package, with tier 1's `test_95` running the old bash and the new Python
+against each other).
 
 ## The port checklist (from PR-A's regressions)
 
@@ -108,9 +113,11 @@ command, against the bash, with a test:
 4. **Run the step 1 tests, unchanged, against the Python.** The test diff
    must not loosen or delete an assertion (skill
    [cst-refactor-parity](../cst-refactor-parity/SKILL.md)).
-5. **Delete the bash**: the old files, their names in the `test lint` script
-   list in `cst.invowkmod/invowkfile.cue`, and their `INSTALL_MANIFEST` rows
-   (kind `shell`) or `SETUP_ENTRYPOINTS` entries when they go away.
+5. **Delete the bash**: the old files, and their `INSTALL_MANIFEST` rows
+   (kind `shell`) or `SETUP_ENTRYPOINTS` entries (`cst_core/domain/install.py`)
+   when they go away. `test lint` finds the shell files by itself
+   (`tests/shell_files.py`); only a test-only script is listed by hand there
+   (`SHELL_TEST_SCRIPTS`).
 6. **Lower the ceilings**: run `invowk cmd fix budgets` (a dry run) and
    then `invowk cmd fix budgets --apply`: it sets `shell W=5 duplicated %`
    in `CEILINGS` of `tests/test_duplication.py` (and every other table the

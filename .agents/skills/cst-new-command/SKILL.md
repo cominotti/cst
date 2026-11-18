@@ -25,14 +25,19 @@ replace them.
 - [ ] It goes through the module's entry point (`<module>-setup.sh` or the
       package's `cli.py`) and its help text uses `CST_PROG`. A new module also
       needs a row in `MODULES` in `cst_core/domain/dispatch.py`. For vm and
-      toolchains, whose scripts are shims, a new command (or subcommand) needs
-      its row in `ROUTING` (same file): read, user, root or as-user, which
-      decides the toolbox refusal and the sudo or runuser re-run; and a line
-      in the script's header comment, which is its help.
+      toolchains, whose scripts run `cst_core/route.py`, a new command (or
+      subcommand) needs its row in `ROUTING` (same file): read, user, root or
+      as-user, which decides the toolbox refusal and the sudo or runuser
+      re-run; and a line in the script's header comment, which is its help.
+      For swap, cpu and bluetooth, whose shims run their own Python program
+      (`swap/cli.py`, `cpu/cpu-setup`, `bluetooth/bt-setup`), it goes into
+      that program's cli and into the help (the shim's header comment for cpu
+      and bluetooth, `swap/cli.py` for swap).
 - [ ] Every file it installs is a row of `INSTALL_MANIFEST`
       (`cst_core/domain/install.py`), written with `cst_install`,
-      `cst_install_as` or `cst_install_text`, removed with the list from
-      `cst_installed_dests`. A new Python program: skill
+      `cst_install_as` or `cst_install_text` from a bash setup script, or
+      through `cst_core/installer.py`'s commands (`install`, `text`, `remove`,
+      `mark`) or its `InstallService` from a Python module; removed with the component's destinations. A new Python program: skill
       [cst-new-helper](../cst-new-helper/SKILL.md).
 - [ ] New logic goes into `domain` (pure) or `adapters` (I/O), not into
       `cli.py`: `CLI_CEILINGS` in `tests/test_architecture.py` caps each

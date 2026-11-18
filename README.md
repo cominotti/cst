@@ -87,7 +87,7 @@ did; the scripts get it at its default. Of cst's own
 settings a module only sees `CST_PROG` (its name in hints), and `CST_NAME`
 after the sudo re-run of `cst status` (so hints keep the name); its locale
 (`LC_CTYPE`) is the caller's, unchanged. So is the locale of the commands
-that `cst swap` and the installer (`cst-install.bash`) run.
+that `cst swap`, `cst cpu`, `cst bluetooth` and the installer (`cst_core/installer.py`) run.
 
 **How to call it.** The first time, run it from the CST folder:
 
@@ -146,7 +146,7 @@ for `toolchains`: `config apply` and `auto on`) yourself.
   `run through sudo from your user account (needs SUDO_USER)`.
 - Inside a toolbox, the root commands stop with
   `'<command>' must run on the host, not inside a toolbox/container ...`.
-  Only `report` and `watch` (of `btrfs` and `cpu`), `cst toolchains`
+  Only `report` and `watch` (of `btrfs` and `cpu`), `cst cpu quiet`, `cst toolchains`
   (it runs itself on the host), `cst vm list` / `status` / `tune plan` /
   `nocow plan`,
   `cst swap plan` / `cst swap status` and
@@ -396,7 +396,7 @@ everything with `plan`, `status` or `doctor` before changing anything:
 | `cst vm` | Yes, for any libvirt VM with file disks | `cst vm backup NAME` (default: `VM_NAME` in `/etc/cpu-setup/cpu-setup.conf`). `--nas` needs `cst btrfs snapshots nas setup` first; quiesced snapshots need the QEMU guest agent in the guest. Reflink copies need the backup folder `/var/lib/libvirt/cst-backups` on the same btrfs filesystem as the disks; otherwise use `--full`. `cst vm tune plan NAME` works for any guest (Windows needs the virtio drivers first); `/etc/cst/vm.conf` switches each part off. |
 | `cst toolchains` | Yes | Override retention or size limits in `~/.config/cst/toolchains.conf` (defaults in [`toolchains/toolchains.conf`](toolchains/toolchains.conf)). |
 | `cst bluetooth` | Yes, once you set your headset's MAC | CST ships no headset. Put `DEVICE=AA:BB:CC:DD:EE:FF` (and optional `LDAC_QUALITY`, `LE_AUDIO`, `BEARER`) in `~/.config/cst/bluetooth.conf` (defaults in [`bluetooth/bluetooth.conf`](bluetooth/bluetooth.conf)), or pass `--device`; without one, the headset's parts are skipped ([bluetooth/README.md, section 4](bluetooth/README.md#4-commands-options-and-settings)). |
-| `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (or in [`cpu-setup.sh`](cpu-setup.sh) / [`cpu/game/domain.py`](cpu/game/domain.py)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. The limits of `cst cpu quiet` come from this machine's idle baseline: take your own reading and set them with its flags or `QUIET_*` variables ([cpu/README.md, section 11.1](cpu/README.md#111-is-the-machine-quiet-quiet)). |
+| `cst cpu` | Hybrid Intel / AMD or multi-core desktops | After `cst cpu install` (its first version comes from [`cpu/setup/domain.py`](cpu/setup/domain.py), the game profile's defaults from [`cpu/game/domain.py`](cpu/game/domain.py)), edit `/etc/cpu-setup/cpu-setup.conf`: `P_CORES`, `BUILD_CPUS`, `VM_NAME`, `VM_VCPUS`, `GAME_MEMORY_LOW`. On a machine without E-cores (`/sys/devices/cpu_atom/cpus`), the toolbox E-core pin is skipped automatically. The limits of `cst cpu quiet` come from this machine's idle baseline: take your own reading and set them with its flags or `QUIET_*` variables ([cpu/README.md, section 11.1](cpu/README.md#111-is-the-machine-quiet-quiet)). |
 | `cst swap` | Needs your swap partition's PARTUUID and size | Put `SWAP_PARTUUID=...` and `SWAP_SIZE_BYTES=...` (exact, in bytes) of your dedicated swap partition in `/etc/cst/swap.conf` ([swap/README.md, section 2.3](swap/README.md#23-the-encrypted-swap-partition)); `cst swap apply` refuses without them. Adjust `MemoryLow=` in [`swap/units/machine.slice.d-10-swap-memory-low.conf`](swap/units/machine.slice.d-10-swap-memory-low.conf) (or zswap's pool cap in [`swap/tmpfiles/zswap.conf`](swap/tmpfiles/zswap.conf)). |
 | `cst btrfs` | Btrfs root on Fedora Silverblue / Workstation | Health checks, stall monitoring, writeback sysctls, automatic reclaim, snapshots and `~/Bulk` discover the root btrfs UUID dynamically. Check `EXPECTED_OPTS` in [`btrfs-setup.sh`](btrfs-setup.sh) if your mount options differ (e.g. single-disk btrfs without `degraded`), and pass `--host` / `--port` / `--user` / `--path` to `cst btrfs snapshots nas setup`. |
 
@@ -407,8 +407,10 @@ everything with `plan`, `status` or `doctor` before changing anything:
   (`cli.py`) behind `cst`, the installer (`installer.py`), the router of the
   shim modules' commands (`route.py`, run by `vm-setup.sh` and
   `toolchains-setup.sh`), and their composition root (`wiring.py`).
-- `cst-install.bash`: how every module installs its files, from one table
-  (`INSTALL_MANIFEST` in `cst_core/domain/install.py`). A file is written only
+- `cst-install.bash`: how the bash setup scripts (`btrfs-setup.sh` and its
+  parts) install their files; the Python modules run `cst_core/installer.py`
+  (cpu, bluetooth) or its `InstallService` (swap, vm, toolchains) themselves. Both work from one table (`INSTALL_MANIFEST` in
+  `cst_core/domain/install.py`). A file is written only
   when it changed, and the output says `unchanged:` or `written:` per file;
   `cst_core/installer.py plan SRC...` (or `--module btrfs`, or
   `--component btrfs:core`) shows what an install would write, without
