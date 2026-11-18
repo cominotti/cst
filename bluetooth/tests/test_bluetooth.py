@@ -447,19 +447,6 @@ class SettingsTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
-    def test_shell_and_helper_agree(self) -> None:
-        with open(SETUP) as f:
-            sh = f.read()
-        self.assertIn(f'ISO_UUID="{self.m.ISO_UUID}"', sh)
-        self.assertIn(f'WP_MARKER="{self.m.MARKER}"', sh)
-        self.assertIn(f'OLD_WP_MARKER="{self.m.OLD_MARKERS[0]}"', sh)
-        self.assertEqual(self.m.ISO_UUID, ISO)
-        self.assertIn(f'LW_UNIT="{self.m.LDAC_UNIT}"', sh)
-        # The unit runs the copy the script installs.
-        self.assertTrue(self.m.LDAC_PROG.startswith("%h/"))
-        self.assertIn('LW_PROG="${HOME}/' + self.m.LDAC_PROG[3:] + '"', sh)
-        self.assertIn('LE_CONF="${WP_CONF_DIR}/' + self.m.LE_CONF_NAME + '"', sh)
-
 
 class LiveParsingTest(unittest.TestCase):
     def setUp(self) -> None:

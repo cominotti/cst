@@ -126,6 +126,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 # splitting a cli.py into it moves the entry and cannot raise the total.
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 149,
+    "bluetooth/setup/cli.py": 69,
     "btrfs/bulk/cli.py": 89,
     "btrfs/chrome_cache/cli.py": 80,
     "btrfs/docker_gc/cli.py": 23,
@@ -192,6 +193,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
 # point: the one module, besides the adapters, that imports adapters and
 # builds them. A package joins once hexagonal_problems() finds nothing in it.
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
+    "bluetooth/setup": "bluetooth/setup/wiring.py",
     "btrfs/bulk": "btrfs/bulk/wiring.py",
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
