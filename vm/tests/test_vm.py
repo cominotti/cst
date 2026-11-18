@@ -37,6 +37,7 @@ from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
+from vm.domain import tune as vm_domain_tune
 from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
@@ -700,7 +701,7 @@ class TuneTransformTest(unittest.TestCase):
     def tune(
         self, xml: str, allow: bool = True, kn: Mapping[str, bool] | None = None
     ) -> tuple[str | None, list[str], list[str], list[str]]:
-        return vm_domain.tune_domain(xml, kn or ALL_ON, allow)
+        return vm_domain_tune.tune_domain(xml, kn or ALL_ON, allow)
 
     def disks(self, xml: str) -> list[ET.Element]:
         return ET.fromstring(xml).findall("devices/disk")
@@ -710,7 +711,7 @@ class TuneTransformTest(unittest.TestCase):
         for allow in (True, False):
             after, changes, held, notes = self.tune(real_domain(), allow)
             self.assertEqual((changes, held, notes), ([], [], []))
-            self.assertEqual(after, vm_domain.normalized(real_domain()))
+            self.assertEqual(after, vm_domain_tune.normalized(real_domain()))
         assert after is not None
         self.assertIn("libosinfo:os id=", after)  # prefixes kept, no ns0
         self.assertNotIn("ns0", after)
@@ -877,7 +878,7 @@ class TuneTransformTest(unittest.TestCase):
         )
 
         def kind(extra: str) -> str:
-            return vm_domain.guest_kind(ET.fromstring(f"<domain>{extra}</domain>"))[0]
+            return vm_domain_tune.guest_kind(ET.fromstring(f"<domain>{extra}</domain>"))[0]
 
         self.assertEqual(kind(osinfo.format("http://microsoft.com/win/11")), "windows")
         self.assertEqual(kind(osinfo.format("http://fedoraproject.org/fedora/43")), "linux")
@@ -885,17 +886,17 @@ class TuneTransformTest(unittest.TestCase):
         self.assertEqual(kind("<features><hyperv mode='custom'/></features>"), "windows")
         self.assertEqual(kind(""), "unknown")
         for i, n in ((0, "sda"), (25, "sdz"), (26, "sdaa")):
-            self.assertEqual(vm_domain.disk_name(i), n)
-            self.assertEqual(vm_domain.disk_index(n), i)
-        self.assertEqual(vm_domain.disk_index("hdb"), 1)
-        self.assertIsNone(vm_domain.disk_index("xvda"))
+            self.assertEqual(vm_domain_tune.disk_name(i), n)
+            self.assertEqual(vm_domain_tune.disk_index(n), i)
+        self.assertEqual(vm_domain_tune.disk_index("hdb"), 1)
+        self.assertIsNone(vm_domain_tune.disk_index("xvda"))
 
 
 class TuneEdgeCaseTest(unittest.TestCase):
     """Cases found in review: default namespaces, SCSI host devices, socket NICs."""
 
     def tune(self, xml: str, allow: bool = True) -> tuple[str | None, list[str], list[str], list[str]]:
-        return vm_domain.tune_domain(xml, ALL_ON, allow)
+        return vm_domain_tune.tune_domain(xml, ALL_ON, allow)
 
     def test_default_namespace_in_metadata_stays_on_its_element(self) -> None:
         x = old_domain()
@@ -909,7 +910,7 @@ class TuneEdgeCaseTest(unittest.TestCase):
         self.assertIsNotNone(root.find("devices/disk"))
         self.assertIsNotNone(root.find("metadata/{http://example.com/app/1}app/{http://example.com/app/1}v"))
         self.assertIn("libosinfo:os id=", after)
-        self.assertEqual(ET.fromstring(vm_domain.normalized(x)).tag, "domain")
+        self.assertEqual(ET.fromstring(vm_domain_tune.normalized(x)).tag, "domain")
         again, changes2, _, _ = self.tune(after)
         self.assertEqual((changes2, again), ([], after))
 
@@ -1556,10 +1557,10 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(parts.uuid, UUID)
         self.assertIn("/var/lib/libvirt/images/win11-devbox.qcow2", parts.disks)
         self.assertTrue(parts.tpm)
-        after, _, held, _ = vm_domain.tune_domain(old_domain(), ALL_ON, allow_bus=False)
+        after, _, held, _ = vm_domain_tune.tune_domain(old_domain(), ALL_ON, allow_bus=False)
         self.assertIsNotNone(after)
         self.assertTrue(held)
-        _, changes, held, notes = vm_domain.tune_domain(real_domain(), ALL_ON, allow_bus=True)
+        _, changes, held, notes = vm_domain_tune.tune_domain(real_domain(), ALL_ON, allow_bus=True)
         self.assertEqual((changes, held, notes), ([], [], []))
 
     def test_parsing_and_backup_helpers(self) -> None:

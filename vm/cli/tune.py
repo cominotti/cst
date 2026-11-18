@@ -24,7 +24,8 @@ from vm.adapters import (
     utc_now,
     virsh,
 )
-from vm.domain import KNOBS, URI, WINDOWS_STEPS, guest_kind, normalized, tune_domain
+from vm.domain import KNOBS, URI
+from vm.domain.tune import WINDOWS_STEPS, guest_kind, normalized, tune_domain
 
 
 def cpu_owner_line(root: ET.Element) -> str:

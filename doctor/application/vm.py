@@ -46,7 +46,7 @@ from doctor.domain import (
     host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
-from vm.domain import guest_kind, tune_domain
+from vm.domain.tune import guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
