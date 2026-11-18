@@ -15,16 +15,18 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import csv
+import dataclasses
 import difflib
+import functools
 import io
 import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any
 import unittest
 import unittest.mock
 import xml.etree.ElementTree as ET
@@ -32,6 +34,7 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode = True
 
 from cpu import adapters as cpu_adapters, cli as cpu_cli, domain as cpu_domain
+from cst_core.domain.errors import Refused
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CPU = os.path.dirname(HERE)
@@ -205,13 +208,11 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "w") as f:
                 f.write("VM_NAME='x'\nVM_CPU_DISABLE=''\n")
-            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
-                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), [])
-                with open(p, "w") as f:
-                    f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
-                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
-            with unittest.mock.patch.object(cpu_adapters, "CONF", os.path.join(tmp, "absent")):
-                self.assertEqual(cpu_adapters.conf()["VM_CPU_DISABLE"].split(), self.names)
+            self.assertEqual(cpu_adapters.conf(p)["VM_CPU_DISABLE"].split(), [])
+            with open(p, "w") as f:
+                f.write("VM_CPU_DISABLE='cet-ss vmx-mbec'\n")
+            self.assertEqual(cpu_adapters.conf(p)["VM_CPU_DISABLE"].split(), ["cet-ss", "vmx-mbec"])
+            self.assertEqual(cpu_adapters.conf(os.path.join(tmp, "absent"))["VM_CPU_DISABLE"].split(), self.names)
 
     def test_undecodable_bytes_are_replaced(self) -> None:
         # Intended change from main, where vm-pin and cpu-watch stopped with a UnicodeDecodeError
@@ -221,8 +222,7 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "wb") as f:
                 f.write(b"VM_VCPUS=8\n# caf\xe9\n")
-            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
-                self.assertEqual(cpu_adapters.conf()["VM_VCPUS"], "8")
+            self.assertEqual(cpu_adapters.conf(p)["VM_VCPUS"], "8")
             maps = os.path.join(tmp, "maps")
             with open(maps, "wb") as f:
                 f.write(
@@ -319,12 +319,39 @@ class CpuWatchTest(unittest.TestCase):
             self.assertIn("profile off", s_nogame)
 
 
+def sample_too_early(taken: list[int]) -> cpu_domain.QuietSample:
+    """A quiet sample that must not be taken: noted in TAKEN."""
+    taken.append(1)
+    raise AssertionError("sampled before the usage check")
+
+
+class WatchRowTest(unittest.TestCase):
+    """cpu-watch watch: one samples.csv row from two readings of the counters."""
+
+    PREV = cpu_domain.WatchCounters(t=100.0, sys=5_000, vm=1_000_000, builds=4_000_000, game=(10_000, 2_000, 30))
+    CUR = cpu_domain.WatchCounters(t=102.0, sys=9_000, vm=4_000_000, builds=3_000_000, game=(13_000, 2_600, 90))
+
+    def test_rates_per_second_of_wall_time(self) -> None:
+        row = cpu_domain.watch_row(self.CUR, self.PREV, start=90.0, profile_on=True, pid=4242, p_mhz=4100, e_mhz=3200)
+        self.assertEqual(len(row), len(cpu_domain.SAMPLE_FIELDS))
+        # 2 s apart: game wait 3000 us -> 1.5 ms/s, memory stall 0.3 ms/s, 30 switches/s, system 2.0 ms/s,
+        # 1.5 VM CPUs; the builds' counter went down (a cgroup gone): 0, never negative.
+        self.assertEqual(row, [12.0, 1, 4242, 1.5, 0.3, 30, 2.0, 4100, 3200, 1.5, 0.0])
+
+    def test_game_columns_stay_empty_until_two_readings_have_the_game(self) -> None:
+        no_game = dataclasses.replace(self.PREV, game=None)
+        for cur, prev in ((self.CUR, no_game), (dataclasses.replace(self.CUR, game=None), self.PREV)):
+            with self.subTest(cur=cur.game, prev=prev.game):
+                row = cpu_domain.watch_row(cur, prev, start=90.0, profile_on=False, pid=None, p_mhz=0, e_mhz=0)
+                self.assertEqual(row, [12.0, 0, "", "", "", "", 2.0, 0, 0, 1.5, 0.0])
+
+
 class FakeProc:
     """A fake /proc with the files `cpu-watch quiet` reads, advanced one second
     at a time: CPU busy share, MB written, each pressure's avg10, game profile."""
 
     HZ_CPUS = 2400  # jiffies per second over all CPUs (100 Hz x 24)
-    IDLE: dict[str, Any] = {
+    IDLE: dict[str, float] = {
         "cpu": 3.0,
         "writes": 2.5,
         "cpu-pressure": 0.3,
@@ -343,7 +370,7 @@ class FakeProc:
         self.kib = 7_000_000
         self.set(self.IDLE)
 
-    def set(self, sec: Mapping[str, Any]) -> None:
+    def set(self, sec: Mapping[str, float]) -> None:
         """Write the files as they read after a second like `sec`."""
         busy = round(self.HZ_CPUS * sec["cpu"] / 100)
         self.jiffies[0] += busy  # user, which counts guest too
@@ -380,7 +407,7 @@ class QuietTest(unittest.TestCase):
     def run_quiet(
         self,
         argv: Sequence[str],
-        second: Callable[[int], Mapping[str, Any]] = lambda i: {},
+        second: Callable[[int], Mapping[str, float]] = lambda i: {},
         env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, int]:
         """second(i) -> what differs from an idle machine in second i (1, 2, ...).
@@ -520,7 +547,7 @@ class QuietTest(unittest.TestCase):
         os.remove(os.path.join(self.proc.root, "pressure", "io"))
         orig = self.proc.set
 
-        def set_without_io(sec: Mapping[str, Any]) -> None:
+        def set_without_io(sec: Mapping[str, float]) -> None:
             orig(sec)
             os.remove(os.path.join(self.proc.root, "pressure", "io"))
 
@@ -540,7 +567,7 @@ class QuietTest(unittest.TestCase):
     def test_unparsable_files_are_not_quiet(self) -> None:
         orig = self.proc.set
 
-        def broken(sec: Mapping[str, Any]) -> None:
+        def broken(sec: Mapping[str, float]) -> None:
             orig(sec)
             with open(os.path.join(self.proc.root, "stat"), "w") as f:
                 f.write("intr 1 2 3\n")
@@ -634,7 +661,7 @@ class QuietTest(unittest.TestCase):
                 with unittest.mock.patch("sys.stderr", err):
                     rc = cpu_cli.quiet(
                         argv,
-                        sample=lambda taken=taken: taken.append(1),
+                        sample=functools.partial(sample_too_early, taken),
                         sleep=lambda d: None,
                         out=io.StringIO(),
                         environ=env,
@@ -1661,7 +1688,8 @@ class VmPinCliTest(unittest.TestCase):
         out = io.StringIO()
         with (
             unittest.mock.patch.object(cpu_cli, "virsh", fake_virsh),
-            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", lambda action: dict(self.CONF)),
+            # autospec: a call that does not fit vm_pin_settings(path, action) fails.
+            unittest.mock.patch.object(cpu_cli, "vm_pin_settings", autospec=True, return_value=dict(self.CONF)),
             contextlib.redirect_stdout(out),
         ):
             rc = cpu_cli.vm_pin(argv, doc="DOC")
@@ -1672,8 +1700,7 @@ class VmPinCliTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "w") as f:
                 f.write("VM_NAME='box'\nVM_VCPUS=8\nBUILD_CPUS=4-7,9\nVM_CPU_DISABLE=\"cet-ss\"\nTARGET_USER=alice\n")
-            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
-                c = cpu_adapters.conf()
+            c = cpu_adapters.conf(p)
         self.assertEqual(
             (c["VM_NAME"], c["VM_VCPUS"], c["BUILD_CPUS"], c["VM_CPU_DISABLE"], c["TARGET_USER"]),
             ("box", "8", "4-7,9", "cet-ss", "alice"),
@@ -1686,8 +1713,7 @@ class VmPinCliTest(unittest.TestCase):
             p = os.path.join(tmp, "cpu-setup.conf")
             with open(p, "w") as f:
                 f.write("BUILD_CPUS='12-23' # E-cores\nexport VM_VCPUS=8\n")
-            with unittest.mock.patch.object(cpu_adapters, "CONF", p):
-                c = cpu_adapters.conf()
+            c = cpu_adapters.conf(p)
             self.assertEqual((c["BUILD_CPUS"], c["VM_VCPUS"]), ("12-23", "8"))
             with open(p, "w") as f:
                 f.write("VM_NAME='box'\nBUILD_CPUS = 8-11\n")
@@ -1699,16 +1725,15 @@ class VmPinCliTest(unittest.TestCase):
                 return SAMPLE_DOMAIN_XML
 
             with (
-                unittest.mock.patch.object(cpu_adapters, "CONF", p),
                 unittest.mock.patch.object(cpu_cli, "virsh", virsh),
                 contextlib.redirect_stderr(err),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
-                c = cpu_adapters.conf()  # plan and status: printed, the key keeps vm-pin's default
+                c = cpu_adapters.conf(p)  # plan and status: printed, the key keeps vm-pin's default
                 self.assertEqual(c["BUILD_CPUS"], "12-23")
                 self.assertIn(f"{p} line 2: BUILD_CPUS = 8-11: blanks around =", err.getvalue())
                 with self.assertRaises(SystemExit) as cm:
-                    cpu_cli.vm_pin(["apply"], doc="DOC")
+                    cpu_cli.vm_pin(["apply"], doc="DOC", paths=cpu_domain.CpuPaths(runs=tmp, conf=p))
             self.assertIn(f"{p} line 2: BUILD_CPUS = 8-11", str(cm.exception.code))
             self.assertIn("nothing changed", str(cm.exception.code))
             self.assertEqual(calls, [], "apply reached virsh with a default BUILD_CPUS")
@@ -1741,6 +1766,69 @@ class VmPinCliTest(unittest.TestCase):
         rc, out, calls = self.run_vm_pin(["bogus"], SAMPLE_DOMAIN_XML)
         self.assertEqual((rc, out, calls), (2, "DOC\n", []))
 
+    def test_save_definition_once_keeps_the_first_and_is_private_from_the_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            etc = os.path.join(tmp, "etc", "cpu-setup")
+            old_umask = os.umask(0)  # 0600 comes from the open, not from the umask
+            try:
+                path = cpu_adapters.save_definition_once(etc, "box", "<domain>first</domain>\n")
+            finally:
+                os.umask(old_umask)
+            self.assertEqual(path, os.path.join(etc, "box.xml.before-vm-pin"))
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            # A later apply keeps the first one: it is the one to go back to.
+            self.assertEqual(cpu_adapters.save_definition_once(etc, "box", "<domain>second</domain>\n"), path)
+            with open(path) as f:
+                self.assertEqual(f.read(), "<domain>first</domain>\n")
+            self.assertEqual(os.listdir(etc), ["box.xml.before-vm-pin"])
+
+    def test_apply_saves_the_definition_then_defines_the_pinned_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cpu_domain.CpuPaths(runs=tmp, conf=os.path.join(tmp, "absent.conf"), etc=os.path.join(tmp, "etc"))
+            defined: list[tuple[str, bool]] = []
+            temp_files: list[str] = []
+
+            def adapter_virsh(*args: str, check: bool = True) -> str:
+                # define_domain's call: the temporary file still exists while virsh reads it.
+                temp_files.append(args[1])
+                with open(args[1]) as f:
+                    defined.append((f.read(), check))
+                self.assertEqual(args[0], "define")
+                return ""
+
+            def cli_virsh(*args: str, check: bool = True) -> str:
+                return SAMPLE_DOMAIN_XML
+
+            for answer in ("n", "y"):
+                out = io.StringIO()
+                with (
+                    unittest.mock.patch.object(cpu_cli, "virsh", cli_virsh),
+                    unittest.mock.patch.object(cpu_adapters, "virsh", adapter_virsh),
+                    unittest.mock.patch.object(cpu_cli, "confirm", return_value=answer == "y") as confirm,
+                    contextlib.redirect_stdout(out),
+                ):
+                    self.assertEqual(cpu_cli.vm_pin(["apply", "box"], doc="DOC", paths=paths), 0)
+                self.assertIn(
+                    "\nDefine box with 12 vCPUs pinned to 12-23 (CPU features to be disabled: ",
+                    confirm.call_args.args[0],
+                )
+                if answer == "n":
+                    self.assertTrue(out.getvalue().endswith("Nothing changed.\n"))
+                    self.assertFalse(os.path.exists(paths.etc), "no is no: nothing saved")
+                    self.assertEqual(defined, [])
+            backup = os.path.join(paths.etc, "box.xml.before-vm-pin")
+            with open(backup) as f:
+                self.assertEqual(f.read(), SAMPLE_DOMAIN_XML)
+            after = cpu_domain.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", cpu_domain.CPU_DISABLE_DEFAULT.split())
+            self.assertEqual(defined, [(after, True)])
+            self.assertFalse(os.path.exists(temp_files[0]), "the temporary definition is removed")
+            self.assertTrue(
+                out.getvalue().endswith(
+                    "Defined. Effective at the next start of box (shut it down and start it when convenient).\n"
+                    f"Previous definition saved in {backup} (restore: virsh -c {cpu_domain.URI} define {backup}).\n"
+                )
+            )
+
     def test_virsh_adapter(self) -> None:
         ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")
         with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=ok) as run:
@@ -1748,7 +1836,7 @@ class VmPinCliTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["virsh", "-c", "qemu:///system", "dumpxml", "win11-devbox"])
         fail = subprocess.CompletedProcess(["virsh"], 1, "partial", "boom")
         with unittest.mock.patch.object(cpu_adapters.subprocess, "run", return_value=fail):
-            with self.assertRaisesRegex(SystemExit, "virsh dumpxml win11-devbox: boom"):
+            with self.assertRaisesRegex(Refused, "virsh dumpxml win11-devbox: boom"):
                 cpu_adapters.virsh("dumpxml", "win11-devbox")
             self.assertEqual(cpu_adapters.virsh("dumpxml", "win11-devbox", check=False), "partial")
 
@@ -1769,12 +1857,12 @@ class VmPinCliTest(unittest.TestCase):
         self.assertEqual(kwargs["errors"], "replace")
 
     def test_a_virsh_that_does_not_answer(self) -> None:
-        # check: the run stops with one line (no traceback); without check it goes on, as after a failure.
+        # check: Refused with one line (vm_pin stops with it, no traceback); without check the run goes on, as after a failure.
         hang = subprocess.TimeoutExpired(["virsh"], cpu_adapters.VIRSH_TIMEOUT)
         with unittest.mock.patch.object(cpu_adapters.subprocess, "run", side_effect=hang):
-            with self.assertRaises(SystemExit) as stop:
+            with self.assertRaises(Refused) as stop:
                 cpu_adapters.virsh("domstate", "win11-devbox")
-            self.assertEqual(str(stop.exception.code), "virsh domstate win11-devbox: no answer within 60 s")
+            self.assertEqual(str(stop.exception), "virsh domstate win11-devbox: no answer within 60 s")
             self.assertEqual(cpu_adapters.virsh("vcpucount", "win11-devbox", check=False), "")
 
 
@@ -1790,35 +1878,33 @@ class CpuWatchCliTest(unittest.TestCase):
         self.assertEqual((seconds, wait, as_json, limits["cpu"]), (5, None, True, 15.0))
 
     def test_dispatch(self) -> None:
-        restored: list[str] = []
         # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-        with unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append("x")):
+        with unittest.mock.patch.object(cpu_cli, "restore_default_signals") as restored:
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 self.assertEqual(cpu_cli.cpu_watch(["quiet", "--for", "0"], doc="DOC"), 2)
                 self.assertEqual(cpu_cli.cpu_watch(["watch", "--bogus"], doc="DOC"), 2)
             self.assertIn("quiet: --for: a whole number of seconds", err.getvalue())
             self.assertIn("unknown argument --bogus", err.getvalue())
-            self.assertEqual(restored, [], "watch and quiet keep Python's SIGPIPE handling")
+            self.assertEqual(restored.call_count, 0, "watch and quiet keep Python's SIGPIPE handling")
             for argv in ([], ["bogus"], ["--help"]):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(cpu_cli.cpu_watch(argv, doc="DOC"), 2)
                 self.assertEqual(out.getvalue(), "DOC\n")
-            self.assertEqual(restored, ["x", "x", "x"], "the help only reads: SIGPIPE back at its default")
-        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(restored.call_count, 3, "the help only reads: SIGPIPE back at its default")
+        with tempfile.TemporaryDirectory() as home:
             out = io.StringIO()
-            restored = []
             with (
-                unittest.mock.patch.object(cpu_cli, "RUNS", tmp),
-                unittest.mock.patch.object(cpu_adapters, "RUNS", tmp),
+                unittest.mock.patch.dict(os.environ, {"HOME": home}),
                 # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-                unittest.mock.patch.object(cpu_cli, "restore_default_signals", lambda: restored.append("x")),
+                unittest.mock.patch.object(cpu_cli, "restore_default_signals") as restored,
                 contextlib.redirect_stdout(out),
             ):
                 self.assertEqual(cpu_cli.cpu_watch(["report"], doc="DOC"), 0)
-            self.assertEqual(restored, ["x"])
-        self.assertEqual(out.getvalue(), f"no runs in {tmp}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
+            self.assertEqual(restored.call_count, 1)
+        runs = os.path.join(home, ".local", "state", "cpu-setup", "runs")
+        self.assertEqual(out.getvalue(), f"no runs in {runs}; record one with: cst cpu watch -l <label> [-- <cmd>]\n")
 
 
 class ClosedPipeTest(unittest.TestCase):
@@ -1853,14 +1939,14 @@ class ClosedPipeTest(unittest.TestCase):
             self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
 
     def test_vm_pin_restores_sigpipe_only_for_what_only_reads(self) -> None:
-        restored: list[str] = []
         with (
-            unittest.mock.patch.object(cpu_adapters, "conf", lambda refuse=False: {"refuse": str(refuse)}),
-            unittest.mock.patch.object(cpu_adapters, "restore_default_signals", lambda: restored.append("x")),
+            unittest.mock.patch.object(cpu_adapters, "conf", return_value={"K": "v"}) as conf,
+            unittest.mock.patch.object(cpu_adapters, "restore_default_signals") as restored,
         ):
             for action in ("status", "plan", "apply"):
-                self.assertEqual(cpu_adapters.vm_pin_settings(action), {"refuse": str(action == "apply")})
-        self.assertEqual(restored, ["x", "x"], "apply (a temp file removed in a finally) must keep Python's handling")
+                self.assertEqual(cpu_adapters.vm_pin_settings("/x.conf", action), {"K": "v"})
+                self.assertEqual(conf.call_args, unittest.mock.call("/x.conf", refuse=action == "apply"))
+        self.assertEqual(restored.call_count, 2, "apply (a temp file removed in a finally) must keep Python's handling")
 
 
 class QuietNumbersTest(unittest.TestCase):
@@ -1891,7 +1977,7 @@ class QuietNumbersTest(unittest.TestCase):
             q([], {"QUIET_CPU_PCT": "-1"})
 
     def test_busy_pct(self) -> None:
-        window = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
+        window: list[cpu_domain.Readings] = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
         self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 750 / 9)  # 900 ticks, 150 idle
         window = [{"v": {"cpu": (7, 3)}}, {"v": {"cpu": (17, 3)}}]
         self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 100.0)

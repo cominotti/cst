@@ -2,64 +2,67 @@
 """The cpu module's command lines: cpu-vm-pin and cpu-watch.
 
 Driving adapters: argv in, the rules of cpu.domain applied to what
-cpu.adapters reads from the host, the answer printed.
+cpu.adapters reads from the host, the answer printed. Light profile: each
+command's main is the composition root (docs/architecture.md, "Package
+profile").
 """
 
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-import csv
-from datetime import datetime
-import difflib
-import glob
 import json
 import os
 import re
-import shutil
-import signal
-import subprocess
 import sys
-import tempfile
-import time
-from typing import Any, TextIO
-import xml.etree.ElementTree as ET
+from typing import TextIO
 
+from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runtime import restore_default_signals
-from cst_core.domain.libvirt_xml import keep_prefixes
-from cst_core.domain.text import is_yes
+from cst_core.adapters.terminal import confirm
+from cst_core.domain.errors import Refused
 from cpu.adapters import (
-    CG,
-    RUNS,
-    build_cgroups,
-    cpus_of,
-    find_game,
-    game_cgroup,
-    invol,
-    mean_mhz,
-    pressure_total,
+    cpu_paths,
+    define_domain,
     quiet_sample,
+    record_run,
     recorded_runs,
+    save_definition_once,
     summarize,
-    usage_usec,
     virsh,
     vm_pin_settings,
 )
 from cpu.domain import (
-    GAME_STATE,
-    SAMPLE_FIELDS,
     URI,
+    CpuPaths,
+    QuietSample,
+    QuietTest,
     cpu_line,
-    features_note,
-    pinned,
+    pin_plan,
     quiet_args,
+    quiet_result,
     quiet_tests,
     quiet_text,
 )
 
+# The clock and the pause of `cpu-watch quiet` (its tests pass their own).
+CLOCK = SystemClockAdapter()
 
-def vm_pin(argv: Sequence[str], doc: str) -> int:
-    """`cpu-vm-pin plan|apply|status [VM]` (argv without the program name); doc is its help."""
+
+def vm_pin(argv: Sequence[str], doc: str, paths: CpuPaths | None = None) -> int:
+    """`cpu-vm-pin plan|apply|status [VM]` (argv without the program name); doc is its help.
+
+    What the run refuses (a settings problem on apply, a failed virsh call, a
+    definition it cannot rewrite) ends it with that one line, exit 1.
+    """
+    try:
+        return pin_vm(argv, doc, cpu_paths() if paths is None else paths)
+    except Refused as e:
+        sys.exit(str(e))
+
+
+def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
+    """vm_pin's work (Refused ends it)."""
     action = argv[0] if len(argv) > 0 else "status"
-    c = vm_pin_settings(action)
+    c = vm_pin_settings(paths.conf, action)
     name = argv[1] if len(argv) > 1 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
     disable = c["VM_CPU_DISABLE"].split()
@@ -75,42 +78,19 @@ def vm_pin(argv: Sequence[str], doc: str) -> int:
         print(doc)
         return 2
     cur = virsh("dumpxml", "--inactive", "--security-info", name)
-    keep_prefixes(cur)
-    croot = ET.fromstring(cur)
-    # Elements tied to the vCPU count that this tool does not rewrite.
-    for path in ("cputune/vcpusched", "cputune/cachetune", "cpu/numa", "vcpus"):
-        if croot.find(path) is not None:
-            sys.exit(f"{name} has <{path}>: adjust it by hand (virsh edit {name}); nothing changed")
-    ET.indent(cur_root := ET.fromstring(cur), space="  ")
-    before = ET.tostring(cur_root, encoding="unicode") + "\n"
-    after = pinned(cur, vcpus, cpus, disable)
-    diff = list(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "current", "pinned"))
-    if not diff:
-        print(f"{name}: already {vcpus} vCPUs pinned to {cpus}; {features_note(croot, disable)}.")
+    plan = pin_plan(name, cur, vcpus, cpus, disable)
+    if not plan.diff:
+        print(f"{name}: already {vcpus} vCPUs pinned to {cpus}; {plan.features}.")
         return 0
-    sys.stdout.writelines(diff)
+    sys.stdout.writelines(plan.diff)
     if action == "plan":
         print("\nPlan only. Apply with: cst cpu vm-pin apply   (effective at the VM's next start)")
         return 0
-    if not sys.stdin.isatty():
-        sys.exit("apply asks for confirmation: run it in a terminal")
-    if not is_yes(
-        input(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({features_note(croot, disable, True)})? [y/N] ")
-    ):
+    if not confirm(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({plan.planned_features})?"):
         print("Nothing changed.")
         return 0
-    backup = f"/etc/cpu-setup/{name}.xml.before-vm-pin"
-    os.makedirs("/etc/cpu-setup", exist_ok=True)
-    if not os.path.exists(backup):
-        # Holds --security-info secrets (graphics passwords): 0600 from the start.
-        with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-            f.write(cur)
-    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
-        f.write(after)
-    try:
-        virsh("define", f.name)
-    finally:
-        os.unlink(f.name)
+    backup = save_definition_once(paths.etc, name, cur)
+    define_domain(plan.after)
     print(f"Defined. Effective at the next start of {name} (shut it down and start it when convenient).")
     print(f"Previous definition saved in {backup} (restore: virsh -c {URI} define {backup}).")
     return 0
@@ -118,6 +98,7 @@ def vm_pin(argv: Sequence[str], doc: str) -> int:
 
 # ---- cpu-watch ---------------------------------------------------------------
 def watch(argv: Sequence[str]) -> int:
+    """`cpu-watch watch ...`: record a run, print its summary; the exit status is CMD's (0 without one)."""
     label = "run"
     game: str | None = None
     seconds: int | None = None
@@ -139,114 +120,34 @@ def watch(argv: Sequence[str]) -> int:
             seconds = int(argv[i + 1])
             i += 2
         elif a == "--mangohud":
-            mangohud = os.path.expanduser(argv[i + 1])
+            mangohud = argv[i + 1]
             i += 2
         else:
             print(f"unknown argument {a}", file=sys.stderr)
             return 2
     label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
-    p_cpus, e_cpus = cpus_of("cpu_core"), cpus_of("cpu_atom")
-    start = time.time()
-    run_dir = os.path.join(RUNS, datetime.fromtimestamp(start).strftime("%Y%m%dT%H%M%S") + "-" + label)
-    os.makedirs(run_dir)
-    proc = subprocess.Popen(cmd) if cmd else None
-    stop: list[int] = []
-    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
-    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
-    print(f"recording into {run_dir} (Ctrl-C to stop)", file=sys.stderr)
-
-    prev: dict[str, Any] = {}
-    rows: list[list[object]] = []
-    pid: int | None = None
-    cg = ""
-    with open(os.path.join(run_dir, "samples.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(SAMPLE_FIELDS)
-        while not stop:
-            if proc and proc.poll() is not None:
-                break
-            if seconds and time.time() - start >= seconds:
-                break
-            if not pid or not os.path.exists(f"/proc/{pid}"):
-                pid = find_game(game)
-                cg = game_cgroup(pid) if pid else ""
-                prev.pop("game", None)
-            now = time.time()
-            cur: dict[str, Any] = {
-                "t": now,
-                "sys": pressure_total("/proc/pressure/cpu", "some") or 0,
-                "vm": usage_usec("machine.slice"),
-                "builds": sum(usage_usec(c) for c in build_cgroups()),
-            }
-            if pid and cg:
-                cur["game"] = (
-                    pressure_total(os.path.join(CG, cg, "cpu.pressure"), "some") or 0,
-                    pressure_total(os.path.join(CG, cg, "memory.pressure"), "full") or 0,
-                    invol(pid),
-                )
-            if prev:
-                dt = now - prev["t"]
-                g_cur: tuple[int, int, int] | None = cur.get("game")
-                g_prev: tuple[int, int, int] | None = prev.get("game")
-                has_game = g_cur is not None and g_prev is not None
-                row: list[object] = [
-                    round(now - start, 1),
-                    int(os.path.exists(GAME_STATE)),
-                    pid or "",
-                    # per second of wall time (samples drift a little past 1 s)
-                    round((g_cur[0] - g_prev[0]) / 1000 / dt, 1) if g_cur is not None and g_prev is not None else "",
-                    round((g_cur[1] - g_prev[1]) / 1000 / dt, 1) if g_cur is not None and g_prev is not None else "",
-                    round((g_cur[2] - g_prev[2]) / dt) if has_game and g_cur is not None and g_prev is not None else "",
-                    round((cur["sys"] - prev["sys"]) / 1000 / dt, 1),
-                    mean_mhz(p_cpus),
-                    mean_mhz(e_cpus),
-                    round((cur["vm"] - prev["vm"]) / 1e6 / dt, 2),
-                    round(max(0, cur["builds"] - prev["builds"]) / 1e6 / dt, 2),
-                ]
-                w.writerow(row)
-                f.flush()
-                rows.append(row)
-            prev = cur
-            time.sleep(1)
-    end = time.time()
-    if proc and proc.poll() is None:
-        proc.terminate()
-    meta: dict[str, object] = {
-        "label": label,
-        "start": start,
-        "end": end,
-        "cmd": cmd,
-        "game": game,
-        "rc": proc.returncode if proc else None,
-    }
-    if mangohud:
-        logs = [p for p in glob.glob(os.path.join(mangohud, "*.csv")) if start - 5 <= os.path.getmtime(p) <= end + 30]
-        if logs:
-            newest = max(logs, key=os.path.getmtime)
-            shutil.copy2(newest, os.path.join(run_dir, "mangohud.csv"))
-            meta["mangohud"] = newest
-    with open(os.path.join(run_dir, "meta.json"), "w") as f:
-        json.dump(meta, f)
+    run_dir, rc = record_run(cpu_paths().runs, label=label, game=game, seconds=seconds, mangohud=mangohud, cmd=cmd)
     print(summarize(run_dir))
-    return proc.returncode if proc and proc.returncode else 0
+    return rc if rc else 0
 
 
-def report(argv: Sequence[str]) -> int:
-    runs = recorded_runs(argv)
+def report(argv: Sequence[str]) -> None:
+    """`cpu-watch report [RUN...]`: one line per run."""
+    runs_dir = cpu_paths().runs
+    runs = recorded_runs(runs_dir, argv)
     if not runs:
-        print(f"no runs in {RUNS}; record one with: cst cpu watch -l <label> [-- <cmd>]")
-        return 0
+        print(f"no runs in {runs_dir}; record one with: cst cpu watch -l <label> [-- <cmd>]")
+        return
     print("game wait = share of time the game's threads were runnable but waiting for a CPU")
     for r in runs:
         print(summarize(r))
-    return 0
 
 
 def quiet(
     argv: Sequence[str],
-    sample: Callable[[], Any] | None = None,
-    sleep: Callable[[float], object] = time.sleep,
-    clock: Callable[[], float] = time.monotonic,
+    sample: Callable[[], QuietSample] | None = None,
+    sleep: Callable[[float], object] = CLOCK.sleep,
+    clock: Callable[[], float] = CLOCK.monotonic,
     out: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> int:
@@ -258,10 +159,12 @@ def quiet(
     except ValueError as e:
         print(f"quiet: {e}", file=sys.stderr)
         return 2
-    sample_fn: Callable[[], Any] = (lambda: quiet_sample(clock=clock)) if sample is None else sample
+    sample_fn: Callable[[], QuietSample] = (lambda: quiet_sample(clock=clock)) if sample is None else sample
     if wait is not None:
         print(f"waiting up to {wait:g} s for {seconds} quiet seconds in a row", file=sys.stderr)
-    window: deque[Any] = deque(maxlen=seconds + 1)
+    window: deque[QuietSample] = deque(maxlen=seconds + 1)
+    tests: list[QuietTest] = []
+    ok = False
     try:
         start = clock()
         window.append(sample_fn())
@@ -280,19 +183,8 @@ def quiet(
     except KeyboardInterrupt:
         print("quiet: interrupted", file=sys.stderr)
         return 130
-
-    def stamp(s: Mapping[str, Any]) -> str:
-        return datetime.fromtimestamp(s["wall"]).isoformat(sep=" ", timespec="seconds")
-
-    result: dict[str, Any] = {
-        "quiet": ok,
-        "seconds": seconds,
-        "start": stamp(window[0]),
-        "end": stamp(window[-1]),
-        "waited_s": None if wait is None else round(clock() - start, 1),
-        "tests": tests,
-        "failed": [t["name"] for t in tests if not t["ok"]],
-    }
+    waited_s = None if wait is None else round(clock() - start, 1)
+    result = quiet_result(window, tests, ok=ok, seconds=seconds, waited_s=waited_s)
     print(json.dumps(result) if as_json else quiet_text(result), file=out_stream)
     return 0 if ok else 1
 
@@ -308,5 +200,6 @@ def cpu_watch(argv: Sequence[str], doc: str) -> int:
     if cmd == "watch":
         return watch(argv[1:])
     if cmd == "report":
-        return report(argv[1:])
+        report(argv[1:])
+        return 0
     return quiet(argv[1:])

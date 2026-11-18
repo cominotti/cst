@@ -37,6 +37,7 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
@@ -1175,6 +1176,33 @@ class ShellAssignmentsTest(unittest.TestCase):
         self.assertEqual([p.line for p in parsed.problems], [1])
         # The same escapes with the closing quote: bash takes up to three octal digits.
         self.assertEqual(parse_snapshots_conf("K=$'\\1111'\n").entries[0].value, "\x491")
+
+
+class ConfirmTest(unittest.TestCase):
+    """confirm: a yes/no question on the terminal (vm apply/nocow, cpu vm-pin apply)."""
+
+    def ask(self, answer: str, *, tty: bool = True) -> tuple[bool, str]:
+        out = io.StringIO()
+        with (
+            mock.patch("sys.stdin") as stdin,
+            mock.patch("builtins.input", side_effect=lambda prompt: (out.write(prompt), answer)[1]),
+        ):
+            stdin.isatty.return_value = tty
+            return confirm("\nDefine it?"), out.getvalue()
+
+    def test_a_yes_is_true_and_the_question_ends_in_the_choices(self) -> None:
+        for answer in ("y", "Y", "yes", " yes ", "sim"):
+            with self.subTest(answer=answer):
+                self.assertEqual(self.ask(answer), (True, "\nDefine it? [y/N] "))
+
+    def test_anything_else_is_no(self) -> None:
+        for answer in ("", "n", "no", "x", " nao"):
+            with self.subTest(answer=answer):
+                self.assertFalse(self.ask(answer)[0])
+
+    def test_no_terminal_refuses_without_asking(self) -> None:
+        with self.assertRaisesRegex(Refused, "^apply asks for confirmation: run it in a terminal$"):
+            self.ask("y", tty=False)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: MPL-2.0
 """The cpu module's rules: vm-pin's rewrite of a libvirt domain definition
-(vCPU count and pinning, the CPU features kept off) and cpu-watch's numbers.
+(vCPU count and pinning, the CPU features kept off) and cpu-watch's numbers
+and records.
 
 Pure: text in, text or values out. Reading the host is cpu.adapters' job.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+import difflib
 from itertools import islice
 import re
-from typing import Any, Literal, NamedTuple
+from typing import Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
 
+from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 
 URI = "qemu:///system"
@@ -40,6 +45,20 @@ SAMPLE_FIELDS = (
 # Windows fix it upstream. cpu-setup.conf's VM_CPU_DISABLE overrides it;
 # cst vm (status) and cst doctor import it from here.
 CPU_DISABLE_DEFAULT: str = "cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet"
+
+# Elements tied to the vCPU count that vm-pin does not rewrite.
+VCPU_TIED = ("cputune/vcpusched", "cputune/cachetune", "cpu/numa", "vcpus")
+
+
+@dataclass(frozen=True, slots=True)
+class CpuPaths:
+    """Where the cpu programs read and write: runs, cpu-watch's recorded runs
+    (~/.local/state/cpu-setup/runs of the user running it); conf, the settings
+    file; etc, where vm-pin keeps the definition it replaced."""
+
+    runs: str
+    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    etc: str = "/etc/cpu-setup"
 
 
 def disable_features(root: ET.Element, names: Sequence[str]) -> None:
@@ -76,9 +95,8 @@ def pinned(xml_text: str, vcpus: int, cpus: str, disable: Sequence[str] = ()) ->
     if tune is None:
         tune = ET.Element("cputune")
         root.insert(list(root).index(vcpu) + 1, tune)
-    for el in list(tune):
-        if el.tag in ("vcpupin", "emulatorpin"):
-            tune.remove(el)
+    for el in [el for el in tune if el.tag in ("vcpupin", "emulatorpin")]:
+        tune.remove(el)
     for i in range(vcpus):
         ET.SubElement(tune, "vcpupin", {"vcpu": str(i), "cpuset": cpus})
     ET.SubElement(tune, "emulatorpin", {"cpuset": cpus})
@@ -96,6 +114,35 @@ def features_note(root: ET.Element, disable: Sequence[str], planned: bool = Fals
     if mode != "host-passthrough":
         return f"CPU features left alone (cpu mode {mode or 'not set'}, not host-passthrough)"
     return f"CPU features {'to be ' if planned else ''}disabled: {' '.join(disable)}"
+
+
+@dataclass(frozen=True, slots=True)
+class PinPlan:
+    """What vm-pin would change: diff, the unified diff of the indented
+    current definition against after (empty: nothing to do); after, the
+    pinned definition; features and planned_features, how the CPU features
+    stand now and once applied (features_note)."""
+
+    diff: tuple[str, ...]
+    after: str
+    features: str
+    planned_features: str
+
+
+def pin_plan(name: str, cur: str, vcpus: int, cpus: str, disable: Sequence[str]) -> PinPlan:
+    """The plan for domain NAME, whose definition is CUR (virsh dumpxml);
+    Refused when it has an element tied to the vCPU count (VCPU_TIED)."""
+    keep_prefixes(cur)
+    croot = ET.fromstring(cur)
+    for path in VCPU_TIED:
+        if croot.find(path) is not None:
+            raise Refused(f"{name} has <{path}>: adjust it by hand (virsh edit {name}); nothing changed")
+    cur_root = ET.fromstring(cur)
+    ET.indent(cur_root, space="  ")
+    before = ET.tostring(cur_root, encoding="unicode") + "\n"
+    after = pinned(cur, vcpus, cpus, disable)
+    diff = tuple(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "current", "pinned"))
+    return PinPlan(diff, after, features_note(croot, disable), features_note(croot, disable, True))
 
 
 def cpu_line(xml_text: str, disable: Sequence[str]) -> str:
@@ -116,6 +163,65 @@ def cpu_line(xml_text: str, disable: Sequence[str]) -> str:
 
 
 # ---- cpu-watch ---------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class WatchCounters:
+    """One reading of the cumulative counters cpu-watch turns into rates: t,
+    the wall clock; sys, the system's CPU pressure (some, µs); vm and builds,
+    the CPU time (µs) of machine.slice and of the build cgroups; game, the
+    game cgroup's CPU and memory pressure (µs) and the game's involuntary
+    context switches, when a game is found."""
+
+    t: float
+    sys: int
+    vm: int
+    builds: int
+    game: tuple[int, int, int] | None = None
+
+
+def watch_row(
+    cur: WatchCounters, prev: WatchCounters, *, start: float, profile_on: bool, pid: int | None, p_mhz: int, e_mhz: int
+) -> list[object]:
+    """One samples.csv row (SAMPLE_FIELDS) from two readings, a second or so apart."""
+    dt = cur.t - prev.t
+    # per second of wall time (samples drift a little past 1 s)
+    game: list[object] = ["", "", ""]
+    if cur.game is not None and prev.game is not None:
+        g_cur, g_prev = cur.game, prev.game
+        game = [
+            round((g_cur[0] - g_prev[0]) / 1000 / dt, 1),
+            round((g_cur[1] - g_prev[1]) / 1000 / dt, 1),
+            round((g_cur[2] - g_prev[2]) / dt),
+        ]
+    return [
+        round(cur.t - start, 1),
+        int(profile_on),
+        pid or "",
+        *game,
+        round((cur.sys - prev.sys) / 1000 / dt, 1),
+        p_mhz,
+        e_mhz,
+        round((cur.vm - prev.vm) / 1e6 / dt, 2),
+        round(max(0, cur.builds - prev.builds) / 1e6 / dt, 2),
+    ]
+
+
+def run_folder(start: float, label: str) -> str:
+    """The name of a run's folder: its start time (local) and its label."""
+    return datetime.fromtimestamp(start).strftime("%Y%m%dT%H%M%S") + "-" + label
+
+
+class RunMeta(TypedDict):
+    """A run's meta.json (written once, at the end of the run)."""
+
+    label: str
+    start: float
+    end: float
+    cmd: list[str]
+    game: str | None
+    rc: int | None
+    mangohud: NotRequired[str]
+
+
 def pressure_field(text: str, kind: Literal["some", "full"], key: str) -> str | None:
     """The KEY= value (as text) on the KIND line ('some' or 'full') of a
     pressure file's text, or None."""
@@ -141,6 +247,70 @@ def lows(ft: Sequence[float]) -> tuple[float, float, float] | None:
 # The defaults come from a 3-day `below` recording of this machine (cpu/README.md,
 # "Is the machine quiet?"): the CPU and write limits pass the machine's quiet
 # hours with room to spare; the pressure limits are reasoned from its quietest window.
+
+
+# One reading of a test's file: (total, idle) jiffies, KiB written or a share (%).
+type Reading = tuple[int, int] | int | float
+
+
+class Readings(TypedDict):
+    """What every reading of a window has: each test's value by test name."""
+
+    v: Mapping[str, Reading]
+
+
+class TimedReadings(Readings):
+    """Readings with the monotonic clock they were taken at."""
+
+    t: float
+
+
+class QuietSample(TimedReadings):
+    """One reading of the quiet tests' files: wall, the wall clock; game,
+    whether the game profile is on; err, the reason a test's file could not
+    be read or parsed, by test name (that test has no value then)."""
+
+    wall: float
+    game: bool
+    err: Mapping[str, str]
+
+
+class QuietTest(TypedDict):
+    """One test of a window, as --json prints it."""
+
+    name: str
+    label: str
+    unit: str
+    limit: float | str
+    value: float | str | None
+    ok: bool
+    error: str | None
+
+
+class QuietResult(TypedDict):
+    """The verdict on a window, as --json prints it."""
+
+    quiet: bool
+    seconds: int
+    start: str
+    end: str
+    waited_s: float | None
+    tests: list[QuietTest]
+    failed: list[str]
+
+
+def counters(r: Reading) -> tuple[int, int]:
+    """A reading that is a pair of counters (stat_cpu)."""
+    if not isinstance(r, tuple):
+        raise TypeError(f"not a pair of counters: {r!r}")
+    return r
+
+
+def number(r: Reading) -> float:
+    """A reading that is one number (vmstat_pgpgout, some_avg10)."""
+    if isinstance(r, tuple):
+        raise TypeError(f"not a number: {r!r}")
+    return r
 
 
 def stat_cpu(text: str) -> tuple[int, int]:
@@ -170,26 +340,26 @@ def some_avg10(text: str) -> float:
     return float(v)
 
 
-def busy_pct(window: Sequence[Mapping[str, Any]], name: str) -> float:
+def busy_pct(window: Sequence[Readings], name: str) -> float:
     """CPU busy (%) from the counters at both ends of the window."""
-    (total0, idle0), (total1, idle1) = window[0]["v"][name], window[-1]["v"][name]
+    (total0, idle0), (total1, idle1) = counters(window[0]["v"][name]), counters(window[-1]["v"][name])
     if total1 <= total0:
         raise ValueError("/proc/stat: the CPU counters did not advance")
     return 100.0 * ((total1 - total0) - (idle1 - idle0)) / (total1 - total0)
 
 
-def write_mbps(window: Sequence[Mapping[str, Any]], name: str) -> float:
+def write_mbps(window: Sequence[TimedReadings], name: str) -> float:
     """MB written per second, from the counters at both ends of the window."""
     elapsed = window[-1]["t"] - window[0]["t"]
     if elapsed <= 0:
         raise ValueError("the clock did not advance")
     # KiB -> MB (1 MB = 1024 KiB)
-    return (window[-1]["v"][name] - window[0]["v"][name]) / 1024 / elapsed
+    return (number(window[-1]["v"][name]) - number(window[0]["v"][name])) / 1024 / elapsed
 
 
-def mean_of_seconds(window: Sequence[Mapping[str, Any]], name: str) -> float:
+def mean_of_seconds(window: Sequence[Readings], name: str) -> float:
     """Mean of each second's reading (the first reading only starts the window)."""
-    return sum(s["v"][name] for s in islice(window, 1, None)) / (len(window) - 1)
+    return sum(number(s["v"][name]) for s in islice(window, 1, None)) / (len(window) - 1)
 
 
 # One row per test. file: under /proc; parse: its text -> one reading (or
@@ -202,8 +372,8 @@ class Limit(NamedTuple):
     env: str
     default: float
     file: str
-    parse: Callable[[str], Any]
-    value: Callable[[Sequence[Mapping[str, Any]], str], float]
+    parse: Callable[[str], Reading]
+    value: Callable[[Sequence[QuietSample], str], float]
 
 
 QUIET_LIMITS = (
@@ -247,11 +417,11 @@ QUIET_LIMITS = (
 )
 
 
-def quiet_tests(window: Sequence[Mapping[str, Any]], limits: Mapping[str, float]) -> list[dict[str, Any]]:
+def quiet_tests(window: Sequence[QuietSample], limits: Mapping[str, float]) -> list[QuietTest]:
     """The tests of one window (SECONDS + 1 readings, a second apart): CPU busy
     and writes from the counters at both ends (the window's mean), pressure as
     the mean of each second's avg10, the game profile off in every reading."""
-    tests: list[dict[str, Any]] = []
+    tests: list[QuietTest] = []
     for lim in QUIET_LIMITS:
         value: float | None = None
         err = next((s["err"][lim.name] for s in window if lim.name in s["err"]), None)
@@ -342,7 +512,27 @@ def positive(text: str, what: str) -> float:
     raise ValueError(f"{what}: a number above 0 (got {text!r})")
 
 
-def quiet_text(result: Mapping[str, Any]) -> str:
+def stamp(s: QuietSample) -> str:
+    """A reading's wall clock, as the result shows it (local time)."""
+    return datetime.fromtimestamp(s["wall"]).isoformat(sep=" ", timespec="seconds")
+
+
+def quiet_result(
+    window: Sequence[QuietSample], tests: list[QuietTest], *, ok: bool, seconds: int, waited_s: float | None
+) -> QuietResult:
+    """The verdict on the last window (OK: every test passed)."""
+    return {
+        "quiet": ok,
+        "seconds": seconds,
+        "start": stamp(window[0]),
+        "end": stamp(window[-1]),
+        "waited_s": waited_s,
+        "tests": tests,
+        "failed": [t["name"] for t in tests if not t["ok"]],
+    }
+
+
+def quiet_text(result: QuietResult) -> str:
     lines = []
     for t in result["tests"]:
         unit = f" {t['unit']}" if t["unit"] else ""
@@ -353,7 +543,9 @@ def quiet_text(result: Mapping[str, Any]) -> str:
         else:
             value = t["value"]
         limit = f"< {t['limit']:g}{unit}" if t["unit"] else t["limit"]
-        verdict = "ok" if t["ok"] else "FAIL" + (f" ({t['error']})" if t["error"] else "")
+        verdict = "ok"
+        if not t["ok"]:
+            verdict = f"FAIL ({t['error']})" if t["error"] else "FAIL"
         lines.append(f"  {t['label']:<16} {value:<12} limit {limit:<11} {verdict}")
     span = f"{result['seconds']} s, {result['start']} to {result['end']}"
     if result.get("waited_s") is not None:
