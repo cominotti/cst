@@ -297,6 +297,26 @@ class BackupTest(Base):
         self.assertEqual(self.read_state("nas-done-home"), f"{SNAP} {REPO_ID}\n")
         self.assertFalse(os.path.exists(self.state_file("nas-check-failures")))
 
+    def test_records_without_a_repository_id_start_over_with_a_line(self) -> None:
+        # nas-repo-id gone (removed by hand, or a run killed in between) while records stay: they
+        # cannot be told apart from another repository's, so they go, and now the journal says so.
+        # Before, they went without a word. A first run (no records) says nothing (test_a_whole_run).
+        self.write(self.state_file("nas-done-home"), f"{SNAP} {REPO_ID}\n")
+        self.days_ago("nas-last-prune", 1)
+        rc, lines, _ = self.nas()
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            lines[0],
+            log(
+                5,
+                f"NAS: {self.state}/nas-repo-id is missing, so the records of the NAS backup are not known to be "
+                "this repository's; they start over",
+            ),
+        )
+        self.assertIn(self.backup_args(), self.restic_calls())
+        self.assertIn("--prune", next(c for c in self.restic_calls() if c[0] == "forget"))
+        self.assertEqual(self.read_state("nas-repo-id"), REPO_ID + "\n")
+
     def test_a_repository_id_that_cannot_be_read_never_counts_a_record(self) -> None:
         self.write(self.state_file("nas-done-home"), f"{SNAP} \n")
         self.restic(cat={"out": "{}\n"})

@@ -1309,7 +1309,11 @@ Rules the script follows about the password:
 
 1. Checks the NAS is reachable. If not, it skips the run. You get an alert
    only when the last good backup is `NAS_STALE_DAYS` (7) days old or more.
-2. Opens the repository with the password.
+2. Opens the repository with the password. What
+   `/var/lib/btrfs-snapshot` records about it (which snapshots it has, the
+   last prune and check) belongs to that repository's id
+   (`nas-repo-id`): for another repository, or when that file is missing,
+   the records start over, and the journal says so.
 3. Takes the **newest local snapshot** of `home` and of `Workspace`, **pins**
    them (a pin is a mark that stops the hourly run from deleting them during
    the upload), and mounts them read-only at fixed paths:

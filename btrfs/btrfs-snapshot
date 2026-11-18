@@ -1158,7 +1158,14 @@ nas_repo_records() {
     local known
     known="$(cat "${STATE}/nas-repo-id" 2>/dev/null)"
     [[ -n "${NAS_REPO_ID}" && "${known}" == "${NAS_REPO_ID}" ]] && return 0
-    [[ -n "${known}" ]] && log 5 "NAS: another repository than last time (id ${known:0:8} -> ${NAS_REPO_ID:0:8}); its records start over"
+    if [[ -n "${known}" ]]; then
+        log 5 "NAS: another repository than last time (id ${known:0:8} -> ${NAS_REPO_ID:0:8}); its records start over"
+    elif compgen -G "${STATE}/nas-done-*" >/dev/null || [[ -e "${STATE}/nas-summary" || -e "${STATE}/nas-last-prune" ||
+        -e "${STATE}/nas-last-check" || -e "${STATE}/nas-check-failures" ]]; then
+        # Records without the id they belong to: they cannot be told apart from another
+        # repository's, so they go too; say so (cst btrfs snapshots status shows them).
+        log 5 "NAS: ${STATE}/nas-repo-id is missing, so the records of the NAS backup are not known to be this repository's; they start over"
+    fi
     rm -f "${STATE}"/nas-done-* "${STATE}/nas-summary" "${STATE}/nas-last-prune" "${STATE}/nas-last-check" \
         "${STATE}/nas-check-failures" "${STATE}/nas-repo-id"
     [[ -n "${NAS_REPO_ID}" ]] && printf '%s\n' "${NAS_REPO_ID}" >"${STATE}/nas-repo-id"
