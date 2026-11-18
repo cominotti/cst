@@ -91,6 +91,11 @@ class GamePaths:
         """The energy/performance preference of one CPU."""
         return posixpath.join(self.sys_cpu, f"cpu{cpu}", "cpufreq", "energy_performance_preference")
 
+    @property
+    def settings_warned(self) -> str:
+        """What the watchdog last said about the settings file's problem lines (once per boot)."""
+        return _in(self.run, "settings-warned")
+
 
 @dataclass(frozen=True, slots=True)
 class GameSettings:

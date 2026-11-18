@@ -834,6 +834,48 @@ class SettingsProblemTest(GameProfileCase):
         self.assertEqual(p.tick(), 0)
         self.assertEqual(self.systemd.actions, [f"{SYS} start --no-block cpu-game.service"])
 
+    def test_the_watchdog_says_it_again_after_a_fix_and_for_another_word(self) -> None:
+        p, out = self.problem_profile()
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("GameMode client running, profile not switched on", out.getvalue())
+        # Fixed (no game now), then broken again the same way: said again.
+        self.no_game()
+        self.write(self.paths.conf, "TARGET_USER='testuser'\n")
+        self.assertEqual(load_profile(self.paths, self.systemd).tick(), 0)
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+        self.gamemode_pid("1")
+        p, out = self.problem_profile()
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("GameMode client running, profile not switched on", out.getvalue())
+        # The profile on (by hand), the same lines: the other word is said too, once.
+        self.write(self.state, "")
+        self.write(self.manual, "")
+        for expected in ("tick changes nothing", ""):
+            p, out = self.problem_profile()
+            self.assertEqual(p.tick(), 0)
+            if expected:
+                self.assertIn(f"<4>game-profile: {expected}: a line of", out.getvalue())
+            else:
+                self.assertEqual(out.getvalue(), "")
+
+    def test_a_link_at_the_watchdog_mark_is_replaced_and_never_followed(self) -> None:
+        victim = os.path.join(self.tmp, "victim")
+        self.write(victim, "keep\n")
+        os.symlink(victim, self.paths.settings_warned)
+        p, out = self.problem_profile()
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("profile not switched on", out.getvalue())
+        self.assertEqual(self.read(victim), "keep\n")
+        self.assertFalse(os.path.islink(self.paths.settings_warned))
+        self.assertEqual(os.stat(self.paths.settings_warned).st_mode & 0o7777, 0o644)
+        # A mark that cannot be written: the tick still ends in success, and says it again next time.
+        os.remove(self.paths.settings_warned)
+        os.mkdir(self.paths.settings_warned)
+        for _ in range(2):
+            p, out = self.problem_profile()
+            self.assertEqual(p.tick(), 0)
+            self.assertIn("profile not switched on", out.getvalue())
+
     def test_the_program_builds_the_profile_over_the_settings_file(self) -> None:
         self.write(self.paths.conf, "TARGET_USER='testuser'\nBUILD_CPUS=$(nproc)\n")
         p = load_profile(self.paths, self.systemd)

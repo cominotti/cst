@@ -529,6 +529,9 @@ class GameProfile:
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
         p = self.paths
+        if not self.problems:  # fixed: a line that breaks again is said again
+            with contextlib.suppress(OSError):
+                os.unlink(p.settings_warned)
         if not os.path.exists(p.state):
             self.remove_leftover_dropins()
             if not self.gamemode_client():
@@ -562,17 +565,18 @@ class GameProfile:
 
     def warn_once(self, what: str) -> None:
         """The watchdog's word on the settings file's problem lines: logged at the first tick that meets
-        them (and again when they change), then quiet until the next boot (the mark is in /run); the
-        watchdog's unit does not fail on them."""
+        them (and again when they or the word change, or after a tick found the file fixed), then quiet
+        until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
         text = describe_problems(self.paths.conf, self.problems)
-        mark = os.path.join(self.paths.run, "settings-warned")
-        if read_text(mark) == text:
+        said = f"{what}\n{text}"  # another word on the same lines is said too
+        mark = self.paths.settings_warned
+        if read_text(mark) == said:
             return
         for line in text.split("\n"):
             self.log(4, line)
         self.log(4, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works; said once per boot)")
         with contextlib.suppress(OSError):
-            write_atomic(mark, text, mode=0o644, durable=False, relabel=False)
+            write_atomic(mark, said, mode=0o644, durable=False, relabel=False)
 
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
