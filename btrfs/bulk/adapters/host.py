@@ -21,7 +21,7 @@ from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import Notifier, PENDING_ALERTS
 from cst_core.domain.contracts import Urgency
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
-from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP
+from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
 
 
 # btrfs-snapshot's test seam (every file below another folder): never handed on to the runs below.
@@ -139,7 +139,7 @@ class Host:
                 exe = ""
             exe = exe.removesuffix(" (deleted)")
             if (
-                comm in ("steam", "steamwebhelper", "steam.sh")
+                comm in STEAM_COMMS
                 or comm.startswith("pressure-vessel")
                 or exe.endswith(("/ubuntu12_32/steam", "/ubuntu12_64/steamwebhelper", "/ubuntu12_32/reaper"))
             ):

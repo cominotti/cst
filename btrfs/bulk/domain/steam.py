@@ -40,6 +40,8 @@ STEAM_BACKUPS = 5  # .cst-bak-* copies kept per libraryfolders.vdf
 STEAM_READ_MAX = 64 << 20  # larger "VDF" files are refused unread
 PROC = "/proc"
 RUN_USER = "/run/user"
+# The names (/proc/PID/comm) of Steam's own processes (not BulkCommand.STEAM: a program's name).
+STEAM_COMMS = ("steam", "steamwebhelper", "steam.sh")
 # Apps that are tools, not games: they stay in the main library unless named
 # with --app. Checked: the Steam Linux Runtime ids are in Valve's own list,
 # doc/steamlinuxruntime-known-issues.md in steam-runtime. 228980 is the
