@@ -25,6 +25,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from collections.abc import Callable, Mapping, Sequence
@@ -68,6 +70,7 @@ class _MonitorProto(Protocol):
     fake: FakeProc
     alert: Callable[[str, str, str, str], None]
     describe: Callable[[str | int, str | int], tuple[list[str], str | None]]
+    cmdlines: md_proc.TimedReader
 
     def describe_all(
         self, d_tasks: Sequence[tuple[str, str, str]]
@@ -80,6 +83,10 @@ class _MonitorProto(Protocol):
     ) -> None: ...
 
     def track_hung(self, d_tasks: Sequence[tuple[str, str, str, list[str], str | None, str]], now: float) -> None: ...
+
+    def report_io_busy(
+        self, t: md_domain.DTaskSince, tid: str, frames: list[str], wchan: str | None, now: float
+    ) -> None: ...
 
 
 class _StallMonitordModule(Protocol):
@@ -520,6 +527,8 @@ def monitor(m: _StallMonitordModule) -> _MonitorProto:
     mon.topo = types.SimpleNamespace(fs={}, disks={}, top_devs=set(), containers={}, scan_cgroups=_scan_cgroups)
     mon.alert = _alert
     mon.describe = _describe
+    # The command lines through the view's read_text at each read (FakeProc and the tests replace it).
+    mon.cmdlines = md_proc.TimedReader(md_domain.CMDLINE_WAIT, lambda path: m.read_text(path))
     return mon
 
 
@@ -666,6 +675,178 @@ class HungKindTest(unittest.TestCase):
         self.assertTrue(events[0]["severe"])
         self.assertEqual(self.mon.alerts, [("hung", "Task stuck in an uninterruptible wait (likely storage)")])
         self.assertIsNotNone(self.mon.episode)
+
+
+class TimedReaderTest(unittest.TestCase):
+    """The helper thread that reads files for the loop (proc.TimedReader): it waits at most its timeout for one
+    read, refuses at once while an earlier read is still waiting, and never hands a late answer to the next read."""
+
+    def setUp(self) -> None:
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        self.calls: list[tuple[str, str]] = []
+
+    def read(self, path: str) -> str | None:
+        self.calls.append((path, threading.current_thread().name))
+        if path.startswith("slow"):
+            self.release.wait(10)
+        return f"text of {path}"
+
+    def test_reads_in_one_helper_thread(self) -> None:
+        reader = md_proc.TimedReader(5.0, self.read)
+        self.assertEqual([reader.read("a"), reader.read("b")], ["text of a", "text of b"])
+        self.assertEqual({name for _, name in self.calls}, {"timed-reader"})
+
+    def test_default_reader_reads_the_file_or_gives_none(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-stall-timed-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "cmdline")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("java\0-jar\0app.jar\0")
+        reader = md_proc.TimedReader(5.0)
+        self.assertEqual(reader.read(path), "java\0-jar\0app.jar\0")
+        self.assertIsNone(reader.read(os.path.join(tmp, "missing")))
+
+    def test_a_slow_read_times_out_and_the_next_is_refused_at_once(self) -> None:
+        reader = md_proc.TimedReader(0.2, self.read)
+        start = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            reader.read("slow")
+        self.assertGreaterEqual(time.monotonic() - start, 0.2)
+        with self.assertRaises(TimeoutError):
+            reader.read("other")
+        self.assertEqual([path for path, _ in self.calls], ["slow"])  # "other" was never handed to a thread
+
+    def test_a_read_that_raises_reads_as_none_and_the_next_read_works(self) -> None:
+        def broken(path: str) -> str | None:
+            if path == "bad":
+                raise MemoryError(path)
+            return self.read(path)
+
+        reader = md_proc.TimedReader(5.0, broken)
+        with mock.patch.object(threading, "excepthook", lambda _args: None):  # the thread's traceback
+            self.assertIsNone(reader.read("bad"))
+        self.assertEqual(reader.read("b"), "text of b")
+
+    def test_a_read_still_waiting_never_holds_the_daemon_s_exit(self) -> None:
+        # A stop or a watchdog restart during a stall must not wait for the stalled program's lock: the
+        # thread left waiting is a daemon thread, which the interpreter does not join at exit.
+        reader = md_proc.TimedReader(0.1, self.read)
+        with self.assertRaises(TimeoutError):
+            reader.read("slow")
+        waiting = [t for t in threading.enumerate() if t.name == "timed-reader" and t.is_alive()]
+        self.assertEqual(len(waiting), 1)
+        self.assertTrue(waiting[0].daemon)
+
+    def test_a_thread_that_cannot_start_is_a_read_not_made(self) -> None:
+        reader = md_proc.TimedReader(5.0, self.read)
+        with (
+            mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")),
+            self.assertRaises(TimeoutError),
+        ):
+            reader.read("a")
+        self.assertEqual(reader.read("b"), "text of b")
+
+    def test_a_late_answer_is_not_handed_to_the_next_read(self) -> None:
+        reader = md_proc.TimedReader(0.2, self.read)
+        with self.assertRaises(TimeoutError):
+            reader.read("slow")
+        self.release.set()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                value = reader.read("b")
+                break
+            except TimeoutError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.01)
+        self.assertEqual(value, "text of b")
+        self.assertEqual(reader.read("c"), "text of c")
+
+
+class CmdlineReadTest(unittest.TestCase):
+    """A hung-task or io-busy report names the task with its /proc/PID/cmdline. That read takes the program's
+    memory map lock, which can stay taken for minutes during the stall being recorded: the report waits at most
+    CMDLINE_WAIT for it and says so, and the loop goes on."""
+
+    m: _StallMonitordModule
+    mon: _MonitorProto
+
+    def setUp(self) -> None:
+        self.m = load()
+        self.mon = monitor(self.m)
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        self.cmdline_reads: list[str] = []
+
+    def blocked_read_text(self, path: str) -> str | None:
+        """/proc/PID/cmdline waits (as for a memory map lock held by a stuck thread); every other file reads as gone."""
+        if path.endswith("/cmdline"):
+            self.cmdline_reads.append(path)
+            self.release.wait(30)
+            return "java\0-jar\0app.jar\0"
+        return None
+
+    def events(self) -> list[tuple[str, str]]:
+        """(kind, msg) of each event the monitor emitted."""
+        return [(str(e["kind"]), str(e["msg"])) for e in (json.loads(line) for _, line in self.mon.buffer)]
+
+    def without_waiting(self, report: Callable[[], None]) -> list[tuple[str, str]]:
+        """The events report() emits, with the cmdline read blocked; fails if report() waits for it."""
+        self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["sync_log"])})
+        done = threading.Event()
+
+        def run() -> None:
+            with self.mon.fake, mock.patch.object(self.m, "read_text", self.blocked_read_text):
+                report()
+            done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        self.assertTrue(done.wait(md_domain.CMDLINE_WAIT + 4.5), "the report waited for the blocked cmdline read")
+        return self.events()
+
+    def hung(self, pid: str = "10", tid: str = "100") -> None:
+        d_tasks = [(pid, tid, "java", STACKS["sync_log"], None, self.m.wait_kind(STACKS["sync_log"], None))]
+        self.mon.track_hung(d_tasks, 1000.0)
+        self.mon.track_hung(d_tasks, 1000.0 + self.m.HUNG_SECONDS + 1)
+
+    def test_hung_report_does_not_wait_for_a_blocked_cmdline(self) -> None:
+        [(kind, msg)] = self.without_waiting(self.hung)
+        self.assertEqual(kind, "hung")
+        self.assertIn(f"java:100 ({md_domain.CMDLINE_SLOW}; cgroup app.slice)", msg)
+
+    def test_io_busy_report_does_not_wait_for_a_blocked_cmdline(self) -> None:
+        now = 5000.0
+        task: md_domain.DTaskSince = {
+            "pid": "10",
+            "comm": "java",
+            "first": now,
+            "busy": now - self.m.HUNG_SECONDS - 1,
+            "slices": 7,
+        }
+        [(kind, msg)] = self.without_waiting(
+            lambda: self.mon.report_io_busy(task, "100", STACKS["sync_log"], None, now)
+        )
+        self.assertEqual(kind, "io-busy")
+        self.assertIn(f"java:100 ({md_domain.CMDLINE_SLOW}; cgroup app.slice)", msg)
+
+    def test_while_one_read_waits_the_next_report_waits_not_at_all(self) -> None:
+        def two_reports() -> None:
+            self.hung("10", "100")
+            self.hung("20", "200")
+
+        events = self.without_waiting(two_reports)
+        self.assertEqual(self.cmdline_reads, ["/proc/10/cmdline"])  # the second report did not even try
+        self.assertEqual(len(events), 2)
+        self.assertIn(f"java:200 ({md_domain.CMDLINE_SLOW};", events[1][1])
+
+    def test_a_readable_cmdline_is_in_the_report(self) -> None:
+        self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["sync_log"])})
+        with self.mon.fake, mock.patch.object(self.m, "read_text", lambda _path: "java\0-jar\0app.jar\0"):
+            self.hung()
+        [(_, msg)] = self.events()
+        self.assertIn("java:100 (java -jar app.jar; cgroup app.slice)", msg)
 
 
 if __name__ == "__main__":

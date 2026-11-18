@@ -32,6 +32,10 @@ QUIET_D_TASKS = 1
 QUIET_SECONDS_TO_CLOSE = 10
 HUNG_SECONDS = 30  # continuous D state reported as a hung task
 HUNG_REPEAT = 15 * 60  # s before the same process is reported again
+# A report reads the task's /proc/PID/cmdline in a helper thread (it waits for that
+# program's memory map lock) and gives up after this long, so the loop goes on.
+CMDLINE_WAIT = 0.5
+CMDLINE_SLOW = f"cmdline not read in {CMDLINE_WAIT:g} s"
 MAINT_HUNG_SECONDS = 15 * 60  # continuous D state of btrfs maintenance (fstrim, scrub) that alerts
 BUSY_ALERT_SECONDS = 10 * 60  # in D at every sample this long alerts even while progressing
 MAX_STACK_SNAPSHOTS = 600  # per episode; afterwards only counts are kept
