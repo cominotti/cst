@@ -164,11 +164,8 @@ class SnapshotRun:
 
     def capture(self, argv: Sequence[str], *, stderr: Stderr = Stderr.DROP, input_text: str | None = None) -> str:
         """$(argv): its stdout (stderr shown, or dropped as 2>/dev/null)."""
-        res = self.run(argv, output="capture" if stderr is Stderr.SHOW else "stdout", input_text=input_text)
-        if stderr is Stderr.SHOW and res.stderr and res.fault is None:
-            sys.stderr.write(res.stderr)
-            sys.stderr.flush()
-        return res.stdout
+        output: OutputMode = "stdout-show-stderr" if stderr is Stderr.SHOW else "stdout"
+        return self.run(argv, output=output, input_text=input_text).stdout
 
     def ok(self, argv: Sequence[str], *, input_text: str | None = None) -> bool:
         """argv >/dev/null 2>&1 succeeded."""
