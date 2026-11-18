@@ -141,6 +141,28 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
     ),
+    # The account name "root" (SUDO_USER, --user, BULK_USER, cst_install_text's OWNER): not a FileOwner or CpuRoute.
+    "bluetooth/setup/wiring.py:step_down": 'compares SUDO_USER with the account name "root", not a FileOwner',
+    "btrfs/bulk/wiring.py:Wiring.user": 'compares the account from --user or BULK_USER with "root", not a FileOwner',
+    "cpu/setup/adapters.py:target_user": 'compares SUDO_USER with the account name "root", not a CpuRoute',
+    "cpu/setup/adapters.py:CpuSetup.install": 'compares the target user with the account name "root", not a CpuRoute',
+    "cpu/setup/adapters.py:CpuSetup.install_text": (
+        'its owner is an account name ("root" means no runuser), not a CpuRoute or FileOwner'
+    ),
+    # Loose records with no fixed format to describe.
+    "btrfs/bulk/adapters/user.py:u_read": (
+        "its answer crosses as_user's JSON pipe, whose result type is bound to Json: a TypedDict does not meet that bound"
+    ),
+    "btrfs/bulk/adapters/user.py:file_read": "the validator at that border: it checks each value of u_read's answer",
+    "btrfs/docker_gc/adapters.py:_obj": (
+        "returns a JSON value nobody has checked yet (docker's answers, last-run.json) when it is an object;"
+        " each caller checks the key it uses, and some of those objects are free maps (Labels)"
+    ),
+    "btrfs/stall_report/adapters.py:below_top.pick": (
+        "rows of `below dump --raw -O json`, whose column names change between below versions: matched by substring"
+    ),
+    "toolchains/domain/common.py:plain": "any TOML document (the user's cargo or uv config) as json.loads would give it",
+    "toolchains/domain/common.py:parses_as": "compares a re-parsed TOML document with plain's: any document, no format",
 }
 
 
