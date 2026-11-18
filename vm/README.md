@@ -1017,7 +1017,7 @@ The Python code inside `vm/` (standard library only at run time):
   flatpak-spawn), on the host only for the rest, which first runs the
   script again through sudo (`nocow apply` stays the user's).
 - `vm/cst-vm`: the entry point (its docstring is the help); it only hands
-  argv to `vm/cli.py`. Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
+  argv to `vm/cli/` (`main`). Installed as `/usr/local/sbin/cst-vm` (a zipapp, by
   `backup-timer on`).
 - `vm/domain.py`: the rules, no I/O: what a domain definition is made of
   (`domain_parts`), the hardware `tune` recommends (`tune_domain`,
@@ -1029,8 +1029,10 @@ The Python code inside `vm/` (standard library only at run time):
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the backup index, the NOCOW flag
   and the image folders (`probe_dir`), the per-VM lock, the paths
   (`CST_VM_*` moves them, for the tests only).
-- `vm/cli.py`: the commands (`backup`, the NAS backup, `backup-timer`,
-  `list`, `status`, `tune`, `nocow`) and `main`.
+- `vm/cli/`: the commands, one module per command group: `backup.py` (the
+  local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
+  `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
+  `__init__.py`.
 
 `cst doctor` imports `vm.domain` (tune rules) and `vm.adapters` (knobs,
 image folder probe) from the same CST copy.

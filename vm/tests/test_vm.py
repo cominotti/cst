@@ -38,6 +38,7 @@ from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
+from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
 
@@ -99,12 +100,12 @@ class _ProbeResult(TypedDict):
 
 
 def patch_vm(name: str, new: object) -> AbstractContextManager[object]:
-    """Patch `name` in every vm module that has it (cli, adapters, domain), so
-    every caller sees the fake, wherever it lives (a fake virsh must reach
-    adapters.domain_state as well as cli.cmd_tune: the real one must never run)."""
+    """Patch `name` in every loaded vm module that has it (the cli groups, adapters,
+    domain), so every caller sees the fake, wherever it lives (a fake virsh must reach
+    adapters.domain_state as well as vm.cli.tune: the real one must never run)."""
     stack = ExitStack()
     found = False
-    for mod in (vm_cli, vm_adapters, vm_domain):
+    for mod in [m for n, m in sorted(sys.modules.items()) if n == "vm" or n.startswith("vm.")]:
         if hasattr(mod, name):
             stack.enter_context(mock.patch.object(mod, name, new))
             found = True
@@ -629,7 +630,7 @@ class BackupTest(Scratch):
             mock.patch.object(os, "statvfs", return_value=fake),
         ):
             with self.assertRaises(Refused) as cm:
-                vm_cli.cmd_backup("win", True)
+                vm_cli_backup.cmd_backup("win", True)
         self.assertIn("--full needs", str(cm.exception))
         self.assertIn("allocated size", str(cm.exception))
         self.assertFalse(os.path.exists(self.backups))
@@ -1038,7 +1039,7 @@ class TuneCommandTest(unittest.TestCase):
             return answer
 
         with patch_vm("confirm", _confirm), mock.patch("sys.stdout", out):
-            rc = vm_cli.cmd_tune("win11-devbox", apply, flag)
+            rc = vm_cli_tune.cmd_tune("win11-devbox", apply, flag)
         return rc, out.getvalue()
 
     def test_plan_windows_without_flag(self) -> None:
@@ -1198,7 +1199,7 @@ class NocowTest(unittest.TestCase):
         self.assertEqual([i["name"] for i in s["images"]], ["win.qcow2"])
         self.assertEqual(s["leftovers"], ["old.qcow2.cow-old"])
         self.assertFalse(d[os.path.join(self.home, ".local/share/libvirt/images")]["present"])
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertEqual(rc, 0)
         self.assertIn("still copy-on-write: win.qcow2", out)
         self.assertIn(f"sudo mv {win} {win}.cow-old", out)
@@ -1231,12 +1232,12 @@ class NocowTest(unittest.TestCase):
             return real_scandir(p)
 
         with mock.patch.object(os, "scandir", scandir):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("NOCOW mark (+C): not readable as your user (root-only folder): cst-vm nocow plan --root", out)
         self.assertNotIn("still copy-on-write", out)
         self.assertNotIn(": no:", out)
         # Readable listing but unreadable image flags (qemu's 0600 files): reported as unknown.
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("images whose mark is not readable as your user: win.qcow2", out)
         self.assertNotIn("still copy-on-write", out)
 
@@ -1245,7 +1246,7 @@ class NocowTest(unittest.TestCase):
             return False
 
         with patch_vm("is_btrfs", _not_btrfs):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("not on btrfs (NOCOW does not apply)", out)
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
@@ -1259,9 +1260,9 @@ class NocowTest(unittest.TestCase):
             return dict(ALL_ON, VM_NOCOW=False)
 
         with patch_vm("knobs", _knobs_off):
-            rc, out = self.out(vm_cli.cmd_nocow_plan)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
             self.assertIn("VM_NOCOW=no", out)
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
             self.assertIn("nothing to do", out)
 
     def test_apply_marks_user_folders_and_uses_sudo_for_the_system_one(self) -> None:
@@ -1297,7 +1298,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("run", fake_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
         self.assertEqual(marked, [self.boxes])
         self.assertEqual(
@@ -1337,7 +1338,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("run", fake_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual(rc, 0, out)
         self.assertEqual(
             sudo,
@@ -1365,7 +1366,7 @@ class NocowTest(unittest.TestCase):
         for p in (self.system, libvirt_user):
             self.assertEqual((d[p]["present"], d[p]["link"]), (False, real))
             self.assertFalse(vm_adapters.needs_mark(d[p]))
-        rc, out = self.out(vm_cli.cmd_nocow_plan)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn(
             f"{self.system}  [libvirt qemu:///system: virt-manager, virsh]: a symbolic link to {real}: "
             "not managed by CST",
@@ -1388,7 +1389,7 @@ class NocowTest(unittest.TestCase):
             mock.patch.object(subprocess, "run", fake_sub_run),
             patch_vm("confirm", _confirm),
         ):
-            rc, out = self.out(vm_cli.cmd_nocow_apply)
+            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertEqual((rc, sudo), (0, []))
         self.assertIn("already has the NOCOW mark (+C) (symbolic links are not managed).", out)
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)  # target untouched
@@ -1401,16 +1402,16 @@ class NocowTest(unittest.TestCase):
             "link": None,
             "nocow": None,
         }
-        self.assertIn("symbolic link: not touched", vm_cli.mark_system_dir(probe))
+        self.assertIn("symbolic link: not touched", vm_cli_nocow.mark_system_dir(probe))
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
-        rc, out = self.out(vm_cli.cmd_nocow_apply)
+        rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertIn("already has the NOCOW mark", out)
         self.flags[self.boxes] = 0
         with mock.patch("sys.stdin", io.StringIO("")):
             with self.assertRaises(Refused):
-                self.out(vm_cli.cmd_nocow_apply)
+                self.out(vm_cli_nocow.cmd_nocow_apply)
 
     def test_status_lists_the_folders(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
@@ -1425,7 +1426,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli.cmd_status, "win11-devbox")
+            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox")
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)
@@ -1471,7 +1472,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
-        vm_cli.copy(src, dest, "reflink", True)
+        vm_cli_backup.copy(src, dest, "reflink", True)
         self.assertTrue(vm_adapters.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
