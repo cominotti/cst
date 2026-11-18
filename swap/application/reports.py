@@ -10,7 +10,7 @@ from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
-from cst_core.ports import FileSystemPort, SystemdPort
+from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
     WSF_EXPERIMENT,
     CgroupSwapRow,
@@ -27,11 +27,20 @@ from swap.domain import (
     cgroup_row,
     describe_state,
     find_swap_used_kib,
+    DEFAULT_SWAP_NAME,
+    SETTINGS_REL,
+    SpecResolution,
     human,
+    is_cst_dropin,
+    marked_crypttab_entry,
+    marked_fstab_name,
+    memory_low_override,
+    parse_swap_settings,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
     parse_proc_swaps,
+    parse_size,
     parse_sysctl,
     parse_tmpfiles_params,
     psi_value,
@@ -47,7 +56,11 @@ from swap.ports import SwapSystemPort
 _MANIFEST = manifest_by_src()
 TMPFILES_ENTRY: InstallEntry = _MANIFEST["swap/tmpfiles/zswap.conf"]
 SYSCTL_ENTRY: InstallEntry = _MANIFEST["swap/sysctl/99-swap-tuning.conf"]
-DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-50-memory-low.conf"]
+DROPIN_ENTRY: InstallEntry = _MANIFEST["swap/units/machine.slice.d-10-swap-memory-low.conf"]
+# The drop-in's name until 2026-11: it sorted after the 50-MemoryLow.conf of `systemctl set-property`
+# ('M' < 'm'), so after a daemon-reload its 48G beat a runtime value. plan shows it, apply removes it.
+OLD_DROPIN_SRC: str = "swap/units/machine.slice.d-50-memory-low.conf"
+OLD_DROPIN_DEST: str = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -72,11 +85,20 @@ class SwapEnvironment:
     zswap_debug_dir: str = "/sys/kernel/debug/zswap"
     cpu_run_dir: str = "/run/cpu-setup"
     prog: str = "cst swap"
-    spec: SwapHardwareSpec = SwapHardwareSpec()
     # The install record that lists swap's three files ("": not recorded) and whether apply runs as
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+
+    def host_view(self, host_path: str) -> str:
+        """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
+        root = self.etc_dir.rstrip("/").removesuffix("/etc")
+        return root + host_path
+
+    @property
+    def settings_path(self) -> str:
+        """/etc/cst/swap.conf: the partition swap manages."""
+        return posixpath.join(self.etc_dir, SETTINGS_REL)
 
     @property
     def crypttab(self) -> str:
@@ -101,6 +123,10 @@ class SwapEnvironment:
     @property
     def slice_dropin(self) -> str:
         return _under(self.etc_dir, DROPIN_ENTRY.dest, "/etc/")
+
+    @property
+    def old_slice_dropin(self) -> str:
+        return _under(self.etc_dir, OLD_DROPIN_DEST, "/etc/")
 
     @property
     def zram_conf(self) -> str:
@@ -181,11 +207,16 @@ class SwapReports:
         actual = self._fs.read_text(dest)
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
 
+    def old_dropin_is_ours(self) -> bool:
+        """The drop-in under its old name is there and CST (or the script before it) wrote it."""
+        text = self._fs.read_text(self._env.old_slice_dropin)
+        return text is not None and is_cst_dropin(text)
+
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
-    def _partition_size_sysfs(self) -> tuple[str, int] | None:
-        dev = self._fs.readlink(self._env.spec.device_path, canonicalize=True)
+    def _partition_size_sysfs(self, spec: SwapHardwareSpec) -> tuple[str, int] | None:
+        dev = self._fs.readlink(spec.device_path, canonicalize=True)
         if dev is None or not self._fs.is_block_device(dev):
             return None
         sectors = self._fs.read_first_line(
@@ -194,6 +225,63 @@ class SwapReports:
         if sectors is None or not sectors.isdigit():
             return None
         return dev, int(sectors) * 512
+
+    def resolve_spec(self) -> SpecResolution:
+        """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
+        up (its marked crypttab line, the partition's size now: apply writes the file from them)."""
+        env = self._env
+        text = self._fs.read_text(env.settings_path)
+        if text is not None:
+            settings = parse_swap_settings(text)
+            if settings.problems:
+                return SpecResolution(None, "bad", "; ".join(settings.problems))
+            return (
+                SpecResolution(settings.spec, "unset") if settings.spec is None else SpecResolution(settings.spec, "ok")
+            )
+        if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
+            name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
+            return SpecResolution(None, "unset") if name is None else SpecResolution(None, "unknown", name)
+        entry = marked_crypttab_entry(self._fs.read_text(env.crypttab, "") or "")
+        if entry is None:
+            return SpecResolution(None, "unset")
+        name, partuuid = entry
+        part = self._partition_size_sysfs(SwapHardwareSpec(partuuid, name, 0))
+        if part is None:
+            return SpecResolution(
+                None, "unset", f"the {name} line in crypttab names /dev/disk/by-partuuid/{partuuid}, which is not here"
+            )
+        return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), "write", name)
+
+    def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
+        """The row of /etc/cst/swap.conf in plan and status."""
+        env = self._env
+        target = _short_etc_path(env.etc_dir, env.settings_path)
+        spec = res.spec
+        if res.state == "ok" and spec is not None:
+            return PlanItem("ok", target, f"partition {spec.partuuid}, {spec.expected_size_bytes} bytes")
+        if res.state == "write" and spec is not None:
+            return PlanItem(
+                "write",
+                target,
+                f"from the {spec.name} line an older CST wrote in crypttab: partition {spec.partuuid},"
+                f" {spec.expected_size_bytes} bytes (its size now)",
+            )
+        if res.state == "unknown":
+            return PlanItem(
+                "?",
+                target,
+                f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
+                f" which needs root to read: on the host, {env.prog} {verb} --root",
+            )
+        if res.state == "bad":
+            return PlanItem("REFUSE", target, f"{res.note}: apply stops")
+        why = f" ({res.note})" if res.note else ""
+        return PlanItem(
+            "REFUSE",
+            target,
+            f"no swap partition configured{why}: set SWAP_PARTUUID and SWAP_SIZE_BYTES (swap/README.md, 2.3);"
+            " apply stops",
+        )
 
     def zswap_params(self) -> dict[str, str]:
         """Read current /sys/module/zswap/parameters entries."""
@@ -230,7 +318,7 @@ class SwapReports:
     def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
         """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
         runtime_items: list[PlanItem] = []
-        part = self._partition_size_sysfs()
+        part = self._partition_size_sysfs(spec)
         if part is not None:
             dev, size = part
             if size == spec.expected_size_bytes:
@@ -277,7 +365,6 @@ class SwapReports:
     def build_config_report(self, verb: str) -> ConfigSectionReport:
         """Inspect managed config files and runtime swap/zram states."""
         env = self._env
-        spec = env.spec
         if not self._fs.is_dir(env.etc_dir):
             return ConfigSectionReport(
                 etc_visible=False,
@@ -288,7 +375,11 @@ class SwapReports:
                 runtime_items=(),
             )
 
-        file_items, tier_change = self._marked_line_items(spec, verb)
+        res = self.resolve_spec()
+        spec = res.spec
+        file_items, tier_change = self._marked_line_items(spec, verb) if spec is not None else ([], False)
+        file_items.insert(0, self._settings_item(res, verb))
+        name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
         for src, dest in (
             (env.src_tmpfiles, env.tmpfiles_conf),
@@ -297,14 +388,20 @@ class SwapReports:
         ):
             st = self._inspect_file(src, dest)
             file_items.append(
-                PlanItem(
-                    describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, spec.name, env.prog, verb)
-                )
+                PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, name, env.prog, verb))
             )
 
         if self._fs.exists(env.old_sysctl_conf):
             file_items.append(
                 PlanItem("remove", _short_etc_path(env.etc_dir, env.old_sysctl_conf), "legacy file of the zram setup")
+            )
+        if self.old_dropin_is_ours():
+            file_items.append(
+                PlanItem(
+                    "remove",
+                    _short_etc_path(env.etc_dir, env.old_slice_dropin),
+                    "the old name: a runtime MemoryLow lost to it after a daemon-reload",
+                )
             )
 
         if self._zram_masked():
@@ -325,7 +422,7 @@ class SwapReports:
             )
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        runtime_items = self._partition_items(spec, swaps_text, tier_change=tier_change)
+        runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
 
         zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
         if zram_used is None:
@@ -371,23 +468,31 @@ class SwapReports:
             if state == "DIFF" and key == exp_key and exp_on:
                 state = "exp"
             rows.append(SettingCheckRow(state, key, live, want))
-        want_low = parse_memory_low(self._desired_text(self._env.src_dropin))
+        row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
+        rows.append(row)
+        return SettingsReport(
+            rows=tuple(rows), exp_name=exp_name, exp_key=exp_key, override_source=source, cst_dropin=DROPIN_ENTRY.dest
+        )
+
+    def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
+        """machine.slice's floor: "over" (and the drop-in that sets it) when systemd takes MemoryLow from a
+        drop-in after CST's; else the cgroup's memory.low against CST's value (DIFF when it differs)."""
+        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths"))
+        effective = shown.get("MemoryLow", "")
+        dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
+        source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
+        if source is not None:
+            size = parse_size(effective)
+            live = effective if size is None else human(size)
+            return SettingCheckRow("over", "machine.slice MemoryLow", live, human(want_low)), source
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
         if live_low is None:
-            rows.append(
-                SettingCheckRow("-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low))
-            )
-        else:
-            ok = live_low.isdigit() and int(live_low) == want_low
-            rows.append(
-                SettingCheckRow(
-                    "ok" if ok else "DIFF",
-                    "machine.slice memory.low",
-                    human(int(live_low)) if live_low.isdigit() else live_low,
-                    human(want_low),
-                )
-            )
-        return SettingsReport(rows=tuple(rows), exp_name=exp_name, exp_key=exp_key)
+            return SettingCheckRow(
+                "-", "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+            ), ""
+        ok = live_low.isdigit() and int(live_low) == want_low
+        live = human(int(live_low)) if live_low.isdigit() else live_low
+        return SettingCheckRow("ok" if ok else "DIFF", "machine.slice memory.low", live, human(want_low)), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
         try:

@@ -26,7 +26,7 @@ sys.dont_write_bytecode = True
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
-from cst_core.application.install import InstallService
+from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application.apply import SwapApplicationService
@@ -68,7 +68,7 @@ REPO = os.path.dirname(SWAP)
 SETUP = os.path.join(REPO, "swap-setup.sh")
 TMPFILES = os.path.join(SWAP, "tmpfiles", "zswap.conf")
 SYSCTL = os.path.join(SWAP, "sysctl", "99-swap-tuning.conf")
-DROPIN = os.path.join(SWAP, "units", "machine.slice.d-50-memory-low.conf")
+DROPIN = os.path.join(SWAP, "units", "machine.slice.d-10-swap-memory-low.conf")
 
 OLD = "# managed-by: apply-swap-config.sh"
 OLDER = "# managed-by: apply-zram-config.sh"
@@ -104,6 +104,27 @@ def _installer() -> InstallService:
     """The installer's use case on real files (the tests' folders), with a record port: swap writes its
     files through it, and lists them in env.install_record when a test sets one."""
     return InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
+
+
+# The partition of the tests (the values swap/domain.py had in code until 2026-11), and its settings file.
+TEST_SPEC = SwapHardwareSpec("612551b1-ca02-4514-86ad-7d8902e612dc", "swap0", 137438953472)
+TEST_SETTINGS = "SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_BYTES=137438953472\n"
+
+# The drop-in as CST installed it until 2026-11, as machine.slice.d/50-memory-low.conf.
+# Its first line, split: the license gate wants that line on line 1 of this file only.
+MAIN_DROPIN = (
+    "# SPDX-"
+    + "License-Identifier: MPL-2.0\n"
+    + """\
+# Managed by swap-setup.sh (CST): protect libvirt guests from reclaim.
+# Soft floor: reclaim prefers unprotected cgroups while they have anything
+# reclaimable; ignored when they don't. Propagates to the VM scope via the
+# memory_recursiveprot cgroup2 mount option. 48G matches the win11-devbox
+# allocation; raise it if the VM grows.
+[Slice]
+MemoryLow=48G
+"""
+)
 
 
 # 1023 KiB of RAM: 20 % of it, and 85 % of that, do not divide evenly.
@@ -331,7 +352,7 @@ class StatusMathTest(unittest.TestCase):
             env,
             LocalFileSystemAdapter(),
             _FakeSystemd(os.path.join(proc, "swaps"), "/dev/dm-0"),
-            _FakeSwapSystem(proc, size_bytes=SwapHardwareSpec().expected_size_bytes),
+            _FakeSwapSystem(proc, size_bytes=TEST_SPEC.expected_size_bytes),
             installer=_installer(),
         )
 
@@ -435,6 +456,14 @@ class StatusMathTest(unittest.TestCase):
         self.assertTrue(lines["reject_reclaim_fail"].endswith(help_["reject_reclaim_fail"]))
         self.assertEqual(lines["new_kernel_counter"].split(), ["new_kernel_counter", "7"])
 
+    def test_is_cst_dropin(self) -> None:
+        self.assertTrue(D.is_cst_dropin(MAIN_DROPIN))
+        self.assertTrue(D.is_cst_dropin(OLD_DROPIN))
+        with open(DROPIN, encoding="utf-8") as f:
+            self.assertTrue(D.is_cst_dropin(f.read()))
+        self.assertFalse(D.is_cst_dropin("[Slice]\nMemoryLow=8G\n"))
+        self.assertFalse(D.is_cst_dropin("[Slice]\nMemoryLow=8G # Managed by swap-setup.sh (CST)\n"))
+
     def test_size_and_bool(self) -> None:
         self.assertEqual(parse_size("512M"), 512 * 2**20)
         self.assertEqual(parse_size("1024"), 1024)
@@ -465,10 +494,10 @@ class MarkerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.fs = _FakeTempFileSystem({})
-        self.spec = SwapHardwareSpec()
+        self.spec = TEST_SPEC
         swaps = os.path.join(self.tmp, "swaps")
         self.svc = SwapApplicationService(
-            SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp, spec=self.spec),
+            SwapEnvironment(src_dir=SWAP, etc_dir=self.tmp),
             self.fs,
             _FakeSystemd(swaps, "/dev/dm-0"),
             _FakeSwapSystem(self.tmp, size_bytes=self.spec.expected_size_bytes),
@@ -493,7 +522,7 @@ class MarkerTest(unittest.TestCase):
 
     def write_marked(self, p: str, which: str = "fstab") -> None:
         events: list[D.ApplyEvent] = []
-        ok, _changed, _written = self.svc._apply_marked_line(p, self.line_spec(which), 0o644, events)
+        ok, _changed, _written = self.svc._apply_marked_line(p, self.line_spec(which), 0o644, events, name="swap0")
         self.assertTrue(ok, events)
 
     def file_state(self, src: str, dest: str) -> str:
@@ -505,7 +534,7 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(self.state(p), "unreadable")
         self.assertEqual(self.file_state(TMPFILES, p), "unreadable")
         events: list[D.ApplyEvent] = []
-        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events)[0], False)
+        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events, name="swap0")[0], False)
         self.assertIn("unreadable", events[-1].text)
 
     def test_other_lines_come_back_byte_for_byte(self) -> None:
@@ -576,7 +605,7 @@ class MarkerTest(unittest.TestCase):
 
     def test_file_state(self) -> None:
         src_tmp = os.path.join(SWAP, "tmpfiles", "zswap.conf")
-        src_drop = os.path.join(SWAP, "units", "machine.slice.d-50-memory-low.conf")
+        src_drop = DROPIN
         self.assertEqual(self.file_state(src_tmp, self.path("t", OLD_TMPFILES)), "adopt")
         self.assertEqual(self.file_state(src_drop, self.path("d", OLD_DROPIN)), "adopt")
         self.assertEqual(self.file_state(src_drop, self.path("d2", OLD_DROPIN.replace("48G", "32G"))), "change")
@@ -638,8 +667,10 @@ class _FakeSystemd:
         fail_unit: str | None = None,
         fail_result: CommandResult | None = None,
         on_call: Callable[[str, str], object] | None = None,
+        shown: Mapping[str, str] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.shown = {} if shown is None else dict(shown)  # what `systemctl show machine.slice` says ({}: no answer)
         self._fail_result = CommandResult(1, "", "") if fail_result is None else fail_result
         self._on_call = on_call
         self.daemon_reloads = 0
@@ -691,6 +722,10 @@ class _FakeSystemd:
 
     def restart(self, unit: str) -> CommandResult:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
+
+    def show(self, unit: UnitName, props: Sequence[str]) -> dict[str, str]:
+        del props
+        return dict(self.shown) if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         cleaned = path.lstrip("/").replace("/", "-")
@@ -796,7 +831,7 @@ class _SwapScratch(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="swap-app-test-")
-        self.spec = SwapHardwareSpec()
+        self.spec = TEST_SPEC
         etc = os.path.join(self.tmp, "etc")
         proc = os.path.join(self.tmp, "proc")
         sys_dir = os.path.join(self.tmp, "sys")
@@ -857,8 +892,10 @@ class _SwapScratch(unittest.TestCase):
             zswap_params_dir=zparams,
             zswap_debug_dir=zdebug,
             cpu_run_dir=run_dir,
-            spec=self.spec,
         )
+        os.makedirs(os.path.join(etc, "cst"))
+        with open(self.env.settings_path, "w", encoding="utf-8") as f:
+            f.write(TEST_SETTINGS)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
@@ -868,6 +905,28 @@ class _SwapScratch(unittest.TestCase):
         if mapper_present:
             links[self.spec.mapper_path] = "/dev/dm-0"
         return _FakeTempFileSystem(links, unreadable)
+
+    def _apply_once(self, env: SwapEnvironment, *, mapper_present: bool) -> tuple[int, str, str, _FakeSystemd]:
+        fs = self._fs(mapper_present=mapper_present)
+        systemd = _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(env, fs, systemd, system, installer=_installer())
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_apply(service.apply_changes(), out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def _plan_text(self, env: SwapEnvironment, *, unreadable: set[str] | None = None) -> str:
+        fs = self._fs(unreadable=unreadable)
+        service = SwapApplicationService(
+            env,
+            fs,
+            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        return out.getvalue()
 
 
 class SwapApplicationTest(_SwapScratch):
@@ -896,7 +955,7 @@ class SwapApplicationTest(_SwapScratch):
             sorted(rec["files"]),
             [
                 "/etc/sysctl.d/99-swap-tuning.conf",
-                "/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+                "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf",
                 "/etc/tmpfiles.d/zswap.conf",
             ],
         )
@@ -922,6 +981,102 @@ class SwapApplicationTest(_SwapScratch):
         self.assertIn("written by a newer CST", err.getvalue())
         with open(record) as f:
             self.assertEqual(f.read(), '{"format": 99, "files": {}}', "the newer record was changed")
+
+    def _old_dropin_install(self, record: str, text: str) -> str:
+        """machine.slice.d/50-memory-low.conf as an older CST's apply left it: the file, listed in the
+        install record by the same installer call (put) that apply made then."""
+        old = os.path.join(self.env.etc_dir, "systemd/system/machine.slice.d/50-memory-low.conf")
+        place = Placement(
+            path=old,
+            dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
+            record=record,
+            component="swap:core",
+            src="swap/units/machine.slice.d-50-memory-low.conf",
+            kind="unit",
+            owner="root",
+            mode=0o644,
+        )
+        _installer().put(place, text.encode(), as_root=False)
+        return old
+
+    def test_apply_moves_the_drop_in_to_its_10_name_and_forgets_the_old_one(self) -> None:
+        # Upgrade: the drop-in under the name an older CST used (it sorted after set-property's
+        # 50-MemoryLow.conf and won over a runtime MemoryLow at every daemon-reload).
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        env = dataclasses.replace(self.env, install_record=record)
+        old = self._old_dropin_install(record, MAIN_DROPIN)
+        new = env.slice_dropin
+        self.assertEqual(os.path.basename(new), "10-swap-memory-low.conf")
+
+        plan = self._plan_text(env)
+        self.assertIn("  remove    machine.slice.d/50-memory-low.conf", plan)
+        self.assertIn("  write     machine.slice.d/10-swap-memory-low.conf", plan)
+        self.assertTrue(os.path.exists(old), "plan removed the old drop-in")
+
+        rc, out, err, systemd = self._apply_once(env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"removed:   {old} (the old name of 10-swap-memory-low.conf)", out)
+        self.assertFalse(os.path.lexists(old))
+        with open(new, encoding="utf-8") as f, open(DROPIN, encoding="utf-8") as want:
+            self.assertEqual(f.read(), want.read())
+        with open(record, encoding="utf-8") as f:
+            files = json.load(f)["files"]
+        self.assertNotIn("/etc/systemd/system/machine.slice.d/50-memory-low.conf", files)
+        self.assertIn("/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf", files)
+        self.assertGreaterEqual(systemd.daemon_reloads, 1)
+
+        self.assertNotIn("50-memory-low.conf", self._plan_text(env))
+        rc, out, err, systemd = self._apply_once(env, mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("removed:", out)
+        self.assertEqual(systemd.daemon_reloads, 0)
+
+    def test_an_old_drop_in_from_the_script_before_cst_is_removed_too(self) -> None:
+        old = self._old_dropin_install("", OLD_DROPIN)
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"removed:   {old}", out)
+        self.assertFalse(os.path.lexists(old))
+
+    def test_a_50_memory_low_conf_cst_did_not_write_is_left_alone(self) -> None:
+        foreign = "[Slice]\nMemoryLow=8G\n"
+        old = self._old_dropin_install("", foreign)
+        self.assertNotIn("50-memory-low.conf", self._plan_text(self.env))
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("removed:", out)
+        with open(old, encoding="utf-8") as f:
+            self.assertEqual(f.read(), foreign)
+
+    def test_the_old_record_line_goes_also_when_the_file_is_gone_or_not_cst_s(self) -> None:
+        old_dest = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
+        foreign = "[Slice]\nMemoryLow=8G\n"
+        for case in ("gone", "foreign"):
+            with self.subTest(case=case):
+                record = os.path.join(self.tmp, f"var/lib/cst/{case}.json")
+                env = dataclasses.replace(self.env, install_record=record)
+                old = self._old_dropin_install(record, MAIN_DROPIN)
+                if case == "gone":
+                    os.remove(old)
+                else:
+                    with open(old, "w", encoding="utf-8") as f:
+                        f.write(foreign)
+                rc, out, err, _ = self._apply_once(env, mapper_present=False)
+                self.assertEqual(rc, 0, err)
+                self.assertNotIn("removed:", out)
+                with open(record, encoding="utf-8") as f:
+                    files = json.load(f)["files"]
+                self.assertNotIn(old_dest, files)
+                self.assertIn("/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf", files)
+                if case == "foreign":
+                    with open(old, encoding="utf-8") as f:
+                        self.assertEqual(f.read(), foreign)
+                with open(record, "rb") as f:
+                    first = f.read()
+                rc, _out, err, _ = self._apply_once(env, mapper_present=True)
+                self.assertEqual(rc, 0, err)
+                with open(record, "rb") as f:
+                    self.assertEqual(f.read(), first, "a second apply changed the record")
 
     def test_plan_apply_idempotent_and_status_cycle(self) -> None:
         # Legacy zram sysctl exists beforehand so apply should remove it.
@@ -1145,6 +1300,394 @@ class SwapApplicationTest(_SwapScratch):
         self.assertEqual(piped.returncode, -signal.SIGPIPE)
         # No container marker (faked: CI itself runs in Docker): the host /etc.
         self.assertEqual(HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000).etc_dir(), "/etc")
+
+
+def _tree(root: str) -> dict[str, bytes]:
+    """Every file under root (links: their target), to prove a run changed nothing."""
+    out: dict[str, bytes] = {}
+    for d, _dirs, files in os.walk(root):
+        for name in files:
+            p = os.path.join(d, name)
+            if os.path.islink(p):
+                out[p] = os.readlink(p).encode()
+            else:
+                with open(p, "rb") as f:
+                    out[p] = f.read()
+    return out
+
+
+class SwapSettingsFileTest(unittest.TestCase):
+    """parse_swap_settings, render_swap_settings and the marked lines an older CST wrote."""
+
+    def test_a_partition_is_read_with_the_default_name(self) -> None:
+        s = D.parse_swap_settings(
+            "# mine\nSWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_BYTES = 4096\n"
+        )
+        self.assertEqual(s, D.SwapSettings(SwapHardwareSpec("612551b1-ca02-4514-86ad-7d8902e612dc", "swap0", 4096)))
+        s = D.parse_swap_settings("SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=8192\nSWAP_NAME=cryptswap\n")
+        self.assertEqual(s.spec, SwapHardwareSpec("0a1b2c3d-02", "cryptswap", 8192))
+
+    def test_no_partuuid_is_not_configured(self) -> None:
+        self.assertEqual(D.parse_swap_settings(""), D.SwapSettings(None))
+        self.assertEqual(D.parse_swap_settings("# nothing yet\nSWAP_NAME=swap1\n"), D.SwapSettings(None))
+
+    def test_bad_values_are_problems_and_no_partition(self) -> None:
+        cases = {
+            "SWAP_PARTUUID=612551B1-CA02-4514-86AD-7D8902E612DC\nSWAP_SIZE_BYTES=1\n": "SWAP_PARTUUID=612551B1",
+            "SWAP_PARTUUID=0a1b2c3d-02\n": "SWAP_SIZE_BYTES=: the partition's exact size",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=128G\n": "SWAP_SIZE_BYTES=128G",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=0\n": "SWAP_SIZE_BYTES=0",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME='a b'\n": "SWAP_NAME=a b",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME=../x\n": "SWAP_NAME=../x",
+            "SWAP_SIZE_BYTES=4096\n": "SWAP_SIZE_BYTES is set, SWAP_PARTUUID is not",
+            "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=1\nSWAP_NAME=$(id)\n": "line 3: SWAP_NAME=$(id)",
+        }
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                s = D.parse_swap_settings(text)
+                self.assertIsNone(s.spec)
+                self.assertEqual(len(s.problems), 1, s.problems)
+                self.assertIn(want, s.problems[0])
+
+    def test_a_key_that_is_not_a_setting_is_a_problem(self) -> None:
+        good = "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=8192\n"
+        for text, key in (
+            (good + "SWAP_NAM=swap1\n", "SWAP_NAM"),  # a typo: not swap0 without a word
+            ("SWAP_PARTUID=0a1b2c3d-02\n", "SWAP_PARTUID"),  # not "not configured"
+        ):
+            with self.subTest(text=text):
+                s = D.parse_swap_settings(text)
+                self.assertIsNone(s.spec)
+                self.assertEqual(
+                    s.problems, (f"{key}: not a setting of this file (SWAP_PARTUUID, SWAP_SIZE_BYTES, SWAP_NAME)",)
+                )
+
+    def test_render_reads_back(self) -> None:
+        text = D.render_swap_settings(TEST_SPEC, "from somewhere")
+        self.assertIn("# Written by cst swap apply from somewhere.", text)
+        self.assertEqual(D.parse_swap_settings(text), D.SwapSettings(TEST_SPEC))
+
+    def test_the_marked_crypttab_line_names_the_partition(self) -> None:
+        mine = "other /dev/sda2 none luks\n"
+        want = ("swap0", "612551b1-ca02-4514-86ad-7d8902e612dc")
+        self.assertEqual(D.marked_crypttab_entry(mine + OLD_CRYPTTAB + "\n"), want)
+        new = TEST_SPEC.crypttab_line + "\n"
+        self.assertEqual(D.marked_crypttab_entry(mine + new), want)
+        self.assertEqual(D.marked_crypttab_entry(new + new), want)  # the old script ran again
+        self.assertIsNone(D.marked_crypttab_entry(mine))
+        self.assertIsNone(D.marked_crypttab_entry(new + new.replace("612551b1", "712551b1")))
+        self.assertIsNone(D.marked_crypttab_entry(f"swap0 /dev/nvme0n1p5 /dev/urandom swap {NEW}\n"))
+        self.assertIsNone(D.marked_crypttab_entry(new.replace("swap0 ", "a#b ", 1)))
+
+    def test_the_marked_fstab_line_names_the_device(self) -> None:
+        self.assertEqual(D.marked_fstab_name("UUID=x / btrfs defaults 0 0\n" + OLD_FSTAB + "\n"), "swap0")
+        self.assertEqual(D.marked_fstab_name(TEST_SPEC.fstab_line + "\n"), "swap0")
+        self.assertIsNone(D.marked_fstab_name("/dev/mapper/swap0 none swap defaults 0 0\n"))
+
+
+class SwapSettingsTest(_SwapScratch):
+    """Which partition plan, status and apply use: /etc/cst/swap.conf, or what an older CST set up."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.remove(self.env.settings_path)
+
+    def _status_text(self) -> str:
+        fs = self._fs()
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_status(service.status_report(), out=out)
+        return out.getvalue()
+
+    def _write(self, path: str, text: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_not_configured_plan_says_so_and_apply_refuses_changing_nothing(self) -> None:
+        before = _tree(self.tmp)
+        plan = self._plan_text(self.env)
+        self.assertIn(
+            "  REFUSE    cst/swap.conf                          no swap partition configured: set SWAP_PARTUUID", plan
+        )
+        self.assertNotIn("crypttab", plan)
+        self.assertNotIn("partition 6", plan)
+        self.assertIn("tmpfiles.d/zswap.conf", plan)  # the rest is still shown
+        self.assertIn("no swap partition configured", self._status_text())
+        rc, out, err, systemd = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            err,
+            f"cst swap: ERROR: {self.env.settings_path}: no swap partition configured: set SWAP_PARTUUID and"
+            " SWAP_SIZE_BYTES (swap/README.md, 2.3); apply stops.\n",
+        )
+        self.assertEqual(systemd.calls, [])
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_with_a_problem_refuses_and_is_kept(self) -> None:
+        self._write(self.env.settings_path, "SWAP_PARTUUID=0a1b2c3d-02\n")
+        self._write(self.env.crypttab, TEST_SPEC.crypttab_line + "\n")  # no migration over a file of the user's
+        before = _tree(self.tmp)
+        self.assertIn("  REFUSE    cst/swap.conf                          SWAP_SIZE_BYTES=", self._plan_text(self.env))
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"cst swap: ERROR: {self.env.settings_path}: SWAP_SIZE_BYTES=: ", err)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_without_a_partition_is_not_overwritten(self) -> None:
+        self._write(self.env.settings_path, "# to do\n")
+        self._write(self.env.crypttab, TEST_SPEC.crypttab_line + "\n")
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("no swap partition configured", err)
+        with open(self.env.settings_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# to do\n")
+
+    def test_upgrade_apply_writes_the_settings_from_what_an_older_cst_set_up(self) -> None:
+        # What an older CST's apply left: its marked lines, no /etc/cst/swap.conf (the partition was in code).
+        self._write(self.env.crypttab, "other /dev/sda2 none luks\n" + OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+        before = _tree(self.tmp)
+        plan = self._plan_text(self.env)
+        self.assertIn(
+            "  write     cst/swap.conf                          from the swap0 line an older CST wrote in crypttab:"
+            " partition 612551b1-ca02-4514-86ad-7d8902e612dc, 137438953472 bytes (its size now)",
+            plan,
+        )
+        self.assertIn("  adopt     crypttab: swap0 line", plan)
+        self.assertIn("  ok        partition 612551b1...", plan)
+        self.assertEqual(_tree(self.tmp), before, "plan wrote something")
+
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(
+            f"== settings\nwritten:   {self.env.settings_path} (SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc,",
+            out,
+        )
+        self.assertLess(out.index("== settings"), out.index("== swap0: crypttab and fstab"))
+        with open(self.env.settings_path, encoding="utf-8") as f:
+            self.assertEqual(D.parse_swap_settings(f.read()), D.SwapSettings(TEST_SPEC))
+        self.assertEqual(stat.S_IMODE(os.stat(self.env.settings_path).st_mode), 0o644)
+
+        self.assertIn(
+            "  ok        cst/swap.conf                          partition 612551b1-ca02-4514-86ad-7d8902e612dc,"
+            " 137438953472 bytes",
+            self._plan_text(self.env),
+        )
+        rc, out, err, _ = self._apply_once(self.env, mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("== settings", out)
+
+    def test_an_upgrade_apply_refused_by_a_hand_written_line_writes_no_settings(self) -> None:
+        # The refusals for a line written by hand come before the settings file is written.
+        for path, line in (
+            (self.env.fstab, "/dev/mapper/swap0 none swap defaults 0 0\n"),
+            (self.env.crypttab, "swap0 /dev/nvme0n1p5 none luks\n"),
+        ):
+            with self.subTest(path=path):
+                if os.path.exists(self.env.settings_path):
+                    os.remove(self.env.settings_path)  # an older apply's, from the subtest before
+                self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+                self._write(self.env.fstab, OLD_FSTAB + "\n")
+                self._write(path, (OLD_CRYPTTAB + "\n" if path == self.env.crypttab else "") + line)
+                before = _tree(self.tmp)
+                rc, out, err, _ = self._apply_once(self.env, mapper_present=False)
+                self.assertEqual(rc, 1)
+                self.assertIn(f"cst swap: ERROR: {path} has an unmarked entry for ", err)
+                self.assertEqual(out, "")
+                self.assertFalse(os.path.exists(self.env.settings_path))
+                self.assertEqual(_tree(self.tmp), before)
+
+    def test_the_size_comes_from_the_partition_and_apply_still_checks_it(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        size = os.path.join(self.env.sys_dir, "class", "block", "nvme0n1p5", "size")
+        self._write(size, "2048\n")
+        self.assertIn(
+            "partition 612551b1-ca02-4514-86ad-7d8902e612dc, 1048576 bytes (its size now)", self._plan_text(self.env)
+        )
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)  # blockdev says 137438953472
+        self.assertEqual(rc, 1)
+        self.assertIn("expected 1048576: the PARTUUID points at an unexpected device; refusing.", err)
+        self.assertFalse(os.path.exists(self.env.settings_path))
+
+    def test_upgrade_with_the_partition_gone_refuses(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        env = self.env
+        fs = _FakeTempFileSystem({})  # no /dev/disk/by-partuuid link
+        service = SwapApplicationService(
+            env,
+            fs,
+            _FakeSystemd(os.path.join(env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out = io.StringIO()
+        render_plan(service.plan_report(), out=out)
+        self.assertIn(
+            "no swap partition configured (the swap0 line in crypttab names"
+            " /dev/disk/by-partuuid/612551b1-ca02-4514-86ad-7d8902e612dc, which is not here)",
+            out.getvalue(),
+        )
+        err = io.StringIO()
+        self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 1)
+        self.assertFalse(os.path.exists(env.settings_path))
+
+    def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+        plan = self._plan_text(self.env, unreadable={self.env.crypttab})
+        self.assertIn(
+            "  ?         cst/swap.conf                          not written yet; an older CST set up swap0 (fstab):"
+            " apply writes it from crypttab, which needs root to read: on the host, cst swap plan --root",
+            plan,
+        )
+        self.assertNotIn("  REFUSE", plan)
+        os.remove(self.env.fstab)
+        self.assertIn("REFUSE    cst/swap.conf", self._plan_text(self.env, unreadable={self.env.crypttab}))
+
+
+class MemoryLowOverrideTest(_SwapScratch):
+    """machine.slice's MemoryLow from a drop-in systemd applies after CST's: an "over" row naming it, no
+    DIFF, apply does not fail; DIFF stays for a cgroup that disagrees with the value systemd reports."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    RUNTIME = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+    FOREIGN = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"
+
+    def setUp(self) -> None:
+        super().setUp()
+        rc, _out, err, _ = self._apply_once(self.env, mapper_present=False)  # CST's drop-in in place
+        self.assertEqual(rc, 0, err)
+
+    def _host_file(self, host_path: str, text: str) -> None:
+        p = self.env.host_view(host_path)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _cgroup_low(self, value: int) -> None:
+        with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
+            f.write(f"{value}\n")
+
+    def _run(self, cmd: str, shown: Mapping[str, str]) -> tuple[int, str, str]:
+        fs = self._fs(mapper_present=True)
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs, shown=shown),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(cmd, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_runtime_value_is_an_over_row_and_apply_does_not_fail(self) -> None:
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        self._cgroup_low(2**30)
+        shown = {"MemoryLow": str(2**30), "DropInPaths": f"{self.CST} {self.RUNTIME}"}
+        note = (
+            f"  over: {self.RUNTIME} sets machine.slice's MemoryLow; systemd applies it after CST's"
+            " 10-swap-memory-low.conf (drop-ins in file-name order, the last one wins). apply leaves it."
+        )
+        for cmd in ("status", "plan", "apply"):
+            with self.subTest(cmd=cmd):
+                rc, out, err = self._run(cmd, shown)
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn("  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+                self.assertIn(note + "\n", out)
+                self.assertNotIn("  DIFF", out)
+                self.assertNotIn("machine.slice memory.low", out)
+                self.assertNotIn("systemctl", out)  # no undo command named
+        self.assertIn(
+            "over = MemoryLow set by a drop-in systemd applies after CST's, left alone;", self._run("plan", shown)[1]
+        )
+
+    def test_a_foreign_50_memory_low_conf_is_an_over_row(self) -> None:
+        self._host_file(self.FOREIGN, "[Slice]\nMemoryLow=8G\n")
+        self._cgroup_low(8 * 2**30)
+        rc, out, _err = self._run("status", {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"})
+        self.assertEqual(rc, 0)
+        self.assertIn("  over  machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
+
+    def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
+        self._cgroup_low(2**30)
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
+        rc, out, _err = self._run("status", shown)
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertNotIn("over", out.replace("over = ", ""))
+        rc, out, err = self._run("apply", shown)
+        self.assertEqual(rc, 1)
+        self.assertIn("one or more settings did not apply as expected", err)
+
+    def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        self._cgroup_low(2**30)
+        rc, out, _err = self._run("status", {})
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+
+
+class MemoryLowOverrideRuleTest(unittest.TestCase):
+    """memory_low_override: which drop-in systemd takes machine.slice's MemoryLow from, if not CST's."""
+
+    CST = "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf"
+    CST_TEXT = "[Slice]\nMemoryLow=48G\n"
+    RUN = "/run/systemd/system.control/machine.slice.d/50-MemoryLow.conf"
+    WANT = 48 * 2**30
+
+    def test_the_last_drop_in_that_sets_it_by_file_name(self) -> None:
+        cpu = "/etc/systemd/system/machine.slice.d/10-cpu-setup.conf"
+        game = "/run/systemd/system.control/machine.slice.d/50-CPUWeight.conf"  # the game profile's: no MemoryLow
+        dropins = [
+            (self.RUN, "[Slice]\nMemoryLow=1G\n"),  # listed first: still applied after 10-
+            (cpu, "[Slice]\nCPUWeight=50\n"),
+            (self.CST, self.CST_TEXT),
+            (game, "[Slice]\nCPUWeight=100\n"),
+        ]
+        self.assertEqual(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT), self.RUN)
+        self.assertIsNone(D.memory_low_override(str(2**30), dropins[1:], self.CST, self.WANT))  # CST's is the last
+        self.assertEqual(D.memory_low_override("infinity", dropins, self.CST, self.WANT), self.RUN)
+
+    def test_none_when_cst_s_value_applies_or_its_drop_in_is_not_loaded(self) -> None:
+        dropins = [(self.CST, self.CST_TEXT), (self.RUN, "[Slice]\nMemoryLow=48G\n")]
+        self.assertIsNone(D.memory_low_override(str(self.WANT), dropins, self.CST, self.WANT))
+        old = "/etc/systemd/system/machine.slice.d/50-memory-low.conf"  # before apply renamed it
+        self.assertIsNone(D.memory_low_override("0", [(old, self.CST_TEXT)], self.CST, self.WANT))
+
+    def test_none_when_the_later_drop_in_cannot_be_read(self) -> None:
+        dropins = [(self.CST, self.CST_TEXT), (self.RUN, None)]
+        self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
+
+    def test_an_assignment_as_systemd_reads_it(self) -> None:
+        mine = "/etc/systemd/system/machine.slice.d/60-mine.conf"
+        for text, effective in (
+            ("[Slice]\nMemoryLow = 32G\n", str(32 * 2**30)),  # blanks around "="
+            ("[Slice]\n  MemoryLow=32G\n", str(32 * 2**30)),  # blanks before the key
+            ("[Slice]\nMemoryLow=\n", "0"),  # an empty value resets it
+        ):
+            with self.subTest(text=text):
+                dropins = [(self.CST, self.CST_TEXT), (mine, text)]
+                self.assertEqual(D.memory_low_override(effective, dropins, self.CST, self.WANT), mine)
+        for comment in (
+            "[Slice]\n#MemoryLow=1G\n",  # comments, also after blanks
+            "[Slice]\n; MemoryLow=1G\n",
+            "[Slice]\n  # MemoryLow=1G\n",
+            "[Slice]\nMemoryLowX=1G\n",  # other keys
+            "[Slice]\nStartupMemoryLow=1G\n",
+            "[Slice]\nDefaultMemoryLow=1G\n",
+        ):
+            with self.subTest(text=comment):
+                dropins = [(self.CST, self.CST_TEXT), (mine, comment)]
+                self.assertIsNone(D.memory_low_override(str(2**30), dropins, self.CST, self.WANT))
 
 
 class _ScriptedRunner:
@@ -1517,6 +2060,38 @@ class SwapWiringTest(unittest.TestCase):
             out = io.StringIO()
             self.assertEqual(execute_cli(["help"], out=out, err=io.StringIO()), 0)
         self.assertIn("Usage: my swap <command> [args]", out.getvalue())
+
+    def test_the_kernel_dirs_come_from_the_environment_only_when_set(self) -> None:
+        ctx = _FakeContext(container=False, root=True, etc_dir="/etc", run_dir="/run")
+        plain = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere", env={"CST_SWAP_PROC": ""})
+        self.assertEqual(
+            (plain.proc_dir, plain.sys_dir, plain.zswap_params_dir, plain.zswap_debug_dir, plain.cgroup_dir),
+            ("/proc", "/sys", "/sys/module/zswap/parameters", "/sys/kernel/debug/zswap", "/sys/fs/cgroup"),
+        )
+        env = {"CST_SWAP_PROC": "/w/proc", "CST_SWAP_SYS": "/w/sys"}
+        moved = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere", env=env)
+        self.assertEqual(
+            (moved.proc_dir, moved.sys_dir, moved.zswap_params_dir, moved.zswap_debug_dir, moved.cgroup_dir),
+            ("/w/proc", "/w/sys", "/w/sys/module/zswap/parameters", "/w/sys/kernel/debug/zswap", "/sys/fs/cgroup"),
+        )
+
+    def test_the_cli_reads_the_kernel_dirs_from_its_environment(self) -> None:
+        # plan in a scratch /proc: the live sysctl values come from there.
+        tmp = tempfile.mkdtemp(prefix="swap-kdirs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        vm = os.path.join(tmp, "proc", "sys", "vm")
+        os.makedirs(vm)
+        with open(os.path.join(vm, "swappiness"), "w", encoding="utf-8") as f:
+            f.write("77\n")
+        ctx = _FakeContext(
+            container=False, root=False, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        out = io.StringIO()
+        env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
+        runner = _ScriptedRunner({})  # never the real systemctl (nor flatpak-spawn --host from a toolbox)
+        self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), runner=runner, ctx=ctx), 0)
+        self.assertRegex(out.getvalue(), r"DIFF  vm\.swappiness +77 ")
+        self.assertEqual(runner.calls, [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"]])
 
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")

@@ -8,11 +8,19 @@ from cst_core.application.install import Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
-from swap.application.reports import DROPIN_ENTRY, SYSCTL_ENTRY, TMPFILES_ENTRY, SwapReports
+from swap.application.reports import (
+    DROPIN_ENTRY,
+    OLD_DROPIN_DEST,
+    OLD_DROPIN_SRC,
+    SYSCTL_ENTRY,
+    TMPFILES_ENTRY,
+    SwapReports,
+)
 from swap.domain import (
     WSF_EXPERIMENT,
     ApplyEvent,
     SwapApplyResult,
+    SwapHardwareSpec,
     can_evict_zram,
     crypto_has_algorithm,
     find_swap_used_kib,
@@ -20,6 +28,7 @@ from swap.domain import (
     killed_text,
     parse_meminfo,
     parse_tmpfiles_params,
+    render_swap_settings,
     same_param,
 )
 
@@ -52,9 +61,8 @@ def _show_output(res: CommandResult, events: list[ApplyEvent], prog: str) -> Non
 class SwapApplicationService(SwapReports):
     """Coordinates plan, status, and apply use cases for swap, zswap, and MemoryLow."""
 
-    def _check_preconditions(self, events: list[ApplyEvent]) -> str | None:
+    def _check_preconditions(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> str | None:
         env = self._env
-        spec = env.spec
 
         def fail(msg: str) -> None:
             events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {msg}"))
@@ -95,9 +103,10 @@ class SwapApplicationService(SwapReports):
         line_spec: MarkedLineSpec,
         mode: int,
         events: list[ApplyEvent],
+        *,
+        name: str,
     ) -> tuple[bool, bool, bool]:
-        """Apply one marked line. Returns (ok, line_changed, line_written)."""
-        name = self._env.spec.name
+        """Apply one marked line (name: the swap device's). Returns (ok, line_changed, line_written)."""
         prog = self._env.prog
         st = self._inspect_marked(path, line_spec)
         if st == "ok":
@@ -161,6 +170,44 @@ class SwapApplicationService(SwapReports):
             events.append(ApplyEvent("out", "line", f"written:   {dest}"))
         return True
 
+    def _write_settings(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> None:
+        """/etc/cst/swap.conf from what an older CST set up (resolve_spec's "write")."""
+        origin = f"from the {spec.name} line an older CST wrote in /etc/crypttab and the partition's size then"
+        self._fs.write_atomic(self._env.settings_path, render_swap_settings(spec, origin), 0o644)
+        events.append(ApplyEvent("out", "section", "== settings"))
+        events.append(
+            ApplyEvent(
+                "out",
+                "line",
+                f"written:   {self._env.settings_path} (SWAP_PARTUUID={spec.partuuid},"
+                f" SWAP_SIZE_BYTES={spec.expected_size_bytes}: {origin})",
+            )
+        )
+
+    def _remove_old_dropin(self, events: list[ApplyEvent]) -> bool:
+        """Remove the drop-in under its old name (and its line in the install record) when CST wrote it.
+        True when it was removed."""
+        if not self.old_dropin_is_ours():
+            # Gone, or someone else's now: CST no longer installs that name, so its record line goes
+            # (doctor would ask for an apply that never puts it back); the file is left alone.
+            self._installer.forget(self._env.install_record, [OLD_DROPIN_DEST])
+            return False
+        old = Placement(
+            path=self._env.old_slice_dropin,
+            dest=OLD_DROPIN_DEST,
+            record=self._env.install_record,
+            component=DROPIN_ENTRY.component,
+            src=OLD_DROPIN_SRC,
+            kind=DROPIN_ENTRY.kind,
+            owner=DROPIN_ENTRY.owner,
+            mode=DROPIN_ENTRY.mode.bits,
+        )
+        for line in self._installer.remove([old]):
+            events.append(
+                ApplyEvent("out", "line", f"{line} (the old name of {posixpath.basename(DROPIN_ENTRY.dest)})")
+            )
+        return True
+
     def _stopped(self, returncode: int, events: list[ApplyEvent]) -> SwapApplyResult:
         """The result of an apply that stopped before the verification."""
         return SwapApplyResult(returncode, tuple(events), None, (), "", "", self._env.prog)
@@ -187,15 +234,19 @@ class SwapApplicationService(SwapReports):
         the result holds them all too.
         """
         env = self._env
-        spec = env.spec
         events: list[ApplyEvent] = _EventLog(emit)
-        tmpfiles_text = self._check_preconditions(events)
+        res = self.resolve_spec()
+        spec = res.spec
+        if spec is None:
+            note = self._settings_item(res, "plan").note
+            events.append(ApplyEvent("err", "error", f"{env.prog}: ERROR: {env.settings_path}: {note}."))
+            return self._stopped(1, events)
+        tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return self._stopped(1, events)
-
-        events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
         c_spec = spec.crypttab_spec()
         f_spec = spec.fstab_spec()
+        # Every refusal comes before the first write: the settings file too.
         if self._inspect_marked(env.crypttab, c_spec) == "conflict":
             events.append(
                 ApplyEvent(
@@ -216,11 +267,14 @@ class SwapApplicationService(SwapReports):
                 )
             )
             return self._stopped(1, events)
+        if res.state == "write":
+            self._write_settings(spec, events)
 
-        ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events)
+        events.append(ApplyEvent("out", "section", f"== {spec.name}: crypttab and fstab"))
+        ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events, name=spec.name)
         if not ok_c:
             return self._stopped(1, events)
-        ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events)
+        ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events, name=spec.name)
         if not ok_f:
             return self._stopped(1, events)
         line_changed = changed_c or changed_f
@@ -341,7 +395,8 @@ class SwapApplicationService(SwapReports):
             return self._stopped(sysctl.returncode, events)
 
         events.append(ApplyEvent("out", "section", "== machine.slice"))
-        if self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events):
+        written = self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events)
+        if self._remove_old_dropin(events) or written:
             self._systemd.daemon_reload()
         # swap:core's files are all in place: the install record says the component is complete.
         self._installer.mark(env.install_record, DROPIN_ENTRY.component)
