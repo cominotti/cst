@@ -32,7 +32,7 @@ SHELL_TEST_SCRIPTS: Final[frozenset[str]] = frozenset(
     {
         "tests/fixtures/legacy/btrfs-health-check@d4d8c91+seam",
         "tests/fixtures/legacy/cst-pending-alerts@d4d8c91",
-        "tests/fixtures/legacy/btrfs-snapshot@31c1cbb",
+        "tests/fixtures/legacy/btrfs-snapshot@47038aa",
         "tests/e2e/scripts/entrypoint-host-sim.sh",
         "tests/e2e/scripts/setup-dind.sh",
         "tests/e2e/scripts/setup-loop-btrfs.sh",

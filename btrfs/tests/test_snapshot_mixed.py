@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 """Mixed-version tests of the btrfs-snapshot port: the bash program of the main branch before the
-port (tests/fixtures/legacy/btrfs-snapshot@31c1cbb, which ran everything itself) and the current
+port (tests/fixtures/legacy/btrfs-snapshot@47038aa, the file of main at 47038aa, this branch's base, which ran everything itself) and the current
 front and Python runtime, one after the other on the same fake machine (snapshot_fakes.py), both
 ways: what one version leaves in /var/lib/btrfs-snapshot, /run and the pin file, the other reads
 and goes on with, and the lock of a run of one version keeps a run of the other out.
@@ -23,7 +23,7 @@ LEGACY = os.path.join(
     "tests",
     "fixtures",
     "legacy",
-    "btrfs-snapshot@31c1cbb",
+    "btrfs-snapshot@47038aa",
 )
 SNAP = "home.20261118T0905"
 REPO_ID = "ab" * 32
