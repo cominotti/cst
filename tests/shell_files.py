@@ -9,7 +9,7 @@ or one whose first line is `# shellcheck shell=...` (tests/duplication.py,
 `is_shell`). The list is derived from the repository, so a new script is
 linted without anyone adding it to a list; tests/test_distribution.py checks
 that each one is a known kind (SHELL_TEST_SCRIPTS below is the kind that
-only the E2E tests run).
+only tests run).
 
 Standard library only.
 """
@@ -25,9 +25,12 @@ if REPO not in sys.path:
 from tests.duplication import is_shell
 from tests.repo_files import repo_files
 
-# Shell scripts that only the E2E tests run, inside their containers.
+# Shell scripts that only tests run: the E2E scripts, inside their containers, and the
+# copies of an earlier version kept in tests/fixtures/legacy (FILE@COMMIT) that the
+# mixed-version tests run next to the current program.
 SHELL_TEST_SCRIPTS: Final[frozenset[str]] = frozenset(
     {
+        "tests/fixtures/legacy/cst-pending-alerts@d4d8c91",
         "tests/e2e/scripts/entrypoint-host-sim.sh",
         "tests/e2e/scripts/setup-dind.sh",
         "tests/e2e/scripts/setup-loop-btrfs.sh",
