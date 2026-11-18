@@ -25,7 +25,8 @@ from cst_core.adapters.runtime import (
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap.adapters import LinuxSwapSystemAdapter
-from swap.application import SwapApplicationService, SwapEnvironment
+from swap.application.apply import SwapApplicationService
+from swap.application.reports import SwapEnvironment
 
 
 def start_swap() -> None:
