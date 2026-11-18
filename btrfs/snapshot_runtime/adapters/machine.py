@@ -6,6 +6,7 @@ journal lines, and btrfs-snapshot-core's command lines with the common arguments
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import io
 import os
 import sys
 import time
@@ -29,6 +30,10 @@ from cst_core.adapters.runtime import program_path
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+
+
+class Stopped(Exception):
+    """TERM, INT or HUP during a run that traps them (nas): after the command that was running."""
 
 
 class SnapshotRun:
@@ -59,6 +64,9 @@ class SnapshotRun:
         self.front = os.path.join(os.path.dirname(program_path(main_file)), "btrfs-snapshot") if main_file else ""
         # The descriptors every command gets (the run's locks: fd 9 and 8 of the bash).
         self.fds: tuple[int, ...] = ()
+        # A trapped signal (see trap_stop): asked for, and whether a command is running now.
+        self.stop_asked = False
+        self.in_command = False
         self.env_home = environ.get("HOME_DIR", "")
         self.settings: dict[str, str] = dict(DEFAULTS)
         self.snapdir = ""
@@ -113,7 +121,9 @@ class SnapshotRun:
         """argv with this process's environment and stdin from /dev/null; a command that cannot start
         says so on stderr as bash does (127 not found, 126 not runnable)."""
         fds = tuple(pass_fds) or self.fds
-        res = self.runner.run(argv, output=output, input_text=input_text, pass_fds=fds, on_line=on_line, env=env)
+        res = self._call(
+            lambda: self.runner.run(argv, output=output, input_text=input_text, pass_fds=fds, on_line=on_line, env=env)
+        )
         if res.fault is not None:
             what = "command not found" if res.fault == "missing" else "cannot be run"
             print(f"{TAG}: {argv[0]}: {what}", file=sys.stderr, flush=True)
@@ -133,8 +143,29 @@ class SnapshotRun:
 
     def ok(self, argv: Sequence[str], *, input_text: str | None = None) -> bool:
         """argv >/dev/null 2>&1 succeeded."""
-        res = self.runner.run(argv, output="capture", input_text=input_text, pass_fds=self.fds)
+        res = self._call(lambda: self.runner.run(argv, output="capture", input_text=input_text, pass_fds=self.fds))
         return res.fault is None and res.returncode == 0
+
+    def _call(self, call: Callable[[], CommandResult]) -> CommandResult:
+        """One command; a signal trap_stop caught while it ran ends the run once it is done (bash
+        runs a trap after the foreground command, which is never killed for it)."""
+        self.in_command = True
+        try:
+            res = call()
+        finally:
+            self.in_command = False
+        if self.stop_asked:
+            self.stop_asked = False  # the cleanup's commands run; a new signal stops it again
+            raise Stopped
+        return res
+
+    def trap_stop(self, signum: int, frame: object) -> None:
+        """The handler of trap 'exit 143' TERM INT HUP: at once between commands, else after the
+        running one."""
+        del signum, frame
+        if not self.in_command:
+            raise Stopped
+        self.stop_asked = True
 
     # ---- what the bash asked through commands ---------------------------------------------------
     def is_subvol(self, path: str) -> bool:
@@ -258,3 +289,10 @@ class SnapshotRun:
         self.fds = tuple(f for f in self.fds if f != fd)
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def keep_bytes_on_output() -> None:
+    """A setting or path that is not UTF-8 goes out as the bytes it was, as bash wrote it."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="surrogateescape")

@@ -6,6 +6,7 @@ import sys
 
 from btrfs.snapshot_runtime.adapters.hourly import hourly, manual_prune, purge
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
+from btrfs.snapshot_runtime.adapters.nas import nas
 from btrfs.snapshot_runtime.domain import CORE_HINTS, NOT_SET_UP, source_args
 
 
@@ -49,6 +50,7 @@ type Command = Callable[[SnapshotRun, Sequence[str]], int]
 # The commands the bash front hands over, by name.
 COMMANDS: Mapping[str, Command] = {
     "hourly": hourly,
+    "nas": nas,
     "list": list_snapshots,
     "caches": list_caches,
     "prune": manual_prune,

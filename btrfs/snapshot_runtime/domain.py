@@ -6,6 +6,7 @@ defaults, btrfs-snapshot-core's command lines, and the texts of the journal line
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
+import json
 import re
 from typing import Final
 
@@ -289,3 +290,92 @@ def blocked_alert(reason: str, conf: str) -> tuple[str, str]:
         )
     cut = reason.split("; check with ", 1)[0]
     return title, f"{cut[:300]} - {hint}; details: journalctl -u btrfs-snapshot."
+
+
+# ---- the NAS backup --------------------------------------------------------------------------
+NAS_SSH_ALIAS: Final = "btrfs-setup-nas"  # the managed Host block in /root/.ssh/config
+# Seconds of NAS_TIMEOUT when it cannot be read (6 h).
+DEFAULT_NAS_TIMEOUT_S: Final = 21600
+# What a step needs at least of the time left.
+MIN_LEFT_S: Final = 60
+RESTIC_SHORT_S: Final = 300  # cat config, unlock, snapshots
+RESTIC_INIT_S: Final = 600
+SFTP_TIMEOUT_S: Final = 60
+NAS_LOCK_WAIT_S: Final = 1800
+CHECK_FAILURES_ALERTED: Final = 3
+SUMMARY_CHARS: Final = 300
+EXIT_STOPPED: Final = 143  # bash's trap 'exit 143' TERM INT HUP
+
+
+class ResticExit(IntEnum):
+    """The exit statuses of restic (and of timeout around it) that the NAS backup tells apart."""
+
+    OK = 0
+    INCOMPLETE = 3
+    NO_REPOSITORY = 10
+    LOCKED = 11
+    WRONG_PASSWORD = 12
+    TIMED_OUT = 124
+    INTERRUPTED = 130
+    KILLED = 137
+
+
+# Messages of restic check (0.19) that name damaged data, not a transport problem.
+RESTIC_DAMAGE_RE: Final = re.compile(
+    r"error for tree|not found in index|ciphertext verification failed|does not match|index is damaged|"
+    r"without subtree|decompression failed|invalid compression|contains [0-9]+ errors|no such file|does not exist",
+    re.IGNORECASE,
+)
+_UNITS: Final[Mapping[str, int]] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": DAY_S}
+
+
+def duration_s(text: str) -> int:
+    """Seconds of a timeout(1) duration (N, Ns, Nm, Nh, Nd); 6 h if it cannot be read."""
+    m = re.fullmatch(r"([0-9]+)([smhd]?)", text)
+    if m is None:
+        return DEFAULT_NAS_TIMEOUT_S
+    n = bash_int(m.group(1))
+    return (int(m.group(1)) if n is None else n) * _UNITS[m.group(2)]
+
+
+def restic_line(line: str) -> str:
+    """restic's output in the journal format: errors and warnings at level 4, the rest at 6."""
+    if re.match(r"Fatal|[Ee]rror|[Ww]arning", line):
+        return f"<4>{TAG}: restic: {line}"
+    return f"<6>{TAG}: restic: {line}"
+
+
+def repo_id(out: str) -> str:
+    """The repository id in restic cat config's JSON ("" when there is none)."""
+    m = re.search(r'"id": *"([0-9a-f]{64})"', out)
+    return "" if m is None else m.group(1)
+
+
+def backup_time(name: str, entry: str) -> str:
+    """restic --time of a snapshot NAME.YYYYMMDDTHHMM[_N]: its time from the name."""
+    ts = entry.removeprefix(f"{name}.").split("_", 1)[0]
+    return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:00"
+
+
+def features_type(out: str) -> str:
+    """The type of device-id-for-hardlinks in restic features' table (awk $1 == ... {print $2})."""
+    for line in out.split("\n"):
+        fields = re.split(r"[ \t]+", line.strip(" \t"))
+        if fields[0] == "device-id-for-hardlinks":
+            return [*fields, ""][1]
+    return ""
+
+
+def summary_text(out: str) -> str:
+    """One line per source about its latest restic snapshot (restic snapshots --json), for
+    snapshots status; raises on output that is not restic's JSON."""
+    lines: list[str] = []
+    for snap in sorted(json.loads(out), key=lambda s: (s.get("paths") or [""])[0]):
+        summary = snap.get("summary") or {}
+        name = (snap.get("paths") or ["?"])[0].rsplit("/", 1)[-1]
+        when = snap.get("time", "")[:16].replace("T", " ")
+        size = summary.get("total_bytes_processed", 0) / 2**30
+        files = summary.get("total_files_processed", 0)
+        added = summary.get("data_added_packed", 0) / 2**20
+        lines.append(f"{name}: {when}, {size:.1f} GiB in {files} files, {added:.0f} MiB new on the NAS\n")
+    return "".join(lines)

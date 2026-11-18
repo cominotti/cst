@@ -2400,7 +2400,7 @@ The program the units, `cst btrfs` and `btrfs-bulk` run is
 `/usr/local/sbin/btrfs-snapshot`, with the same commands as always. It is a
 bash front: the conversion engine (`convert`, `convert-boot`, `convert-one`,
 `planned-left`, `busy`) stays bash for good, and the other commands
-(`hourly`, `list`, `caches`, `prune`, `purge` and `configure`) go at once, with their command line, to
+(`hourly`, `nas`, `list`, `caches`, `prune`, `purge` and `configure`) go at once, with their command line, to
 `/usr/local/sbin/btrfs-snapshot-runtime` (Python, `btrfs/snapshot_runtime`),
 installed next to it, before it and removed after it. The runtime reads
 `snapshots.conf` with the same reader as `cst doctor` and runs
