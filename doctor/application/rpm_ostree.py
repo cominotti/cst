@@ -47,7 +47,7 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
     target = pending if pending is not None else booted
     assert target is not None
     # found[id(d)] starts with d itself: this binds target to the same object (typed as found's).
-    target, treqs, tcls, tpinned = found[id(target)]
+    target, treqs, _tcls, tpinned = found[id(target)]
     for d, reqs, cls, pinned in found.values():
         if not pinned:
             continue
@@ -119,7 +119,7 @@ def check_overrides(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"{describe(target)}: base packages replaced by another version: "
             f"{', '.join(replaced)}. They stay at that version through every upgrade",
-            " ".join(shlex.quote(w) for w in ["sudo", "rpm-ostree", "override", "reset"] + replaced),
+            " ".join(shlex.quote(w) for w in ["sudo", "rpm-ostree", "override", "reset", *replaced]),
         )
     if removed:
         yield Result(
@@ -133,7 +133,7 @@ def check_overrides(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "rpm-ostree")
 def check_staged(host: DoctorHostPort) -> Iterator[Result]:
-    booted, pending, err = deployments(host)
+    _booted, pending, err = deployments(host)
     if err:
         return
     if pending is None:
