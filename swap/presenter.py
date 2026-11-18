@@ -7,6 +7,7 @@ import sys
 from typing import TextIO
 
 from cst_core.domain.errors import Refused, shell_exit_status
+from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandFailed, WriteFailed
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError
@@ -22,7 +23,6 @@ from swap.domain import (
     SwapPlanReport,
     SwapStatusReport,
     ZswapSummary,
-    human,
     killed_text,
     pct,
 )

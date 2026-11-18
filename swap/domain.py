@@ -353,16 +353,11 @@ def pct(frac: float | None) -> str:
     return "-" if frac is None else f"{frac * 100:.1f} %"
 
 
-def human(n: int | None) -> str:
-    """Format bytes into binary IEC units, or '-' when None."""
-    return format_bytes_human(n)
-
-
 def human_size(value: str) -> str:
     """A size as systemd prints it (`systemctl show`: bytes), in binary IEC units; other text (infinity)
     as it is."""
     size = parse_size(value)
-    return value if size is None else human(size)
+    return value if size is None else format_bytes_human(size)
 
 
 def psi_value(text: str, kind: str = "some", key: str = "avg60") -> str | None:

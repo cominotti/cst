@@ -10,6 +10,7 @@ from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
+from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
     WSF_EXPERIMENT,
@@ -30,7 +31,6 @@ from swap.domain import (
     DEFAULT_SWAP_NAME,
     SETTINGS_REL,
     SpecResolution,
-    human,
     human_size,
     is_cst_dropin,
     marked_crypttab_entry,

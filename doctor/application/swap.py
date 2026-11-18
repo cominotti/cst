@@ -3,12 +3,12 @@
 
 from collections.abc import Iterator
 
+from cst_core.domain.values import format_bytes_human as human
 from doctor.application.cpu import unit_props
 from doctor.application.shared import check, read_text
 from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, SWAP_DROPIN, WARN, ZSWAP_CONF, ZSWAP_PARAMS, Result
 from doctor.ports import CheckFn, DoctorHostPort
 from swap.domain import (
-    human,
     human_size,
     marked_fstab_name,
     memory_low_override,
