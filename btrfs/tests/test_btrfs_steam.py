@@ -1189,6 +1189,22 @@ class SteamTest(tb.BulkBase):
             ),
         )
 
+    def test_a_pid_file_naming_a_path_is_not_followed(self) -> None:
+        # steam.pid is the user's file: a path in it must not make root open
+        # (and read, or block on) PATH/comm instead of /proc/<pid>/comm.
+        proc, run = os.path.join(self.tmp, "proc"), os.path.join(self.tmp, "run-user")
+        self.fake(self.host, "proc", proc)
+        self.fake(self.host, "run_user", run)
+        os.makedirs(proc)
+        decoy = os.path.join(self.tmp, "decoy")
+        self.put(os.path.join(decoy, "comm"), "steam\n")
+        self.put(os.path.join(self.home, ".steam", "steam.pid"), decoy + "\n")
+        with mock.patch("builtins.open", wraps=open) as spy:
+            self.assertEqual(self.real_steam_running(self.ctx), [])
+        opened = [os.fspath(c.args[0]) for c in spy.call_args_list]
+        self.assertIn(os.path.join(self.home, ".steam", "steam.pid"), opened)  # the file itself is read
+        self.assertNotIn(os.path.join(decoy, "comm"), opened)  # the path in it is not
+
     def test_cli_plan_as_user_changes_nothing(self) -> None:
         env = dict(
             os.environ,
