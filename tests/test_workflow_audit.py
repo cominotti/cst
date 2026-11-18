@@ -13,6 +13,9 @@ what zizmor itself cannot:
   out for every file, and zizmor then counts none of its findings as
   ignored). The file must be plain block YAML, which this reader follows:
   no flow style (`ignore: [a, b]`), anchor, alias, tag or quoted key;
+- every ignore entry names exactly one file of .github: zizmor matches an
+  entry by the file's base name only, so `action.yml:201` would also hide
+  a finding at line 201 of a second composite action;
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
 - the nightly runs `invowk cmd ci uv-audit`, and that task runs exactly
@@ -34,7 +37,7 @@ See docs/dev-tools.md, "The workflow audit".
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import os
 import re
 import tempfile
@@ -112,6 +115,50 @@ def config_problems(text: str) -> list[str]:
 
 
 _FLOW = "no flow style, anchor, alias or tag here (`{`, `[`, `&`, `*`, `!`): the gate reads block YAML only"
+
+
+_ENTRY = re.compile(r"^(\s*)-\s+([^\s:#]+)(?::(\d+))?(?::\d+)?\s*$")
+
+
+def entry_problems(text: str, line_counts: Mapping[str, int]) -> list[str]:
+    """Every ignore entry of .github/zizmor.yml that does not name exactly one file, as text lines.
+
+    zizmor matches an entry by the base name of the file only (a folder in
+    the entry matches nothing), so `action.yml:201` also hides that audit's
+    finding at line 201 of every other `action.yml`. line_counts holds the
+    files of .github, each with its number of lines: an entry fails when
+    no file has its base name, or when several do (for `FILE:LINE`: several
+    long enough to have that line).
+    """
+    out: list[str] = []
+    rule = "?"
+    ignore_indent: int | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        key = _KEY.match(line)
+        if key is not None:
+            if indent == 2:
+                rule = key.group(2)
+            ignore_indent = indent if key.group(2) == "ignore" else None
+            continue
+        entry = _ENTRY.match(line)
+        if entry is None or ignore_indent is None or indent <= ignore_indent:
+            continue
+        name, at = entry.group(2), entry.group(3)
+        files = sorted(p for p in line_counts if os.path.basename(p) == name)
+        hit = [p for p in files if at is None or line_counts[p] >= int(at)]
+        if not files:
+            out.append(f"{CONFIG}:{number}: {rule}: `{name}` is no file of .github; delete the entry")
+        elif len(hit) > 1:
+            out.append(
+                f"{CONFIG}:{number}: {rule}: `{stripped[1:].strip()}` matches {', '.join(hit)}: zizmor "
+                "matches an entry by the file's base name, so it hides the finding in each; rename one "
+                "of the files (an action may be action.yaml) or fix the finding"
+            )
+    return out
 
 
 def _starts_with_comment(rest: list[str]) -> bool:
@@ -276,6 +323,38 @@ class WorkflowAuditTest(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.assertEqual(config_problems(GOOD_CONFIG + extra), want)
 
+    def test_an_entry_names_exactly_one_file(self) -> None:
+        files = {
+            ".github/actions/one/action.yml": 231,
+            ".github/actions/two/action.yml": 118,
+            ".github/workflows/ci.yml": 40,
+        }
+        self.assertEqual(entry_problems(GOOD_CONFIG, files), [])
+        # The second action.yml grows to line 201: the entry would hide its finding there too.
+        self.assertEqual(
+            entry_problems(GOOD_CONFIG, {**files, ".github/actions/two/action.yml": 201}),
+            [
+                f"{CONFIG}:6: github-env: `action.yml:201` matches .github/actions/one/action.yml, "
+                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                "fix the finding"
+            ],
+        )
+        whole = GOOD_CONFIG + "  artipacked:\n    ignore:\n      # why\n      - action.yml\n      - ci.yml\n"
+        self.assertEqual(
+            entry_problems(whole, files),
+            [
+                f"{CONFIG}:14: artipacked: `action.yml` matches .github/actions/one/action.yml, "
+                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                "fix the finding"
+            ],
+        )
+        self.assertEqual(
+            entry_problems(GOOD_CONFIG.replace("action.yml:201", "gone.yml:3"), files),
+            [f"{CONFIG}:6: github-env: `gone.yml` is no file of .github; delete the entry"],
+        )
+
     def test_inline_ignores_fail(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-zizmor-") as tmp:
             # Built from pieces so that this file holds no ignore comment of its own.
@@ -366,9 +445,15 @@ class WorkflowAuditTest(unittest.TestCase):
             cue = fh.read()
         with open(os.path.join(REPO, NIGHTLY), encoding="utf-8") as fh:
             nightly = fh.read()
+        github = [f for f in files if f.startswith(".github/")]
+        line_counts: dict[str, int] = {}
+        for rel in github:
+            with open(os.path.join(REPO, rel), encoding="utf-8", errors="replace") as fh:
+                line_counts[rel] = sum(1 for _ in fh)
         found = (
             config_problems(config)
-            + inline_ignores(REPO, [f for f in files if f.startswith(".github/")])
+            + entry_problems(config, line_counts)
+            + inline_ignores(REPO, github)
             + task_problems(cue)
             + uv_audit_problems(cue, nightly)
         )

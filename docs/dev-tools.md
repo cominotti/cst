@@ -233,7 +233,11 @@ What the audit asked for when it was turned on:
 
 **Exceptions** live in `.github/zizmor.yml` only, as `ignore` lists of
 `FILE` (every finding of that audit in that file) or `FILE:LINE` (one
-finding), by the file's base name. Each list starts with a comment that
+finding), by the file's base name only (a folder in the entry matches
+nothing), so an entry must name exactly one file of `.github`: the test
+fails when several files share its base name (for `FILE:LINE`, several
+long enough to have that line), since the entry would hide the finding in
+each, and when no file has it. Each list starts with a comment that
 says why, and so does a per-audit `config` block (it can weaken an audit
 as much as an ignore list: a cooldown of 0 days, actions pinned by tag).
 The file is plain block YAML, which the test reads line by line: no flow
