@@ -45,8 +45,6 @@ def loads_code_by_path(source: str, filename: str = "<source>") -> list[int]:
                 "spec_from_file_location",
                 "run_path",
             }
-            or isinstance(node, ast.Name)
-            and node.id in {"SourceFileLoader", "spec_from_file_location", "run_path"}
-        ):
+        ) or (isinstance(node, ast.Name) and node.id in {"SourceFileLoader", "spec_from_file_location", "run_path"}):
             lines.append(node.lineno)
     return sorted(set(lines))
