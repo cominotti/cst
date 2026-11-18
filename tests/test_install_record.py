@@ -233,6 +233,22 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.svc.forget(self.ROOT, ["/etc/systemd/system/u.service"])
         self.assertEqual(self.record.doc().files, {})
 
+    def test_put_with_a_record_of_a_newer_cst_names_the_file_it_did_not_write(self) -> None:
+        # put writes one file of a module that may have changed other things before it (swap
+        # apply edits crypttab first): "nothing was changed" would be wrong there.
+        place = Placement(
+            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", "root", 0o644
+        )
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaises(InstallRefused) as cm:
+            self.svc.put(place, b"[Unit]\n", as_root=False)
+        self.assertEqual(
+            str(cm.exception),
+            f"{self.ROOT}: format 9, written by a newer CST (this one reads format 1): /t/u.service was not written",
+        )
+        self.assertEqual(self.target.writes, [])
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+
     def test_no_record_port_records_nothing(self) -> None:
         svc = InstallService(self.target, lambda e: self.payloads[e.src])
         self.assertEqual(list(svc.install([self.a], InstallRequest())), ["written:   /usr/local/sbin/a"])

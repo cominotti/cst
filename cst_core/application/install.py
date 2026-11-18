@@ -194,8 +194,9 @@ class InstallService:
         self._check_records({p.record for p, _ in places})
         return places
 
-    def _check_records(self, records: set[str]) -> None:
-        """A record of a newer CST stops the call before any write (it is never rewritten by an older one)."""
+    def _check_records(self, records: set[str], outcome: str = "nothing was changed") -> None:
+        """A record of a newer CST stops the call before any write (it is never rewritten by an older one);
+        outcome ends the refusal (what the call left undone)."""
         if self._record is None:
             return
         for path in sorted(r for r in records if r):
@@ -203,7 +204,7 @@ class InstallService:
                 self._record.read(path)
             except RecordFormatError as e:
                 if e.newer:
-                    raise InstallRefused(f"{path}: {e}: nothing was changed") from None
+                    raise InstallRefused(f"{path}: {e}: {outcome}") from None
             except OSError:
                 continue  # unreadable here: the update below says why, after the files
 
@@ -352,7 +353,8 @@ class InstallService:
     def put(self, place: Placement, data: bytes, *, as_root: bool) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
         True when it was written."""
-        self._check_records({place.record})
+        # Only this file: the module may have changed other things before it (swap's crypttab).
+        self._check_records({place.record}, f"{place.path} was not written")
         written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
             "written"
         )
