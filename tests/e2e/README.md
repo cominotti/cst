@@ -35,6 +35,8 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_25`: `cst btrfs snapshots chrome-cache` on Chrome's `chrome-flags.conf` (the tool runs as the user through runuser): without the Flatpak, `apply` writes nothing; `status` changes nothing; `apply` adds the marker and the two flags after the user's own line, in a file the user owns; a second `apply` leaves the file as it is; `off` removes the flags and keeps a marker that a later `apply` respects; a second `off` changes nothing; the marker of a version named f44-tools counts as CST's.
 - `test_26`: `cst btrfs watch` as the user, with the installed `btrfs-stall-report` and an empty recording folder: usage errors exit 2 and `--list` says there are no runs; without the report program it exits 1 and records nothing; a run passes on the command's exit status, keeps its output in `workload.log`, saves the report of its window (NO DATA here, once the wait for the recorder runs out: about a minute) and adds a line to `runs.tsv` that `--list` shows.
 - `test_35`: `disable_timers` from `btrfs-setup.sh` (the snapshots, NAS and docker-gc disable paths, and `uninstall`) with the real systemd: a running `Persistent=` timer and a running service are both disabled and stopped although a unit named between them does not exist, the timer's stamp is forgotten, and the missing unit prints nothing.
+- `test_84`: `cst cpu install` as root for tester with the real systemd, over what the bash `cpu-setup.sh` of the last commit before its port installed (the previous version, from `tests/fixtures/legacy`, put into a copy of the checkout): only the programs are written again (the game profile becomes a zipapp; `cpu-watch` and `cpu-vm-pin` carry the new `cst_core`), every unit, drop-in, rule and setting is `unchanged:`; `status` shows every section; a second install writes nothing; `uninstall` removes the programs, units, rule and drop-ins with their record lines and stops the watchdog timer; a second uninstall, and the bash version's, find nothing left.
+- `test_85`: the game profile of that commit (bash, `tests/fixtures/legacy/game-profile@cfb496a`) and this one (Python), both ways with the real system and user managers: one switches it on, the other's `tick` adds no record and its `state` shows it on with no drift, the other's `off` restores machine.slice's weight and removes `game.state` and the `zz-cst-game.conf` drop-ins; each copy waits for a run lock the other kind holds (`flock` and Python's `fcntl.flock` on `/run/cpu-setup/lock`).
 - `test_73`: `vm-setup.sh` and `toolchains-setup.sh` started as root (as sudo starts them), from a scratch copy with fake programs: vm runs its program directly as root with `CST_PROG`; toolchains steps down to `SUDO_USER` through the real `runuser` (tester's `HOME`, `USER`, `XDG_RUNTIME_DIR`; `SUDO_USER` and `XDG_CONFIG_HOME` dropped), refuses with exit 1 without a `SUDO_USER`, with `root` or with an unknown one; vm's root commands refuse in a toolbox; the help of both works as root. The unit twin is `tests/test_module_routing.py` (under `unshare -r`, skipped where user namespaces are off).
 - `test_74`: in a container with `/.dockerenv` (no override), `cst vm`'s commands that change the host (`backup --nas`, `tune apply`, `nocow apply`, `backup-timer on`) refuse before sudo, with the host command to type.
 - `test_76`: `btrfs-bulk-boot.service` as the manifest installs it (this checkout's `btrfs-bulk` through a drop-in in `/run`) under the real systemd, with a journal of an interrupted move written by a newer `btrfs-bulk` (`"v": 99`): the unit runs (its glob condition), counts "needs a look" (exit 1) as success, names the format in its journal, and leaves the journal byte for byte as it was, at two boots. A throwaway user owns the home it acts on; the cleanup puts the container's settings, journals and `btrfs-notify` back.
@@ -81,6 +83,21 @@ prints the fix, `chcon -R -t container_file_t <checkout>`.
 
 `invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
 `test lint`, `test pylint`, `test types`, `test unit`), then both tiers.
+
+## Mixed-version tests
+
+A test that runs a previous version of a program next to this checkout's (an
+upgrade over what an older CST installed, two copies sharing state files or a
+lock) takes that version from `tests/fixtures/legacy/<file>@<short-sha>`: the
+file copied byte for byte from the commit named after the `@` (the last one
+before the change), never edited. Tests never read the git history (`git
+archive`, `git show`): CI checks out one commit, and a source tarball has no
+history at all. The test installs the fixture as the previous version (a copy
+of the checkout with the fixtures put back in their places, or the program run
+straight from the fixture). The fixtures carry no license line of their own
+(`LICENSE_EXEMPT` in `tests/license_headers.py`: captured data); the shell ones
+are in `SHELL_TEST_SCRIPTS` (`tests/shell_files.py`). Delete a fixture with
+the last test that uses it.
 
 ## Tier 2 needs an explicit opt-in
 

@@ -942,7 +942,7 @@ EOF
             [[ "$(systemctl show -P MemoryLow e2e-order.slice)" == 0 ]]
             # The game profile's answer: a drop-in with another name, which sorts
             # after 50-MemoryLow.conf, is applied after it whatever its folder.
-            zz="$(sed -n 's/^GAME_DROPIN=//p' /opt/cst-rw/cpu/game-profile)"
+            zz="$(cd /opt/cst-rw && python3 -I -B -c 'import sys; sys.path.insert(0, "."); from cpu.game.domain import GAME_DROPIN; print(GAME_DROPIN)')"
             [[ "$zz" == zz-* ]]
             mkdir -p /run/systemd/system/e2e-order.slice.d
             printf '[Slice]\nMemoryLow=16G\n' >"/run/systemd/system/e2e-order.slice.d/$zz"
@@ -1281,7 +1281,7 @@ echo E2E-OK
                 trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
                 ucg={ucg}
                 u() {{ systemctl --user -M tester@ "$@"; }}
-                gp() {{ bash /opt/cst-rw/cpu/game-profile "$@"; }}
+                gp() {{ python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }}
                 ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
                     XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
                 doc() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}   # exits non-zero on a WARN
@@ -1380,7 +1380,7 @@ echo E2E-OK
                     u stop "$j" 2>/dev/null || true
                 done
                 systemctl stop docker-e2eprobe.scope 2>/dev/null || true
-                bash /opt/cst-rw/cpu/game-profile off || true
+                python3 -I -B /opt/cst-rw/cpu/game-profile off || true
                 rm -rf /run/cpu-setup /etc/systemd/system.control/user-1000.slice.d
                 rm -f /etc/cpu-setup/cpu-setup.conf
                 if [[ -e /tmp/e2e-cpu-conf.bak ]]; then mv /tmp/e2e-cpu-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
@@ -1755,6 +1755,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
+            "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
             "/home/tester/.local/lib/cst/cst-toolchains": ("help", 0),
             "/usr/local/sbin/cst-vm": ("help", 0),
@@ -3027,6 +3028,158 @@ EOF
             # Undo: cargo no longer names the wrapper.
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    # The previous version of the cpu programs (the bash cpu-setup.sh and game-profile of cfb496a, the
+    # last commit before the port), vendored in tests/fixtures/legacy (tests/e2e/README.md,
+    # "Mixed-version tests"): test_84 installs it as the version an upgraded machine has, test_85 runs
+    # its game profile next to this one.
+    LEGACY = "/opt/cst-rw/tests/fixtures/legacy"
+    LEGACY_CPU_DIR = "/var/tmp/e2e-cst-legacy-cpu"
+
+    def legacy_cpu_tree(self) -> str:
+        """A copy of this checkout with the previous version's cpu-setup.sh, game-profile and install
+        manifest (the files the port changed that the old install reads) put back."""
+        d, src = self.LEGACY_CPU_DIR, self.LEGACY
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rm -rf {d} && cp -a /opt/cst-rw {d}
+            install -m 0644 {src}/cpu-setup.sh@cfb496a {d}/cpu-setup.sh
+            install -m 0644 {src}/game-profile@cfb496a {d}/cpu/game-profile
+            install -m 0644 {src}/install.py@cfb496a {d}/cst_core/domain/install.py
+            find {d} -name __pycache__ -prune -exec rm -rf {{}} +
+            chmod -R a+rX {d}
+            """,
+        )
+        return d
+
+    def test_84_cpu_install_cycle_over_the_bash_version(self) -> None:
+        """`cst cpu install` as root for tester with the real systemd, over what the bash
+        cpu-setup.sh (main before the port) installed: only the programs are written again (the game
+        profile becomes a zipapp; the other zipapps carry the new cst_core), every unit, drop-in, rule
+        and setting stays as it was; `status` runs; a second install writes nothing; `uninstall`
+        removes the units, programs, rule and drop-ins (and their record lines) and stops the timer; a
+        second uninstall works too. The bash version's uninstall then finds nothing left."""
+        old = self.legacy_cpu_tree()
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-84-conf.bak ]]; then mv /tmp/e2e-84-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rm -rf {old}
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-conf.bak
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            as_root() {{ SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 "$@"; }}
+            as_root bash {old}/cpu-setup.sh install >/tmp/e2e-84-old.txt
+            [[ "$(head -n1 /usr/local/sbin/cpu-game-profile)" == *bash* ]]
+            # This version over it: the programs again (zipapps), nothing else.
+            as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-new.txt
+            written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
+' ' ')
+            # The game profile becomes a zipapp; cpu-watch and cpu-vm-pin carry this version's cst_core.
+            [[ "$written" == "/usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin " ]] \
+                || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
+            grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
+            grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
+            grep -q 'unchanged: /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf' /tmp/e2e-84-new.txt
+            systemctl is-active cpu-game-watchdog.timer
+            grep -q 'cpu-game-profile' /var/lib/cst/installed.json
+            # status (root): every section, exit 0 with a target user.
+            st=$(as_root /opt/cst-rw/cst cpu status)
+            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
+                grep -qx "== $s" <<<"$st" || {{ echo "status without '$s'" >&2; exit 1; }}
+            done
+            # A second install writes nothing.
+            as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
+            if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
+            # uninstall, twice.
+            as_root /opt/cst-rw/cst cpu uninstall
+            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service                     /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules                     /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
+                [[ ! -e "$f" ]] || {{ echo "uninstall left $f" >&2; exit 1; }}
+            done
+            if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
+            if grep -q 'cpu-game-profile' /var/lib/cst/installed.json; then echo "the record still lists the game profile" >&2; exit 1; fi
+            as_root /opt/cst-rw/cst cpu uninstall >/dev/null
+            as_root bash {old}/cpu-setup.sh uninstall >/dev/null
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            [[ ! -e /tmp/e2e-84-conf.bak ]] || mv /tmp/e2e-84-conf.bak /etc/cpu-setup/cpu-setup.conf
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_85_cpu_game_profile_bash_and_python_copies_share_their_state_and_lock(self) -> None:
+        """The game profile of an older CST (bash) and this one (Python) with the real system and
+        user managers, both ways: one switches it on, the other's tick adds nothing and its state
+        reads it, and the other switches it off, which restores machine.slice's weight and removes
+        game.state and the zz- drop-ins. Each waits for the other's run lock (flock(2) on
+        /run/cpu-setup/lock)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -rf /run/cpu-setup
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-85-conf.bak ]]; then mv /tmp/e2e-85-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-85-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s
+' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" "VM_WEIGHT=10"                 "GAME_MEMORY_LOW='16G'" "GAME_ZSWAP_WRITEBACK='yes'" >/etc/cpu-setup/cpu-setup.conf
+            touch /run/cpu-setup/manual   # no GameMode client here: tick must not switch off
+            bashgp() {{ bash {self.LEGACY}/game-profile@cfb496a "$@"; }}
+            pygp() {{ python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }}
+            base=$(systemctl show -P CPUWeight machine.slice)
+            for pair in "bashgp pygp" "pygp bashgp"; do
+                read -r first second <<<"$pair"
+                touch /run/cpu-setup/manual
+                $first on
+                [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+                n1=$(wc -l </run/cpu-setup/game.state)
+                $second tick
+                [[ "$(wc -l </run/cpu-setup/game.state)" == "$n1" ]] || {{ echo "$second tick added records" >&2; exit 1; }}
+                st=$($second state)
+                grep -q '^game profile: ON (by hand)' <<<"$st"
+                grep -q 'drift: none' <<<"$st" || {{ echo "$second state: $st" >&2; exit 1; }}
+                $second off
+                test ! -e /run/cpu-setup/game.state
+                test -z "$(ls /run/systemd/system/*.d/zz-cst-game.conf 2>/dev/null)"
+                [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            done
+            # The lock: a holder of either kind keeps the other waiting.
+            (flock /run/cpu-setup/lock sleep 3) &
+            sleep 0.5
+            t0=$(date +%s); pygp tick; t1=$(date +%s)
+            (( t1 - t0 >= 2 )) || {{ echo "the Python copy did not wait for flock's lock" >&2; exit 1; }}
+            wait
+            python3 -I -c 'import fcntl, os, time; fd = os.open("/run/cpu-setup/lock", os.O_WRONLY); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(3)' &
+            sleep 0.5
+            t0=$(date +%s); bashgp tick; t1=$(date +%s)
+            (( t1 - t0 >= 2 )) || {{ echo "the bash copy did not wait for the Python lock" >&2; exit 1; }}
+            wait
             echo E2E-OK
             """,
         ).stdout

@@ -144,7 +144,7 @@ class DomainTest(unittest.TestCase):
 
     def test_select_entries_by_module_and_kind(self) -> None:
         cpu = select_entries(INSTALL_MANIFEST, module="cpu", kind="python-entry")
-        self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-watch"})
+        self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-watch", "cpu/game-profile"})
         self.assertTrue(all(e.module == "cpu" for e in select_entries(INSTALL_MANIFEST, module="cpu")))
 
     def test_select_entries_by_component(self) -> None:
@@ -705,7 +705,10 @@ class BashLibraryTest(unittest.TestCase):
         r = self.bash(f'cst_install_text "{self.stage}/etc/gen" 0644', stdin=b"x\n")
         self.assertEqual(r.stdout.decode(), f"written:   {self.stage}/etc/gen\n")
         r = self.bash(f'cst_installed_dests --module cpu --kind python-entry --root "{self.stage}"')
-        self.assertEqual(r.stdout.decode().split(), ["/usr/local/sbin/cpu-vm-pin", "/usr/local/bin/cpu-watch"])
+        self.assertEqual(
+            r.stdout.decode().split(),
+            ["/usr/local/sbin/cpu-vm-pin", "/usr/local/bin/cpu-watch", "/usr/local/sbin/cpu-game-profile"],
+        )
 
     def test_user_files_are_written_through_runuser_with_the_users_home(self) -> None:
         r = self.bash(f'cst_install_as alice --root "{self.stage}" cpu/gamemode.ini')

@@ -114,7 +114,7 @@ btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automa
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
 cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
-cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  shell         root   cpu:core
+cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  python-entry  root   cpu:core
 cpu/units/builds.slice.in                           /etc/systemd/system/builds.slice                              644  root  unit          root   cpu:docker-slice
 cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root   cpu:core
@@ -189,6 +189,7 @@ btrfs/tests/realbtrfs-snapshot-core.sh
 cst_core/cli.py
 cst_core/installer.py
 cst_core/route.py
+cpu/cpu-setup
 doctor/cst-doctor
 fix-anaconda-webui-btrfs-compress.sh
 swap/cli.py

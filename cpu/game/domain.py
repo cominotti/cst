@@ -1,0 +1,383 @@
+# SPDX-License-Identifier: MPL-2.0
+"""The game profile's rules (cpu-game-profile): its settings, its records and what they say. No I/O.
+
+game.state holds one record per change 'on' made, written before the change,
+so that 'off' can undo whatever was changed even when 'on' died halfway:
+"prop MGR UNIT PROP existed OLD" (a runtime override was there, OLD its
+value) or "prop MGR UNIT PROP new -", "cgw FILE OLD" (a cgroup file written
+directly), "epp CPU OLD". game.intended holds what 'on' set, as systemd
+showed it right after: "prop MGR UNIT PROP VALUE SHOWN" and "cgw FILE VALUE
+SHOWN", for the drift repair. The fields are written as bash's printf %q
+writes them, because an installed bash game-profile (an older CST) reads
+these files with eval and greps them for its own quoted form.
+"""
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+import fnmatch
+import posixpath
+import re
+from typing import Final, Literal
+
+from cst_core.domain.contracts import state_format
+from cst_core.domain.text import file_lines, printf_q, printf_q_words
+
+type Manager = Literal["sys", "usr"]
+type Record = tuple[str, ...]
+
+# The journal tag of every line (log in the adapters).
+TAG: Final = "game-profile"
+# The MemoryLow drop-ins 'on' writes into the system manager's runtime folder: zz- sorts after
+# every other drop-in (uresourced's 50-MemoryLow.conf included), so it wins at a daemon-reload.
+GAME_DROPIN: Final = "zz-cst-game.conf"
+# Top-level slices of the user manager that have rules of their own: the game and the desktop
+# apps (app.slice), gnome-shell (session.slice), the toolboxes (user.slice).
+KNOWN_SLICES: Final = frozenset({"app.slice", "session.slice", "user.slice"})
+STEAM_SCOPES: Final = "app-flatpak-com.valvesoftware.Steam-*"
+DOCKER_SCOPES: Final = "docker-*.scope"
+USAGE: Final = "usage: game-profile on|off|tick|state"
+
+
+def _in(folder: str, name: str) -> str:
+    """A file of the run folder."""
+    return posixpath.join(folder, name)
+
+
+@dataclass(frozen=True, slots=True)
+class GamePaths:
+    """Where the profile reads and writes (tests point them into a folder of their own)."""
+
+    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    run: str = posixpath.dirname(state_format("game-state").path)
+    cgroot: str = "/sys/fs/cgroup"
+    # The system manager's runtime unit folder (the MemoryLow drop-ins).
+    unit_runtime: str = "/run/systemd/system"
+    # Where `set-property --runtime` writes: under /run/systemd (system manager) and
+    # /run/user/UID/systemd (the user's).
+    run_systemd: str = "/run/systemd"
+    run_user: str = "/run/user"
+    sys_cpu: str = "/sys/devices/system/cpu"
+    proc: str = "/proc"
+
+    @property
+    def state(self) -> str:
+        """game.state: exists exactly while the profile is on (other projects key on that)."""
+        return posixpath.join(self.run, posixpath.basename(state_format("game-state").path))
+
+    @property
+    def intended(self) -> str:
+        """game.intended: what 'on' set, for the drift repair."""
+        return posixpath.join(self.run, posixpath.basename(state_format("game-intended").path))
+
+    @property
+    def manual(self) -> str:
+        """Switched on by hand: the watchdog leaves it on."""
+        return _in(self.run, "manual")
+
+    @property
+    def suppress(self) -> str:
+        """Switched off by hand: no automatic 'on' until the game ends."""
+        return _in(self.run, "suppress")
+
+    @property
+    def lock(self) -> str:
+        """on, off and tick never interleave."""
+        return _in(self.run, "lock")
+
+    def epp(self, cpu: str) -> str:
+        """The energy/performance preference of one CPU."""
+        return posixpath.join(self.sys_cpu, f"cpu{cpu}", "cpufreq", "energy_performance_preference")
+
+
+@dataclass(frozen=True, slots=True)
+class GameSettings:
+    """The profile's settings: /etc/cpu-setup/cpu-setup.conf over these defaults."""
+
+    target_user: str = ""
+    build_cpus: str = "12-23"  # VM, Docker and nothing of the game while it runs
+    p_cores: str = "0-7"
+    vm_weight: str = "10"
+    game_memory_low: str = "16G"  # Dota 2 ~10 GB resident + steamwebhelper
+    game_zswap_writeback: str = "no"  # app.slice during games: "no" = swapped pages stay in zswap
+
+
+_SETTING_KEYS: Final = {
+    "TARGET_USER": "target_user",
+    "BUILD_CPUS": "build_cpus",
+    "P_CORES": "p_cores",
+    "VM_WEIGHT": "vm_weight",
+    "GAME_MEMORY_LOW": "game_memory_low",
+    "GAME_ZSWAP_WRITEBACK": "game_zswap_writeback",
+}
+
+
+def game_settings(values: Mapping[str, str]) -> GameSettings:
+    """The settings a settings file's values give (keys it does not set keep their default)."""
+    d = GameSettings()
+    return GameSettings(**{attr: values.get(key, getattr(d, attr)) for key, attr in _SETTING_KEYS.items()})
+
+
+def vm_io_weight(vm_weight: str) -> str:
+    """machine.slice's IOWeight while the game runs: VM_WEIGHT when it is 1..10000 (systemd's
+    IOWeight does not accept 'idle'), else 10."""
+    if re.fullmatch(r"[0-9]+", vm_weight) and 1 <= int(vm_weight) <= 10000:
+        return vm_weight
+    return "10"
+
+
+def expand_cpus(spec: str) -> list[str]:
+    """ "0-3,6" -> ["0", "1", "2", "3", "6"]. A range whose ends are not whole numbers gives
+    nothing, as `seq` did."""
+    out: list[str] = []
+    parts = spec.split(",")
+    if parts and parts[-1] == "":
+        parts.pop()  # `read -ra` drops a last empty field
+    for part in parts:
+        if "-" in part:
+            lo, hi = part[: part.rfind("-")], part[part.find("-") + 1 :]
+            if re.fullmatch(r"\s*\+?[0-9]+\s*", lo) and re.fullmatch(r"\s*\+?[0-9]+\s*", hi):
+                out.extend(str(n) for n in range(int(lo), int(hi) + 1))
+        else:
+            out.append(part)
+    return " ".join(out).split()
+
+
+def transient_unit(unit: str) -> bool:
+    """A unit systemd made at run time (scopes: Docker containers, Steam, apps; systemd-run's
+    run-*.service): its runtime overrides live next to it, in the transient folder."""
+    return fnmatch.fnmatchcase(unit, "*.scope") or fnmatch.fnmatchcase(unit, "run-*.service")
+
+
+def ctl_file(paths: GamePaths, mgr: Manager, unit: str, prop: str, uid: str) -> str:
+    """The file `systemctl set-property --runtime UNIT PROP=...` writes (uid: the user's, for usr)."""
+    base = paths.run_systemd if mgr == "sys" else posixpath.join(paths.run_user, uid, "systemd")
+    folder = "transient" if transient_unit(unit) else ("system.control" if mgr == "sys" else "user.control")
+    return f"{base}/{folder}/{unit}.d/50-{prop}.conf"
+
+
+def shown(stdout: str) -> str:
+    """What `systemctl show -P PROP` printed, as the profile reads it: "[not set]" is empty, the
+    last newlines go (a shell's command substitution)."""
+    return "\n".join("" if line == "[not set]" else line for line in stdout.split("\n")).rstrip("\n")
+
+
+def show_values(stdout: str) -> dict[str, str]:
+    """{PROP: value} of `systemctl show -p A -p B UNIT` ("[not set]" is empty)."""
+    vals: dict[str, str] = {}
+    for line in stdout.split("\n"):
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        vals[key] = "" if value == "[not set]" else value
+    return vals
+
+
+def record_line(*fields: str) -> str:
+    """One record: its fields as printf %q writes them, a blank between, and a newline."""
+    return " ".join(printf_q(f) for f in fields) + "\n"
+
+
+def records(text: str) -> list[Record]:
+    """The records of game.state or game.intended in file order; a line bash could not read as
+    plain words is left out."""
+    out: list[Record] = []
+    for line in file_lines(text):
+        words = printf_q_words(line)
+        if words is not None:
+            out.append(tuple(words))
+    return out
+
+
+def off_records(text: str) -> tuple[list[Record], int | None]:
+    """The records of game.state 'off' undoes, newest first, as bash's `eval "rec=(${line})"` loop read
+    them, and the number of the line where it stopped (None: it read them all).
+
+    An empty line is skipped. A line eval cannot read as words (an unclosed quote) leaves the previous
+    record in place, which is undone again; with none before it, bash stopped. A line with fewer fields
+    than its kind needs (cgw and epp: 3, any other: 6; a record cut short) stopped bash too (`set -u`):
+    'off' then ends with exit 1 and leaves game.state as it is."""
+    lines = file_lines(text)
+    out: list[Record] = []
+    prev: Record | None = None
+    for number in range(len(lines), 0, -1):
+        line = lines[number - 1]
+        if line == "":
+            continue
+        words = printf_q_words(line)
+        rec = prev if words is None else tuple(words)
+        if not rec or len(rec) < (3 if rec[0] in ("cgw", "epp") else 6):
+            return out, number
+        out.append(rec)
+        prev = rec
+    return out, None
+
+
+def drift_readable(text: str) -> bool:
+    """bash's drift check read game.intended whole: False when it stopped first (a line eval cannot read
+    as words, an empty record, a prop record with fewer than 4 fields), and so compared nothing."""
+    for line in file_lines(text):
+        if line == "":
+            continue
+        words = printf_q_words(line)
+        if not words or (words[0] == "prop" and len(words) < 4):
+            return False
+    return True
+
+
+def state_escapes(text: str) -> str:
+    """The 'other boxes idle' part of 'state' from game.state's text: escapes_in_state of its records, or
+    nothing when a line cannot be read as words (bash's eval then ended the command substitution)."""
+    if any(printf_q_words(line) is None for line in file_lines(text)):
+        return ""
+    return escapes_in_state(records(text))
+
+
+def has_record_part(text: str, part: str) -> bool:
+    """A line of the file holds part (bash: grep -F on the file)."""
+    return any(part in line for line in file_lines(text))
+
+
+def escaped_unit(name: str) -> str | None:
+    """The unit of a cgroup folder of the user manager next to the game, or None for one with a
+    rule of its own. systemd puts a '_' before a cgroup name that could clash with a controller
+    file (cpu.slice -> _cpu.slice)."""
+    unit = name.removeprefix("_")
+    return None if unit in KNOWN_SLICES else unit
+
+
+@dataclass(frozen=True, slots=True)
+class Drift:
+    """A setting in game.intended that no longer holds.
+
+    record: the intended record ("prop", MGR, UNIT, PROP, VALUE, SHOWN) or ("cgw", FILE, VALUE,
+    SHOWN); now: what systemd shows (or the file holds) now.
+    """
+
+    record: Record
+    now: str
+
+    @property
+    def is_cgroup_file(self) -> bool:
+        """A cgroup file written directly (cgw), not a unit property."""
+        return self.record[0] == "cgw"
+
+
+def intended_props(recs: Sequence[Record]) -> dict[tuple[Manager, str], list[str]]:
+    """{(MGR, UNIT): [PROP, ...]} of the prop records, in file order: one systemctl show each."""
+    out: dict[tuple[Manager, str], list[str]] = {}
+    for r in recs:
+        if len(r) >= 4 and r[0] == "prop" and r[1] in ("sys", "usr"):
+            mgr: Manager = "sys" if r[1] == "sys" else "usr"
+            out.setdefault((mgr, r[2]), []).append(r[3])
+    return out
+
+
+def drifted(
+    recs: Sequence[Record],
+    now: Mapping[tuple[str, str], Mapping[str, str]],
+    read_file: Callable[[str], str | None],
+) -> list[Drift]:
+    """The settings of game.intended that no longer hold, in file order.
+
+    now: show_values of each loaded unit (a unit systemd could not be asked about, or has not
+    loaded, is missing: nothing to compare). read_file: a cgroup file's text without its last
+    newlines, None when it is gone. Skipped too: a record with an empty SHOWN.
+    """
+    out: list[Drift] = []
+    for r in recs:
+        if r[:1] == ("prop",) and len(r) >= 6:
+            vals = now.get((r[1], r[2]))
+            if not r[5] or vals is None:
+                continue
+            value = vals.get(r[3], "")
+            if value != r[5]:
+                out.append(Drift(r[:6], value))
+        elif r[:1] == ("cgw",) and len(r) >= 4:
+            if not r[3]:
+                continue
+            value = read_file(r[1])
+            if value is None or value == r[3]:
+                continue
+            out.append(Drift(r[:4], value))
+    return out
+
+
+def repaired_text(d: Drift, *, ok: bool) -> tuple[int, str]:
+    """The journal line (priority, text) for a drift the tick set again (ok) or could not."""
+    r = d.record
+    if d.is_cgroup_file:
+        if ok:
+            return 5, f"drift: {r[1]} was '{d.now}', wrote {r[2]} again"
+        return 4, f"drift: {r[1]} is '{d.now}', could not write {r[2]} again"
+    if ok:
+        return 5, (
+            f"drift: {r[2]} {r[3]} was '{d.now}' instead of '{r[5]}' (daemon-reload or uresourced?): "
+            f"set {r[3]}={r[4]} again"
+        )
+    return 4, f"drift: {r[2]} {r[3]} is '{d.now}' instead of '{r[5]}': could not set it again"
+
+
+def again_cmd(*, manual: bool) -> str:
+    """The command that switches the profile off and on again in the same mode: 'off' drops the
+    by-hand mark, so a restart of the unit alone would let the watchdog switch a by-hand profile
+    off at the next tick when no game runs."""
+    return "cst cpu game off && cst cpu game on" if manual else "sudo systemctl restart cpu-game.service"
+
+
+def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool) -> list[str]:
+    """The drift part of 'state' (drifts None: no game.intended, switched on by an older version)."""
+    if drifts is None:
+        return [
+            "  drift: not checked (switched on by an older version, which kept no record of its values;",
+            f"         {again_cmd(manual=manual)} switches it off and on again with one)",
+        ]
+    lines: list[str] = []
+    for d in drifts:
+        r = d.record
+        if d.is_cgroup_file:
+            lines.append(f"  DRIFT: {r[1]} is '{d.now}', the profile wrote '{r[3]}'")
+        else:
+            lines.append(f"  DRIFT: {r[2]} {r[3]} is '{d.now}', the profile set '{r[5]}'")
+    if drifts:
+        lines.append("  (a daemon-reload or uresourced undid these; the watchdog sets them again within 30 s;")
+        lines.append(f"   if they stay: {again_cmd(manual=manual)})")
+    else:
+        lines.append("  drift: none (every setting the profile made still holds)")
+    return lines
+
+
+def escapes_in_state(recs: Sequence[Record]) -> str:
+    """The boxes of the user manager the profile made idle, from game.state ("none" if none)."""
+    out = [
+        r[2]
+        for r in recs
+        if len(r) >= 4 and r[0] == "prop" and r[1] == "usr" and r[3] == "CPUWeight" and r[2] != "user.slice"
+    ]
+    return " ".join(out) if out else "none"
+
+
+def first_cpu(cpus: str) -> str:
+    """The first CPU of a list such as 12-23 (bash: ${BUILD_CPUS%%-*})."""
+    return cpus.split("-", 1)[0]
+
+
+def dropin_text(unit: str, memory_low: str) -> str:
+    """The MemoryLow drop-in 'on' writes for one unit of the memory chain."""
+    section = "Service" if unit.endswith(".service") else "Slice"
+    return (
+        "# Written by cpu-game-profile (CST) while the game profile is on; 'off' removes it.\n"
+        f"[{section}]\nMemoryLow={memory_low}\n"
+    )
+
+
+def on_text(s: GameSettings) -> str:
+    """The journal line at the end of 'on'."""
+    return (
+        f"on: VM/Docker on {s.build_cpus}, toolboxes and other user boxes idle, game memory protected "
+        f"({s.game_memory_low}), app zswap writeback {s.game_zswap_writeback}, P-cores EPP performance"
+    )
+
+
+def cpuset_in(subtree_control: str) -> bool:
+    """cpuset is among the controllers (grep -w cpuset)."""
+    return re.search(r"(?<![A-Za-z0-9_])cpuset(?![A-Za-z0-9_])", subtree_control) is not None
