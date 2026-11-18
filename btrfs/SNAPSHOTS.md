@@ -2489,9 +2489,18 @@ clock guards still apply.
   the convert plan and flags, `/var/lib/btrfs-snapshot`, the locks, the pin
   file, `/proc`) and runs `btrfs-snapshot-core` and `btrfs-notify` from
   there; commands still come from `PATH`. The unit tests run the whole
-  program on a fake machine this way. It is not a setting: the shipped units
-  pass no environment (a unit test checks that they have no `Environment=`,
-  `EnvironmentFile=` or `PassEnvironment=`).
+  program on a fake machine this way. It is not a setting, and no part of CST
+  hands it on to a run as root (unit tests check each):
+  - `cst btrfs snapshots ...` (setup-snapshots.bash) runs `btrfs-snapshot`
+    without it, also when the caller has it (`sudo -E`, a root shell);
+  - `btrfs-bulk` runs `btrfs-snapshot busy` and `convert-one` without it;
+  - `cst btrfs` reaches root through sudo, which resets the environment;
+  - the shipped units pass no environment (no `Environment=`,
+    `EnvironmentFile=` or `PassEnvironment=`). What root itself puts into
+    systemd's own environment (`systemctl set-environment`) still reaches
+    them; CST never does that.
+  A root shell that runs `/usr/local/sbin/btrfs-snapshot` directly with the
+  variable set gets that folder, not the machine.
 
 ---
 

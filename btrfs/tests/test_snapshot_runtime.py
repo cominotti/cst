@@ -103,6 +103,56 @@ class SnapStatusCachesTest(unittest.TestCase):
         self.assertIn("(u@nas:22)", on[0])
 
 
+class SetupHandsNoSeamTest(unittest.TestCase):
+    """Every btrfs-snapshot run of `cst btrfs snapshots ...` (setup-snapshots.bash, as root) is
+    started without CST_SNAPSHOT_ROOT, btrfs-snapshot's test seam, even when the caller has it.
+    (setup's live conversion: test_btrfs_setup.py, the setup cycle.)"""
+
+    def run_setup(self, body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "btrfs-snapshot")
+            with open(fake, "w", encoding="utf-8") as f:
+                f.write('#!/bin/bash\nprintf "%s|%s\\n" "$*" "${CST_SNAPSHOT_ROOT-unset}" >>"$T/seen"\n')
+            os.chmod(fake, 0o755)
+            script = "\n".join(
+                [
+                    'SRC="$1"; . "$1/setup-snapshots.bash"',
+                    'SNAP_RUNTIME="$T/btrfs-snapshot"; PROG=cst-btrfs-test',
+                    # What snap_disable does besides the purge (units, mounts) is not this test's.
+                    "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }",
+                    'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"',
+                    "export CST_SNAPSHOT_ROOT=/elsewhere",
+                    body,
+                ]
+            )
+            r = subprocess.run(
+                ["bash", "-c", script, "_", BTRFS],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": d},
+                stdin=subprocess.DEVNULL,
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(os.path.join(d, "seen"), encoding="utf-8") as f:
+                return f.read().splitlines()
+
+    def test_list_caches_prune_and_purge(self) -> None:
+        self.assertEqual(
+            self.run_setup(
+                "snapshots_cmd list --json; snapshots_cmd caches; snapshots_cmd prune; "
+                "snapshots_cmd prune --confirm; snap_disable --purge >/dev/null"
+            ),
+            [
+                "list --json|unset",
+                "caches|unset",
+                "prune --dry-run --allow-mass-delete|unset",
+                "prune --allow-mass-delete|unset",
+                "purge|unset",
+            ],
+        )
+
+
 class ShippedUnitsTest(unittest.TestCase):
     def test_no_unit_hands_the_test_seam_or_any_setting_to_btrfs_snapshot(self) -> None:
         # CST_SNAPSHOT_ROOT moves every path of a root program into a test folder: the units

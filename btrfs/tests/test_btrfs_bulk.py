@@ -41,6 +41,7 @@ from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.application.context import Bulk
 from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser, SteamJournal, SteamPart
+from btrfs.bulk.adapters.host import Host, snapshot_env
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.values import Json
@@ -1748,6 +1749,27 @@ class BulkTest(BulkBase):
         self.journal_crashed()
         keys = ItemJournal.__required_keys__ | ItemJournal.__optional_keys__
         self.assertLessEqual(set(self.journal("apps")), keys | {"v"})
+
+
+class SnapshotSeamTest(BulkBase):
+    def test_btrfs_snapshot_never_gets_its_test_seam(self) -> None:
+        # CST_SNAPSHOT_ROOT moves every file of btrfs-snapshot below another folder (tests only):
+        # btrfs-bulk, which runs as root, never hands it on to the busy check or a conversion.
+        log = os.path.join(self.tmp, "seen")
+        fake = os.path.join(self.tmp, "btrfs-snapshot")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write(f'printf "%s %s\\n" "$1" "${{CST_SNAPSHOT_ROOT-unset}}" >>{log}\n')
+        host = Host(self.paths, self.wiring.tree, lambda: fake)
+        bulk = os.path.join(self.home, "Bulk")
+        with mock.patch.dict(os.environ, {"CST_SNAPSHOT_ROOT": os.path.join(self.tmp, "elsewhere"), "KEPT": "1"}):
+            self.assertEqual(host.busy_paths([bulk], self.home), set())
+            host.convert_bulk_dir(bulk)
+        with open(log, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines(), ["busy unset", "convert-one unset"])
+        # Everything else of the environment still goes through.
+        with mock.patch.dict(os.environ, {"CST_SNAPSHOT_ROOT": "/x", "KEPT": "1"}):
+            env = snapshot_env()
+        self.assertEqual((env.get("KEPT"), "CST_SNAPSHOT_ROOT" in env), ("1", False))
 
 
 class StateFilesDurableTest(BulkBase):
