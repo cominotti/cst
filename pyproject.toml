@@ -199,6 +199,7 @@ include = [
     "cpu/game/domain.py",
     "cpu/tests/__init__.py",
     "cpu/tests/test_cpu.py",
+    "cpu/tests/test_cpu_setup.py",
     "cpu/tests/test_game_profile.py",
     "cpu/vm-pin",
     "cst_core/__init__.py",
