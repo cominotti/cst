@@ -46,7 +46,13 @@ class Change(Checks):
         changing = self.o.cmd == "apply" or (self.o.cmd == "revert" and not self.o.check)
         commands = {"plan": self.plan, "status": self.status, "apply": self.apply, "revert": self.revert}
         try:
+            self.need_tmp()  # every command made it first (TMP="$(mktemp)"), before the ERR trap
+        except StepFailed as e:
+            return e.status
+        try:
             return commands.get(self.o.cmd, self.le_audio)()
+        except BrokenPipeError:
+            raise  # a closed stdout ends the run as SIGPIPE ended the shell (wiring.run_guarded)
         except Refused as e:
             self.err(f"{prog}: ERROR: {e}\n")
             return 1

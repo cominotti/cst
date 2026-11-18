@@ -195,7 +195,22 @@ class StepDownTest(unittest.TestCase):
             "XDG_RUNTIME_DIR=/run/user/1000",
             "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
         ]
-        head = ["runuser", "-u", "tester", "--", "env", "-u", "XDG_CONFIG_HOME", "-u", "CST_BT_ROOT", "-u", "CST_BT_CONTAINER", "-u", "SUDO_USER", *session]
+        head = [
+            "runuser",
+            "-u",
+            "tester",
+            "--",
+            "env",
+            "-u",
+            "XDG_CONFIG_HOME",
+            "-u",
+            "CST_BT_ROOT",
+            "-u",
+            "CST_BT_CONTAINER",
+            "-u",
+            "SUDO_USER",
+            *session,
+        ]
         self.assertEqual(execs, [[*head, SELF, "status", "--device", MAC]])
         # CST_PROG is handed on only when the caller set it.
         _, execs = self.step_down({"SUDO_USER": "tester", "CST_PROG": "cst bluetooth"}, "plan")

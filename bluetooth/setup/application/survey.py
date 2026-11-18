@@ -33,6 +33,7 @@ from bluetooth.domain import (
 from bluetooth.ports import BluetoothHostPort
 from bluetooth.setup.domain import (
     Config,
+    Exit,
     Options,
     Paths,
     bap_state,
@@ -50,21 +51,25 @@ from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode
 
 
-def read_settings(host: BluetoothHostPort, paths: Paths) -> tuple[dict[str, str], tuple[str, ...], str]:
-    """(the merged settings, the keys the user's file sets, the warnings about its problem lines)."""
+def read_settings(host: BluetoothHostPort, paths: Paths) -> tuple[dict[str, str], tuple[str, ...], str] | Exit:
+    """(the merged settings, the keys the user's file sets, what to print on stderr). As
+    bluetooth-setup.sh's two bt-helper calls (settings, then settings-keys), each names a file
+    it cannot read: the first leaves the settings empty, the second (the user's file) ends the
+    run with exit 1."""
     files: list[tuple[str, str]] = []
-    errors = ""
-    for path in (paths.default_settings, paths.user_settings):
-        try:
+    try:
+        for path in (paths.default_settings, paths.user_settings):
             text = host.read_or_none(path)
-        except (OSError, ValueError) as e:
-            errors += f"bt-helper: {e}\n"
-            return {}, (), errors
-        if text is not None:
-            files.append((path, text))
-    shown, warnings = settings_report(files)
-    user = next((t for p, t in files if p == paths.user_settings), "")
-    return read_settings_output(shown), tuple(set_keys(user)), errors + warnings
+            if text is not None:
+                files.append((path, text))
+        shown, said = settings_report(files)
+    except (OSError, ValueError) as e:
+        shown, said = "", f"bt-helper: {e}\n"
+    try:
+        user = host.read_or_none(paths.user_settings) or ""
+    except (OSError, ValueError) as e:
+        return Exit(1, err=f"{said}bt-helper: {e}\n")
+    return read_settings_output(shown), tuple(set_keys(user)), said
 
 
 class StepFailed(Exception):
@@ -163,8 +168,9 @@ class Survey:
     def need_tmp(self) -> str:
         """The scratch file for main.conf (mktemp), made once."""
         if not self.tmp:
-            r = self.run(["mktemp"], output="stdout")
+            r = self.run(["mktemp"])
             if r.returncode != 0:
+                self.err(r.stderr)
                 raise StepFailed(shell_exit_status(r.returncode))
             self.tmp = r.stdout.rstrip("\n")
         return self.tmp
@@ -300,7 +306,8 @@ class Survey:
 
     def file_state(self, path: str, rendered: str, *, unit: bool = False) -> str:
         """bt-helper's state of a file apply writes: a link judged by what it points to; what is
-        there but not a readable plain file is a conflict."""
+        there but not a readable plain file is a conflict. A file it cannot decode stops the
+        run (STATE="$(file_state ...)" under set -e)."""
         f = self.m.files
         if f.exists(path) and not (f.is_file(path) and f.is_readable(path)):
             return "conflict"
@@ -308,7 +315,7 @@ class Survey:
             text = self.m.host.read_or_none(path)
         except (OSError, ValueError) as e:
             self.err(f"bt-helper: {e}\n")
-            return ""
+            raise StepFailed(1) from e
         return unit_state(text, rendered) if unit else wp_state(text, rendered)
 
     # ---- what apply would do ---------------------------------------------------------------

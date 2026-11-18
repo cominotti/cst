@@ -6,16 +6,9 @@ from collections.abc import Sequence
 import sys
 
 from bluetooth.setup import wiring
-from bluetooth.setup.application.change import Change, ReRun
+from bluetooth.setup.application.change import ReRun
 from bluetooth.setup.application.survey import read_settings
 from bluetooth.setup.domain import Exit, bt_timeout, changes_machine, parse_command_line, resolve
-
-
-def emit(done: Exit) -> int:
-    """Print an Exit and return its status."""
-    sys.stdout.write(done.out)
-    sys.stderr.write(done.err)
-    return done.status
 
 
 def main(entry: str, argv: Sequence[str]) -> int:
@@ -24,37 +17,29 @@ def main(entry: str, argv: Sequence[str]) -> int:
     prog = wiring.prog(env)
     opts = parse_command_line(argv, prog, wiring.usage(entry, prog))
     if isinstance(opts, Exit):
-        return emit(opts)
+        return wiring.emit(opts)
     stepped = wiring.step_down(env, entry, opts, prog)
     if stepped is not None:
-        return emit(stepped)
+        return wiring.emit(stepped)
     container = wiring.in_toolbox(env)
     if changes_machine(opts) and container:
-        return emit(
+        return wiring.emit(
             Exit(1, err=f"'{prog} {' '.join(opts.args)}' must run on the host, not inside a toolbox/container.\n")
         )
     timeout = bt_timeout(env.get("BT_TIMEOUT"))
     if isinstance(timeout, Exit):
-        return emit(timeout)
+        return wiring.emit(timeout)
     where = wiring.paths(env, entry, container=container)
-    settings, user_keys, warnings = read_settings(wiring.bt_host(), where)
+    found = read_settings(wiring.bt_host(), where)
+    if isinstance(found, Exit):
+        return wiring.emit(found)
+    settings, user_keys, warnings = found
     sys.stderr.write(warnings)
     cfg = resolve(opts, settings, user_keys, where, prog)
     if isinstance(cfg, Exit):
-        return emit(cfg)
+        return wiring.emit(cfg)
     run = wiring.build(opts, cfg, where, container=container, bt_timeout=timeout)
-    result = execute(run)
+    result = wiring.run_guarded(run)
     if isinstance(result, ReRun):
         wiring.replace([where.self_script, *result.args])
     return result
-
-
-def execute(run: Change) -> int | ReRun:
-    """One command over the machine; its exit status (a stop prints why), or the run again of le-audio."""
-    try:
-        return run.run_command()
-    except KeyboardInterrupt:
-        run.cleanup()
-        wiring.interrupted()
-    finally:
-        run.cleanup()

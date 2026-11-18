@@ -9,6 +9,8 @@ import shutil
 import signal
 import stat
 import sys
+from collections.abc import Callable
+from types import FrameType
 from typing import NoReturn
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
@@ -88,9 +90,63 @@ def account(user: str) -> tuple[int, str] | None:
     return pw.pw_uid, pw.pw_dir
 
 
-def die_by_interrupt() -> NoReturn:
-    """End killed by SIGINT, as the shell did on Ctrl-C."""
-    sys.stdout.flush()
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    os.kill(os.getpid(), signal.SIGINT)
-    raise SystemExit(130)
+def die_by_signal(signum: int) -> NoReturn:
+    """End killed by the signal, as the shell did (Ctrl-C: SIGINT; a closed stdout: SIGPIPE)."""
+    with contextlib.suppress(OSError):
+        sys.stdout.flush()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    raise SystemExit(128 + signum)
+
+
+def drop_stdout() -> None:
+    """stdout from here on is /dev/null (its reader went away)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
+    os.close(devnull)
+
+
+def print_exit(out: str, err: str, status: int) -> int:
+    """out on stdout, err on stderr; status, or 141 when stdout's reader went away (as the shell's
+    help, whose sed died by SIGPIPE in a pipeline under set -e and pipefail)."""
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    try:
+        sys.stdout.write(out)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        drop_stdout()
+        status = 128 + signal.SIGPIPE
+    sys.stderr.write(err)
+    return status
+
+
+def on_fatal_signals(then: Callable[[], None]) -> None:
+    """SIGHUP and SIGTERM: then(), and the program ends killed by that signal at once (a
+    command it runs goes on to its end); a write to a closed stdout raises BrokenPipeError
+    instead of killing it (SIGPIPE ignored here; the commands it runs get the default)."""
+
+    def fatal(signum: int, _frame: FrameType | None) -> None:
+        then()
+        die_by_signal(signum)
+
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        if signal.getsignal(sig) is not signal.SIG_IGN:  # ignored on entry (nohup) stays ignored, as in bash
+            signal.signal(sig, fatal)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+
+def guarded[T](command: Callable[[], T], cleanup: Callable[[], None]) -> T:
+    """command(), with cleanup() however it ends, as a shell's EXIT trap: Ctrl-C, SIGHUP and
+    SIGTERM end the program killed by that signal, and so does a closed stdout (SIGPIPE, as
+    the shell died at its next write there)."""
+    on_fatal_signals(cleanup)
+    try:
+        return command()
+    except KeyboardInterrupt:
+        cleanup()
+        die_by_signal(signal.SIGINT)
+    except BrokenPipeError:
+        cleanup()
+        die_by_signal(signal.SIGPIPE)
+    finally:
+        cleanup()

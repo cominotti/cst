@@ -14,8 +14,15 @@ import sys
 from typing import NoReturn
 
 from bluetooth.adapters import LocalBluetoothHostAdapter
-from bluetooth.setup.adapters import LocalSetupFiles, SetupTerminal, account, die_by_interrupt, effective_uid
-from bluetooth.setup.application.change import Change
+from bluetooth.setup.adapters import (
+    LocalSetupFiles,
+    SetupTerminal,
+    account,
+    effective_uid,
+    guarded,
+    print_exit,
+)
+from bluetooth.setup.application.change import Change, ReRun
 from bluetooth.setup.application.survey import SetupMachine
 from bluetooth.setup.domain import Config, Exit, Options, Paths
 from cst_core.adapters import SystemClockAdapter
@@ -72,7 +79,13 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
     uid, home = found
     handed = [f"CST_PROG={env['CST_PROG']}"] if env.get("CST_PROG") else []
     self_script = os.path.join(checkout(entry), "bluetooth-setup.sh")
-    argv = step_down_argv(user, uid, home, unset=["XDG_CONFIG_HOME", "CST_BT_ROOT", "CST_BT_CONTAINER"], then=[*handed, self_script, *opts.args])
+    argv = step_down_argv(
+        user,
+        uid,
+        home,
+        unset=["XDG_CONFIG_HOME", "CST_BT_ROOT", "CST_BT_CONTAINER"],
+        then=[*handed, self_script, *opts.args],
+    )
     replace(argv)
 
 
@@ -130,6 +143,13 @@ def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeo
     )
 
 
-def interrupted() -> NoReturn:
-    """Ctrl-C: the run ends as the shell did, killed by SIGINT."""
-    die_by_interrupt()
+def emit(done: Exit) -> int:
+    """Print an Exit (the help, a usage error, a refusal) and return its status (adapters.print_exit)."""
+    return print_exit(done.out, done.err, done.status)
+
+
+def run_guarded(run: Change) -> int | ReRun:
+    """run's command, its scratch file removed however the run ends, as the shell's EXIT trap
+    removed it (adapters.guarded: Ctrl-C, SIGHUP, SIGTERM and a closed stdout end it killed by
+    that signal)."""
+    return guarded(run.run_command, run.cleanup)
