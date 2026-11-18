@@ -206,20 +206,9 @@ class SwapReports:
             out[name] = self._read_first(posixpath.join(self._env.zswap_params_dir, name), "?")
         return out
 
-    def build_config_report(self, verb: str) -> ConfigSectionReport:
-        """Inspect managed config files and runtime swap/zram states."""
+    def _marked_line_items(self, spec: SwapHardwareSpec, verb: str) -> tuple[list[PlanItem], bool]:
+        """The crypttab and fstab rows, and whether either line changes (so swap0 must be re-activated)."""
         env = self._env
-        spec = env.spec
-        if not self._fs.is_dir(env.etc_dir):
-            return ConfigSectionReport(
-                etc_visible=False,
-                etc_dir=env.etc_dir,
-                prog=env.prog,
-                verb=verb,
-                file_items=(),
-                runtime_items=(),
-            )
-
         file_items: list[PlanItem] = []
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
@@ -236,6 +225,70 @@ class SwapReports:
             )
         )
         tier_change = c_state in ("missing", "change") or f_state in ("missing", "change")
+        return file_items, tier_change
+
+    def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:
+        """The rows of the partition and of swap0 (swaps_text: /proc/swaps)."""
+        runtime_items: list[PlanItem] = []
+        part = self._partition_size_sysfs()
+        if part is not None:
+            dev, size = part
+            if size == spec.expected_size_bytes:
+                runtime_items.append(
+                    PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected")
+                )
+            else:
+                runtime_items.append(
+                    PlanItem(
+                        "REFUSE",
+                        f"partition {spec.partuuid[:8]}...",
+                        f"{size} bytes, expected {spec.expected_size_bytes}: apply stops",
+                    )
+                )
+        else:
+            runtime_items.append(
+                PlanItem("REFUSE", f"partition {spec.partuuid[:8]}...", f"{spec.device_path} not found: apply stops")
+            )
+
+        real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
+        swap0_used = find_swap_used_kib(swaps_text, real_swap0)
+        if swap0_used is not None:
+            if tier_change:
+                if swap0_used == 0:
+                    runtime_items.append(
+                        PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
+                    )
+                else:
+                    runtime_items.append(
+                        PlanItem(
+                            "later",
+                            spec.name,
+                            f"active with {swap0_used // 1024} MiB in use: new options only after a reboot",
+                        )
+                    )
+            else:
+                runtime_items.append(PlanItem("ok", spec.name, f"active as swap ({real_swap0})"))
+        else:
+            runtime_items.append(
+                PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
+            )
+        return runtime_items
+
+    def build_config_report(self, verb: str) -> ConfigSectionReport:
+        """Inspect managed config files and runtime swap/zram states."""
+        env = self._env
+        spec = env.spec
+        if not self._fs.is_dir(env.etc_dir):
+            return ConfigSectionReport(
+                etc_visible=False,
+                etc_dir=env.etc_dir,
+                prog=env.prog,
+                verb=verb,
+                file_items=(),
+                runtime_items=(),
+            )
+
+        file_items, tier_change = self._marked_line_items(spec, verb)
 
         for src, dest in (
             (env.src_tmpfiles, env.tmpfiles_conf),
@@ -271,50 +324,8 @@ class SwapReports:
                 )
             )
 
-        runtime_items: list[PlanItem] = []
-        part = self._partition_size_sysfs()
-        if part is not None:
-            dev, size = part
-            if size == spec.expected_size_bytes:
-                runtime_items.append(
-                    PlanItem("ok", f"partition {spec.partuuid[:8]}...", f"{dev}, {size} bytes as expected")
-                )
-            else:
-                runtime_items.append(
-                    PlanItem(
-                        "REFUSE",
-                        f"partition {spec.partuuid[:8]}...",
-                        f"{size} bytes, expected {spec.expected_size_bytes}: apply stops",
-                    )
-                )
-        else:
-            runtime_items.append(
-                PlanItem("REFUSE", f"partition {spec.partuuid[:8]}...", f"{spec.device_path} not found: apply stops")
-            )
-
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
-        swap0_used = find_swap_used_kib(swaps_text, real_swap0)
-        if swap0_used is not None:
-            if tier_change:
-                if swap0_used == 0:
-                    runtime_items.append(
-                        PlanItem("restart", spec.name, "active and empty: apply re-activates it with the new options")
-                    )
-                else:
-                    runtime_items.append(
-                        PlanItem(
-                            "later",
-                            spec.name,
-                            f"active with {swap0_used // 1024} MiB in use: new options only after a reboot",
-                        )
-                    )
-            else:
-                runtime_items.append(PlanItem("ok", spec.name, f"active as swap ({real_swap0})"))
-        else:
-            runtime_items.append(
-                PlanItem("start", spec.name, "not active: apply opens it (dm-crypt + mkswap) and swaps on")
-            )
+        runtime_items = self._partition_items(spec, swaps_text, tier_change=tier_change)
 
         zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
         if zram_used is None:
