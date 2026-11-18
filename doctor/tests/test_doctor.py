@@ -1353,7 +1353,7 @@ CPU_FEATURES = ("cet-ss", "cet-ibt", "vmx-mbec", "vmx-exit-save-cet", "vmx-entry
 CAPS_QEMU11 = (
     "<domainCapabilities><cpu><mode name='host-passthrough' supported='yes'/>"
     "<mode name='host-model' supported='yes'><model>Arrow</model>"
-    + "".join(f"<feature policy='require' name='{n}'/>" for n in CPU_FEATURES + ("invtsc",))
+    + "".join(f"<feature policy='require' name='{n}'/>" for n in (*CPU_FEATURES, "invtsc"))
     + "</mode></cpu></domainCapabilities>\n"
 )
 CAPS_QEMU10 = (
@@ -2756,7 +2756,7 @@ class HermeticTest(Scratch):
             spawned = (
                 [a for a in args[2:] if not a.startswith("--env=")] if args[:2] == ["flatpak-spawn", "--host"] else []
             )
-            names = [args[0]] + spawned[:1]
+            names = [args[0], *spawned[:1]]
             found = [(n, shutil.which(n, path=path)) for n in names]
             seen.extend(found)
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
