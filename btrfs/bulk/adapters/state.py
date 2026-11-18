@@ -8,10 +8,12 @@ CounterFile, which wiring.py builds.)
 from __future__ import annotations
 
 from collections.abc import Collection
+from collections.abc import Mapping
 from collections.abc import Sequence
 import json
 import os
 import re
+from typing import TypeGuard
 
 from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkPaths, ItemJournal, SteamJournal
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
@@ -27,6 +29,75 @@ def bulk_user(conf: str) -> str | None:
     if parsed.problems:
         raise BadSettings(describe_problems(conf, parsed.problems))
     return parsed.values.get("BULK_USER") or None
+
+
+# The shape recovery may trust: each key it reads without .get, of its type, and the optional
+# ones of their type when present (journals of older versions lack stamp2, conflict, undo).
+# A journal that fails it is damaged: named, kept, and nothing it names is touched.
+type KeyTypes = Mapping[str, tuple[type, ...]]
+_ITEM_REQUIRED: KeyTypes = {
+    "kind": (str,),
+    "src": (str,),
+    "target": (str,),
+    "new": (str,),
+    "old": (str,),
+    "stamp": (int,),
+    "link": (str, type(None)),
+}
+_ITEM_OPTIONAL: KeyTypes = {
+    "stamp2": (int,),
+    "bulk_only": (bool,),
+    "conflict": (bool,),
+    "undo": (bool,),
+    "finishing": (bool,),
+}
+_PART_REQUIRED: KeyTypes = {k: (str,) for k in ("name", "kind", "src", "dst", "new", "old")}
+_PART_OPTIONAL: KeyTypes = {"mode": (str,), "bytes": (int,), "sample": (str,)}
+_STEAM_REQUIRED: KeyTypes = {
+    **{k: (str,) for k in ("kind", "appid", "src_lib", "dst_lib", "size", "contentid", "phase")},
+    "stamp": (int,),
+    "parts": (list,),
+}
+_STEAM_OPTIONAL: KeyTypes = {"stamp2": (int,), "conflict": (bool,), "undo": (bool,)}
+STEAM_PHASES = ("prepared", "switching", "switched", "finishing")
+
+
+def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> TypeGuard[Mapping[str, object]]:
+    """obj is a JSON object with every required key and each known key of its type (a bool is
+    no int here, as JSON tells them apart)."""
+    if not isinstance(obj, dict):
+        return False
+    for key, kinds in (*required.items(), *optional.items()):
+        if key not in obj:
+            if key in required:
+                return False
+            continue
+        value = obj[key]
+        if not isinstance(value, kinds) or (isinstance(value, bool) and bool not in kinds):
+            return False
+    return True
+
+
+def is_item_journal(obj: object) -> TypeGuard[ItemJournal]:
+    """A journal-<id>.json's JSON has the shape btrfs-bulk writes (kind copy or subvol)."""
+    return _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL) and obj["kind"] in ("copy", "subvol")
+
+
+def is_steam_journal(obj: object) -> TypeGuard[SteamJournal]:
+    """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
+    phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
+    if not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
+        return False
+    appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
+    return (
+        obj["kind"] == "steam"
+        and isinstance(appid, str)
+        and re.fullmatch(r"[0-9]+", appid, re.ASCII) is not None
+        and phase in STEAM_PHASES
+        and (phase == "prepared" or "stamp2" in obj)
+        and isinstance(parts, list)
+        and all(_fits(p, _PART_REQUIRED, _PART_OPTIONAL) for p in parts)
+    )
 
 
 class StateFiles:
@@ -52,19 +123,23 @@ class StateFiles:
         # durable: the rename itself is on disk before anything it protects is done.
         write_atomic(self.jpath(ident), json.dumps(j), mode="umask", relabel=False)
 
-    def jread_item(self, ident: str) -> ItemJournal | None:
+    def jload(self, ident: str) -> object:
+        """The journal's JSON; None when it is missing or not JSON."""
         try:
             with open(self.jpath(ident)) as f:
                 return json.load(f)
         except OSError, ValueError:
             return None
 
+    def jread_item(self, ident: str) -> ItemJournal | None:
+        """The item's journal; None when missing, not JSON or not the shape btrfs-bulk writes."""
+        j = self.jload(ident)
+        return j if is_item_journal(j) else None
+
     def jread_steam(self, ident: str) -> SteamJournal | None:
-        try:
-            with open(self.jpath(ident)) as f:
-                return json.load(f)
-        except OSError, ValueError:
-            return None
+        """The Steam game's journal; None when missing, not JSON or not the shape btrfs-bulk writes."""
+        j = self.jload(ident)
+        return j if is_steam_journal(j) else None
 
     def jdrop(self, ident: str) -> None:
         try:

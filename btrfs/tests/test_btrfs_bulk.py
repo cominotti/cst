@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, cast
 from unittest import mock
 
@@ -921,6 +921,55 @@ class BulkTest(BulkBase):
         self.assertLink("Programs", "apps")
         self.assertEqual(self.read("Programs/sub/b"), "b")
         self.assertEqual(self.journals(), [])
+
+    def named_by(self, j: Mapping[str, object]) -> list[tuple[str, str, str | bytes | int]]:
+        """self.tree() limited to the paths journal j names, and the journal file itself."""
+        named = [p for k in ("src", "target", "new", "old", "link") if isinstance(p := j.get(k), str) and p]
+        roots = [*named, self.state.jpath("apps")]
+        return [t for t in self.tree() if any(t[0] == r or t[0].startswith(r + "/") for r in roots)]
+
+    def test_a_journal_of_the_wrong_shape_is_damaged_and_kept(self) -> None:
+        # Valid JSON that btrfs-bulk never writes: a list, a key missing, a key of another type,
+        # an unknown kind. Recovery names it, keeps it, touches no data, and the run needs a look.
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 1)
+        good = self.journal("apps")
+        damaged: list[object] = [
+            [1, 2],
+            {k: v for k, v in good.items() if k != "old"},
+            {**good, "stamp": "0"},
+            {**good, "stamp": True},
+            {**good, "kind": "steam"},
+        ]
+        for bad in damaged:
+            with open(self.state.jpath("apps"), "w") as f:
+                json.dump(bad, f)
+            before = self.named_by(good)
+            self.assertGreater(len(before), 3)  # the journal and the item's data
+            deferred, problems = self.apply()
+            self.assertIn("apps", problems, bad)
+            self.assertIn(f"NEEDS A LOOK: apps: damaged journal {self.state.jpath('apps')} (unreadable", self.out)
+            self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 1)
+            self.assertEqual(self.named_by(good), before, bad)
+            _, text = self.report()
+            self.assertIn("apps: NEEDS A LOOK: damaged journal", text)
+        self.write_journal("apps", good)
+        self.check_recovered()
+
+    def test_an_older_journal_without_the_optional_keys_still_recovers(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 1)
+        old = {k: v for k, v in self.journal("apps").items() if k not in ("stamp2", "bulk_only", "undo", "conflict")}
+        self.write_journal("apps", old)
+        self.check_recovered()
+
+    def test_mount_points_with_escaped_characters(self) -> None:
+        line = "36 25 0:32 / /mnt/a\\040b\\011c\\012d\\134e\\134040f rw - btrfs /dev/x rw\n"
+        with mock.patch("builtins.open", mock.mock_open(read_data=line)):
+            got = bulk_machine.Primitives.mounts(self.machine)
+        self.assertEqual(got, ["/mnt/a b\tc\nd\\e\\040f"])
+        self.assertEqual(bulk_machine.unescape_mountinfo("/plain"), "/plain")
+        self.assertEqual(bulk_machine.unescape_mountinfo("\\0401\\9"), " 1\\9")
 
     def test_failed_recovery_is_a_problem(self) -> None:
         self.setup_programs()

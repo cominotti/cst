@@ -503,14 +503,18 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
     raise Unexpected(f"unknown phase {phase!r}")
 
 
+# How a damaged journal is reported (recovery and report, of items and Steam games alike).
+DAMAGED = "unreadable, or not as btrfs-bulk writes it: left in place, nothing it names was touched"
+
+
 def steam_recover_all(b: Bulk) -> list[str]:
     state, log = b.state, b.out.log
     stuck: list[str] = []
     for ident in state.steam_journal_ids():
         j = state.jread_steam(ident)
-        if not j or j.get("kind") != "steam":
+        if not j:
             stuck.append(ident)
-            log(f"NEEDS A LOOK: {ident}: unreadable journal {state.jpath(ident)}")
+            log(f"NEEDS A LOOK: {ident}: damaged journal {state.jpath(ident)} ({DAMAGED})")
             continue
         try:
             log(f"  {ident}: {steam_recover(b, j)}")

@@ -1332,6 +1332,11 @@ What you should know:
   needs a look, `snapshots setup` says so before starting the snapshots and
   asks first (not for kept items, and not for a problem inside `~/Bulk`
   only, whose data is not in /home).
+- **A damaged journal** (`/var/lib/btrfs-bulk/journal-*.json` that is not
+  JSON, or JSON btrfs-bulk never writes: a key missing or of another type,
+  an unknown kind or phase) is reported as `NEEDS A LOOK: ID: damaged
+  journal PATH`. It stays where it is, nothing it names is touched, and the
+  run exits non-zero. Compare the paths by hand, then delete the journal.
 - **Steam**: close Steam, then `cst btrfs bulk steam plan` and `cst btrfs
   bulk steam apply` move your installed games into `~/Bulk/steam` (a reflink
   copy, checked, then switched; nothing is downloaded again). Before the
