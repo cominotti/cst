@@ -54,6 +54,7 @@ from cst_core.domain.text import (
     parse_snapshots_conf,
     printf_q,
     printf_q_words,
+    read_fields,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
@@ -87,6 +88,19 @@ class DomainTest(unittest.TestCase):
             self.assertTrue(is_yes(answer), answer)
         for answer in ("", "n", "N", "no", " ", "x y", "não"):
             self.assertFalse(is_yes(answer), answer)
+
+    def test_read_fields_as_bash_read_assigns_them(self) -> None:
+        lines = ["  a  b   c  d  ", "a", "", "\ta\tb", "a b c\t", "x  y", "a\x0bb c", " \t "]
+        for line in lines:
+            for n in (1, 2, 3):
+                names = " ".join(f"v{i}" for i in range(n))
+                values = " ".join(f'"$v{i}"' for i in range(n))
+                r = subprocess.run(
+                    ["bash", "-c", f'read -r {names} <<<"$1"; printf "%s\\x1f" {values}', "_", line],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True,
+                )  # fmt: skip
+                with self.subTest(line=line, n=n):
+                    self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")

@@ -29,7 +29,7 @@ import time
 from typing import Final
 
 from cst_core.domain.contracts import state_format
-from cst_core.domain.text import file_lines
+from cst_core.domain.text import file_lines, read_fields
 
 _SPOOL: Final = state_format("alert-spool")
 
@@ -57,7 +57,6 @@ _APP: Final = re.compile(r"[A-Za-z0-9._-]{1,40}")
 _EPOCH: Final = re.compile(r"[0-9]{1,12}")
 _COUNT: Final = re.compile(r"[0-9]{1,9}")
 _MTIME: Final = re.compile(r"[0-9]{1,12}(\.[0-9]{1,10})?")
-_BLANKS: Final = re.compile(r"[ \t\n]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,19 +146,6 @@ class Seen:
 
     def line(self, name: str) -> str:
         return f"{name} {self.mtime} {self.how} {self.count} {self.first}"
-
-
-def read_fields(line: str, n: int) -> list[str]:
-    """The n fields bash's read -r assigns from line (default IFS): the last one takes the rest."""
-    rest = line.strip(" \t\n")
-    fields: list[str] = []
-    while rest and len(fields) < n - 1:
-        parts = _BLANKS.split(rest, maxsplit=1)
-        fields.append(parts[0])
-        rest = parts[1] if len(parts) > 1 else ""
-    if rest:
-        fields.append(rest)
-    return fields + [""] * (n - len(fields))
 
 
 def parse_delivered(text: str) -> dict[str, Seen]:
