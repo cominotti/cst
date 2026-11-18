@@ -10,7 +10,36 @@ from datetime import datetime
 import os
 import re
 
+from cst_core.domain.contracts import StateFormat, state_format, version_of
 from cst_core.domain.values import format_bytes_decimal
+
+# The recorder's state and the last run's summary (the files of GcPaths).
+STATE_FORMAT: StateFormat = state_format("docker-gc-state")
+LAST_RUN_FORMAT: StateFormat = state_format("docker-gc-last-run")
+
+
+class NewerState(RuntimeError):
+    """A state file of a newer docker-gc: nothing is recorded or removed with it, and it is left as it is."""
+
+
+# The exit status of a command that met a NewerState. docker-gc-recorder.service names it in
+# RestartPreventExitStatus=: the recorder then stays failed (cst doctor lists it) instead of being
+# started again every 10 s to read the same file. Not 1 (any other error), not 2 (usage); record
+# passes on the status `docker events` ends with (the docker CLI uses 1 for its errors).
+# 65: EX_DATAERR of sysexits.h.
+NEWER_STATE_EXIT = 65
+
+
+def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
+    """The format of a state file as read ("v"; none: 0, an older docker-gc wrote it), None when it is not one
+    docker-gc wrote. Raises NewerState for a newer format than fmt's."""
+    if (found := fmt.newer(data, "v")) is not None:
+        raise NewerState(
+            f"{fmt.newer_text(path, found)}: nothing is recorded or removed with it, and it is left as it is; "
+            "install the docker-gc of that CST (cst btrfs docker-gc enable in that checkout)"
+        )
+    return version_of(data, "v")
+
 
 DAY = 86400
 HEARTBEAT_SECONDS = 300
@@ -96,7 +125,7 @@ class GcSettings:
 class GcPaths:
     """Where docker-gc keeps its state (StateDirectory) and its run lock (RuntimeDirectory)."""
 
-    state_dir: str = "/var/lib/docker-gc"
+    state_dir: str = STATE_FORMAT.folder
     # In docker-gc.service's RuntimeDirectory= (kept after the run): with the state folder, the
     # places the sandboxed unit may write. Shared with runs outside it (cleanup-now,
     # run --dry-run), which make the folder; a tmpfs, so they leave no file in the state folder.
@@ -104,11 +133,11 @@ class GcPaths:
 
     @property
     def last_used(self) -> str:
-        return os.path.join(self.state_dir, "last-used.json")
+        return os.path.join(self.state_dir, STATE_FORMAT.file_name)
 
     @property
     def last_run(self) -> str:
-        return os.path.join(self.state_dir, "last-run.json")
+        return os.path.join(self.state_dir, LAST_RUN_FORMAT.file_name)
 
     @property
     def lock(self) -> str:

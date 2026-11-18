@@ -543,7 +543,16 @@ class AlertsTest(Scratch):
         os.utime(p, (NOW - age, NOW - age))
         return p
 
+    def reader(self) -> None:
+        """cst-pending-alerts installed, as btrfs:alerts installs it."""
+        p = os.path.join(self.root, "usr", "local", "bin", "cst-pending-alerts")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(p, 0o755)
+
     def test_unseen_alerts(self) -> None:
+        self.reader()
         self.alert("a" * 32 + ".alert", "critical", "btrfs: device missing")
         self.alert("b" * 32 + ".alert")
         self.alert("c" * 32 + ".alert", age=8 * 86400)  # too old
@@ -555,6 +564,18 @@ class AlertsTest(Scratch):
         self.assertIn("WARN   alert you have not seen yet (normal", r.stdout)
         self.assertEqual(r.stdout.count("alert you have not seen yet"), 2)
         self.assertIn("fix: cst-pending-alerts --list\n", r.stdout)
+
+    def test_an_unseen_alert_without_its_reader_names_the_install(self) -> None:
+        # Kept by cst_core when btrfs-notify is missing: then cst-pending-alerts (same component) is
+        # missing too, and "shown at your next login, fix: cst-pending-alerts --list" was false.
+        self.alert("a" * 32 + ".alert", "critical", "~/Bulk: nothing moved at boot")
+        r = self.run_tool()
+        self.assertIn(
+            "ERROR  alert you have not seen yet (critical, Thu 05 Nov 16:33): ~/Bulk: nothing moved at boot (no login "
+            "shows it while /usr/local/bin/cst-pending-alerts is missing: the fix installs it)\n"
+            "         fix: cst btrfs install\n",
+            r.stdout,
+        )
 
     def test_seen_alert_is_info(self) -> None:
         p = self.alert("d" * 32 + ".alert")
@@ -1622,6 +1643,28 @@ class VmTest(Scratch):
         self.assertNotIn("ostree admin pin", r.stdout)
         self.assertIn("No VM backup since the booted deployment was built", r.stdout)
 
+    def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
+        # After going back to an older CST: a newer index is neither taken for "never backed up"
+        # nor read as if this checkout knew its format.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        with open(path) as f:
+            data = json.load(f)
+        data["version"] = 2
+        with open(path, "w") as f:
+            json.dump(data, f)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(
+            "WARN   /var/lib/cst/vm-backups.json is format 2 of the vm-index (this CST reads format 1 and older): "
+            "written by a newer CST: cst vm refuses to back up or list with it",
+            r.stdout,
+        )
+        self.assertIn("last backup: unknown (see the index line)", r.stdout)
+        self.assertNotIn("rollback pinned and VM backup present", r.stdout)
+        self.assert_read_only()
+
     def test_pin_index_follows_the_list(self) -> None:
         """A staged deployment first: booted is 1, rollback 2."""
         self.deployments()
@@ -2253,9 +2296,47 @@ class InstallAreaTest(Scratch):
         res = list(doc_app.check_vm_backup_alerts(self.host))
         self.assertEqual(len(res), 1)
         self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
-        self.assertIn("a failed NAS backup of the VM alerts nobody", res[0].message)
+        # cst vm sends through cst_core's notify adapter, which keeps the alert for the alerts area.
+        self.assertIn(
+            "a failed NAS backup of the VM reaches no desktop, only the journal and the pending alerts above",
+            res[0].message,
+        )
         self.install("btrfs:alerts")
         self.assertEqual(list(doc_app.check_vm_backup_alerts(self.host)), [])
+
+    def test_units_that_alert_without_btrfs_notify_warn(self) -> None:
+        # A refusal of btrfs-bulk-boot (a bad bulk.conf line) alerts through btrfs-notify; without it the
+        # alert reached nobody. Now it is kept for this doctor, which also says why no desktop shows it.
+        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+        self.install("btrfs:snapshots")
+        res = list(doc_app.check_alert_program(self.host))
+        self.assertEqual(len(res), 1, res)
+        self.assertEqual((res[0].status, res[0].fix), (doc_domain.WARN, "cst btrfs install"))
+        self.assertTrue(
+            res[0].message.startswith(
+                "btrfs-bulk-boot.service, btrfs-snapshot.service, btrfs-snapshot-nas.service alert through "
+                "/usr/local/sbin/btrfs-notify, which is missing"
+            ),
+            res[0].message,
+        )
+        self.assertTrue(
+            res[0].message.endswith("; btrfs-bulk-boot.service: also the pending alerts above"), res[0].message
+        )
+        self.install("btrfs:alerts")
+        self.assertEqual(list(doc_app.check_alert_program(self.host)), [])
+
+    def test_units_whose_alerts_are_not_kept_are_not_said_to_be(self) -> None:
+        # The health check and the stall alert are bash: without btrfs-notify their alerts reach only the
+        # journal, and the line must not send the reader to the pending alerts for them.
+        units = os.path.join(self.root, "etc/systemd/system")
+        os.makedirs(units, exist_ok=True)
+        for name in ("btrfs-health-check.service", "btrfs-stall-alert.service"):  # btrfs:core's
+            open(os.path.join(units, name), "w").close()
+        [res] = list(doc_app.check_alert_program(self.host))
+        self.assertIn("btrfs-health-check.service", res.message)
+        self.assertNotIn("btrfs-bulk-boot", res.message)
+        self.assertNotIn("pending alerts", res.message)
+        self.assertTrue(res.message.endswith("their alerts reach no desktop, only the journal"), res.message)
 
     def test_unit_exec_paths(self) -> None:
         text = (

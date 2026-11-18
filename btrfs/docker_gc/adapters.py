@@ -19,11 +19,14 @@ from btrfs.docker_gc.domain import (
     DockerEvent,
     EventsEnd,
     GcPaths,
+    LAST_RUN_FORMAT,
+    STATE_FORMAT,
     GcState,
     Image,
     RunSummary,
     Volume,
     daemon_down,
+    stored_version,
     ts,
 )
 from btrfs.docker_gc.ports import EventSink
@@ -264,7 +267,7 @@ class GcStateFiles:
                 st = json.load(f)
         except OSError, ValueError:
             st = None
-        if isinstance(st, dict):
+        if isinstance(st, dict) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
             images, since = st.get("images"), _num(st.get("since"))
             heartbeat = _num(st.get("heartbeat", 0))
             # a value that is not a time: not a state docker-gc wrote
@@ -275,7 +278,10 @@ class GcStateFiles:
 
     def save_state(self, state: GcState) -> None:
         os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
-        write_atomic(self.paths.last_used, json.dumps(asdict(state)), mode="umask", durable="file", relabel=False)
+        # "v": its format (STATE_FORMAT). A docker-gc from this format on refuses a state of a newer one;
+        # one from before the field reads any state as its own (format 0).
+        text = json.dumps({**asdict(state), "v": STATE_FORMAT.version})
+        write_atomic(self.paths.last_used, text, mode="umask", durable="file", relabel=False)
 
     def load_summary(self) -> RunSummary | None:
         try:
@@ -284,6 +290,8 @@ class GcStateFiles:
         except OSError, ValueError:
             return None
         lr = _obj(lr)
+        if stored_version(LAST_RUN_FORMAT, self.paths.last_run, lr) is None:
+            return None
         at = _num(lr.get("at"))
         counts = [n for k in SUMMARY_COUNTS if (n := _num(lr.get(k))) is not None]
         if at is None or len(counts) < len(SUMMARY_COUNTS):
@@ -294,7 +302,8 @@ class GcStateFiles:
     def save_summary(self, summary: RunSummary) -> None:
         """LAST_RUN, replaced atomically (it was rewritten in place): what status shows of the last run."""
         os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
-        write_atomic(self.paths.last_run, json.dumps(asdict(summary)), mode="umask", durable=False, relabel=False)
+        text = json.dumps({**asdict(summary), "v": LAST_RUN_FORMAT.version})
+        write_atomic(self.paths.last_run, text, mode="umask", durable=False, relabel=False)
 
     def take_run_lock(self) -> bool:
         """The run lock, held (its fd open) until the process ends."""

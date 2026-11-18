@@ -20,6 +20,9 @@ from doctor.domain import (
     ALERT_KEEP_DAYS,
     ALERT_MAX_FILE,
     ALERT_NAME,
+    ALERT_PENDING,
+    ALERTING_UNITS,
+    KEEPING_UNITS,
     BTRFS_SYSFS,
     CET_ISSUE,
     CPU_CONF,
@@ -34,6 +37,7 @@ from doctor.domain import (
     HEALTH_CHECK_HOST,
     INFO,
     NOTIFY_HOST,
+    PENDING_READER_HOST,
     MIRROR_COPIES,
     NOCOW_POSTPONED,
     NOCOW_WARN_BOOTS,
@@ -54,6 +58,7 @@ from doctor.domain import (
     VIRSH_URI,
     VM_CONF,
     VM_INDEX,
+    VM_INDEX_FORMAT,
     VM_LIVE_STATES,
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
@@ -382,9 +387,9 @@ def mtime_matches(recorded: str, st: os.stat_result) -> bool:
 
 @check("alerts")
 def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
-    pending = host.path(HostPath("/var/lib/cst-alerts/pending"))
+    pending = host.path(ALERT_PENDING)
     if not host.isdir(pending):
-        yield Result(INFO, f"no alert folder /var/lib/cst-alerts/pending (installed by {host.cst} btrfs install)")
+        yield Result(INFO, f"no alert folder {ALERT_PENDING} (installed by {host.cst} btrfs install)")
         return
     try:
         names = sorted(n for n in host.listdir(pending) if ALERT_NAME.match(n))
@@ -409,13 +414,18 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
             seen_n += 1
         else:
             unseen.append(a)
+    reader = runs(host, PENDING_READER_HOST)
     for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
         when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
         yield Result(
             ERROR if urgency == "critical" else WARN,
-            f"alert you have not seen yet ({urgency}, {when}): {title} (shown at your next login; "
-            f"the fix shows it now, as does {host.cst} btrfs status)",
-            "cst-pending-alerts --list",
+            f"alert you have not seen yet ({urgency}, {when}): {title} ("
+            + (
+                f"shown at your next login; the fix shows it now, as does {host.cst} btrfs status)"
+                if reader
+                else f"no login shows it while {PENDING_READER_HOST} is missing: the fix installs it)"
+            ),
+            "cst-pending-alerts --list" if reader else refresh(host, "btrfs:alerts"),
         )
     if seen_n:
         yield Result(
@@ -424,6 +434,27 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
         )
     if not unseen and not seen_n:
         yield Result(OK, "no pending alerts")
+
+
+def runs(host: DoctorHostPort, program: HostPath) -> bool:
+    """program is installed and executable."""
+    view = host.path(program)
+    return host.isfile(view) and bool(host.stat(view).st_mode & 0o111)
+
+
+@check("alerts")
+def check_alert_program(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN when installed units alert through btrfs-notify but it is missing (KEEPING_UNITS: kept for this doctor)."""
+    units = [os.path.basename(u) for u in ALERTING_UNITS if host.exists(host.path(u))]
+    if not units or runs(host, NOTIFY_HOST):
+        return
+    kept = ", ".join(u for u in units if u in KEEPING_UNITS)
+    yield Result(
+        WARN,
+        f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, only the "
+        "journal" + (f"; {kept}: also the pending alerts above" if kept else ""),
+        refresh(host, "btrfs:alerts"),
+    )
 
 
 @check("alerts")
@@ -1248,13 +1279,21 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
             )
 
 
-def newest_vm_backup(host: DoctorHostPort) -> float:
-    """Epoch of the newest backup in cst vm's index, 0 when none or unreadable."""
+def vm_index_data(host: DoctorHostPort) -> object:
+    """cst vm's backup index as read, None when it is missing or unreadable."""
     try:
         with host.open_text(host.path(VM_INDEX)) as f:
-            data = json.load(f)
+            return json.load(f)
     except OSError, ValueError:
-        return 0
+        return None
+
+
+def newest_vm_backup(host: DoctorHostPort) -> float | None:
+    """Epoch of the newest backup in cst vm's index, 0 when none or unreadable, None when the index is of
+    a newer cst vm (not read: check_vm_index says so)."""
+    data = vm_index_data(host)
+    if VM_INDEX_FORMAT.newer(data, "version") is not None:
+        return None
     entries = data.get("backups") if isinstance(data, dict) else None
     return max(
         (e["epoch"] for e in entries or [] if isinstance(e, dict) and isinstance(e.get("epoch"), (int, float))),
@@ -1267,6 +1306,19 @@ def nas_configured(host: DoctorHostPort) -> bool:
     parsed = settings_of(host, SNAP_CONF)
     values = parsed.values if parsed else {}
     return values.get("NAS_ENABLED") == "1" and bool(values.get("NAS_PATH"))
+
+
+@check("vm")
+def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN when cst vm's backup index is of a newer format: this checkout's cst vm refuses to back up
+    or list with it (after going back to an older CST)."""
+    found = VM_INDEX_FORMAT.newer(vm_index_data(host), "version")
+    if found is not None:
+        yield Result(
+            WARN,
+            f"{VM_INDEX_FORMAT.newer_text(VM_INDEX, found)}: {host.cst} vm refuses to back up or list "
+            "with it; use the cst vm of that CST (its checkout: cst vm backup-timer on)",
+        )
 
 
 @check("vm")
@@ -1305,7 +1357,7 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
     ts = booted.get("timestamp")
     built = ts if isinstance(ts, (int, float)) else 0
     backup = newest_vm_backup(host)
-    fresh = backup > built > 0
+    fresh = backup is not None and backup > built > 0
     if pinned and fresh:
         yield Result(INFO, f"{what}; rollback pinned and VM backup present")
         return
@@ -1319,7 +1371,13 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
         )
     if not fresh:
         when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
-        last = time.strftime("%Y-%m-%d", time.localtime(backup)) if backup else "never"
+        last = (
+            "unknown (see the index line)"
+            if backup is None
+            else time.strftime("%Y-%m-%d", time.localtime(backup))
+            if backup
+            else "never"
+        )
         if nas_configured(host):
             yield Result(
                 WARN,
@@ -1580,12 +1638,11 @@ def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
         timers = sorted(n for n in host.listdir(host.path(VM_TIMER_WANTS)) if n.startswith("cst-vm-backup@"))
     except OSError:
         return
-    notify = host.path(NOTIFY_HOST)
-    if not timers or (host.isfile(notify) and host.stat(notify).st_mode & 0o111):
+    if not timers or runs(host, NOTIFY_HOST):
         return
     yield Result(
         WARN,
-        f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM alerts nobody",
+        f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM reaches no desktop, only the journal and the pending alerts above",
         refresh(host, "btrfs:alerts"),
     )
 
@@ -1664,8 +1721,7 @@ def _unit_findings(
         return False
     bad = False
     for prog in unit_exec_paths(text, home):
-        p = host.path(HostPath(prog))
-        if not (host.isfile(p) and host.stat(p).st_mode & 0o111):
+        if not runs(host, HostPath(prog)):
             out.results.append(
                 Result(WARN, f"{dest} runs {prog}, which is missing or not executable", refresh(host, f.component))
             )

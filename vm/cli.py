@@ -77,6 +77,7 @@ from vm.adapters import (
     probe_dir,
     qcow2_backing_file,
     read_conf,
+    check_backup_start,
     read_index,
     restic,
     run,
@@ -184,8 +185,7 @@ def check_shut_off(vm: str) -> None:
 
 
 def cmd_backup(vm: str, full: bool) -> int:
-    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
-        raise Refused("backup needs root: run it as `cst vm backup` (it calls sudo by itself)")
+    check_backup_start("backup")
     check_shut_off(vm)
     rc, xml_text, err = virsh("dumpxml", "--inactive", "--security-info", vm)
     if rc != 0:
@@ -599,8 +599,7 @@ def nas_sources(vm: str, parts: Mapping[str, Any], notes: list[str]) -> list[tup
 
 
 def cmd_backup_nas(vm: str, keep: str | None, quiesce: bool) -> int:
-    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
-        raise Refused("backup --nas needs root: run it as `cst vm backup --nas` (it calls sudo by itself)")
+    check_backup_start("backup --nas")
     if "," in vm or not vm.strip():
         raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
     nas = nas_settings()

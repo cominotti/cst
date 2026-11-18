@@ -14,8 +14,9 @@ import time
 import zlib
 
 from btrfs.stall_report.domain import BelowItem
+from cst_core.domain.contracts import state_format
 
-LOG_DIR = "/var/log/btrfs-stall-monitor"
+LOG_DIR = state_format("stall-records").folder
 
 
 def parse_time(s: str | None, default: float) -> float:

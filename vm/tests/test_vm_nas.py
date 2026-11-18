@@ -285,6 +285,7 @@ class Nas(unittest.TestCase):
             "CST_VM_NAS_STAGE": self.stage,
             "CST_VM_RUN_DIR": os.path.join(self.tmp, "run"),
             "CST_VM_NOTIFY": os.path.join(self.bin, "notify"),
+            "CST_VM_ALERTS": os.path.join(self.tmp, "alerts", "pending"),
             "CST_VM_CONF": os.path.join(self.tmp, "vm.conf"),
             "CST_VM_UNIT_DIR": self.units,
             "UNIT_DIR": self.units,
@@ -628,6 +629,24 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
+
+    def test_an_index_of_a_newer_cst_vm_stops_the_nas_backup_before_restic(self) -> None:
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        with open(self.index, "w") as f:
+            json.dump({"version": 2, "backups": []}, f)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"{self.index} is format 2 of the vm-index (this CST reads format 1 and older)", r.stderr)
+        self.assertFalse([c for c in self.calls() if c.startswith("restic ") or "snapshot-create" in c])
+
+    def test_a_nas_entry_has_the_fields_of_the_checked_in_index(self) -> None:
+        # The fixture main's readers were shown to read (tests/fixtures/state-formats/vm-index-v1.json).
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
+            nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
+        self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
+        [real] = [e for e in vm_adapters.read_index(self.index) if e.get("mode") == "nas"]
+        self.assertEqual(set(real), set(nas))
 
     def test_list_shows_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)

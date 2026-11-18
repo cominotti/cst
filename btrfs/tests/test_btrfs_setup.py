@@ -936,7 +936,8 @@ class DockerGcUnitsTest(unittest.TestCase):
     def test_both_have_the_same_sandbox(self) -> None:
         # The block is written out in each unit (systemd has no include): a setting added to
         # one only shows here. What differs is the job, and the weekly run's lock folder.
-        own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "Nice", "IOSchedulingClass"}
+        own = {"Type", "ExecCondition", "ExecStart", "Restart", "RestartSec", "RestartPreventExitStatus", "Nice"}
+        own |= {"IOSchedulingClass"}
         own |= {"TimeoutStartSec", "Environment", "RuntimeDirectory", "RuntimeDirectoryPreserve"}
         recorder, weekly = ({k: v for k, v in self.service(name).items() if k not in own} for name in self.UNITS)
         self.assertEqual(recorder, weekly)

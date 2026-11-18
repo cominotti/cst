@@ -44,6 +44,7 @@ from btrfs.bulk.domain import (
     vdf_block,
     vdf_text,
 )
+from btrfs.bulk.ports import BulkStatePort
 
 
 # ---- Steam: reading and checking (as root: lstat only; file contents are read as the user) ----
@@ -507,6 +508,11 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
 DAMAGED = "unreadable, or not as btrfs-bulk writes it: left in place, nothing it names was touched"
 
 
+def damaged(state: BulkStatePort, ident: str) -> str:
+    """What NEEDS A LOOK says of a journal that is not as btrfs-bulk writes it."""
+    return f"damaged journal {state.jpath(ident)} ({DAMAGED})"
+
+
 def steam_recover_all(b: Bulk) -> list[str]:
     state, log = b.state, b.out.log
     stuck: list[str] = []
@@ -514,7 +520,7 @@ def steam_recover_all(b: Bulk) -> list[str]:
         j = state.jread_steam(ident)
         if not j:
             stuck.append(ident)
-            log(f"NEEDS A LOOK: {ident}: damaged journal {state.jpath(ident)} ({DAMAGED})")
+            log(f"NEEDS A LOOK: {ident}: {state.newer_journal(ident) or damaged(state, ident)}")
             continue
         try:
             log(f"  {ident}: {steam_recover(b, j)}")

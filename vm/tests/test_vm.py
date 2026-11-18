@@ -42,6 +42,10 @@ from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# A VM backup index as cst vm writes it (tests/fixtures/state-formats).
+INDEX_FIXTURE = os.path.join(
+    os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats", "vm-index-v1.json"
+)
 VM_DIR = os.path.dirname(HERE)
 TOOL = os.path.join(VM_DIR, "cst-vm")
 REPO = os.path.dirname(VM_DIR)
@@ -203,6 +207,9 @@ class Scratch(unittest.TestCase):
             "CST_VM_SWTPM_DIR": self.swtpm,
             "CST_PROG": "cst vm",
             "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),
+            # Never the host's btrfs-notify or its pending alerts folder.
+            "CST_VM_NOTIFY": os.path.join(self.tmp, "no-btrfs-notify"),
+            "CST_VM_ALERTS": os.path.join(self.tmp, "alerts", "pending"),
         }
 
     def state(self, s: str) -> None:
@@ -446,6 +453,46 @@ class BackupTest(Scratch):
         p = closed_pipe("backup", "win")
         self.assertEqual((p.returncode, p.stderr), (0, b""))
         self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
+
+    def test_an_index_of_a_newer_cst_vm_stops_the_backup_before_it_copies(self) -> None:
+        # After going back to an older CST: the backup would end in write_index, which would drop
+        # what this cst vm does not know of the newer index. Refused before anything is copied.
+        os.makedirs(os.path.dirname(self.index))
+        text = json.dumps({"version": 2, "backups": [{"vm": "win", "path": "/x", "epoch": 1, "timestamp": "a"}]})
+        with open(self.index, "w") as f:
+            f.write(text)
+        for args in (("backup", "win"), ("list",)):
+            with self.subTest(args=args):
+                r = self.run_tool(*args)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"cst vm: {self.index} is format 2 of the vm-index (this CST reads format 1 and older): "
+                    "written by a newer CST: left as it is, and nothing is backed up or listed with it",
+                    r.stderr,
+                )
+        self.assertEqual([c for c in self.calls() if c.startswith("cp ")], [])
+        self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))
+        with open(self.index) as f:
+            self.assertEqual(f.read(), text)
+
+    def test_the_index_writer_produces_the_checked_in_file_exactly(self) -> None:
+        # The bytes main's cst vm and doctor read (the format did not change; REPORT has the proof):
+        # a local and a NAS entry with every field. The real entries' fields are checked against them
+        # (here, and in test_vm_nas for a NAS backup), so a new field fails and needs the proof again.
+        with open(INDEX_FIXTURE) as f:
+            text = f.read()
+        entries = json.loads(text)["backups"]
+        path = os.path.join(self.tmp, "index.json")
+        vm_adapters.write_index(entries, path)
+        with open(path) as f:
+            self.assertEqual(f.read(), text)
+        with open(path, "w") as f:
+            json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
+        self.assertEqual(vm_adapters.read_index(path), entries)
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        [real] = json.load(open(self.index))["backups"]
+        self.assertEqual(set(real), set(entries[0]))
+        self.assertEqual(set(real["deployment"]), set(entries[0]["deployment"]))
 
     def test_index_drops_removed_backups(self) -> None:
         os.makedirs(os.path.dirname(self.index))

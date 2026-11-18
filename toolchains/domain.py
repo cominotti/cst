@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
 from cst_core.domain.errors import Usage
+from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.units import render_timer as unit_timer, render_unit_file
 from cst_core.domain.values import MIB, ByteSize, DomainValidationError, Duration, format_bytes_gib_mib
@@ -32,10 +33,11 @@ CONF_REL = ".config/cst/toolchains.conf"
 # Left by `auto off` (and removed by `auto on`): `snapshots setup` then does
 # not turn the timer back on (auto on --unless-off).
 OFF_REL = ".config/cst/toolchains-auto.off"
-LIB_REL = ".local/lib/cst"
-PROG_REL = f"{LIB_REL}/{NAME}"
+# Where `auto on` installs the helper and its defaults (their manifest rows), relative to the home.
+PROG_REL = manifest_by_src()["toolchains/cst-toolchains"].dest.removeprefix("~/")
+LIB_REL = os.path.dirname(PROG_REL)
 DEFAULTS_NAME = "toolchains.conf"
-DEFAULTS_REL = f"{LIB_REL}/{DEFAULTS_NAME}"
+DEFAULTS_REL = manifest_by_src()["toolchains/toolchains.conf"].dest.removeprefix("~/")
 UNIT_DIR_REL = ".config/systemd/user"
 STATE_DIR_REL = ".local/state/cst"
 SERVICE = "cst-toolchains-prune.service"
@@ -570,7 +572,7 @@ def same_debug(value: object, want: object) -> bool:
 # --no-sccache removes CST's line again: a wrapper left behind is riskier
 # than a debug setting. RUST_SCCACHE=no alone never removes it.
 WRAPPER_NAME = "rustc-wrapper"
-WRAPPER_REL = ".local/libexec/cst/rustc-wrapper"
+WRAPPER_REL = manifest_by_src()["toolchains/rustc-wrapper"].dest.removeprefix("~/")
 SCCACHE_DIR_REL = ".cache/sccache"
 SCCACHE_DEFAULT_SIZE = "25G"
 SCCACHE_HEAD = (

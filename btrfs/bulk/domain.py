@@ -18,9 +18,9 @@ from typing import TypedDict
 import os
 import re
 
+from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
 from cst_core.domain.values import format_bytes_gib_mib
 
-NOTIFY = "/usr/local/sbin/btrfs-notify"
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
 TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
@@ -501,13 +501,13 @@ class BulkPaths:
     keep: str = "/etc/btrfs-setup/bulk-keep"
     convert_plan: str = "/etc/btrfs-setup/convert-plan"
     snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
-    notify: str = NOTIFY
-    state: str = "/var/lib/btrfs-bulk"
+    notify: str = NOTIFY_PROGRAM
+    state: str = state_format("bulk-journal").folder
     attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
     lock: str = "/run/btrfs-snapshot.lock"  # shared with btrfs-snapshot
 
     @classmethod
-    def under(cls, *, etc: str, state: str, lock: str, notify: str = NOTIFY) -> BulkPaths:
+    def under(cls, *, etc: str, state: str, lock: str, notify: str = NOTIFY_PROGRAM) -> BulkPaths:
         """The same files in the folders etc and state, the lock at lock."""
         return cls(
             etc=etc,

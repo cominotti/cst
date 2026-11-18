@@ -315,7 +315,11 @@ class FakeSystem:
 
         As subprocess.run(capture_output=True, text=True) ran them: stdin ours, strict
         decoding; btrfs-notify's output was never decoded."""
-        want = {"stdin": "inherit"} if args[0] == self.notify else {"stdin": "inherit", "decode_errors": "strict"}
+        want = (
+            {"timeout": 60, "new_session": True}
+            if args[0] == self.notify
+            else {"stdin": "inherit", "decode_errors": "strict"}
+        )
         if kw != want:
             raise AssertionError(f"{args[0]} run with {kw}, not {want}")
         if args[0] not in self.missing:
@@ -437,6 +441,7 @@ class Base(unittest.TestCase):
             attempts=self.attempts,
             postponed=self.postponed,
             notify=self.notify,
+            alerts=os.path.join(self.tmp, "alerts", "pending"),
             proc=self.proc,
         )
         self.cli = Commands(nocow_wiring.build_nocow(self.paths, runner=self.fs))
@@ -445,7 +450,15 @@ class Base(unittest.TestCase):
         self.enterContext(mock.patch.object(os, "getxattr", self.fs.getxattr))
         # Nothing of the helper may point outside the test folder.
         paths = self.cli.service.paths
-        for path in (paths.volumes, paths.flag, paths.attempts, paths.postponed, paths.notify, paths.proc):
+        for path in (
+            paths.volumes,
+            paths.flag,
+            paths.attempts,
+            paths.postponed,
+            paths.notify,
+            paths.alerts,
+            paths.proc,
+        ):
             self.assertTrue(path.startswith(self.tmp + os.sep), path)
 
     # ---- set-up helpers ---------------------------------------------------
@@ -780,15 +793,24 @@ class MissingProgramTest(Base):
         self.assertEqual(sorted(os.listdir(os.path.join(self.vols, "cow"))), ["_data", "_data.nocow-new"])
 
     def test_notify_missing_after_giving_up(self) -> None:
+        """Without btrfs-notify the alert is kept in the pending folder (cst doctor shows it), and the journal says so."""
         self.set_attempts("2")
         self.fs.missing.add(self.notify)
         rc, out, _ = self.main("migrate")
         self.assertEqual(rc, 0)
+        pending = os.path.join(self.tmp, "alerts", "pending")
+        [name] = os.listdir(pending)
+        kept = os.path.join(pending, name)
         self.assertEqual(
             out,
             f"<3>{TAG}: Gave up after two boots; see journalctl -u docker-volumes-nocow.\n"
-            f"<3>{TAG}: {self.vols}: [Errno 2] No such file or directory: '{self.notify}'\n",
+            f"<3>{TAG}: alert not delivered ({self.notify} is not installed): "
+            f"Docker volumes: NOCOW migration gave up; kept in {kept} (cst doctor shows it)\n",
         )
+        with open(kept) as f:
+            text = f.read()
+        self.assertTrue(text.startswith("cst-alert 1\nurgency=normal\napp=btrfs-setup\n"), text)
+        self.assertIn("\ntitle=Docker volumes: NOCOW migration gave up\n\nGave up after two boots", text)
         self.assertFalse(os.path.exists(self.flag))
         self.assertIsNone(read_attempts(self))
 

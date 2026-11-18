@@ -26,7 +26,9 @@ from datetime import UTC, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
+RECORDER_UNIT = os.path.join(os.path.dirname(HERE), "units", "docker-gc-recorder.service")
 DAY = 86400
+NEWER_STATE_EXIT = 65  # a state file of a newer docker-gc: the recorder unit does not restart on it
 
 FAKE_DOCKER = r"""#!@PYTHON@ -I
 import json, os, sys, time
@@ -409,6 +411,49 @@ class StatusTest(unittest.TestCase):
         rc, out, err = self.p.run("run", "--dry-run")
         self.assertEqual((rc, out, err), (1, "<3>docker-gc: docker volume ls: Error response from daemon: boom\n", ""))
 
+    def test_a_state_of_a_newer_docker_gc_stops_every_command_and_stays(self) -> None:
+        # After going back to an older CST: the older docker-gc must not read a newer last-used.json
+        # as "no state" and write over it (or remove images by it).
+        path = os.path.join(self.p.state, "last-used.json")
+        text = json.dumps({"since": OLD, "images": {sha("8"): self.p.now}, "heartbeat": self.p.now, "v": 2})
+        with open(path, "w") as f:
+            f.write(text)
+        before = self.p.docker()
+        for args in (("status",), ("run",), ("run", "--dry-run"), ("record",)):
+            with self.subTest(args=args):
+                rc, out, err = self.p.run(*args)
+                self.assertEqual((rc, err), (NEWER_STATE_EXIT, ""))
+                self.assertIn(f"<3>docker-gc: {path} is format 2 of the docker-gc-state (this CST reads format 1", out)
+                with open(path) as f:
+                    self.assertEqual(f.read(), text)
+        self.assertEqual(self.p.docker(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.p.state, "last-run.json")))
+
+    def test_a_last_run_of_a_newer_docker_gc_stops_the_run_before_it_removes(self) -> None:
+        # The run writes last-run.json at its end and never read it: a newer one was written over.
+        path = os.path.join(self.p.state, "last-run.json")
+        text = json.dumps(
+            {"at": OLD, "containers": 0, "volumes": 0, "images": 0, "image_bytes": 0, "failed": 0, "v": 2}
+        )
+        with open(path, "w") as f:
+            f.write(text)
+        before = self.p.docker()
+        rc, out, err = self.p.run("run")
+        self.assertEqual((rc, err), (NEWER_STATE_EXIT, ""))
+        self.assertIn(f"<3>docker-gc: {path} is format 2 of the docker-gc-last-run (this CST reads format 1", out)
+        with open(path) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(self.p.docker(), before)
+
+    def test_the_recorder_unit_does_not_restart_on_a_newer_state(self) -> None:
+        # Restart=on-failure with RestartSec=10 would start the recorder again every 10 s, forever, to
+        # read the same file (systemd's start limit never trips at that pace), and the unit would never
+        # show as failed. Its exit status for that case stops the restarts (tier 1 test_78: real systemd).
+        with open(RECORDER_UNIT) as f:
+            service = f.read().split("[Service]\n", 1)[1].split("\n[", 1)[0].splitlines()
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT}", service)
+
     def test_cleanup_now_needs_a_terminal(self) -> None:
         rc, out, err = self.p.run("cleanup-now")
         self.assertEqual((rc, out), (1, ""))
@@ -434,7 +479,7 @@ class RecordTest(unittest.TestCase):
 
     def check_state(self, start: float, end: float) -> None:
         st = self.p.last_used()
-        self.assertEqual(list(st), ["since", "images", "heartbeat"])
+        self.assertEqual(list(st), ["since", "images", "heartbeat", "v"])
         images = st["images"]
         assert isinstance(images, dict)
         # Every container counts as a use at the start (stopped ones: when they stopped), then the events.

@@ -138,7 +138,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "doctor/cli.py": 24,
     "swap/cli.py": 99,
     "toolchains/cli.py": 1887,
-    "vm/cli.py": 1287,
+    "vm/cli.py": 1285,
 }
 
 
@@ -244,7 +244,7 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
     "btrfs/bulk os.fsync": 3,
     "btrfs/bulk subprocess.Popen": 1,
-    "btrfs/bulk subprocess.run": 13,
+    "btrfs/bulk subprocess.run": 12,
     "btrfs/chrome_cache os.fsync": 1,
     "btrfs/docker_gc subprocess.Popen": 1,
     "btrfs/docker_volumes_nocow os.fsync": 1,

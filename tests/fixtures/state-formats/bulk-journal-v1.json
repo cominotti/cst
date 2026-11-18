@@ -1,0 +1,1 @@
+{"kind": "copy", "src": "/var/home/u/Programs", "target": "/var/home/u/Bulk/apps", "new": "/var/home/u/Bulk/apps.bulk-new-1", "stamp2": 1794000100, "bulk_only": false, "old": "/var/home/u/Programs.bulk-old-1", "stamp": 1794000000, "conflict": false, "undo": false, "link": "/var/home/u/Programs", "finishing": false, "v": 1}

@@ -40,7 +40,7 @@ from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser
+from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser, SteamJournal, SteamPart
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.values import Json
@@ -49,6 +49,15 @@ from tests.probes import assert_replaced_durably, recorded_fsyncs
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def kind_of(path: str) -> str:
+    """absent, link or there."""
+    return "link" if os.path.islink(path) else "there" if os.path.exists(path) else "absent"
+
+
+# The exact bytes of state files the writers produce (tests/fixtures/state-formats).
+STATE_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 
 
@@ -89,8 +98,11 @@ class BulkBase(unittest.TestCase):
             lock=os.path.join(self.tmp, "lock"),
             notify=os.path.join(self.tmp, "no-notify"),
         )
+        self.alerts = os.path.join(self.tmp, "alerts", "pending")
         self.machine = Primitives()
-        self.wiring = Wiring(TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine)
+        self.wiring = Wiring(
+            TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine, alerts=self.alerts
+        )
         self.host = self.wiring.host
         self.state = self.wiring.state()
         self.ctx = self.wiring.home_ctx(self.home)
@@ -533,6 +545,28 @@ class BulkTest(BulkBase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "plan"], TOOL, wiring=root), 1)
         self.assertEqual(sent, [])
+
+    def test_the_boot_refusal_reaches_cst_doctor_without_btrfs_notify(self) -> None:
+        # btrfs-notify missing (cst btrfs uninstall left snapshots in place, say): the alert of the
+        # refusal went nowhere. Now it is kept in the pending alerts folder that cst doctor reads.
+        root = self.root_wiring()
+        with open(self.paths.conf, "w") as f:
+            f.write("BULK_USER=$USER\n")
+        out = io.StringIO()
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
+        [name] = os.listdir(self.alerts)
+        kept = os.path.join(self.alerts, name)
+        with open(kept) as f:
+            text = f.read()
+        self.assertIn("\nurgency=critical\napp=btrfs-bulk\n", text)
+        self.assertIn("\ntitle=~/Bulk: nothing moved at boot\n\n", text)
+        self.assertIn(f"{self.paths.conf} line 1: BULK_USER=$USER", text)
+        self.assertIn(
+            f"<3>btrfs-bulk: alert not delivered ({self.paths.notify} is not installed): "
+            f"~/Bulk: nothing moved at boot; kept in {kept} (cst doctor shows it)\n",
+            out.getvalue(),
+        )
 
     def test_boot_counter_is_durable_before_the_moves_start(self) -> None:
         # The counter was written with open("w") and no fsync before the moves; a hang
@@ -1613,6 +1647,107 @@ class BulkTest(BulkBase):
         self.assertLink("go/pkg/mod", "toolchains/go/pkg/mod")
         self.assertTrue(self.machine.is_subvol(self.B("toolchains/go/pkg/mod")))
         self.assertEqual(self.read("go/pkg/mod/a"), "data")
+
+    # ---- the journal's format version ("v", cst_core/domain/contracts.py): an older btrfs-bulk's
+    # journal (no "v") is still finished or undone; a newer one's is left alone, never read as broken.
+    def journal_crashed(self) -> bytes:
+        self.setup_programs()
+        self.crash_after_late_write()
+        with open(self.state.jpath("apps"), "rb") as f:
+            return f.read()
+
+    def files_now(self) -> list[tuple[str, list[str], list[str]]]:
+        """What is there of the move of apps (the journal's src, link, new and old, and its target)."""
+        j = self.journal("apps")
+        tops = sorted({p for k in ("src", "target", "new", "old", "link") if isinstance(p := j.get(k), str)})
+        found: list[tuple[str, list[str], list[str]]] = [(p, [kind_of(p)], []) for p in tops]
+        found += [(r, sorted(d), sorted(f)) for p in tops if not os.path.islink(p) for r, d, f in os.walk(p)]
+        return found
+
+    def test_a_journal_carries_its_format_version(self) -> None:
+        self.journal_crashed()
+        self.assertEqual(self.journal("apps")["v"], 1)
+
+    def test_a_journal_without_a_version_is_finished_or_undone_as_before(self) -> None:
+        self.journal_crashed()
+        j = self.journal("apps")
+        del j["v"]  # as btrfs-bulk wrote it before the field
+        self.write_journal("apps", j)
+        self.assertEqual(self.apply(), ([], []), self.out)
+        self.assertIn("the old folder was written to during the switch", self.out)
+        self.assertEqual(self.read("Programs/a"), "late")
+        self.assertEqual(self.journals(), [])
+
+    def test_a_journal_of_a_newer_btrfs_bulk_is_left_alone(self) -> None:
+        self.journal_crashed()
+        j = self.journal("apps")
+        j["v"] = 2
+        self.write_journal("apps", j)
+        with open(self.state.jpath("apps"), "rb") as f:
+            raw = f.read()
+        before = self.files_now()
+        deferred, problems = self.apply()
+        self.assertEqual(problems, ["apps"], self.out)
+        self.assertEqual(bulk_items.exit_status(self.bulk, deferred, problems), 1)
+        path = self.state.jpath("apps")
+        self.assertIn(
+            f"NEEDS A LOOK: apps: {path} is format 2 of the bulk-journal (this CST reads format 1 and older): "
+            "written by a newer CST; left as it is",
+            self.out,
+        )
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), raw)
+        self.assertEqual(self.files_now(), before)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertGreaterEqual(bulk_items.report_journals(self.bulk), 1)
+        self.assertIn(f"apps: NEEDS A LOOK: {path} is format 2 of the bulk-journal", out.getvalue())
+
+    def test_a_version_that_is_no_whole_number_makes_an_unreadable_journal(self) -> None:
+        self.journal_crashed()
+        path = self.state.jpath("apps")
+        for bad in (True, "1", -1, 1.0):
+            with self.subTest(bad=bad):
+                j = self.journal("apps")
+                j["v"] = bad
+                self.write_journal("apps", j)
+                self.out = ""
+                self.assertEqual(self.apply()[1], ["apps"], self.out)
+                self.assertIn(
+                    f"NEEDS A LOOK: apps: damaged journal {path} (unreadable, or not as btrfs-bulk writes it", self.out
+                )
+
+    def test_the_writer_produces_the_checked_in_journals_exactly(self) -> None:
+        # The bytes main's btrfs-bulk was shown to read (REPORT, the mixed-version proof). Each fixture
+        # holds every field of its record: a field added to ItemJournal, SteamJournal or SteamPart
+        # fails here, and needs that proof again.
+        for ident, name, keys in (
+            ("apps", "bulk-journal", ItemJournal.__required_keys__ | ItemJournal.__optional_keys__),
+            ("steam-570", "bulk-journal-steam", SteamJournal.__required_keys__ | SteamJournal.__optional_keys__),
+        ):
+            with self.subTest(name):
+                with open(os.path.join(STATE_FIXTURES, f"{name}-v0.json"), "rb") as f:
+                    v0 = f.read()
+                record = json.loads(v0)
+                self.assertEqual(set(record), keys)
+                self.state.jwrite(ident, record)
+                with (
+                    open(self.state.jpath(ident), "rb") as f,
+                    open(os.path.join(STATE_FIXTURES, f"{name}-v1.json"), "rb") as g,
+                ):
+                    self.assertEqual(f.read(), g.read())
+                with open(self.state.jpath(ident), "wb") as f:
+                    f.write(v0)
+                read = self.state.jread_item(ident) if ident == "apps" else self.state.jread_steam(ident)
+                self.assertEqual(read, record)
+        with open(os.path.join(STATE_FIXTURES, "bulk-journal-steam-v0.json")) as f:
+            self.assertEqual(set(json.load(f)["parts"][0]), SteamPart.__required_keys__ | SteamPart.__optional_keys__)
+
+    def test_a_real_journal_has_only_the_fields_of_its_record(self) -> None:
+        # What apply writes, not only what a fixture holds: no field outside ItemJournal (and "v").
+        self.journal_crashed()
+        keys = ItemJournal.__required_keys__ | ItemJournal.__optional_keys__
+        self.assertLessEqual(set(self.journal("apps")), keys | {"v"})
 
 
 class StateFilesDurableTest(BulkBase):

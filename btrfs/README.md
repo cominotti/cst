@@ -492,6 +492,17 @@ logged in to the desktop** at that moment. When a service starts it, the alert
 text is also written to the journal. When you start it from a terminal (as
 `test-alert` does), that text goes to the terminal instead.
 
+**When `btrfs-notify` is missing or fails.** The Python programs (`btrfs-bulk`,
+`docker-volumes-nocow`, `cst vm`'s backups) send their alerts through one
+`cst_core` adapter. When `btrfs-notify` is not installed, does not answer
+within 60 s, or could neither show nor keep the alert, the adapter writes a
+journal line ("alert not delivered (...)") and keeps the alert itself in
+`/var/lib/cst-alerts/pending/`, in the same format and under the same lock as
+`btrfs-notify`. `cst doctor` then lists it as an alert you have not seen yet,
+and also warns that the installed units alert through a missing `btrfs-notify`
+(fix: `cst btrfs install`). So, for example, `btrfs-bulk-boot`'s refusal of a
+bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
+
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
 which sends it. That folder survives a restart of the monitor, also an automatic
@@ -1472,6 +1483,18 @@ Because of this:
 - If its record in `/var/lib/docker-gc` cannot be read, or holds values
   docker-gc never writes (a time that is not a number), it counts as no record:
   the 14-day clock starts again from now.
+- The record and `last-run.json` carry their format in `"v"` (none: format 0,
+  from before the field; still read). One written by a newer docker-gc (after
+  you went back to an older CST) is left as it is: `record`, `run` and
+  `status` stop with exit 65 and a journal line that names the format, `... is
+  format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
+  nothing is removed by a record they do not understand. systemd does not
+  restart the recorder for exit 65 (`RestartPreventExitStatus=`; any other
+  failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  failed, which `cst doctor` lists, and images are held back meanwhile, as
+  with any recorder that is not running. Install the docker-gc of that CST
+  again (`cst btrfs docker-gc enable` in that checkout), which starts the
+  recorder again.
 - Right before removing an image, it checks again that nothing started using it.
 
 **When the weekly run does not happen.** The run is skipped in the first 10

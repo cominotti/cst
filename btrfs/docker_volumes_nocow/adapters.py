@@ -22,6 +22,7 @@ from btrfs.docker_volumes_nocow.domain import (
 )
 from cst_core.adapters.files import CounterFile, write_atomic
 from cst_core.adapters.journal import log as journal_log
+from cst_core.adapters.notify import Notifier
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
 
@@ -405,6 +406,6 @@ class NocowOutput:
         journal_log(prio, msg, tag="docker-volumes-nocow")
 
     def notify(self, title: str, body: str) -> None:
-        checked(
-            self._runner.run([self.paths.notify, "-u", "normal", "-a", "btrfs-setup", title, body], stdin="inherit")
+        Notifier(self._runner, self.paths.notify, self.paths.alerts, log=self.log).send(
+            "normal", "btrfs-setup", title, body
         )

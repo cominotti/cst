@@ -9,6 +9,7 @@ those modules can switch to it without changing a byte.
 
 from collections.abc import Callable, Sequence
 import contextlib
+import hashlib
 import io
 import os
 import re
@@ -36,9 +37,12 @@ from cst_core.adapters.files import (
     unit_file_state_at,
 )
 from cst_core.adapters.journal import log
+from cst_core.adapters import notify as core_notify
+from cst_core.adapters.notify import Notifier
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused, Usage
+from doctor.domain import parse_alert_text
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
 from cst_core.domain.text import (
@@ -303,6 +307,18 @@ class AdaptersTest(unittest.TestCase):
             take_lock(self.path("link"), wait=False)
         os.close(fd)
         fd2 = take_lock(lock, wait=True)
+        assert fd2 is not None
+        os.close(fd2)
+
+    def test_a_wait_with_a_timeout_gives_up_and_takes_a_freed_lock(self) -> None:
+        lock = self.path("lock")
+        fd = take_lock(lock, wait=False)
+        assert fd is not None
+        start = time.monotonic()
+        self.assertIsNone(take_lock(lock, wait=True, timeout=0.3))
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+        os.close(fd)
+        fd2 = take_lock(lock, wait=True, timeout=0.3)
         assert fd2 is not None
         os.close(fd2)
 
@@ -1202,6 +1218,209 @@ class ConfirmTest(unittest.TestCase):
     def test_no_terminal_refuses_without_asking(self) -> None:
         with self.assertRaisesRegex(Refused, "^apply asks for confirmation: run it in a terminal$"):
             self.ask("y", tty=False)
+
+
+class _NotifyRunner:
+    """CommandRunnerPort for Notifier: one answer for every command, and the calls with their options."""
+
+    def __init__(self, result: core_ports.CommandResult) -> None:
+        self.result = result
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: Sequence[str], **kw: object) -> core_ports.CommandResult:
+        self.calls.append((list(argv), kw))
+        return self.result
+
+
+class NotifierTest(unittest.TestCase):
+    """cst_core.adapters.notify: btrfs-notify's command line, and an alert it could not take kept for cst doctor."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-notify-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pending = os.path.join(self.tmp, "alerts", "pending")
+        self.lines: list[tuple[int, str]] = []
+
+    def send(
+        self,
+        result: core_ports.CommandResult,
+        title: str = "Disk: problem",
+        *,
+        app: str = "btrfs-bulk",
+        body: str = "the body\nline 2",
+    ) -> tuple[str, _NotifyRunner]:
+        runner = _NotifyRunner(result)
+        notifier = Notifier(runner, "/x/btrfs-notify", self.pending, log=lambda p, m: self.lines.append((p, m)))
+        return notifier.send("critical", app, title, body), runner
+
+    def missing(self, title: str = "Disk: problem", *, app: str = "btrfs-bulk", body: str = "the body") -> str:
+        """Send with btrfs-notify missing; the file the alert was kept in."""
+        cause = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        outcome, _ = self.send(
+            core_ports.CommandResult(127, "", "", fault="missing", cause=cause), title, app=app, body=body
+        )
+        self.assertEqual(outcome, "kept")
+        return self.lines[-1][1].split("; kept in ", 1)[1].removesuffix(" (cst doctor shows it)")
+
+    def kept(self) -> list[str]:
+        return sorted(os.listdir(self.pending)) if os.path.isdir(self.pending) else []
+
+    def test_a_delivered_alert_is_one_btrfs_notify_call_and_nothing_else(self) -> None:
+        outcome, runner = self.send(core_ports.CommandResult(0, "", ""))
+        self.assertEqual(outcome, "sent")
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    ["/x/btrfs-notify", "-u", "critical", "-a", "btrfs-bulk", "Disk: problem", "the body\nline 2"],
+                    {"timeout": 60, "new_session": True},
+                )
+            ],
+        )
+        self.assertEqual((self.lines, self.kept()), ([], []))
+
+    def test_without_btrfs_notify_the_alert_is_kept_and_the_journal_says_so(self) -> None:
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        self.assertEqual(outcome, "kept")
+        [name] = self.kept()
+        path = os.path.join(self.pending, name)
+        self.assertEqual(name, hashlib.sha256(b"btrfs-bulk\nDisk: problem").hexdigest()[:32] + ".alert")
+        self.assertEqual(
+            self.lines,
+            [
+                (
+                    3,
+                    f"alert not delivered (/x/btrfs-notify is not installed): Disk: problem; kept in {path} (cst doctor shows it)",
+                )
+            ],
+        )
+        with open(path) as f:
+            head, body = f.read().split("\n\n", 1)
+        lines = head.splitlines()
+        self.assertEqual(lines[:3], ["cst-alert 1", "urgency=critical", "app=btrfs-bulk"])
+        self.assertEqual((lines[5], lines[6], body), ("count=1", "title=Disk: problem", "the body\nline 2\n"))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(os.stat(self.pending).st_mode), 0o755)
+
+    def test_a_failure_or_no_answer_keeps_the_alert_too(self) -> None:
+        for result, why in (
+            (core_ports.CommandResult(1, "", ""), "/x/btrfs-notify exited 1"),
+            (core_ports.CommandResult(124, "", "", fault="timeout"), "/x/btrfs-notify did not answer within 60 s"),
+        ):
+            with self.subTest(why):
+                self.lines.clear()
+                outcome, _ = self.send(result)
+                self.assertEqual(outcome, "kept")
+                self.assertIn(f"alert not delivered ({why})", self.lines[0][1])
+
+    def test_a_repeat_is_merged_into_the_kept_alert(self) -> None:
+        path = self.missing(body="first")
+        with open(path, "r+") as f:
+            text = f.read().replace("\nfirst=", "\nfirst=1000\nignored=", 1)
+            f.seek(0)
+            f.write(text)
+        self.assertEqual(self.missing(body="second"), path)
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("\nfirst=1000\n", text)
+        self.assertIn("\ncount=2\n", text)
+        self.assertTrue(text.endswith("\n\nsecond\n"))
+        self.assertEqual(len(self.kept()), 1)
+
+    def test_app_title_and_body_are_bounded_as_btrfs_notify_bounds_them(self) -> None:
+        path = self.missing("a\tb\nc" + "t" * 300, app="my app/" + "x" * 60, body="b" * 5000)
+        with open(path) as f:
+            head, body = f.read().split("\n\n", 1)
+        app, title = ("my_app_" + "x" * 60)[:40], ("a b c" + "t" * 300)[:200]
+        self.assertIn(f"\napp={app}\n", head)
+        self.assertTrue(head.endswith(f"\ntitle={title}"), head)
+        self.assertEqual(body, "b" * 4000 + "\n")
+        self.assertEqual(os.path.basename(path), hashlib.sha256(f"{app}\n{title}".encode()).hexdigest()[:32] + ".alert")
+        self.assertTrue(
+            self.missing("", app="").endswith(hashlib.sha256(b"btrfs\nbtrfs alert").hexdigest()[:32] + ".alert")
+        )
+
+    def test_when_the_alert_cannot_be_kept_either_only_the_journal_has_it(self) -> None:
+        with open(os.path.join(self.tmp, "alerts"), "w"):
+            pass  # a file where the folder should be
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        self.assertEqual(outcome, "lost")
+        [(prio, msg)] = self.lines
+        self.assertEqual(prio, 3)
+        self.assertTrue(msg.startswith("alert not delivered (/x/btrfs-notify is not installed) and not kept ("), msg)
+        self.assertTrue(msg.endswith("): Disk: problem; it is only in this journal"), msg)
+
+    def test_a_folder_or_title_no_file_takes_leaves_the_alert_in_the_journal_only(self) -> None:
+        # A caller's error handler sends this alert: a ValueError (a folder from an override that is no
+        # plain path, a title with a lone surrogate) must end as "lost" with its line, not as a traceback.
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        result = core_ports.CommandResult(127, "", "", fault="missing", cause=missing)
+        for pending, title in (
+            (os.path.join(self.tmp, "x", "..", "alerts", "pending"), "Disk"),
+            (self.pending, "VM \udcff"),
+        ):
+            with self.subTest(pending=pending, title=title):
+                self.lines.clear()
+                notifier = Notifier(
+                    _NotifyRunner(result), "/x/btrfs-notify", pending, log=lambda p, m: self.lines.append((p, m))
+                )
+                self.assertEqual(notifier.send("normal", "cst-vm", title, "body"), "lost")
+                [(prio, msg)] = self.lines
+                self.assertEqual(prio, 3)
+                self.assertTrue(msg.endswith(f"): {title}; it is only in this journal"), msg)
+                self.assertEqual(self.kept(), [])
+
+    def test_a_spool_lock_held_too_long_leaves_the_alert_in_the_journal_only(self) -> None:
+        # btrfs-notify gives up on this lock after 30 s; at boot nothing may wait for it forever.
+        os.makedirs(self.pending)
+        held = take_lock(os.path.join(os.path.dirname(self.pending), ".lock"), wait=False)
+        assert held is not None
+        self.addCleanup(os.close, held)
+        missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
+        with mock.patch.object(core_notify, "_LOCK_WAIT", 0.3):
+            start = time.monotonic()
+            outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+        self.assertEqual((outcome, self.kept()), ("lost", []))
+        self.assertIn(
+            "/alerts/.lock is still held after 0.3 s): Disk: problem; it is only in this journal", self.lines[0][1]
+        )
+
+    def test_btrfs_notify_and_cst_pending_alerts_read_what_it_keeps(self) -> None:
+        """The same alert kept by btrfs-notify (no desktop session) and then by cst_core is one file, merged;
+        cst-pending-alerts --list and cst doctor read it."""
+        alerts = os.path.dirname(self.pending)
+        run_user = os.path.join(self.tmp, "run-user")
+        os.mkdir(run_user)
+        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "CST_ALERTS_DIR": alerts, "CST_RUN_USER": run_user}
+        notify = os.path.join(REPO, "btrfs", "btrfs-notify")
+        done = subprocess.run(
+            ["bash", notify, "-u", "critical", "-a", "btrfs-bulk", "Disk: problem", "from bash"],
+            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+        )  # fmt: skip
+        self.assertEqual(done.returncode, 0, done.stderr)
+        [name] = self.kept()
+        path = self.missing(body="from python")
+        self.assertEqual(self.kept(), [name])
+        self.assertEqual(os.path.basename(path), name)
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("\ncount=2\n", text)
+        parsed = parse_alert_text(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed[:2], ("critical", "Disk: problem"))
+        home = os.path.join(self.tmp, "home")
+        os.mkdir(home)
+        listed = subprocess.run(
+            ["bash", os.path.join(REPO, "btrfs", "cst-pending-alerts"), "--list"],
+            env={**env, "HOME": home, "CST_ALERTS_OWNER": str(os.getuid())},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+        )  # fmt: skip
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
 
 
 if __name__ == "__main__":

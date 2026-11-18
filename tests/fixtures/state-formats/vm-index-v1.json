@@ -1,0 +1,41 @@
+{
+  "backups": [
+    {
+      "deployment": {
+        "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "timestamp": 1793900000,
+        "version": "45.20261110.0"
+      },
+      "epoch": 1794000000,
+      "mode": "reflink",
+      "path": "/var/lib/libvirt/cst-backups/win/20261116T030000Z",
+      "timestamp": "20261116T030000Z",
+      "versions": {
+        "qemu-kvm": "qemu-kvm-11.1.3-1.fc45.x86_64",
+        "swtpm": "not installed"
+      },
+      "vm": "win"
+    },
+    {
+      "consistency": "quiesced",
+      "deployment": {
+        "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "timestamp": 1793900000,
+        "version": "45.20261110.0"
+      },
+      "epoch": 1794086400,
+      "host": "sophia",
+      "keep": null,
+      "mode": "nas",
+      "repository": "sftp:btrfs-setup-nas:/volume1/restic",
+      "snapshot": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+      "timestamp": "20261117T030000Z",
+      "versions": {
+        "qemu-kvm": "qemu-kvm-11.1.3-1.fc45.x86_64",
+        "swtpm": "not installed"
+      },
+      "vm": "win"
+    }
+  ],
+  "version": 1
+}

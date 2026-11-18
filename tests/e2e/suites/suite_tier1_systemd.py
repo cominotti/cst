@@ -2431,6 +2431,232 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77) ----------------------
+    # The unit as the manifest installs it (copied to /etc when the container has none), running this
+    # checkout's btrfs-bulk through a drop-in in /run; the settings, journals, boot flag, btrfs-notify
+    # and new pending alerts are put back by the cleanup (btrfs-notify is moved aside, never removed).
+    BULK_BOOT_SETUP = r"""
+s=/var/tmp/e2e-bulk-boot
+rm -rf "$s"; mkdir -p "$s/aside"
+if [ ! -e /etc/systemd/system/btrfs-bulk-boot.service ]; then
+    cp /opt/cst-rw/btrfs/units/btrfs-bulk-boot.service /etc/systemd/system/
+    touch "$s/made-unit"
+fi
+mkdir -p /run/systemd/system/btrfs-bulk-boot.service.d
+# ExecStopPost: the exit status and result, read after the oneshot is gone (an unreferenced
+# inactive unit may be unloaded, and systemctl show would then answer for a fresh one).
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I /opt/cst-rw/btrfs/btrfs-bulk boot\nExecStopPost=/bin/sh -c %s\n' \
+    "'echo \"\$\$EXIT_STATUS \$\$SERVICE_RESULT\" >/var/tmp/e2e-bulk-boot/exit'" \
+    >/run/systemd/system/btrfs-bulk-boot.service.d/50-e2e.conf
+for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
+    if [ -e "$p" ] || [ -L "$p" ]; then mkdir -p "$s/aside$(dirname "$p")"; mv "$p" "$s/aside$p"; fi
+done
+[ -d /var/lib/cst-alerts ] || touch "$s/made-alerts"
+[ -d /var/lib/cst-alerts/pending ] || touch "$s/made-pending"
+[ -e /var/lib/cst-alerts/.lock ] || touch "$s/made-lock"
+ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-before" || true
+id cste2ebulk >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /var/tmp/cst-e2e-bulk-home cste2ebulk
+install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
+[ -d /etc/btrfs-setup ] || touch "$s/made-etc"
+mkdir -p /etc/btrfs-setup
+systemctl daemon-reload
+# boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
+boot_unit() {
+    rm -f "$s/exit"
+    systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
+    for _ in $(seq 1 20); do [ -s "$s/exit" ] && break; sleep 0.25; done   # ExecStopPost may lag the job
+    [ "$(cat "$s/exit" 2>/dev/null)" = "1 success" ] ||
+        { echo "exit status and result: $(cat "$s/exit" 2>/dev/null)" >&2; return 1; }
+}
+# unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
+unit_log_has() {
+    for _ in $(seq 1 60); do
+        journalctl --sync 2>/dev/null || true
+        if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF -- "$1"; then return 0; fi
+        sleep 0.5
+    done
+    echo "not in the unit's journal: $1" >&2
+    journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" >&2 || true
+    return 1
+}
+start="$(date +%s)"
+"""
+    BULK_BOOT_CLEANUP = r"""
+s=/var/tmp/e2e-bulk-boot
+systemctl reset-failed btrfs-bulk-boot.service 2>/dev/null || true
+rm -f /run/systemd/system/btrfs-bulk-boot.service.d/50-e2e.conf
+rmdir /run/systemd/system/btrfs-bulk-boot.service.d 2>/dev/null || true
+if [ -e "$s/made-unit" ]; then rm -f /etc/systemd/system/btrfs-bulk-boot.service; fi
+rm -rf /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk
+if [ -e "$s/made-alerts" ]; then
+    rm -rf /var/lib/cst-alerts
+else
+    if [ -e "$s/made-pending" ]; then
+        rm -rf /var/lib/cst-alerts/pending
+    elif [ -d /var/lib/cst-alerts/pending ]; then
+        ls -1 /var/lib/cst-alerts/pending | sort | comm -13 "$s/pending-before" - |
+            while read -r n; do rm -f "/var/lib/cst-alerts/pending/$n"; done
+    fi
+    if [ -e "$s/made-lock" ]; then rm -f /var/lib/cst-alerts/.lock; fi
+fi
+for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
+    if [ -e "$s/aside$p" ] || [ -L "$s/aside$p" ]; then mv "$s/aside$p" "$p"; fi
+done
+if [ -e "$s/made-etc" ]; then rmdir /etc/btrfs-setup 2>/dev/null || true; fi
+userdel cste2ebulk 2>/dev/null || true
+rm -rf /var/tmp/cst-e2e-bulk-home "$s"
+systemctl daemon-reload
+"""
+
+    def bulk_boot(self, script: str) -> str:
+        """script after BULK_BOOT_SETUP, as root in the systemd container; its output."""
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, self.BULK_BOOT_CLEANUP, check=False)
+        return exec_bash(self.SYSTEMD_CONTAINER, self.BULK_BOOT_SETUP + script).stdout
+
+    def test_76_bulk_boot_leaves_a_journal_of_a_newer_btrfs_bulk_alone(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) finds a journal of an interrupted move written by a
+        newer btrfs-bulk ("v" above this checkout's bulk-journal format): the unit runs (the glob
+        condition), counts "needs a look" (exit 1) as success, names the format in its journal, and
+        leaves the journal byte for byte as it was, at that boot and the next one."""
+        out = self.bulk_boot(
+            r"""
+h=/var/tmp/cst-e2e-bulk-home
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+install -d -m 0755 /var/lib/btrfs-bulk
+j=/var/lib/btrfs-bulk/journal-apps.json
+printf '{"kind": "copy", "src": "%s/Programs", "target": "%s/Bulk/apps", "new": "%s/Bulk/apps.bulk-new-1", "old": "%s/Programs.bulk-old-1", "stamp": 1, "link": "%s/Programs", "v": 99}' \
+    "$h" "$h" "$h" "$h" "$h" >"$j"
+cp "$j" "$s/journal.before"
+boot_unit
+unit_log_has "NEEDS A LOOK: apps: $j is format 99 of the bulk-journal (this CST reads format 1 and older): written by a newer CST; left as it is"
+cmp "$s/journal.before" "$j"
+boot_unit
+cmp "$s/journal.before" "$j"
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+
+    def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
+        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the refusal's alert
+        is kept in /var/lib/cst-alerts/pending in btrfs-notify's format (the unit's journal says so),
+        and cst doctor, as the user, shows it and warns that the installed unit alerts through a
+        missing btrfs-notify; cst-pending-alerts lists it for the next login."""
+        out = self.bulk_boot(
+            r"""
+printf 'BULK_USER=$USER\n' >/etc/btrfs-setup/bulk.conf
+printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
+boot_unit
+unit_log_has "alert not delivered (/usr/local/sbin/btrfs-notify is not installed): ~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
+f="$(grep -lxF 'title=~/Bulk: nothing moved at boot' /var/lib/cst-alerts/pending/*.alert)"
+[ "$(head -n 1 "$f")" = "cst-alert 1" ]
+grep -qxF 'urgency=critical' "$f"
+grep -qxF 'app=btrfs-bulk' "$f"
+[ "$(stat -c '%a %U' "$f")" = "644 root" ]
+[ "$(stat -c '%a' /var/lib/cst-alerts/pending)" = 755 ]
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
+        doctor = as_tester_bash(self.SYSTEMD_CONTAINER, "/opt/cst-rw/cst doctor", check=False).stdout
+        self.assertIn("~/Bulk: nothing moved at boot", doctor)
+        self.assertIn("btrfs-bulk-boot.service", doctor)
+        self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
+        listed = as_tester_bash(self.SYSTEMD_CONTAINER, "bash /opt/cst-rw/btrfs/cst-pending-alerts --list").stdout
+        self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
+
+    def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
+        """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
+        checkout's docker-gc, under a name of its own; a stub docker.service when the container has
+        none, for its BindsTo=), with a last-used.json of a newer docker-gc ("v": 99): the recorder exits
+        65 before any docker call, and RestartPreventExitStatus= keeps systemd from starting it again
+        after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
+        names the format once, and the file is byte for byte as it was. Control: the same unit ending
+        with exit 1 is restarted."""
+        shipped = docker_exec(
+            self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
+        ).stdout
+        self.assertEqual(shipped.count("\nExecStart="), 1, "the shipped recorder has one ExecStart= line")
+        unit = "e2e-gc-recorder.service"
+        path = f"/run/systemd/system/{unit}"
+
+        def derived(exec_start: str) -> str:
+            return "".join(
+                f"ExecStart={exec_start}\n" if line.startswith("ExecStart=") else line
+                for line in shipped.splitlines(keepends=True)
+            )
+
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            s=/var/tmp/e2e-gc-recorder
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            rm -f {path}
+            if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
+            if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
+            if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
+            rm -rf "$s"
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"cat >{path}"],
+            input_text=derived("/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"),
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            s=/var/tmp/e2e-gc-recorder
+            rm -rf "$s"; mkdir -p "$s"
+            diag() {{ systemctl status --no-pager {unit} >&2 || true; journalctl -q --no-pager -u {unit} -n 30 >&2 || true; }}
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            if [ -e /var/lib/docker-gc ]; then mv /var/lib/docker-gc "$s/state-aside"; fi
+            if ! systemctl cat docker.service >/dev/null 2>&1; then
+                printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >/run/systemd/system/docker.service
+                touch "$s/made-docker"
+            fi
+            install -d -m 0755 /var/lib/docker-gc
+            touch "$s/made-state"   # the cleanup removes this folder only then
+            printf '{{"since": 1, "images": {{}}, "heartbeat": 2, "v": 99}}' >/var/lib/docker-gc/last-used.json
+            cp /var/lib/docker-gc/last-used.json "$s/before"
+            systemctl daemon-reload
+            start="$(date +%s)"
+            systemctl start {unit} || {{ diag; exit 1; }}
+            sleep 14   # past RestartSec=10: a restart would have happened by now
+            [ "$(show ActiveState)" = failed ] || {{ echo "state: $(show ActiveState)" >&2; diag; exit 1; }}
+            [ "$(show NRestarts)" = 0 ] || {{ echo "restarted $(show NRestarts) time(s)" >&2; diag; exit 1; }}
+            [ "$(show ExecMainStatus)" = 65 ] || {{ echo "exit status $(show ExecMainStatus)" >&2; diag; exit 1; }}
+            cmp "$s/before" /var/lib/docker-gc/last-used.json
+            journalctl --sync 2>/dev/null || true
+            n="$(journalctl -q --no-pager -o cat -u {unit} --since "@$start" | grep -cF 'last-used.json is format 99 of the docker-gc-state' || true)"
+            [ "$n" = 1 ] || {{ echo "the format line was logged $n time(s)" >&2; diag; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Control: the restart policy is in force; only exit 65 is exempt from it.
+        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=derived("/bin/sh -c 'exit 1'"))
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            systemctl daemon-reload
+            systemctl start {unit}
+            sleep 14
+            n="$(systemctl show -p NRestarts --value {unit})"
+            systemctl stop {unit} || true
+            [ "$n" -ge 1 ] || {{ echo "an exit 1 was not restarted (NRestarts=$n)" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
         """In a container with /.dockerenv (no override), cst vm's commands that change the
         host refuse before sudo, with the host command to type (cst is not on PATH there:
