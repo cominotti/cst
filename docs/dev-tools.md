@@ -276,7 +276,10 @@ uploads the reports as the `nightly-coverage-report` artifact.
 `--out DIR` (absolute, outside the checkout; by default a new folder under
 `${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`) receives `report.txt` (per
 file), `coverage.json`, `html/index.html` (each file with the lines no
-test ran), `floors.txt` and coverage.py's data file. The task stops when a
+test ran), `floors.txt` and coverage.py's data file. A relative folder, or
+one inside the checkout (also through a symlink), is refused before
+anything is created; `tests/test_coverage_floors.py` runs the task's
+script from `invowkfile.cue` to check it. The task stops when a
 unit test fails.
 
 The last step, `tests/coverage_floors.py`, adds the numbers up per package

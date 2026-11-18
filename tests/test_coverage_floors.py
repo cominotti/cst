@@ -10,12 +10,15 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from tests import coverage_floors
 from tests.coverage_floors import COVERAGE_FLOORS, floor_problems, layer_counts, percentages
+from tests.repo_files import REPO
+from tests.test_workflow_audit import INVOWKFILE, task_script
 
 
 def summary(lines: int, covered_lines: int, branches: int = 0, covered_branches: int = 0) -> dict[str, object]:
@@ -102,6 +105,71 @@ class CoverageFloorsTest(unittest.TestCase):
     def test_not_a_report_is_refused(self) -> None:
         with self.assertRaises(ValueError):
             layer_counts({"totals": {}})
+
+
+class CoverageTaskOutTest(unittest.TestCase):
+    """The --out check of `invowk cmd test coverage`, run from invowkfile.cue under bash.
+
+    Each refusal ends the script before it runs any tool, so the script runs
+    as it is, in a scratch "checkout" that has no tests/uv-dev.
+    """
+
+    def setUp(self) -> None:
+        with open(os.path.join(REPO, INVOWKFILE), encoding="utf-8") as fh:
+            script = task_script(fh.read(), "test coverage")
+        self.assertIsNotNone(script)
+        self.script = script or ""
+        tmp = tempfile.TemporaryDirectory(prefix="cst-coverage-out-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = os.path.realpath(tmp.name)
+        self.repo = os.path.join(self.tmp, "checkout")
+        self.outside = os.path.join(self.tmp, "outside")
+        os.makedirs(self.repo)
+        os.makedirs(self.outside)
+
+    def run_task(self, out: str) -> subprocess.CompletedProcess[str]:
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp, "INVOWK_FLAG_OUT": out}
+        return subprocess.run(
+            ["bash", "-c", self.script],
+            cwd=self.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+
+    def test_a_relative_folder_is_refused(self) -> None:
+        r = self.run_task("cov")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("test coverage: --out must be an absolute path (outside the checkout)", r.stderr)
+        self.assertEqual(os.listdir(self.repo), [])
+
+    def test_a_folder_inside_the_checkout_is_refused_and_not_created(self) -> None:
+        os.symlink(self.repo, os.path.join(self.outside, "link"))
+        for out, shown in (
+            (os.path.join(self.repo, "cov"), os.path.join(self.repo, "cov")),
+            (self.repo, self.repo),
+            # A path through a symlink is judged where it leads.
+            (os.path.join(self.outside, "link", "cov"), os.path.join(self.repo, "cov")),
+            (os.path.join(self.outside, "..", "checkout", "cov"), os.path.join(self.repo, "cov")),
+        ):
+            with self.subTest(out=out):
+                r = self.run_task(out)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn(f"test coverage: {shown} is inside the checkout; give a folder outside it", r.stderr)
+                self.assertEqual(os.listdir(self.repo), [])
+
+    def test_a_folder_outside_the_checkout_is_created(self) -> None:
+        # A folder whose name only starts like the checkout's is outside it.
+        out = self.repo + "-coverage"
+        r = self.run_task(out)
+        self.assertTrue(os.path.isdir(out))
+        self.assertNotIn("inside the checkout", r.stderr)
+        # It went on to the tools, which this scratch checkout does not have.
+        self.assertIn("tests/uv-dev", r.stderr)
+        self.assertNotEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":
