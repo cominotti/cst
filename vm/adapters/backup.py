@@ -3,7 +3,7 @@
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import json
 import os
 import shutil
@@ -113,10 +113,8 @@ def precreate_nocow(dest: str) -> None:
     """btrfs clones only between files with the same NOCOW flag: an empty
     destination with the flag set, which cp then fills. Best effort."""
     os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    try:
+    with suppress(OSError):
         inode_attrs.set_nocow(dest)
-    except OSError:
-        pass
 
 
 def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
@@ -207,19 +205,15 @@ class BackupFiles(LocalFileSystemAdapter):
         private_dirs(self.cfg.paths.nas_stage, d)
         for name, text in ((DOMAIN_XML, xml_text), (MANIFEST_JSON, manifest)):
             path = os.path.join(d, name)
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(path)
-            except FileNotFoundError:
-                pass
             write_private(path, text)
         return d
 
     def unstage(self, folder: str) -> None:
         for name in (DOMAIN_XML, MANIFEST_JSON):
-            try:
+            with suppress(OSError):
                 os.unlink(os.path.join(folder, name))
-            except OSError:
-                pass
 
     def remove_overlay(self, path: str) -> str | None:
         try:
@@ -231,10 +225,8 @@ class BackupFiles(LocalFileSystemAdapter):
         return None
 
     def drop(self, path: str) -> None:
-        try:
+        with suppress(OSError):
             os.unlink(path)
-        except OSError:
-            pass
 
     def describe(self, entry: IndexEntry) -> str:
         return describe_entry(entry)
@@ -322,10 +314,8 @@ def mute() -> None:
     except OSError:
         return
     for n in (1, 2):
-        try:
+        with suppress(OSError):
             os.dup2(fd, n)
-        except OSError:
-            pass
     os.close(fd)
 
 
