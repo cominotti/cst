@@ -561,6 +561,26 @@ class BlockedTest(Base):
         (alert,) = self.notified()
         return alert
 
+    def test_bytes_that_are_not_utf_8_reach_the_journal_and_the_alert_as_they_were(self) -> None:
+        # A home folder with a Latin-1 name: the core's lines and CORE_REASON name it with the byte
+        # 0xE9. They were decoded with U+FFFD on the way, so the journal and the alert named a path
+        # that does not exist; bash passed the bytes on.
+        reason = "home: not deleting /home/u/caf\udce9.20261101T0000: blocked"
+        self.core(snapshot={"out": log(4, reason) + "\n", "rc": 4})
+        r = subprocess.run(
+            ["bash", SCRIPT, "hourly"],
+            capture_output=True,
+            env=self.env,
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertIn(b"<4>btrfs-snapshot: home: not deleting /home/u/caf\xe9.20261101T0000: blocked\n", r.stdout)
+        (alert,) = self.notified()
+        self.assertTrue(str(alert[5]).startswith("home: not deleting /home/u/caf\udce9.20261101T0000: blocked - "))
+
     def test_circuit_breaker(self) -> None:
         conf = self.path("etc/btrfs-setup/snapshots.conf")
         reason = "home: circuit breaker: 6 deletions at once (limit 5); not deleting"

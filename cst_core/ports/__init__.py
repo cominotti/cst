@@ -24,8 +24,10 @@ type StdinMode = Literal["devnull", "inherit"]
 type OutputMode = Literal["capture", "merge", "stdout", "stdout-show-stderr", "inherit"]
 
 # Captured output that is not UTF-8: U+FFFD for the bad bytes (every CST
-# caller), or a UnicodeDecodeError out of run().
-type DecodeErrors = Literal["replace", "strict"]
+# caller), a UnicodeDecodeError out of run(), or the bad bytes kept as lone
+# surrogates ("surrogateescape": written back with surrogateescape, or passed
+# in an argv, they are the bytes the command printed, as a shell passes them on).
+type DecodeErrors = Literal["replace", "strict", "surrogateescape"]
 
 
 @dataclass(frozen=True, slots=True)

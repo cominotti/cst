@@ -909,6 +909,19 @@ class CommandRunnerTest(unittest.TestCase):
         _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], decode_errors="strict"))
         self.assertNotIn("errors", kw)
 
+    def test_surrogateescape_keeps_the_bytes_that_are_not_utf_8(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        got = runner.run(["printf", "caf\\351\\n"], decode_errors="surrogateescape")
+        self.assertEqual(got.stdout, "caf\udce9\n")
+        self.assertEqual(got.stdout.encode("utf-8", "surrogateescape"), b"caf\xe9\n")
+        lines: list[str] = []
+        streamed = runner.run(
+            ["printf", "a\\377\\nb\\n"], output="stdout", on_line=lines.append, decode_errors="surrogateescape"
+        )
+        self.assertEqual((lines, streamed.stdout), (["a\udcff", "b"], "a\udcff\nb\n"))
+        # The default stays U+FFFD.
+        self.assertEqual(runner.run(["printf", "caf\\351"]).stdout, "caf\ufffd")
+
     def test_faults_are_marked_with_their_cause(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-runner-")
         self.addCleanup(shutil.rmtree, tmp)

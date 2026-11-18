@@ -137,7 +137,15 @@ class SnapshotRun:
         says so on stderr as bash does (127 not found, 126 not runnable)."""
         fds = tuple(pass_fds) or self.fds
         res = self._call(
-            lambda: self.runner.run(argv, output=output, input_text=input_text, pass_fds=fds, on_line=on_line, env=env)
+            lambda: self.runner.run(
+                argv,
+                output=output,
+                input_text=input_text,
+                pass_fds=fds,
+                on_line=on_line,
+                env=env,
+                decode_errors="surrogateescape",
+            )
         )
         if res.fault is not None:
             # As bash says it (without its line number).
@@ -164,7 +172,11 @@ class SnapshotRun:
 
     def ok(self, argv: Sequence[str], *, input_text: str | None = None) -> bool:
         """argv >/dev/null 2>&1 succeeded."""
-        res = self._call(lambda: self.runner.run(argv, output="capture", input_text=input_text, pass_fds=self.fds))
+        res = self._call(
+            lambda: self.runner.run(
+                argv, output="capture", input_text=input_text, pass_fds=self.fds, decode_errors="surrogateescape"
+            )
+        )
         return res.fault is None and res.returncode == 0
 
     def desktop_alert(self, urgency: Urgency, title: str, body: str) -> bool:
@@ -268,7 +280,7 @@ class SnapshotRun:
     def write(path: str, text: str) -> None:
         """echo/printf ... >PATH (umask mode); a failure said on stderr, as bash's redirection."""
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
                 f.write(text)
         except OSError as e:
             print(f"{TAG}: {path}: {e.strerror}", file=sys.stderr, flush=True)

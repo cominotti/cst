@@ -99,8 +99,8 @@ def _stream_kwargs(
         kw["stdout"] = subprocess.PIPE
     if output != "inherit" or input_text is not None:
         kw["text"] = True
-        if decode_errors == "replace":
-            kw["errors"] = "replace"
+        if decode_errors != "strict":
+            kw["errors"] = decode_errors
     return kw
 
 

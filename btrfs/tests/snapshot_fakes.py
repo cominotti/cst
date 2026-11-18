@@ -171,8 +171,9 @@ def inside(p):
 def answer(table, key):
     # An entry {"rc": .., "out": .., "err": .., "sleep": seconds} of table[key] (a queue of them, or one).
     a = take(key, {}, table)
-    sys.stdout.write(a.get("out", ""))
-    sys.stderr.write(a.get("err", ""))
+    # Bytes that are not UTF-8 stand as lone surrogates in the description: written as those bytes.
+    sys.stdout.buffer.write(a.get("out", "").encode("utf-8", "surrogateescape"))
+    sys.stderr.buffer.write(a.get("err", "").encode("utf-8", "surrogateescape"))
     sys.stdout.flush()
     if a.get("sleep"):
         import time
