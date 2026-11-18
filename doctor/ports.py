@@ -54,7 +54,8 @@ class DoctorHostPort(Protocol):
 
     def zip_text(self, path: ViewPath, member: str, limit: int) -> str:
         """The first limit bytes of one member of the zip archive at path (an installed zipapp), as UTF-8
-        with undecodable bytes replaced. OSError also when path is no zip archive or has no such member."""
+        with undecodable bytes replaced. OSError also when path is no zip archive, has no such member, or
+        the member is not stored uncompressed or cannot be read (encrypted, damaged): never another error."""
         ...
 
     def listdir(self, path: ViewPath) -> list[str]:

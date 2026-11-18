@@ -892,6 +892,56 @@ class BtrfsTest(Scratch):
             f.write("UNALLOC_MIN_GIB: Final = 61\nUNALLOC_CRIT_GIB: Final = 6\n")
         self.assertEqual(doc_btrfs.unalloc_thresholds(doc_adapters.Host(self.env, repo=repo)), (61, 6))
 
+    def test_a_damaged_or_foreign_installed_zipapp_falls_back_to_the_checkout_s_levels(self) -> None:
+        # A zip archive at the installed path that zipfile cannot read (damaged, compressed, encrypted,
+        # odd flags) is read as unreadable: the checkout's levels count, and the allocation check runs.
+        hc = os.path.join(self.root, "usr", "local", "sbin")
+        os.makedirs(hc)
+        repo = os.path.join(self.tmp, "checkout")
+        os.makedirs(os.path.join(repo, "btrfs", "health_check"))
+        with open(os.path.join(repo, "btrfs", "health_check", "domain.py"), "w", encoding="utf-8") as f:
+            f.write("UNALLOC_MIN_GIB: Final = 61\nUNALLOC_CRIT_GIB: Final = 6\n")
+        member = "btrfs/health_check/domain.py"
+
+        def archive(content: bytes, method: int) -> bytearray:
+            buf = io.BytesIO(b"#!/usr/bin/python3 -I\n")
+            buf.seek(0, io.SEEK_END)
+            with zipfile.ZipFile(buf, "w", compression=method) as zf:
+                zf.writestr(member, content)
+            return bytearray(buf.getvalue())
+
+        def patched(local: dict[int, int], central: dict[int, int], method: int = zipfile.ZIP_STORED) -> bytes:
+            # Sets bits (offset: mask) in the member's local header and in its central directory entry.
+            data = archive(b"x = 1\n", method)
+            lh, cd = data.find(b"PK\x03\x04"), data.rfind(b"PK\x01\x02")
+            for at, mask in local.items():
+                data[lh + at] |= mask
+            for at, mask in central.items():
+                data[cd + at] |= mask
+            return bytes(data)
+
+        deflated = archive(b"UNALLOC_MIN_GIB: Final = 70\nUNALLOC_CRIT_GIB: Final = 9\n" * 50, zipfile.ZIP_DEFLATED)
+        start = deflated.find(b"PK\x03\x04") + 30 + len(member)
+        deflated[start : start + 8] = b"\xff" * 8
+        name_at = 46  # where the name starts in a central directory entry
+        cases = {
+            "deflate data damaged": bytes(deflated),
+            "compression method 99": patched({8: 99}, {10: 99}),
+            "encrypted": patched({6: 0x01}, {8: 0x01}),
+            "patched-data flag": patched({6: 0x20}, {8: 0x20}),
+            "UTF-8 flag on a name that is not": patched({}, {9: 0x08, name_at: 0xFF}),
+        }
+        host = doc_adapters.Host(self.env, repo=repo)
+        self.fs()
+        for case, data in cases.items():
+            with self.subTest(case), mock.patch.object(doc_btrfs, "UNALLOC_DEFAULTS", (1, 1)):
+                with open(os.path.join(hc, "btrfs-health-check"), "wb") as f:
+                    f.write(data)
+                self.assertEqual(doc_btrfs.unalloc_thresholds(host), (61, 6))
+                res = [r for a, r in doc_registry.run_checks(host) if a == "btrfs"]
+                self.assertNotIn(doc_domain.ERROR, [r.status for r in res], res)
+                self.assertIn("warning below 61 GiB, critical below 6 GiB", res[-1].message)
+
     def test_reclaim_off_on_the_root_warns(self) -> None:
         self.fs(dyn=0, per=1)
         r = self.run_tool()
