@@ -6,7 +6,7 @@ import hashlib
 import os
 import pwd
 import time
-from typing import Any, BinaryIO, TextIO
+from typing import BinaryIO, TextIO
 
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
@@ -18,6 +18,7 @@ from cst_core.domain.values import DomainValidationError
 from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
+from vm.domain import ImageDir, ImageProbe
 
 
 class Host:
@@ -207,10 +208,10 @@ class VmTools:
         """vm.adapters.knobs."""
         return vm_adapters.knobs(path)
 
-    def image_dirs(self) -> list[dict[str, str]]:
+    def image_dirs(self) -> list[ImageDir]:
         """vm.adapters.image_dirs."""
         return vm_adapters.image_dirs()
 
-    def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
+    def probe_dir(self, d: ImageDir, readable: Callable[[str], str]) -> ImageProbe:
         """vm.adapters.probe_dir."""
         return vm_adapters.probe_dir(d, readable)

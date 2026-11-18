@@ -1023,7 +1023,9 @@ The Python code inside `vm/` (standard library only at run time):
   (`domain_parts`), the hardware `tune` recommends (`tune_domain`,
   `guest_kind`), the NAS backup's names and retention (`valid_keep`,
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
-  `render_timer`), the command line (`parse_args`).
+  `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
+  and the records the other modules pass around (`DomainParts`, `LiveDisk`,
+  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
 - `vm/adapters.py`: what reaches the host: `virsh`, `rpm`, `rpm-ostree`,
   `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the backup index, the NOCOW flag

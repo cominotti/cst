@@ -9,6 +9,7 @@ Every path below can be moved by its CST_VM_* variable, for the tests only
 
 from collections.abc import Callable, Mapping, Sequence
 import ctypes
+from dataclasses import replace
 import datetime
 import functools
 import json
@@ -63,6 +64,9 @@ from vm.domain import (
     URI,
     USER_IMAGES,
     VIRT_PACKAGES,
+    ImageDir,
+    ImageInfo,
+    ImageProbe,
     is_cst_vm_program,
     render_service,
     render_timer,
@@ -707,45 +711,32 @@ def mark_folder_nocow(path: str) -> None:
     inode_attrs.set_nocow(path, directory=True)
 
 
-def image_dirs(home: str | None = None) -> list[dict[str, str]]:
-    """[{scope, path, what}] of every known VM image folder."""
+def image_dirs(home: str | None = None) -> list[ImageDir]:
+    """Every known VM image folder."""
     home = home or user_home()
-    out = [{"scope": "system", "path": SYSTEM_IMAGES, "what": "libvirt qemu:///system: virt-manager, virsh"}]
-    out += [{"scope": "user", "path": os.path.join(home, rel), "what": what} for rel, what in USER_IMAGES]
+    out = [ImageDir("system", SYSTEM_IMAGES, "libvirt qemu:///system: virt-manager, virsh")]
+    out += [ImageDir("user", os.path.join(home, rel), what) for rel, what in USER_IMAGES]
     return out
 
 
-def probe_dir(d: Mapping[str, Any], readable: Callable[[str], str] = lambda p: p) -> dict[str, Any]:
-    """What a VM image folder looks like. readable maps a path to where this
-    process reads it (the doctor in a toolbox: under /run/host). Adds:
-    present, link (the target when the path is a symbolic link: never
-    created, marked or listed; present is then False), btrfs (None: unknown), nocow (True/False/None: not readable),
-    listed (False: the folder cannot be listed by this user), images
-    [{name, path, alloc, size, nocow}] (regular files, not .iso, not the
-    *.cow-old leftovers of a conversion) and leftovers [names]."""
-    res: dict[str, Any] = dict(d)
-    rp = readable(res["path"])
+def probe_dir(d: ImageDir, readable: Callable[[str], str] = lambda p: p) -> ImageProbe:
+    """What a VM image folder looks like (ImageProbe). readable maps a path to where this
+    process reads it (the doctor in a toolbox: under /run/host)."""
+    rp = readable(d.path)
     link = os.readlink(rp) if os.path.islink(rp) else None
-    res.update(
-        present=link is None and os.path.isdir(rp),
-        link=link,
-        btrfs=None,
-        nocow=None,
-        listed=False,
-        images=[],
-        leftovers=[],
-    )
-    if not res["present"]:
-        return res
-    res["btrfs"] = is_btrfs(rp)
-    if res["btrfs"] is False:
-        return res
-    res["nocow"] = flag_state(readable_inode_flags(rp))
+    here = ImageProbe(d.scope, d.path, d.what, present=link is None and os.path.isdir(rp), link=link)
+    if not here.present:
+        return here
+    btrfs = is_btrfs(rp)
+    if btrfs is False:
+        return replace(here, btrfs=False)
+    nocow = flag_state(readable_inode_flags(rp))
     try:
         entries = sorted(os.scandir(rp), key=lambda e: e.name)
     except OSError:
-        return res
-    res["listed"] = True
+        return replace(here, btrfs=btrfs, nocow=nocow)
+    images: list[ImageInfo] = []
+    leftovers: list[str] = []
     for e in entries:
         try:
             if not e.is_file(follow_symlinks=False):
@@ -754,31 +745,31 @@ def probe_dir(d: Mapping[str, Any], readable: Callable[[str], str] = lambda p: p
         except OSError:
             continue
         if e.name.endswith(".cow-old"):
-            res["leftovers"].append(e.name)
+            leftovers.append(e.name)
             continue
         if e.name.lower().endswith(".iso"):
             continue  # read-only installers: nothing to gain
-        res["images"].append(
-            {
-                "name": e.name,
-                "path": os.path.join(res["path"], e.name),
-                "alloc": st.st_blocks * 512,
-                "size": st.st_size,
-                "nocow": flag_state(readable_inode_flags(os.path.join(rp, e.name))),
-            }
+        images.append(
+            ImageInfo(
+                name=e.name,
+                path=os.path.join(d.path, e.name),
+                alloc=st.st_blocks * 512,
+                size=st.st_size,
+                nocow=flag_state(readable_inode_flags(os.path.join(rp, e.name))),
+            )
         )
-    return res
+    return replace(here, btrfs=btrfs, nocow=nocow, listed=True, images=images, leftovers=leftovers)
 
 
-def needs_mark(d: Mapping[str, Any]) -> bool:
+def needs_mark(d: ImageProbe) -> bool:
     """True when nocow apply would act on the folder (also: unknown state of
     the system folder, or the system folder missing while libvirt is there).
     A symbolic link is never acted on (install -d and chattr would follow it)."""
-    if d.get("link") is not None or os.path.lexists(d["path"]) and not d["present"]:
+    if d.link is not None or os.path.lexists(d.path) and not d.present:
         return False
-    if d["scope"] == "system" and not d["present"]:
-        return os.path.isdir(os.path.dirname(d["path"]))
-    return d["present"] and d["btrfs"] is not False and d["nocow"] is not True
+    if d.scope == "system" and not d.present:
+        return os.path.isdir(os.path.dirname(d.path))
+    return d.present and d.btrfs is not False and d.nocow is not True
 
 
 def domain_state(vm: str) -> str:

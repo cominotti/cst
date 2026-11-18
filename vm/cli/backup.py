@@ -91,11 +91,11 @@ def cmd_backup(vm: str, full: bool) -> int:
     if rc != 0:
         raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
     parts = domain_parts(xml_text)
-    if parts["problems"]:
-        raise Refused(f"{vm}: nothing copied:\n  " + "\n  ".join(parts["problems"]))
-    if not parts["disks"]:
+    if parts.problems:
+        raise Refused(f"{vm}: nothing copied:\n  " + "\n  ".join(parts.problems))
+    if not parts.disks:
         raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
-    notes = list(parts["skipped"])
+    notes = list(parts.skipped)
 
     def real(path: str, what: str) -> str:
         # cp -a copies a symbolic link as a link (no data): the file it points
@@ -106,7 +106,7 @@ def cmd_backup(vm: str, full: bool) -> int:
         return r
 
     sources: list[tuple[str, bool]] = []
-    for p in parts["disks"]:
+    for p in parts.disks:
         if not os.path.isfile(p):
             raise Refused(f"{vm}: disk {p} not found")
         p = real(p, "disk")
@@ -117,15 +117,15 @@ def cmd_backup(vm: str, full: bool) -> int:
             )
         if (p, True) not in sources:
             sources.append((p, True))
-    if parts["nvram"]:
-        if os.path.isfile(parts["nvram"]):
-            sources.append((real(parts["nvram"], "UEFI variables"), False))
+    if parts.nvram:
+        if os.path.isfile(parts.nvram):
+            sources.append((real(parts.nvram, "UEFI variables"), False))
         else:
-            notes.append(f"UEFI variables {parts['nvram']} not there yet (the VM never started?): not copied")
+            notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not copied")
     tpm_dir = ""
-    if parts["tpm"]:
-        tpm_dir = os.path.join(SWTPM_DIR, parts["uuid"])
-        if parts["uuid"] and os.path.isdir(tpm_dir):
+    if parts.tpm:
+        tpm_dir = os.path.join(SWTPM_DIR, parts.uuid)
+        if parts.uuid and os.path.isdir(tpm_dir):
             tpm_dir = real(tpm_dir, "TPM state")
             sources.append((tpm_dir, False))
         else:
@@ -196,7 +196,7 @@ def cmd_backup(vm: str, full: bool) -> int:
             f.write(xml_text)
         manifest = {
             "vm": vm,
-            "uuid": parts["uuid"],
+            "uuid": parts.uuid,
             "timestamp": stamp,
             "epoch": int(epoch),
             "mode": mode,

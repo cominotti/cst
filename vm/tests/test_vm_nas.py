@@ -917,8 +917,8 @@ class ShutOffAndRefusalTest(Nas):
             self.assertEqual(r.returncode, 1)
             self.assertIn("needs root", r.stderr)
         a = vm_domain.parse_args(["backup", "--keep-tag", "pre-f46", "--nas", "w"])
-        self.assertEqual((a["vm"], a["keep"], a["nas"]), ("w", "pre-f46", True))
-        self.assertEqual(vm_domain.parse_args(["backup", "--nas", "--keep-tag=x1"])["keep"], "x1")
+        self.assertEqual((a.vm, a.keep, a.nas), ("w", "pre-f46", True))
+        self.assertEqual(vm_domain.parse_args(["backup", "--nas", "--keep-tag=x1"]).keep, "x1")
         for bad in (
             ["backup", "--nas", "--full"],
             ["backup", "--keep-tag", "x"],

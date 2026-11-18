@@ -3,11 +3,12 @@
 
 from collections.abc import Callable, Iterable, Mapping
 import os
-from typing import Any, BinaryIO, Protocol, TextIO
+from typing import BinaryIO, Protocol, TextIO
 
 from cst_core.domain.record import InstallRecord
 from cst_core.ports import VirshPort
 from doctor.domain import HostPath, Result, ViewPath
+from vm.domain import ImageDir, ImageProbe
 
 
 class DoctorHostPort(Protocol):
@@ -115,11 +116,11 @@ class VmToolsPort(Protocol):
         """{knob: on} from a vm.conf (missing file or knob: on)."""
         ...
 
-    def image_dirs(self) -> list[dict[str, str]]:
-        """[{scope, path, what}] of every known VM image folder."""
+    def image_dirs(self) -> list[ImageDir]:
+        """Every known VM image folder."""
         ...
 
-    def probe_dir(self, d: Mapping[str, Any], readable: Callable[[str], str]) -> dict[str, Any]:
+    def probe_dir(self, d: ImageDir, readable: Callable[[str], str]) -> ImageProbe:
         """What an image folder looks like (readable maps a path to where this process reads it)."""
         ...
 

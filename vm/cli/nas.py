@@ -54,6 +54,7 @@ from vm.adapters import (
 )
 from vm.cli.backup import check_shut_off
 from vm.domain import (
+    DomainParts,
     KEEP_TAG,
     LIVE_STATES,
     NAS_SSH_ALIAS,
@@ -284,10 +285,10 @@ def unstage(d: str) -> None:
             pass
 
 
-def nas_sources(vm: str, parts: Mapping[str, Any], notes: list[str]) -> list[tuple[str, str]]:
+def nas_sources(vm: str, parts: DomainParts, notes: list[str]) -> list[tuple[str, str]]:
     """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder."""
     out: list[tuple[str, str]] = []
-    for p in parts["disks"]:
+    for p in parts.disks:
         if not os.path.isfile(p):
             raise Refused(f"{vm}: disk {p} not found")
         if OVERLAY_MARK in p:
@@ -304,14 +305,14 @@ def nas_sources(vm: str, parts: Mapping[str, Any], notes: list[str]) -> list[tup
                 "(qemu-img info --backing-chain)"
             )
         out.append((r, "disk"))
-    if parts["nvram"]:
-        if os.path.isfile(parts["nvram"]):
-            out.append((os.path.realpath(parts["nvram"]), "nvram"))
+    if parts.nvram:
+        if os.path.isfile(parts.nvram):
+            out.append((os.path.realpath(parts.nvram), "nvram"))
         else:
-            notes.append(f"UEFI variables {parts['nvram']} not there yet: not backed up")
-    if parts["tpm"]:
-        tpm_dir = os.path.join(SWTPM_DIR, parts["uuid"])
-        if parts["uuid"] and os.path.isdir(tpm_dir):
+            notes.append(f"UEFI variables {parts.nvram} not there yet: not backed up")
+    if parts.tpm:
+        tpm_dir = os.path.join(SWTPM_DIR, parts.uuid)
+        if parts.uuid and os.path.isdir(tpm_dir):
             out.append((os.path.realpath(tpm_dir), "tpm"))
         else:
             notes.append(
@@ -345,11 +346,11 @@ def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], li
     if rc != 0:
         raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
     parts = domain_parts(xml_text)
-    if parts["problems"]:
-        raise Refused(f"{vm}: nothing backed up:\n  " + "\n  ".join(parts["problems"]))
-    if not parts["disks"]:
+    if parts.problems:
+        raise Refused(f"{vm}: nothing backed up:\n  " + "\n  ".join(parts.problems))
+    if not parts.disks:
         raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
-    notes = list(parts["skipped"])
+    notes = list(parts.skipped)
     sources = nas_sources(vm, parts, notes)
     epoch, stamp = utc_now()
     specs: dict[str, tuple[str, str]] = {}
@@ -361,16 +362,16 @@ def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], li
             raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
         disks = live_disks(live_xml)
         for d in disks:
-            if d["device"] != "disk" or d["type"] != "file":
-                others.append(d["target"])
+            if d.device != "disk" or d.kind != "file":
+                others.append(d.target)
                 continue
-            if OVERLAY_MARK in d["source"] or d["backing"]:
+            if OVERLAY_MARK in d.source or d.backing:
                 raise Refused(
-                    f"{vm}: {disk_label(d['target'], word='disk ')} runs on {d['source']} with a backing chain (an overlay "
+                    f"{vm}: {disk_label(d.target, word='disk ')} runs on {d.source} with a backing chain (an overlay "
                     f"left by an earlier backup?). Put it back first; `{CST} doctor` shows the commands"
                 )
-            base = os.path.realpath(d["source"])
-            specs[d["target"]] = (
+            base = os.path.realpath(d.source)
+            specs[d.target] = (
                 base,
                 os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
             )
@@ -402,7 +403,7 @@ def nas_run(vm: str, keep: str | None, quiesce: bool, nas: Mapping[str, Any], li
         tags = [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep else [])
         manifest = {
             "vm": vm,
-            "uuid": parts["uuid"],
+            "uuid": parts.uuid,
             "timestamp": stamp,
             "epoch": int(epoch),
             "mode": "nas",

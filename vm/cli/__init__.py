@@ -10,6 +10,7 @@ command group (vm.cli.backup, nas, timer, status, tune, nocow); main is here.
 from collections.abc import Sequence
 import os
 import sys
+from typing import assert_never
 
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.text import first_line
@@ -33,30 +34,30 @@ def main(argv: Sequence[str], doc: str, entry_file: str) -> int:
     except Usage as e:
         print(f"{PROG}: {e}\n{USAGE}", file=sys.stderr)
         return 2
-    cmd, vm = a["cmd"], a["vm"]
+    cmd, vm = a.cmd, a.vm
     try:
-        prepare_command(cmd, a["sub"], a["nas"], vm)
+        prepare_command(cmd, a.sub, a.nas, vm)
         if cmd == "help":
             print(doc)
             return 0
         if cmd == "list":
             return status.cmd_list(vm)
         if cmd == "nocow":
-            return nocow.cmd_nocow_plan(a["root"]) if a["sub"] == "plan" else nocow.cmd_nocow_apply()
+            return nocow.cmd_nocow_plan(a.root) if a.sub == "plan" else nocow.cmd_nocow_apply()
         vm = vm or default_vm()
         if cmd == "status":
             return status.cmd_status(vm)
         if cmd == "tune":
-            return tune.cmd_tune(vm, a["sub"] == "apply", a["guest_virtio"])
+            return tune.cmd_tune(vm, a.sub == "apply", a.guest_virtio)
         if cmd == "backup-timer":
-            return timer.cmd_timer(a["sub"], vm, entry_file)
+            return timer.cmd_timer(a.sub or "status", vm, entry_file)
+        if cmd != "backup":
+            assert_never(cmd)  # every command is handled above
         safe_output()  # a closed terminal or pipe never cuts a backup or its cleanup short
-        if a["nas"]:
-            return nas.cmd_backup_nas(vm, a["keep"], not a["no_quiesce"])
-        return backup.cmd_backup(vm, a["full"])
+        return nas.cmd_backup_nas(vm, a.keep, not a.no_quiesce) if a.nas else backup.cmd_backup(vm, a.full)
     except (Refused, Stop, WriteFailed) as e:
         print(f"{PROG}: {e}", file=sys.stderr)
-        if cmd == "backup" and a["nas"] and os.environ.get("INVOCATION_ID") and "DISK NOT MERGED" not in str(e):
+        if cmd == "backup" and a.nas and os.environ.get("INVOCATION_ID") and "DISK NOT MERGED" not in str(e):
             # Started by systemd (the weekly timer): nobody reads the terminal.
             notify(
                 "normal",

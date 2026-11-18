@@ -27,7 +27,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import TypedDict, cast
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -53,50 +52,6 @@ REPO = os.path.dirname(VM_DIR)
 SETUP = os.path.join(REPO, "vm-setup.sh")
 UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
-
-
-class _DomainParts(TypedDict):
-    uuid: str
-    disks: list[str]
-    nvram: str
-    tpm: bool
-    problems: list[str]
-    skipped: list[str]
-
-
-class _ParsedArgs(TypedDict):
-    cmd: str
-    sub: str | None
-    vm: str | None
-    full: bool
-    guest_virtio: bool
-    root: bool
-    nas: bool
-    keep: str | None
-    no_quiesce: bool
-
-
-class _DirSpec(TypedDict):
-    scope: str
-    path: str
-    what: str
-
-
-class _ImageEntry(TypedDict):
-    path: str
-    name: str
-
-
-class _ProbeResult(TypedDict):
-    scope: str
-    path: str
-    what: str
-    present: bool
-    link: str | None
-    nocow: bool | None
-    listed: bool
-    images: list[_ImageEntry]
-    leftovers: list[str]
 
 
 def patch_vm(name: str, new: object) -> AbstractContextManager[object]:
@@ -260,12 +215,12 @@ class PartsTest(unittest.TestCase):
           <disk type='file' device='cdrom'><target dev='sdc'/></disk>
           <tpm><backend type='emulator'/></tpm></devices></domain>"""
         p = vm_domain.domain_parts(xml)
-        self.assertEqual(p["uuid"], UUID)
-        self.assertEqual(p["disks"], ["/a.qcow2", "/b.raw"])
-        self.assertEqual(p["nvram"], "/n/VARS.fd")
-        self.assertTrue(p["tpm"])
-        self.assertEqual(p["problems"], [])
-        self.assertEqual(p["skipped"], ["sdc (cdrom, not copied)"])
+        self.assertEqual(p.uuid, UUID)
+        self.assertEqual(p.disks, ["/a.qcow2", "/b.raw"])
+        self.assertEqual(p.nvram, "/n/VARS.fd")
+        self.assertTrue(p.tpm)
+        self.assertEqual(p.problems, [])
+        self.assertEqual(p.skipped, ["sdc (cdrom, not copied)"])
 
     def test_a_disk_without_a_target_name_is_named_by_its_source(self) -> None:
         # libvirt requires <target dev>; a definition without one must not print "None".
@@ -277,17 +232,17 @@ class PartsTest(unittest.TestCase):
           <disk type='file' device='disk'><source file='/a.qcow2'/></disk></devices></domain>"""
         p = vm_domain.domain_parts(xml)
         self.assertEqual(
-            p["skipped"],
+            p.skipped,
             ["unnamed disk on /iso/win.iso (cdrom, not copied)", "unnamed disk (cdrom, not copied)",
              "unnamed disk (no source file)"],
         )  # fmt: skip
-        self.assertEqual(len(p["problems"]), 1)
-        self.assertTrue(p["problems"][0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p["problems"])
-        self.assertEqual(p["disks"], ["/a.qcow2"])
+        self.assertEqual(len(p.problems), 1)
+        self.assertTrue(p.problems[0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p.problems)
+        self.assertEqual(p.disks, ["/a.qcow2"])
         self.assertNotIn("None", repr(p))
         live = vm_domain.live_disks(xml)
-        self.assertEqual([d["target"] for d in live], ["", "", "", "", ""])
-        self.assertEqual(vm_domain.disk_label(live[4]["target"], word="disk "), "unnamed disk")
+        self.assertEqual([d.target for d in live], ["", "", "", "", ""])
+        self.assertEqual(vm_domain.disk_label(live[4].target, word="disk "), "unnamed disk")
         self.assertEqual(vm_domain.disk_label("sda", "/a.qcow2", word="disk "), "disk sda")
         self.assertEqual(vm_domain.disk_label(None, "/a.qcow2"), "unnamed disk on /a.qcow2")
 
@@ -297,16 +252,16 @@ class PartsTest(unittest.TestCase):
           <disk type='network' device='disk'><source protocol='rbd' name='pool/img'/><target dev='vdb'/></disk>
           <tpm><backend type='passthrough'/></tpm></devices></domain>"""
         p = vm_domain.domain_parts(xml)
-        self.assertEqual(len(p["problems"]), 2)
-        self.assertIn("vda: a block disk (/dev/vg/win)", p["problems"][0])
-        self.assertIn("vdb: a network disk (pool/img)", p["problems"][1])
-        self.assertFalse(p["tpm"])
-        self.assertEqual(p["nvram"], "")
+        self.assertEqual(len(p.problems), 2)
+        self.assertIn("vda: a block disk (/dev/vg/win)", p.problems[0])
+        self.assertIn("vdb: a network disk (pool/img)", p.problems[1])
+        self.assertFalse(p.tpm)
+        self.assertEqual(p.nvram, "")
 
     def test_parse_args(self) -> None:
         def short(argv: Sequence[str]) -> tuple[str, str | None, str | None, bool, bool, bool]:
             a = vm_domain.parse_args(argv)
-            return a["cmd"], a["sub"], a["vm"], a["full"], a["guest_virtio"], a["root"]
+            return a.cmd, a.sub, a.vm, a.full, a.guest_virtio, a.root
 
         self.assertEqual(short(["backup", "x", "--full"]), ("backup", None, "x", True, False, False))
         self.assertEqual(short(["list"]), ("list", None, None, False, False, False))
@@ -1176,8 +1131,8 @@ class NocowTest(unittest.TestCase):
             f.write(b"x" * size)
         return p
 
-    def dirs(self) -> dict[str, _ProbeResult]:
-        return {d["path"]: cast("_ProbeResult", vm_adapters.probe_dir(d)) for d in vm_adapters.image_dirs()}
+    def dirs(self) -> dict[str, vm_domain.ImageProbe]:
+        return {d.path: vm_adapters.probe_dir(d) for d in vm_adapters.image_dirs()}
 
     def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
         buf = io.StringIO()
@@ -1195,10 +1150,10 @@ class NocowTest(unittest.TestCase):
         self.flags[good] = inode_attrs.FS_NOCOW_FL
         d = self.dirs()
         s = d[self.system]
-        self.assertEqual((s["present"], s["nocow"], s["listed"]), (True, True, True))
-        self.assertEqual([i["name"] for i in s["images"]], ["win.qcow2"])
-        self.assertEqual(s["leftovers"], ["old.qcow2.cow-old"])
-        self.assertFalse(d[os.path.join(self.home, ".local/share/libvirt/images")]["present"])
+        self.assertEqual((s.present, s.nocow, s.listed), (True, True, True))
+        self.assertEqual([i.name for i in s.images], ["win.qcow2"])
+        self.assertEqual(s.leftovers, ["old.qcow2.cow-old"])
+        self.assertFalse(d[os.path.join(self.home, ".local/share/libvirt/images")].present)
         rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertEqual(rc, 0)
         self.assertIn("still copy-on-write: win.qcow2", out)
@@ -1212,7 +1167,7 @@ class NocowTest(unittest.TestCase):
         self.assertNotIn("virtio-win.iso", out)
 
     def test_convert_lines_order(self) -> None:
-        img = {"path": "/i/w b.qcow2"}
+        img = vm_domain.ImageInfo("w b.qcow2", "/i/w b.qcow2", 0, 0, False)
         lines = vm_domain.convert_lines(img, False)
         self.assertEqual([ln.split()[0] for ln in lines], ["mv", "install", "chattr", "cp", "cmp", "#"])
         self.assertIn("install -m 0600 /dev/null '/i/w b.qcow2'", lines[1])
@@ -1364,7 +1319,7 @@ class NocowTest(unittest.TestCase):
         self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
         d = self.dirs()
         for p in (self.system, libvirt_user):
-            self.assertEqual((d[p]["present"], d[p]["link"]), (False, real))
+            self.assertEqual((d[p].present, d[p].link), (False, real))
             self.assertFalse(vm_adapters.needs_mark(d[p]))
         rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn(
@@ -1394,14 +1349,7 @@ class NocowTest(unittest.TestCase):
         self.assertIn("already has the NOCOW mark (+C) (symbolic links are not managed).", out)
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o755)  # target untouched
         # Even if the folder turns into a link between the probe and the action.
-        probe: dict[str, object] = {
-            "scope": "system",
-            "path": self.system,
-            "what": "x",
-            "present": False,
-            "link": None,
-            "nocow": None,
-        }
+        probe = vm_domain.ImageProbe("system", self.system, "x", present=False, link=None, nocow=None)
         self.assertIn("symbolic link: not touched", vm_cli_nocow.mark_system_dir(probe))
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
@@ -1605,9 +1553,9 @@ class PackageTest(unittest.TestCase):
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
-        self.assertEqual(parts["uuid"], UUID)
-        self.assertIn("/var/lib/libvirt/images/win11-devbox.qcow2", parts["disks"])
-        self.assertTrue(parts["tpm"])
+        self.assertEqual(parts.uuid, UUID)
+        self.assertIn("/var/lib/libvirt/images/win11-devbox.qcow2", parts.disks)
+        self.assertTrue(parts.tpm)
         after, _, held, _ = vm_domain.tune_domain(old_domain(), ALL_ON, allow_bus=False)
         self.assertIsNotNone(after)
         self.assertTrue(held)
@@ -1616,9 +1564,7 @@ class PackageTest(unittest.TestCase):
 
     def test_parsing_and_backup_helpers(self) -> None:
         a = vm_domain.parse_args(["backup", "win", "--nas", "--keep-tag=pre-f46", "--no-quiesce"])
-        self.assertEqual(
-            (a["cmd"], a["vm"], a["nas"], a["keep"], a["no_quiesce"]), ("backup", "win", True, "pre-f46", True)
-        )
+        self.assertEqual((a.cmd, a.vm, a.nas, a.keep, a.no_quiesce), ("backup", "win", True, "pre-f46", True))
         for bad in (
             ["backup", "--full", "--nas"],
             ["backup", "--keep-tag", "pre-f46"],

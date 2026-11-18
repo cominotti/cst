@@ -5,10 +5,11 @@ the weekly timer unit, the command line. Pure: text in, text or values out.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 import os.path
 import re
 import shlex
-from typing import Any
+from typing import Final, Literal
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused, Usage
@@ -61,6 +62,105 @@ UNIT_MARKER = "# Managed by cst vm (CST)"
 
 ON_CALENDAR = "Sat *-*-* 04:30:00"
 
+# The commands of cst vm, and the subcommands of those that take one.
+type VmCommand = Literal["help", "backup", "backup-timer", "list", "status", "tune", "nocow"]
+type VmSub = Literal["plan", "apply", "on", "off", "status"]
+
+COMMANDS: Final[dict[str, VmCommand]] = {
+    "backup": "backup",
+    "backup-timer": "backup-timer",
+    "list": "list",
+    "status": "status",
+    "tune": "tune",
+    "nocow": "nocow",
+}
+
+SUBS: Final[dict[VmCommand, dict[str, VmSub]]] = {
+    "tune": {"plan": "plan", "apply": "apply"},
+    "nocow": {"plan": "plan", "apply": "apply"},
+    "backup-timer": {"on": "on", "off": "off", "status": "status"},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class VmArgs:
+    """The command line of cst vm, as parse_args reads it."""
+
+    cmd: VmCommand = "help"
+    sub: VmSub | None = None
+    vm: str | None = None
+    full: bool = False
+    guest_virtio: bool = False
+    root: bool = False
+    nas: bool = False
+    keep: str | None = None
+    no_quiesce: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DomainParts:
+    """What a backup copies, from the inactive definition (domain_parts)."""
+
+    uuid: str
+    disks: list[str]
+    nvram: str
+    tpm: bool
+    skipped: list[str]
+    problems: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveDisk:
+    """One disk of a definition (live_disks); backing: the live definition shows a backing chain."""
+
+    target: str
+    device: str
+    kind: str
+    source: str
+    backing: bool
+
+
+type ImageScope = Literal["system", "user"]
+
+
+@dataclass(frozen=True, slots=True)
+class ImageDir:
+    """A known VM image folder: system (libvirt's pool, root's) or one in the user's home."""
+
+    scope: ImageScope
+    path: str
+    what: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageInfo:
+    """An image file in a probed folder; nocow None: its flags are not readable by this user."""
+
+    name: str
+    path: str
+    alloc: int
+    size: int
+    nocow: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageProbe:
+    """What a VM image folder looks like (probe_dir). present: a folder (a symbolic link is not:
+    link holds its target, and it is never created, marked or listed); btrfs None: unknown;
+    nocow None: not readable; listed False: not listable by this user; images: regular files,
+    not .iso, not the *.cow-old leftovers of a conversion (leftovers)."""
+
+    scope: ImageScope
+    path: str
+    what: str
+    present: bool = False
+    link: str | None = None
+    btrfs: bool | None = None
+    nocow: bool | None = None
+    listed: bool = False
+    images: list[ImageInfo] = field(default_factory=list)
+    leftovers: list[str] = field(default_factory=list)
+
 
 def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
     """A disk as a message names it: word + its target (sda). Without a
@@ -71,9 +171,9 @@ def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
     return f"unnamed disk on {source}" if source else "unnamed disk"
 
 
-def domain_parts(xml_text: str) -> dict[str, Any]:
-    """From the inactive definition: {uuid, disks: [path], nvram, tpm, skipped,
-    problems}. problems are disks a file copy cannot back up (block, network,
+def domain_parts(xml_text: str) -> DomainParts:
+    """From the inactive definition: uuid, disks [path], nvram, tpm, skipped,
+    problems. problems are disks a file copy cannot back up (block, network,
     pool volumes): the backup refuses then, rather than leaving one out."""
     root = ET.fromstring(xml_text)
     disks: list[str] = []
@@ -113,17 +213,17 @@ def domain_parts(xml_text: str) -> dict[str, Any]:
             path = s.get("file") or ""
         nvram = path
     tpm = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
-    return {
-        "uuid": (root.findtext("uuid") or "").strip(),
-        "disks": disks,
-        "nvram": nvram,
-        "tpm": tpm,
-        "skipped": skipped,
-        "problems": problems,
-    }
+    return DomainParts(
+        uuid=(root.findtext("uuid") or "").strip(),
+        disks=disks,
+        nvram=nvram,
+        tpm=tpm,
+        skipped=skipped,
+        problems=problems,
+    )
 
 
-def index_entry(manifest: Mapping[str, Any], path: str) -> dict[str, Any]:
+def index_entry(manifest: Mapping[str, object], path: str) -> dict[str, object]:
     return {
         "vm": manifest["vm"],
         "timestamp": manifest["timestamp"],
@@ -159,23 +259,22 @@ def restore_lines(vm: str, dest_dir: str, copied: Sequence[tuple[str, bool]], tp
     return lines
 
 
-def live_disks(xml_text: str) -> list[dict[str, Any]]:
-    """[{target, device, type, source, backing}] of a definition's disks;
-    backing: the live definition shows a backing chain (an overlay)."""
-    out: list[dict[str, Any]] = []
+def live_disks(xml_text: str) -> list[LiveDisk]:
+    """The disks of a definition; backing: the live definition shows a backing chain (an overlay)."""
+    out: list[LiveDisk] = []
     for disk in ET.fromstring(xml_text).findall("devices/disk"):
         t, s, bs = disk.find("target"), disk.find("source"), disk.find("backingStore")
         src = ""
         if s is not None:
             src = s.get("file") or s.get("dev") or s.get("name") or s.get("volume") or ""
         out.append(
-            {
-                "target": (t.get("dev") if t is not None else None) or "",
-                "device": disk.get("device", "disk"),
-                "type": disk.get("type", "file"),
-                "source": src,
-                "backing": bs is not None and bs.find("source") is not None,
-            }
+            LiveDisk(
+                target=(t.get("dev") if t is not None else None) or "",
+                device=disk.get("device", "disk"),
+                kind=disk.get("type", "file"),
+                source=src,
+                backing=bs is not None and bs.find("source") is not None,
+            )
         )
     return out
 
@@ -379,11 +478,11 @@ def version_changes(old: Mapping[str, str] | None, new: Mapping[str, str] | None
     return out
 
 
-def convert_lines(img: Mapping[str, Any], system: bool) -> list[str]:
+def convert_lines(img: ImageInfo, system: bool) -> list[str]:
     """The commands that make an existing image NOCOW (never run by CST)."""
     q = shlex.quote
     s = "sudo " if system else ""
-    f, old = q(img["path"]), q(img["path"] + ".cow-old")
+    f, old = q(img.path), q(img.path + ".cow-old")
     return [
         f"{s}mv {f} {old}",
         f"{s}install -m 0600 /dev/null {f}      # new empty file, private until cp -a sets the mode",
@@ -623,60 +722,68 @@ WINDOWS_STEPS = """The virtio drivers must be in Windows BEFORE its disk moves t
 Details: vm/README.md in CST, section "Windows guests"."""
 
 
-def parse_args(argv: Sequence[str]) -> dict[str, Any]:
-    """{cmd, sub, vm, full, guest_virtio, root, nas, keep, no_quiesce}."""
-    a: dict[str, Any] = {
-        "cmd": "help",
-        "sub": None,
-        "vm": None,
-        "full": False,
-        "guest_virtio": False,
-        "root": False,
-        "nas": False,
-        "keep": None,
-        "no_quiesce": False,
-    }
+def parse_args(argv: Sequence[str]) -> VmArgs:
+    """The command line of cst vm; Usage when it is not one."""
     if not argv or argv[0] in ("help", "-h", "--help"):
         if len(argv) > 1:
             raise Usage("help takes no arguments")
-        return a
-    a["cmd"], rest = argv[0], list(argv[1:])
-    if a["cmd"] not in ("backup", "backup-timer", "list", "status", "tune", "nocow"):
-        raise Usage(f"unknown command '{a['cmd']}'")
-    subs: dict[str, tuple[str, ...]] = {
-        "tune": ("plan", "apply"),
-        "nocow": ("plan", "apply"),
-        "backup-timer": ("on", "off", "status"),
-    }
-    if a["cmd"] in subs:
-        if not rest or rest[0] not in subs[a["cmd"]]:
-            raise Usage(f"{a['cmd']}: {' or '.join(subs[a['cmd']])}")
-        a["sub"], rest = rest[0], rest[1:]
-    flags = {
-        "backup": {"--full": "full", "--nas": "nas", "--no-quiesce": "no_quiesce"},
-        "tune": {"--guest-has-virtio": "guest_virtio"},
-        "nocow": {"--root": "root"} if a["sub"] == "plan" else {},
-    }.get(a["cmd"], {})
-    takes_vm = a["cmd"] != "nocow"
-    where = " ".join(filter(None, (a["cmd"], a["sub"])))
+        return VmArgs()
+    word, rest = argv[0], list(argv[1:])
+    cmd = COMMANDS.get(word)
+    if cmd is None:
+        raise Usage(f"unknown command '{word}'")
+    sub: VmSub | None = None
+    if cmd in SUBS:
+        subs = SUBS[cmd]
+        sub = subs.get(rest[0]) if rest else None
+        if sub is None:
+            raise Usage(f"{cmd}: {' or '.join(subs)}")
+        rest = rest[1:]
+    flags = _FLAGS.get(cmd, ())
+    if cmd == "nocow" and sub != "plan":
+        flags = ()
+    takes_vm = cmd != "nocow"
+    where = " ".join(filter(None, (cmd, sub)))
+    seen: set[str] = set()
+    vm: str | None = None
+    keep: str | None = None
     while rest:
         x = rest.pop(0)
-        if a["cmd"] == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and a["keep"] is None:
+        if cmd == "backup" and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
             value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
             if not valid_keep(value):
                 raise Usage(
                     f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
                     "starting with cst- or vm:), e.g. pre-f46"
                 )
-            a["keep"] = value
-        elif x in flags and not a[flags[x]]:
-            a[flags[x]] = True
-        elif takes_vm and not x.startswith("-") and a["vm"] is None:
-            a["vm"] = x
+            keep = value
+        elif x in flags and x not in seen:
+            seen.add(x)
+        elif takes_vm and not x.startswith("-") and vm is None:
+            vm = x
         else:
             raise Usage(f"{where}: unexpected argument '{x}'")
-    if a["full"] and a["nas"]:
+    a = VmArgs(
+        cmd=cmd,
+        sub=sub,
+        vm=vm,
+        full="--full" in seen,
+        guest_virtio="--guest-has-virtio" in seen,
+        root="--root" in seen,
+        nas="--nas" in seen,
+        keep=keep,
+        no_quiesce="--no-quiesce" in seen,
+    )
+    if a.full and a.nas:
         raise Usage("backup: --full is for the local copy, --nas for the NAS: one of them")
-    if (a["keep"] is not None or a["no_quiesce"]) and not a["nas"]:
+    if (a.keep is not None or a.no_quiesce) and not a.nas:
         raise Usage("backup: --keep-tag and --no-quiesce go with --nas")
     return a
+
+
+# The flags each command takes (nocow: --root with plan only).
+_FLAGS: Final[dict[VmCommand, tuple[str, ...]]] = {
+    "backup": ("--full", "--nas", "--no-quiesce"),
+    "tune": ("--guest-has-virtio",),
+    "nocow": ("--root",),
+}
