@@ -650,7 +650,7 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
 
     def readlink(self, path: str, *, canonicalize: bool = False) -> str | None:
         if path in self._block_links:
-            return self._block_links[path] if canonicalize else self._block_links[path]
+            return self._block_links[path]
         return super().readlink(path, canonicalize=canonicalize)
 
     def is_readable(self, path: str) -> bool:
