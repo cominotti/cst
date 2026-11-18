@@ -52,8 +52,8 @@ _RULE_UUID: Final = re.compile(r'ENV\{ID_FS_UUID\}!="([0-9a-f-]*)"')
 
 
 def output(text: str) -> str:
-    """What $(...) keeps of a command's output: every newline at the end removed."""
-    return text.rstrip("\n")
+    """What $(...) keeps of a command's output: every NUL byte dropped, every newline at the end removed."""
+    return text.replace("\0", "").rstrip("\n")
 
 
 def lines_of(items: Sequence[str]) -> str:

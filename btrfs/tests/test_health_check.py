@@ -653,6 +653,16 @@ class HealthCheckTest(unittest.TestCase):
         with open(marker, encoding="utf-8") as f:
             self.assertEqual(f.read(), text)
 
+    def test_nul_bytes_in_a_marker_are_dropped(self) -> None:
+        # bash read the marker's values through $(...), which drops NUL bytes: the problem names
+        # since_human without them (a NUL cannot be passed to btrfs-notify at all).
+        self.write("var/lib/btrfs-degraded-boot/degraded-9999", "since=1700000000\nsince_human=2023-11-14\0 22:13\n")
+        problem = self.marker_problem("9999", "2023-11-14 22:13", "not mounted")
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(self.alerts(), [["-u", "critical", "-a", TAG, TITLE, f"1 problem(s):\n{problem}"]])
+        self.assertTrue(r.stderr.endswith(f"<2>{TAG}: {problem}\n"), r.stderr)
+
     # ---- the kernel log -----------------------------------------------------------------------------------------
 
     def test_kernel_messages(self) -> None:
