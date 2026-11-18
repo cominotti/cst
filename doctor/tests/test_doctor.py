@@ -1444,6 +1444,26 @@ class GameProfileTest(Scratch):
             self.assertEqual(list(doc_cpu.check_game_profile_drift(doc_adapters.Host(self.env, repo=REPO))), [])
         self.assertEqual(self.calls(), [])
 
+    def test_the_format_line_of_game_intended(self) -> None:
+        # This version's file starts with its format line: the records are read as before.
+        self.intended = "cst-game-intended 1\n" + self.intended
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertIn("the 8 settings it made still hold", res[0].message)
+        # A newer format (a downgraded CST while the profile is on): not compared, and said so.
+        self.intended = self.intended.replace("cst-game-intended 1", "cst-game-intended 2", 1)
+        self.profile_on()
+        asked = len(self.calls())
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.INFO], res)
+        self.assertIn("drift not checked (", res[0].message)
+        self.assertIn(
+            "is format 2 of the game-intended (this CST reads format 1 and older): written by a newer CST",
+            res[0].message,
+        )
+        self.assertEqual(self.calls()[asked:], [])  # systemd is not asked
+
     def test_all_settings_hold(self) -> None:
         self.profile_on()
         res = self.results()
@@ -2102,6 +2122,23 @@ class VmNasBackupTest(VmTest):
         )
         self.assertIn("/etc/cst/vm.conf line 2: VM_TUNE_NIC=$X: $", r.stdout)
         self.assertNotIn("vm.conf line 1", r.stdout)
+
+    def test_a_cpu_setup_conf_line_warns_that_the_game_profile_does_not_switch_on(self) -> None:
+        # No bash program of this CST sources cpu-setup.conf any more: the game profile is Python, and
+        # refuses to switch on over such a line.
+        self.deployments(rollback_pinned=True)
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='tester'\nBUILD_CPUS=$(nproc)\n")
+        r = self.run_tool()
+        line = next((x for x in r.stdout.split("\n") if "cpu-setup.conf line 2" in x), "")
+        self.assertIn("WARN", line)
+        self.assertIn(
+            "CST's Python programs take nothing from the line (the game profile does not switch on), and the cst"
+            " commands that change the machine with these settings refuse to run until it is fixed",
+            line,
+        )
+        self.assertNotIn("bash, which also sources", line)
 
     def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
         # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.

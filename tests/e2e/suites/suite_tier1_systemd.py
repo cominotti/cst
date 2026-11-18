@@ -3160,12 +3160,22 @@ EOF
                 touch /run/cpu-setup/manual
                 $first on
                 [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+                # This version's game.intended names its format; the bash copy skips that line.
+                if [[ $first == pygp ]]; then [[ "$(head -n1 /run/cpu-setup/game.intended)" == "cst-game-intended 1" ]]; fi
                 n1=$(wc -l </run/cpu-setup/game.state)
                 $second tick
                 [[ "$(wc -l </run/cpu-setup/game.state)" == "$n1" ]] || {{ echo "$second tick added records" >&2; exit 1; }}
                 st=$($second state)
                 grep -q '^game profile: ON (by hand)' <<<"$st"
                 grep -q 'drift: none' <<<"$st" || {{ echo "$second state: $st" >&2; exit 1; }}
+                # Each copy reads the records of the other's game.intended (past the format line): a
+                # drift is seen by its state and set again by its tick.
+                systemctl set-property --runtime machine.slice CPUWeight=77
+                st=$($second state)
+                grep -qF "DRIFT: machine.slice CPUWeight is '77', the profile set '10'" <<<"$st" \
+                    || {{ echo "$second state saw no drift: $st" >&2; exit 1; }}
+                $second tick
+                [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]] || {{ echo "$second tick did not repair" >&2; exit 1; }}
                 $second off
                 test ! -e /run/cpu-setup/game.state
                 test -z "$(ls /run/systemd/system/*.d/zz-cst-game.conf 2>/dev/null)"
@@ -3182,6 +3192,139 @@ EOF
             t0=$(date +%s); bashgp tick; t1=$(date +%s)
             (( t1 - t0 >= 2 )) || {{ echo "the bash copy did not wait for the Python lock" >&2; exit 1; }}
             wait
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_86_cpu_game_profile_refuses_a_settings_line_bash_would_run(self) -> None:
+        """With a line in cpu-setup.conf that bash would expand (`BUILD_CPUS=$(nproc)`), the real
+        game profile does not switch on: exit 1, the line in its output, no game.state, machine.slice's
+        weight as it was. The watchdog's tick, run as a unit with a GameMode client running (a process
+        that maps a file named libgamemode), does not start cpu-game.service (a stub that records its
+        starts): its unit ends in success, the line is named once, a second tick says nothing. `off`
+        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-86-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-86-conf.bak ]]; then mv /tmp/e2e-86-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup /tmp/e2e-86-client.pid /tmp/e2e-86-ready /tmp/e2e-86-starts /tmp/e2e-86-libgamemode.so
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-86-conf.bak
+            install -d /etc/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            base=$(systemctl show -P CPUWeight machine.slice)
+            rc=0; got=$(gp on) || rc=$?
+            [[ $rc == 1 ]] || { echo "on with a bad line: exit $rc" >&2; exit 1; }
+            grep -q 'cpu-setup.conf line 2: BUILD_CPUS=$(nproc): ' <<<"$got"
+            grep -q 'not switched on' <<<"$got"
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            grep -q 'settings: /etc/cpu-setup/cpu-setup.conf line 2' <<<"$(gp state)"
+            # The watchdog, a game running, the profile off: cpu-game.service is not started.
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-86-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-86-libgamemode.so /tmp/e2e-86-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-86-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-86-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-86-client.pid)/maps"
+            tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-86-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick; }
+            first=$(tick 1)   # exit 0: the unit does not fail
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$first"                 || { echo "first tick: $first" >&2; exit 1; }
+            second=$(tick 2)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            sleep 1
+            test ! -e /tmp/e2e-86-starts
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            test ! -e /run/cpu-setup/game.state
+            gp off
+            sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
+            # Fixed: the watchdog starts the unit again.
+            grep -q 'switching on' <<<"$(tick 3)"
+            for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
+            test -e /tmp/e2e-86-starts
+            kill "$(cat /tmp/e2e-86-client.pid)"
+            systemctl stop cpu-game.service
+            rm -f "$stub"
+            systemctl daemon-reload
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            gp off
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_87_cpu_game_profile_off_skips_a_cut_record_and_acts_for_the_user_on_acted_for(self) -> None:
+        """'off' with the real system and user managers, after 'on' for tester: a last line of
+        game.state cut short (no newline, "existed 1") is named and not undone (machine.slice's
+        IOWeight goes back to its own value, not 1), and with TARGET_USER changed to a line that sets
+        nothing (`TARGET_USER="$(id -un tester)"`) the user manager's side is undone for tester, the
+        uid game.state names: user.slice's CPUWeight back, its override file gone."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-87-conf.bak ]]; then mv /tmp/e2e-87-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-87-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            uid=$(id -u tester)
+            io=$(systemctl show -P IOWeight machine.slice)
+            uw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            override=/run/user/$uid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            grep -q "^prop sys user@$uid.service MemoryLow " /run/cpu-setup/game.state
+            printf 'prop sys machine.slice IOWeight existed 1' >>/run/cpu-setup/game.state   # cut short
+            n=$(( $(wc -l </run/cpu-setup/game.state) + 1 ))
+            printf '%s\n' 'TARGET_USER="$(id -un tester)"' "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            got=$(gp off)
+            grep -qF "game.state line $n: no record 'off' can read, skipped: prop sys machine.slice IOWeight existed 1" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf: undoing for tester (uid $uid)" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]] || { echo "IOWeight: not $io" >&2; exit 1; }
+            test ! -e "$override"
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$uw" ]] \
+                || { echo "user.slice CPUWeight: not $uw" >&2; exit 1; }
             echo E2E-OK
             """,
         ).stdout

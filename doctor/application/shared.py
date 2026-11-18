@@ -121,10 +121,18 @@ def conf_value(host: DoctorHostPort, path: HostPath, key: str) -> str | None:
     return None if parsed is None else parsed.values.get(key)
 
 
-def settings_file_warnings(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool) -> Iterator[Result]:
-    """WARN for each line of a settings file that is not a plain assignment."""
+def settings_file_warnings(
+    host: DoctorHostPort, path: HostPath, *, bash_sourced: bool, note: str | None = None
+) -> Iterator[Result]:
+    """WARN for each line of a settings file that is not a plain assignment. note: what the warning
+    adds after "take nothing from the line" (by default, for a file bash sources, that bash reads the
+    line its own way)."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
-    bash = " (bash, which also sources this file, reads it its own way)" if bash_sourced else ""
+    bash = (
+        (" (bash, which also sources this file, reads it its own way)" if bash_sourced else "")
+        if note is None
+        else note
+    )
     for p in parsed.problems if parsed else ():
         yield Result(
             WARN,

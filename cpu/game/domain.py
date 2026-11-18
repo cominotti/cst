@@ -19,7 +19,7 @@ import posixpath
 import re
 from typing import Final, Literal
 
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import first_line_version, state_format
 from cst_core.domain.text import file_lines, printf_q, printf_q_words
 
 type Manager = Literal["sys", "usr"]
@@ -36,6 +36,9 @@ KNOWN_SLICES: Final = frozenset({"app.slice", "session.slice", "user.slice"})
 STEAM_SCOPES: Final = "app-flatpak-com.valvesoftware.Steam-*"
 DOCKER_SCOPES: Final = "docker-*.scope"
 USAGE: Final = "usage: game-profile on|off|tick|state"
+# game.intended's first line names its format (cst_core.domain.contracts): "cst-game-intended 1".
+INTENDED_MAGIC: Final = "cst-game-intended"
+INTENDED_FORMAT: Final = state_format("game-intended")
 
 
 def _in(folder: str, name: str) -> str:
@@ -87,6 +90,11 @@ class GamePaths:
     def epp(self, cpu: str) -> str:
         """The energy/performance preference of one CPU."""
         return posixpath.join(self.sys_cpu, f"cpu{cpu}", "cpufreq", "energy_performance_preference")
+
+    @property
+    def settings_warned(self) -> str:
+        """What the watchdog last said about the settings file's problem lines (once per boot)."""
+        return _in(self.run, "settings-warned")
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,59 +185,76 @@ def record_line(*fields: str) -> str:
     return " ".join(printf_q(f) for f in fields) + "\n"
 
 
+def intended_header() -> str:
+    """The first line of a game.intended this version writes."""
+    return record_line(INTENDED_MAGIC, str(INTENDED_FORMAT.version))
+
+
+def newer_intended(path: str, text: str) -> str | None:
+    """Why game.intended cannot be compared (a format newer than this version reads, or a first line
+    that names no version), None when it can."""
+    found = first_line_version(text, INTENDED_MAGIC)
+    if found is None:
+        return f"{path}: its first line names no format version"
+    return INTENDED_FORMAT.newer_text(path, found) if found > INTENDED_FORMAT.version else None
+
+
+def _cut_short(text: str, lines: Sequence[str], number: int) -> bool:
+    """Line number (1-based) of a file is its last line, and has no newline at its end: a record cut
+    short. Every writer (this one, bash's printf) ends a record with a newline and writes it before
+    the change it describes, so the change of such a line was never made, and a value cut short
+    (an old value "1" of "100") must not be undone."""
+    return number == len(lines) and not text.endswith("\n")
+
+
 def records(text: str) -> list[Record]:
     """The records of game.state or game.intended in file order; a line bash could not read as
-    plain words is left out."""
+    plain words, and a last line cut short (no newline at its end), are left out."""
     out: list[Record] = []
-    for line in file_lines(text):
+    lines = file_lines(text)
+    for number, line in enumerate(lines, 1):
+        if _cut_short(text, lines, number):
+            continue
         words = printf_q_words(line)
         if words is not None:
             out.append(tuple(words))
     return out
 
 
-def off_records(text: str) -> tuple[list[Record], int | None]:
-    """The records of game.state 'off' undoes, newest first, as bash's `eval "rec=(${line})"` loop read
-    them, and the number of the line where it stopped (None: it read them all).
-
-    An empty line is skipped. A line eval cannot read as words (an unclosed quote) leaves the previous
-    record in place, which is undone again; with none before it, bash stopped. A line with fewer fields
-    than its kind needs (cgw and epp: 3, any other: 6; a record cut short) stopped bash too (`set -u`):
-    'off' then ends with exit 1 and leaves game.state as it is."""
+def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
+    """The lines (number, text) of game.state, or of game.intended (intended), that hold no record the
+    profile can use: bash could not read them as plain words (an unclosed quote), or they have fewer
+    fields than their kind needs, or are the last line with no newline at its end (a record cut
+    short). Blank lines are none. records() leaves such a line out; bash's eval stopped 'off' there
+    instead (exit 1, game.state kept), and undid a last line cut short with its cut value."""
+    out: list[tuple[int, str]] = []
     lines = file_lines(text)
-    out: list[Record] = []
-    prev: Record | None = None
-    for number in range(len(lines), 0, -1):
-        line = lines[number - 1]
-        if line == "":
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
             continue
         words = printf_q_words(line)
-        rec = prev if words is None else tuple(words)
-        if not rec or len(rec) < (3 if rec[0] in ("cgw", "epp") else 6):
-            return out, number
-        out.append(rec)
-        prev = rec
-    return out, None
-
-
-def drift_readable(text: str) -> bool:
-    """bash's drift check read game.intended whole: False when it stopped first (a line eval cannot read
-    as words, an empty record, a prop record with fewer than 4 fields), and so compared nothing."""
-    for line in file_lines(text):
-        if line == "":
+        if words is None or _cut_short(text, lines, number):
+            out.append((number, line))
             continue
-        words = printf_q_words(line)
-        if not words or (words[0] == "prop" and len(words) < 4):
-            return False
-    return True
+        kind = words[0] if words else ""
+        if intended:
+            need = {"prop": 6, "cgw": 4}.get(kind, 0)  # another kind (the format line) is no drift record
+        else:
+            need = 3 if kind in ("cgw", "epp") else 6  # 'off' undoes any other line as a prop record
+        if len(words) < need:
+            out.append((number, line))
+    return out
 
 
-def state_escapes(text: str) -> str:
-    """The 'other boxes idle' part of 'state' from game.state's text: escapes_in_state of its records, or
-    nothing when a line cannot be read as words (bash's eval then ended the command substitution)."""
-    if any(printf_q_words(line) is None for line in file_lines(text)):
-        return ""
-    return escapes_in_state(records(text))
+def state_uid(recs: Sequence[Record]) -> str | None:
+    """The uid of the user 'on' acted for, from game.state: 'on' always records MemoryLow of the system
+    manager's user@UID.service (its memory chain). None when no such record is there."""
+    for r in recs:
+        if len(r) >= 3 and r[0] == "prop" and r[1] == "sys":
+            m = re.fullmatch(r"user@([0-9]+)\.service", r[2])
+            if m:
+                return m.group(1)
+    return None
 
 
 def has_record_part(text: str, part: str) -> bool:
@@ -324,8 +349,11 @@ def again_cmd(*, manual: bool) -> str:
     return "cst cpu game off && cst cpu game on" if manual else "sudo systemctl restart cpu-game.service"
 
 
-def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool) -> list[str]:
-    """The drift part of 'state' (drifts None: no game.intended, switched on by an older version)."""
+def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None) -> list[str]:
+    """The drift part of 'state' (drifts None: no game.intended, switched on by an older version; newer:
+    why game.intended cannot be compared)."""
+    if newer is not None:
+        return [f"  drift: not checked ({newer})"]
     if drifts is None:
         return [
             "  drift: not checked (switched on by an older version, which kept no record of its values;",
