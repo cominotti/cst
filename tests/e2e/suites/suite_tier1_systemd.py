@@ -2182,9 +2182,15 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         `plan` then has nothing left to do; `status` changes nothing and ends
         in "verdict: OK"; without the next deployment's boot entry plan and
         install refuse and change nothing, status says NO BOOT ENTRY and
-        files-only still runs; a typo in a unit (an unknown key in a drop-in of the
-        record unit) stops an install at its `systemd-analyze verify`, before
-        any rpm-ostree change; uninstall removes everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        files-only still runs; a control: the real verify reads the units
+        from the work folder's copies, not from /etc (a broken record unit and
+        service template in /etc do not stop an install, which writes the good
+        ones back; this also held when verify ran after the writes); a typo in
+        a unit (an unknown key in a drop-in of the record unit, which verify
+        reads with the copy) stops plan and an install at their
+        `systemd-analyze verify`, before they write anything (a hand edit of
+        the timer stays) and before any rpm-ostree change; uninstall removes
+        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -2312,17 +2318,40 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             finally:
                 step(f"mv {w}/entry.conf {entry}")
 
+        # A control: the units named on verify's command line are the work
+        # folder's copies (the templates under their instance names, the
+        # record unit under its own), so broken ones in /etc are not what
+        # verify reads. (The old order, writes first, passed this too.)
+        with self.subTest("broken installed units are replaced, not verified"):
+            broken = (record, files[1])
+            step(" && ".join(f"printf 'BogusKeyE2E=1\\n' >>{f}" for f in broken))
+            fixed = step("/opt/cst-rw/cst btrfs degraded-boot")
+            for f in broken:
+                self.assertIn(f"written:   {f}\n", fixed)
+                self.assertNotIn("BogusKeyE2E", step(f"cat {f}"))
         # verify reads a unit's drop-ins with it; an unknown key there is only
-        # a warning unless the script passes --recursive-errors=no.
-        with self.subTest("a typo in a unit stops the install"):
+        # a warning unless the script passes --recursive-errors=no. The check
+        # runs before anything is written: a hand edit of the timer stays.
+        timer = files[2]
+        with self.subTest("a typo in a unit stops plan and install before they write"):
             step(f"mkdir -p {typo} && printf '[Service]\\nTimeoutStratSec=5\\n' >{typo}/e2e-typo.conf")
+            step(f"printf '# e2e local edit\\n' >>{timer}")
             n = len(calls())
-            bad = exec_bash(c, f". {w}/fakes.bash\n/opt/cst-rw/cst btrfs degraded-boot", check=False)
-            self.assertNotEqual(bad.returncode, 0, bad.stdout)
-            self.assertIn("Unknown key 'TimeoutStratSec'", bad.stdout + bad.stderr)
-            self.assertIn("ERROR: systemd-analyze verify failed", bad.stdout + bad.stderr)
-            self.assertNotIn("self-test:", bad.stdout)
-            self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+            for mode in ("plan", "install"):
+                bad = exec_bash(c, f". {w}/fakes.bash\n/opt/cst-rw/cst btrfs degraded-boot {mode}", check=False)
+                self.assertNotEqual(bad.returncode, 0, bad.stdout)
+                self.assertNotIn("written:", bad.stdout)
+                self.assertNotIn("would write:", bad.stdout)
+                self.assertEqual(step(f"tail -n 1 {timer}"), "# e2e local edit\n")
+                self.assertIn("Unknown key 'TimeoutStratSec'", bad.stdout + bad.stderr)
+                self.assertIn(
+                    "ERROR: systemd-analyze verify failed for the generated units; nothing was written",
+                    bad.stdout + bad.stderr,
+                )
+                self.assertNotIn("self-test:", bad.stdout)
+            self.assertEqual(
+                [x for x in calls()[n:] if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], []
+            )
         step(f"rm -rf {typo} && systemctl daemon-reload")
 
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")

@@ -1138,11 +1138,13 @@ own checks:
     staged for the next boot, which gets its entry only at shutdown. Without
     the entry, `status` says `NO BOOT ENTRY` instead of `overlay not
     found`.
-- It checks the new udev rule with `udevadm verify` before it writes
-  anything: a rule that fails leaves nothing written.
-- It writes its files, then checks its units with `systemd-analyze verify`:
-  a problem such as a typo (an unknown key) stops the install there, with
-  the files written and the initramfs **not** changed.
+- It makes every file in a temporary folder first and checks it there: the
+  new udev rule with `udevadm verify`, the helper script with `bash -n`,
+  the units with `systemd-analyze verify` (with the drop-ins systemd
+  would apply to them). A problem such as a typo (an
+  unknown key) stops the install before it writes anything: the files of a
+  previous install stay as they are, and the initramfs is **not** changed.
+  Only then it writes each file, atomically.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
@@ -1154,15 +1156,15 @@ own checks:
   nothing changed does not create one.
 - `uninstall` refuses while the current boot is degraded.
 
-`plan` runs the refusals above, `udevadm verify` on the rule and a syntax
-check of the helper, and prints `would write:` or `unchanged:` for each file
-and `would run: ...` for each change install would make (`rpm-ostree
-initramfs-etc`, `systemctl enable` when the record unit is not enabled, the
-removal of files an older version left). It writes no file, reloads nothing
-and creates no deployment. Two checks need the new files in place, so only
-install runs them: `systemd-analyze verify` on the units, and the self-test
-(`plan` says how many disks it would check). Install also reloads systemd
-and udev on every run; `plan` does not list that.
+`plan` runs the refusals above and the same checks of the files
+(`udevadm verify`, `bash -n`, `systemd-analyze verify`), and prints
+`would write:` or `unchanged:` for each file and `would run: ...` for each
+change install would make (`rpm-ostree initramfs-etc`, `systemctl enable`
+when the record unit is not enabled, the removal of files an older version
+left). It writes no file, reloads nothing and creates no deployment. The
+self-test needs the new files in place, so only install runs it (`plan`
+says how many disks it would check). Install also reloads systemd and udev
+on every run; `plan` does not list that.
 
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.

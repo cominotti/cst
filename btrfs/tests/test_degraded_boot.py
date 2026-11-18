@@ -236,9 +236,18 @@ esac""",
     test) cat "${FAKE}/udev-test-$(basename "${@: -1}")" ;;
     info) cat "${FAKE}/udev-info-$(basename "${@: -1}")" ;;
 esac""",
+    # It keeps each unit file it is handed under the name it verifies it as
+    # (FILE:NAME, or the file's own name) in $FAKE/verified-units.
     # FAKE_UNIT_TYPO: a unit with an unknown key, as the real verify sees it:
     # a warning, and a failure only with --recursive-errors=no.
-    "systemd-analyze": """if [[ -n "${FAKE_UNIT_TYPO:-}" ]]; then
+    "systemd-analyze": """mkdir -p "${FAKE}/verified-units"
+for a in "${@:2}"; do
+    [[ "$a" == -* ]] && continue
+    f="${a%%:*}"; n="${f##*/}"
+    [[ "$a" == *:* ]] && n="${a#*:}"
+    cp "$f" "${FAKE}/verified-units/$n" || exit 65
+done
+if [[ -n "${FAKE_UNIT_TYPO:-}" ]]; then
     echo "btrfs-last-resort@.service:12: Unknown key 'TimeoutStratSec' in section [Service], ignoring." >&2
     [[ " $* " == *" --recursive-errors=no "* ]] && exit 1
 fi
@@ -798,6 +807,75 @@ echo "[$ov] $rc"
         self.assertEqual(len(lines), 5, r.stdout)
         self.assertTrue(all(line.startswith("unchanged: ") for line in lines), r.stdout)
 
+    def test_units_are_verified_as_the_instances_the_rule_starts(self) -> None:
+        """systemd-analyze verify gets the work folder's copies, named as the units the rule and the timer start."""
+        self.install()
+        analyze = [c for c in self.calls() if c.startswith("systemd-analyze ")]
+        self.assertEqual(len(analyze), 1, analyze)
+        self.assertRegex(
+            analyze[0],
+            rf"^systemd-analyze verify --recursive-errors=no \S+/units/btrfs-last-resort@\.timer:btrfs-last-resort@{UUID}\.timer "
+            rf"\S+/units/btrfs-last-resort@\.service:btrfs-last-resort@{UUID}\.service "
+            r"\S+/units/btrfs-degraded-boot-record\.service$",
+        )
+        self.assertNotIn("/etc/", analyze[0])
+        verified = os.path.join(self.tmp, "verified-units")
+        self.assertEqual(
+            {name: self.read(f"verified-units/{name}") for name in os.listdir(verified)},
+            {
+                f"btrfs-last-resort@{UUID}.timer": EXPECTED_TIMER,
+                f"btrfs-last-resort@{UUID}.service": EXPECTED_SERVICE,
+                "btrfs-degraded-boot-record.service": EXPECTED_RECORD,
+            },
+        )
+
+    def previous_install_with_local_edits(self) -> None:
+        """An install whose units then changed by hand (an install would write them back)."""
+        self.install()
+        with open(self.at(TIMER), "a", encoding="utf-8") as f:
+            f.write("# local edit\n")
+        self.put("root" + SERVICE, "# an older service\n")
+
+    def test_units_that_fail_systemd_analyze_verify_leave_nothing_written(self) -> None:
+        """The units are verified before anything is written: a failed verify keeps the previous files as they are."""
+        cases = {
+            "verify fails": {"FAKE_ANALYZE_RC": "1"},
+            "an unknown key (a failure with --recursive-errors=no)": {"FAKE_UNIT_TYPO": "1"},
+        }
+        for previous in (False, True):
+            for label, env in cases.items():
+                with self.subTest(label, previous_install=previous):
+                    shutil.rmtree(self.root)
+                    self.put("root/usr/lib/udev/rules.d/64-btrfs.rules", UPSTREAM_64)
+                    if previous:
+                        self.previous_install_with_local_edits()
+                    self.put("calls", "")
+                    before = self.tree()
+                    r = self.write_files(env=env)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(
+                        "ERROR: systemd-analyze verify failed for the generated units; nothing was written", r.stderr
+                    )
+                    if "FAKE_UNIT_TYPO" in env:
+                        self.assertIn("Unknown key 'TimeoutStratSec'", r.stderr)
+                    self.assertEqual(r.stdout, "")
+                    self.assertEqual(self.tree(), before)
+                    self.assertEqual(os.path.exists(self.at("/etc")), previous)
+                    self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_helper_with_a_syntax_error_leaves_nothing_written(self) -> None:
+        """bash -n runs on the work folder's copy of the helper, before anything is written."""
+        self.previous_install_with_local_edits()
+        files = self.read("lib/btrfs/files.sh")
+        self.assertEqual(files.count("\nset -u\n"), 1)
+        self.put("lib/btrfs/files.sh", files.replace("\nset -u\n", "\nset -u\nif then\n"))
+        before = self.tree()
+        r = self.write_files()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"ERROR: syntax error in the generated {HELPER}", r.stderr)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(self.tree(), before)
+
     def test_rule_that_fails_udevadm_verify_leaves_nothing_written(self) -> None:
         """The rule is verified before the helper and the units are written: a bad one writes nothing."""
         before = self.tree()
@@ -853,11 +931,6 @@ echo "[$ov] $rc"
                 "systemctl enable btrfs-degraded-boot-record.service",
             ],
         )
-        self.assertIn(
-            f"systemd-analyze verify --recursive-errors=no btrfs-last-resort@{UUID}.timer btrfs-last-resort@{UUID}.service "
-            "btrfs-degraded-boot-record.service",
-            self.calls(),
-        )
 
     def test_selftest_failure_removes_a_new_rule(self) -> None:
         r = self.selftest(ready={"dm-0": True, "dm-1": False})
@@ -871,12 +944,6 @@ echo "[$ov] $rc"
         r = self.selftest(ready={"dm-0": False, "dm-1": True}, rule_was_present=1)
         self.assertEqual(r.returncode, 1)
         self.assertTrue(os.path.exists(self.at(RULE)))
-
-    def test_selftest_stops_when_systemd_analyze_rejects_the_units(self) -> None:
-        r = self.selftest(ready={"dm-0": True, "dm-1": True}, env={"FAKE_ANALYZE_RC": "1"})
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
-        self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
 
     def test_selftest_fails_when_lsblk_lists_another_member_count(self) -> None:
         """Every member btrfs counts must be checked: fewer (or more) in lsblk fails, all ready or not."""
@@ -892,15 +959,6 @@ echo "[$ov] $rc"
                 self.assertIn(f"self-test: lsblk lists {listed} member(s) of {UUID}, btrfs counts {ndev}", r.stderr)
                 self.assertIn("ERROR: udev self-test failed; no initramfs change made", r.stderr)
                 self.assertFalse(os.path.exists(self.at(RULE)))
-
-    def test_selftest_stops_on_a_typo_in_a_unit(self) -> None:
-        """systemd-analyze verify only warns about an unknown key unless --recursive-errors=no."""
-        r = self.selftest(ready={"dm-0": True, "dm-1": True}, env={"FAKE_UNIT_TYPO": "1"})
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("Unknown key 'TimeoutStratSec'", r.stderr)
-        self.assertIn("ERROR: systemd-analyze verify failed", r.stderr)
-        self.assertNotIn("systemctl enable btrfs-degraded-boot-record.service", self.calls())
-        self.assertNotIn("self-test: dm-0", r.stdout)
 
     # -------------------------------------------------- initramfs overlay --
     def overlay_step(self, *args: str, overlay: str = "", rc: int = 0) -> str:
@@ -1070,19 +1128,26 @@ status() {{ echo STATUS; }}
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", out)
 
     def test_plan_stops_where_install_stops(self) -> None:
-        """A check plan shares with install stops it the same way: here a rule that fails udevadm verify.
-        (systemd-analyze verify and the self-test need the files written: install runs them, plan does not.)"""
+        """A check plan shares with install stops it the same way: a rule that fails udevadm verify,
+        units that fail systemd-analyze verify. (The self-test needs the files written: install runs it, plan does not.)"""
         self.udev_ready()
         self.tracked_json([])
         before = self.tree()
-        r = self.run_bash(
-            f"plan=1\nUUID={UUID}\n{GENERATE}\n{self.section('files', '--plan')}",
-            repoint=False,
-            env={"FAKE_VERIFY_RC": "1"},
-        )
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("ERROR: udevadm verify failed for the generated rule", r.stderr)
-        self.assertEqual(self.tree(), before)
+        cases = {
+            "FAKE_VERIFY_RC": "ERROR: udevadm verify failed for the generated rule",
+            "FAKE_ANALYZE_RC": "ERROR: systemd-analyze verify failed for the generated units; nothing was written",
+        }
+        for key, error in cases.items():
+            with self.subTest(key):
+                r = self.run_bash(
+                    f"plan=1\nUUID={UUID}\n{GENERATE}\n{self.section('files', '--plan')}",
+                    repoint=False,
+                    env={key: "1"},
+                )
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(error, r.stderr)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(self.tree(), before)
 
     def test_plan_warns_when_the_self_test_would_fail(self) -> None:
         self.udev_ready()
