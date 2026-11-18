@@ -2053,6 +2053,8 @@ class DetachedTest(unittest.TestCase):
                 output: OutputMode = "capture",
                 decode_errors: DecodeErrors = "replace",
                 nice: int | None = None,
+                pass_fds: Sequence[int] = (),
+                on_line: Callable[[str], None] | None = None,
             ) -> CommandResult:
                 sessions.append((argv[0], new_session))
                 return CommandResult(0, "", "")

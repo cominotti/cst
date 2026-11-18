@@ -791,6 +791,43 @@ class CommandRunnerTest(unittest.TestCase):
         }
         self.assertEqual(kw, want)
 
+    def test_pass_fds_hands_an_open_descriptor_on(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        read_end, write_end = os.pipe()
+        self.addCleanup(os.close, read_end)
+        self.addCleanup(os.close, write_end)
+        probe = [self.py, "-I", "-c", "import os, sys; os.write(int(sys.argv[1]), b'x')", str(write_end)]
+        self.assertEqual(runner.run(probe, pass_fds=(write_end,)).returncode, 0)
+        self.assertEqual(os.read(read_end, 1), b"x")
+        # Without it the descriptor is closed in the command, as before.
+        self.assertNotEqual(runner.run(probe).returncode, 0)
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], pass_fds=[5]))
+        self.assertEqual(kw["pass_fds"], (5,))
+
+    def test_on_line_gets_each_line_while_the_command_runs(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        seen: list[tuple[str, float]] = []
+        script = (
+            "import sys, time\nprint('one', flush=True)\ntime.sleep(0.6)\nprint('two')\nsys.stdout.write('three')\n"
+        )
+        res = runner.run([self.py, "-I", "-c", script], on_line=lambda ln: seen.append((ln, time.monotonic())))
+        self.assertEqual((res.returncode, res.stdout), (0, "one\ntwo\nthree"))
+        self.assertEqual([ln for ln, _ in seen], ["one", "two", "three"])
+        # 'one' came before the command slept: it was not held until the end.
+        self.assertGreater(seen[1][1] - seen[0][1], 0.4)
+        merged = runner.run(
+            [self.py, "-I", "-c", "import sys; print('out', flush=True); print('err', file=sys.stderr)"],
+            output="merge",
+            on_line=lambda ln: None,
+        )
+        self.assertEqual(sorted(merged.stdout.splitlines()), ["err", "out"])
+        failed = runner.run([self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"], on_line=lambda ln: None)
+        self.assertEqual((failed.returncode, failed.stdout), (3, "x\n"))
+        missing = runner.run(["/nonexistent/cst-test-cmd"], on_line=lambda ln: None)
+        self.assertEqual((missing.returncode, missing.fault), (127, "missing"))
+        with self.assertRaises(ValueError):
+            runner.run(["true"], on_line=lambda ln: None, timeout=1)
+
     def test_strict_decoding_raises_as_text_true_did(self) -> None:
         runner = core_runner.SubprocessCommandRunner()
         with self.assertRaises(UnicodeDecodeError):

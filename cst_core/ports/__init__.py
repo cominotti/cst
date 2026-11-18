@@ -95,7 +95,13 @@ class CommandRunnerPort(Protocol):
       flatpak-spawn process, not on the host command (a timeout stops
       flatpak-spawn; the host command may run on);
     - stdin, output, decode_errors: see StdinMode, OutputMode, DecodeErrors;
-    - nice: added to the command's niceness before it starts.
+    - nice: added to the command's niceness before it starts;
+    - pass_fds: open file descriptors the command gets as they are (the
+      others are closed): a lock this process holds, handed on;
+    - on_line: called with each line of the captured stdout (output
+      "capture", "merge" or "stdout"; without its newline) as soon as the
+      command writes it, for a caller that passes the lines on while the
+      command runs; not with timeout (use timeout(1) then) or input_text.
     """
 
     def run(
@@ -116,6 +122,8 @@ class CommandRunnerPort(Protocol):
         output: OutputMode = "capture",
         decode_errors: DecodeErrors = "replace",
         nice: int | None = None,
+        pass_fds: Sequence[int] = (),
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult: ...
 
 

@@ -49,6 +49,7 @@ class _RunKwargs(TypedDict, total=False):
     errors: str
     cwd: str
     start_new_session: bool
+    pass_fds: tuple[int, ...]
 
 
 def _renice(increment: int) -> None:
@@ -178,6 +179,8 @@ class SubprocessCommandRunner:
         output: OutputMode = "capture",
         decode_errors: DecodeErrors = "replace",
         nice: int | None = None,
+        pass_fds: Sequence[int] = (),
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult:
         """Run argv (see CommandRunnerPort for the options).
 
@@ -199,7 +202,14 @@ class SubprocessCommandRunner:
             kw["start_new_session"] = True
         if nice:
             kw["preexec_fn"] = functools.partial(_renice, nice)
-        res = self._spawn(cmd, kw, timeout)
+        if pass_fds:
+            kw["pass_fds"] = tuple(pass_fds)
+        if on_line is not None:
+            if timeout is not None or input_text is not None or output == "inherit":
+                raise ValueError("on_line reads the captured stdout as it comes: no timeout, input_text or inherit")
+            res = self._stream(cmd, kw, on_line)
+        else:
+            res = self._spawn(cmd, kw, timeout)
         if res.fault is not None and self._words is not None:
             res = self._words(argv, res, timeout)
         if check and res.returncode != 0:
@@ -222,6 +232,41 @@ class SubprocessCommandRunner:
         except OSError as exc:
             return _fault_result(cmd, "unstartable", exc)
         return CommandResult(proc.returncode, _decode_stream(proc.stdout), _decode_stream(proc.stderr), argv=tuple(cmd))
+
+    @staticmethod
+    def _stream(cmd: Sequence[str], kw: _RunKwargs, on_line: Callable[[str], None]) -> CommandResult:
+        """subprocess.Popen with the same arguments: each line of stdout goes to on_line (without its
+        newline) as soon as the command writes it; the result holds the whole stdout and stderr."""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=kw.get("stdin"),
+                stdout=subprocess.PIPE,
+                stderr=kw.get("stderr", subprocess.PIPE),
+                text=True,
+                errors=kw.get("errors"),
+                env=kw.get("env"),
+                cwd=kw.get("cwd"),
+                start_new_session=kw.get("start_new_session", False),
+                preexec_fn=kw.get("preexec_fn"),
+                pass_fds=kw.get("pass_fds", ()),
+            )
+        except FileNotFoundError as exc:
+            fault: CommandFault = (
+                "unstartable" if exc.filename is not None and exc.filename == kw.get("cwd") else "missing"
+            )
+            return _fault_result(cmd, fault, exc)
+        except OSError as exc:
+            return _fault_result(cmd, "unstartable", exc)
+        out: list[str] = []
+        assert proc.stdout is not None
+        with proc:
+            for line in proc.stdout:
+                out.append(line)
+                on_line(line[:-1] if line.endswith("\n") else line)
+            err = proc.stderr.read() if proc.stderr is not None else ""
+            rc = proc.wait()
+        return CommandResult(rc, "".join(out), _decode_stream(err), argv=tuple(cmd))
 
 
 class HostExecutionContext:
