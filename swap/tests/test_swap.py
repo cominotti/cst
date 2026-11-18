@@ -1854,6 +1854,36 @@ class SwapWiringTest(unittest.TestCase):
             self.assertEqual(execute_cli(["help"], out=out, err=io.StringIO()), 0)
         self.assertIn("Usage: my swap <command> [args]", out.getvalue())
 
+    def test_the_kernel_dirs_come_from_the_environment_only_when_set(self) -> None:
+        ctx = _FakeContext(container=False, root=True, etc_dir="/etc", run_dir="/run")
+        plain = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere", env={"CST_SWAP_PROC": ""})
+        self.assertEqual(
+            (plain.proc_dir, plain.sys_dir, plain.zswap_params_dir, plain.zswap_debug_dir, plain.cgroup_dir),
+            ("/proc", "/sys", "/sys/module/zswap/parameters", "/sys/kernel/debug/zswap", "/sys/fs/cgroup"),
+        )
+        env = {"CST_SWAP_PROC": "/w/proc", "CST_SWAP_SYS": "/w/sys"}
+        moved = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere", env=env)
+        self.assertEqual(
+            (moved.proc_dir, moved.sys_dir, moved.zswap_params_dir, moved.zswap_debug_dir, moved.cgroup_dir),
+            ("/w/proc", "/w/sys", "/w/sys/module/zswap/parameters", "/w/sys/kernel/debug/zswap", "/sys/fs/cgroup"),
+        )
+
+    def test_the_cli_reads_the_kernel_dirs_from_its_environment(self) -> None:
+        # plan in a scratch /proc: the live sysctl values come from there.
+        tmp = tempfile.mkdtemp(prefix="swap-kdirs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        vm = os.path.join(tmp, "proc", "sys", "vm")
+        os.makedirs(vm)
+        with open(os.path.join(vm, "swappiness"), "w", encoding="utf-8") as f:
+            f.write("77\n")
+        ctx = _FakeContext(
+            container=False, root=False, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        out = io.StringIO()
+        env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
+        self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), ctx=ctx), 0)
+        self.assertRegex(out.getvalue(), r"DIFF  vm\.swappiness +77 ")
+
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")
         self.assertEqual(

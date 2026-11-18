@@ -112,7 +112,7 @@ def execute_cli(
             reexec = wiring.sudo_reexec if elevate is None else elevate
             reexec(wiring.sudo_rerun_argv(prog, orig_args))
 
-    service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root)
+    service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root, env=env_map)
     return run_command(cmd, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
 
 

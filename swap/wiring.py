@@ -66,13 +66,15 @@ def build_service(
     fs: FileSystemPort | None,
     *,
     fallback_root: str,
+    env: Mapping[str, str] | None = None,
 ) -> SwapApplicationService:
-    """The swap use cases over the real adapters (runner and fs: a test's fakes, or None)."""
+    """The swap use cases over the real adapters (runner and fs: a test's fakes, or None; env: the
+    environment, for kernel_dirs)."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     file_sys = LocalFileSystemAdapter() if fs is None else fs
     systemd = SystemctlAdapter(cmd_runner)
     swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
-    paths = desired_paths(prog, ctx, fallback_root=fallback_root)
+    paths = desired_paths(prog, ctx, fallback_root=fallback_root, env=env)
     # swap's files are written through the installer and listed in the install record.
     return SwapApplicationService(
         paths,
@@ -83,10 +85,29 @@ def build_service(
     )
 
 
-def desired_paths(prog: str, ctx: ExecutionContextPort, *, fallback_root: str) -> SwapEnvironment:
-    """Where swap's desired files are (this checkout, else fallback_root: the bootstrap's root) and the host's /etc and /run."""
+def kernel_dirs(env: Mapping[str, str]) -> dict[str, str]:
+    """Where /proc and /sys are read and written: CST_SWAP_PROC and CST_SWAP_SYS when set (a test's
+    scratch tree: the tier 1 E2E container's own /proc/sys and /sys are read-only and the host's
+    kernel), else the defaults. The cgroup tree stays /sys/fs/cgroup either way."""
+    out: dict[str, str] = {}
+    proc, sys_dir = env.get("CST_SWAP_PROC", ""), env.get("CST_SWAP_SYS", "")
+    if proc:
+        out["proc_dir"] = proc
+    if sys_dir:
+        out["sys_dir"] = sys_dir
+        out["zswap_params_dir"] = os.path.join(sys_dir, "module", "zswap", "parameters")
+        out["zswap_debug_dir"] = os.path.join(sys_dir, "kernel", "debug", "zswap")
+    return out
+
+
+def desired_paths(
+    prog: str, ctx: ExecutionContextPort, *, fallback_root: str, env: Mapping[str, str] | None = None
+) -> SwapEnvironment:
+    """Where swap's desired files are (this checkout, else fallback_root: the bootstrap's root), the
+    host's /etc and /run, and the kernel's files (kernel_dirs)."""
     etc = ctx.etc_dir()
     return SwapEnvironment(
+        **kernel_dirs(env or {}),
         src_dir=os.path.join(checkout_root(__file__) or fallback_root, "swap"),
         etc_dir=etc,
         cpu_run_dir=ctx.host_run_dir("cpu-setup"),
