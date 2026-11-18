@@ -238,10 +238,6 @@ def off(home: str) -> tuple[str, bool, bool]:
 
 
 # ---- the user and the home -----------------------------------------------------------------
-def caller_is_root() -> bool:
-    return os.geteuid() == 0
-
-
 def real_home(home: str | None) -> str:
     """HOME given (or the caller's ~), symlinks resolved."""
     return os.path.realpath(home or os.path.expanduser("~"))

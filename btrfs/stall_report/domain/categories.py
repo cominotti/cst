@@ -112,7 +112,7 @@ IDLE_SIG = re.compile(
 # "maintenance" replaces the former "scrub" category (scrub is maintenance too).
 # "reclaim" (memory reclaim, swap, zswap) waits on memory, not on the disks:
 # daemon v8+ tags it "memory" and leaves it out of "d"; for older records the
-# report takes it out of the storage counts itself (see analyse()).
+# report takes it out of the storage counts itself (see summarise()).
 NON_STORAGE = ("fuse", "idle", "maintenance", "reclaim")
 V2_HUNG_SIG = re.compile(r" at (\S+)")
 CAT_RE = [(k, re.compile(rx)) for k, rx, _ in CATEGORIES]

@@ -207,7 +207,7 @@ class Monitor:
         psi = {r: parse_psi(f"/proc/pressure/{r}") for r in ("io", "memory", "cpu")}
         vm = read_kv("/proc/vmstat")
         st = read_kv("/proc/stat")
-        counts = wait_counts(d_tasks)  # d, d_all, d_fuse, d_maint, d_mem
+        counts = wait_counts(d_tasks)
         load1 = float((read_text("/proc/loadavg") or "0").split()[0])
 
         fs: dict[str, FsSampleOut] = {}
@@ -270,11 +270,11 @@ class Monitor:
             "vm": [vm.get(k, 0) for k in VMSTAT_KEYS],
             # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
             "procs": [st.get("procs_running", 0), st.get("procs_blocked", 0)],
-            "d": counts[0],
-            "d_all": counts[1],
-            "d_fuse": counts[2],
-            "d_maint": counts[3],
-            "d_mem": counts[4],
+            "d": counts.d,
+            "d_all": counts.d_all,
+            "d_fuse": counts.d_fuse,
+            "d_maint": counts.d_maint,
+            "d_mem": counts.d_mem,
             "load1": load1,
             "fs": fs,
             "disk": disks,
@@ -353,8 +353,7 @@ class Monitor:
                 continue
             self.hung_reported[(pid, key)] = now
             at = wait_at(frames, wchan)
-            cmd = cmdline_text(read_text(f"/proc/{pid}/cmdline"))
-            rep = hung_report(key, task_where(comm, tid, cmd, short_cgroup(pid)), now - first, at)
+            rep = hung_report(key, self.where(pid, tid, comm), now - first, at)
             self.emit(
                 {
                     "t": "ev",
@@ -374,6 +373,10 @@ class Monitor:
         live = {v["pid"] for v in current.values()}
         self.hung_reported = {k: t for k, t in self.hung_reported.items() if k[0] in live or now - t < HUNG_REPEAT}
 
+    def where(self, pid: str, tid: str, comm: str) -> str:
+        """The task as a report names it: comm:tid, its command line (read now) and its cgroup."""
+        return task_where(comm, tid, cmdline_text(read_text(f"/proc/{pid}/cmdline")), short_cgroup(pid))
+
     def report_io_busy(self, t: DTaskSince, tid: str, frames: list[str], wchan: str | None, now: float) -> None:
         """In D at every sample for HUNG_SECONDS while still being scheduled
         (typically an fsync loop): an informational event; an alert once it
@@ -386,8 +389,7 @@ class Monitor:
             return
         self.hung_reported[(pid, key)] = now
         at = wait_at(frames, wchan)
-        cmd = cmdline_text(read_text(f"/proc/{pid}/cmdline"))
-        msg = io_busy_message(task_where(t["comm"], tid, cmd, short_cgroup(pid)), busy_s, at)
+        msg = io_busy_message(self.where(pid, tid, t["comm"]), busy_s, at)
         self.emit(
             {
                 "t": "ev",

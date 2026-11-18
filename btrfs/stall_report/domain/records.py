@@ -79,7 +79,7 @@ class FsInfo(TypedDict, total=False):
 
 class MetaRecord(TypedDict, total=False):
     """The meta record ("t": "meta"), written when the daemon starts. Every
-    key is optional: analyse() uses {} when the window has no meta record,
+    key is optional: summarise() uses {} when the window has no meta record,
     and reads every key with .get()."""
 
     ts: float
@@ -158,7 +158,7 @@ class Sig(SigRecord):
 
 
 class Episode(_EpisodeBase):
-    """An EpisodeRecord as analyse() returns it."""
+    """An EpisodeRecord as summarise() returns it."""
 
     sigs: list[Sig]
     estimated: NotRequired[bool]  # max_d / max_d_mem estimated from the stacks (daemon < v8)
@@ -167,7 +167,7 @@ class Episode(_EpisodeBase):
 class Notice(TypedDict, total=False):
     """An event ("t": "ev": kernel messages, hung or busy tasks) or an alert
     ("t": "al", the notification the daemon sent). One class for both: the
-    same loop in analyse() rewrites the kind of each, and tells them apart by
+    same loop in summarise() rewrites the kind of each, and tells them apart by
     "severe", which only events have. "ts" is in both, so it is required.
     The report also reads "msg" (in every event) and "title" and "body" (in
     every alert) with [], but each is only in one of the two, so they stay
@@ -289,8 +289,9 @@ class BelowSection(TypedDict):
 
 
 class AnalyseResult(TypedDict):
-    """What analyse() returns. The keys after "coverage" are only there when
-    the window has 2+ samples; main() pops "coverage" for --json."""
+    """What summarise() returns (analyse() adds "below"). The keys after
+    "coverage" are only there when the window has 2+ samples; main() pops
+    "coverage" for --json."""
 
     window: Window
     kernel: str | None

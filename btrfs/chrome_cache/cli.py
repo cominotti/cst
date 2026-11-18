@@ -18,9 +18,9 @@ from btrfs.chrome_cache.adapters import (
     plan_line,
     ram_cache,
     real_home,
-    caller_is_root,
 )
 from btrfs.chrome_cache.domain import CACHE_SUBVOL_REL, FLAGS_REL, OLD_CACHE_REL, decide, size_text
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 
@@ -73,7 +73,7 @@ def main(argv: Sequence[str]) -> int:
     if cmd not in ("status", "plan", "apply", "off", "undo") or (("--home" in args) and not home):
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
-    if caller_is_root():
+    if HostExecutionContext().is_root():
         print("chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)", file=sys.stderr)
         return 2
     home = real_home(home)

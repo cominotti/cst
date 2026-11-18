@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import NotRequired
+from typing import NamedTuple, NotRequired
 from typing import TypedDict
 import re
 
@@ -406,9 +406,10 @@ class Episode:
     def add_snapshot(self, d_tasks: Sequence[DTask], cgroup_of: Callable[[str], str]) -> None:
         """The D-state tasks of one sample (cgroup_of: a task's short cgroup, asked once per process)."""
         self.snapshots += 1
-        self.max_d = max(self.max_d, sum(1 for t in d_tasks if t[5] == "storage"))
-        self.max_d_mem = max(self.max_d_mem, sum(1 for t in d_tasks if t[5] == "memory"))
-        self.max_d_all = max(self.max_d_all, len(d_tasks))
+        counts = wait_counts(d_tasks)
+        self.max_d = max(self.max_d, counts.d)
+        self.max_d_mem = max(self.max_d_mem, counts.d_mem)
+        self.max_d_all = max(self.max_d_all, counts.d_all)
         if self.snapshots > MAX_STACK_SNAPSHOTS:
             return
         cg_cache: dict[str, str] = {}
@@ -518,16 +519,25 @@ def settle_kinds(tasks: list[DTask]) -> list[DTask]:
     return out
 
 
-def wait_counts(d_tasks: Sequence[DTask]) -> tuple[int, int, int, int, int]:
-    """(storage, all, fuse, maintenance, memory) waits of one sample: "d" counts
-    the tasks waiting on storage; "d_all" also FUSE, maintenance, memory and
-    idle-ish waits."""
-    return (
-        sum(1 for t in d_tasks if t[5] == "storage"),
-        len(d_tasks),
-        sum(1 for t in d_tasks if t[5] == "fuse"),
-        sum(1 for t in d_tasks if t[5] == "maintenance"),
-        sum(1 for t in d_tasks if t[5] == "memory"),
+class WaitCounts(NamedTuple):
+    """The waits of one sample's D-state tasks: "d" counts the tasks waiting on
+    storage; "d_all" also FUSE, maintenance, memory and idle-ish waits."""
+
+    d: int
+    d_all: int
+    d_fuse: int
+    d_maint: int
+    d_mem: int
+
+
+def wait_counts(d_tasks: Sequence[DTask]) -> WaitCounts:
+    """The storage, all, FUSE, maintenance and memory waits of one sample."""
+    return WaitCounts(
+        d=sum(1 for t in d_tasks if t[5] == "storage"),
+        d_all=len(d_tasks),
+        d_fuse=sum(1 for t in d_tasks if t[5] == "fuse"),
+        d_maint=sum(1 for t in d_tasks if t[5] == "maintenance"),
+        d_mem=sum(1 for t in d_tasks if t[5] == "memory"),
     )
 
 
