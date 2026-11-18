@@ -5,6 +5,7 @@ recorded runs (cpu-watch)."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+import contextlib
 import csv
 import glob
 import json
@@ -28,6 +29,7 @@ from cpu.domain import (
     QuietSample,
     Reading,
     RunMeta,
+    VmPinAction,
     WatchCounters,
     lows,
     pressure_field,
@@ -78,8 +80,8 @@ def vm_pin_settings(path: str, action: str) -> dict[str, str]:
     Python's SIGPIPE handling (its temporary XML file is removed in a
     finally); status and plan print them and, since they only read, get
     SIGPIPE back at its default: `cst cpu vm-pin plan | head` ends quietly."""
-    settings = conf(path, refuse=action == "apply")
-    if action != "apply":
+    settings = conf(path, refuse=action == VmPinAction.APPLY)
+    if action != VmPinAction.APPLY:
         restore_default_signals()
     return settings
 
@@ -152,7 +154,7 @@ def pressure_total(path: str, kind: Literal["some", "full"]) -> int | None:
 
 
 def usage_usec(cg: str) -> int:
-    m = re.search(r"^usage_usec (\d+)", read_text(os.path.join(CG, cg, "cpu.stat"), ""), re.M)
+    m = re.search(r"^usage_usec (\d+)", read_text(os.path.join(CG, cg, "cpu.stat"), ""), re.MULTILINE)
     return int(m.group(1)) if m else 0
 
 
@@ -183,7 +185,7 @@ def game_cgroup(pid: int) -> str:
 def invol(pid: int) -> int:
     total = 0
     for st in glob.glob(f"/proc/{pid}/task/*/status"):
-        m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read_text(st, ""), re.M)
+        m = re.search(r"^nonvoluntary_ctxt_switches:\s+(\d+)", read_text(st, ""), re.MULTILINE)
         total += int(m.group(1)) if m else 0
     return total
 
@@ -311,10 +313,8 @@ def frametimes(path: str) -> list[float]:
                 if "frametime" in low:
                     col = low.index("frametime")
                 continue
-            try:
+            with contextlib.suppress(ValueError, IndexError):
                 out.append(float(row[col]))
-            except ValueError, IndexError:
-                pass
     return out
 
 

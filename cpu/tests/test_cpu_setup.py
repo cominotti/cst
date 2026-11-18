@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Literal
+from typing import Literal, override
 import unittest
 import unittest.mock
 
@@ -58,6 +58,7 @@ def help_text(script: str, prog: str) -> str:
 
 
 class CpuSetupCommandLineTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-setup-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -182,6 +183,7 @@ def handed(
 class RouteTest(unittest.TestCase):
     """Where each command goes: help, cpu-watch (here or on the host), the toolbox refusal, sudo, root."""
 
+    @override
     def setUp(self) -> None:
         self.ran: list[tuple[str, list[str]]] = []
 
@@ -290,6 +292,7 @@ class ShimExecTest(unittest.TestCase):
     """The shim execs Python, which execs cpu-watch (or flatpak-spawn): one process all the way, with
     the caller's environment (nothing the shim hands over, the caller's LC_CTYPE)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-shim-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -369,6 +372,7 @@ class FakeRunner:
 
 
 class CpuSetupCase(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-cpu-root-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -652,7 +656,7 @@ class UninstallTest(CpuSetupCase):
         with unittest.mock.patch("locale.strxfrm", lambda s: "".join(chr(0x10FFFF - ord(c)) for c in s)):
             _, out, _ = self.command("uninstall")
         removed = [line for line in out.split("\n") if line.startswith("removed '") and "zz-cst-game" in line]
-        self.assertEqual(removed, [f"removed '{rt}/{u}.d/zz-cst-game.conf'" for u in reversed(sorted(units))])
+        self.assertEqual(removed, [f"removed '{rt}/{u}.d/zz-cst-game.conf'" for u in sorted(units, reverse=True)])
 
     def test_the_root_commands_sort_names_as_bash_did(self) -> None:
         h = Handed(script=f"{REPO}/cpu-setup.sh", arg0="cpu-setup.sh", cst_prog="", sudo_user="tester", quiet={})
@@ -917,9 +921,9 @@ class BaselineDropinTest(unittest.TestCase):
             "50-MemoryLow.conf",
             "50-MemoryZSwapWriteback.conf",
         ]
-        self.assertEqual(sorted([*overrides, DROPIN_NAME], key=os.fsencode)[0], DROPIN_NAME)
+        self.assertEqual(min([*overrides, DROPIN_NAME], key=os.fsencode), DROPIN_NAME)
         # The old name sorted after them (upper case before lower case): the bug.
-        self.assertEqual(sorted([*overrides, OLD_DROPIN_NAME], key=os.fsencode)[-1], OLD_DROPIN_NAME)
+        self.assertEqual(max([*overrides, OLD_DROPIN_NAME], key=os.fsencode), OLD_DROPIN_NAME)
         # The user drop-ins get the same name.
         self.assertEqual(toolbox_dropin("/home/u"), "/home/u/.config/systemd/user/user.slice.d/10-cpu-setup.conf")
         self.assertEqual(

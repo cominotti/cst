@@ -32,6 +32,9 @@ from cpu.setup.domain import (
     MANAGED_MARK,
     DROPIN_NAME,
     OLD_DROPIN_NAME,
+    CpuRootCommand,
+    DaemonJson,
+    DockerSliceAction,
     Halt,
     SetupPaths,
     conf_lines,
@@ -47,6 +50,7 @@ from cpu.setup.domain import (
     hwp_tmpfiles_text,
     indented,
     install_done_lines,
+    is_daemon_json,
     json_text,
     last_lines,
     preempt_modes,
@@ -401,29 +405,30 @@ class CpuSetup:
     # ---- docker-slice ------------------------------------------------------------------------------
     def docker_slice(self, args: Sequence[str]) -> int:
         """docker-slice install|status|uninstall: Docker containers born in builds.slice."""
-        action = first_arg(args, "status")
-        if action == "install":
-            ecores = self.e_cores()
-            allowed = f"AllowedCPUs={ecores}" if ecores else ""
-            self.installer("install", "--set", f"ALLOWED={allowed}", "--component", "cpu:docker-slice")
-            self.run(["systemctl", "daemon-reload"])
-            self.run(["systemctl", "start", "builds.slice"])
-            self.installer("mark", "--component", "cpu:docker-slice", "done")
-            self._set_builds_parent()
-            self.say("Restart Docker when convenient (stops running containers): sudo systemctl restart docker")
-            return 0
-        if action == "uninstall":
-            self._drop_builds_parent()
-            self.installer("remove", "--component", "cpu:docker-slice")
-            self.run(["systemctl", "daemon-reload"])
-            self.say("Restart Docker when convenient for new containers to leave builds.slice.")
-            return 0
-        if action == "status":
-            self.say(self.docker_slice_status())
-            return 0
-        raise Halt(2, "docker-slice: install|status|uninstall")
+        match first_arg(args, DockerSliceAction.STATUS):
+            case DockerSliceAction.INSTALL:
+                ecores = self.e_cores()
+                allowed = f"AllowedCPUs={ecores}" if ecores else ""
+                self.installer("install", "--set", f"ALLOWED={allowed}", "--component", "cpu:docker-slice")
+                self.run(["systemctl", "daemon-reload"])
+                self.run(["systemctl", "start", "builds.slice"])
+                self.installer("mark", "--component", "cpu:docker-slice", "done")
+                self._set_builds_parent()
+                self.say("Restart Docker when convenient (stops running containers): sudo systemctl restart docker")
+                return 0
+            case DockerSliceAction.UNINSTALL:
+                self._drop_builds_parent()
+                self.installer("remove", "--component", "cpu:docker-slice")
+                self.run(["systemctl", "daemon-reload"])
+                self.say("Restart Docker when convenient for new containers to leave builds.slice.")
+                return 0
+            case DockerSliceAction.STATUS:
+                self.say(self.docker_slice_status())
+                return 0
+            case _:
+                raise Halt(2, "docker-slice: install|status|uninstall")
 
-    def _daemon_json(self, *, missing_ok: bool) -> dict[str, object]:
+    def _daemon_json(self, *, missing_ok: bool) -> DaemonJson:
         """daemon.json's object ({} when there is none and missing_ok); Halt(1) when it cannot be read."""
         path = self.paths.daemon_json
         try:
@@ -435,7 +440,7 @@ class CpuSetup:
             raise Halt(1, f"{path}: not found") from None
         except (OSError, ValueError) as e:
             raise Halt(1, f"{path}: {e}") from None
-        if not isinstance(current, dict):
+        if not is_daemon_json(current):
             raise Halt(1, f"{path}: not a JSON object")
         return current
 
@@ -633,19 +638,21 @@ class CpuSetup:
     def command(self, cmd: str, args: Sequence[str]) -> int:
         """Run one root command; its exit status (a Stop's message on stderr)."""
         try:
-            if cmd == "install":
-                return self.install()
-            if cmd == "uninstall":
-                return self.uninstall()
-            if cmd == "status":
-                return self.status()
-            if cmd == "game":
-                return self.game(args)
-            if cmd == "vm-pin":
-                return self.vm_pin(args)
-            if cmd == "docker-slice":
-                return self.docker_slice(args)
-            return self.experiment(args)
+            match cmd:
+                case CpuRootCommand.INSTALL:
+                    return self.install()
+                case CpuRootCommand.UNINSTALL:
+                    return self.uninstall()
+                case CpuRootCommand.STATUS:
+                    return self.status()
+                case CpuRootCommand.GAME:
+                    return self.game(args)
+                case CpuRootCommand.VM_PIN:
+                    return self.vm_pin(args)
+                case CpuRootCommand.DOCKER_SLICE:
+                    return self.docker_slice(args)
+                case _:
+                    return self.experiment(args)
         except Halt as stop:
             if stop.message:
                 self.warn(stop.message)

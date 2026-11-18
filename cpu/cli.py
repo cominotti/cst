@@ -33,8 +33,10 @@ from cpu.adapters import (
 from cpu.domain import (
     URI,
     CpuPaths,
+    CpuWatchOption,
     QuietSample,
     QuietTest,
+    VmPinAction,
     cpu_line,
     pin_plan,
     quiet_args,
@@ -61,12 +63,12 @@ def vm_pin(argv: Sequence[str], doc: str, paths: CpuPaths | None = None) -> int:
 
 def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
     """vm_pin's work (Refused ends it)."""
-    action = argv[0] if len(argv) > 0 else "status"
+    action = argv[0] if len(argv) > 0 else VmPinAction.STATUS
     c = vm_pin_settings(paths.conf, action)
     name = argv[1] if len(argv) > 1 else c["VM_NAME"]
     vcpus, cpus = int(c["VM_VCPUS"]), c["BUILD_CPUS"]
     disable = c["VM_CPU_DISABLE"].split()
-    if action == "status":
+    if action == VmPinAction.STATUS:
         state = virsh("domstate", name).strip()
         print(f"{name}: {state}")
         print(cpu_line(virsh("dumpxml", "--inactive", name, check=False), disable))
@@ -74,7 +76,7 @@ def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
         print(virsh("vcpupin", name, "--config", check=False).rstrip())
         print("emulator (persistent):", virsh("emulatorpin", name, "--config", check=False).split()[-1:])
         return 0
-    if action not in ("plan", "apply"):
+    if action not in (VmPinAction.PLAN, VmPinAction.APPLY):
         print(doc)
         return 2
     cur = virsh("dumpxml", "--inactive", "--security-info", name)
@@ -83,7 +85,7 @@ def pin_vm(argv: Sequence[str], doc: str, paths: CpuPaths) -> int:
         print(f"{name}: already {vcpus} vCPUs pinned to {cpus}; {plan.features}.")
         return 0
     sys.stdout.writelines(plan.diff)
-    if action == "plan":
+    if action == VmPinAction.PLAN:
         print("\nPlan only. Apply with: cst cpu vm-pin apply   (effective at the VM's next start)")
         return 0
     if not confirm(f"\nDefine {name} with {vcpus} vCPUs pinned to {cpus} ({plan.planned_features})?"):
@@ -106,29 +108,29 @@ def watch(argv: Sequence[str]) -> int:
     cmd: list[str] = []
     i = 0
     while i < len(argv):
-        a = argv[i]
-        if a == "--":
-            cmd = list(argv[i + 1 :])
-            break
-        if a in ("-l", "--label"):
-            label = argv[i + 1]
-            i += 2
-        elif a == "--game":
-            game = argv[i + 1]
-            i += 2
-        elif a == "--seconds":
-            seconds = int(argv[i + 1])
-            i += 2
-        elif a == "--mangohud":
-            mangohud = argv[i + 1]
-            i += 2
-        else:
-            print(f"unknown argument {a}", file=sys.stderr)
-            return 2
+        match argv[i]:
+            case CpuWatchOption.END:
+                cmd = list(argv[i + 1 :])
+                break
+            case CpuWatchOption.LABEL_SHORT | CpuWatchOption.LABEL:
+                label = argv[i + 1]
+                i += 2
+            case CpuWatchOption.GAME:
+                game = argv[i + 1]
+                i += 2
+            case CpuWatchOption.SECONDS:
+                seconds = int(argv[i + 1])
+                i += 2
+            case CpuWatchOption.MANGOHUD:
+                mangohud = argv[i + 1]
+                i += 2
+            case other:
+                print(f"unknown argument {other}", file=sys.stderr)
+                return 2
     label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
     run_dir, rc = record_run(cpu_paths().runs, label=label, game=game, seconds=seconds, mangohud=mangohud, cmd=cmd)
     print(summarize(run_dir))
-    return rc if rc else 0
+    return rc or 0
 
 
 def report(argv: Sequence[str]) -> None:

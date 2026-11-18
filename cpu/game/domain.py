@@ -237,10 +237,9 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
             out.append((number, line))
             continue
         kind = words[0] if words else ""
-        if intended:
-            need = {"prop": 6, "cgw": 4}.get(kind, 0)  # another kind (the format line) is no drift record
-        else:
-            need = 3 if kind in ("cgw", "epp") else 6  # 'off' undoes any other line as a prop record
+        # intended: another kind (the format line) is no drift record;
+        # otherwise 'off' undoes any other line as a prop record.
+        need = {"prop": 6, "cgw": 4}.get(kind, 0) if intended else (3 if kind in ("cgw", "epp") else 6)
         if len(words) < need:
             out.append((number, line))
     return out

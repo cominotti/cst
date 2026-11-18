@@ -22,7 +22,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from typing import IO
+from typing import IO, override
 
 sys.dont_write_bytecode = True
 
@@ -131,6 +131,7 @@ class FakeSystemd:
 class GameProfileCase(unittest.TestCase):
     """The game profile with a fake systemd, a fake cgroup tree, /proc and sysfs."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-game-test-")
         self.addCleanup(shutil.rmtree, self.tmp)

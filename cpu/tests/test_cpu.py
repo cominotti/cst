@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import ClassVar, override
 import unittest.mock
 import xml.etree.ElementTree as ET
 
@@ -79,6 +80,7 @@ class CpusOfTest(unittest.TestCase):
 
 
 class VmPinTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.m = cpu_domain
 
@@ -129,6 +131,7 @@ class VmPinTest(unittest.TestCase):
 class VmPinCpuFeaturesTest(unittest.TestCase):
     """The CET/MBEC features vm-pin keeps disabled on host-passthrough."""
 
+    @override
     def setUp(self) -> None:
         self.m = cpu_domain
         self.names = self.m.CPU_DISABLE_DEFAULT.split()
@@ -195,7 +198,7 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
         self.assertEqual(
             self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", []), self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23")
         )
-        self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", "".split())), [])
+        self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", [])), [])
 
     def test_conf_knob_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,7 +348,7 @@ class FakeProc:
     at a time: CPU busy share, MB written, each pressure's avg10, game profile."""
 
     HZ_CPUS = 2400  # jiffies per second over all CPUs (100 Hz x 24)
-    IDLE: dict[str, float] = {
+    IDLE: ClassVar[dict[str, float]] = {
         "cpu": 3.0,
         "writes": 2.5,
         "cpu-pressure": 0.3,
@@ -393,6 +396,7 @@ class QuietTest(unittest.TestCase):
     """`cpu-watch quiet`: fake /proc files, a fake clock and sleep (each sleep
     is one second: the fake files advance by that second)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -684,7 +688,12 @@ class QuietTest(unittest.TestCase):
 class VmPinCliTest(unittest.TestCase):
     """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
 
-    CONF = {"VM_NAME": "win11-devbox", "VM_VCPUS": "12", "BUILD_CPUS": "12-23", "VM_CPU_DISABLE": "cet-ss cet-ibt"}
+    CONF: ClassVar[dict[str, str]] = {
+        "VM_NAME": "win11-devbox",
+        "VM_VCPUS": "12",
+        "BUILD_CPUS": "12-23",
+        "VM_CPU_DISABLE": "cet-ss cet-ibt",
+    }
 
     def run_vm_pin(self, argv: list[str], xml: str) -> tuple[int, str, list[tuple[str, ...]]]:
         calls: list[tuple[str, ...]] = []

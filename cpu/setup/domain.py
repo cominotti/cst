@@ -8,17 +8,48 @@ report and quiet are cpu-watch's (as the caller, on the host also from a toolbox
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 import json
 import re
-from typing import Final, Literal
+from typing import Final, TypedDict, TypeIs
 
+from cst_core.domain.dispatch import HELP_WORDS
 from cst_core.domain.text import file_lines
+from cst_core.domain.values import Json
 
-type Route = Literal["help", "watch", "root", "unknown"]
+
+class CpuRoute(StrEnum):
+    """Where a command of `cst cpu` goes (route)."""
+
+    HELP = "help"
+    WATCH = "watch"
+    ROOT = "root"
+    UNKNOWN = "unknown"
+
+
+class CpuRootCommand(StrEnum):
+    """The commands of `cst cpu` that need root (CpuSetup.command runs them)."""
+
+    INSTALL = "install"
+    STATUS = "status"
+    UNINSTALL = "uninstall"
+    GAME = "game"
+    VM_PIN = "vm-pin"
+    DOCKER_SLICE = "docker-slice"
+    EXPERIMENT = "experiment"
+
+
+class DockerSliceAction(StrEnum):
+    """What `docker-slice` does (its argument)."""
+
+    INSTALL = "install"
+    STATUS = "status"
+    UNINSTALL = "uninstall"
+
 
 # The commands cpu-watch answers (as the caller), and the ones that need root.
 WATCH_COMMANDS: Final = frozenset({"watch", "report", "quiet"})
-ROOT_COMMANDS: Final = frozenset({"install", "status", "uninstall", "game", "vm-pin", "docker-slice", "experiment"})
+ROOT_COMMANDS: Final = frozenset(CpuRootCommand)
 # quiet's limits a toolbox hands to the host (flatpak-spawn passes no environment on).
 QUIET_ENV: Final = ("QUIET_CPU_PCT", "QUIET_CPU_PSI", "QUIET_IO_PSI", "QUIET_MEMORY_PSI", "QUIET_WRITE_MBPS")
 
@@ -38,13 +69,13 @@ EXPERIMENTS: Final[Mapping[str, tuple[str, str]]] = {
 }
 
 
-def route(cmd: str) -> Route:
+def route(cmd: str) -> CpuRoute:
     """Where a command goes (an empty one, or none, is help)."""
-    if cmd in ("", "help", "-h", "--help"):
-        return "help"
+    if not cmd or cmd in HELP_WORDS:
+        return CpuRoute.HELP
     if cmd in WATCH_COMMANDS:
-        return "watch"
-    return "root" if cmd in ROOT_COMMANDS else "unknown"
+        return CpuRoute.WATCH
+    return CpuRoute.ROOT if cmd in ROOT_COMMANDS else CpuRoute.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,17 +241,27 @@ def current_choice(text: str) -> str:
     return "\n".join(parts)
 
 
+# The part of Docker's daemon.json docker-slice reads and writes. total=False: the file holds more
+# keys (kept as they are) and may leave this one out; nothing checks its value at run time.
+DaemonJson = TypedDict("DaemonJson", {"cgroup-parent": Json}, total=False)
+
+
+def is_daemon_json(value: object) -> TypeIs[DaemonJson]:
+    """daemon.json holds an object (what docker-slice can edit)."""
+    return isinstance(value, dict)
+
+
 @dataclass(frozen=True, slots=True)
 class JsonEdit:
     """What docker-slice does with daemon.json: the new content (None: write nothing), and the line it
     prints (on stdout, or on stderr with exit status 1 when error)."""
 
-    content: Mapping[str, object] | None
+    content: DaemonJson | None
     message: str
     error: bool = False
 
 
-def with_builds_parent(path: str, current: Mapping[str, object]) -> JsonEdit:
+def with_builds_parent(path: str, current: DaemonJson) -> JsonEdit:
     """daemon.json with "cgroup-parent": "builds.slice" (another parent already set is left alone)."""
     parent = current.get("cgroup-parent")
     if parent == "builds.slice":
@@ -230,7 +271,7 @@ def with_builds_parent(path: str, current: Mapping[str, object]) -> JsonEdit:
     return JsonEdit({**current, "cgroup-parent": "builds.slice"}, f"written:   {path} (cgroup-parent: builds.slice)")
 
 
-def json_text(content: Mapping[str, object], *, newline: bool) -> str:
+def json_text(content: DaemonJson, *, newline: bool) -> str:
     """json.dump(content, indent=2), with a newline after it or not (as each writer did)."""
     return json.dumps(content, indent=2) + ("\n" if newline else "")
 
