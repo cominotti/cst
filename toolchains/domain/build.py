@@ -12,7 +12,7 @@ import os
 import re
 import stat
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -123,6 +123,7 @@ class Folder:
     def inc_size(self) -> int:
         return sum(d.size for d in self.inc)
 
+    @override
     def __repr__(self) -> str:
         return f"Folder({self.key}, {self.size}, {self.activity})"
 

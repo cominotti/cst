@@ -13,7 +13,7 @@ import re
 import shlex
 import tomllib
 from enum import StrEnum
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, override
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -278,6 +278,7 @@ class WrapperValues:
     size: str = SCCACHE_DEFAULT_SIZE
     workspace: bool = True  # local crates through sccache too
 
+    @override
     def __str__(self) -> str:
         return f"cache size {self.size}" + ("" if self.workspace else "; local crates straight to rustc")
 
