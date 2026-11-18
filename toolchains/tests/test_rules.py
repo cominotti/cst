@@ -1134,7 +1134,7 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.cfg(), before)
 
     def test_missing_wrapper_source_blocks_the_line(self) -> None:
-        p = mock.patch.object(tc_home_files, "wrapper_text", lambda values, entry_file: None)
+        p = mock.patch.object(tc_home_files, "wrapper_text", return_value=None)
         p.start()
         self.addCleanup(p.stop)
         before = self.cfg()
@@ -1930,7 +1930,8 @@ class RustcWrapperTest(unittest.TestCase):
             (start["uds"], start["tmp"], start["fd9"], start["sock"]), (sock, "/tmp", "no", "absent"), start
         )
         self.assertEqual((start["in"], start["out"], start["err"]), ("/dev/null",) * 3, start)
-        self.assertEqual((calls[2]["uds"], calls[2]["tmp"], calls[2]["auto"]), (sock, "/tmp", "no"))
+        sccache = calls[2]
+        self.assertEqual((sccache["uds"], sccache["tmp"], sccache["auto"]), (sock, "/tmp", "no"), sccache)
         self.assertTrue(os.path.isdir(self.scope_dir()))
         self.assertTrue(stat.S_ISSOCK(os.stat(sock).st_mode))
         self.assertTrue(os.path.exists(sock + ".lock"))

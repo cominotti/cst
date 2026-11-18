@@ -75,7 +75,7 @@ class FakeUnits(tc_units.UserUnits):
 
 def quiet_signals(test: unittest.TestCase) -> None:
     """main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run."""
-    p = mock.patch.object(tc_program, "restore_default_signals", lambda: None)
+    p = mock.patch.object(tc_program, "restore_default_signals", return_value=None)
     p.start()
     test.addCleanup(p.stop)
 

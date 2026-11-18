@@ -233,6 +233,7 @@ WORKSPACE_REL = "Workspace"
 SCAN_SKIP = frozenset({"node_modules", "target", "__pycache__", "venv"})
 REPO_DEPTH = 6  # levels below ~/Workspace searched for repositories
 CRATE_DEPTH = 6  # levels below a worktree searched for Cargo.toml
+CARGO_MANIFEST = "Cargo.toml"  # a crate's or a workspace's manifest
 ENUM_BUDGET = 600  # seconds for the whole search; longer: incomplete
 CMD_TIMEOUT = 60  # seconds for one git or cargo call
 PIN_NAMES = ("rust-toolchain.toml", "rust-toolchain")

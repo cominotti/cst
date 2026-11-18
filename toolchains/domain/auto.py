@@ -90,7 +90,7 @@ def own_session_env(env: Mapping[str, str], uid: int, owner: int | None, *, own_
         if own_exists:
             out["XDG_RUNTIME_DIR"] = own
         return out
-    named = re.fullmatch(r"/run/user/([0-9]+)/?", xdg, re.ASCII)
+    named = re.fullmatch(r"/run/user/(\d+)/?", xdg, re.ASCII)
     if (owner is not None and owner != uid) or (named is not None and int(named.group(1)) != uid):
         out["XDG_RUNTIME_DIR"] = own
         if f"={xdg.rstrip('/')}/" in env.get("DBUS_SESSION_BUS_ADDRESS", ""):

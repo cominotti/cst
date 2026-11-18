@@ -261,8 +261,9 @@ class SelectTest(Scratch):
         settings = tc_home_files.load_settings(self.home, TOOL)
         for tid in ("go:build", ""):
             with self.subTest(tid=tid):
+                session = self.session()
                 with self.assertRaises(KeyError):
-                    tc_wiring.target(self.session(), settings, tid)
+                    tc_wiring.target(session, settings, tid)
                 with self.assertRaises(KeyError):
                     settings.policy_text(tid)
                 with self.assertRaises(KeyError):
