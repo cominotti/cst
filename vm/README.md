@@ -1031,10 +1031,14 @@ The Python code inside `vm/` (standard library only at run time):
 - `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`,
   `systemctl`, `restic` (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
-  files, the paths (`CST_VM_*` moves them, for the tests only). `backup.py`: the
+  files. `backup.py`: the
   backup index, fingerprints and sizes, the stop signals, the per-VM lock and
   the alert. `timer.py`: the weekly timer's files. `images.py`: the NOCOW flag
   and the image folders (`probe_dir`).
+- `vm/wiring.py`: the composition root: the environment of one run becomes a
+  `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
+  `CST_VM_*`, which move each path for the tests only, and the snapshot and
+  merge timeouts). `cst doctor` builds the same settings for its VM checks.
 - `vm/cli/`: the commands, one module per command group: `backup.py` (the
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in

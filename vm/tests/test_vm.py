@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
+from dataclasses import replace
 import io
 import json
 import os
@@ -39,6 +40,7 @@ from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
+from vm import wiring as vm_wiring
 from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
@@ -54,6 +56,8 @@ REPO = os.path.dirname(VM_DIR)
 SETUP = os.path.join(REPO, "vm-setup.sh")
 UUID = "ff2515e6-3708-42be-be94-d4356f12bfc2"
 NOW = 1794100000
+# The machine's paths (no CST_VM_* variable): a test moves the one it needs with replace().
+PATHS = vm_wiring.vm_paths({})
 
 
 def patch_vm(name: str, new: object) -> AbstractContextManager[object]:
@@ -302,8 +306,8 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "w") as f:
                 f.write("VM_NOCOW = 0\n# VM_TUNE=x\nVM_TUNE_DISK_BUS='scsi'\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
-            self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent")), {})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": "0", "VM_TUNE_DISK_BUS": "scsi"})
+            self.assertEqual(vm_adapters.read_conf(os.path.join(tmp, "absent"), nas_conf=""), {})
 
     def test_read_conf_last_line_wins_with_or_without_blanks(self) -> None:
         # main's cst-vm stripped the key line by line, so the last line in the file won.
@@ -317,7 +321,7 @@ class PartsTest(unittest.TestCase):
                 with self.subTest(text=text):
                     with open(p, "w", encoding="utf-8") as f:
                         f.write(text)
-                    self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": want})
+                    self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": want})
 
     def test_read_conf_lines_end_at_newlines_only(self) -> None:
         # main read the file line by line: a form feed or \u2028 inside a line does not end it.
@@ -325,7 +329,7 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "w", encoding="utf-8") as f:
                 f.write("A=1\x0cB=2\nC=3\u2028D=4\r\nE=5\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"A": "1\x0cB=2", "C": "3\u2028D=4", "E": "5"})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"A": "1\x0cB=2", "C": "3\u2028D=4", "E": "5"})
 
     def test_read_conf_replaces_undecodable_bytes(self) -> None:
         # Intended change from main (which stopped with a UnicodeDecodeError traceback): the
@@ -334,15 +338,15 @@ class PartsTest(unittest.TestCase):
             p = os.path.join(tmp, "vm.conf")
             with open(p, "wb") as f:
                 f.write(b"VM_NOCOW=no\n# caf\xe9\n")
-            self.assertEqual(vm_adapters.read_conf(p), {"VM_NOCOW": "no"})
+            self.assertEqual(vm_adapters.read_conf(p, nas_conf=""), {"VM_NOCOW": "no"})
 
     def test_cpu_disable_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "c.conf")
-            self.assertEqual(vm_adapters.cpu_disable_list(conf)[0], "cet-ss")
+            self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf))[0], "cet-ss")
             with open(conf, "w") as f:
                 f.write("VM_CPU_DISABLE=''\n")
-            self.assertEqual(vm_adapters.cpu_disable_list(conf), [])
+            self.assertEqual(vm_adapters.cpu_disable_list(replace(PATHS, cpu_conf=conf)), [])
 
 
 class BackupTest(Scratch):
@@ -446,7 +450,7 @@ class BackupTest(Scratch):
             self.assertEqual(f.read(), text)
         with open(path, "w") as f:
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
-        self.assertEqual(vm_adapters_backup.read_index(path), entries)
+        self.assertEqual(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": path})), entries)
         self.assertEqual(self.run_tool("backup", "win").returncode, 0)
         [real] = json.load(open(self.index))["backups"]
         self.assertEqual(set(real), set(entries[0]))
@@ -580,14 +584,11 @@ class BackupTest(Scratch):
     def test_full_refuses_without_space(self) -> None:
         fake = os.statvfs_result((4096, 4096, 100, 10, 10, 0, 0, 0, 0, 255))
         with (
-            patch_vm("BACKUP_DIR", self.backups),
-            patch_vm("INDEX", self.index),
-            patch_vm("SWTPM_DIR", self.swtpm),
             mock.patch.dict(os.environ, self.env),
             mock.patch.object(os, "statvfs", return_value=fake),
         ):
             with self.assertRaises(Refused) as cm:
-                vm_cli_backup.cmd_backup("win", True)
+                vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
         self.assertIn("--full needs", str(cm.exception))
         self.assertIn("allocated size", str(cm.exception))
         self.assertFalse(os.path.exists(self.backups))
@@ -976,15 +977,19 @@ class TuneCommandTest(unittest.TestCase):
                 return 0, "", ""
             return 1, "", "unsupported"
 
-        def _knobs(path: str | None = None) -> dict[str, bool]:
+        def _knobs(paths: object) -> dict[str, bool]:
             return dict(ALL_ON)
 
+        self.cfg = vm_wiring.vm_settings(
+            {
+                "CST_VM_BACKUP_DIR": self.tmp,
+                "CST_VM_CPU_CONF": os.path.join(self.tmp, "none.conf"),
+                "CST_VM_NONROOT_OK": "1",
+            }
+        )
         patches: list[AbstractContextManager[object]] = [
             patch_vm("virsh", virsh),
-            patch_vm("BACKUP_DIR", self.tmp),
             patch_vm("knobs", _knobs),
-            patch_vm("CPU_CONF", os.path.join(self.tmp, "none.conf")),
-            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": "1"}),
         ]
         for p in patches:
             self.enterContext(p)
@@ -996,7 +1001,7 @@ class TuneCommandTest(unittest.TestCase):
             return answer
 
         with patch_vm("confirm", _confirm), mock.patch("sys.stdout", out):
-            rc = vm_cli_tune.cmd_tune("win11-devbox", apply, flag)
+            rc = vm_cli_tune.cmd_tune(self.cfg, "win11-devbox", apply, flag)
         return rc, out.getvalue()
 
     def test_plan_windows_without_flag(self) -> None:
@@ -1083,12 +1088,9 @@ class TuneCommandTest(unittest.TestCase):
         def _uid() -> int:
             return 1000
 
-        with (
-            mock.patch.dict(os.environ, {"CST_VM_NONROOT_OK": ""}),
-            mock.patch.object(os, "geteuid", _uid),
-        ):
-            with self.assertRaises(Refused):
-                self.run_cmd(True, True)
+        self.cfg = replace(self.cfg, nonroot_ok=False)
+        with mock.patch.object(os, "geteuid", _uid), self.assertRaises(Refused):
+            self.run_cmd(True, True)
 
 
 # ---- NOCOW of the VM image folders ----------------------------------------------------------------
@@ -1111,14 +1113,14 @@ class NocowTest(unittest.TestCase):
         def _inode_flags(p: str) -> int | None:
             return self.flags.get(p, 0)
 
-        def _user_home() -> str:
+        def _user_home(sudo_user: str | None) -> str:
             return self.home
 
-        def _knobs(path: str | None = None) -> dict[str, bool]:
+        def _knobs(paths: object) -> dict[str, bool]:
             return dict(ALL_ON)
 
+        self.cfg = vm_wiring.vm_settings({"CST_VM_SYSTEM_IMAGES": self.system})
         patches: list[AbstractContextManager[object]] = [
-            patch_vm("SYSTEM_IMAGES", self.system),
             patch_vm("is_btrfs", _is_btrfs),
             patch_vm("readable_inode_flags", _inode_flags),
             patch_vm("user_home", _user_home),
@@ -1134,12 +1136,12 @@ class NocowTest(unittest.TestCase):
         return p
 
     def dirs(self) -> dict[str, vm_domain.ImageProbe]:
-        return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs()}
+        return {d.path: vm_adapters_images.probe_dir(d) for d in vm_adapters_images.image_dirs(self.cfg)}
 
     def out(self, fn: Callable[..., int], *args: object) -> tuple[int, str]:
         buf = io.StringIO()
         with mock.patch("sys.stdout", buf):
-            rc = fn(*args)
+            rc = fn(self.cfg, *args)
         return rc, buf.getvalue()
 
     def test_probe_and_plan(self) -> None:
@@ -1213,7 +1215,7 @@ class NocowTest(unittest.TestCase):
         self.assertFalse(vm_adapters_images.needs_mark(self.dirs()[self.system]))  # libvirt not installed
 
     def test_knob_off(self) -> None:
-        def _knobs_off(path: str | None = None) -> dict[str, bool]:
+        def _knobs_off(paths: object) -> dict[str, bool]:
             return dict(ALL_ON, VM_NOCOW=False)
 
         with patch_vm("knobs", _knobs_off):
@@ -1369,7 +1371,7 @@ class NocowTest(unittest.TestCase):
         def _virsh(*a: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
             return (0, "shut off\n", "") if a[0] == "domstate" else (0, real_domain(), "")
 
-        def _read_index(path: str | None = None) -> list[dict[str, object]]:
+        def _read_index(cfg: object) -> list[dict[str, object]]:
             return []
 
         with (
@@ -1422,7 +1424,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
-        vm_cli_backup.copy(src, dest, "reflink", True)
+        vm_cli_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
         self.assertTrue(vm_adapters_images.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
@@ -1527,15 +1529,55 @@ class SetupScriptTest(unittest.TestCase):
 class PackageTest(unittest.TestCase):
     """The vm package's settings, parsing, dispatch and virsh wrapper (in-process)."""
 
+    def test_settings_from_the_environment(self) -> None:
+        variables = {
+            "backup_dir": "CST_VM_BACKUP_DIR",
+            "index": "CST_VM_INDEX",
+            "swtpm_dir": "CST_VM_SWTPM_DIR",
+            "vm_conf": "CST_VM_CONF",
+            "cpu_conf": "CST_VM_CPU_CONF",
+            "system_images": "CST_VM_SYSTEM_IMAGES",
+            "nas_conf": "CST_VM_NAS_CONF",
+            "restic_password": "CST_VM_RESTIC_PASSWORD",
+            "restic_cache": "CST_VM_RESTIC_CACHE",
+            "nas_stage": "CST_VM_NAS_STAGE",
+            "run_dir": "CST_VM_RUN_DIR",
+            "notify": "CST_VM_NOTIFY",
+            "alerts": "CST_VM_ALERTS",
+            "unit_dir": "CST_VM_UNIT_DIR",
+            "sbin_copy": "CST_VM_SBIN_COPY",
+            "install_record": "CST_VM_INSTALL_RECORD",
+        }
+        moved = vm_wiring.vm_paths({var: f"/t/{field}" for field, var in variables.items()})
+        self.assertEqual({f: getattr(moved, f) for f in variables}, {f: f"/t/{f}" for f in variables})
+        machine = vm_wiring.vm_paths({var: "" for var in variables.values()})  # empty: the machine's path
+        self.assertEqual(
+            (machine.backup_dir, machine.index, machine.vm_conf, machine.unit_dir, machine.sbin_copy),
+            (
+                "/var/lib/libvirt/cst-backups",
+                "/var/lib/cst/vm-backups.json",
+                "/etc/cst/vm.conf",
+                "/etc/systemd/system",
+                "/usr/local/sbin/cst-vm",
+            ),
+        )
+        cfg = vm_wiring.vm_settings({"CST_PROG": "./cst vm", "CST_VM_NONROOT_OK": "1", "CST_VM_COMMIT_TIMEOUT": "60"})
+        self.assertEqual((cfg.prog, cfg.cst, cfg.nonroot_ok, cfg.under_systemd), ("./cst vm", "./cst", True, False))
+        self.assertEqual((cfg.commit_timeout, cfg.snapshot_timeout, cfg.snapshot_settle), (60, 600, 600))
+        plain = vm_wiring.vm_settings({"INVOCATION_ID": "x", "CST_VM_NOW": "5"})
+        self.assertEqual((plain.prog, plain.cst, plain.under_systemd, plain.now), ("cst-vm", "cst", True, "5"))
+        with self.assertRaises(ValueError):
+            vm_wiring.vm_settings({"CST_VM_SNAPSHOT_TIMEOUT": "ten"})
+
     def test_knobs_and_nas_numbers_from_vm_conf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")
             self.assertEqual(
-                vm_adapters.knobs(conf),
+                vm_adapters.knobs(replace(PATHS, vm_conf=conf)),
                 {"VM_NOCOW": True, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": True, "VM_TUNE_NIC": True},
             )
             numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
-            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [4, 3, 6])
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
             with open(conf, "w") as f:
                 f.write(
                     "# comment\n"
@@ -1548,10 +1590,10 @@ class PackageTest(unittest.TestCase):
                     "VM_NAS_TIMEOUT_HOURS=12\n"
                 )
             self.assertEqual(
-                vm_adapters.knobs(conf),
+                vm_adapters.knobs(replace(PATHS, vm_conf=conf)),
                 {"VM_NOCOW": False, "VM_TUNE_DISK_BUS": True, "VM_TUNE_DISK_DRIVER": False, "VM_TUNE_NIC": False},
             )
-            self.assertEqual([vm_adapters.conf_number(k, conf) for k in numbers], [8, 3, 12])
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
 
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
@@ -1607,7 +1649,7 @@ class PackageTest(unittest.TestCase):
         out = io.StringIO()
         restored: list[bool] = []
         with (
-            patch_vm("read_index", lambda path=None: []),
+            patch_vm("read_index", lambda cfg: []),
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
             mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
@@ -1706,13 +1748,13 @@ class VmLockTest(unittest.TestCase):
         run_dir = os.path.join(tmp, "run", "cst-vm")
         old = os.umask(0o077)
         try:
-            with mock.patch.object(vm_adapters_backup, "RUN_DIR", run_dir), vm_adapters_backup.VmLock("win") as lock:
+            with vm_adapters_backup.VmLock("win", run_dir) as lock:
                 self.assertEqual(os.stat(run_dir).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(os.path.dirname(run_dir)).st_mode & 0o7777, 0o755)
                 self.assertEqual(os.stat(lock.path).st_mode & 0o7777, 0o644)
                 with open(lock.path) as f:
                     self.assertEqual(f.read(), f"{os.getpid()}\n")  # the pid is in the flocked file itself
-                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters_backup.VmLock("win"):
+                with self.assertRaisesRegex(Refused, "another NAS backup"), vm_adapters_backup.VmLock("win", run_dir):
                     pass
         finally:
             os.umask(old)
@@ -1743,7 +1785,10 @@ class IndexDurableTest(unittest.TestCase):
         with recorded_fsyncs() as synced:
             vm_adapters_backup.write_index([{"vm": "win", "path": "/b/win-1"}], path=index)
         assert_replaced_durably(self, index, synced)
-        self.assertEqual(vm_adapters_backup.read_index(index), [{"vm": "win", "path": "/b/win-1"}])
+        self.assertEqual(
+            vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": index})),
+            [{"vm": "win", "path": "/b/win-1"}],
+        )
 
 
 if __name__ == "__main__":

@@ -12,57 +12,50 @@ from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.install import manifest_by_src
-from vm.adapters import (
-    COMMIT_TIMEOUT,
-    SNAPSHOT_TIMEOUT,
-    SNAPSHOT_SETTLE,
-    UNIT_DIR,
-    SBIN_COPY,
-    INSTALL_RECORD,
-    TIMER_COMPONENT,
-)
-from vm.domain import SERVICE, TIMER, UNIT_MARKER, is_cst_vm_program, render_service, render_timer
+from vm.adapters import TIMER_COMPONENT
+from vm.domain import SERVICE, TIMER, UNIT_MARKER, VmPaths, VmSettings, is_cst_vm_program, render_service, render_timer
 
 
-def is_ours(path: str, data: bytes) -> bool:
+def is_ours(sbin_copy: str, path: str, data: bytes) -> bool:
     """Whether the file at PATH with these bytes is CST's: a unit with CST's
-    marker, or (at SBIN_COPY) a copy of cst-vm from any CST version."""
-    return UNIT_MARKER.encode() in data or path == SBIN_COPY and is_cst_vm_program(data)
+    marker, or (at sbin_copy) a copy of cst-vm from any CST version."""
+    return UNIT_MARKER.encode() in data or path == sbin_copy and is_cst_vm_program(data)
 
 
-def wants_links() -> list[str]:
-    d = os.path.join(UNIT_DIR, "timers.target.wants")
+def wants_links(unit_dir: str) -> list[str]:
+    d = os.path.join(unit_dir, "timers.target.wants")
     try:
         return sorted(n for n in os.listdir(d) if n.startswith("cst-vm-backup@") and n.endswith(".timer"))
     except OSError:
         return []
 
 
-def stop_timeout() -> str:
-    """A stop may arrive while the snapshot call is held (SNAPSHOT_TIMEOUT +
-    SNAPSHOT_SETTLE), then the merge runs (COMMIT_TIMEOUT, plus virsh's own
+def stop_timeout(s: VmSettings) -> str:
+    """A stop may arrive while the snapshot call is held (snapshot_timeout +
+    snapshot_settle), then the merge runs (commit_timeout, plus virsh's own
     300 s), then the checks and the alert: 30 minutes of margin."""
-    return f"{(SNAPSHOT_TIMEOUT + SNAPSHOT_SETTLE + COMMIT_TIMEOUT + 300 + 1800 + 59) // 60}min"
+    return f"{(s.snapshot_timeout + s.snapshot_settle + s.commit_timeout + 300 + 1800 + 59) // 60}min"
 
 
-def timer_files(entry_file: str) -> dict[str, tuple[bytes, int]]:
+def timer_files(s: VmSettings, entry_file: str) -> dict[str, tuple[bytes, int]]:
     """{path: (wanted bytes, mode)}: the program as `install` writes it (a
     zipapp; entry_file is the running cst-vm), the service and the timer."""
+    p = s.paths
     return {
-        SBIN_COPY: (install_payload("vm/cst-vm", entry_file), 0o755),
-        os.path.join(UNIT_DIR, SERVICE): (render_service(SBIN_COPY, stop_timeout()).encode(), 0o644),
-        os.path.join(UNIT_DIR, TIMER): (render_timer().encode(), 0o644),
+        p.sbin_copy: (install_payload("vm/cst-vm", entry_file), 0o755),
+        os.path.join(p.unit_dir, SERVICE): (render_service(p.sbin_copy, stop_timeout(s)).encode(), 0o644),
+        os.path.join(p.unit_dir, TIMER): (render_timer().encode(), 0o644),
     }
 
 
 def timer_installer(entry_file: str) -> InstallService:
     """The installer's use case for backup-timer's files: written only when they changed, and listed in
-    the install record (INSTALL_RECORD) under the component vm:backup-timer."""
+    the install record (paths.install_record) under the component vm:backup-timer."""
     return program_installer(entry_file)
 
 
 def install_timer_files(
-    files: Mapping[str, tuple[bytes, int]], states: Mapping[str, UnitFileState], entry_file: str
+    paths: VmPaths, files: Mapping[str, tuple[bytes, int]], states: Mapping[str, UnitFileState], entry_file: str
 ) -> None:
     """Write (through the installer) each of backup-timer's files that is not current, and say so.
     Its own refusals (a foreign or masked file) come first, in cmd_timer."""
@@ -70,11 +63,11 @@ def install_timer_files(
     as_root = os.geteuid() == 0
     program_entry = manifest_by_src()["vm/cst-vm"]
     for p, (text, mode) in files.items():
-        program = p == SBIN_COPY
+        program = p == paths.sbin_copy
         place = Placement(
             path=p,
             dest=p,
-            record=INSTALL_RECORD,
+            record=paths.install_record,
             component=TIMER_COMPONENT,
             src=program_entry.src if program else None,
             kind=program_entry.kind if program else "text",
@@ -85,25 +78,27 @@ def install_timer_files(
             print(f"  {'installed' if states[p] == 'missing' else 'updated'}: {p}")
 
 
-def timer_record_done(entry_file: str) -> None:
+def timer_record_done(paths: VmPaths, entry_file: str) -> None:
     """backup-timer on finished: the record says vm:backup-timer is complete."""
-    timer_installer(entry_file).mark(INSTALL_RECORD, TIMER_COMPONENT)
+    timer_installer(entry_file).mark(paths.install_record, TIMER_COMPONENT)
 
 
-def forget_timer_files(entry_file: str, removed: Sequence[str]) -> None:
+def forget_timer_files(paths: VmPaths, entry_file: str, removed: Sequence[str]) -> None:
     """backup-timer off removed these files: the record no longer lists them."""
-    timer_installer(entry_file).forget(INSTALL_RECORD, removed)
+    timer_installer(entry_file).forget(paths.install_record, removed)
 
 
-def timer_file_states(files: Mapping[str, tuple[bytes, int]], instance_timer: str) -> dict[str, UnitFileState]:
+def timer_file_states(
+    paths: VmPaths, files: Mapping[str, tuple[bytes, int]], instance_timer: str
+) -> dict[str, UnitFileState]:
     """{path: state} of what backup-timer on writes (timer_files): the program by
     the installer's link rule, the two units also "masked" (systemctl mask: a
     link to /dev/null). instance_timer, the VM's own timer (cst-vm-backup@VM.timer
-    in UNIT_DIR, which `systemctl mask` of that one VM creates), is added only
+    in unit_dir, which `systemctl mask` of that one VM creates), is added only
     when it is masked: CST never writes it."""
     states: dict[str, UnitFileState] = {
-        p: (owned_file_state_at if p == SBIN_COPY else unit_file_state_at)(
-            p, t, functools.partial(is_ours, p), owner="root"
+        p: (owned_file_state_at if p == paths.sbin_copy else unit_file_state_at)(
+            p, t, functools.partial(is_ours, paths.sbin_copy, p), owner="root"
         )
         for p, (t, _) in files.items()
     }

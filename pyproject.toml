@@ -363,4 +363,5 @@ include = [
     "vm/tests/__init__.py",
     "vm/tests/test_vm.py",
     "vm/tests/test_vm_nas.py",
+    "vm/wiring.py",
 ]

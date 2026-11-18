@@ -4,28 +4,26 @@ restic, and the settings files. vm.adapters.backup has the backups' files
 and the run of a backup, vm.adapters.timer the weekly timer's files,
 vm.adapters.images the VM image folders.
 
-Every path below can be moved by its CST_VM_* variable, for the tests only
-(scratch folders instead of the host's).
+Where they read and write comes from the settings (vm.wiring.vm_settings).
 """
 
 from collections.abc import Mapping, Sequence
 import json
 import os
+import socket
 import sys
 from typing import Any
 
 from cpu.domain import CPU_DISABLE_DEFAULT
-from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner, c_locale
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import (
     read_text,
 )
-from cst_core.adapters.notify import PENDING_ALERTS
 from cst_core.adapters.runtime import restore_default_signals
-from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
+from cst_core.domain.contracts import state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
@@ -35,6 +33,10 @@ from cst_core.domain.text import (
     parse_snapshots_conf,
 )
 from vm.domain import (
+    NAS_SSH_ALIAS,
+    NasRepo,
+    VmSettings,
+    VmPaths,
     DEFAULT_VM,
     KNOBS,
     NAS_DEFAULTS,
@@ -46,104 +48,20 @@ from vm.domain import (
 
 NAME = "cst-vm"
 
-
-PROG = os.environ.get("CST_PROG") or NAME
-
-
-CST = PROG[: -len(" vm")] if PROG.endswith(" vm") else "cst"
-
-
-CPU_CONF = os.environ.get("CST_VM_CPU_CONF") or "/etc/cpu-setup/cpu-setup.conf"  # override: tests
-
-
-# Overridable for the tests only (scratch folders instead of the host's).
-BACKUP_DIR = os.environ.get("CST_VM_BACKUP_DIR") or "/var/lib/libvirt/cst-backups"
-
-
 INDEX_FORMAT = state_format("vm-index")
 
-
-INDEX = os.environ.get("CST_VM_INDEX") or INDEX_FORMAT.path
-
-
-SWTPM_DIR = os.environ.get("CST_VM_SWTPM_DIR") or "/var/lib/libvirt/swtpm"
-
-
-# Settings of this module (optional file; every knob defaults to yes).
-VM_CONF = os.environ.get("CST_VM_CONF") or "/etc/cst/vm.conf"  # override: tests
-
-
-# VM image folders. The system one is libvirt's default storage pool.
-SYSTEM_IMAGES = os.environ.get("CST_VM_SYSTEM_IMAGES") or "/var/lib/libvirt/images"  # override: tests
-
-
-# The NAS backup reuses the restic repository, password and cache of the
-# /home NAS backup (btrfs/btrfs-snapshot: NAS_SSH_ALIAS, RESTIC_PASSWORD,
-# RESTIC_CACHE; a test checks they stay the same). The password never leaves
-# its root-only file: restic reads it through RESTIC_PASSWORD_FILE.
-NAS_CONF = os.environ.get("CST_VM_NAS_CONF") or "/etc/btrfs-setup/snapshots.conf"  # override: tests
-
-
-RESTIC_PASSWORD = os.environ.get("CST_VM_RESTIC_PASSWORD") or "/etc/btrfs-setup/restic-password"
-
-
-RESTIC_CACHE = os.environ.get("CST_VM_RESTIC_CACHE") or "/var/cache/btrfs-snapshot-restic"
-
-
-# The definition and the manifest, written here for restic to read: a fixed
-# path per VM, so restic's parent snapshot and forget's groups stay the same.
-NAS_STAGE = os.environ.get("CST_VM_NAS_STAGE") or "/var/lib/cst/vm-nas"
-
-
-RUN_DIR = os.environ.get("CST_VM_RUN_DIR") or "/run/cst-vm"  # per-VM lock (holds the pid)
-
-
-NOTIFY = os.environ.get("CST_VM_NOTIFY") or NOTIFY_PROGRAM
-
-
-# Where an alert btrfs-notify could not take is kept for cst doctor and the next login.
-ALERTS = os.environ.get("CST_VM_ALERTS") or PENDING_ALERTS  # override: tests
-
-
-# The merge back (every blockcommit of a run together; it copies the guest's
-# writes of the backup's duration). The timer's TimeoutStopSec leaves room
-# for it after a stop.
-COMMIT_TIMEOUT = int(os.environ.get("CST_VM_COMMIT_TIMEOUT") or 4 * 3600)
-
-
-# virsh snapshot-create-as; after a timeout the run waits up to
-# SNAPSHOT_SETTLE seconds for libvirt to finish (or not) on its own.
-SNAPSHOT_TIMEOUT = int(os.environ.get("CST_VM_SNAPSHOT_TIMEOUT") or 600)
-
-
-SNAPSHOT_SETTLE = int(os.environ.get("CST_VM_SNAPSHOT_SETTLE") or 600)
-
-
-# The weekly timer (backup-timer).
-UNIT_DIR = os.environ.get("CST_VM_UNIT_DIR") or "/etc/systemd/system"  # override: tests
-
-
-SBIN_COPY = os.environ.get("CST_VM_SBIN_COPY") or manifest_by_src()["vm/cst-vm"].dest  # as `install` places it
-
-
-# The install record that lists what backup-timer on writes (override: tests).
-INSTALL_RECORD = os.environ.get("CST_VM_INSTALL_RECORD") or ROOT_RECORD
-
-
+# The component of the files backup-timer on installs (the install record lists them under it).
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
-
 
 # True during the merge back of a NAS backup: every child then runs in its own
 # session, so a Ctrl-C or a closed terminal cannot reach it (virsh cancels a
 # `blockcommit --wait` on SIGINT).
 DETACH = {"on": False}
 
-
 # The commands cst-vm runs (where it runs: not moved to the host from a
 # toolbox), and virsh over the same runner. Bytes of their output that are
 # not UTF-8 become U+FFFD.
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
-
 
 VIRSH: VirshPort = SubprocessVirshAdapter(URI, RUNNER, on_host=False)
 
@@ -195,40 +113,41 @@ def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[in
     return _triple(r, "virsh", timeout)
 
 
-def read_conf(path: str, *, bash_sourced: bool = False) -> dict[str, str]:
+def read_conf(path: str, *, nas_conf: str, bash_sourced: bool = False) -> dict[str, str]:
     """The settings of a KEY=VALUE file ({} when it cannot be read), through
     cst_core's one reader (parse_shell_assignments); the last line of a key
     wins. bash_sourced: cpu-setup.conf and snapshots.conf, which bash sources
     too, read exactly as bash reads them; vm.conf (only Python reads it) also
     accepts blanks around = (`VM_NOCOW = 0`), as cst-vm always did. A line
     that is not an assignment sets nothing (prepare_command reports it).
-    Undecodable bytes are replaced (main's cst-vm stopped with a traceback)."""
-    return dict(settings_file(path, bash_sourced=bash_sourced).values)
+    Undecodable bytes are replaced (main's cst-vm stopped with a traceback).
+    nas_conf: the path of snapshots.conf (settings_file)."""
+    return dict(settings_file(path, bash_sourced=bash_sourced, nas_conf=nas_conf).values)
 
 
-def settings_file(path: str, *, bash_sourced: bool) -> ShellAssignments:
+def settings_file(path: str, *, bash_sourced: bool, nas_conf: str) -> ShellAssignments:
     """A settings file through cst_core's one reader ("" when it cannot be read).
-    snapshots.conf (NAS_CONF) also takes the lines an older CST wrote there with
+    snapshots.conf (the file at nas_conf) also takes the lines an older CST wrote there with
     printf %q, read as bash reads them (parse_snapshots_conf)."""
     text = read_text(path, "")
-    if path == NAS_CONF:
+    if path == nas_conf:
         return parse_snapshots_conf(text)
     return parse_shell_assignments(text, bash_sourced=bash_sourced)
 
 
-def conf_files(cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
+def conf_files(paths: VmPaths, cmd: str, nas: bool, vm: str | None) -> list[tuple[str, bool]]:
     """[(settings file, bash_sourced)] that a cst-vm command reads; vm: the VM named on the command line."""
-    files = [(VM_CONF, False)]
+    files = [(paths.vm_conf, False)]
     # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
     # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
     if cmd != "nocow" and not (vm and cmd in ("backup", "backup-timer")):
-        files.append((CPU_CONF, True))
+        files.append((paths.cpu_conf, True))
     if nas or cmd == "backup-timer":
-        files.append((NAS_CONF, True))
+        files.append((paths.nas_conf, True))
     return files
 
 
-def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> None:
+def prepare_command(paths: VmPaths, cmd: str, sub: str | None, nas: bool, vm: str | None) -> None:
     """Before a cst-vm command runs (help: only the SIGPIPE default below). Problem lines of the settings files it
     reads: a command that changes the machine with them (backup, tune/nocow
     apply, backup-timer on) refuses to start, since a default must never
@@ -242,8 +161,8 @@ def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> Non
         restore_default_signals()
         return
     found = []
-    for path, bash_sourced in conf_files(cmd, nas, vm):
-        problems = settings_file(path, bash_sourced=bash_sourced).problems
+    for path, bash_sourced in conf_files(paths, cmd, nas, vm):
+        problems = settings_file(path, bash_sourced=bash_sourced, nas_conf=paths.nas_conf).problems
         if problems:
             found.append(describe_problems(path, problems))
     changes = cmd == "backup" or sub in ("apply", "on", "off")
@@ -255,20 +174,20 @@ def prepare_command(cmd: str, sub: str | None, nas: bool, vm: str | None) -> Non
         restore_default_signals()
 
 
-def conf_number(key: str, path: str | None = None) -> int:
+def conf_number(paths: VmPaths, key: str) -> int:
     """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
-    v = read_conf(path or VM_CONF).get(key, "")
+    v = read_conf(paths.vm_conf, nas_conf=paths.nas_conf).get(key, "")
     return int(v) if v.isdigit() else NAS_DEFAULTS[key]
 
 
-def default_vm() -> str:
-    return read_conf(CPU_CONF, bash_sourced=True).get("VM_NAME") or DEFAULT_VM
+def default_vm(paths: VmPaths) -> str:
+    return read_conf(paths.cpu_conf, nas_conf=paths.nas_conf, bash_sourced=True).get("VM_NAME") or DEFAULT_VM
 
 
-def cpu_disable_list(conf_path: str | None = None) -> list[str]:
+def cpu_disable_list(paths: VmPaths) -> list[str]:
     """The features vm-pin keeps disabled: VM_CPU_DISABLE from cpu-setup.conf
     when set there (also empty), else vm-pin's default (cpu.domain)."""
-    conf = read_conf(conf_path or CPU_CONF, bash_sourced=True)
+    conf = read_conf(paths.cpu_conf, nas_conf=paths.nas_conf, bash_sourced=True)
     if "VM_CPU_DISABLE" in conf:
         return conf["VM_CPU_DISABLE"].split()
     return CPU_DISABLE_DEFAULT.split()
@@ -301,6 +220,12 @@ def restic(nas: Mapping[str, Any], *args: str, timeout: int = 1800) -> tuple[int
     return run(["restic", *args], timeout=timeout, extra_env=nas["env"])
 
 
+def restic_env(extra: Mapping[str, str]) -> dict[str, str]:
+    """The environment of a restic run that streams its output (restic backup --json): this
+    process's, in the C locale, with extra (the repository's variables) on top."""
+    return {**c_locale(os.environ), **extra}
+
+
 def blklist(vm: str, inactive: bool = False) -> tuple[dict[str, str] | None, str]:
     """({target: source}, problem) from virsh domblklist --details."""
     rc, so, err = virsh("domblklist", vm, "--details", *(["--inactive"] if inactive else []))
@@ -324,9 +249,40 @@ def systemctl(*args: str) -> tuple[int, str, str]:
     return rc, so.strip(), first_line(err)
 
 
-def knobs(path: str | None = None) -> dict[str, bool]:
+def nas_settings(cfg: VmSettings) -> NasRepo:
+    """{host, env, repo} for restic, from the /home NAS backup's settings.
+    Refused when that backup is not set up: its setup creates the
+    repository, the SSH key and the password file this one reuses."""
+    conf = read_conf(cfg.paths.nas_conf, nas_conf=cfg.paths.nas_conf, bash_sourced=True)
+    setup = f"{cfg.cst} btrfs snapshots nas setup"
+    if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
+        raise Refused(
+            f"the NAS backup is not set up ({cfg.paths.nas_conf}: NAS_ENABLED=1 and NAS_PATH are needed). "
+            f"Set it up first: {setup} (the VM backup shares its restic repository)"
+        )
+    try:
+        if os.path.getsize(cfg.paths.restic_password) == 0:
+            raise OSError
+    except OSError:
+        raise Refused(
+            f"{cfg.paths.restic_password} is missing or empty: run {setup} again (or put the saved repository password there)"
+        ) from None
+    host = conf.get("NAS_RESTIC_HOST") or socket.gethostname().split(".")[0]
+    repo = f"sftp:{NAS_SSH_ALIAS}:{conf['NAS_PATH']}"
+    return {
+        "host": host,
+        "repo": repo,
+        "env": {
+            "RESTIC_REPOSITORY": repo,
+            "RESTIC_PASSWORD_FILE": cfg.paths.restic_password,
+            "RESTIC_CACHE_DIR": cfg.paths.restic_cache,
+        },
+    }
+
+
+def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
-    conf = read_conf(path or VM_CONF)
+    conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
     return {k: conf.get(k, "yes").strip().lower() not in ("no", "0", "false", "off") for k in KNOBS}
 
 

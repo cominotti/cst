@@ -6,28 +6,28 @@ import shlex
 
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
-from vm.adapters import PROG, VM_CONF, knobs, run, run_on_terminal
+from vm.adapters import knobs, run, run_on_terminal
 from vm.adapters.images import flag_state, image_dirs, readable_inode_flags, needs_mark, probe_dir, mark_folder_nocow
-from vm.domain import ImageProbe, nocow_lines
+from vm.domain import ImageProbe, nocow_lines, VmSettings
 
 
-def cmd_nocow_plan(as_root: bool = False) -> int:
-    if as_root and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+def cmd_nocow_plan(cfg: VmSettings, as_root: bool = False) -> int:
+    if as_root and os.geteuid() != 0 and not cfg.nonroot_ok:
         raise Refused(
-            f"--root reads the system folder as root: run it as `{PROG} nocow plan --root` (it calls sudo by itself)"
+            f"--root reads the system folder as root: run it as `{cfg.prog} nocow plan --root` (it calls sudo by itself)"
         )
-    if not knobs()["VM_NOCOW"]:
-        print(f"VM_NOCOW=no in {VM_CONF}: the VM image folders are not managed.")
+    if not knobs(cfg.paths)["VM_NOCOW"]:
+        print(f"VM_NOCOW=no in {cfg.paths.vm_conf}: the VM image folders are not managed.")
         return 0
-    dirs = [probe_dir(d) for d in image_dirs()]
+    dirs = [probe_dir(d) for d in image_dirs(cfg)]
     for d in dirs:
-        for ln in nocow_lines(d, PROG):
+        for ln in nocow_lines(d, cfg.prog):
             print(ln)
     todo = [d for d in dirs if needs_mark(d)]
     print()
     if todo:
         print(
-            f"Set the mark with: {PROG} nocow apply   (folders: "
+            f"Set the mark with: {cfg.prog} nocow apply   (folders: "
             + ", ".join(
                 d.path
                 + (
@@ -77,11 +77,11 @@ def mark_system_dir(d: ImageProbe) -> str:
     return "" if "C" in attrs else f"{path}: the mark could not be confirmed (sudo lsattr -d {q})"
 
 
-def cmd_nocow_apply() -> int:
-    if not knobs()["VM_NOCOW"]:
-        print(f"VM_NOCOW=no in {VM_CONF}: nothing to do.")
+def cmd_nocow_apply(cfg: VmSettings) -> int:
+    if not knobs(cfg.paths)["VM_NOCOW"]:
+        print(f"VM_NOCOW=no in {cfg.paths.vm_conf}: nothing to do.")
         return 0
-    dirs = [probe_dir(d) for d in image_dirs()]
+    dirs = [probe_dir(d) for d in image_dirs(cfg)]
     todo = [d for d in dirs if needs_mark(d)]
     if not todo:
         print(
@@ -95,7 +95,7 @@ def cmd_nocow_apply() -> int:
         print(f"  {what} +C: {d.path}{' (sudo)' if d.scope == 'system' and os.geteuid() else ''}{unknown}")
     print(
         "Only files created there later get the mark; existing images stay as they are "
-        f"({PROG} nocow plan shows how to convert them)."
+        f"({cfg.prog} nocow plan shows how to convert them)."
     )
     if not confirm("Set the NOCOW mark on these folders?"):
         print("Nothing changed.")

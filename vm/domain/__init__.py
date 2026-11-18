@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import os.path
 import re
 import shlex
-from typing import Final, Literal
+from typing import Final, Literal, TypedDict
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import Refused, Usage
@@ -118,6 +118,58 @@ class LiveDisk:
     kind: str
     source: str
     backing: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VmPaths:
+    """Where cst vm reads and writes on the machine. Each can be moved by its CST_VM_* variable
+    (vm.wiring.vm_settings), for the tests only: scratch folders instead of the host's."""
+
+    backup_dir: str  # the local copies: BACKUP_DIR/VM/STAMP
+    index: str  # the backups index (cst_core.domain.contracts "vm-index")
+    swtpm_dir: str  # the software TPM's state, per domain UUID
+    vm_conf: str  # this module's settings (optional; every knob defaults to yes)
+    cpu_conf: str  # cpu-setup.conf: VM_NAME, VM_CPU_DISABLE
+    system_images: str  # libvirt's default storage pool
+    nas_conf: str  # the /home NAS backup's snapshots.conf: its repository, shared
+    restic_password: str  # its password file (restic reads it through RESTIC_PASSWORD_FILE)
+    restic_cache: str
+    nas_stage: str  # the definition and the manifest, written here for restic to read
+    run_dir: str  # the per-VM lock of a NAS backup (holds the pid)
+    notify: str  # btrfs-notify
+    alerts: str  # where an alert btrfs-notify could not take is kept
+    unit_dir: str  # the weekly timer's units
+    sbin_copy: str  # the program copy the timer runs, as `install` places it
+    install_record: str  # what backup-timer on writes is listed there
+
+
+@dataclass(frozen=True, slots=True)
+class VmSettings:
+    """What the environment sets for one run of cst vm (vm.wiring.vm_settings)."""
+
+    paths: VmPaths
+    prog: str  # how the help and the hints name this program (CST_PROG, else cst-vm)
+    cst: str  # how they name cst itself
+    nonroot_ok: bool  # CST_VM_NONROOT_OK: the commands that need root run as the user (tests)
+    under_systemd: bool  # INVOCATION_ID: started by systemd (the weekly timer)
+    now: str | None  # CST_VM_NOW: the clock of the backups' names (tests)
+    sudo_user: str | None  # SUDO_USER: whose home has the user's image folders under sudo
+    # The merge back (every blockcommit of a run together; it copies the guest's writes of the
+    # backup's duration). The timer's TimeoutStopSec leaves room for it after a stop.
+    commit_timeout: int
+    # virsh snapshot-create-as; after a timeout the run waits up to snapshot_settle seconds for
+    # libvirt to finish (or not) on its own.
+    snapshot_timeout: int
+    snapshot_settle: int
+
+
+class NasRepo(TypedDict):
+    """The restic repository of the /home NAS backup, as a VM backup uses it (nas_settings): the
+    --host of its snapshots, the repository, and restic's variables (the password stays in its file)."""
+
+    host: str
+    repo: str
+    env: dict[str, str]
 
 
 type ImageScope = Literal["system", "user"]

@@ -11,17 +11,7 @@ from typing import Any
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
-from vm.adapters import (
-    BACKUP_DIR,
-    CST,
-    PROG,
-    SWTPM_DIR,
-    booted_deployment,
-    has_managed_save,
-    package_versions,
-    run,
-    virsh,
-)
+from vm.adapters import booted_deployment, has_managed_save, package_versions, run, virsh
 from vm.adapters.backup import (
     fingerprint,
     precreate_nocow,
@@ -33,10 +23,10 @@ from vm.adapters.backup import (
     write_index,
 )
 from vm.adapters.images import nocow
-from vm.domain import FULL_MARGIN, URI, domain_parts, index_entry, restore_lines, stored
+from vm.domain import FULL_MARGIN, URI, domain_parts, index_entry, restore_lines, stored, VmSettings
 
 
-def copy(src: str, dest: str, mode: str, big: bool) -> None:
+def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
     """Copy src (a file or a folder) to dest with cp -a. Disks (big) follow
     the mode; the small parts (UEFI variables, TPM state) are plain copies."""
     os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
@@ -58,7 +48,7 @@ def copy(src: str, dest: str, mode: str, big: bool) -> None:
             f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}"
             + (
                 f"\nReflink copies need the backup folder on the same btrfs filesystem as the "
-                f"disks. Use real copies instead: {PROG} backup VM --full"
+                f"disks. Use real copies instead: {cfg.prog} backup VM --full"
                 if big and mode == "reflink"
                 else ""
             )
@@ -86,8 +76,8 @@ def check_shut_off(vm: str) -> None:
         )
 
 
-def cmd_backup(vm: str, full: bool) -> int:
-    check_backup_start("backup")
+def cmd_backup(cfg: VmSettings, vm: str, full: bool) -> int:
+    check_backup_start(cfg, "backup")
     check_shut_off(vm)
     rc, xml_text, err = virsh("dumpxml", "--inactive", "--security-info", vm)
     if rc != 0:
@@ -126,7 +116,7 @@ def cmd_backup(vm: str, full: bool) -> int:
             notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not copied")
     tpm_dir = ""
     if parts.tpm:
-        tpm_dir = os.path.join(SWTPM_DIR, parts.uuid)
+        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
         if parts.uuid and os.path.isdir(tpm_dir):
             tpm_dir = real(tpm_dir, "TPM state")
             sources.append((tpm_dir, False))
@@ -136,8 +126,8 @@ def cmd_backup(vm: str, full: bool) -> int:
                 "recovery key after a restore)"
             )
     mode = "full" if full else "reflink"
-    epoch, stamp = utc_now()
-    vm_dir = os.path.join(BACKUP_DIR, vm)
+    epoch, stamp = utc_now(cfg.now)
+    vm_dir = os.path.join(cfg.paths.backup_dir, vm)
     dest_dir = os.path.join(vm_dir, stamp)
     if os.path.exists(dest_dir):
         raise Refused(f"{dest_dir} already exists: wait a second and run it again")
@@ -145,7 +135,7 @@ def cmd_backup(vm: str, full: bool) -> int:
     if full:
         need = sum(a for a, _ in sizes.values())
         margin = max(FULL_MARGIN[0], int(need * FULL_MARGIN[1]))
-        probe = BACKUP_DIR
+        probe = cfg.paths.backup_dir
         while not os.path.exists(probe):
             probe = os.path.dirname(probe)
         st = os.statvfs(probe)
@@ -155,7 +145,7 @@ def cmd_backup(vm: str, full: bool) -> int:
                 f"--full needs {format_bytes_gib_mib(need, mib_decimals=1)} (allocated size) + {format_bytes_gib_mib(margin, mib_decimals=1)} margin, but "
                 f"{probe} has {format_bytes_gib_mib(free, mib_decimals=1)} free: free space first, or use the default reflink copy"
             )
-    for d in (BACKUP_DIR, vm_dir):
+    for d in (cfg.paths.backup_dir, vm_dir):
         os.makedirs(d, mode=0o700, exist_ok=True)
         os.chmod(d, 0o700)
     os.mkdir(dest_dir, 0o700)
@@ -169,7 +159,7 @@ def cmd_backup(vm: str, full: bool) -> int:
                 f"  copying {src} ({format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)",
                 flush=True,
             )
-            copy(src, stored(dest_dir, src), mode, big)
+            copy(cfg, src, stored(dest_dir, src), mode, big)
             copied.append((src, big))
         # Nothing stops the VM from starting during a long copy: check again,
         # and that no source changed while it was read.
@@ -226,10 +216,12 @@ def cmd_backup(vm: str, full: bool) -> int:
         print(f"  incomplete backup removed: {dest_dir}", file=sys.stderr)
         raise
     # Entries whose folder was removed by hand leave the index here.
-    entries = [e for e in read_index() if e.get("mode") == "nas" or os.path.isdir(e["path"]) and e["path"] != dest_dir]
+    entries = [
+        e for e in read_index(cfg) if e.get("mode") == "nas" or os.path.isdir(e["path"]) and e["path"] != dest_dir
+    ]
     entries.append(index_entry(manifest, dest_dir))
     entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-    write_index(entries)
+    write_index(entries, cfg.paths.index)
     for n in notes:
         print(f"  note: {n}")
     print(f"Done: {len(copied)} item(s), definition and manifest in {dest_dir}")
@@ -244,6 +236,6 @@ def cmd_backup(vm: str, full: bool) -> int:
         print(f"  {line}")
     print(
         f"\nRemove an old backup by hand: sudo rm -r {shlex.quote(vm_dir)}/TIMESTAMP "
-        f"(the next backup drops it from {CST} vm list)"
+        f"(the next backup drops it from {cfg.cst} vm list)"
     )
     return 0

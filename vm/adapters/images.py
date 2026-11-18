@@ -9,8 +9,7 @@ import pwd
 import struct
 
 from cst_core.adapters import nocow as inode_attrs
-from vm.adapters import SYSTEM_IMAGES
-from vm.domain import BTRFS_MAGIC, USER_IMAGES, ImageDir, ImageInfo, ImageProbe
+from vm.domain import BTRFS_MAGIC, USER_IMAGES, ImageDir, ImageInfo, ImageProbe, VmSettings
 
 
 def flag_state(flags: int | None) -> bool | None:
@@ -21,12 +20,12 @@ def nocow(path: str) -> bool:
     return flag_state(readable_inode_flags(path)) is True
 
 
-def user_home() -> str:
+def user_home(sudo_user: str | None) -> str:
     """The home of the user who runs CST: under sudo, SUDO_USER's (sudo may
     set HOME to /root), else HOME."""
-    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+    if os.geteuid() == 0 and sudo_user:
         try:
-            return pwd.getpwnam(os.environ["SUDO_USER"]).pw_dir
+            return pwd.getpwnam(sudo_user).pw_dir
         except KeyError:
             pass
     return os.path.expanduser("~")
@@ -61,10 +60,10 @@ def mark_folder_nocow(path: str) -> None:
     inode_attrs.set_nocow(path, directory=True)
 
 
-def image_dirs(home: str | None = None) -> list[ImageDir]:
+def image_dirs(s: VmSettings) -> list[ImageDir]:
     """Every known VM image folder."""
-    home = home or user_home()
-    out = [ImageDir("system", SYSTEM_IMAGES, "libvirt qemu:///system: virt-manager, virsh")]
+    home = user_home(s.sudo_user)
+    out = [ImageDir("system", s.paths.system_images, "libvirt qemu:///system: virt-manager, virsh")]
     out += [ImageDir("user", os.path.join(home, rel), what) for rel, what in USER_IMAGES]
     return out
 

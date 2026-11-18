@@ -12,15 +12,15 @@ from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import first_line
-from vm.adapters import BACKUP_DIR, CST, PROG, VM_CONF, cpu_disable_list, domain_state, has_managed_save, knobs, virsh
+from vm.adapters import cpu_disable_list, domain_state, has_managed_save, knobs, virsh
 from vm.adapters.backup import utc_now
-from vm.domain import KNOBS, URI
+from vm.domain import KNOBS, URI, VmSettings
 from vm.domain.tune import WINDOWS_STEPS, cpu_owner_line, guest_kind, normalized, tune_domain
 
 
-def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
-    if apply and os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
-        raise Refused(f"tune apply needs root: run it as `{PROG} tune apply` (it calls sudo by itself)")
+def cmd_tune(cfg: VmSettings, vm: str, apply: bool, guest_virtio: bool) -> int:
+    if apply and os.geteuid() != 0 and not cfg.nonroot_ok:
+        raise Refused(f"tune apply needs root: run it as `{cfg.prog} tune apply` (it calls sudo by itself)")
     state = domain_state(vm)
     # Without --security-info: what is printed holds no graphics passwords.
     rc, plain, err = virsh("dumpxml", "--inactive", vm)
@@ -30,7 +30,7 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
     root = ET.fromstring(plain)
     kind, why = guest_kind(root)
     allow_bus = kind == "linux" or guest_virtio
-    kn = knobs()
+    kn = knobs(cfg.paths)
     after, changes, held, notes = tune_domain(plain, kn, allow_bus)
     if after is None:
         raise Refused(f"{vm}: {notes[0]}")
@@ -38,14 +38,14 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
     print(f"{vm}: {state}; guest: {label} ({why})")
     off = [k for k in KNOBS[1:] if not kn[k]]
     if off:
-        print(f"  skipped by {VM_CONF}: {', '.join(k + '=no' for k in off)}")
+        print(f"  skipped by {cfg.paths.vm_conf}: {', '.join(k + '=no' for k in off)}")
     for c in changes:
         print(f"  change: {c}")
     for h in held:
         print(f"  held back: {h}")
     for n in notes:
         print(f"  note: {n}")
-    print(f"  {cpu_owner_line(root, cpu_disable_list(), CST)}")
+    print(f"  {cpu_owner_line(root, cpu_disable_list(cfg.paths), cfg.cst)}")
     if kind == "linux" and changes and any("bus" in c or "network card" in c for c in changes):
         print(
             "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
@@ -53,11 +53,11 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
         )
     if held:
         print(f"\nHeld back: the guest is {label}, and its virtio drivers are not known to be installed.")
-        print(WINDOWS_STEPS.format(cst=CST, vm=vm))
+        print(WINDOWS_STEPS.format(cst=cfg.cst, vm=vm))
     diff = list(difflib.unified_diff(normalized(plain).splitlines(True), after.splitlines(True), "current", "tuned"))
     if not diff:
         print(
-            f"\n{vm}: disks and network card already as {CST} vm tune recommends"
+            f"\n{vm}: disks and network card already as {cfg.cst} vm tune recommends"
             + (" (except what is held back above)." if held else ".")
         )
         return 0
@@ -78,11 +78,11 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
                 f"virsh -c {URI} managedsave-remove {vm}"
             )
         if not apply:
-            print(f"\nPlan only. {msg}; then: {CST} vm tune apply {vm}{flag}")
+            print(f"\nPlan only. {msg}; then: {cfg.cst} vm tune apply {vm}{flag}")
             return 0
         raise Refused(msg)
     if not apply:
-        print(f"\nPlan only. Apply with: {CST} vm tune apply {vm}{flag}   (effective at the VM's next start)")
+        print(f"\nPlan only. Apply with: {cfg.cst} vm tune apply {vm}{flag}   (effective at the VM's next start)")
         return 0
     # Define from the definition WITH its secrets (else graphics passwords are lost).
     rc, secret, err = virsh("dumpxml", "--inactive", "--security-info", vm)
@@ -94,9 +94,9 @@ def cmd_tune(vm: str, apply: bool, guest_virtio: bool) -> int:
     if not confirm(f"\nDefine {vm} with these changes (effective at its next start)?"):
         print("Nothing changed.")
         return 0
-    _, stamp = utc_now()
-    keep = os.path.join(BACKUP_DIR, vm, "definitions")
-    for d in (BACKUP_DIR, os.path.join(BACKUP_DIR, vm), keep):
+    _, stamp = utc_now(cfg.now)
+    keep = os.path.join(cfg.paths.backup_dir, vm, "definitions")
+    for d in (cfg.paths.backup_dir, os.path.join(cfg.paths.backup_dir, vm), keep):
         os.makedirs(d, mode=0o700, exist_ok=True)
         os.chmod(d, 0o700)
     saved = os.path.join(keep, f"{stamp}.before-tune.xml")

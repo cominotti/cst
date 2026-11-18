@@ -18,12 +18,13 @@ from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.domain.errors import Refused
-from vm.adapters import NAME, PROG, CST, INDEX_FORMAT, INDEX, RUN_DIR, NOTIFY, ALERTS, RUNNER
-from vm.domain import NOT_INSTALLED
+from vm.adapters import INDEX_FORMAT, NAME, RUNNER
+from vm.domain import NOT_INSTALLED, VmSettings
 
 
-def utc_now() -> tuple[float, str]:
-    now = float(os.environ.get("CST_VM_NOW") or time.time())
+def utc_now(override: str | None = None) -> tuple[float, str]:
+    """(seconds, its UTC stamp) of now, or of override (settings.now: CST_VM_NOW, tests)."""
+    now = float(override or time.time())
     return now, datetime.datetime.fromtimestamp(now, datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -77,11 +78,11 @@ def tree_sizes(path: str) -> tuple[int, int]:
     return st.st_blocks * 512, st.st_size
 
 
-def read_index(path: str | None = None) -> list[dict[str, Any]]:
+def read_index(cfg: VmSettings) -> list[dict[str, Any]]:
     """The backups in the index ([] when there is none or it cannot be read). Refused for an index of a
     newer cst vm ("version" above INDEX_FORMAT's): listing it could mislead, and writing it back would
-    lose what this one does not know."""
-    path = path or INDEX
+    lose what this one does not know. The index is cfg.paths.index."""
+    path = cfg.paths.index
     try:
         with open(path) as f:
             data = json.load(f)
@@ -90,7 +91,7 @@ def read_index(path: str | None = None) -> list[dict[str, Any]]:
     if (found := INDEX_FORMAT.newer(data, "version")) is not None:
         raise Refused(
             f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
-            f"with it; use the cst vm of that CST (in that checkout: {CST} vm backup-timer on installs it)"
+            f"with it; use the cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)"
         )
     entries = data.get("backups") if isinstance(data, dict) else None
     return [
@@ -100,18 +101,17 @@ def read_index(path: str | None = None) -> list[dict[str, Any]]:
     ]
 
 
-def check_backup_start(what: str) -> None:
+def check_backup_start(s: VmSettings, what: str) -> None:
     """Before a backup copies anything: root (or the tests' override), and an index this cst vm can
     record it in (read_index refuses one of a newer cst vm)."""
-    if os.geteuid() != 0 and not os.environ.get("CST_VM_NONROOT_OK"):
+    if os.geteuid() != 0 and not s.nonroot_ok:
         raise Refused(f"{what} needs root: run it as `cst vm {what}` (it calls sudo by itself)")
-    read_index()
+    read_index(s)
 
 
-def write_index(entries: Sequence[Mapping[str, Any]], path: str | None = None) -> None:
+def write_index(entries: Sequence[Mapping[str, Any]], path: str) -> None:
     """Atomically (temporary file + rename), mode 0644, folder 0755; durable
     (the file and the folder fsynced): a lost index hides a finished backup."""
-    path = path or INDEX
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
@@ -201,13 +201,13 @@ def safe_output() -> None:
         sys.stdout, sys.stderr = SafeStream(sys.stdout), SafeStream(sys.stderr)
 
 
-def notify(urgency: Urgency, title: str, body: str) -> None:
+def notify(s: VmSettings, urgency: Urgency, title: str, body: str) -> None:
     """A CST desktop alert (btrfs-notify keeps it for the next login when no
     session shows it; without btrfs-notify, cst_core keeps it there and says
     so). Sent first, then printed."""
-    Notifier(RUNNER, NOTIFY, ALERTS, log=lambda _prio, msg: print(f"{PROG}: {msg}", file=sys.stderr)).send(
-        urgency, NAME, title, body
-    )
+    Notifier(
+        RUNNER, s.paths.notify, s.paths.alerts, log=lambda _prio, msg: print(f"{s.prog}: {msg}", file=sys.stderr)
+    ).send(urgency, NAME, title, body)
     print(f"{title}: {body}", file=sys.stderr)
 
 
@@ -216,13 +216,14 @@ class VmLock:
     lock file holds the pid: cst doctor reads it to tell a backup in
     progress from an overlay left behind."""
 
-    def __init__(self, vm: str) -> None:
-        self.path = os.path.join(RUN_DIR, f"nas-{vm}.lock")
+    def __init__(self, vm: str, run_dir: str) -> None:
+        self.run_dir = run_dir
+        self.path = os.path.join(run_dir, f"nas-{vm}.lock")
         self.fd: int | None = None
 
     def __enter__(self) -> VmLock:
         # 0755 and 0644 exactly, whatever the umask (sudo keeps a user's 077): cst doctor reads the pid.
-        ensure_dir(RUN_DIR, 0o755)
+        ensure_dir(self.run_dir, 0o755)
         fd = take_lock(self.path, wait=False, mode=0o644, nofollow=False)
         if fd is None:
             raise Refused(f"another NAS backup of this VM is running ({self.path})")

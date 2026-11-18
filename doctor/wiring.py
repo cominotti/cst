@@ -11,6 +11,7 @@ import os
 from cst_core.adapters.runtime import checkout_root, restore_default_signals
 from doctor.adapters import Host, InstalledFiles, VmTools
 from doctor.ports import DoctorHostPort, InstalledFilesPort, VmToolsPort
+from vm.wiring import vm_settings
 
 
 def doctor_env() -> Mapping[str, str]:
@@ -29,8 +30,8 @@ def host(env: Mapping[str, str], entry_file: str) -> DoctorHostPort:
 
 
 def vm_tools() -> VmToolsPort:
-    """The vm package's checks of the VM hardware and image folders."""
-    return VmTools()
+    """The vm package's checks of the VM hardware and image folders, with vm's settings of this process."""
+    return VmTools(vm_settings(doctor_env()))
 
 
 def installed_files(entry_file: str) -> InstalledFilesPort:
