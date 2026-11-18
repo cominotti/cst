@@ -18,10 +18,12 @@ import fcntl
 import io
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections.abc import Callable, Iterator, Sequence
 from typing import Protocol
@@ -873,11 +875,16 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
     def test_cargo_procs_reads_a_real_process(self) -> None:
         ws = os.path.join(self.tmp, "ws")
         os.makedirs(ws)
-        # A script named cargo: its process is named cargo too.
-        exe = self.fake_cargo("sleep 60\n")
+        # A script named cargo: its process is named cargo too. It writes a file once it runs, and
+        # the test reads /proc only then: while the kernel is still in exec, environ can read empty.
+        ready = os.path.join(self.tmp, "ready")
+        exe = self.fake_cargo(f": > {shlex.quote(ready)}\nsleep 60\n")
         env = dict(os.environ, CARGO_BUILD_BUILD_DIR="/b/{workspace-path-hash}")
         p = subprocess.Popen([exe, "test", "--manifest-path=sub/Cargo.toml"], cwd=ws, env=env)
         try:
+            deadline = time.monotonic() + 30
+            while not os.path.exists(ready) and p.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
             procs = [x for x in self.real_cargo_procs() if x.pid == str(p.pid)]
         finally:
             p.kill()
