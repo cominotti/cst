@@ -1410,5 +1410,64 @@ class NotUtf8OutputTest(unittest.TestCase):
             self.assertEqual(tc_adapters.systemctl("is-enabled", "x.timer"), "enabled\ufffd")
 
 
+class SessionEnvTest(unittest.TestCase):
+    """systemctl --user reaches this user's own manager whatever the caller handed down: another
+    uid's XDG_RUNTIME_DIR (root's /run/user/0, which sudo and runuser pass on) and a bus inside it
+    become this user's; this user's own folder and bus stay. The stub prints what reached it."""
+
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-tc-session-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.stub = os.path.join(self.tmp, "systemctl")
+        with open(self.stub, "w") as f:
+            f.write('#!/bin/sh\necho "${XDG_RUNTIME_DIR-unset}|${DBUS_SESSION_BUS_ADDRESS-unset}"\n')
+        os.chmod(self.stub, 0o755)
+        self.uid = os.getuid()
+        self.own = f"/run/user/{self.uid}"
+
+    def seen(self, **env: str) -> str:
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
+            return tc_adapters.systemctl("show-environment")
+
+    def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
+        other = f"/run/user/{self.uid + 1}"
+        got = self.seen(XDG_RUNTIME_DIR=other, DBUS_SESSION_BUS_ADDRESS=f"unix:path={other}/bus")
+        self.assertEqual(got, f"{self.own}|unix:path={self.own}/bus")
+
+    def test_this_users_own_folder_and_bus_are_kept(self) -> None:
+        bus = f"unix:path={self.tmp}/bus"
+        self.assertEqual(self.seen(XDG_RUNTIME_DIR=self.tmp, DBUS_SESSION_BUS_ADDRESS=bus), f"{self.tmp}|{bus}")
+
+    def test_the_rules(self) -> None:
+        def xdg_bus(
+            env: dict[str, str], owner: int | None, *, own_exists: bool = True
+        ) -> tuple[str | None, str | None]:
+            out = tc_domain.own_session_env(env, 1000, owner, own_exists=own_exists)
+            return out.get("XDG_RUNTIME_DIR"), out.get("DBUS_SESSION_BUS_ADDRESS")
+
+        own, own_bus = "/run/user/1000", "unix:path=/run/user/1000/bus"
+        # None handed down (root through runuser): this user's folder when it exists, else none.
+        self.assertEqual(xdg_bus({}, None), (own, None))
+        self.assertEqual(xdg_bus({"XDG_RUNTIME_DIR": ""}, None, own_exists=False), ("", None))
+        self.assertEqual(xdg_bus({}, None, own_exists=False), (None, None))
+        # Another uid's: by its name (also when it does not exist) or by its folder's owner;
+        # this user's folder even when it does not exist (systemctl then says why).
+        root = {"XDG_RUNTIME_DIR": "/run/user/0/", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus"}
+        self.assertEqual(xdg_bus(root, None, own_exists=False), (own, own_bus))
+        self.assertEqual(
+            xdg_bus({"XDG_RUNTIME_DIR": "/tmp/x", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/b"}, 0), (own, "unix:path=/b")
+        )
+        self.assertEqual(
+            xdg_bus({"XDG_RUNTIME_DIR": "/tmp/x", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/x/bus"}, 0),
+            (own, own_bus),
+        )
+        # This user's own: kept as it is.
+        self.assertEqual(xdg_bus({"XDG_RUNTIME_DIR": "/run/user/1000/"}, 1000), ("/run/user/1000/", None))
+        self.assertEqual(
+            xdg_bus({"XDG_RUNTIME_DIR": "/tmp/x", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus"}, 1000),
+            ("/tmp/x", "unix:path=/run/user/0/bus"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

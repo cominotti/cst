@@ -2329,6 +2329,47 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_82_toolchains_auto_on_reaches_the_users_manager_with_roots_variables(self) -> None:
+        """`cst toolchains auto on` run as tester directly (not through snapshots setup), with
+        the XDG_RUNTIME_DIR and bus of root that sudo and runuser can pass on: the program's
+        own systemctl --user calls use tester's /run/user/1000 and bus instead, so the timer
+        is enabled and active. The same variables make systemctl --user fail as they are
+        (checked first, else the test proves nothing). Afterwards the earlier state is put back."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_82 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            H=/home/tester
+            off=$H/.config/cst/toolchains-auto.off
+            was_off=0; [[ -e "$off" ]] && was_off=1
+            as_tester() { runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester "$@"; }
+            mine=(XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus)
+            roots=(XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus)
+            restore() {
+                as_tester "${mine[@]}" /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true
+                (( was_off )) || rm -f "$off"
+            }
+            trap restore EXIT
+            if as_tester "${roots[@]}" systemctl --user show-environment >/dev/null 2>&1; then
+                echo "root's variables still reach tester's manager: the test would prove nothing" >&2
+                exit 1
+            fi
+            as_tester "${mine[@]}" /opt/cst-rw/cst toolchains auto off >/dev/null 2>&1 || true   # the check below is what counts
+            if as_tester "${mine[@]}" systemctl --user is-enabled cst-toolchains-prune.timer >/dev/null 2>&1; then
+                echo "auto off left the timer enabled: the test would prove nothing" >&2
+                exit 1
+            fi
+            out="$(as_tester "${roots[@]}" /opt/cst-rw/cst toolchains auto on 2>&1)"
+            sed 's/^/test_82: /' <<<"$out" >&2
+            grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
+            as_tester "${mine[@]}" systemctl --user is-enabled cst-toolchains-prune.timer
+            as_tester "${mine[@]}" systemctl --user is-active cst-toolchains-prune.timer
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
