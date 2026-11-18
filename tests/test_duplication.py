@@ -46,10 +46,10 @@ from tests.test_entrypoints import BOOTSTRAP, without_bootstrap
 
 # One table: metric -> ceiling. `invowk cmd fix budgets` lowers a number the code is below.
 CEILINGS: Final[dict[str, float]] = {
-    "python type-1 W=8 duplicated %": 0.07,
+    "python type-1 W=8 duplicated %": 0.06,
     "python type-1 W=8 cross-file lines": 0,
-    "python type-2 W=8 duplicated %": 0.48,
-    "shell W=5 duplicated %": 0.45,
+    "python type-2 W=8 duplicated %": 0.4,
+    "shell W=5 duplicated %": 0.0,
     "same-name definitions in >1 file": 0,
 }
 
