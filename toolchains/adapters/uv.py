@@ -63,7 +63,7 @@ def uv_prune_preview(
     if UV_LOCK_TIMED_OUT.search(text) or uv_lock_busy(cache):
         lines.append("uv cache prune --dry-run waited for the cache lock (another uv runs): no preview this time")
         return lines, True
-    return lines + [f"uv cache prune --dry-run failed (exit {r.returncode})"], False
+    return [*lines, f"uv cache prune --dry-run failed (exit {r.returncode})"], False
 
 
 class UvTool:
